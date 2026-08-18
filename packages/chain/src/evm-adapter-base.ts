@@ -599,6 +599,23 @@ export type SelectSignerSpec =
       preferIdle?: boolean;
     };
 
+/**
+ * GH#2270 PR-3 r1 — the signed transaction's nonce, or `undefined` if it cannot be read.
+ *
+ * Deliberately total: this runs inside the serialized send window, immediately before the WAL
+ * checkpoint, and a throw there would abort a publish that is otherwise ready to broadcast. A
+ * missing nonce costs the recovery side its proof of absence (it stays fail-closed and holds),
+ * which is the right way round — never a failed publish, and never a weaker `not-found`.
+ */
+function nonceOfSignedTx(signedTx: string): number | undefined {
+  try {
+    const nonce = ethers.Transaction.from(signedTx).nonce;
+    return Number.isSafeInteger(nonce) && nonce >= 0 ? nonce : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
   get deploymentId(): string {
@@ -1695,14 +1712,25 @@ export class EVMChainAdapterBase {
   protected async dispatchSerializedV10Write(
     signer: Wallet,
     label: 'publish' | 'update',
-    onBroadcast: ((info: { txHash: string }) => Promise<void> | void) | undefined,
+    onBroadcast: ((info: { txHash: string; nonce?: number }) => Promise<void> | void) | undefined,
     buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<{ signedTx: string; txHash: string }>,
     onNullReceipt: (preBroadcastTxHash: string) => never,
   ): Promise<ethers.TransactionReceipt> {
     return this.withSerializedSignerWrite(signer, async (ctx) => {
       const { signedTx, txHash: preBroadcastTxHash } = await buildSignedTx(ctx);
+      // GH#2270 PR-3 r1 — the WAL checkpoint also carries the signed NONCE. A null transaction
+      // lookup is point-in-time, backend-local evidence: a broadcast whose response timed out can
+      // still be accepted and mined later, so "the node does not have it" is not absence. The
+      // nonce is what makes absence PROVABLE — once the wallet's account nonce at a FINALIZED
+      // block is past this slot, and the transaction is still not found, it can never mine.
+      //
+      // It costs no extra RPC and no change to any signing path: the signed transaction already
+      // carries it, and `signPopulatedTransaction` already parses this same object for the hash.
+      // A parse failure degrades to `undefined` (the recovery side then stays fail-closed) rather
+      // than throwing inside the nonce-critical send window.
+      const nonce = nonceOfSignedTx(signedTx);
       try {
-        await onBroadcast?.({ txHash: preBroadcastTxHash });
+        await onBroadcast?.({ txHash: preBroadcastTxHash, nonce });
       } catch (hookErr) {
         throw new Error(
           `chain:writeahead hook failed before ${label} broadcast: ` +

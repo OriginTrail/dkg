@@ -36,7 +36,13 @@ import {
   createAsyncLift2270Harness,
   expectFailed,
 } from './_helpers/async-lift-2270-harness.js';
-import { kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
+import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
+import {
+  KA_VM_KA_UAL,
+  kaVmPublishRequest,
+  stageKnowledgeAssetShareSnapshot,
+} from './_helpers/ka-vm-publish.js';
 
 const AUTHOR = '0x1111111111111111111111111111111111111111' as LiftJobHex;
 const MERKLE_ROOT = `0x${'12'.repeat(32)}` as LiftJobHex;
@@ -358,6 +364,159 @@ describe('GH#2270 proof-first chain dispatcher', () => {
 
     expect(await publisher.recover()).toBe(0);
     expect(isHeldForChainProof(expectFailed(await publisher.getStatus(failed.jobId)))).toBe(true);
+  });
+
+  // GH#2270 PR-3 r1 — RAW LIFT is dispatched on the same held predicate. The lane used to gate on
+  // `resolution === 'retry_recovery'` plus live broadcast metadata, which is a strict SUBSET: it
+  // missed a job that failed from 'broadcast' with an ordinary retryable code while still holding
+  // a persisted txHash, and that job has a transaction unaccounted for just the same.
+  describe('raw lift is dispatched on the same held predicate', () => {
+    async function heldRawLiftAfterWriteAhead(
+      publisher: ReturnType<typeof createPublisher>,
+    ): Promise<PersistedFailedJob> {
+      await stageKnowledgeAssetShareSnapshot({ store: h.store });
+      const jobId = await seedLegacyRawLiftTestJob(h.store, {
+        swmId: 'swm-1',
+        namespace: 'default',
+        contextGraphId: 'music-social',
+        shareOperationId: 'share-op-1',
+        roots: [],
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: KA_VM_KA_UAL,
+        assertionVersion: '1',
+        publicTripleCount: 2,
+        privateTripleCount: 0,
+        scope: 'full',
+        transitionType: 'CREATE',
+        authority: { type: 'owner', proofRef: 'proof:owner:1' },
+      });
+      await publisher.processNext('wallet-raw');
+      return expectFailed(await publisher.getStatus(jobId));
+    }
+
+    it('asks the chain about a raw job that failed AFTER the pre-send write-ahead', async () => {
+      // The exact gap: the send timed out post-signing, so the job failed from 'broadcast' with a
+      // txHash on it. The legacy gate skipped it (its resolution is not `retry_recovery`); the
+      // held predicate does not.
+      const publisher = dispatcher({ status: 'not-found' }, {
+        publishExecutor: async (input) => {
+          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          throw new Error('ETIMEDOUT: request timed out');
+        },
+      });
+      const failed = await heldRawLiftAfterWriteAhead(publisher);
+
+      expect(failed.broadcast?.txHash).toBe(TX_HASH);
+      expect(failed.failure.resolution).not.toBe('retry_recovery');
+      expect(isHeldForChainProof(failed)).toBe(true);
+
+      expect(await publisher.recover()).toBe(1);
+      expect((await publisher.getStatus(failed.jobId))?.status).toBe('accepted');
+    });
+
+    it('keeps that same raw job held on an inconclusive verdict', async () => {
+      const publisher = dispatcher({ status: 'inconclusive' }, {
+        publishExecutor: async (input) => {
+          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          throw new Error('ETIMEDOUT: request timed out');
+        },
+      });
+      const failed = await heldRawLiftAfterWriteAhead(publisher);
+
+      expect(await publisher.recover()).toBe(0);
+      expect(isHeldForChainProof(expectFailed(await publisher.getStatus(failed.jobId)))).toBe(true);
+    });
+  });
+
+  it('re-records an INCLUDED-origin job as tx_reverted, keeping its hash', async () => {
+    // The row the `tx_reverted` allowed-states widening was for. A job that already recorded an
+    // inclusion can still have its transaction reverted out from under it by a reorg, and that is
+    // its OWN transaction — so it takes the proven-ineffective re-record, not the reset.
+    const publisher = dispatcher({ status: 'reverted' });
+    const failed = await h.failFromIncluded(publisher);
+    expect(failed.failure.failedFromState).toBe('included');
+    expect(isHeldForChainProof(failed)).toBe(true);
+
+    expect(await publisher.recover()).toBe(1);
+
+    const settled = expectFailed(await publisher.getStatus(failed.jobId));
+    expect(settled.failure.code).toBe('tx_reverted');
+    expect(settled.failure.failedFromState).toBe('included');
+    expect(settled.broadcast?.txHash).toBe(TX_HASH);
+    expect(isHeldForChainProof(settled)).toBe(false);
+    expect(sends).toBe(0);
+  });
+
+  it('records the signed NONCE in the pre-send write-ahead, so absence can be proven later', async () => {
+    // The dispatcher can only earn a `not-found` if this ran. The adapter emits the nonce
+    // breadcrumb just before the hash one, and the recorder writes both in the single durable
+    // pre-send write.
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onPhase?.('chain:txsigned:nonce-41', 'start');
+          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          throw new Error('stop after the durable write-ahead');
+        },
+      },
+    });
+    await stageKnowledgeAssetShareSnapshot({ store: h.store });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
+    expect(processed?.broadcast?.nonce).toBe(41);
+    expect((await publisher.getStatus(jobId))?.broadcast?.nonce).toBe(41);
+  });
+
+  it('records no nonce when the signing path did not report one', async () => {
+    // Fail-closed by construction: an older signing path, or a signed transaction whose nonce
+    // could not be parsed, simply emits no breadcrumb. The record then carries no nonce and the
+    // resolver can never turn a null lookup into a release for it.
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          throw new Error('stop after the durable write-ahead');
+        },
+      },
+    });
+    await stageKnowledgeAssetShareSnapshot({ store: h.store });
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
+    expect(processed?.broadcast?.nonce).toBeUndefined();
+  });
+
+  it('one job whose lookup throws does not strand the rest of the pass', async () => {
+    // The blast radius of the crash this round fixed. The typed lookup removed the specific cause
+    // (a failed record cast to a shape it did not have), but the resolver still reaches the
+    // network and the handlers still reach the store, so a throw remains possible. It must cost
+    // that ONE job its turn, not every job queued behind it — silently halting recovery for the
+    // whole queue is exactly how a held job goes unnoticed for hours.
+    let asked = 0;
+    const publisher = createPublisher({
+      chainRecoveryResolver: async () => {
+        asked += 1;
+        if (asked === 1) throw new Error('RPC endpoint exploded');
+        return { status: 'not-found' as const };
+      },
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
+    });
+    const first = await failAfterRecordedTxHash(publisher);
+    const second = await failAfterRecordedTxHash(publisher, kaVmPublishRequest({
+      name: 'second-album',
+      shareOperationId: 'second-op',
+      intentKey: `sha256:${'cd'.repeat(32)}`,
+    }));
+
+    // The pass completes, and the job behind the thrower was still reconciled.
+    expect(await publisher.recover()).toBe(1);
+    expect(asked).toBe(2);
+    expect((await publisher.getStatus(second.jobId))?.status).toBe('accepted');
+    // The one that threw keeps its hold and is asked again next tick.
+    expect(isHeldForChainProof(expectFailed(await publisher.getStatus(first.jobId)))).toBe(true);
   });
 
   it('never touches a failed job that is not held', async () => {

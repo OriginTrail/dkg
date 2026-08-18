@@ -34,6 +34,7 @@ import type {
   AsyncKnowledgeAssetVmPublishRecoveryResolver,
   AsyncLiftDetailedRetrier,
   AsyncLiftPublisherConfig,
+  AsyncLiftChainProofLookup,
   AsyncLiftPublisherRecoveryResolver,
   AsyncLiftPublisherRecoveryResult,
   AsyncLiftRetryOutcome,
@@ -55,6 +56,7 @@ import {
   isAutomaticallyRetryableLiftJob,
   isBulkClearableTerminalLiftJob,
   isClearableTerminalLiftJob,
+  decideChainProofDisposition,
   isHeldForChainProof,
   selectLifecycleBindingJobs,
   type LiftJobRetryProjection,
@@ -313,11 +315,14 @@ export class TripleStoreAsyncLiftPublisher
     inspectPreparedPayload: (job) => this.inspectRawLiftPreparedPayload(job),
     process: (claimed, walletId) => this.processRawLift(claimed, walletId),
     recoverInterrupted: (job) => this.recoverRawLiftInterrupted(job),
+    // GH#2270 PR-3 r1 — the same held predicate the named lane uses. It SUPERSETS the legacy
+    // `retry_recovery` + live-broadcast gate: every job that gate admitted persists a txHash and
+    // is therefore held, while the gate missed jobs that equally have a transaction unaccounted
+    // for — a post-write-ahead `tx_submit_timeout`, or anything held on the recovery carrier
+    // alone. One definition of "this job's transaction is unaccounted for" across both lanes, so
+    // raw lift and named KA cannot answer differently about the same evidence.
     canRetryFailedRecovery: (job) =>
-      rawLiftRequestFromJobRequest(job.request) !== null &&
-      job.failure.resolution === 'retry_recovery' &&
-      'broadcast' in job &&
-      Boolean(job.broadcast),
+      rawLiftRequestFromJobRequest(job.request) !== null && isHeldForChainProof(job),
     finalizeProvenPublish: async (job, recovery) => {
       const finalized = this.finalizeRecoveredJob(job, recovery.inclusion, recovery.finalization);
       await this.promoteFinalizedPrivateStaging(finalized);
@@ -828,7 +833,13 @@ export class TripleStoreAsyncLiftPublisher
     // governs a job that is still LIVE ('broadcast'/'included'), where that gate is what bounds
     // time-to-declare-failure. Verdict-driven dispatch belongs to the FAILED-job lane, which only
     // starts once this gate has already fired.
-    const resolution = await this.chainRecoveryResolver(recoverable);
+    // A LIVE broadcast always has its metadata, so the lookup is direct here — no derivation
+    // and nothing to fail to derive.
+    const resolution = await this.chainRecoveryResolver({
+      txHash: recoverable.broadcast.txHash,
+      walletId: recoverable.broadcast.walletId,
+      nonce: recoverable.broadcast.nonce,
+    });
     if (resolution.status === 'recovered') {
       await this.releaseWalletLockForJob(job);
       const finalized = this.finalizeRecoveredJob(
@@ -1185,84 +1196,75 @@ export class TripleStoreAsyncLiftPublisher
 
     let dispatched = 0;
     for (const job of heldJobs) {
-      const evidence = getLiftJobTransactionEvidence(job);
-      const resolution = await this.chainRecoveryResolver(job as unknown as LiftJobBroadcast);
-      switch (resolution.status) {
-        case 'recovered': {
-          // Restore the pre-failure status so finalizeRecoveredJob records the correct
-          // recoveredFromStatus (could be 'broadcast' or 'included').
-          const restoredStatus = job.failure.failedFromState === 'included' ? 'included' : 'broadcast';
-          const { failure: _staleFailure, ...jobWithoutFailure } = job as unknown as Record<string, unknown>;
-          // A job held on the RECOVERY carrier alone has no `broadcast` metadata — an earlier reset
-          // dropped it and kept only the hash. Restoring it to 'broadcast' without rebuilding that
-          // metadata produces a job the finalizers read straight through (`broadcast.txHash`,
-          // `broadcast.walletId`), so rebuild it from the evidence that made the job held in the
-          // first place. Both carriers then finalize through one path.
-          const broadcast = job.broadcast
-            ?? (evidence && job.claim ? { txHash: evidence, walletId: job.claim.walletId } : undefined);
-          if (!broadcast) {
-            // Held on an 'included' origin with neither carrier: there is nothing to finalize
-            // against. Stay held rather than invent a transaction.
-            break;
-          }
-          const recoverable = {
-            ...jobWithoutFailure,
-            status: restoredStatus,
-            broadcast,
-          } as unknown as LiftJobBroadcast;
-          // Release the lock BEFORE the handler runs so the wallet is free either way; a handler
-          // that cannot finalize yet leaves the job held, and it holds no wallet while it waits.
-          await this.releaseWalletLockForJob(job);
-          if (await this.jobHandlerFor(job.request).finalizeProvenPublish(recoverable, resolution.recovery)) {
-            dispatched += 1;
-          }
-          break;
-        }
-        case 'reverted': {
-          // The transaction is accounted for and published nothing. WHOSE transaction it is
-          // decides the release: a job that failed from 'broadcast'/'included' sent this one
-          // itself, so it is re-recorded as `tx_reverted` — the registry's own proven-ineffective
-          // verdict, which releases the hold through `isProvenIneffectiveLiftFailure` and lets the
-          // job supersede so the KA can be published again. A revert is terminal there by
-          // registry policy (`fail_job`, no autoRetry): re-running it automatically would just
-          // revert again, on this node's money.
-          if (job.failure.failedFromState === 'broadcast' || job.failure.failedFromState === 'included') {
-            await this.releaseWalletLockForJob(job);
-            await this.writeJob(this.failProvenRevertedJob(job), 'failed');
-            dispatched += 1;
-            break;
-          }
-          // Otherwise the hash was INHERITED — this job's own failure was pre-send and an earlier
-          // attempt sent the reverted transaction. Nothing of this job's is on chain, so it takes
-          // the same release as a proven absence.
-          // falls through
-        }
-        case 'not-found': {
-          // Proven absence: the node was asked for the TRANSACTION and does not have it. The job
-          // may re-run, on the SAME jobId, through the one reset builder — which carries the hash
-          // forward in `recovery.txHashChecked`, so a later failure is still correctly held.
-          await this.releaseWalletLockForJob(job);
-          await this.writeJob(resetFailedLiftJobToAccepted(job, this.now()), 'recover-reset');
-          dispatched += 1;
-          break;
-        }
-        case 'pending':
-        case 'unrecognized':
-        case 'inconclusive':
-          // Nothing was established about this job's transaction. Stay held; the next recover()
-          // asks again. `unrecognized` is here and not with the absences on purpose: a mined
-          // transaction carrying no publish this adapter parses is a fact about THAT transaction,
-          // not proof that no publish happened — an adapter with unwired publish contracts lands
-          // there too.
-          break;
-        default: {
-          // A new verdict must choose its disposition here rather than inherit a silent hold.
-          const unhandled: never = resolution;
-          return unhandled;
-        }
+      // Derive the lookup ONCE, before anything is called with this job. A held job's hash lives
+      // in whichever carrier it has, and its wallet in `broadcast` or the claim; a job missing
+      // either cannot be asked about at all, so it stays held rather than being handed to a
+      // resolver as a shape it is not. This is what the resolver used to be given as a cast.
+      const lookup = this.chainProofLookupFor(job);
+      if (!lookup) continue;
+      // One held job must never strand the rest of the pass. The resolver reaches the network and
+      // the handlers reach the store, so either can throw; before this the exception propagated
+      // out of recover() and every job queued behind this one silently stopped being reconciled.
+      // A job whose turn ended in an exception simply stays held and is asked again next tick,
+      // which is the same disposition as any other unestablished answer.
+      try {
+        dispatched += await this.dispatchOneHeldJob(job, lookup);
+      } catch {
+        continue;
       }
     }
     return dispatched;
+  }
+
+  /** One held job's turn: ask the chain, then execute the disposition the policy module decides. */
+  private async dispatchOneHeldJob(
+    job: PersistedFailedJob,
+    lookup: AsyncLiftChainProofLookup,
+  ): Promise<number> {
+    if (!this.chainRecoveryResolver) return 0;
+    const resolution = await this.chainRecoveryResolver(lookup);
+    const disposition = decideChainProofDisposition(job, resolution.status);
+
+    switch (disposition.action) {
+      case 'finalize': {
+        if (resolution.status !== 'recovered') return 0;
+        // Restore the pre-failure status so finalizeRecoveredJob records the correct
+        // recoveredFromStatus, and rebuild `broadcast` from the lookup so a job held on the
+        // recovery carrier alone finalizes through the same path as any other.
+        const restoredStatus = job.failure.failedFromState === 'included' ? 'included' : 'broadcast';
+        const { failure: _staleFailure, ...jobWithoutFailure } = job as unknown as Record<string, unknown>;
+        const recoverable = {
+          ...jobWithoutFailure,
+          status: restoredStatus,
+          broadcast: job.broadcast ?? { txHash: lookup.txHash, walletId: lookup.walletId },
+        } as unknown as LiftJobBroadcast;
+        // Release the lock BEFORE the handler runs so the wallet is free either way; a handler
+        // that cannot finalize yet leaves the job held, and it holds no wallet while it waits.
+        await this.releaseWalletLockForJob(job);
+        const finalized = await this.jobHandlerFor(job.request)
+          .finalizeProvenPublish(recoverable, resolution.recovery);
+        return finalized ? 1 : 0;
+      }
+      case 'refail_reverted': {
+        await this.releaseWalletLockForJob(job);
+        await this.writeJob(this.failProvenRevertedJob(job, disposition.failedFromState), 'failed');
+        return 1;
+      }
+      case 'reset': {
+        // The job may re-run, on the SAME jobId, through the one reset builder — which carries the
+        // hash forward in `recovery.txHashChecked`, so a later failure is still correctly held.
+        await this.releaseWalletLockForJob(job);
+        await this.writeJob(resetFailedLiftJobToAccepted(job, this.now()), 'recover-reset');
+        return 1;
+      }
+      case 'hold':
+        return 0;
+      default: {
+        // A new disposition must be executed here rather than silently do nothing.
+        const unhandled: never = disposition;
+        return unhandled;
+      }
+    }
   }
 
   async getStats(): Promise<Record<LiftJobState, number>> {
@@ -1849,9 +1851,16 @@ export class TripleStoreAsyncLiftPublisher
     // terminal. It stays 'not-reached' unless the write-ahead hook actually fires.
     let outcome: PreSendOutcome = 'not-reached';
     let recordedTxHash: LiftJobHex | undefined;
+    // GH#2270 PR-3 r1 — the adapter emits the nonce breadcrumb strictly BEFORE the hash one, so by
+    // the time the hash triggers the single durable write this is already set. A signing path that
+    // cannot report a nonce simply never sets it, and the record carries none — recovery then has
+    // no proof of absence for that job and holds, which is the safe direction.
+    let signedNonce: number | undefined;
     const onPhase: PhaseCallback = async (phase, status) => {
       await (params.delegate?.(phase, status) as unknown as Promise<void> | void);
       if (status !== 'start') return;
+      const nonce = nonceFromSignedPhase(phase);
+      if (nonce !== undefined && !recordedTxHash) signedNonce = nonce;
       const txHash = txHashFromSignedPhase(phase);
       if (!txHash || recordedTxHash) return;
       recordedTxHash = txHash;
@@ -1860,6 +1869,7 @@ export class TripleStoreAsyncLiftPublisher
           jobId: params.jobId,
           walletId: params.walletId,
           txHash,
+          nonce: signedNonce,
           merkleRoot: params.merkleRoot,
           publicByteSize: params.publicByteSize,
         });
@@ -1884,6 +1894,7 @@ export class TripleStoreAsyncLiftPublisher
     jobId: string;
     walletId: string;
     txHash: LiftJobHex;
+    nonce?: number;
     merkleRoot?: LiftJobHex;
     publicByteSize?: number;
   }): Promise<void> {
@@ -1897,6 +1908,7 @@ export class TripleStoreAsyncLiftPublisher
     await this.recordDurableBroadcastBeforeSend(current, {
       txHash: params.txHash,
       walletId: params.walletId,
+      nonce: params.nonce,
       merkleRoot: params.merkleRoot,
       publicByteSize: params.publicByteSize,
     });
@@ -2288,8 +2300,31 @@ export class TripleStoreAsyncLiftPublisher
    * No retry is scheduled: a revert is terminal by registry policy, and re-running it would spend
    * gas to revert again.
    */
-  private failProvenRevertedJob(job: PersistedFailedJob): LiftJob {
-    const failedFromState = job.failure.failedFromState === 'included' ? 'included' : 'broadcast';
+  /**
+   * GH#2270 PR-3 — the facts a chain-proof lookup needs, from whichever carrier holds them, or
+   * `null` when this job cannot be asked about at all.
+   *
+   * The hash comes from {@link getLiftJobTransactionEvidence}, so a job whose only carrier is the
+   * recovery record is covered. The wallet comes from `broadcast` when it exists and otherwise
+   * from the claim, because a job reset once has no broadcast metadata left. The nonce is only
+   * ever on live broadcast metadata: an inherited hash carries none, and the resolver reads that
+   * absence as "no proof of absence available" rather than guessing.
+   *
+   * `null` means stay held WITHOUT a chain read — the honest answer for a record we cannot form a
+   * question about, and strictly better than the previous behaviour, which handed the resolver a
+   * failed job cast to `LiftJobBroadcast` and let it throw on the field that was not there.
+   */
+  private chainProofLookupFor(job: PersistedFailedJob): AsyncLiftChainProofLookup | null {
+    const txHash = getLiftJobTransactionEvidence(job);
+    const walletId = job.broadcast?.walletId ?? job.claim?.walletId;
+    if (!txHash || !walletId) return null;
+    return { txHash, walletId, nonce: job.broadcast?.nonce };
+  }
+
+  private failProvenRevertedJob(
+    job: PersistedFailedJob,
+    failedFromState: 'broadcast' | 'included',
+  ): LiftJob {
     const failure = createLiftJobFailureMetadata({
       failedFromState,
       code: 'tx_reverted',
@@ -2467,4 +2502,18 @@ function canonicalizeTerm(term: string, canonicalRootMap: Readonly<Record<string
 function txHashFromSignedPhase(phase: string): LiftJobHex | null {
   const match = phase.match(/^chain:txsigned:tx-(0x[0-9a-fA-F]+)$/);
   return match ? (match[1] as LiftJobHex) : null;
+}
+
+/**
+ * GH#2270 PR-3 r1 — the nonce breadcrumb the adapter emits just before the hash one.
+ *
+ * Anchored like its sibling, and deliberately in the SAME `chain:txsigned:` family: consumers that
+ * do not care about this family already ignore it wholesale, and the two anchors cannot collide
+ * (`tx-` vs `nonce-`), so neither parser can mistake one breadcrumb for the other.
+ */
+function nonceFromSignedPhase(phase: string): number | undefined {
+  const match = phase.match(/^chain:txsigned:nonce-(\d+)$/);
+  if (!match) return undefined;
+  const nonce = Number(match[1]);
+  return Number.isSafeInteger(nonce) && nonce >= 0 ? nonce : undefined;
 }

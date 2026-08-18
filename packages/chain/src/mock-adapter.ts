@@ -190,6 +190,11 @@ export class MockChainAdapter implements ChainAdapter {
    * {@link __setTransactionState}.
    */
   private transactionStates = new Map<string, MockTransactionState>();
+  /**
+   * GH#2270 PR-3 r1 — per-wallet finalized account nonce, declared by tests. Empty by default:
+   * the mock has no finality, so it reports `null` and recovery stays fail-closed.
+   */
+  private finalizedAccountNonces = new Map<string, number>();
   /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
   private reservedRangesByPublisher = new Map<string, Array<{ startId: bigint; endId: bigint }>>();
   /** Publisher addresses this mock is explicitly allowed to attribute V10 publishes to. */
@@ -432,6 +437,29 @@ export class MockChainAdapter implements ChainAdapter {
   /** Test seam — undo {@link __setTransactionState} for one hash. */
   __clearTransactionState(txHash: string): void {
     this.transactionStates.delete(txHash);
+  }
+
+  /**
+   * GH#2270 PR-3 r1 — see {@link ChainAdapter.getFinalizedAccountNonce}.
+   *
+   * `null` unless a test declares one. The mock mines instantly and has no finality notion, so it
+   * has no honest finalized nonce to report, and `null` is exactly the fail-closed answer the
+   * recovery side must see from a deployment that cannot prove nonce consumption.
+   */
+  async getFinalizedAccountNonce(
+    address: string,
+    _options: ChainReadOptions = {},
+  ): Promise<number | null> {
+    return this.finalizedAccountNonces.get(address.toLowerCase()) ?? null;
+  }
+
+  /**
+   * Test seam — declare the wallet's account nonce at the finalized block. Pass `undefined` to go
+   * back to "this deployment cannot answer", which is the mock's default.
+   */
+  __setFinalizedAccountNonce(address: string, nonce: number | undefined): void {
+    if (nonce === undefined) this.finalizedAccountNonces.delete(address.toLowerCase());
+    else this.finalizedAccountNonces.set(address.toLowerCase(), nonce);
   }
 
   async resolveCanonicalFinalizationReceipt(

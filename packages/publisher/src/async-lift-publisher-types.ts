@@ -332,8 +332,34 @@ export type AsyncLiftChainProofResolution =
   /** Nothing was established. Never absence, never proof. */
   | { status: 'inconclusive' };
 
+/**
+ * GH#2270 PR-3 — everything a chain-proof lookup needs, and nothing else.
+ *
+ * The resolver used to take the JOB, which forced the dispatcher to hand it a failed record cast
+ * to `LiftJobBroadcast`. That cast was a lie for one real population: a job held on the recovery
+ * carrier alone has no `broadcast` at all, and the production resolver dereferenced
+ * `job.broadcast.walletId` straight through it, threw, and killed the whole recovery tick for
+ * every job behind it. A resolver must not be handed a shape its caller cannot guarantee.
+ *
+ * The caller now derives these facts ONCE, from whichever carrier holds them, and a job whose hash
+ * or wallet cannot be derived is never looked up at all — it stays held. Nothing here is cast to
+ * something it is not.
+ */
+export interface AsyncLiftChainProofLookup {
+  /** The transaction to ask about, from either evidence carrier. */
+  readonly txHash: LiftJobHex;
+  /** The wallet that signed it — the account whose nonce proves consumption. */
+  readonly walletId: string;
+  /**
+   * The nonce that transaction reserved, when the record carries one. Absent for records written
+   * before the field existed and for inherited hashes; a resolver must then refuse to report a
+   * proven absence, because without it a null lookup is not proof.
+   */
+  readonly nonce?: number;
+}
+
 export type AsyncLiftPublisherRecoveryResolver = (
-  job: LiftJobBroadcast | LiftJobIncluded,
+  lookup: AsyncLiftChainProofLookup,
 ) => Promise<AsyncLiftChainProofResolution>;
 
 export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (

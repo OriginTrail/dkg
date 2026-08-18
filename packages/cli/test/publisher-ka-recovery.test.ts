@@ -95,7 +95,7 @@ describe('named KA publisher recovery wiring', () => {
       },
       publishProof: { merkleRoot, authorAddress: walletId, txIndex: 4 },
     });
-    await expect(createChainProofResolver(publishers)(job)).resolves.toMatchObject({
+    await expect(createChainProofResolver(publishers)({ txHash, walletId })).resolves.toMatchObject({
       status: 'recovered',
       recovery: {
         finalization: {
@@ -202,7 +202,7 @@ describe('named KA publisher recovery wiring', () => {
       broadcast: { txHash, walletId },
     } as LiftJobBroadcast;
 
-    expect((await createChainProofResolver(publishers)(job)).status).toBe('recovered');
+    expect((await createChainProofResolver(publishers)({ txHash, walletId })).status).toBe('recovered');
     await expect(createKnowledgeAssetVmPublishRecoveryResolver(publishers)(job)).resolves.toBeNull();
   });
 

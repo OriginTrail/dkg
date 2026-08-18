@@ -3792,7 +3792,7 @@ export class DKGPublisher implements Publisher {
         const emitPhase = async (phase: string, status: 'start' | 'end') => {
           await (onPhase?.(phase, status) as unknown as Promise<void> | void);
         };
-        const emitWriteAheadStart = async (info?: { txHash?: string }) => {
+        const emitWriteAheadStart = async (info?: { txHash?: string; nonce?: number }) => {
           if (wroteAhead) return;
           wroteAhead = true;
           // PR #241 Codex iter-5: emit a hash-bearing phase BEFORE the
@@ -3810,6 +3810,16 @@ export class DKGPublisher implements Publisher {
           // already bracketed by `chain:writeahead`), and keeping
           // starts balanced by ends preserves the "every start has a
           // matching end" golden-sequence invariant.
+          // GH#2270 PR-3 r1 — the NONCE breadcrumb goes first, so the write-ahead listener has it
+          // in hand when the hash phase triggers its single durable write. It rides the same
+          // `chain:txsigned:` family on purpose: every existing consumer already ignores that
+          // family wholesale (the golden phase-sequence tests strip it by prefix) and the hash
+          // parser is anchored on `tx-`, so this cannot be mistaken for a second transaction.
+          if (info?.nonce !== undefined) {
+            const noncePhase = `chain:txsigned:nonce-${info.nonce}`;
+            await emitPhase(noncePhase, 'start');
+            await emitPhase(noncePhase, 'end');
+          }
           if (info?.txHash) {
             const phase = `chain:txsigned:tx-${info.txHash}`;
             await emitPhase(phase, 'start');
@@ -5182,13 +5192,19 @@ export class DKGPublisher implements Publisher {
     const emitPhase = async (phase: string, status: 'start' | 'end') => {
       await (onPhase?.(phase, status) as unknown as Promise<void> | void);
     };
-    const emitWriteAheadStart = async (info?: { txHash?: string }) => {
+    const emitWriteAheadStart = async (info?: { txHash?: string; nonce?: number }) => {
       if (wroteAhead) return;
       wroteAhead = true;
       // Mirror the publish path (above): emit a balanced, hash-bearing
       // phase first so WAL listeners record the signed-but-not-yet-
       // broadcast update tx identity, then the generic
       // `chain:writeahead:start` for legacy consumers.
+      // GH#2270 PR-3 r1 — nonce breadcrumb first, exactly as the publish path above.
+      if (info?.nonce !== undefined) {
+        const noncePhase = `chain:txsigned:nonce-${info.nonce}`;
+        await emitPhase(noncePhase, 'start');
+        await emitPhase(noncePhase, 'end');
+      }
       if (info?.txHash) {
         const phase = `chain:txsigned:tx-${info.txHash}`;
         await emitPhase(phase, 'start');

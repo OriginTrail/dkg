@@ -12,6 +12,7 @@ export type {
   AsyncLiftPublisher,
   AsyncLiftPublisherConfig,
   AsyncLiftPublishExecutionInput,
+  AsyncLiftChainProofLookup,
   AsyncLiftChainProofResolution,
   AsyncLiftPublisherRecoveryResolver,
   AsyncLiftPublisherRecoveryResult,
