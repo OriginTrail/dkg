@@ -19,7 +19,7 @@ import {
   createChainProofResolver,
   hasChainPublishLookup,
   type PublisherChainAdapters,
-} from '../src/publisher-runner.js';
+} from '../src/publisher-chain-proof.js';
 
 const TX_HASH = `0x${'ab'.repeat(32)}` as `0x${string}`;
 const WALLET = '0x1111111111111111111111111111111111111111';

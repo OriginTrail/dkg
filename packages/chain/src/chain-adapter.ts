@@ -999,6 +999,23 @@ export interface OperationalWalletRegistrationResult {
  * be smuggled to listeners as two parsed phase STRINGS, which made a durability guarantee depend
  * on a naming convention, on emission order, and on nobody else claiming the same prefix.
  */
+/**
+ * GH#2270 PR-3 r3 — a signed, not-yet-sent transaction, as the signing path produces it.
+ *
+ * The nonce is parsed ONCE, where the transaction is signed and the bytes are already being
+ * decoded for the hash. It used to be re-parsed later, at the dispatch boundary, which meant two
+ * decodes of the same bytes and two places that had to agree on what "the nonce" meant.
+ *
+ * `nonce` stays optional because it is only as available as the signer made it: an unparseable
+ * transaction yields none, and the recovery side reads that absence as "no proof of absence
+ * available" rather than guessing.
+ */
+export interface SignedTransactionEnvelope {
+  readonly signedTx: string;
+  readonly txHash: string;
+  readonly nonce?: number;
+}
+
 export interface PreBroadcastSignal {
   /** The signed transaction's hash, known before it is sent. */
   readonly txHash: string;

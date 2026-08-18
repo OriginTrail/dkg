@@ -5055,10 +5055,18 @@ describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () 
     a.init = async () => {};
     const wallet = new ethers.Wallet(SIGNER_PK);
 
-    // A REAL signed transaction, produced by ethers from a fully prefilled request so it signs
-    // offline. The nonce is the one fact this row is about, and it lives in the signed BYTES —
-    // the adapter has to read it back out of them, which is exactly what production does.
-    const signedTx = await wallet.signTransaction({
+    // Drive the PRODUCTION signer. `signPopulatedTransaction` is where the one decode of the
+    // signed bytes happens, so the hash and the nonce this row asserts on are both produced by
+    // the code under test — nothing is handed in. A stub provider is enough because every field
+    // is prefilled; ethers only needs it to exist.
+    const signed = await a.signPopulatedTransaction(wallet.connect({
+      getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
+      estimateGas: async () => 21_000n,
+      getTransactionCount: async () => KNOWN_NONCE,
+      getFeeData: async () => ({ maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1_000_000_000n }),
+      resolveName: async (n: string) => n,
+      _isProvider: true,
+    } as never), {
       to: '0x0000000000000000000000000000000000000002',
       value: 0n,
       nonce: KNOWN_NONCE,
@@ -5068,11 +5076,13 @@ describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () 
       maxFeePerGas: 1_000_000_000n,
       maxPriorityFeePerGas: 1_000_000_000n,
     });
-    // Independent decode of the same bytes: the nonce the adapter must surface, and the hash
-    // production derives the same way.
+    const { signedTx, txHash } = signed;
+    // Independent decode of the same bytes, so the row cannot pass on values the adapter merely
+    // echoed back to itself.
     const decoded = ethers.Transaction.from(signedTx);
     expect(decoded.nonce).toBe(KNOWN_NONCE);
-    const txHash = decoded.hash!;
+    expect(txHash).toBe(decoded.hash);
+    expect(signed.nonce).toBe(KNOWN_NONCE);
 
     const received: any[] = [];
     let sentAfterSignal = false;
@@ -5085,7 +5095,7 @@ describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () 
       wallet,
       'publish',
       async (signal: any) => { received.push(signal); },
-      async () => ({ signedTx, txHash }),
+      async () => signed,
       () => { throw new Error('unreachable'); },
     );
 

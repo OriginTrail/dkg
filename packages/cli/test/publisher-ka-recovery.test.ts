@@ -9,10 +9,9 @@ import {
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import { createChainProofResolver, type PublisherChainAdapters } from '../src/publisher-chain-proof.js';
 import {
-  createChainProofResolver,
   createKnowledgeAssetVmPublishRecoveryResolver,
-  type PublisherChainAdapters,
   scopeKnowledgeAssetVmPublishHandler,
 } from '../src/publisher-runner.js';
 
