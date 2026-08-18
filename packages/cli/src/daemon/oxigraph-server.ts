@@ -188,6 +188,7 @@ export async function startOxigraphServer(
     child: ChildProcess;
     listenerPid: number;
     reason: string;
+    signalAccepted: boolean;
   }
   type LifecycleState =
     | { phase: 'starting' }
@@ -262,7 +263,9 @@ export async function startOxigraphServer(
       // off to revive(), which respawns and re-proves ownership before
       // restoring `ready`.
       markStoreDown();
-      if (requestedRecovery === null) recoveryGeneration += 1;
+      if (requestedRecovery === null || !requestedRecovery.signalAccepted) {
+        recoveryGeneration += 1;
+      }
       // Best-effort OOM classification: `oom_kill` is cgroup-scoped, not
       // per-PID, so use an increment only as supporting evidence for a
       // SIGKILL-compatible child death. This catches MemoryMax/host OOM kills
@@ -420,7 +423,10 @@ export async function startOxigraphServer(
       return;
     }
     try {
-      io.killProcess(request.listenerPid, 'SIGKILL');
+      const signalled = io.killProcess(request.listenerPid, 'SIGKILL');
+      if (!signalled) throw new Error('process signal was not accepted');
+      request.signalAccepted = true;
+      recoveryGeneration += 1;
     } catch {
       log('[oxigraph] recovery restart could not signal the verified listener');
       lifecycle = { phase: 'ready', listenerPid: request.listenerPid };
@@ -437,8 +443,8 @@ export async function startOxigraphServer(
       child: child!,
       listenerPid: lifecycle.listenerPid,
       reason: normalizedReason,
+      signalAccepted: false,
     };
-    recoveryGeneration += 1;
     lifecycle = { phase: 'restart-requested', request };
     markStoreDown();
     log(`[oxigraph] ${normalizedReason}; terminating server for supervised recovery`);
@@ -447,7 +453,9 @@ export async function startOxigraphServer(
   };
 
   const getRecoveryState = (): OxigraphRecoveryState => ({
-    recovering: lifecycle.phase !== 'ready',
+    recovering: lifecycle.phase === 'recovering'
+      || lifecycle.phase === 'stopping'
+      || (lifecycle.phase === 'restart-requested' && lifecycle.request.signalAccepted),
     generation: recoveryGeneration,
   });
 

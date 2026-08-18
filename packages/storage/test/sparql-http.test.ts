@@ -547,6 +547,50 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('classifies an in-flight write after recovery has already completed', async () => {
+    const originalFetch = globalThis.fetch;
+    let recovery = { recovering: false, generation: 0 };
+    let rejectWrite!: (error: unknown) => void;
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    globalThis.fetch = (async () => await new Promise<Response>((_resolve, reject) => {
+      rejectWrite = reject;
+      markWriteStarted();
+    })) as typeof fetch;
+
+    try {
+      const managed = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        updateEndpoint: 'http://managed-oxigraph.test/update',
+        managedOxigraph: true,
+        timeout: 5_000,
+        getRecoveryState: () => recovery,
+      });
+      const writeFailure = managed.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/g',
+      }]).catch((error) => error);
+      await writeStarted;
+
+      // The transport rejects only after the supervisor is healthy again.
+      // The generation change is therefore the sole evidence that this
+      // in-flight write crossed a recovery boundary.
+      recovery = { recovering: false, generation: 1 };
+      rejectWrite(new TypeError('socket closed by completed recovery'));
+
+      expect(await writeFailure).toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'insert',
+        outcome: 'indeterminate',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('rejects a partial managed Oxigraph SELECT response when the native deadline cancels it', async () => {
     const originalFetch = globalThis.fetch;
     const onClientTimeout = vi.fn();

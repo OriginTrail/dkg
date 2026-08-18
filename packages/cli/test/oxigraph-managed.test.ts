@@ -535,7 +535,9 @@ describe('startManagedOxigraph (real download + real server)', () => {
       expect(getRecoveryState().generation).toBe(0);
 
       onClientTimeout('query');
-      expect(getRecoveryState()).toMatchObject({ recovering: true, generation: 1 });
+      // Ownership verification is asynchronous; an unverified request is not
+      // yet a recovery generation and must not be exposed as one.
+      expect(getRecoveryState()).toEqual({ recovering: false, generation: 0 });
       let pid2 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
