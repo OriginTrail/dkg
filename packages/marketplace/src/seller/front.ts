@@ -144,6 +144,9 @@ export function buildV3Quote(deps: FrontDeps): Record<string, unknown> {
     providerAddress: deps.providerAddress,
     chainId: deps.chainId,
     apiBase: deps.cfg.apiBase ?? null,
+    // v3.5: lane sellers name their CG in the SIGNED quote — the transport
+    // pointer is quote-authoritative like every other endpoint
+    laneContextGraphId: deps.cfg.laneContextGraphId ?? null,
     offerings,
     providerKeyId: providerKeyId(deps.home),
     issuedAt: new Date().toISOString(),

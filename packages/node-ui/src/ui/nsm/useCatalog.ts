@@ -189,15 +189,22 @@ export function useCatalog(): CatalogState {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  // one verified quote per provider apiBase (the node fetches + verifies)
+  // one verified quote per provider (the node fetches + verifies) — direct
+  // sellers via their apiBase bootstrap; lane-only sellers via the SWM lane on
+  // the graph the offering was DISCOVERED in, addressed to the provider
   useEffect(() => {
     for (const o of offerings) {
       const key = o.provider.toLowerCase();
-      if (!o.apiBase || quoteFetched.current.has(key)) continue;
+      if (quoteFetched.current.has(key)) continue;
+      const laneCg = o.graph.match(/context-graph:([^/]+)/)?.[1];
+      const query = o.apiBase
+        ? `apiBase=${encodeURIComponent(o.apiBase)}`
+        : laneCg ? `lane=${encodeURIComponent(laneCg)}&to=${encodeURIComponent(o.provider)}` : null;
+      if (!query) continue;
       quoteFetched.current.add(key);
       setQuotes((q) => ({ ...q, [key]: { status: 'loading' } }));
       getJson<{ verified?: boolean; quote?: Record<string, unknown> | null; error?: string }>(
-        `/marketplace/buyer/quote?apiBase=${encodeURIComponent(o.apiBase)}`,
+        `/marketplace/buyer/quote?${query}`,
       ).then((r) => {
         if (r.error) { setQuotes((q) => ({ ...q, [key]: { status: 'unreachable' } })); return; }
         if (!r.verified || !r.quote) { setQuotes((q) => ({ ...q, [key]: { status: 'unverifiable' } })); return; }

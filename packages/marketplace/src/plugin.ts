@@ -17,6 +17,7 @@ import { connectCodexOAuth, type CodexOAuthBinding } from "./seller/connector-co
 import { handleFront, type FrontDeps, type OfferingBinding } from "./seller/front.js";
 import { handleGateway, type GatewayDeps, type GatewayOffering } from "./gateway/router.js";
 import { BuyerClient } from "./buyer/client.js";
+import { LaneBuyerClient } from "./lane/client.js";
 import { hfEngine, tiktokenEngine } from "./buyer/bpe.js";
 import { startLaneExecutor } from "./lane/executor.js";
 import { readFileSync, existsSync, statSync } from "node:fs";
@@ -32,6 +33,40 @@ function buyerCfgStamp(): string {
 
 const BASE = "/marketplace";
 const dkgHome = () => process.env.DKG_HOME ?? `${process.env.HOME}/.dkg`;
+
+// ── self-kick (v3.5): mount() — and with it the LANE EXECUTOR — historically
+// ran lazily on the first HTTP request to /marketplace. A lane-only seller
+// never receives one, so its executor never started and lane requests aged
+// out unanswered (found on the devnet lane e2e). The daemon's RoutePlugin
+// API has no init hook (and counterparties run stock daemons with only this
+// plugin from the branch), so the plugin kicks itself: retry-ping our own
+// operate/status via the node's own api.port + auth.token until the daemon
+// answers once. Fail-soft: no files / no marketplace ⇒ kicks stop silently.
+(function selfKick() {
+  let attempts = 0;
+  const timer = setInterval(() => {
+    attempts++;
+    if (attempts > 60) { clearInterval(timer); return; }
+    try {
+      const home = dkgHome();
+      const portRaw = readFileSync(join(home, "api.port"), "utf8").trim();
+      const port = Number(portRaw.split("\n")[0]);
+      if (!Number.isFinite(port) || port <= 0) return;
+      let token = "";
+      try {
+        token = readFileSync(join(home, "auth.token"), "utf8").split("\n")
+          .map((l) => l.trim()).filter((l) => l && !l.startsWith("#"))[0] ?? "";
+      } catch { /* token optional on loopback */ }
+      fetch(`http://127.0.0.1:${port}${BASE}/operate/status`, {
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+        signal: AbortSignal.timeout(5_000),
+      }).then((res) => {
+        if (res.status !== 404) clearInterval(timer);   // handle() ran → mounted
+      }).catch(() => { /* daemon not listening yet — keep trying */ });
+    } catch { /* api.port not written yet */ }
+  }, 3_000);
+  timer.unref?.();
+})();
 
 interface Mounted {
   front: FrontDeps | null;
@@ -123,7 +158,13 @@ async function mount(cfg: MarketplaceConfig, ctx: RequestContext, log: (l: strin
           bundleKind: "hf" | "tiktoken";
         }>;
       };
-      const client = new BuyerClient(b.sellerApiBase, b.walletEnvFile, b.tabId ?? null);
+      const bAny = b as unknown as { transport?: string; laneContextGraphId?: string; providerAddress?: string };
+      const client = bAny.transport === "lane" && bAny.laneContextGraphId
+        ? (new LaneBuyerClient(
+            `http://127.0.0.1:${ctx.apiPortRef.value}`, cfg.nodeToken ?? [...ctx.validTokens][0] ?? "",
+            bAny.laneContextGraphId, b.walletEnvFile, b.tabId ?? null, 240_000, 3_000,
+            bAny.providerAddress ?? null) as unknown as BuyerClient)
+        : new BuyerClient(b.sellerApiBase, b.walletEnvFile, b.tabId ?? null);
       const gos = new Map<string, GatewayOffering>();
       for (const o of b.offerings) {
         const raw = readFileSync(o.bundlePath, "utf8");
@@ -191,6 +232,7 @@ export const plugin: RoutePlugin = {
         nodeBase: `http://127.0.0.1:${ctx.apiPortRef.value}`,
         nodeToken: token,
         contextGraphId: cfg.laneContextGraphId,
+        providerAddress: cfg.providerAddress,
         basePath: BASE,
         pollMs: 3000,
         log,
@@ -239,15 +281,31 @@ export const plugin: RoutePlugin = {
         ctx.res.end('{"error":"E_TOKEN"}');
         return;
       }
-      const apiBase = new URL(ctx.req.url ?? "", "http://x").searchParams.get("apiBase") ?? "";
+      const sp = new URL(ctx.req.url ?? "", "http://x").searchParams;
+      const apiBase = sp.get("apiBase") ?? "";
+      const laneCg = sp.get("lane") ?? "";
+      const laneTo = sp.get("to") ?? "";
       let out: Record<string, unknown>;
-      if (!/^https?:\/\//.test(apiBase)) out = { error: "E_APIBASE" };
+      if (!/^https?:\/\//.test(apiBase) && !laneCg) out = { error: "E_APIBASE" };
       else {
         try {
           const { readBuyerCfg } = await import("./buyer/actions.js");
           const bcfg = readBuyerCfg(marketplaceHome(dkgHome()));
-          const client = new BuyerClient(apiBase.replace(/\/$/, ""), bcfg?.walletEnvFile ?? "/dev/null", null);
-          const v = await client.fetchAndVerifyTerms();
+          let v;
+          if (laneCg) {
+            // lane-quoted seller: terms ride the SWM lane, addressed to the
+            // provider; the verifier is the SAME as the HTTP path
+            const { LaneBuyerClient } = await import("./lane/client.js");
+            const { verifyTermsBody } = await import("./buyer/client.js");
+            const lc = new LaneBuyerClient(
+              `http://127.0.0.1:${ctx.apiPortRef.value}`, cfg.nodeToken ?? [...ctx.validTokens][0] ?? "",
+              laneCg, bcfg?.walletEnvFile ?? "/dev/null", null, 60_000, 2_000, laneTo || null);
+            const res = await lc.terms();
+            v = verifyTermsBody(res.status, res.body as never);
+          } else {
+            const client = new BuyerClient(apiBase.replace(/\/$/, ""), bcfg?.walletEnvFile ?? "/dev/null", null);
+            v = await client.fetchAndVerifyTerms();
+          }
           const verified = v.checks.every((c) => c.pass);
           out = { verified, checks: v.checks.filter((c) => !c.pass), quote: verified ? v.quote : null, quoteDigest: v.quoteDigest };
         } catch (e) {
@@ -272,17 +330,19 @@ export const plugin: RoutePlugin = {
       const { walletStatus, fundTab, fundStatus, treasuryStatus, closeTab } = await import("./buyer/actions.js");
       const home = marketplaceHome(dkgHome());
       const method = (ctx.req.method ?? "GET").toUpperCase();
+      // the buyer's OWN node — lane transports publish/poll through it
+      const own = { nodeBase: `http://127.0.0.1:${ctx.apiPortRef.value}`, nodeToken: cfg.nodeToken ?? [...ctx.validTokens][0] ?? "" };
       let out: Record<string, unknown>;
       try {
-        if (path.endsWith("/buyer/wallet")) out = await walletStatus(home);
+        if (path.endsWith("/buyer/wallet")) out = await walletStatus(home, own);
         else if (path.endsWith("/buyer/treasury")) out = await treasuryStatus(home);
-        else if (path.endsWith("/buyer/close") && method === "POST") { out = await closeTab(home); log(`buyer-close ${JSON.stringify(out).slice(0, 120)}`); }
-        else if (path.endsWith("/fund/status")) out = await fundStatus(home);
+        else if (path.endsWith("/buyer/close") && method === "POST") { out = await closeTab(home, own); log(`buyer-close ${JSON.stringify(out).slice(0, 120)}`); }
+        else if (path.endsWith("/fund/status")) out = await fundStatus(home, own);
         else if (method === "POST") {
           const chunks: Buffer[] = [];
           for await (const c of ctx.req as unknown as AsyncIterable<Buffer>) chunks.push(c);
           const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as { amountMicroTrac?: number };
-          out = await fundTab(home, Number(parsed.amountMicroTrac ?? 0));
+          out = await fundTab(home, Number(parsed.amountMicroTrac ?? 0), own);
           log(`buyer-fund ${JSON.stringify(out).slice(0, 140)}`);
         } else out = { error: "E_METHOD" };
       } catch (e) {

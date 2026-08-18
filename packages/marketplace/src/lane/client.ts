@@ -27,6 +27,9 @@ export class LaneBuyerClient {
     public tabId: string | null = null,
     private readonly responseTimeoutMs = 240_000,
     private readonly pollMs = 3_000,
+    /** v3.5: provider this client buys FROM — stamped on every request so
+     *  only that seller's executor answers (multi-seller CGs). */
+    private readonly providerAddress: string | null = null,
   ) {
     this.call = nodeCaller(ownNodeBase, ownNodeToken);
   }
@@ -39,7 +42,8 @@ export class LaneBuyerClient {
     const id = newLaneId();
     await publishLaneMessage(this.call, this.contextGraphId, {
       kind: "request",
-      req: { id, method, path, bodyB64: body.toString("base64"), headers, from: this.address(), at: new Date().toISOString() },
+      req: { id, method, path, bodyB64: body.toString("base64"), headers, from: this.address(),
+        ...(this.providerAddress ? { to: this.providerAddress } : {}), at: new Date().toISOString() },
     });
     const deadline = Date.now() + this.responseTimeoutMs;
     for (;;) {

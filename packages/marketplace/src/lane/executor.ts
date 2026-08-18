@@ -7,7 +7,7 @@
 // harmless even if this file is lost.
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { nodeCaller, pollLaneRequests, publishLaneMessage, type LaneRequest } from "./swm-lane.js";
+import { laneRequestIsForMe, nodeCaller, pollLaneRequests, publishLaneMessage, type LaneRequest } from "./swm-lane.js";
 import { markDelivered, sweepExpiredDeliveries } from "../seller/lifecycle.js";
 
 export interface LaneExecutorOpts {
@@ -16,6 +16,9 @@ export interface LaneExecutorOpts {
   nodeToken: string;
   contextGraphId: string;
   basePath: string;             // front mount, e.g. /marketplace
+  /** this seller's provider address — requests addressed elsewhere are
+   *  skipped (marked processed, never answered). */
+  providerAddress?: string;
   pollMs: number;
   log: (line: string) => void;
 }
@@ -92,6 +95,12 @@ export function startLaneExecutor(opts: LaneExecutorOpts): { stop: () => void } 
       const reqs = await pollLaneRequests(call, opts.contextGraphId);
       for (const r of reqs) {
         if (processed.has(r.id)) continue;
+        if (opts.providerAddress && !laneRequestIsForMe(r, opts.providerAddress)) {
+          // not ours — mark processed so we never rescan it, never answer it
+          processed.add(r.id);
+          markProcessed(opts.home, r.id);
+          continue;
+        }
         processed.add(r.id);
         markProcessed(opts.home, r.id);   // mark BEFORE serving: a crash mid-serve
         // must not double-serve — the buyer retries with a fresh id if needed,

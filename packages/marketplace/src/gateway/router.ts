@@ -123,6 +123,12 @@ export async function handleGateway(deps: GatewayDeps, req: Req & AsyncIterable<
     const auth = authorize({ model: parsed.model, isQuery: false, estCostMicroTrac: est });
     if (!auth.ok) { send(res, auth.status, { error: auth.code }); return true; }
 
+    if (parsed.stream === true && typeof (deps.client as { chatStream?: unknown }).chatStream !== "function") {
+      // lane sellers have no wire-streaming: honest fallback is a plain
+      // JSON completion (the UI's chip still lands after the recount) —
+      // never a fake stream with no chain claims
+      parsed.stream = false;
+    }
     if (parsed.stream === true) {
       // ── streaming pass-through: frames reach the consumer AS they arrive
       // from the seller, the chain verifies incrementally, and the recount

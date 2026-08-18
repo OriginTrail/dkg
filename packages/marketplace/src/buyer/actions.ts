@@ -16,7 +16,8 @@
 import { Contract, JsonRpcProvider, Wallet, getAddress } from "ethers";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { BuyerClient } from "./client.js";
+import { BuyerClient, verifyTermsBody, type TermsBody } from "./client.js";
+import { LaneBuyerClient } from "../lane/client.js";
 
 export const DEFAULT_BASE_RPC = "https://mainnet.base.org";
 export const DEFAULT_BASE_TRAC = "0xA81a52B4dda010896cDd386C7fBdc5CDc835ba23";
@@ -33,6 +34,23 @@ export interface BuyerCfg {
   rpcUrl?: string;
   tracContract?: string;
   chainId?: number;
+  /** v3.5 lane transport: when "lane", terms/tab-open/serving ride the SWM
+   *  lane on `laneContextGraphId`, addressed to `providerAddress`;
+   *  sellerApiBase is unused. Default: "direct" (HTTP). */
+  transport?: "direct" | "lane";
+  laneContextGraphId?: string;
+  /** the seller this buyer buys FROM (lane addressing + quote expectation) */
+  providerAddress?: string;
+}
+
+/** the buyer's OWN node loopback — the plugin supplies it; lane calls
+ *  publish/poll through it and never open a cross-device socket */
+export interface OwnNode { nodeBase: string; nodeToken: string }
+
+function laneClientFor(cfg: BuyerCfg, own: OwnNode, tabId: string | null = null): InstanceType<typeof LaneBuyerClient> {
+  if (!cfg.laneContextGraphId) throw new Error("E_LANE_CG_ABSENT");
+  return new LaneBuyerClient(own.nodeBase, own.nodeToken, cfg.laneContextGraphId, cfg.walletEnvFile,
+    tabId, 240_000, 3_000, cfg.providerAddress ?? null);
 }
 
 const buyerCfgPath = (home: string) => join(home, "buyer.json");
@@ -69,7 +87,7 @@ function fundingRows(home: string): FundingRecord[] {
 
 /** Wallet readout for the onboarding card: address + TRAC/ETH balances from
  *  the buyer's own RPC. Read-only; display-only. */
-export async function walletStatus(home: string): Promise<Record<string, unknown>> {
+export async function walletStatus(home: string, own?: OwnNode): Promise<Record<string, unknown>> {
   const cfg = readBuyerCfg(home);
   if (!cfg) return { configured: false };
   const address = getAddress(new Wallet(readWalletKey(cfg.walletEnvFile)).address);
@@ -85,8 +103,7 @@ export async function walletStatus(home: string): Promise<Record<string, unknown
     let quoteProvider: string | null = null;
     let quoteVerified = false;
     try {
-      const client = new BuyerClient(cfg.sellerApiBase, cfg.walletEnvFile, null);
-      const v = await client.fetchAndVerifyTerms(cfg.chainId ? { chainId: cfg.chainId } : undefined);
+      const v = await fetchVerifiedTerms(cfg, own);
       quoteVerified = v.checks.every((c) => c.pass);
       if (quoteVerified) quoteProvider = String((v.quote as { providerAddress?: string }).providerAddress ?? "") || null;
     } catch { /* seller unreachable — the UI shows its offline state */ }
@@ -104,16 +121,31 @@ export async function walletStatus(home: string): Promise<Record<string, unknown
   }
 }
 
+/** Fetch + verify terms over the configured transport — the SAME invariants
+ *  either way (verifyTermsBody); lane requests are addressed to the seller. */
+export async function fetchVerifiedTerms(cfg: BuyerCfg, own?: OwnNode) {
+  const expect = {
+    ...(cfg.chainId ? { chainId: cfg.chainId } : {}),
+    ...(cfg.providerAddress ? { providerAddress: cfg.providerAddress } : {}),
+  };
+  if (cfg.transport === "lane") {
+    if (!own) throw new Error("E_OWN_NODE_ABSENT");
+    const res = await laneClientFor(cfg, own).terms();
+    return verifyTermsBody(res.status, res.body as unknown as TermsBody, expect);
+  }
+  const client = new BuyerClient(cfg.sellerApiBase, cfg.walletEnvFile, null);
+  return client.fetchAndVerifyTerms(Object.keys(expect).length ? expect : undefined);
+}
+
 /** Step 2+3 seed: verify quote, send the deposit, journal it. Returns the tx
  *  hash immediately; confirmation + tab-open happen in fundStatus polls. */
-export async function fundTab(home: string, amountMicroTrac: number): Promise<Record<string, unknown>> {
+export async function fundTab(home: string, amountMicroTrac: number, own?: OwnNode): Promise<Record<string, unknown>> {
   const cfg = readBuyerCfg(home);
   if (!cfg) return { error: "E_BUYER_UNCONFIGURED" };
   if (!Number.isInteger(amountMicroTrac) || amountMicroTrac <= 0) return { error: "E_AMOUNT" };
 
   // quote first — providerAddress comes from the verified quote only
-  const client = new BuyerClient(cfg.sellerApiBase, cfg.walletEnvFile, null);
-  const verified = await client.fetchAndVerifyTerms(cfg.chainId ? { chainId: cfg.chainId } : undefined);
+  const verified = await fetchVerifiedTerms(cfg, own);
   const failed = verified.checks.filter((c) => !c.pass);
   if (failed.length) return { error: "E_QUOTE_UNVERIFIABLE", detail: failed.map((c) => c.name).slice(0, 3) };
   const providerAddress = String((verified.quote as { providerAddress?: string }).providerAddress ?? "");
@@ -137,21 +169,30 @@ export async function fundTab(home: string, amountMicroTrac: number): Promise<Re
 /** Poll step: latest funding record; if its tab isn't open yet, try
  *  /tab/open (seller enforces confirmation depth — E_CONFIRMATIONS means
  *  "not yet", anything else is surfaced). Persists tabId on success. */
-export async function fundStatus(home: string): Promise<Record<string, unknown>> {
+export async function fundStatus(home: string, own?: OwnNode): Promise<Record<string, unknown>> {
   const cfg = readBuyerCfg(home);
   if (!cfg) return { error: "E_BUYER_UNCONFIGURED" };
   const rows = fundingRows(home);
   const last = rows[rows.length - 1];
   if (!last) return { state: cfg.tabId ? "funded" : "none", tabId: cfg.tabId ?? null };
   if (last.tabId) return { state: "funded", txHash: last.txHash, tabId: last.tabId };
-  // try to open
+  // try to open — over the configured transport
   try {
-    const res = await fetch(cfg.sellerApiBase + "/tab/open", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ txHash: last.txHash }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    const body = (await res.json()) as { tab?: { tabId: string }; error?: string };
+    let res: { status: number; json(): Promise<unknown> } | { status: number; body: Record<string, unknown> };
+    let body: { tab?: { tabId: string }; error?: string };
+    if (cfg.transport === "lane") {
+      if (!own) return { state: "error", txHash: last.txHash, error: "E_OWN_NODE_ABSENT" };
+      const out = await laneClientFor(cfg, own).openTab(last.txHash);
+      res = out; body = out.body as { tab?: { tabId: string }; error?: string };
+      if (out.status === 0) return { state: "confirming", txHash: last.txHash, detail: "E_LANE_TIMEOUT" };
+    } else {
+      const r = await fetch(cfg.sellerApiBase + "/tab/open", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ txHash: last.txHash }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      res = r; body = (await r.json()) as { tab?: { tabId: string }; error?: string };
+    }
     if (res.status === 200 && body.tab?.tabId) {
       const tabId = body.tab.tabId;
       appendFileSync(fundingPath(home), JSON.stringify({ ...last, tabId, at: new Date().toISOString() }) + "\n");
@@ -201,10 +242,12 @@ export async function treasuryStatus(home: string): Promise<Record<string, unkno
 
 /** Signed close of the buyer's tab — the buyer's own move, human-gated in
  *  the UI. Returns the seller's signed close statement verbatim. */
-export async function closeTab(home: string): Promise<Record<string, unknown>> {
+export async function closeTab(home: string, own?: OwnNode): Promise<Record<string, unknown>> {
   const cfg = readBuyerCfg(home);
   if (!cfg?.tabId) return { error: "E_NO_TAB" };
-  const client = new BuyerClient(cfg.sellerApiBase, cfg.walletEnvFile, cfg.tabId);
+  const client = cfg.transport === "lane" && own
+    ? laneClientFor(cfg, own, cfg.tabId)
+    : new BuyerClient(cfg.sellerApiBase, cfg.walletEnvFile, cfg.tabId);
   const res = await client.close();
   return { status: res.status, ...res.body };
 }

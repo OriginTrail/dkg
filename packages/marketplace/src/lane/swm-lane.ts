@@ -30,7 +30,20 @@ export interface LaneRequest {
   bodyB64: string;                   // exact request bytes, base64
   headers: Record<string, string>;   // x-nsm-* auth headers (public by design)
   from: string;                      // sender address (informational; auth is the signature)
+  /** v3.5: the provider address this request is FOR. v3 lanes were
+   *  single-seller-per-CG and had no addressing; with two executors on one CG
+   *  an unaddressed request is answered (and raced) by BOTH sellers — the
+   *  wrong one publishing E_TAB_UNKNOWN 401s against the right one's 200. */
+  to?: string;
   at: string;
+}
+
+/** Is this lane request addressed to me? Unaddressed requests keep the v3
+ *  single-seller behavior (served); addressed requests are served only by the
+ *  named provider. Case-insensitive on the address. */
+export function laneRequestIsForMe(req: { to?: string }, providerAddress: string): boolean {
+  if (!req.to) return true;
+  return req.to.toLowerCase() === providerAddress.toLowerCase();
 }
 
 export interface LaneResponse {

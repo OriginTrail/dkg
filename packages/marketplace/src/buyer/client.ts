@@ -47,35 +47,8 @@ export class BuyerClient {
   /** GET /terms and verify the signed quote per-invariant. Unverifiable ≠ pass. */
   async fetchAndVerifyTerms(expect?: { providerAddress?: string; chainId?: number }): Promise<VerifiedQuote> {
     const res = await fetch(this.apiBase + "/terms", { signal: AbortSignal.timeout(15_000) });
-    const body = (await res.json()) as { quote: Record<string, unknown>; quoteDigest: string; signature: string; providerPublicPem: string };
-    const checks: VerifiedQuote["checks"] = [];
-    const push = (name: string, pass: boolean, detail?: string) => checks.push({ name, pass, ...(detail ? { detail } : {}) });
-
-    push("terms returns 402 (payment-required bootstrap)", res.status === 402, `status=${res.status}`);
-    const digest = "sha256:" + createHash("sha256").update(canonicalize(body.quote)).digest("hex");
-    push("quoteDigest == sha256(canonical quote)", digest === body.quoteDigest);
-    let sigOk = false;
-    try {
-      sigOk = edVerify(null, Buffer.from(QUOTE_DOMAIN_V3 + "\n" + canonicalize(body.quote)),
-        createPublicKey(body.providerPublicPem), Buffer.from(body.signature, "base64"));
-    } catch { sigOk = false; }
-    push("quote signature verifies under the delivered provider key", sigOk);
-    const q = body.quote as { providerAddress?: string; chainId?: number; apiBase?: string; offerings?: Array<Record<string, unknown>> };
-    if (expect?.providerAddress) push("quote names the expected provider address", String(q.providerAddress).toLowerCase() === expect.providerAddress.toLowerCase(), String(q.providerAddress));
-    if (expect?.chainId !== undefined) push("quote names the expected chain id", q.chainId === expect.chainId, String(q.chainId));
-    push("quote declares apiBase (URL discipline: probes resolve only from it)", typeof q.apiBase === "string" && q.apiBase.length > 0);
-    const offerings = q.offerings ?? [];
-    push("quote lists at least one offering", offerings.length > 0);
-    for (const o of offerings) {
-      const id = String(o.id);
-      push(`offering ${id}: provenanceClass declared`, o.provenanceClass === "weights-pinned" || o.provenanceClass === "upstream-claimed", String(o.provenanceClass));
-      push(`offering ${id}: tokenizer bundle ref present`, typeof o.tokenizerBundleRef === "string" && (o.tokenizerBundleRef as string).length > 0);
-      push(`offering ${id}: integer µTRAC pricing`, [o.perInputTokenMicroTrac, o.perOutputTokenMicroTrac, o.queryFlatMicroTrac, o.perReturnedQuadMicroTrac].every((n) => Number.isInteger(n) && (n as number) >= 0));
-    }
-    return {
-      quote: body.quote, quoteDigest: body.quoteDigest, providerPublicPem: body.providerPublicPem,
-      offerings, checks, ok: checks.every((c) => c.pass),
-    };
+    const body = (await res.json()) as TermsBody;
+    return verifyTermsBody(res.status, body, expect);
   }
 
   /** POST /tab/open with the human-made deposit's tx hash. */
@@ -210,4 +183,57 @@ export class BuyerClient {
   close() {
     return this.signedPost("/close", {});
   }
+}
+
+// ── shared quote verification (v3.5): the SAME invariants whether the terms
+// arrived over HTTP or over the SWM lane — transport must not change what
+// "verified" means. Extracted from fetchAndVerifyTerms; the endpoint-
+// discipline check is transport-aware: a quote must declare EITHER a direct
+// apiBase or (lane-only) its laneContextGraphId — never neither.
+export interface TermsBody {
+  quote: Record<string, unknown>;
+  quoteDigest: string;
+  signature: string;
+  providerPublicPem: string;
+}
+
+export function verifyTermsBody(
+  status: number,
+  body: TermsBody,
+  expect?: { providerAddress?: string; chainId?: number },
+): VerifiedQuote {
+  const checks: VerifiedQuote["checks"] = [];
+  const push = (name: string, pass: boolean, detail?: string) => checks.push({ name, pass, ...(detail ? { detail } : {}) });
+
+  push("terms returns 402 (payment-required bootstrap)", status === 402, `status=${status}`);
+  const digest = "sha256:" + createHash("sha256").update(canonicalize(body.quote)).digest("hex");
+  push("quoteDigest == sha256(canonical quote)", digest === body.quoteDigest);
+  let sigOk = false;
+  try {
+    sigOk = edVerify(null, Buffer.from(QUOTE_DOMAIN_V3 + "\n" + canonicalize(body.quote)),
+      createPublicKey(body.providerPublicPem), Buffer.from(body.signature, "base64"));
+  } catch { sigOk = false; }
+  push("quote signature verifies under the delivered provider key", sigOk);
+  const q = body.quote as {
+    providerAddress?: string; chainId?: number; apiBase?: string | null;
+    laneContextGraphId?: string | null; offerings?: Array<Record<string, unknown>>;
+  };
+  if (expect?.providerAddress) push("quote names the expected provider address", String(q.providerAddress).toLowerCase() === expect.providerAddress.toLowerCase(), String(q.providerAddress));
+  if (expect?.chainId !== undefined) push("quote names the expected chain id", q.chainId === expect.chainId, String(q.chainId));
+  const hasDirect = typeof q.apiBase === "string" && q.apiBase.length > 0;
+  const hasLane = typeof q.laneContextGraphId === "string" && q.laneContextGraphId.length > 0;
+  push("quote declares a reachable transport (apiBase and/or laneContextGraphId — endpoint discipline)", hasDirect || hasLane,
+    `apiBase=${String(q.apiBase)} lane=${String(q.laneContextGraphId)}`);
+  const offerings = q.offerings ?? [];
+  push("quote lists at least one offering", offerings.length > 0);
+  for (const o of offerings) {
+    const id = String(o.id);
+    push(`offering ${id}: provenanceClass declared`, o.provenanceClass === "weights-pinned" || o.provenanceClass === "upstream-claimed", String(o.provenanceClass));
+    push(`offering ${id}: tokenizer bundle ref present`, typeof o.tokenizerBundleRef === "string" && (o.tokenizerBundleRef as string).length > 0);
+    push(`offering ${id}: integer µTRAC pricing`, [o.perInputTokenMicroTrac, o.perOutputTokenMicroTrac, o.queryFlatMicroTrac, o.perReturnedQuadMicroTrac].every((n) => Number.isInteger(n) && (n as number) >= 0));
+  }
+  return {
+    quote: body.quote, quoteDigest: body.quoteDigest, providerPublicPem: body.providerPublicPem,
+    offerings, checks, ok: checks.every((c) => c.pass),
+  };
 }
