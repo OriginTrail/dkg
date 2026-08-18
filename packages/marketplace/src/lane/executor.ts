@@ -51,7 +51,12 @@ export function startLaneExecutor(opts: LaneExecutorOpts): { stop: () => void } 
     const body = Buffer.from(req.bodyB64, "base64");
     const res = await fetch(opts.nodeBase + opts.basePath + req.path, {
       method: req.method,
-      headers: { "content-type": "application/json", "x-nsm-transport": "lane", ...req.headers },
+      // the replay hits our OWN daemon: attach our own node token — some
+      // 10.0.13 builds (Hermes's 9151aee8) enforce Bearer auth on plugin
+      // routes even over loopback, and the buyer's x-nsm-* headers carry
+      // wire auth, not node-API auth (found live: his executor's replies
+      // came back as daemon 401s over an otherwise-working lane)
+      headers: { "content-type": "application/json", authorization: `Bearer ${opts.nodeToken}`, "x-nsm-transport": "lane", ...req.headers },
       ...(req.method === "GET" ? {} : { body }),
       signal: AbortSignal.timeout(300_000),
     });
