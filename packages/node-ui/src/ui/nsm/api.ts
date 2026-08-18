@@ -3,11 +3,11 @@
 // actually returns; nothing here invents data.
 import { authHeaders, HttpError } from '../http.js';
 
-async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function req<T>(path: string, init: RequestInit = {}, timeoutMs = 20_000): Promise<T> {
   const res = await fetch(path, {
     ...init,
     headers: { ...authHeaders(), ...(init.body ? { 'content-type': 'application/json' } : {}), ...(init.headers ?? {}) },
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new HttpError(res.status, (body as { error?: string }).error ?? `HTTP ${res.status}`, body);
@@ -64,12 +64,12 @@ export interface NsmWallet {
   quoteVerified?: boolean;
 }
 
-export const fetchBuyerWallet = () => req<NsmWallet>('/marketplace/buyer/wallet');
+export const fetchBuyerWallet = () => req<NsmWallet>('/marketplace/buyer/wallet', {}, 240_000);
 
 export const postBuyerFund = (amountMicroTrac: number) =>
   req<{ txHash?: string; error?: string; detail?: unknown }>('/marketplace/buyer/fund', {
     method: 'POST', body: JSON.stringify({ amountMicroTrac }),
-  });
+  }, 360_000);
 
 export interface NsmFundStatus {
   state: 'none' | 'confirming' | 'funded' | 'error' | 'offline';
@@ -79,7 +79,7 @@ export interface NsmFundStatus {
   detail?: string;
 }
 
-export const fetchFundStatus = () => req<NsmFundStatus>('/marketplace/buyer/fund/status');
+export const fetchFundStatus = () => req<NsmFundStatus>('/marketplace/buyer/fund/status', {}, 360_000);
 
 // ── gateway keys (loopback) ──
 

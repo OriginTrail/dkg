@@ -67,12 +67,16 @@ export function OnboardingCard({ status, fxRate = DEFAULT_TRAC_USD, onDone }: {
   }, []);
   useEffect(() => { kpiMarkStart(); refreshWallet(); }, [refreshWallet]);
 
-  // poll while a funding tx is confirming
+  // poll while a funding tx is confirming — and also right after a fund
+  // attempt whose slow (lane) server call outlived the client request, so a
+  // broadcast that succeeded server-side is never lost by the card
   useEffect(() => {
-    if (fund?.state !== 'confirming') return;
-    const t = setInterval(() => { fetchFundStatus().then(setFund).catch(() => {}); }, 5000);
+    const active = fund?.state === 'confirming'
+      || (sentAmountMicro != null && (!fund || fund.state === 'none'));
+    if (!active) return;
+    const t = setInterval(() => { fetchFundStatus().then(setFund).catch(() => {}); }, 8000);
     return () => clearInterval(t);
-  }, [fund?.state]);
+  }, [fund?.state, fund, sentAmountMicro]);
 
   const phase: Phase = useMemo(() => {
     if (dismissed) return { k: 'done' };
