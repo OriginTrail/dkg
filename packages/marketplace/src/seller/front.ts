@@ -31,6 +31,7 @@ import { buildInferenceEvidence } from "../core/inference-meter.js";
 import { modelKaFromBinding, modelKaUrn } from "./model-ka.js";
 import { verifyRequestAuth, bodyDigest } from "./auth.js";
 import { legState, markDelivered, sweepExpiredDeliveries, idempoLookup, idempoRecord, DELIVERY_DEADLINE_MS } from "./lifecycle.js";
+import { streamAccumulator, STREAM_SCHEME_VERSION } from "./streaming.js";
 import { verifyDepositOnchain, openTab, tabById, txHashConsumed, tabQuantities } from "./tabs.js";
 import { completeLlamaCpp, type LlamaCppBinding } from "./connector-llamacpp.js";
 import { completeOpenAi, type OpenAiBinding, CHAT_TEMPLATE_CONSTANTS, templateConstantsDigest } from "./connector-openai.js";
@@ -253,7 +254,7 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
         return true;
       }
     }
-    let parsed: { model?: string; messages?: Array<{ role: string; content: string }>; max_tokens?: number };
+    let parsed: { model?: string; messages?: Array<{ role: string; content: string }>; max_tokens?: number; stream?: boolean };
     try { parsed = JSON.parse(body.toString("utf8")); } catch { send(res, 400, { error: "E_BODY" }); return true; }
     const ob = parsed.model ? deps.offerings.get(parsed.model) : undefined;
     if (!ob || !parsed.messages?.length) { send(res, 400, { error: "E_MODEL_UNKNOWN" }); return true; }
@@ -355,12 +356,27 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
       return true;
     }
     const deadlineMs = DELIVERY_DEADLINE_MS[transport] ?? DELIVERY_DEADLINE_MS.direct;
+    // v3.5 wire streaming: the SIGNED leg binds the exact frames the wire will
+    // carry (chain root + count) alongside the classic bytes digest — a
+    // tampered, dropped, or reordered frame breaks the chain mid-stream.
+    let frames: Buffer[] | null = null;
+    let streaming: Record<string, unknown> | undefined;
+    if (parsed.stream === true) {
+      const bytes = Buffer.from(completion, "utf8");
+      frames = [];
+      for (let i = 0; i < bytes.length; i += 48) frames.push(bytes.subarray(i, Math.min(i + 48, bytes.length)));
+      if (frames.length === 0) frames.push(Buffer.alloc(0));
+      const acc = streamAccumulator();
+      for (const f of frames) acc.push(f);
+      streaming = { scheme: STREAM_SCHEME_VERSION, streamChainRoot: acc.root(), frameCount: acc.frameCount() };
+    }
     const leg = signLeg(deps.home, {
       type: "leg", legType: "inference", tabId: auth.tabId, principal: auth.principal,
       offeringId: ob.offering.id, provenanceClass: ob.offering.provenanceClass,
       meter: { inputTokens, outputTokens },
       pricing: { ...pricingPolicy, costMicroTrac: cost, policyDigest },
       evidence,
+      ...(streaming ? { streaming } : {}),
       tokenizerBundleRef: ob.tokenizerBundleRef,
       transport, deliveryDeadline: new Date(Date.now() + deadlineMs).toISOString(),
       at: new Date().toISOString(),
@@ -380,10 +396,25 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
         ...( { responseB64: Buffer.from(JSON.stringify(responseBody), "utf8").toString("base64") } as object ),
       } as never);
     }
+    if (frames) {
+      // SSE: every frame exactly as chained into the signed leg, then the
+      // final event carrying the leg. Delivery is durable once the stream
+      // ends — markDelivered only after the last byte is out.
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      const w = res as unknown as { write(chunk: string): boolean };
+      for (let i = 0; i < frames.length; i++) {
+        w.write(`data: ${JSON.stringify({ seq: i, frame: frames[i].toString("base64") })}\n\n`);
+      }
+      w.write(`data: ${JSON.stringify({ final: responseBody })}\n\n`);
+      w.write("data: [DONE]\n\n");
+      res.end();
+      if (transport === "direct") markDelivered(deps.home, String(leg.legId), "direct");
+      return true;
+    }
     send(res, 200, responseBody);
     // DIRECT transport: the response is written — delivery is durable from the
     // seller's side the moment the socket flushed. LANE: the executor marks
-    // delivered only after the response KA publish succeeds.
+    // delivered only after the response KA publish succeeded.
     if (transport === "direct") markDelivered(deps.home, String(leg.legId), "direct");
     return true;
   }

@@ -114,7 +114,7 @@ export async function handleGateway(deps: GatewayDeps, req: Req & AsyncIterable<
 
   if (sub === "/chat/completions" && method === "POST") {
     const body = await readBodyBuf(req);
-    let parsed: { model?: string; messages?: Array<{ role: string; content: string }>; max_tokens?: number };
+    let parsed: { model?: string; messages?: Array<{ role: string; content: string }>; max_tokens?: number; stream?: boolean };
     try { parsed = JSON.parse(body.toString("utf8")); } catch { send(res, 400, { error: "E_BODY" }); return true; }
     const off = parsed.model ? deps.offerings.get(parsed.model) : undefined;
     if (!off || !parsed.messages?.length) { send(res, 400, { error: "E_MODEL_UNKNOWN" }); return true; }
@@ -122,6 +122,48 @@ export async function handleGateway(deps: GatewayDeps, req: Req & AsyncIterable<
     const est = 2048 * (off.expectation.perOutputTokenMicroTrac ?? 6) + 4096 * (off.expectation.perInputTokenMicroTrac ?? 2);
     const auth = authorize({ model: parsed.model, isQuery: false, estCostMicroTrac: est });
     if (!auth.ok) { send(res, auth.status, { error: auth.code }); return true; }
+
+    if (parsed.stream === true) {
+      // ── streaming pass-through: frames reach the consumer AS they arrive
+      // from the seller, the chain verifies incrementally, and the recount
+      // still runs before any countersign — verification mid-path, on stream.
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      const w = res as unknown as { write(chunk: string): boolean };
+      const up = await deps.client.chatStream(
+        parsed.model!, parsed.messages, Math.min(Number(parsed.max_tokens ?? 256), 2048),
+        (frame, seq) => { w.write(`data: ${JSON.stringify({ seq, frame: frame.toString("base64") })}\n\n`); },
+      );
+      const finish = (payload: unknown) => { w.write(`data: ${JSON.stringify(payload)}\n\n`); w.write("data: [DONE]\n\n"); res.end(); };
+      if (up.status !== 200 || !up.body.nsm) { finish({ error: up.status === 402 ? "E_402" : "E_UPSTREAM", detail: up.body.error ?? up.status }); return true; }
+      const sLeg = (up.body.nsm as { leg: Record<string, unknown> }).leg;
+      if (!up.stream?.ok) {
+        // chain broke — the counts/bytes no longer reproduce from the wire
+        await deps.client.withhold(String(sLeg.legId), "E_RECOUNT_MISMATCH", up.stream?.detail ?? "stream chain unverifiable");
+        deps.log(`gateway WITHHOLD ${sLeg.legId} E_RECOUNT_MISMATCH (stream: ${up.stream?.detail ?? "no claims"})`);
+        finish({ error: "E_LEG_WITHHELD", code: "E_RECOUNT_MISMATCH", detail: up.stream?.detail, legId: sLeg.legId });
+        return true;
+      }
+      const sCompletion = up.stream.bytes.toString("utf8");
+      const sVerdict = verifyInferenceLegV3({
+        leg: sLeg, deliveredBytes: up.stream.bytes,
+        promptMessages: parsed.messages, offering: off.expectation, engine: off.engine,
+        provenanceClass: off.provenanceClass,
+      });
+      if (sVerdict.decision === "withhold") {
+        const code = sVerdict.violations[0].code;
+        await deps.client.withhold(String(sLeg.legId), code, sVerdict.violations[0].detail);
+        deps.log(`gateway WITHHOLD ${sLeg.legId} ${code} (streamed)`);
+        finish({ error: "E_LEG_WITHHELD", code, violations: sVerdict.violations, legId: sLeg.legId });
+        return true;
+      }
+      await deps.client.countersign(String(sLeg.legId));
+      const sCost = Number((sLeg.pricing as { costMicroTrac: number }).costMicroTrac);
+      recordKeyUsage(deps.home, { keyId: auth.record.keyId, legId: String(sLeg.legId), costMicroTrac: sCost, kind: "inference" });
+      deps.log(`gateway countersign ${sLeg.legId} ${sCost}µ key=${auth.record.keyId} (streamed, ${up.stream.frames} frames)`);
+      finish({ final: { ...up.body, nsm: { leg: sLeg, decision: "countersigned", keyId: auth.record.keyId, stream: { verified: true, frames: up.stream.frames } } } });
+      void sCompletion;
+      return true;
+    }
 
     const upstream = await deps.client.chat(parsed.model!, parsed.messages, Math.min(Number(parsed.max_tokens ?? 256), 2048));
     if (upstream.status !== 200) { send(res, upstream.status === 402 ? 402 : 502, upstream.body); return true; }

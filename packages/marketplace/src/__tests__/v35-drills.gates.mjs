@@ -138,6 +138,38 @@ console.log("═══ C. streaming-digest tamper drill ═══");
   ok("reordered frames → E_RECOUNT_MISMATCH (chain root)", vr.ok === false && vr.detail.includes("chain root"));
 }
 
+console.log("═══ E. wire-SSE streaming drill (signed leg binds the exact frames) ═══");
+{
+  const { randomBytes } = await import("node:crypto");
+  const payload = { model: "fixture-model", messages: [{ role: "user", content: "stream drill" }], max_tokens: 16, stream: true };
+  const sbody = Buffer.from(JSON.stringify(payload));
+  const nonce = randomBytes(12).toString("hex");
+  const stmt = buildAuthStatement({ method: "POST", path: "/v1/chat/completions", body: sbody, tabId: opened.tab.tabId, nonce });
+  const sig = await wallet.signMessage(stmt);
+  const res = await fetch(base + "/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-nsm-tab": opened.tab.tabId, "x-nsm-address": wallet.address, "x-nsm-nonce": nonce, "x-nsm-signature": sig },
+    body: sbody,
+  });
+  ok("stream response is SSE", res.status === 200 && String(res.headers.get("content-type")).includes("text/event-stream"));
+  const raw = await res.text();
+  const events = raw.split("\n\n").filter(Boolean).map((e) => e.replace(/^data: /, "")).filter((d) => d !== "[DONE]");
+  const frames = events.filter((d) => d.includes("\"frame\"")).map((d) => Buffer.from(JSON.parse(d).frame, "base64"));
+  const finalEv = JSON.parse(events.find((d) => d.includes("\"final\"")));
+  const leg = finalEv.final.nsm.leg;
+  ok("final event carries the signed leg with stream claims", !!leg.streaming?.streamChainRoot && leg.streaming.frameCount === frames.length);
+  const v = streamVerifier();
+  for (const f of frames) v.push(f);
+  const verdict = v.finalize({
+    streamChainRoot: leg.streaming.streamChainRoot, frameCount: leg.streaming.frameCount,
+    deliveredResponseBytesDigest: leg.evidence.deliveredResponseBytesDigest,
+  });
+  ok("wire frames verify against the leg (chain + classic digest)", verdict.ok === true);
+  ok("reassembled bytes equal the completion", verdict.ok && verdict.bytes.toString("utf8") === finalEv.final.choices[0].message.content);
+  ok("leg is delivered after stream end (direct)", legState(home, leg.legId).state === "delivered");
+  await client.countersign(leg.legId);
+}
+
 llama.close(); srv.close();
 console.log(`\n${pass}/${pass + fail} v3.5 drills pass`);
 process.exit(fail ? 1 : 0);

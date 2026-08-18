@@ -62,11 +62,44 @@ export function PlaygroundView({ cat, fxRate = DEFAULT_TRAC_USD, initialModel }:
           model: active.providers[0]?.modelId ?? active.displayName,
           messages: [{ role: 'user', content: text }],
           max_tokens: 512,
+          stream: true,
         }),
-        signal: AbortSignal.timeout(120_000),
+        signal: AbortSignal.timeout(300_000),
       });
-      const body = await res.json().catch(() => ({}));
-      if (res.status === 200 && body.nsm?.leg) {
+      let body: Record<string, unknown> & { nsm?: { leg?: Record<string, unknown> }; error?: unknown; code?: unknown; legId?: unknown; choices?: Array<{ message?: { content?: string } }> };
+      if (res.status === 200 && res.headers.get('content-type')?.includes('text/event-stream') && res.body) {
+        // frames render as they arrive; the ✓ lands only after the gateway's
+        // final recount event — timing honest, not decorative (spec 04)
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let final: typeof body = {};
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buf.indexOf('\n\n')) >= 0) {
+            const event = buf.slice(0, idx); buf = buf.slice(idx + 2);
+            const data = event.split('\n').filter((l) => l.startsWith('data: ')).map((l) => l.slice(6)).join('');
+            if (!data || data === '[DONE]') continue;
+            let obj: Record<string, unknown>;
+            try { obj = JSON.parse(data) as Record<string, unknown>; } catch { continue; }
+            if (typeof obj.frame === 'string') {
+              const chunk = decodeBase64Utf8(obj.frame);
+              setMessages((ms) => ms.map((m) => m.id === mid ? { ...m, text: m.text + chunk } : m));
+            } else if (obj.final) {
+              final = obj.final as typeof body;
+            } else if (obj.error) {
+              final = obj as typeof body;
+            }
+          }
+        }
+        body = final;
+      } else {
+        body = await res.json().catch(() => ({}));
+      }
+      if (body.nsm?.leg) {
         const leg = body.nsm.leg as Record<string, unknown>;
         const meter = leg.meter as { inputTokens: number; outputTokens: number };
         const pricing = leg.pricing as { costMicroTrac: number; perInputTokenMicroTrac?: number; perOutputTokenMicroTrac?: number };
@@ -93,8 +126,9 @@ export function PlaygroundView({ cat, fxRate = DEFAULT_TRAC_USD, initialModel }:
             }
           : m));
       } else {
-        const errKey = res.status === 402
-          ? (body.error === 'E_BUDGET' ? 'err.402.budget' : 'err.402.unfunded')
+        const code = String(body.error ?? '');
+        const errKey = res.status === 402 || code === 'E_402' || code === 'E_BUDGET'
+          ? (code === 'E_BUDGET' ? 'err.402.budget' : 'err.402.unfunded')
           : res.status === 401 ? 'err.401'
           : res.status === 429 ? 'err.429'
           : 'err.5xx';
@@ -133,9 +167,10 @@ export function PlaygroundView({ cat, fxRate = DEFAULT_TRAC_USD, initialModel }:
               <div className="sec">{copy(m.errKey)}</div>
             ) : (
               <>
-                {m.text ? <div>{m.text}</div> : m.state === 'checking' ? (
-                  <div className="stream-note">{copy('play.stream.note')}</div>
-                ) : null}
+                {m.text && <div>{m.text}</div>}
+                {m.state === 'checking' && (
+                  <div className="stream-note">▁▂▃ {copy('play.stream.note')}</div>
+                )}
                 <div className="msg-footer">
                   {m.leg && m.leg.costMicro > 0 && (
                     <CostChip micro={m.leg.costMicro} fxRate={fxRate}
@@ -168,4 +203,11 @@ export function PlaygroundView({ cat, fxRate = DEFAULT_TRAC_USD, initialModel }:
       </div>
     </div>
   );
+}
+
+function decodeBase64Utf8(b64: string): string {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
 }

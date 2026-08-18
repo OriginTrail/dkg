@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { Wallet, getAddress } from "ethers";
 import { canonicalize } from "../core/ledger.js";
 import { buildAuthStatement } from "../seller/auth.js";
+import { streamVerifier } from "../seller/streaming.js";
 import { QUOTE_DOMAIN_V3 } from "../seller/front.js";
 import { createPublicKey, verify as edVerify } from "node:crypto";
 
@@ -114,6 +115,88 @@ export class BuyerClient {
 
   chat(model: string, messages: Array<{ role: string; content: string }>, maxTokens = 256) {
     return this.signedPost("/v1/chat/completions", { model, messages, max_tokens: maxTokens });
+  }
+
+  /** v3.5 streaming chat: same signed request with stream:true; the response
+   *  is SSE. Frames are fed to `onFrame` AND to an incremental chain verifier;
+   *  the final signed leg's stream claims are checked against exactly what the
+   *  wire carried. A broken chain is a withhold-grade verdict, not an error. */
+  async chatStream(
+    model: string,
+    messages: Array<{ role: string; content: string }>,
+    maxTokens = 256,
+    onFrame?: (frame: Buffer, seq: number) => void,
+  ): Promise<{
+    status: number;
+    body: Record<string, unknown>;
+    stream?: { ok: boolean; detail?: string; frames: number; bytes: Buffer };
+  }> {
+    if (!this.tabId) throw new Error("E_NO_TAB");
+    const payload = { model, messages, max_tokens: maxTokens, stream: true };
+    const body = Buffer.from(JSON.stringify(payload), "utf8");
+    const nonce = randomBytes(12).toString("hex");
+    const statement = buildAuthStatement({ method: "POST", path: "/v1/chat/completions", body, tabId: this.tabId, nonce });
+    const wallet = new Wallet(readWalletKey(this.walletEnvFile));
+    const signature = await wallet.signMessage(statement);
+    const res = await fetch(this.apiBase + "/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-nsm-tab": this.tabId,
+        "x-nsm-address": wallet.address,
+        "x-nsm-nonce": nonce,
+        "x-nsm-signature": signature,
+      },
+      body,
+      signal: AbortSignal.timeout(300_000),
+    });
+    if (!res.ok || !res.headers.get("content-type")?.includes("text/event-stream")) {
+      return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+    }
+    const verifier = streamVerifier();
+    let seq = 0;
+    let final: Record<string, unknown> | null = null;
+    const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const event = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        const data = event.split("\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6)).join("");
+        if (!data || data === "[DONE]") continue;
+        let obj: Record<string, unknown>;
+        try { obj = JSON.parse(data) as Record<string, unknown>; } catch { continue; }
+        if (typeof obj.frame === "string") {
+          const frame = Buffer.from(obj.frame, "base64");
+          verifier.push(frame);
+          onFrame?.(frame, Number(obj.seq ?? seq));
+          seq++;
+        } else if (obj.final) {
+          final = obj.final as Record<string, unknown>;
+        }
+      }
+    }
+    if (!final) return { status: 502, body: { error: "E_STREAM_NO_FINAL" } };
+    const leg = (final.nsm as { leg?: Record<string, unknown> } | undefined)?.leg;
+    const claims = leg?.streaming as { streamChainRoot?: string; frameCount?: number } | undefined;
+    const bytesDigest = (leg?.evidence as { deliveredResponseBytesDigest?: string } | undefined)?.deliveredResponseBytesDigest;
+    if (!claims?.streamChainRoot || !Number.isFinite(claims.frameCount) || !bytesDigest) {
+      return { status: 200, body: final, stream: { ok: false, detail: "leg carries no stream claims", frames: seq, bytes: Buffer.alloc(0) } };
+    }
+    const v = verifier.finalize({
+      streamChainRoot: claims.streamChainRoot, frameCount: Number(claims.frameCount),
+      deliveredResponseBytesDigest: bytesDigest,
+    });
+    return {
+      status: 200, body: final,
+      stream: v.ok
+        ? { ok: true, frames: seq, bytes: v.bytes }
+        : { ok: false, detail: v.detail, frames: seq, bytes: Buffer.alloc(0) },
+    };
   }
   query(sparql: string, offeringId?: string) {
     return this.signedPost("/v1/query", { sparql, ...(offeringId ? { offeringId } : {}) });
