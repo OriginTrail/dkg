@@ -90,6 +90,9 @@ export async function publishLaneMessage(
     lit(S, `${LANE_NS}laneBodyB64`, msg.req.bodyB64),
     lit(S, `${LANE_NS}laneHeaders`, Buffer.from(JSON.stringify(msg.req.headers), "utf8").toString("base64")),
     lit(S, `${LANE_NS}laneFrom`, msg.req.from),
+    // addressing rides the wire or it doesn't exist (the first cut filtered
+    // on a field that was never serialized — a wire no-op)
+    ...(msg.req.to ? [lit(S, `${LANE_NS}laneTo`, msg.req.to)] : []),
     lit(S, `${LANE_NS}laneAt`, msg.req.at),
   ] : [
     lit(S, `${LANE_NS}laneKind`, "response"),
@@ -116,9 +119,10 @@ function unq(v: unknown): string {
 /** Query the caller's OWN node for lane requests (seller side). */
 export async function pollLaneRequests(call: NodeCall, cg: string): Promise<LaneRequest[]> {
   const q = await call("/api/query", {
-    sparql: `PREFIX nsm: <${LANE_NS}> SELECT ?id ?m ?p ?b ?h ?f ?at WHERE { GRAPH ?g {
+    sparql: `PREFIX nsm: <${LANE_NS}> SELECT ?id ?m ?p ?b ?h ?f ?at ?to WHERE { GRAPH ?g {
       ?s nsm:laneKind ?k ; nsm:laneId ?id ; nsm:laneMethod ?m ; nsm:lanePath ?p ;
          nsm:laneBodyB64 ?b ; nsm:laneHeaders ?h ; nsm:laneFrom ?f ; nsm:laneAt ?at .
+      OPTIONAL { ?s nsm:laneTo ?to }
       FILTER(STR(?k) = "request" || STR(?k) = "\\"request\\"") } } LIMIT 200`,
     contextGraphId: cg, includeSharedMemory: true, includeContextGraphPartitions: true,
   });
@@ -127,6 +131,7 @@ export async function pollLaneRequests(call: NodeCall, cg: string): Promise<Lane
     id: unq(r.id), method: unq(r.m), path: unq(r.p), bodyB64: unq(r.b),
     headers: (() => { try { return JSON.parse(Buffer.from(unq(r.h), "base64").toString("utf8")) as Record<string, string>; } catch { return {}; } })(),
     from: unq(r.f), at: unq(r.at),
+    ...(r.to ? { to: unq(r.to) } : {}),
   }));
 }
 
