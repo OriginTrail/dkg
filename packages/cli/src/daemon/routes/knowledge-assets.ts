@@ -39,6 +39,7 @@ import {
   isWritableQuad,
   validateQuadObjectTerms,
   respondIfReconcileUnavailable,
+  respondIfStoreUnavailable,
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
   validateWritableQuadLiteralSizes,
@@ -226,6 +227,7 @@ function respondAssertionError(res: RequestContext["res"], e: any): void {
     jsonResponse(res, 413, payloadTooLargeResponseBody(e));
     return;
   }
+  if (respondIfStoreUnavailable(res, e)) return;
   if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
     jsonResponse(res, 409, {
       error: e.message,
@@ -1132,6 +1134,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (e?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
       }
+      if (respondIfStoreUnavailable(res, e)) return;
       // Transient KA-number-floor reconcile failure (rate-limited RPC) -> 503.
       if (respondIfReconcileUnavailable(res, e)) return;
       return jsonResponse(res, 500, { error: e?.message ?? String(e) });
@@ -1719,6 +1722,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // relabel an author-selection failure whose message happens to contain
         // "is not finalized" as a generic VM_PUBLISH_PRECONDITION.
         if (respondAuthorSelectionError(res, e)) return;
+        if (respondIfStoreUnavailable(res, e)) return;
         if (e?.code === "PUBLISH_NOT_FULL_SHARE" || /is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {
           return jsonResponse(res, 409, { code: e?.code === "PUBLISH_NOT_FULL_SHARE" ? "PUBLISH_NOT_FULL_SHARE" : "VM_PUBLISH_PRECONDITION", error: msg });
         }

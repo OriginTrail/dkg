@@ -379,13 +379,67 @@ describe('SparqlHttpStore (test server)', () => {
     }) as typeof fetch;
     try {
       const store = new SparqlHttpStore({ queryEndpoint: 'http://example.test/query', timeout: 5 });
-      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeDefined();
+      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        backend: 'sparql-http',
+        operation: 'query',
+      });
       expect(active).toBe(0);
 
       await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).resolves.toMatchObject({
         type: 'bindings',
       });
       expect(maxActive).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('rejects a partial managed Oxigraph SELECT response when the native deadline cancels it', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      '{"head":{"vars":["s"]},"results":{"bindings":[The SPARQL operation has been cancelled',
+      { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+    )) as typeof fetch;
+    try {
+      const managed = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        managedByDkg: true,
+      });
+      await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        backend: 'oxigraph-server',
+        operation: 'query',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('rejects rather than parsing a partial managed Oxigraph CONSTRUCT response', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      '<http://s> <http://p> "partial" <http://g> .\nThe SPARQL operation has been cancelled',
+      { status: 200, headers: { 'Content-Type': 'application/n-quads' } },
+    )) as typeof fetch;
+    try {
+      const managed = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        managedByDkg: true,
+      });
+      await expect(
+        managed.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'),
+      ).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        backend: 'oxigraph-server',
+        operation: 'construct',
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

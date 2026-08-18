@@ -228,6 +228,7 @@ import {
   deriveBlockExplorerUrl,
   classifyClientError,
   sanitizeRevertMessage,
+  respondIfStoreUnavailable,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -391,21 +392,7 @@ export function createApiQueryRequestLifecycle(
 /** Map retryable, pre-dispatch read shedding without changing write routes. */
 export function respondIfApiQueryStoreBusy(res: ServerResponse, err: unknown): boolean {
   if (!(err instanceof StoreSchedulerBusyError)) return false;
-
-  jsonResponse(
-    res,
-    503,
-    {
-      error: err.message,
-      code: err.code,
-      reason: err.reason,
-      priority: err.priority,
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '1' },
-  );
-  return true;
+  return respondIfStoreUnavailable(res, err);
 }
 
 function parseVerifyTimeoutMs(

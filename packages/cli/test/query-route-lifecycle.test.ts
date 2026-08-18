@@ -142,6 +142,7 @@ describe('/api/query request lifecycle', () => {
       reason: 'queue_wait_timeout',
       priority: 'background',
       retryable: true,
+      outcome: 'not_started',
     });
   });
 

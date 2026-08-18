@@ -34,6 +34,7 @@ import {
 import { quadToNQuad } from '../bounded-rdf.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
+import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
@@ -115,16 +116,18 @@ function abortError(signal: AbortSignal): Error {
 function createStoreOperationDeadline(
   timeoutMs: number,
   callerSignal?: AbortSignal,
+  operation = 'operation',
 ): StoreOperationDeadline {
   const controller = new AbortController();
   const deadlineAt = performance.now() + timeoutMs;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let callerAttached = false;
 
-  const timeoutError = () => new DOMException(
-    `Blazegraph operation exceeded its ${timeoutMs}ms deadline`,
-    'TimeoutError',
-  );
+  const timeoutError = () => new StoreOperationTimeoutError({
+    backend: 'blazegraph',
+    operation,
+    timeoutMs,
+  });
   const detachCaller = () => {
     if (!callerAttached) return;
     callerAttached = false;
@@ -217,7 +220,11 @@ export class BlazegraphStore implements TripleStore {
     options: QueryOptions | undefined,
     work: (deadline: StoreOperationDeadline) => Promise<T>,
   ): Promise<T> {
-    const deadline = createStoreOperationDeadline(this.operationTimeoutMs, options?.signal);
+    const deadline = createStoreOperationDeadline(
+      this.operationTimeoutMs,
+      options?.signal,
+      operation,
+    );
     const source = options?.source ?? `blazegraph.${operation}`;
     let admitted = false;
     const scheduled = externalStorePriorityScheduler.run(

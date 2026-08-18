@@ -19,6 +19,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import type { DKGAgent, ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
+import {
+  StoreSchedulerBusyError,
+  isStoreOperationTimeoutError,
+} from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from '../config.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
 
@@ -50,6 +54,58 @@ export function payloadTooLargeResponseBody(err: unknown): Record<string, unknow
   const hint = shaped.hint;
   if (typeof hint === 'string' && hint.length > 0) body.hint = hint;
   return body;
+}
+
+/**
+ * Map transient triple-store pressure to one retryable HTTP contract across
+ * query and lifecycle routes. Scheduler shedding is known not to have started;
+ * a dispatched write timeout is indeterminate and clients must retry the same
+ * idempotency key / Knowledge Asset name rather than minting a new asset.
+ */
+export function respondIfStoreUnavailable(res: ServerResponse, err: unknown): boolean {
+  if (err instanceof StoreSchedulerBusyError) {
+    jsonResponse(
+      res,
+      503,
+      {
+        error: err.message,
+        code: err.code,
+        reason: err.reason,
+        priority: err.priority,
+        retryable: true,
+        outcome: 'not_started',
+      },
+      undefined,
+      { 'Retry-After': '1' },
+    );
+    return true;
+  }
+
+  if (!isStoreOperationTimeoutError(err)) return false;
+  const shaped = err as {
+    message?: unknown;
+    backend?: unknown;
+    operation?: unknown;
+    timeoutMs?: unknown;
+  };
+  jsonResponse(
+    res,
+    503,
+    {
+      error: typeof shaped.message === 'string'
+        ? shaped.message
+        : 'Triple-store operation exceeded its deadline',
+      code: 'STORE_OPERATION_TIMEOUT',
+      retryable: true,
+      outcome: 'indeterminate',
+      ...(typeof shaped.backend === 'string' ? { backend: shaped.backend } : {}),
+      ...(typeof shaped.operation === 'string' ? { operation: shaped.operation } : {}),
+      ...(typeof shaped.timeoutMs === 'number' ? { timeoutMs: shaped.timeoutMs } : {}),
+    },
+    undefined,
+    { 'Retry-After': '1' },
+  );
+  return true;
 }
 
 /**
@@ -97,6 +153,9 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
     // Funded-wallet selection found no operational wallet with gas + TRAC — a
     // user-actionable funding condition (4xx), not a server bug.
     jsonResponse(res, 400, noFundedPublisherWalletBody(typeof err?.message === 'string' ? err.message : String(err)));
+  } else if (respondIfStoreUnavailable(res, err)) {
+    // Store admission pressure and adapter deadlines are transient. The typed
+    // response preserves whether work never started or may have completed.
   } else if (respondIfChainRpcTransportError(res, err)) {
     // Transient transport exhaustion (RPC_ENDPOINTS_EXHAUSTED /
     // RPC_RECEIPT_LOOKUP_FAILED → 503, TIMEOUT → 504) is retryable — a route

@@ -382,7 +382,12 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const s = new BlazegraphStore(baseUrl, { timeout: 20 });
 
     const outcome = await outcomeWithin(run(s), 200);
-    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    expect(outcome).toMatchObject({
+      name: 'TimeoutError',
+      code: 'STORE_OPERATION_TIMEOUT',
+      retryable: true,
+      backend: 'blazegraph',
+    });
     expect(seenSignal?.aborted).toBe(true);
   });
 
