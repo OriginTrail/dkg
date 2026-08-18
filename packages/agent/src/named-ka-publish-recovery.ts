@@ -9,7 +9,6 @@ import { createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import type {
   AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   KnowledgeAssetVmPublishRequest,
-  LiftJobBroadcastMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { unpackKnowledgeAssetId } from './ka-identity.js';
 
@@ -64,26 +63,32 @@ function equalsIgnoreCase(left: string, right: string): boolean {
  */
 export async function normalizeRecoveredNamedKaPublish(input: {
   readonly request: KnowledgeAssetVmPublishRequest;
-  // Only the broadcast metadata (queued tx hash + optional merkle root) is read here; a
-  // structural type keeps the boundary honest instead of taking the whole queue-job union.
-  readonly job: { readonly broadcast: LiftJobBroadcastMetadata };
+  /**
+   * The queued transaction's identity — the tx hash the resolved receipt must be bound to, and the
+   * merkle root to cross-check against the seal when the record carries one.
+   *
+   * GH#2270 PR-3 r3 — named facts rather than `job.broadcast`. A failed job held on the recovery
+   * carrier alone has no broadcast metadata at all, so a caller could only satisfy the old shape
+   * by rebuilding one; the two things actually read are now simply asked for.
+   */
+  readonly queued: { readonly txHash: string; readonly merkleRoot?: string };
   readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
   readonly chain: ChainAdapter;
 }): Promise<RecoveredNamedKaPublish> {
-  const { request, job, recovery, chain } = input;
+  const { request, queued, recovery, chain } = input;
   const inconsistent = (message: string): Error => recoveryInconsistent(request.name, message);
 
-  if (!equalsIgnoreCase(job.broadcast.txHash, recovery.inclusion.txHash)) {
+  if (!equalsIgnoreCase(queued.txHash, recovery.inclusion.txHash)) {
     throw inconsistent(
-      `resolved inclusion tx ${recovery.inclusion.txHash} does not match queued tx ${job.broadcast.txHash}`,
+      `resolved inclusion tx ${recovery.inclusion.txHash} does not match queued tx ${queued.txHash}`,
     );
   }
-  if (!recovery.finalization.txHash || !equalsIgnoreCase(job.broadcast.txHash, recovery.finalization.txHash)) {
+  if (!recovery.finalization.txHash || !equalsIgnoreCase(queued.txHash, recovery.finalization.txHash)) {
     throw inconsistent('resolved finalization is not bound to the queued transaction hash');
   }
-  if (job.broadcast.merkleRoot && !equalsIgnoreCase(job.broadcast.merkleRoot, request.sealMerkleRoot)) {
+  if (queued.merkleRoot && !equalsIgnoreCase(queued.merkleRoot, request.sealMerkleRoot)) {
     throw inconsistent(
-      `queued broadcast merkle root ${job.broadcast.merkleRoot} does not match seal ${request.sealMerkleRoot}`,
+      `queued broadcast merkle root ${queued.merkleRoot} does not match seal ${request.sealMerkleRoot}`,
     );
   }
 

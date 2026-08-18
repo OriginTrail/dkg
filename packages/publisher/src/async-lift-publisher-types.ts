@@ -283,7 +283,21 @@ export interface AsyncKnowledgeAssetVmPublishPreflightInput {
 export interface AsyncKnowledgeAssetVmPublishRecoveryInput {
   readonly walletId: string;
   readonly request: KnowledgeAssetVmPublishRequest;
-  readonly job: LiftJobBroadcast | LiftJobIncluded;
+  /**
+   * GH#2270 PR-3 r3 — the PERSISTED record, whatever state it is actually in.
+   *
+   * It used to be typed as broadcast-or-included, which the failed-job dispatcher could only
+   * satisfy by fabricating one: restore a synthetic status, rebuild the broadcast metadata a reset
+   * had dropped, and cast. The boundary now takes the record as it is, and the facts a caller
+   * needs about the transaction arrive separately and typed.
+   */
+  readonly job: LiftJob;
+  /**
+   * GH#2270 PR-3 r3 — the transaction facts, typed, from whichever carrier the record has. The
+   * consumer needs the queued tx hash to bind the resolved receipt to it, and a failed job held
+   * on the recovery carrier alone has no `broadcast` to read it off.
+   */
+  readonly lookup: AsyncLiftChainProofLookup;
   readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
   readonly publisher?: DKGPublisher;
 }
@@ -377,7 +391,8 @@ export type AsyncLiftPublisherRecoveryResolver = (
 ) => Promise<AsyncLiftChainProofResolution>;
 
 export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
-  job: LiftJobBroadcast | LiftJobIncluded,
+  job: LiftJob,
+  lookup: AsyncLiftChainProofLookup,
 ) => Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null>;
 
 export interface AsyncLiftPublisherConfig {

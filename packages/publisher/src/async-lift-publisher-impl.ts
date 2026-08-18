@@ -207,6 +207,42 @@ function pinnedPublishIdentityKaId(job: LiftJob): string | undefined {
   }
 }
 
+/**
+ * GH#2270 PR-3 r3 — where a chain-proof recovery is finalizing FROM, stated rather than inferred.
+ *
+ * The two lanes carry the same two facts in different places. A live interrupted job has its
+ * origin in `status` and its transaction in `broadcast`; a FAILED one has them in
+ * `failure.failedFromState` and in whichever evidence carrier survived a reset. The finalize path
+ * used to read them off the record, which only worked for the first shape — so the failed-job
+ * dispatcher fabricated the first shape to hand over: a synthetic status, a rebuilt `broadcast`,
+ * and a cast that asserted a record was something it was not.
+ *
+ * Deriving them at the call site instead lets every caller pass its record exactly as persisted.
+ */
+type ChainRecoveryOrigin = {
+  readonly recoveredFromStatus: 'broadcast' | 'included';
+  readonly txHash: LiftJobHex;
+  readonly lookup: AsyncLiftChainProofLookup;
+};
+
+/**
+ * The origin of a LIVE interrupted job: it is still in the state it is recovering from, and its
+ * transaction is still on its broadcast metadata. The failed-job dispatcher derives the same two
+ * facts from `failure.failedFromState` and the evidence carrier instead.
+ */
+function liveChainRecoveryOrigin(job: LiftJobBroadcast | LiftJobIncluded): ChainRecoveryOrigin {
+  return {
+    recoveredFromStatus: job.status,
+    txHash: job.broadcast.txHash,
+    lookup: {
+      txHash: job.broadcast.txHash,
+      walletId: job.broadcast.walletId,
+      nonce: job.broadcast.nonce,
+      publishIdentityKaId: pinnedPublishIdentityKaId(job),
+    },
+  };
+}
+
 type AsyncLiftJobHandler = {
   readonly inspectPreparedPayload: (job: LiftJob) => Promise<AsyncPreparedPublishPayload | null>;
   readonly process: (claimed: LiftJob, walletId: string) => Promise<LiftJob>;
@@ -220,7 +256,8 @@ type AsyncLiftJobHandler = {
    * than inventing a disposition it has no proof for.
    */
   readonly finalizeProvenPublish: (
-    job: LiftJobBroadcast | LiftJobIncluded,
+    job: PersistedFailedJob,
+    origin: ChainRecoveryOrigin,
     recovery: AsyncLiftPublisherRecoveryResult,
   ) => Promise<boolean>;
   readonly shouldPromoteFinalizedPrivateStaging: (job: LiftJob) => boolean;
@@ -372,8 +409,8 @@ export class TripleStoreAsyncLiftPublisher
     // raw lift and named KA cannot answer differently about the same evidence.
     canRetryFailedRecovery: (job) =>
       rawLiftRequestFromJobRequest(job.request) !== null && isHeldForChainProof(job),
-    finalizeProvenPublish: async (job, recovery) => {
-      const finalized = this.finalizeRecoveredJob(job, recovery.inclusion, recovery.finalization);
+    finalizeProvenPublish: async (job, origin, recovery) => {
+      const finalized = this.finalizeRecoveredJob(job, origin, recovery.inclusion, recovery.finalization);
       await this.promoteFinalizedPrivateStaging(finalized);
       await this.writeJob(finalized, 'recovered-finalize');
       return true;
@@ -392,8 +429,8 @@ export class TripleStoreAsyncLiftPublisher
     // reaccept writer, the retry projection and bulk clear, rather than a second rule that could
     // disagree with them.
     canRetryFailedRecovery: (job) => isHeldForChainProof(job),
-    finalizeProvenPublish: async (job) =>
-      await this.finalizeProvenKnowledgeAssetVmPublish(job) === 'finalized',
+    finalizeProvenPublish: async (job, origin) =>
+      await this.finalizeProvenKnowledgeAssetVmPublish(job, origin) === 'finalized',
     shouldPromoteFinalizedPrivateStaging: () => false,
   };
 
@@ -883,15 +920,13 @@ export class TripleStoreAsyncLiftPublisher
     // starts once this gate has already fired.
     // A LIVE broadcast always has its metadata, so the lookup is direct here — no derivation
     // and nothing to fail to derive.
-    const resolution = await this.chainProofResolver({
-      txHash: recoverable.broadcast.txHash,
-      walletId: recoverable.broadcast.walletId,
-      nonce: recoverable.broadcast.nonce,
-    });
+    const origin = liveChainRecoveryOrigin(recoverable);
+    const resolution = await this.chainProofResolver(origin.lookup);
     if (resolution.status === 'recovered') {
       await this.releaseWalletLockForJob(job);
       const finalized = this.finalizeRecoveredJob(
         recoverable,
+        origin,
         resolution.recovery.inclusion,
         resolution.recovery.finalization,
       );
@@ -911,7 +946,10 @@ export class TripleStoreAsyncLiftPublisher
     if (job.status !== 'broadcast' && job.status !== 'included') return false;
 
     const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
-    const outcome = await this.finalizeProvenKnowledgeAssetVmPublish(recoverable);
+    const outcome = await this.finalizeProvenKnowledgeAssetVmPublish(
+      recoverable,
+      liveChainRecoveryOrigin(recoverable),
+    );
     if (outcome === 'finalized') return true;
     // Chain success is authoritative, but local lifecycle repair may be temporarily blocked (for
     // example while SWM catch-up is still in progress). Keep the job tx-bearing and retry recovery
@@ -945,23 +983,25 @@ export class TripleStoreAsyncLiftPublisher
    * second one is paid once, on the terminal transition only.
    */
   private async finalizeProvenKnowledgeAssetVmPublish(
-    recoverable: LiftJobBroadcast | LiftJobIncluded,
+    job: LiftJob,
+    origin: ChainRecoveryOrigin,
   ): Promise<'finalized' | 'unresolved' | 'repair-deferred' | 'unsupported'> {
     if (!this.knowledgeAssetVmPublishRecoveryResolver) return 'unresolved';
-    const resolved = await this.knowledgeAssetVmPublishRecoveryResolver(recoverable);
+    const resolved = await this.knowledgeAssetVmPublishRecoveryResolver(job, origin.lookup);
     if (!resolved) return 'unresolved';
     if (
       !this.knowledgeAssetVmPublishHandler?.finalizeRecovered
-      || !isKnowledgeAssetVmPublishJobRequest(recoverable.request)
+      || !isKnowledgeAssetVmPublishJobRequest(job.request)
     ) {
       return 'unsupported';
     }
 
     try {
       await this.knowledgeAssetVmPublishHandler.finalizeRecovered({
-        walletId: recoverable.broadcast.walletId,
-        request: recoverable.request.knowledgeAssetVmPublish,
-        job: recoverable,
+        walletId: origin.lookup.walletId,
+        request: job.request.knowledgeAssetVmPublish,
+        job,
+        lookup: origin.lookup,
         recovery: resolved,
       });
     } catch {
@@ -975,9 +1015,9 @@ export class TripleStoreAsyncLiftPublisher
       return 'repair-deferred';
     }
 
-    await this.releaseWalletLockForJob(recoverable);
+    await this.releaseWalletLockForJob(job);
     await this.writeJob(
-      this.finalizeRecoveredJob(recoverable, resolved.inclusion, resolved.finalization),
+      this.finalizeRecoveredJob(job, origin, resolved.inclusion, resolved.finalization),
       'recovered-finalize',
     );
     return 'finalized';
@@ -1287,21 +1327,20 @@ export class TripleStoreAsyncLiftPublisher
     switch (disposition.action) {
       case 'finalize': {
         if (resolution.status !== 'recovered') return 0;
-        // Restore the pre-failure status so finalizeRecoveredJob records the correct
-        // recoveredFromStatus, and rebuild `broadcast` from the lookup so a job held on the
-        // recovery carrier alone finalizes through the same path as any other.
-        const restoredStatus = job.failure.failedFromState === 'included' ? 'included' : 'broadcast';
-        const { failure: _staleFailure, ...jobWithoutFailure } = job as unknown as Record<string, unknown>;
-        const recoverable = {
-          ...jobWithoutFailure,
-          status: restoredStatus,
-          broadcast: job.broadcast ?? { txHash: lookup.txHash, walletId: lookup.walletId },
-        } as unknown as LiftJobBroadcast;
+        // The record goes to the handler AS PERSISTED. Where it is recovering from is stated
+        // separately, from the two places a failed job actually keeps it — the failure's origin
+        // state and the evidence carrier the lookup was derived from. Nothing is restored,
+        // rebuilt or cast.
+        const origin: ChainRecoveryOrigin = {
+          recoveredFromStatus: job.failure.failedFromState === 'included' ? 'included' : 'broadcast',
+          txHash: lookup.txHash,
+          lookup,
+        };
         // Release the lock BEFORE the handler runs so the wallet is free either way; a handler
         // that cannot finalize yet leaves the job held, and it holds no wallet while it waits.
         await this.releaseWalletLockForJob(job);
         const finalized = await this.jobHandlerFor(job.request)
-          .finalizeProvenPublish(recoverable, resolution.recovery);
+          .finalizeProvenPublish(job, origin, resolution.recovery);
         return finalized ? 1 : 0;
       }
       case 'refail_reverted': {
@@ -2302,18 +2341,35 @@ export class TripleStoreAsyncLiftPublisher
     return reaccepted;
   }
 
+  /**
+   * GH#2270 PR-3 r3 — the ORIGIN is passed in rather than read off the job.
+   *
+   * A live interrupted job carries it in `status` and `broadcast.txHash`; a FAILED one carries it
+   * in `failure.failedFromState` and whichever evidence carrier it has. Reading it off the record
+   * only worked for the first, which is why the dispatcher used to fabricate a broadcast-shaped
+   * job to hand over. Taking it as an argument lets both lanes pass the record exactly as it is.
+   *
+   * `failure` is dropped here rather than by each caller: a finalized job has none, and stripping
+   * it at the one place that produces a finalized record is what makes that true by construction.
+   */
   private finalizeRecoveredJob(
-    job: LiftJobBroadcast | LiftJobIncluded,
+    job: LiftJob,
+    origin: ChainRecoveryOrigin,
     inclusion: LiftJobInclusionMetadata,
     finalization: LiftJobFinalizationMetadata,
   ): LiftJob {
     const now = this.now();
+    const { failure: _dropped, ...withoutFailure } = job as LiftJob & { failure?: unknown };
     return {
-      ...job,
+      ...withoutFailure,
       status: 'finalized',
       inclusion,
       finalization,
-      recovery: { action: 'finalized_from_chain', recoveredFromStatus: job.status, txHashChecked: job.broadcast.txHash },
+      recovery: {
+        action: 'finalized_from_chain',
+        recoveredFromStatus: origin.recoveredFromStatus,
+        txHashChecked: origin.txHash,
+      },
       timestamps: {
         ...job.timestamps,
         failedAt: undefined,

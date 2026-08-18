@@ -728,6 +728,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const recoveryInput = {
       walletId: 'wallet-1',
       request: recoveryRequest,
+      // GH#2270 PR-3 r3 — the typed transaction facts the finalizer reads; `job.broadcast`
+      // stays only as the optional merkle-root cross-check carrier.
+      lookup: { txHash, walletId: 'wallet-1' },
       job: {
         jobId: 'recovery-job',
         jobSlug: 'recovery-job',
@@ -1544,6 +1547,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
       walletId: 'wallet-1',
       request: intent,
+      lookup: { txHash: processed.broadcast.txHash, walletId: 'wallet-1' },
       job: {
         jobId: 'subgraph-recovery-job',
         jobSlug: 'subgraph-recovery-job',

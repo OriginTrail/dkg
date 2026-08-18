@@ -417,6 +417,31 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect((await publisher.getStatus(failed.jobId))?.status).toBe('accepted');
     });
 
+    it('finalizes a raw job from the verdict evidence, not from anything it invented', async () => {
+      // The RAW-LIFT finalize path had no dispatcher-driven row: every `recovered` row above runs
+      // a named-KA job, and the raw-lift rows only ever used absent/inconclusive verdicts. A
+      // mutant that ignored the verdict and finalized from made-up inclusion data survived
+      // because of it. This pins that the persisted result is the evidence the chain returned.
+      const publisher = dispatcher(RECOVERED, {
+        publishExecutor: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
+          throw new Error('ETIMEDOUT: request timed out');
+        },
+      });
+      const failed = await heldRawLiftAfterWriteAhead(publisher);
+      expect(isHeldForChainProof(failed)).toBe(true);
+
+      expect(await publisher.recover()).toBe(1);
+
+      const finalized = await publisher.getStatus(failed.jobId);
+      expect(finalized?.status).toBe('finalized');
+      expect(finalized?.inclusion?.blockNumber).toBe(77);
+      expect(finalized?.finalization?.ual).toBe('did:dkg:evm:31337/0xabc/7');
+      expect(finalized?.recovery?.action).toBe('finalized_from_chain');
+      expect(finalized?.recovery?.txHashChecked).toBe(TX_HASH);
+      expect(sends).toBe(0);
+    });
+
     it('keeps that same raw job held on an inconclusive verdict', async () => {
       const publisher = dispatcher({ status: 'inconclusive' }, {
         publishExecutor: async (input) => {

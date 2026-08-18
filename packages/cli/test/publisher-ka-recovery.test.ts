@@ -75,7 +75,7 @@ describe('named KA publisher recovery wiring', () => {
       },
       broadcast: { txHash, walletId },
     } as LiftJobBroadcast;
-    const resolved = await resolver(job);
+    const resolved = await resolver(job, { txHash, walletId });
 
     expect(resolveCanonicalFinalizationReceipt).toHaveBeenCalledWith(txHash);
     expect(resolved).toEqual({
@@ -147,10 +147,10 @@ describe('named KA publisher recovery wiring', () => {
     };
     const publisher = chain as unknown as ChainAdapter;
 
-    const resolved = await createKnowledgeAssetVmPublishRecoveryResolver(new Map([[walletId, publisher]]))({
-      status: 'broadcast',
-      broadcast: { txHash, walletId },
-    } as LiftJobBroadcast);
+    const resolved = await createKnowledgeAssetVmPublishRecoveryResolver(new Map([[walletId, publisher]]))(
+      { status: 'broadcast', broadcast: { txHash, walletId } } as LiftJobBroadcast,
+      { txHash, walletId },
+    );
 
     expect(chain.getDKGKnowledgeAssetsAddress).toHaveBeenCalledOnce();
     expect(resolved?.finalization.ual).toBe(
@@ -201,7 +201,8 @@ describe('named KA publisher recovery wiring', () => {
     } as LiftJobBroadcast;
 
     expect((await createChainProofResolver(publishers)({ txHash, walletId })).status).toBe('recovered');
-    await expect(createKnowledgeAssetVmPublishRecoveryResolver(publishers)(job)).resolves.toBeNull();
+    await expect(createKnowledgeAssetVmPublishRecoveryResolver(publishers)(job, { txHash, walletId }))
+      .resolves.toBeNull();
   });
 
   it('forwards the immutable job and wallet-scoped publisher to the agent repair method', async () => {

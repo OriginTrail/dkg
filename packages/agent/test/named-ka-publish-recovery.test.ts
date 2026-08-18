@@ -11,7 +11,6 @@ import {
 import type {
   AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   KnowledgeAssetVmPublishRequest,
-  LiftJobBroadcastMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { normalizeRecoveredNamedKaPublish } from '../src/named-ka-publish-recovery.js';
 
@@ -123,10 +122,12 @@ function baseRequest(
 
 // The normalizer only reads job.broadcast; its input type is the narrow structural
 // shape, so this fixture is a real contract guard (no cast) rather than a faked job.
-function broadcastJob(): { broadcast: LiftJobBroadcastMetadata } {
-  return {
-    broadcast: { txHash: TX_HASH, walletId: 'wallet-1', merkleRoot: SEAL_MERKLE_ROOT },
-  };
+/**
+ * GH#2270 PR-3 r3 — the two queued-transaction facts the normalizer reads, named. It used to take
+ * `job.broadcast`, which a failed job held on the recovery carrier alone does not have.
+ */
+function queuedTx(): { txHash: string; merkleRoot?: string } {
+  return { txHash: TX_HASH, merkleRoot: SEAL_MERKLE_ROOT };
 }
 
 // Typed optional tweaks (no Partial-over-required spread) so the fixture satisfies
@@ -168,7 +169,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     // `ual !== expectedReceiptUal` check; with the fix it resolves.
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),
-      job: broadcastJob(),
+      queued: queuedTx(),
       recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
       chain: seededChain(),
     });
@@ -201,7 +202,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),
-      job: broadcastJob(),
+      queued: queuedTx(),
       recovery: recoveryEvidence(CONTRACT_RECEIPT_UAL),
       chain: seededChain(),
     });
@@ -217,7 +218,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     expect(checksummedUal).not.toBe(GRAPH_LOCAL_UAL); // differs only by case
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),
-      job: broadcastJob(),
+      queued: queuedTx(),
       recovery: recoveryEvidence(checksummedUal),
       chain: seededChain(),
     });
@@ -232,7 +233,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     const { chain, calls } = chainThatRejectsContractLookup();
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),
-      job: broadcastJob(),
+      queued: queuedTx(),
       recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
       chain,
     });
@@ -248,7 +249,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     await expect(
       normalizeRecoveredNamedKaPublish({
         request: baseRequest(),
-        job: broadcastJob(),
+        queued: queuedTx(),
         recovery: recoveryEvidence(CONTRACT_RECEIPT_UAL),
         chain,
       }),
@@ -385,7 +386,7 @@ describe('normalizeRecoveredNamedKaPublish — fail-closed boundary (GH#1966)', 
     await expect(
       normalizeRecoveredNamedKaPublish({
         request: request ?? baseRequest(),
-        job: broadcastJob(),
+        queued: queuedTx(),
         recovery,
         chain: seededChain(),
       }),

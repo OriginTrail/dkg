@@ -4928,7 +4928,7 @@ export class PublishMethods extends DKGAgentBase {
     input: AsyncKnowledgeAssetVmPublishRecoveryInput,
     ctx: OperationContext,
   ): Promise<void> {
-    const { request, job, recovery } = input;
+    const { request, job, lookup, recovery } = input;
     if (
       request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
       || request.kaUal === undefined
@@ -4941,7 +4941,10 @@ export class PublishMethods extends DKGAgentBase {
     }
     const recovered = await normalizeRecoveredNamedKaPublish({
       request,
-      job,
+      // GH#2270 PR-3 r3 — the queued transaction comes from the typed lookup, which is derived
+      // from whichever evidence carrier the record has. `broadcast` is only consulted for the
+      // optional merkle-root cross-check, and a job held on the recovery carrier has none.
+      queued: { txHash: lookup.txHash, merkleRoot: job.broadcast?.merkleRoot },
       recovery,
       chain: this.chain,
     });

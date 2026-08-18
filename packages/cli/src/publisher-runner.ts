@@ -35,9 +35,7 @@ import {
   type AsyncLiftChainProofResolution,
   type AsyncLiftPublisherRecoveryResult,
   type VmPublisherControl,
-  type LiftJobBroadcast,
   type LiftJobHex,
-  type LiftJobIncluded,
   type PublishOptions,
   type V10ACKProviderParams,
   type SnapshotPageIndexStore,
@@ -773,8 +771,8 @@ function createV10ACKProviderForPublisher(
 export function createKnowledgeAssetVmPublishRecoveryResolver(
   adapters: PublisherChainAdapters,
 ): AsyncKnowledgeAssetVmPublishRecoveryResolver {
-  return async (job) => {
-    const recovered = await resolveCanonicalOnChainPublish(job, adapters);
+  return async (job, lookup) => {
+    const recovered = await resolveCanonicalOnChainPublish(lookup, adapters);
     if (!recovered) return null;
     const evidence = mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
       recovered.receipt,
@@ -809,19 +807,19 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
 }
 
 async function resolveCanonicalOnChainPublish(
-  job: LiftJobBroadcast | LiftJobIncluded,
+  lookup: AsyncLiftChainProofLookup,
   adapters: PublisherChainAdapters,
 ): Promise<{
   receipt: CanonicalFinalizationReceipt;
   chain: ChainAdapter;
   knowledgeAssetsContract: string;
 } | null> {
-  const chain = adapters.get(job.broadcast.walletId);
+  const chain = adapters.get(lookup.walletId);
   if (!chain?.resolveCanonicalFinalizationReceipt) return null;
 
   let resolution;
   try {
-    resolution = await chain.resolveCanonicalFinalizationReceipt(job.broadcast.txHash);
+    resolution = await chain.resolveCanonicalFinalizationReceipt(lookup.txHash);
   } catch {
     return null;
   }
