@@ -301,9 +301,40 @@ export interface AsyncKnowledgeAssetVmPublishJobHandler {
   finalizeRecovered?(input: AsyncKnowledgeAssetVmPublishRecoveryInput): Promise<void>;
 }
 
+/**
+ * GH#2270 — what the chain established about one job's transaction.
+ *
+ * This resolver used to answer `AsyncLiftPublisherRecoveryResult | null`, and that `null` fused
+ * "the chain proved this transaction does not exist" with "we could not find out". The
+ * proof-first dispatcher turns on exactly that difference: a resend is safe on the first and a
+ * double publish on the second, so the two cannot share an answer.
+ *
+ * The contract lives HERE, in the publisher, because the publisher is what decides on it — the
+ * adapter and the runner that reads it are downstream implementers, and the publisher cannot
+ * import from either. Whoever supplies the resolver owns one rule the union cannot express: an
+ * absence must be ESTABLISHED. A lookup that failed, an adapter that cannot see the mempool, a
+ * wallet with no publisher — all of those are `inconclusive`, never `not-found`.
+ *
+ * `inconclusive` is the fail-closed member: the dispatcher holds on it forever rather than
+ * guessing, which is why nothing may collapse into it that the chain actually answered.
+ */
+export type AsyncLiftChainProofResolution =
+  /** The chain carries a publish, mapped to evidence this node can finalize with. */
+  | { status: 'recovered'; recovery: AsyncLiftPublisherRecoveryResult }
+  /** Mined with a failure receipt: the transaction is accounted for and published nothing. */
+  | { status: 'reverted' }
+  /** Mined and successful, but carrying no publish the adapter recognizes. Not absence. */
+  | { status: 'unrecognized' }
+  /** The node holds the transaction and has not mined it. Never absence. */
+  | { status: 'pending' }
+  /** The node was asked for the TRANSACTION and does not have it: the only proven absence. */
+  | { status: 'not-found' }
+  /** Nothing was established. Never absence, never proof. */
+  | { status: 'inconclusive' };
+
 export type AsyncLiftPublisherRecoveryResolver = (
   job: LiftJobBroadcast | LiftJobIncluded,
-) => Promise<AsyncLiftPublisherRecoveryResult | null>;
+) => Promise<AsyncLiftChainProofResolution>;
 
 export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
   job: LiftJobBroadcast | LiftJobIncluded,

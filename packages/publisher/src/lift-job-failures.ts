@@ -219,7 +219,12 @@ const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJ
   quorum_unmet: ['broadcast'],
   rpc_unavailable: ['broadcast'],
   tx_submit_timeout: ['broadcast'],
-  tx_reverted: ['broadcast'],
+  // GH#2270 — also reachable from 'included': the proof-first dispatcher re-records this code on a
+  // held job once the chain resolves its transaction to a failure receipt, and a job that had
+  // already recorded an inclusion reaches that state when a reorg replaces its transaction. The
+  // pre-send states stay excluded — a job that failed before signing has no transaction of its own
+  // to revert, and the dispatcher releases that one by reset instead.
+  tx_reverted: ['broadcast', 'included'],
   insufficient_funds: ['broadcast'],
   nonce_conflict: ['broadcast'],
   inclusion_timeout: ['broadcast', 'included'],

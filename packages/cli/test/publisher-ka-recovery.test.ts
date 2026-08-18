@@ -9,7 +9,7 @@ import {
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
 import {
-  createChainRecoveryResolver,
+  createChainProofResolver,
   createKnowledgeAssetVmPublishRecoveryResolver,
   scopeKnowledgeAssetVmPublishHandler,
 } from '../src/publisher-runner.js';
@@ -95,9 +95,12 @@ describe('named KA publisher recovery wiring', () => {
       },
       publishProof: { merkleRoot, authorAddress: walletId, txIndex: 4 },
     });
-    await expect(createChainRecoveryResolver(publishers)(job)).resolves.toMatchObject({
-      finalization: {
-        ual: `did:dkg:evm:31337/0xabcdefabcdefabcdefabcdefabcdefabcdefabcd/${kaId}`,
+    await expect(createChainProofResolver(publishers)(job)).resolves.toMatchObject({
+      status: 'recovered',
+      recovery: {
+        finalization: {
+          ual: `did:dkg:evm:31337/0xabcdefabcdefabcdefabcdefabcdefabcdefabcd/${kaId}`,
+        },
       },
     });
     expect(resolvePublishByTxHash).toHaveBeenCalledWith(txHash);
@@ -199,7 +202,7 @@ describe('named KA publisher recovery wiring', () => {
       broadcast: { txHash, walletId },
     } as LiftJobBroadcast;
 
-    await expect(createChainRecoveryResolver(publishers)(job)).resolves.not.toBeNull();
+    expect((await createChainProofResolver(publishers)(job)).status).toBe('recovered');
     await expect(createKnowledgeAssetVmPublishRecoveryResolver(publishers)(job)).resolves.toBeNull();
   });
 

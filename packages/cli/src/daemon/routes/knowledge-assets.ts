@@ -1591,24 +1591,26 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           });
         }
         // GH#2270 — admission refused to republish a job that may already have sent a
-        // transaction. Deliberately NOT the 409 above: nothing is wrong with the client's
-        // request, and the job KEEPS its lifecycle subject (`existingJobId`). `retryable`
-        // is FALSE on purpose: nothing in this build resolves the hold on its own. The
-        // chain-recovery loop never re-checks a failed KA-VM publish job
-        // (`canRetryFailedRecovery` is false for that handler), so a client that kept retrying
-        // this enqueue would loop until an operator intervened. The status and code stay 503 +
-        // LIFT_JOB_PENDING_CHAIN_PROOF: the condition IS transient in principle and this is not a
-        // client mistake (the 409 below would send them to re-share for nothing) nor a node bug
-        // (without this branch it fell through to a generic 500). The message names the two exits
-        // — chain recovery establishing the transaction's fate, or clearing THAT job by id — and
-        // GH#2270 PR-3's proof-first dispatcher is what flips `retryable` back to true.
+        // transaction. Deliberately NOT the 409 below: nothing is wrong with the client's
+        // request, and the job KEEPS its lifecycle subject (`existingJobId`).
+        //
+        // PR-3 landed the proof-first dispatcher, so `retryable` is TRUE again. A held KA VM
+        // publish job is now re-checked against the chain on every recover() tick
+        // (`canRetryFailedRecovery` is the held predicate for that handler, not `false`), and a
+        // verdict of proven-absent or proven-reverted releases the hold with no operator at all.
+        // A client that keeps retrying this enqueue therefore converges as soon as the chain can
+        // answer, which is exactly what `retryable: true` promises. What it does NOT promise is a
+        // deadline: the hold never expires into a blind reset, so while the chain stays silent
+        // (`pending`/`inconclusive`) the 503 keeps coming, and the by-id clear stays the exit for
+        // an operator who has checked the transaction themselves and does not want to wait.
         if (err instanceof LiftJobPendingChainProofError) {
           return jsonResponse(res, 503, {
             code: err.code,
-            error: `${err.message}. No automatic lane resolves this: clear the job with `
-              + `POST /api/publisher/clear-job {"jobId":"${err.existingJobId}"} once you have `
-              + 'checked the transaction, or wait for chain recovery to establish its fate.',
-            retryable: false,
+            error: `${err.message}. Chain recovery re-checks this job and releases it once the `
+              + 'transaction\'s fate is established — retry this request, or, if you have checked '
+              + `the transaction yourself, clear the job with POST /api/publisher/clear-job `
+              + `{"jobId":"${err.existingJobId}"}.`,
+            retryable: true,
             existingJobId: err.existingJobId,
           });
         }
