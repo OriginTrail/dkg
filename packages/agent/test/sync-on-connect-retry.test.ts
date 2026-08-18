@@ -1263,6 +1263,88 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
 });
 
 describe('DKGAgent sync retry — periodic reconciler', () => {
+  it('refreshes only selected RFC-64 SWM when broad sync-on-connect is disabled', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ReconcilerSelectedSwmIndependent',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      syncOnConnectEnabled: false,
+    });
+    try {
+      await agent.start();
+      allowAllNetworkAdmission(agent);
+
+      const peerA = freshPeerIdString();
+      (agent.node.libp2p as any).getPeers = recorder(() => [peerIdFromString(peerA)]);
+      (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = recorder(
+        () => ['selected-public-cg'],
+      );
+      const owner = (agent as any).selectedSwmBootstrapAdmission.beginTransfer(
+        peerA,
+        ['selected-public-cg'],
+      );
+      (agent as any).selectedSwmBootstrapAdmission.markTransferTerminal(
+        owner,
+        Date.now() - 20 * 60_000,
+      );
+
+      const selectedCalls: string[] = [];
+      (agent as any).trySelectedSwmRetryFromPeer = async (
+        peerId: string,
+        onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
+      ) => {
+        selectedCalls.push(peerId);
+        onSyncAccounting?.({ progress: false, fresh: true });
+        return 'synced';
+      };
+      const broadSync = recorder(async () => 'synced');
+      (agent as any).trySyncFromPeer = broadSync;
+
+      await (agent as any).reconcileSyncFromConnectedPeers();
+      await flushMicrotasks();
+
+      expect(selectedCalls).toEqual([peerA]);
+      expect(broadSync.calls).toEqual([]);
+      expect((agent as any).selectedSwmBootstrapAdmission.isRetryRequired(peerA)).toBe(true);
+      expect((agent as any).lastSuccessfulSyncAt.has(peerA)).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not refresh a recently completed selected RFC-64 SWM scope', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ReconcilerSelectedSwmFresh',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      syncOnConnectEnabled: false,
+    });
+    try {
+      await agent.start();
+      allowAllNetworkAdmission(agent);
+
+      const peerA = freshPeerIdString();
+      (agent.node.libp2p as any).getPeers = recorder(() => [peerIdFromString(peerA)]);
+      (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = recorder(
+        () => ['selected-public-cg'],
+      );
+      const owner = (agent as any).selectedSwmBootstrapAdmission.beginTransfer(
+        peerA,
+        ['selected-public-cg'],
+      );
+      (agent as any).selectedSwmBootstrapAdmission.markTransferTerminal(owner, Date.now());
+      const selectedRetry = recorder(async () => 'synced');
+      (agent as any).trySelectedSwmRetryFromPeer = selectedRetry;
+
+      await (agent as any).reconcileSyncFromConnectedPeers();
+      await flushMicrotasks();
+
+      expect(selectedRetry.calls).toEqual([]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('retries connected peers with no successful sync on record', async () => {
     const agent = await DKGAgent.create({
       name: 'ReconcilerNeverSynced',
@@ -1930,6 +2012,14 @@ describe('DKGAgent sync state lifecycle', () => {
         nextRetryAt: now - 20 * 60_000,
       });
       (agent as any).lastSyncDisconnectedAt.set(remotePeer, now - 20 * 60_000);
+      const selectedOwner = (agent as any).selectedSwmBootstrapAdmission.beginTransfer(
+        remotePeer,
+        ['selected-public-cg'],
+      );
+      (agent as any).selectedSwmBootstrapAdmission.markTransferTerminal(
+        selectedOwner,
+        now - 20 * 60_000,
+      );
       (agent.node.libp2p as any).getPeers = recorder(() => []);
 
       (agent as any).pruneSyncReconcilerState(now);
@@ -1939,6 +2029,7 @@ describe('DKGAgent sync state lifecycle', () => {
       expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
       expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
       expect((agent as any).lastSyncDisconnectedAt.has(remotePeer)).toBe(false);
+      expect((agent as any).selectedSwmBootstrapAdmission.snapshot(remotePeer)).toBeNull();
     } finally {
       await agent.stop().catch(() => {});
     }

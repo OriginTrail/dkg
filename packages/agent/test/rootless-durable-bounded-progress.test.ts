@@ -226,7 +226,11 @@ describe('bounded rootless durable progress', () => {
       ...fixtures[2]!.payload,
     ];
     const materialized: string[] = [];
-    const checkpoints: Array<[string, number]> = [];
+    const checkpoints: Array<{
+      key: string;
+      offset: number;
+      responderSessionOffset?: number;
+    }> = [];
 
     const summary = await runDurableSync({
       ctx,
@@ -359,7 +363,9 @@ describe('bounded rootless durable progress', () => {
           })
           : pageResult('data', {
             quads: rawData,
+            quadRawOffsets: [1, 2, 3, 4, 6, 7, 8, 9, 11, 12],
             nextOffset: rawData.length,
+            rawNextOffset: 13,
             completed: false,
             timedOut: true,
           });
@@ -375,7 +381,13 @@ describe('bounded rootless durable progress', () => {
         return 'applied';
       },
       deleteCheckpoint: () => {},
-      setCheckpoint: (key, checkpoint) => { checkpoints.push([key, checkpoint.offset]); },
+      setCheckpoint: (key, checkpoint) => {
+        checkpoints.push({
+          key,
+          offset: checkpoint.offset,
+          responderSessionOffset: checkpoint.responderSessionOffset,
+        });
+      },
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},
@@ -385,8 +397,12 @@ describe('bounded rootless durable progress', () => {
     expect(summary.complete).toBe(false);
     expect(summary.timedOutPhases).toBe(1);
     expect(summary.insertedDataTriples).toBe(8);
-    expect(checkpoints).toContainEqual([`${CONTEXT_GRAPH_ID}:data`, 8]);
-    expect(checkpoints.some(([key]) => key === `${CONTEXT_GRAPH_ID}:meta`)).toBe(false);
+    expect(checkpoints).toContainEqual({
+      key: `${CONTEXT_GRAPH_ID}:data`,
+      offset: 8,
+      responderSessionOffset: 10,
+    });
+    expect(checkpoints.some(({ key }) => key === `${CONTEXT_GRAPH_ID}:meta`)).toBe(false);
     expect(freshSessions).toEqual([
       ['meta', true],
       ['data', false],
@@ -398,6 +414,145 @@ describe('bounded rootless durable progress', () => {
     expect(materialized.flatMap((entry) => entry.dataQuads)
       .some((quad) => quad.graph === fixtures[2]!.graph)).toBe(false);
     expect(inserted.flat().some((quad) => fixtures.some((entry) => entry.graph === quad.graph))).toBe(false);
+  });
+
+  it('does not rebind a partial responder cursor before its verified prefix is stored', async () => {
+    const fixtures = orderedAssets();
+    const selected = fixtures.slice(0, 2);
+    const meta = selected.flatMap((entry) => entry.meta);
+    const rawData = [
+      ...selected[0]!.payload,
+      ...selected[1]!.payload.slice(0, 2),
+    ];
+    const checkpoints: Array<{ key: string; offset: number }> = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-store-fails-before-rewind',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase }: DurableSyncFetchRequest) => phase === 'meta'
+        ? pageResult('meta', { quads: meta, nextOffset: meta.length })
+        : pageResult('data', {
+            quads: rawData,
+            quadRawOffsets: [1, 2, 3, 4, 6, 7],
+            nextOffset: rawData.length,
+            rawNextOffset: 8,
+            completed: false,
+            timedOut: true,
+          }),
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async () => {
+        throw new Error('simulated atomic store failure before commit');
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: (key, checkpoint) => {
+        checkpoints.push({ key, offset: checkpoint.offset });
+      },
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.complete).toBe(false);
+    expect(summary.failedPhases).toBe(1);
+    expect(summary.insertedDataTriples).toBe(0);
+    expect(checkpoints).toEqual([]);
+  });
+
+  it('rewinds a responder cursor when a timeout leaves only a partial graph', async () => {
+    const [fixture] = orderedAssets();
+    const partialData = fixture!.payload.slice(0, 2);
+    const checkpoints: Array<{
+      offset: number;
+      responderSessionOffset?: number;
+      manifestDigest?: string;
+      terminal?: boolean;
+    }> = [];
+    const deleted: string[] = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-partial-graph-timeout',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase }: DurableSyncFetchRequest) => phase === 'meta'
+        ? pageResult('meta', { quads: fixture!.meta, nextOffset: fixture!.meta.length })
+        : pageResult('data', {
+            quads: partialData,
+            nextOffset: partialData.length,
+            rawNextOffset: partialData.length,
+            completed: false,
+            timedOut: true,
+          }),
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async () => 'applied',
+      deleteCheckpoint: (key) => { deleted.push(key); },
+      setCheckpoint: (_key, checkpoint) => {
+        checkpoints.push({
+          offset: checkpoint.offset,
+          responderSessionOffset: checkpoint.responderSessionOffset,
+          manifestDigest: checkpoint.binding?.manifestDigest,
+          terminal: checkpoint.binding?.terminal,
+        });
+      },
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.complete).toBe(false);
+    expect(summary.insertedDataTriples).toBe(0);
+    expect(deleted).not.toContain(`${CONTEXT_GRAPH_ID}:data`);
+    expect(checkpoints).toContainEqual({
+      offset: 0,
+      responderSessionOffset: 0,
+      manifestDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      terminal: false,
+    });
+  });
+
+  it('self-heals a raw EOF checkpoint stranded ahead of its verified graph boundary', async () => {
+    const [fixture] = orderedAssets();
+    const manifestDigest = manifest(fixture!.meta).manifestDigest;
+    const deleted: string[] = [];
+    const dataCheckpoints: number[] = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-stranded-raw-eof',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase }: DurableSyncFetchRequest) => phase === 'meta'
+        ? pageResult('meta', { quads: fixture!.meta, nextOffset: fixture!.meta.length })
+        : pageResult('data', {
+            quads: [],
+            resumedFromOffset: 0,
+            rawResumedFromOffset: fixture!.payload.length,
+            nextOffset: fixture!.payload.length,
+            rawNextOffset: fixture!.payload.length,
+            manifestDigest,
+            completed: true,
+            timedOut: false,
+          }),
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async () => 'applied',
+      deleteCheckpoint: (key) => { deleted.push(key); },
+      setCheckpoint: (key, checkpoint) => {
+        if (key.endsWith(':data')) dataCheckpoints.push(checkpoint.offset);
+      },
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.complete).toBe(false);
+    expect(summary.insertedDataTriples).toBe(0);
+    expect(deleted).toContain(`${CONTEXT_GRAPH_ID}:data`);
+    expect(dataCheckpoints).toEqual([]);
   });
 
   it('persists an authenticated asset prefix before a later authentication deadline', async () => {

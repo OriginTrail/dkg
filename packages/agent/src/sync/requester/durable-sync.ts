@@ -369,6 +369,15 @@ interface ManifestSettlementCheckpoint {
   readonly numericAdvance: boolean;
 }
 
+type RootlessDataCheckpointRepair =
+  | { readonly kind: 'none' }
+  | {
+      readonly kind: 'rewind';
+      readonly offset: number;
+      readonly responderSessionOffset: number;
+    }
+  | { readonly kind: 'reset-stranded-session' };
+
 /**
  * Advance only across a contiguous prefix of graph descriptors whose exact
  * assets have finished the chain-authentication + atomic-materialization
@@ -906,6 +915,7 @@ async function runDurableSyncWithBudget(
 
       let effectiveDataResult = dataResult;
       let dataForVerification = dataResult.quads;
+      let dataCheckpointRepair: RootlessDataCheckpointRepair = { kind: 'none' };
       let verificationMode: DurableBatchVerificationMode = sinceBatchId === undefined
         ? { kind: 'fullSnapshot' }
         : { kind: 'sinceBatchId', sinceBatchId };
@@ -991,6 +1001,36 @@ async function runDurableSyncWithBudget(
           );
         }
         if (bounded) {
+          const rawResumedFromOffset = dataResult.rawResumedFromOffset
+            ?? dataResult.resumedFromOffset;
+          const rawNextOffset = dataResult.rawNextOffset ?? dataResult.nextOffset;
+          // page-fetch owns a raw immutable responder cursor, while this layer
+          // owns the verified complete-graph cursor. A timeout may accept part
+          // of the next graph and persist the RAW cursor before this bounded
+          // projection deliberately drops that unusable suffix. Rebind the
+          // same responder token to the last complete raw graph boundary so a
+          // retry replays the dropped rows instead of skipping them forever.
+          const rewoundDiscardedDataSuffix = rawNextOffset > bounded.safeRawNextOffset;
+          // Repair checkpoints written by older code that already reached raw
+          // EOF while their verified cursor remained behind. With no rows in
+          // this response there is no raw-offset mapping from which to rewind,
+          // so discard the paired token/checkpoint and let the next attempt
+          // obtain a fresh immutable responder generation from offset zero.
+          const resetStrandedDataSession = dataResult.completed
+            && bounded.safeNextOffset < bounded.manifestRowCount
+            && bounded.safeNextOffset === dataResult.resumedFromOffset
+            && bounded.completedGraphCount === 0
+            && rawResumedFromOffset > dataResult.resumedFromOffset
+            && rawNextOffset === rawResumedFromOffset;
+          dataCheckpointRepair = resetStrandedDataSession
+            ? { kind: 'reset-stranded-session' }
+            : rewoundDiscardedDataSuffix
+              ? {
+                  kind: 'rewind',
+                  offset: bounded.safeNextOffset,
+                  responderSessionOffset: bounded.safeRawNextOffset,
+                }
+              : { kind: 'none' };
           dataForVerification = bounded.dataQuads;
           effectiveDataResult = {
             ...dataResult,
@@ -1061,7 +1101,6 @@ async function runDurableSyncWithBudget(
       if (graphScopedManifest && processed.dataRejectedMissingMeta !== 0) {
         deleteCheckpoint(rawDataResult.checkpointKey);
       }
-
       const notifyVerifiedFullSnapshot = async (): Promise<void> => {
         if (
           !onVerifiedFullSnapshot
@@ -1122,6 +1161,56 @@ async function runDurableSyncWithBudget(
         && !metaResult.timedOut
         && effectiveDataResult.completed
         && !effectiveDataResult.timedOut;
+      const settleZeroProgressDataCheckpointRepair = () => {
+        if (
+          !graphScopedManifest
+          || !batchVerifiedCleanly
+          || processed.dataRejectedMissingMeta !== 0
+          || dataCheckpointRepair.kind === 'none'
+        ) return;
+        if (dataCheckpointRepair.kind === 'reset-stranded-session') {
+          deleteCheckpoint(rawDataResult.checkpointKey);
+          logWarn(
+            ctx,
+            `Reset stranded rootless durable session for "${pid}": raw cursor `
+              + `${rawDataResult.rawResumedFromOffset ?? rawDataResult.resumedFromOffset} `
+              + `was ahead of verified graph boundary ${effectiveDataResult.resumedFromOffset}`,
+          );
+          return;
+        }
+        // A zero-length verified prefix has no store side effect to await, so
+        // it is safe to repair the raw responder cursor at the empty-response
+        // checkpoint boundary. Non-empty prefixes are deliberately left to
+        // the normal post-materialization settlement/checkpoint path below.
+        if (dataCheckpointRepair.offset !== effectiveDataResult.resumedFromOffset) return;
+        const prefix = graphScopedDurableManifestPrefixAtOffset(
+          graphScopedManifest,
+          dataCheckpointRepair.offset,
+        );
+        if (!prefix) {
+          deleteCheckpoint(rawDataResult.checkpointKey);
+          throw new Error(
+            `Refusing to rewind durable DATA cursor ${dataCheckpointRepair.offset}: `
+              + 'the completed META manifest has no matching graph boundary',
+          );
+        }
+        setCheckpoint(rawDataResult.checkpointKey, {
+          offset: dataCheckpointRepair.offset,
+          responderSessionOffset: dataCheckpointRepair.responderSessionOffset,
+          binding: {
+            manifestDigest: graphScopedManifest.manifestDigest,
+            manifestPrefixDigest: prefix.prefixDigest,
+            terminal: false,
+          },
+        });
+        logInfo(
+          ctx,
+          `Rewound rootless durable responder cursor for "${pid}" to complete graph `
+            + `boundary ${dataCheckpointRepair.offset} `
+            + `(raw ${rawDataResult.rawNextOffset ?? rawDataResult.nextOffset}`
+            + `->${dataCheckpointRepair.responderSessionOffset})`,
+        );
+      };
       const settledExactDisposition = (): ExactDurableFetchDisposition => (
         classifyExactDurableFetch({
           requestedAssetCount: exactAssetUals?.length ?? 0,
@@ -1142,6 +1231,7 @@ async function runDurableSyncWithBudget(
       ) {
         await notifyVerifiedFullSnapshot();
         throwIfOperationAborted();
+        settleZeroProgressDataCheckpointRepair();
         // The verifier reports an empty batch only when both fetched phase
         // payloads are empty. Record each phase independently: a completed
         // zero-offset phase is a real clean-empty response, while a sibling

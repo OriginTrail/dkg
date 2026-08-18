@@ -1291,6 +1291,14 @@ interface RecoverContextGraphSwmFromPeerDependencies {
 
 type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'deferred-backpressure';
 
+type SyncReconcilerAttemptPlan =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'broad' }
+  | {
+    readonly kind: 'selected-swm';
+    readonly contextGraphIds: readonly string[];
+  };
+
 export interface ContextGraphCatchupOptions {
   includeSharedMemory?: boolean;
   maxPeers?: number;
@@ -4883,9 +4891,44 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * Designed to be safe to call concurrently with the event-driven path
    * — `runSyncOnConnect` itself is idempotent via `syncingPeers`.
    */
+  planSyncReconcilerAttempt(
+    this: DKGAgent,
+    peerId: string,
+    options: {
+      readonly broadSyncEnabled: boolean;
+      readonly now: number;
+      readonly disconnectBoundary: number;
+      readonly lastSyncCooldown: number;
+    },
+  ): SyncReconcilerAttemptPlan {
+    const broadSyncStale = options.broadSyncEnabled && (
+      options.lastSyncCooldown === 0
+      || options.lastSyncCooldown <= options.disconnectBoundary
+      || (options.now - options.lastSyncCooldown) >= SYNC_STALENESS_THRESHOLD_MS
+    );
+    // Broad sync owns the attempt whenever it is due. Selected-SWM refresh is
+    // an independent fallback for deployments that disable broad sync, not a
+    // second transfer to schedule beside the same peer attempt.
+    if (broadSyncStale) return { kind: 'broad' };
+
+    const contextGraphIds = this.selectedSwmBootstrapContextGraphIdsForPeer(peerId);
+    if (!this.selectedSwmBootstrapAdmission.shouldRefresh(
+      peerId,
+      contextGraphIds,
+      {
+        now: options.now,
+        disconnectBoundary: options.disconnectBoundary,
+        staleAfterMs: SYNC_STALENESS_THRESHOLD_MS,
+      },
+    )) return { kind: 'none' };
+
+    return { kind: 'selected-swm', contextGraphIds };
+  }
+
   async reconcileSyncFromConnectedPeers(this: DKGAgent): Promise<void> {
     if (!this.started) return;
-    if (!syncReconcilerEnabled(this.config) || !syncOnConnectEnabled(this.config)) return;
+    if (!syncReconcilerEnabled(this.config)) return;
+    const broadSyncEnabled = syncOnConnectEnabled(this.config);
     const now = Date.now();
     const ctx = createOperationContext('sync');
     this.pruneSyncReconcilerState(now);
@@ -4897,10 +4940,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const lastDisconnected = this.syncOnConnectDisconnectBoundary(peerId, now);
       const lastProgress = this.lastSyncProgressAt.get(peerId);
       const lastSyncCooldown = Math.max(lastOk ?? 0, lastProgress ?? 0);
-      const stale = lastSyncCooldown === 0
-        || lastSyncCooldown <= lastDisconnected
-        || (now - lastSyncCooldown) >= SYNC_STALENESS_THRESHOLD_MS;
-      if (!stale) continue;
+      const attemptPlan = this.planSyncReconcilerAttempt(
+        peerId,
+        {
+          broadSyncEnabled,
+          now,
+          disconnectBoundary: lastDisconnected,
+          lastSyncCooldown,
+        },
+      );
+      if (attemptPlan.kind === 'none') continue;
       // Per-peer exponential backoff: a peer that can never be synced
       // (dead / NAT-stuck / persistently stream-resetting) never stamps
       // `lastSuccessfulSyncAt`, so it reads as perpetually stale. Without
@@ -4918,8 +4967,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Sync reconciler'))) continue;
       const shortPeer = peerId.slice(-8);
-      this.log.info(ctx, `Sync reconciler retrying ${shortPeer} (last success: ${lastOk == null ? 'never' : `${Math.round((now - lastOk) / 1000)}s ago`}${backoff ? `, prior failures: ${backoff.failures}` : ''})`);
-      this.attemptSyncFromPeerWithReconcilerAccounting(peerId, probe, 'reconcile')
+      if (attemptPlan.kind === 'selected-swm') {
+        // Terminal means complete at the last observed head, not never refresh
+        // this selected graph again. Re-open only this peer/scope after the
+        // bounded freshness window; the broad sync kill switch and unselected
+        // graphs remain untouched.
+        this.selectedSwmBootstrapAdmission.requestRefresh(peerId, attemptPlan.contextGraphIds);
+        this.log.info(
+          ctx,
+          `Sync reconciler refreshing ${attemptPlan.contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
+        );
+      } else {
+        this.log.info(ctx, `Sync reconciler retrying ${shortPeer} (last success: ${lastOk == null ? 'never' : `${Math.round((now - lastOk) / 1000)}s ago`}${backoff ? `, prior failures: ${backoff.failures}` : ''})`);
+      }
+      const attempt = attemptPlan.kind === 'selected-swm'
+        ? this.attemptSelectedSwmRetryWithReconcilerAccounting(peerId, probe, 'reconcile')
+        : this.attemptSyncFromPeerWithReconcilerAccounting(peerId, probe, 'reconcile');
+      attempt
         .then(() => undefined)
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
@@ -4956,6 +5020,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.lastSyncProgressAt.delete(peerId);
       }
     }
+    this.selectedSwmBootstrapAdmission.pruneDisconnected(
+      connected,
+      now,
+      SYNC_STALENESS_THRESHOLD_MS,
+    );
     for (const [peerId, backoff] of this.syncReconcilerBackoff) {
       if (!connected.has(peerId) && now >= backoff.nextRetryAt + SYNC_STALENESS_THRESHOLD_MS) {
         this.syncReconcilerBackoff.delete(peerId);
