@@ -52,6 +52,11 @@ const srv = http.createServer((req, res) => {
     res.end(JSON.stringify(args));
     return;
   }
+  if (req.url === '/pid') {
+    res.statusCode = 200;
+    res.end(String(process.pid));
+    return;
+  }
   res.statusCode = 200;
   res.setHeader('Content-Type', 'application/sparql-results+json');
   res.end(JSON.stringify({ head: {}, boolean: true }));
@@ -430,6 +435,11 @@ async function fetchManagedArgs(port: number): Promise<string[]> {
   return await res.json() as string[];
 }
 
+async function fetchManagedPid(port: number): Promise<number> {
+  const res = await fetch(`http://127.0.0.1:${port}/pid`);
+  return Number(await res.text());
+}
+
 describe('startManagedOxigraph (real download + real server)', () => {
   it('returns null for non-managed backends', async () => {
     // Contract: a non-managed backend is a no-op — null result, and nothing
@@ -491,6 +501,75 @@ describe('startManagedOxigraph (real download + real server)', () => {
       const timeoutIndex = args.indexOf('--timeout-s');
       expect(timeoutIndex).toBeGreaterThanOrEqual(0);
       expect(args[timeoutIndex + 1]).toBe('175');
+    } finally {
+      await result?.handle.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('wires query and construct timeouts to recovery while filtering mutations', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
+    const port = await freePort();
+    const result = await startManagedOxigraph({
+      config: {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { port, readyTimeoutMs: 5_000 },
+        },
+      },
+      dataDir,
+      platform: 'freebsd',
+      log: () => {},
+    });
+    try {
+      const onClientTimeout = result!.storeConfig.options.onClientTimeout as (operation: string) => void;
+      const getRecoveryState = result!.storeConfig.options.getRecoveryState as () => {
+        recovering: boolean;
+        generation: number;
+      };
+      const pid1 = await fetchManagedPid(port);
+
+      onClientTimeout('insert');
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(await fetchManagedPid(port)).toBe(pid1);
+      expect(getRecoveryState().generation).toBe(0);
+
+      onClientTimeout('query');
+      expect(getRecoveryState()).toMatchObject({ recovering: true, generation: 1 });
+      let pid2 = 0;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        try {
+          pid2 = await fetchManagedPid(port);
+          if (pid2 !== pid1) break;
+        } catch {
+          /* server is between processes */
+        }
+      }
+      expect(pid2).toBeGreaterThan(0);
+      expect(pid2).not.toBe(pid1);
+      for (let i = 0; i < 50 && getRecoveryState().recovering; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(getRecoveryState()).toEqual({ recovering: false, generation: 1 });
+
+      onClientTimeout('construct');
+      let pid3 = 0;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        try {
+          pid3 = await fetchManagedPid(port);
+          if (pid3 !== pid2) break;
+        } catch {
+          /* server is between processes */
+        }
+      }
+      expect(pid3).toBeGreaterThan(0);
+      expect(pid3).not.toBe(pid2);
+      for (let i = 0; i < 50 && getRecoveryState().recovering; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(getRecoveryState()).toEqual({ recovering: false, generation: 2 });
     } finally {
       await result?.handle.stop();
       await rm(dataDir, { recursive: true, force: true });
@@ -570,6 +649,7 @@ describe('startManagedOxigraph (real download + real server)', () => {
             timeout: 30_000,
             queryEndpoint: `http://127.0.0.1:${port}/query`,
             updateEndpoint: `http://127.0.0.1:${port}/update`,
+            getRecoveryState: expect.any(Function),
             onClientTimeout: expect.any(Function),
           },
         });

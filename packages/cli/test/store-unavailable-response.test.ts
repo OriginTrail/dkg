@@ -45,7 +45,7 @@ describe('respondIfStoreUnavailable', () => {
       'knowledge-assets.write',
     );
 
-    expect(respondIfStoreUnavailable(res, error)).toBe(true);
+    expect(respondIfStoreUnavailable(res, error)).toBe('not_started');
     expect(res.statusCode).toBe(503);
     expect(res.headers['Retry-After']).toBe('1');
     expect(JSON.parse(res.body ?? '{}')).toMatchObject({
@@ -65,7 +65,7 @@ describe('respondIfStoreUnavailable', () => {
       timeoutMs: 30_000,
     });
 
-    expect(respondIfStoreUnavailable(res, error)).toBe(true);
+    expect(respondIfStoreUnavailable(res, error)).toBe('indeterminate');
     expect(res.statusCode).toBe(503);
     expect(res.headers['Retry-After']).toBe('1');
     expect(JSON.parse(res.body ?? '{}')).toEqual({
@@ -85,7 +85,7 @@ describe('respondIfStoreUnavailable', () => {
     expect(respondIfStoreUnavailable(res, {
       code: 'STORE_OPERATION_TIMEOUT',
       message: 'wrapped store timeout',
-    })).toBe(true);
+    })).toBe('indeterminate');
     expect(JSON.parse(res.body ?? '{}')).toEqual({
       error: 'wrapped store timeout',
       code: 'STORE_OPERATION_TIMEOUT',
@@ -96,11 +96,11 @@ describe('respondIfStoreUnavailable', () => {
 
   it('does not reclassify unrelated failures', () => {
     const res = mockResponse();
-    expect(respondIfStoreUnavailable(res, new Error('invalid query'))).toBe(false);
+    expect(respondIfStoreUnavailable(res, new Error('invalid query'))).toBeNull();
     expect(respondIfStoreUnavailable(res, {
       code: 'STORE_OPERATION_TIMEOUT',
       outcome: 'completed',
-    })).toBe(false);
+    })).toBeNull();
     expect(res.writableEnded).toBe(false);
   });
 });

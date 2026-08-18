@@ -63,7 +63,12 @@ export function payloadTooLargeResponseBody(err: unknown): Record<string, unknow
  * a dispatched write timeout is indeterminate and clients must retry the same
  * idempotency key / Knowledge Asset name rather than minting a new asset.
  */
-export function respondIfStoreUnavailable(res: ServerResponse, err: unknown): boolean {
+export type StoreUnavailableOutcome = 'not_started' | 'indeterminate';
+
+export function respondIfStoreUnavailable(
+  res: ServerResponse,
+  err: unknown,
+): StoreUnavailableOutcome | null {
   if (err instanceof StoreSchedulerBusyError) {
     jsonResponse(
       res,
@@ -79,10 +84,11 @@ export function respondIfStoreUnavailable(res: ServerResponse, err: unknown): bo
       undefined,
       { 'Retry-After': '1' },
     );
-    return true;
+    return 'not_started';
   }
 
-  if (!isStoreOperationTimeoutError(err)) return false;
+  if (!isStoreOperationTimeoutError(err)) return null;
+  const outcome = err.outcome ?? 'indeterminate';
   jsonResponse(
     res,
     503,
@@ -92,7 +98,7 @@ export function respondIfStoreUnavailable(res: ServerResponse, err: unknown): bo
         : 'Triple-store operation exceeded its deadline',
       code: STORE_OPERATION_TIMEOUT_CODE,
       retryable: true,
-      outcome: err.outcome ?? 'indeterminate',
+      outcome,
       ...(typeof err.backend === 'string' ? { backend: err.backend } : {}),
       ...(typeof err.operation === 'string' ? { operation: err.operation } : {}),
       ...(typeof err.timeoutMs === 'number' ? { timeoutMs: err.timeoutMs } : {}),
@@ -100,7 +106,7 @@ export function respondIfStoreUnavailable(res: ServerResponse, err: unknown): bo
     undefined,
     { 'Retry-After': '1' },
   );
-  return true;
+  return outcome;
 }
 
 /**

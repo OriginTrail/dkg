@@ -459,6 +459,94 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('classifies a concurrent write and new work during query-triggered recovery', async () => {
+    const originalFetch = globalThis.fetch;
+    let recovery = { recovering: false, generation: 0 };
+    let fetchCalls = 0;
+    let resolveQueryStarted!: () => void;
+    let resolveUpdateStarted!: () => void;
+    let rejectUpdate!: (error: unknown) => void;
+    const queryStarted = new Promise<void>((resolve) => { resolveQueryStarted = resolve; });
+    const updateStarted = new Promise<void>((resolve) => { resolveUpdateStarted = resolve; });
+
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls += 1;
+      const body = String(init?.body ?? '');
+      if (recovery.generation > 0 && !recovery.recovering) {
+        return new Response(JSON.stringify({ head: {}, boolean: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        });
+      }
+      if (body.startsWith('INSERT')) {
+        resolveUpdateStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          rejectUpdate = reject;
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+        });
+      }
+      resolveQueryStarted();
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    }) as typeof fetch;
+
+    try {
+      const managed = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        updateEndpoint: 'http://managed-oxigraph.test/update',
+        managedOxigraph: true,
+        timeout: 100,
+        getRecoveryState: () => recovery,
+        onClientTimeout: (operation) => {
+          if (operation !== 'query') return;
+          recovery = { recovering: true, generation: 1 };
+          rejectUpdate(new TypeError('fetch failed: managed server restarted'));
+        },
+      });
+
+      const query = managed.query('SELECT ?s WHERE { ?s ?p ?o }');
+      const queryFailure = query.catch((error) => error);
+      await queryStarted;
+      const update = managed.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/g',
+      }]);
+      const updateFailure = update.catch((error) => error);
+      await updateStarted;
+
+      expect(await queryFailure).toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'query',
+        outcome: 'indeterminate',
+      });
+      expect(await updateFailure).toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'insert',
+        outcome: 'indeterminate',
+      });
+
+      await expect(managed.query('ASK { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'query',
+        outcome: 'not_started',
+      });
+      expect(fetchCalls).toBe(2);
+
+      recovery = { recovering: false, generation: 1 };
+      await expect(managed.query('ASK { ?s ?p ?o }')).resolves.toMatchObject({
+        type: 'boolean',
+        value: true,
+      });
+      expect(fetchCalls).toBe(3);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('rejects a partial managed Oxigraph SELECT response when the native deadline cancels it', async () => {
     const originalFetch = globalThis.fetch;
     const onClientTimeout = vi.fn();

@@ -103,6 +103,11 @@ export interface SparqlHttpSlowQueryEvent {
   queryBytes: number;
 }
 
+export interface SparqlHttpRecoveryState {
+  recovering: boolean;
+  generation: number;
+}
+
 export interface SparqlHttpStoreOptions {
   /** SPARQL query endpoint URL (required). */
   queryEndpoint: string;
@@ -128,6 +133,8 @@ export interface SparqlHttpStoreOptions {
   managedOxigraph?: boolean;
   /** Runtime-only recovery hook invoked when the HTTP client deadline fires. */
   onClientTimeout?: (operation: string) => void;
+  /** Runtime-only managed-server state used to classify restart collateral. */
+  getRecoveryState?: () => SparqlHttpRecoveryState;
   /**
    * Declare that the endpoint executes a whole multi-operation SPARQL Update
    * request as one transaction (SPARQL 1.1 only RECOMMENDS this). Required for
@@ -160,6 +167,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly managedByDkg: boolean;
   private readonly managedOxigraph: boolean;
   private readonly onClientTimeout?: (operation: string) => void;
+  private readonly getRecoveryState?: () => SparqlHttpRecoveryState;
   private readonly atomicUpdates: boolean;
 
   private readonly now: () => number;
@@ -186,6 +194,7 @@ export class SparqlHttpStore implements TripleStore {
     this.managedByDkg = options.managedByDkg === true;
     this.managedOxigraph = options.managedOxigraph === true || this.managedByDkg;
     this.onClientTimeout = options.onClientTimeout;
+    this.getRecoveryState = options.getRecoveryState;
     this.atomicUpdates = options.atomicUpdates === true || this.managedOxigraph;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
@@ -211,6 +220,10 @@ export class SparqlHttpStore implements TripleStore {
     options: QueryOptions | undefined,
     work: (signal: AbortSignal | undefined) => Promise<T>,
   ): Promise<T> {
+    const recovery = this.readRecoveryState();
+    if (recovery?.recovering) {
+      return Promise.reject(this.recoveryError(operation, 'not_started'));
+    }
     return this.workLifecycle.run(
       options?.signal,
       (signal) => externalStorePriorityScheduler.run(
@@ -219,6 +232,47 @@ export class SparqlHttpStore implements TripleStore {
         () => work(signal),
         signal,
       ),
+    );
+  }
+
+  private readRecoveryState(): SparqlHttpRecoveryState | null {
+    if (!this.managedOxigraph || !this.getRecoveryState) return null;
+    try {
+      const state = this.getRecoveryState();
+      if (
+        typeof state?.recovering === 'boolean'
+        && Number.isSafeInteger(state.generation)
+        && state.generation >= 0
+      ) return state;
+    } catch {
+      // A broken observability hook must not replace the endpoint's real result.
+    }
+    return null;
+  }
+
+  private recoveryError(
+    operation: string,
+    outcome: 'not_started' | 'indeterminate',
+    cause?: unknown,
+  ): StoreOperationTimeoutError {
+    return new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation,
+      outcome,
+      message: outcome === 'not_started'
+        ? `Managed Oxigraph is recovering; ${operation} was not started`
+        : `Managed Oxigraph recovery interrupted ${operation}; outcome is indeterminate`,
+      cause,
+    });
+  }
+
+  private recoveryInterrupted(
+    started: SparqlHttpRecoveryState | null,
+  ): boolean {
+    const current = this.readRecoveryState();
+    return current !== null && (
+      current.recovering
+      || (started !== null && current.generation !== started.generation)
     );
   }
 
@@ -246,6 +300,10 @@ export class SparqlHttpStore implements TripleStore {
     options: SparqlHttpQueryOptions | undefined,
     consume: (response: Response) => Promise<T>,
   ): Promise<T> {
+    const recoveryAtStart = this.readRecoveryState();
+    if (recoveryAtStart?.recovering) {
+      throw this.recoveryError(operation, 'not_started');
+    }
     // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
     // request body with `application/sparql-query`, not URL-encoded form
     // data. Form-encoded bodies (`query=...`) are parsed by the server's
@@ -287,6 +345,9 @@ export class SparqlHttpStore implements TripleStore {
           cause: error,
         });
       }
+      if (this.recoveryInterrupted(recoveryAtStart)) {
+        throw this.recoveryError(operation, 'indeterminate', error);
+      }
       throw error;
     } finally {
       signalScope.dispose();
@@ -302,6 +363,10 @@ export class SparqlHttpStore implements TripleStore {
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
     return this.runStoreWork(operation, options, async (lifecycleSignal) => {
+      const recoveryAtStart = this.readRecoveryState();
+      if (recoveryAtStart?.recovering) {
+        throw this.recoveryError(operation, 'not_started');
+      }
       const timeoutSignal = AbortSignal.timeout(this.timeout);
       const signalScope = composeAbortSignals(lifecycleSignal, timeoutSignal);
       const signal = signalScope.signal ?? timeoutSignal;
@@ -336,6 +401,9 @@ export class SparqlHttpStore implements TripleStore {
             timeoutMs: this.timeout,
             cause: error,
           });
+        }
+        if (this.recoveryInterrupted(recoveryAtStart)) {
+          throw this.recoveryError(operation, 'indeterminate', error);
         }
         throw error;
       } finally {

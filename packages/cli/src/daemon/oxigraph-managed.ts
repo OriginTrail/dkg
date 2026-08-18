@@ -341,6 +341,7 @@ export async function startManagedOxigraph(
       ...plan.storeConfigTemplate.options,
       queryEndpoint: handle.queryEndpoint,
       updateEndpoint: handle.updateEndpoint,
+      getRecoveryState: () => handle.getRecoveryState(),
       onClientTimeout: (operation: string) => {
         if (operation !== 'query' && operation !== 'construct') return;
         handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);

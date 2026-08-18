@@ -18,7 +18,7 @@
  * production code path; only the supervised binary's identity differs, and
  * the binary's own behaviour is real, not emitted by the test.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
 import { createServer, type Server } from 'node:net';
 import { spawn } from 'node:child_process';
@@ -348,6 +348,7 @@ describe('startOxigraphServer (real child processes)', () => {
     try {
       const pid1 = await fetchPid(port);
       expect(handle.requestRestart('query exceeded the managed SPARQL client deadline')).toBe(true);
+      expect(handle.getRecoveryState()).toEqual({ recovering: true, generation: 1 });
       expect(handle.requestRestart('duplicate timeout')).toBe(false);
 
       let pid2 = 0;
@@ -362,7 +363,41 @@ describe('startOxigraphServer (real child processes)', () => {
       }
       expect(pid2, 'supervisor never recovered the explicitly restarted child').toBeGreaterThan(0);
       expect(pid2).not.toBe(pid1);
+      for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i++) await sleep(20);
+      expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
       expect(logs.some((line) => line.includes('server terminated for recovery'))).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('cancels recovery without signalling when listener ownership changes', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    let reportChangedOwner = false;
+    const killProcess = vi.fn(() => true) as unknown as typeof process.kill;
+    const handle = await startOxigraphServer(startOpts(port, {
+      log: (line: string) => logs.push(line),
+      io: {
+        killProcess,
+        findListenOwnerPid: async (child, listenerPort, host, ownership) => {
+          const actual = await findListenOwnerPid(child, listenerPort, host, ownership);
+          return reportChangedOwner && actual !== null ? actual + 100_000 : actual;
+        },
+      },
+    }));
+    try {
+      const pid = await fetchPid(port);
+      reportChangedOwner = true;
+      expect(handle.requestRestart('ownership-negative-path')).toBe(true);
+
+      for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i++) await sleep(20);
+
+      expect(killProcess).not.toHaveBeenCalled();
+      expect(handle.getRecoveryState().recovering).toBe(false);
+      expect(await fetchPid(port)).toBe(pid);
+      expect(await portAnswers(port)).toBe(true);
+      expect(logs.some((line) => line.includes('ownership changed'))).toBe(true);
     } finally {
       await handle.stop();
     }
@@ -425,6 +460,8 @@ describe('startOxigraphServer (real child processes)', () => {
     const handle = await startOxigraphServer(startOpts(port));
     expect(await portAnswers(port)).toBe(true);
     await handle.stop();
+    expect(handle.getRecoveryState().recovering).toBe(true);
+    expect(handle.requestRestart('after-stop')).toBe(false);
     // Wait well past restartBackoffMaxMs: a buggy supervisor would have
     // respawned by now and the probe would answer.
     await sleep(600);
