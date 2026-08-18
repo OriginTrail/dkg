@@ -124,6 +124,10 @@ export interface SparqlHttpStoreOptions {
    * index/revalidation owner.
    */
   managedByDkg?: boolean;
+  /** Runtime-only marker for a daemon-supervised Oxigraph endpoint. */
+  managedOxigraph?: boolean;
+  /** Runtime-only recovery hook invoked when the HTTP client deadline fires. */
+  onClientTimeout?: (operation: string) => void;
   /**
    * Declare that the endpoint executes a whole multi-operation SPARQL Update
    * request as one transaction (SPARQL 1.1 only RECOMMENDS this). Required for
@@ -154,6 +158,8 @@ export class SparqlHttpStore implements TripleStore {
   private readonly timeout: number;
   private readonly headers: Record<string, string>;
   private readonly managedByDkg: boolean;
+  private readonly managedOxigraph: boolean;
+  private readonly onClientTimeout?: (operation: string) => void;
   private readonly atomicUpdates: boolean;
 
   private readonly now: () => number;
@@ -178,7 +184,9 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
-    this.atomicUpdates = options.atomicUpdates === true || this.managedByDkg;
+    this.managedOxigraph = options.managedOxigraph === true || this.managedByDkg;
+    this.onClientTimeout = options.onClientTimeout;
+    this.atomicUpdates = options.atomicUpdates === true || this.managedOxigraph;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
       options.slowQueryThresholdMs,
@@ -214,6 +222,14 @@ export class SparqlHttpStore implements TripleStore {
     );
   }
 
+  private notifyClientTimeout(operation: string): void {
+    try {
+      this.onClientTimeout?.(operation);
+    } catch {
+      // Recovery notification must never replace the typed timeout contract.
+    }
+  }
+
   getPressureSnapshot(): StorePressureSnapshot {
     return externalStorePriorityScheduler.snapshot;
   }
@@ -226,6 +242,7 @@ export class SparqlHttpStore implements TripleStore {
   private async postQuery<T>(
     sparql: string,
     accept: string,
+    operation: 'query' | 'construct',
     options: SparqlHttpQueryOptions | undefined,
     consume: (response: Response) => Promise<T>,
   ): Promise<T> {
@@ -257,14 +274,15 @@ export class SparqlHttpStore implements TripleStore {
     } catch (error) {
       if (signal.aborted) {
         getMetrics().storeCancellationCompletedTotal.add(1, {
-          operation: 'query',
-          source: options?.source ?? 'sparql-http.query',
+          operation,
+          source: options?.source ?? `sparql-http.${operation}`,
         });
       }
       if (timeoutSignal.aborted) {
+        this.notifyClientTimeout(operation);
         throw new StoreOperationTimeoutError({
-          backend: this.managedByDkg ? 'oxigraph-server' : 'sparql-http',
-          operation: 'query',
+          backend: this.managedOxigraph ? 'oxigraph-server' : 'sparql-http',
+          operation,
           timeoutMs: this.timeout,
           cause: error,
         });
@@ -311,8 +329,9 @@ export class SparqlHttpStore implements TripleStore {
           });
         }
         if (timeoutSignal.aborted) {
+          this.notifyClientTimeout(operation);
           throw new StoreOperationTimeoutError({
-            backend: this.managedByDkg ? 'oxigraph-server' : 'sparql-http',
+            backend: this.managedOxigraph ? 'oxigraph-server' : 'sparql-http',
             operation,
             timeoutMs: this.timeout,
             cause: error,
@@ -571,12 +590,13 @@ export class SparqlHttpStore implements TripleStore {
         return await this.postQuery(
           trimmed,
           'application/sparql-results+json',
+          'query',
           effectiveOptions,
           async (res) => {
             if (!res.ok) {
               const text = await readSparqlResponseText(res, {
                 maxResponseBytes: effectiveOptions.maxResponseBytes,
-                managedOxigraph: this.managedByDkg,
+                managedOxigraph: this.managedOxigraph,
                 operation: 'query',
                 tolerateReadFailure: true,
               });
@@ -585,7 +605,7 @@ export class SparqlHttpStore implements TripleStore {
 
             const text = await readSparqlResponseText(res, {
               maxResponseBytes: effectiveOptions.maxResponseBytes,
-              managedOxigraph: this.managedByDkg,
+              managedOxigraph: this.managedOxigraph,
               operation: 'query',
             });
             const json = JSON.parse(text) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
@@ -615,12 +635,13 @@ export class SparqlHttpStore implements TripleStore {
     return this.postQuery(
       sparql,
       'application/n-quads, text/n-quads',
+      'construct',
       options,
       async (res) => {
         if (!res.ok) {
           const text = await readSparqlResponseText(res, {
             maxResponseBytes: options?.maxResponseBytes,
-            managedOxigraph: this.managedByDkg,
+            managedOxigraph: this.managedOxigraph,
             operation: 'construct',
             tolerateReadFailure: true,
           });
@@ -628,7 +649,7 @@ export class SparqlHttpStore implements TripleStore {
         }
         const text = await readSparqlResponseText(res, {
           maxResponseBytes: options?.maxResponseBytes,
-          managedOxigraph: this.managedByDkg,
+          managedOxigraph: this.managedOxigraph,
           operation: 'construct',
         });
         const quads = parseNQuadsTextTolerant(text);

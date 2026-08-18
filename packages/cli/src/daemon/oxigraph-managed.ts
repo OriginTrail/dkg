@@ -255,6 +255,7 @@ export function planManagedOxigraph(
     // we own end-to-end; queryEndpoint/updateEndpoint added at launch.
     options: {
       managedByDkg: true,
+      managedOxigraph: true,
       timeout: clientTimeoutMs,
     },
   };
@@ -340,6 +341,10 @@ export async function startManagedOxigraph(
       ...plan.storeConfigTemplate.options,
       queryEndpoint: handle.queryEndpoint,
       updateEndpoint: handle.updateEndpoint,
+      onClientTimeout: (operation: string) => {
+        if (operation !== 'query' && operation !== 'construct') return;
+        handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);
+      },
     },
   };
   if (plan.storeConfigTemplate.graphSetIndex !== undefined) {

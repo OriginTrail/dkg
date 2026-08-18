@@ -83,7 +83,7 @@ Managed Oxigraph accepts optional launch settings under `store.options`:
 
 `readyTimeoutMs` is the maximum startup readiness wait in milliseconds. It must be a positive integer; invalid values are ignored and the default 30-second timeout is used. Increase it when a large or recovering RocksDB database needs longer to open.
 
-`clientTimeoutMs` is the SPARQL HTTP client deadline in milliseconds. Managed Oxigraph defaults to 30 seconds. When you configure a longer client deadline, the daemon automatically derives a native query deadline five seconds earlier (for example, `180000` derives `175` seconds) so disconnecting the HTTP client cannot leave an unbounded query running inside Oxigraph.
+`clientTimeoutMs` is the SPARQL HTTP client deadline in milliseconds. Managed Oxigraph defaults to 30 seconds. When you configure a longer client deadline, the daemon automatically derives a native query deadline five seconds earlier (for example, `180000` derives `175` seconds). If an Oxigraph evaluator path does not honor native cancellation before the client deadline, the daemon terminates and supervises a fresh managed Oxigraph process so the store cannot remain stalled indefinitely.
 
 `queryTimeoutS` is the native Oxigraph query timeout in seconds and is passed to `oxigraph serve --timeout-s`. The default is 25 seconds. An explicit value overrides the derived native deadline; when necessary, the daemon extends `clientTimeoutMs` so the native timeout still fires at least five seconds before the HTTP deadline. The native deadline applies to query evaluation, while the client deadline also bounds updates and response decoding. Upgraded nodes must restart once so the managed Oxigraph child is relaunched with `--timeout-s`.
 

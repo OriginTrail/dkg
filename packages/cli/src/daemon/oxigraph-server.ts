@@ -102,6 +102,12 @@ export interface OxigraphServerHandle {
   readonly port: number;
   readonly queryEndpoint: string;
   readonly updateEndpoint: string;
+  /**
+   * Terminate an unhealthy managed server and let the existing supervisor
+   * respawn it. Returns false when shutdown/recovery is already in progress;
+   * accepted requests re-verify listener ownership before sending a signal.
+   */
+  requestRestart(reason: string): boolean;
   /** Stop the server and prevent further restarts. Idempotent. */
   stop(): Promise<void>;
   /**
@@ -171,7 +177,9 @@ export async function startOxigraphServer(
   let stopping = false;
   let ready = false;
   let child: ChildProcess | null = null;
+  let listenerPid: number | null = null;
   let restarts = 0;
+  let requestedRestartReason: string | null = null;
   // Tail of the child's stderr, surfaced in the startup error so a bind
   // failure (`Address already in use`) is visible to the operator.
   let lastStderr = '';
@@ -229,7 +237,10 @@ export async function startOxigraphServer(
       // off to revive(), which respawns and re-proves ownership before
       // restoring `ready`.
       ready = false;
+      listenerPid = null;
       markStoreDown();
+      const recoveryReason = requestedRestartReason;
+      requestedRestartReason = null;
       // Best-effort OOM classification: `oom_kill` is cgroup-scoped, not
       // per-PID, so use an increment only as supporting evidence for a
       // SIGKILL-compatible child death. This catches MemoryMax/host OOM kills
@@ -245,9 +256,9 @@ export async function startOxigraphServer(
       })) {
         oomNote = ', OOM-killed by cgroup memory cap (or host OOM)';
       }
-      scheduleRevive(
-        `server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'}${oomNote})`,
-      );
+      scheduleRevive(recoveryReason === null
+        ? `server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'}${oomNote})`
+        : `server terminated for recovery (${recoveryReason}; signal=${signal ?? 'null'}${oomNote})`);
     });
     return c;
   };
@@ -313,6 +324,7 @@ export async function startOxigraphServer(
   const revive = async (): Promise<void> => {
     if (stopping) return;
     child = spawnChild();
+    listenerPid = null;
     const reviveDeadline = Date.now() + readyTimeoutMs;
     while (Date.now() < reviveDeadline) {
       if (stopping) return;
@@ -320,9 +332,12 @@ export async function startOxigraphServer(
       // because `ready` is false). Retry with backoff; never adopt whatever
       // may now be answering on the port.
       if (!childAlive()) break;
-      const listenerPid = await probeReady();
-      if (listenerPid !== null && childAlive()) {
-        captureOomSnapshotForListener(child!, listenerPid);
+      const verifiedListenerPid = await probeReady();
+      if (verifiedListenerPid !== null && childAlive()) {
+        captureOomSnapshotForListener(child!, verifiedListenerPid);
+        // Keep the actual listener PID, not the optional systemd-run wrapper,
+        // so timeout recovery terminates Oxigraph itself inside its scope.
+        listenerPid = verifiedListenerPid;
         ready = true;
         restarts = 0;
         log(`[oxigraph] server restarted and healthy on ${bind}.`);
@@ -356,6 +371,56 @@ export async function startOxigraphServer(
     } catch {
       /* best-effort */
     }
+  };
+
+  const terminateVerifiedListener = async (
+    expectedChild: ChildProcess,
+    expectedListenerPid: number,
+  ): Promise<void> => {
+    let verifiedListenerPid: number | null = null;
+    try {
+      verifiedListenerPid = await launchStrategy.resolveListenerPid(
+        expectedChild,
+        port,
+        host,
+        io.findListenOwnerPid,
+      );
+    } catch {
+      /* handled by the fail-closed branch below */
+    }
+    if (
+      stopping
+      || child !== expectedChild
+      || !childAlive()
+      || requestedRestartReason === null
+    ) return;
+    if (verifiedListenerPid !== expectedListenerPid) {
+      log('[oxigraph] recovery restart cancelled: verified listener ownership changed');
+      requestedRestartReason = null;
+      return;
+    }
+    try {
+      process.kill(expectedListenerPid, 'SIGKILL');
+    } catch {
+      log('[oxigraph] recovery restart could not signal the verified listener');
+      requestedRestartReason = null;
+    }
+  };
+
+  const requestRestart = (reason: string): boolean => {
+    if (
+      stopping
+      || !ready
+      || !childAlive()
+      || listenerPid === null
+      || requestedRestartReason !== null
+    ) return false;
+    const normalizedReason = reason.trim().slice(0, 500) || 'unspecified health failure';
+    requestedRestartReason = normalizedReason;
+    markStoreDown();
+    log(`[oxigraph] ${normalizedReason}; terminating server for supervised recovery`);
+    void terminateVerifiedListener(child!, listenerPid);
+    return true;
   };
 
   const stop = async (): Promise<void> => {
@@ -407,16 +472,19 @@ export async function startOxigraphServer(
       childDied = true;
       break;
     }
-    const listenerPid = await probeReady();
-    if (listenerPid !== null) {
+    const verifiedListenerPid = await probeReady();
+    if (verifiedListenerPid !== null) {
       // Only trust a 200 if the child WE spawned is the one still alive
       // and bound — guards the race where a foreign server answers while
       // our child has just died on EADDRINUSE.
       if (childAlive()) {
-        captureOomSnapshotForListener(child!, listenerPid);
+        captureOomSnapshotForListener(child!, verifiedListenerPid);
+        // Persist the verified listener owner for targeted timeout recovery.
+        // This differs from `child.pid` when Oxigraph runs in a systemd scope.
+        listenerPid = verifiedListenerPid;
         ready = true;
         log(`Oxigraph server ready on ${bind} after ${attempt} probe(s).`);
-        return { host, port, queryEndpoint, updateEndpoint, stop, killSync };
+        return { host, port, queryEndpoint, updateEndpoint, requestRestart, stop, killSync };
       }
       childDied = true;
       break;

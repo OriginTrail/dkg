@@ -341,6 +341,85 @@ describe('startOxigraphServer (real child processes)', () => {
     }
   });
 
+  it('restarts the child on an explicit recovery request and coalesces duplicates', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    const handle = await startOxigraphServer(startOpts(port, { log: (line: string) => logs.push(line) }));
+    try {
+      const pid1 = await fetchPid(port);
+      expect(handle.requestRestart('query exceeded the managed SPARQL client deadline')).toBe(true);
+      expect(handle.requestRestart('duplicate timeout')).toBe(false);
+
+      let pid2 = 0;
+      for (let i = 0; i < 100; i++) {
+        await sleep(100);
+        try {
+          pid2 = await fetchPid(port);
+          if (pid2 && pid2 !== pid1) break;
+        } catch {
+          /* recovery is still in progress */
+        }
+      }
+      expect(pid2, 'supervisor never recovered the explicitly restarted child').toBeGreaterThan(0);
+      expect(pid2).not.toBe(pid1);
+      expect(logs.some((line) => line.includes('server terminated for recovery'))).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('targets the verified Oxigraph listener when a systemd-style wrapper owns the child', async () => {
+    const port = await freePort();
+    const wrapperProgram = `
+      const { spawn } = require('node:child_process');
+      const [command, ...args] = process.argv.slice(1);
+      const child = spawn(command, args, { stdio: 'inherit' });
+      process.on('SIGTERM', () => child.kill('SIGTERM'));
+      child.once('exit', (code, signal) => process.exit(signal === 'SIGKILL' ? 137 : (code ?? 1)));
+    `;
+    const injectedSpawn = ((_command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      const binaryIndex = args.indexOf(standin);
+      return spawn(
+        process.execPath,
+        ['-e', wrapperProgram, standin, ...args.slice(binaryIndex + 1)],
+        options,
+      );
+    }) as typeof spawn;
+    const handle = await startOxigraphServer(startOpts(port, {
+      memoryLimits: { maxMiB: 256 },
+      platform: 'linux',
+      io: {
+        spawn: injectedSpawn,
+        findListenOwnerPid: async () => await fetchPid(port),
+      },
+    }));
+    try {
+      const pid1 = await fetchPid(port);
+      expect(handle.requestRestart('client deadline fallback')).toBe(true);
+
+      let pid2 = 0;
+      for (let i = 0; i < 100; i++) {
+        await sleep(100);
+        try {
+          pid2 = await fetchPid(port);
+          if (pid2 && pid2 !== pid1) break;
+        } catch {
+          /* recovery is still in progress */
+        }
+      }
+      expect(pid2, 'supervisor did not replace the scoped listener').toBeGreaterThan(0);
+      expect(pid2).not.toBe(pid1);
+    } finally {
+      await handle.stop();
+      // Failure-path cleanup if a regression orphaned the listener behind its wrapper.
+      try {
+        process.kill(await fetchPid(port), 'SIGKILL');
+      } catch {
+        /* port is already free */
+      }
+    }
+  });
+
   it('does NOT restart after stop() — the port stays free past the backoff window', async () => {
     const port = await freePort();
     const handle = await startOxigraphServer(startOpts(port));
