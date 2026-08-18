@@ -117,6 +117,22 @@ export async function publishOffering(nodeBase: string, token: string, ob: Offer
     }
     if (have.size === 0) throw e;   // KA not resolvable — the original error stands
     if (diffs.length > 0) throw new Error(`E_PUBLISH_STALE_KA: existing ${ka} differs from current config — ${diffs.slice(0, 3).join("; ")} (KA edit flow required; not improvised)`);
+    // Content matches — but the earlier publication may have died BETWEEN
+    // finalize and share (found live: Hermes's KA was finalized on his node
+    // and invisible to every other node). finalize+share are idempotent-or-
+    // harmless; re-run BOTH so alreadyPublished always implies SHARED.
+    await call(`/api/knowledge-assets/${ka}/wm/finalize`, { contextGraphId: a.contextGraphId, subGraphName: sg }).catch(() => null);
+    let shared = true;
+    let shareDetail: string | undefined;
+    try {
+      await call(`/api/knowledge-assets/${ka}/swm/share`, { contextGraphId: a.contextGraphId, subGraphName: sg });
+    } catch (se) {
+      // an "already shared" refusal is success; anything else is surfaced —
+      // an unshared listing is invisible, never silently OK
+      shareDetail = String((se as Error).message).slice(0, 140);
+      shared = /already|exists|duplicate/i.test(shareDetail);
+    }
+    if (!shared) throw new Error(`E_PUBLISH_UNSHARED: ${ka} is finalized but swm/share failed — ${shareDetail}`);
     return { ka, ual: `did:dkg:context-graph:${a.contextGraphId}/${ka}`, alreadyPublished: true } as { ka: string; ual: string };
   }
   await call(`/api/knowledge-assets/${ka}/wm/finalize`, { contextGraphId: a.contextGraphId, subGraphName: sg });
