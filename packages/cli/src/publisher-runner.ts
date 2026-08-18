@@ -35,6 +35,7 @@ import {
   type AsyncLiftChainProofResolution,
   type AsyncLiftPublisherRecoveryResult,
   type VmPublisherControl,
+  type LiftJob,
   type LiftJobHex,
   type PublishOptions,
   type V10ACKProviderParams,
@@ -772,6 +773,11 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
   adapters: PublisherChainAdapters,
 ): AsyncKnowledgeAssetVmPublishRecoveryResolver {
   return async (job, lookup) => {
+    // GH#2270 PR-3 r4 — an UPDATE transaction has no publish receipt to resolve canonically; its
+    // proof is the update-verification machinery, against the exact root the queued seal intended.
+    if (lookup.operationKind === 'update') {
+      return resolveCanonicalUpdateRecoveryEvidence(job, lookup, adapters);
+    }
     const recovered = await resolveCanonicalOnChainPublish(lookup, adapters);
     if (!recovered) return null;
     const evidence = mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
@@ -803,6 +809,81 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
         ual: request.kaUal,
       },
     };
+  };
+}
+
+/**
+ * GH#2270 PR-3 r4 — recovery evidence for a queued named-KA UPDATE, from the update-verification
+ * machinery: the receipt fetched by OUR recorded txHash must carry an update event for OUR pinned
+ * kaId, the chain-verified root must equal the root OUR seal intended, and the root history at
+ * the receipt block must attribute it to OUR signing wallet — that is what `verifyKAUpdate`
+ * establishes. The evidence shape mirrors the create lane's: singleton batch range pinned to the
+ * reserved id, the graph-local queued UAL for materialization, and the publish proof carrying the
+ * intended (now chain-verified) root plus the request's sealed author. Every gap answers `null`,
+ * and the publisher keeps the job held.
+ */
+async function resolveCanonicalUpdateRecoveryEvidence(
+  job: LiftJob,
+  lookup: AsyncLiftChainProofLookup,
+  adapters: PublisherChainAdapters,
+): Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null> {
+  const chain = adapters.get(lookup.walletId);
+  if (!chain?.verifyKAUpdate) return null;
+  const request = job.request?.jobType === 'knowledge-asset-vm-publish'
+    ? job.request.knowledgeAssetVmPublish
+    : undefined;
+  if (
+    request?.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+    || request.kaUal === undefined
+    || lookup.publishIdentityKaId === undefined
+    || lookup.intendedUpdateRoot === undefined
+  ) {
+    return null;
+  }
+  let kaId: bigint;
+  try {
+    kaId = BigInt(lookup.publishIdentityKaId);
+  } catch {
+    return null;
+  }
+  let verification;
+  try {
+    verification = await chain.verifyKAUpdate(lookup.txHash, kaId, lookup.walletId);
+  } catch {
+    return null;
+  }
+  if (!verification.verified || !verification.onChainMerkleRoot) return null;
+  if (verification.blockNumber === undefined || verification.txIndex === undefined) return null;
+  const onChainRoot = asLiftJobHex(ethers.hexlify(verification.onChainMerkleRoot));
+  if (!onChainRoot || onChainRoot.toLowerCase() !== lookup.intendedUpdateRoot.toLowerCase()) {
+    return null;
+  }
+  const blockHash = verification.blockHash ? asLiftJobHex(verification.blockHash) : null;
+  if (!blockHash) return null;
+  const authorAddress = asLiftJobHex(request.seal.authorAddress);
+  const publisherAddress = asLiftJobHex(lookup.walletId);
+  if (!authorAddress || !publisherAddress) return null;
+
+  return {
+    inclusion: {
+      txHash: lookup.txHash,
+      blockNumber: verification.blockNumber,
+      blockHash,
+    },
+    finalization: {
+      mode: 'published',
+      txHash: lookup.txHash,
+      ual: request.kaUal,
+      batchId: kaId.toString() as `${bigint}`,
+      startKAId: kaId.toString() as `${bigint}`,
+      endKAId: kaId.toString() as `${bigint}`,
+      publisherAddress,
+    },
+    publishProof: {
+      merkleRoot: onChainRoot,
+      authorAddress,
+      txIndex: verification.txIndex,
+    },
   };
 }
 

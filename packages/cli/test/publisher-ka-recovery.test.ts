@@ -106,6 +106,85 @@ describe('named KA publisher recovery wiring', () => {
     expect(resolvePublishByTxHash).toHaveBeenCalledWith(txHash);
   });
 
+  it('resolves a queued UPDATE through verifyKAUpdate, bound to the intended root [GH#2270 r4]', async () => {
+    const txHash = `0x${'ee'.repeat(32)}` as `0x${string}`;
+    const blockHash = `0x${'bd'.repeat(32)}` as `0x${string}`;
+    const walletId = '0x1111111111111111111111111111111111111111';
+    const author = '0x3333333333333333333333333333333333333333';
+    const kaNumber = 7n;
+    const kaId = (BigInt(author) << 96n) | kaNumber;
+    const graphUal = `did:dkg:evm:31337/${author}/${kaNumber}`;
+    const intendedRoot = `0x${'12'.repeat(32)}` as `0x${string}`;
+    const verifyKAUpdate = vi.fn(async () => ({
+      verified: true,
+      onChainMerkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+      blockNumber: 91,
+      blockHash,
+      txIndex: 3,
+    }));
+    // No publish-receipt surfaces at all: an update must not need them, and reaching for them
+    // would prove the lane fell through to the create path.
+    const publishers: PublisherChainAdapters = new Map([[walletId, {
+      chainId: 'evm:31337',
+      verifyKAUpdate,
+    } as unknown as ChainAdapter]]);
+    const resolver = createKnowledgeAssetVmPublishRecoveryResolver(publishers);
+
+    const job = {
+      status: 'failed',
+      request: {
+        jobType: 'knowledge-asset-vm-publish',
+        knowledgeAssetVmPublish: {
+          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+          kaUal: graphUal,
+          seal: { authorAddress: author },
+        },
+      },
+      broadcast: { txHash, walletId },
+    } as unknown as LiftJobBroadcast;
+    const lookup = {
+      txHash,
+      walletId,
+      publishIdentityKaId: kaId.toString(),
+      operationKind: 'update' as const,
+      intendedUpdateRoot: intendedRoot,
+    };
+
+    expect(await resolver(job, lookup)).toEqual({
+      inclusion: { txHash, blockNumber: 91, blockHash },
+      finalization: {
+        mode: 'published',
+        txHash,
+        ual: graphUal,
+        batchId: kaId.toString(),
+        startKAId: kaId.toString(),
+        endKAId: kaId.toString(),
+        publisherAddress: walletId,
+      },
+      publishProof: { merkleRoot: intendedRoot, authorAddress: author, txIndex: 3 },
+    });
+    expect(verifyKAUpdate).toHaveBeenCalledWith(txHash, kaId, walletId);
+
+    // A verified update for the WRONG root is someone else's update: null, and the job stays held.
+    verifyKAUpdate.mockResolvedValueOnce({
+      verified: true,
+      onChainMerkleRoot: Buffer.from('ff'.repeat(32), 'hex'),
+      blockNumber: 91,
+      blockHash,
+      txIndex: 3,
+    });
+    await expect(resolver(job, lookup)).resolves.toBeNull();
+
+    // No canonical block hash → no durable evidence → null (fail-closed, not fabricated).
+    verifyKAUpdate.mockResolvedValueOnce({
+      verified: true,
+      onChainMerkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+      blockNumber: 91,
+      txIndex: 3,
+    });
+    await expect(resolver(job, lookup)).resolves.toBeNull();
+  });
+
   it('falls back to the adapter knowledge-assets address when the receipt omits it', async () => {
     const txHash = `0x${'cd'.repeat(32)}` as `0x${string}`;
     const blockHash = `0x${'bc'.repeat(32)}` as `0x${string}`;

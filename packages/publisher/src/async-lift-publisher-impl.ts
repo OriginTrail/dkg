@@ -36,6 +36,7 @@ import type {
   AsyncLiftDetailedRetrier,
   AsyncLiftPublisherConfig,
   AsyncLiftChainProofLookup,
+  AsyncLiftChainProofResolution,
   AsyncLiftPublisherRecoveryResolver,
   AsyncLiftPublisherRecoveryResult,
   AsyncLiftRetryOutcome,
@@ -107,6 +108,7 @@ import {
   isFailedJob,
   normalizePersistedLiftJobRequest,
   buildLiftJobAcceptedReset,
+  queuedLiftOperationKind,
   resetFailedLiftJobToAccepted,
   rawLiftRequestFromJobRequest,
   jobSubject,
@@ -208,6 +210,23 @@ function pinnedPublishIdentityKaId(job: LiftJob): string | undefined {
 }
 
 /**
+ * GH#2270 PR-3 r4 — the operation facts a chain-proof lookup carries: what the queued transaction
+ * was trying to DO, and (for an update) the root it intended to install. The kind derivation is
+ * {@link queuedLiftOperationKind}; the intended root is the seal root the update would have
+ * committed, read from the same immutable request. Both lookup builders spread this, so the live
+ * lane and the failed-job dispatcher cannot describe the same job differently.
+ */
+function chainProofOperationFacts(
+  job: LiftJob,
+): { operationKind: 'create' | 'update'; intendedUpdateRoot?: LiftJobHex } {
+  const operationKind = queuedLiftOperationKind(job);
+  if (operationKind === 'create') return { operationKind };
+  const root = (job.request as { knowledgeAssetVmPublish?: { sealMerkleRoot?: LiftJobHex } })
+    .knowledgeAssetVmPublish?.sealMerkleRoot;
+  return { operationKind, ...(root ? { intendedUpdateRoot: root } : {}) };
+}
+
+/**
  * GH#2270 PR-3 r3 — where a chain-proof recovery is finalizing FROM, stated rather than inferred.
  *
  * The two lanes carry the same two facts in different places. A live interrupted job has its
@@ -239,6 +258,7 @@ function liveChainRecoveryOrigin(job: LiftJobBroadcast | LiftJobIncluded): Chain
       walletId: job.broadcast.walletId,
       nonce: job.broadcast.nonce,
       publishIdentityKaId: pinnedPublishIdentityKaId(job),
+      ...chainProofOperationFacts(job),
     },
   };
 }
@@ -1322,6 +1342,51 @@ export class TripleStoreAsyncLiftPublisher
   ): Promise<number> {
     if (!this.chainProofResolver) return 0;
     const resolution = await this.chainProofResolver(lookup);
+
+    // GH#2270 PR-3 r4 — the verdict was earned across an RPC await, against a SNAPSHOT of the
+    // job. While it was in flight, an operator's `clearTerminalJob` or a client's fresh mandate
+    // can have moved or removed the record; writing the disposition against the stale snapshot
+    // would put the old record BACK — a cleared job resurrected by its own verdict, on top of
+    // whatever exists now. So the disposition is applied under the SAME claim lock those
+    // transitions serialize on, against a RE-READ of the record, and only when it is still the
+    // identical held job the chain was asked about — same failure identity, same transaction
+    // evidence. Anything else drops the verdict; the next tick asks about whatever now exists.
+    return this.withClaimLock(async () => {
+      const current = await this.getStatus(job.jobId);
+      if (!current || !isFailedJob(current)) return 0;
+      if (!this.isSameHeldFailedJob(job, current, lookup)) return 0;
+      return this.applyChainProofDisposition(current, lookup, resolution);
+    });
+  }
+
+  /**
+   * Is `current` still the exact held job the chain was asked about? Same failure identity (origin
+   * state, code, and the failure timestamp — a re-failed successor gets a fresh `failedAt` from
+   * the injected clock) and the same derived transaction evidence, compared field by field so an
+   * inherited-hash successor with different nonce or pinned identity cannot inherit the verdict.
+   */
+  private isSameHeldFailedJob(
+    before: PersistedFailedJob,
+    current: PersistedFailedJob,
+    lookup: AsyncLiftChainProofLookup,
+  ): boolean {
+    if (current.failure.failedFromState !== before.failure.failedFromState) return false;
+    if (current.failure.code !== before.failure.code) return false;
+    if (current.timestamps.failedAt !== before.timestamps.failedAt) return false;
+    const currentLookup = this.chainProofLookupFor(current);
+    return currentLookup !== null
+      && currentLookup.txHash === lookup.txHash
+      && currentLookup.walletId === lookup.walletId
+      && currentLookup.nonce === lookup.nonce
+      && currentLookup.publishIdentityKaId === lookup.publishIdentityKaId;
+  }
+
+  /** Execute the disposition the policy module decides for a (re-verified) held job. */
+  private async applyChainProofDisposition(
+    job: PersistedFailedJob,
+    lookup: AsyncLiftChainProofLookup,
+    resolution: AsyncLiftChainProofResolution,
+  ): Promise<number> {
     const disposition = decideChainProofDisposition(job, resolution.status);
 
     switch (disposition.action) {
@@ -2439,6 +2504,7 @@ export class TripleStoreAsyncLiftPublisher
       walletId,
       nonce: job.broadcast?.nonce,
       publishIdentityKaId: pinnedPublishIdentityKaId(job),
+      ...chainProofOperationFacts(job),
     };
   }
 

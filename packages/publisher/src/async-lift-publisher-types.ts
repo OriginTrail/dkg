@@ -384,6 +384,31 @@ export interface AsyncLiftChainProofLookup {
    * absence: the resolver holds it instead.
    */
   readonly publishIdentityKaId?: string;
+  /**
+   * GH#2270 PR-3 r4 — what the queued transaction was TRYING to do: mint a fresh asset, or
+   * install a new root on one that exists.
+   *
+   * The distinction decides which proofs can ever settle the job. A mined UPDATE carries
+   * `KnowledgeAssetUpdated`, which the publish parser reports `unrecognized` — so canonical
+   * recognition for an update goes through the update-verification machinery instead. And the
+   * absence release is CREATE-ONLY: a create's identity register (token minted-ness) is monotone,
+   * so "unminted at a finalized block with the nonce consumed" can never be invalidated later; an
+   * update has no such register, and any absence statement about it is an ABA hazard — "the
+   * intended root is not current" also describes our update landing and being superseded.
+   *
+   * Derived conservatively from the persisted request. Absent (legacy resolvers, hand-built
+   * lookups) reads as 'create' for recognition purposes but the derivation errs toward 'update'
+   * for anything not provably a create, because misclassifying a create as an update only narrows
+   * what can release it.
+   */
+  readonly operationKind?: 'create' | 'update';
+  /**
+   * GH#2270 PR-3 r4 — for an UPDATE job, the assertion root its seal intended to install (the
+   * request's `sealMerkleRoot`). Canonical update recognition requires the chain-verified new
+   * root to equal exactly this; an update lookup without it can never be recognized and stays
+   * held.
+   */
+  readonly intendedUpdateRoot?: LiftJobHex;
 }
 
 export type AsyncLiftPublisherRecoveryResolver = (

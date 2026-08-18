@@ -22,6 +22,7 @@ import {
   compareAcceptedJobs,
   getLiftJobTransactionEvidence,
   isFailedJob,
+  queuedLiftOperationKind,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
 import { getLiftJobFailurePolicy, isTerminalLiftJobState } from './lift-job.js';
@@ -414,7 +415,15 @@ export function decideChainProofDisposition(
     case 'recovered':
       return { action: 'finalize' };
     case 'not-found':
-      return { action: 'reset' };
+      // GH#2270 PR-3 r4 — release-by-absence is CREATE-ONLY, enforced HERE because this is the
+      // decision that authorises the reset write. The CLI resolver already refuses to earn a
+      // `not-found` for an update, but the resolver is replaceable wiring; an embedder's resolver
+      // that does not know the rule must not be able to release an update through this table. An
+      // update has no monotone register to prove absence against — "the intended root is not
+      // current" also describes our update landing and then being SUPERSEDED by a third party,
+      // and a release would re-apply the stale root over newer state (the ABA hazard). Held, with
+      // the operator's by-id clear as the exit.
+      return queuedLiftOperationKind(job) === 'update' ? { action: 'hold' } : { action: 'reset' };
     case 'reverted':
       return job.failure.failedFromState === 'broadcast' || job.failure.failedFromState === 'included'
         ? { action: 'refail_reverted', failedFromState: job.failure.failedFromState }

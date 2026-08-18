@@ -19,6 +19,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type {
   AsyncKnowledgeAssetVmPublishRecoveryEvidence,
+  AsyncLiftChainProofLookup,
   AsyncLiftChainProofResolution,
   AsyncLiftPublisherConfig,
   LiftJob,
@@ -728,5 +729,162 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     // Still failed on its own schedule — the dispatcher did not reset it out from under the
     // ordinary retry lane.
     expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+  });
+
+  // GH#2270 PR-3 r4 — UPDATE jobs. A queued update's transaction proves itself through the
+  // update-verification machinery, and — the load-bearing half — can NEVER be released by
+  // absence: an update has no monotone register to prove absence against, so "the intended root
+  // is not current" also describes our update landing and being superseded by a third party. A
+  // release would re-apply the stale root over newer state (the ABA hazard).
+  describe('update jobs: recognized canonically, never released by absence', () => {
+    /** The same recorded-tx failure, on a request whose queued operation was an UPDATE. */
+    const updateRequest = () => kaVmPublishRequest({
+      vmCurrentAssertion: 'aa'.repeat(32),
+      assertionVersion: '2',
+    });
+
+    it('derives the update facts onto the lookup: kind and the intended root', async () => {
+      const seen: AsyncLiftChainProofLookup[] = [];
+      const publisher = createPublisher({
+        chainProofResolver: async (lookup) => {
+          seen.push(lookup);
+          return { status: 'inconclusive' };
+        },
+      });
+      const held = await failAfterRecordedTxHash(publisher, updateRequest());
+      expect(isHeldForChainProof(held)).toBe(true);
+
+      expect(await publisher.recover()).toBe(0);
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.operationKind).toBe('update');
+      expect(seen[0]!.intendedUpdateRoot).toBe(updateRequest().sealMerkleRoot);
+      expect(seen[0]!.publishIdentityKaId).toBeDefined();
+    });
+
+    it('derives a plain create lookup for a create job — no update identity rides along', async () => {
+      const seen: AsyncLiftChainProofLookup[] = [];
+      const publisher = createPublisher({
+        chainProofResolver: async (lookup) => {
+          seen.push(lookup);
+          return { status: 'inconclusive' };
+        },
+      });
+      await failAfterRecordedTxHash(publisher);
+
+      expect(await publisher.recover()).toBe(0);
+
+      expect(seen[0]!.operationKind).toBe('create');
+      expect(seen[0]!.intendedUpdateRoot).toBeUndefined();
+    });
+
+    it('STAYS HELD on a proven-absent verdict — the writer refuses the reset for an update', async () => {
+      // The guard lives in decideChainProofDisposition, the decision that authorises the reset
+      // WRITE, not only in the CLI resolver: a wired-in resolver that does not know the
+      // create-only rule must still be unable to release an update through the dispatch table.
+      // The row's verdict is exactly the one that releases the create-shaped sibling below.
+      const publisher = dispatcher({ status: 'not-found' });
+      const held = await failAfterRecordedTxHash(publisher, updateRequest());
+
+      expect(await publisher.recover()).toBe(0);
+
+      const after = expectFailed(await publisher.getStatus(held.jobId));
+      expect(after.status).toBe('failed');
+      expect(isHeldForChainProof(after)).toBe(true);
+      expect(sends).toBe(0);
+    });
+
+    it('POSITIVE CONTROL: the create-shaped sibling releases on the very same verdict', async () => {
+      const publisher = dispatcher({ status: 'not-found' });
+      const held = await failAfterRecordedTxHash(publisher);
+
+      expect(await publisher.recover()).toBe(1);
+      expect((await publisher.getStatus(held.jobId))?.status).toBe('accepted');
+    });
+
+    it('finalizes an update job on a recovered verdict, through the named lane, without sending', async () => {
+      const publisher = dispatcher(RECOVERED);
+      const held = await failAfterRecordedTxHash(publisher, updateRequest());
+
+      expect(await publisher.recover()).toBe(1);
+      expect((await publisher.getStatus(held.jobId))?.status).toBe('finalized');
+      expect(sends).toBe(0);
+    });
+  });
+
+  // GH#2270 PR-3 r4 — the verdict is earned across an RPC await, and the job can move while it is
+  // in flight. The disposition must be applied under the queue's claim lock, against a RE-READ,
+  // and only to the exact held job the chain was asked about.
+  describe('a verdict is applied only to the job it was earned about', () => {
+    function gatedResolver(verdict: AsyncLiftChainProofResolution) {
+      let release: () => void = () => {};
+      let entered: () => void = () => {};
+      const whenEntered = new Promise<void>((resolve) => { entered = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      return {
+        resolver: async () => {
+          entered();
+          await gate;
+          return verdict;
+        },
+        whenEntered,
+        release,
+      };
+    }
+
+    it('drops the verdict when the job was cleared mid-lookup — the clear is not undone', async () => {
+      // The resurrection the reviewer named: the operator's by-id clear lands while the chain is
+      // being asked, and the stale reset write would put the record straight back. The write goes
+      // through the same claim lock the clear takes and re-reads first, so the verdict is simply
+      // dropped.
+      const gated = gatedResolver({ status: 'not-found' });
+      const publisher = createPublisher({ chainProofResolver: gated.resolver });
+      const held = await failAfterRecordedTxHash(publisher);
+
+      const recovering = publisher.recover();
+      await gated.whenEntered;
+      expect((await publisher.clearTerminalJob(held.jobId)).outcome).toBe('cleared');
+      gated.release();
+
+      expect(await recovering).toBe(0);
+      // NOT resurrected: the operator's clear stands.
+      expect(await publisher.getStatus(held.jobId)).toBeNull();
+    });
+
+    it('does not touch a successor enqueued for the same work mid-lookup', async () => {
+      // After the concurrent clear, a fresh admission for the same KA creates a NEW job. The
+      // stale verdict belongs to the OLD record and must neither resurrect it nor move the
+      // successor.
+      const gated = gatedResolver({ status: 'not-found' });
+      const publisher = createPublisher({ chainProofResolver: gated.resolver });
+      const held = await failAfterRecordedTxHash(publisher);
+
+      const recovering = publisher.recover();
+      await gated.whenEntered;
+      expect((await publisher.clearTerminalJob(held.jobId)).outcome).toBe('cleared');
+      const successorId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+      gated.release();
+
+      expect(await recovering).toBe(0);
+      expect(await publisher.getStatus(held.jobId)).toBeNull();
+      const successor = await publisher.getStatus(successorId);
+      expect(successor?.status).toBe('accepted');
+      expect(successor?.recovery).toBeUndefined();
+    });
+
+    it('applies the disposition when the job is unchanged — the guard is not a veto', async () => {
+      const gated = gatedResolver({ status: 'not-found' });
+      const publisher = createPublisher({ chainProofResolver: gated.resolver });
+      const held = await failAfterRecordedTxHash(publisher);
+
+      const recovering = publisher.recover();
+      await gated.whenEntered;
+      gated.release();
+
+      expect(await recovering).toBe(1);
+      const released = await publisher.getStatus(held.jobId);
+      expect(released?.status).toBe('accepted');
+      expect(released?.recovery?.txHashAccounted).toBe(true);
+    });
   });
 });

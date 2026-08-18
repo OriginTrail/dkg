@@ -65,9 +65,27 @@ const SIGNED_NONCE = 41;
 const lookup: AsyncLiftChainProofLookup = { txHash: TX_HASH, walletId: WALLET };
 const lookupWithNonce: AsyncLiftChainProofLookup = { ...lookup, nonce: SIGNED_NONCE };
 
-/** An adapter whose wallet nonce has moved PAST the signed slot at the finalized block. */
-function nonceConsumed(extra: Record<string, unknown> = {}) {
-  return { getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1), ...extra };
+/**
+ * GH#2270 PR-3 r4 — the ONE pinned-snapshot capability the absence decision reads. Rows script
+ * the pair (nonce + minted state, one finalized block) rather than two independent reads, because
+ * two independent reads are exactly what the capability exists to forbid.
+ */
+function proofSnapshot(
+  snapshot: { accountNonce?: number; kaMinted?: boolean | null } | null,
+  extra: Record<string, unknown> = {},
+) {
+  return {
+    readFinalizedChainProofSnapshot: vi.fn(async () =>
+      snapshot === null
+        ? null
+        : {
+            blockNumber: 90,
+            blockHash: `0x${'cd'.repeat(32)}`,
+            accountNonce: SIGNED_NONCE + 1,
+            ...snapshot,
+          }),
+    ...extra,
+  };
 }
 
 describe('GH#2270 runner chain-proof resolution', () => {
@@ -107,74 +125,92 @@ describe('GH#2270 runner chain-proof resolution', () => {
     it('downgrades a bare adapter not-found to inconclusive when no nonce was recorded', async () => {
       // The reviewer's exact scenario: broadcast accepted, response timed out, the lookup answers
       // null, and the record carries no nonce. Nothing has been established. Note the adapter here
-      // COULD prove consumption — it is the missing record, not a missing capability, that holds.
-      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, nonceConsumed()));
+      // COULD prove consumption — it is the missing record, not a missing capability, that holds,
+      // and the missing record means the snapshot is never even spent.
+      const adapter = triStateAdapter({ status: 'not-found' }, proofSnapshot({ kaMinted: false }));
+      const publishers = publishersWith(adapter);
 
-      const resolution = await createChainProofResolver(publishers)(lookup);
+      const resolution = await createChainProofResolver(publishers)({
+        ...lookup,
+        publishIdentityKaId: KA_ID.toString(),
+      });
 
       expect(resolution).toEqual({ status: 'inconclusive' });
       expect(resolution.status).not.toBe('not-found');
+      expect(adapter.readFinalizedChainProofSnapshot).not.toHaveBeenCalled();
     });
 
     it('reports not-found once the signed nonce is spent at a FINALIZED block', async () => {
       // The other polarity, and the only difference is the recorded nonce plus a finalized account
       // nonce past it: the slot was consumed by something else, so this transaction can never mine.
-      const getFinalizedAccountNonce = vi.fn(async () => SIGNED_NONCE + 1);
-      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, {
-        getFinalizedAccountNonce,
-        // The identity half, covered in its own describe below: no other transaction published it.
-        isKnowledgeAssetMinted: vi.fn(async () => false),
-      }));
+      // Both proofs arrive in the ONE pinned snapshot; the identity half has its own describe.
+      const adapter = triStateAdapter(
+        { status: 'not-found' },
+        proofSnapshot({ accountNonce: SIGNED_NONCE + 1, kaMinted: false }),
+      );
 
-      expect(await createChainProofResolver(publishers)({
+      expect(await createChainProofResolver(publishersWith(adapter))({
         ...lookupWithNonce,
-        publishIdentityKaId: ((BigInt(WALLET) << 96n) | 7n).toString(),
+        publishIdentityKaId: KA_ID.toString(),
       })).toEqual({ status: 'not-found' });
-      expect(getFinalizedAccountNonce).toHaveBeenCalledWith(WALLET);
+      expect(adapter.readFinalizedChainProofSnapshot).toHaveBeenCalledWith({
+        address: WALLET,
+        kaId: KA_ID,
+      });
     });
 
     it('holds while the finalized nonce still EQUALS the signed slot', async () => {
       // Equality is not consumption: that slot is the next one to be used, so the transaction is
       // still perfectly able to mine. An off-by-one here would resend a live transaction.
-      const publishers = publishersWith(
-        triStateAdapter({ status: 'not-found' }, { getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE) }),
-      );
+      const publishers = publishersWith(triStateAdapter(
+        { status: 'not-found' },
+        proofSnapshot({ accountNonce: SIGNED_NONCE, kaMinted: false }),
+      ));
 
-      expect(await createChainProofResolver(publishers)(lookupWithNonce)).toEqual({ status: 'inconclusive' });
+      expect(await createChainProofResolver(publishers)({
+        ...lookupWithNonce,
+        publishIdentityKaId: KA_ID.toString(),
+      })).toEqual({ status: 'inconclusive' });
     });
 
-    it('holds when the deployment cannot answer at the finalized block', async () => {
-      // A chain with no finality, or an endpoint that rejects the tag, answers null. Falling back
-      // to a `latest` nonce would let a reorg take the conclusion back after the resend.
-      const publishers = publishersWith(
-        triStateAdapter({ status: 'not-found' }, { getFinalizedAccountNonce: vi.fn(async () => null) }),
-      );
+    it('holds when no endpoint can produce the pinned pair', async () => {
+      // A chain with no finality, an endpoint that rejects the tag, or a provider set that cannot
+      // serve the finalized block identity: the capability answers null, and nothing may fall back
+      // to unpinned reads — that fallback IS the snapshot-skew hole.
+      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, proofSnapshot(null)));
 
-      expect(await createChainProofResolver(publishers)(lookupWithNonce)).toEqual({ status: 'inconclusive' });
+      expect(await createChainProofResolver(publishers)({
+        ...lookupWithNonce,
+        publishIdentityKaId: KA_ID.toString(),
+      })).toEqual({ status: 'inconclusive' });
     });
 
-    it('holds when the adapter has no finalized-nonce read, or the read throws', async () => {
+    it('holds when the adapter has no snapshot capability, or the read throws', async () => {
       const noRead = publishersWith(triStateAdapter({ status: 'not-found' }));
       const throwing = publishersWith(triStateAdapter({ status: 'not-found' }, {
-        getFinalizedAccountNonce: vi.fn(async () => {
+        readFinalizedChainProofSnapshot: vi.fn(async () => {
           throw new Error('endpoint rejected the finalized tag');
         }),
       }));
+      const identity = { ...lookupWithNonce, publishIdentityKaId: KA_ID.toString() };
 
-      expect(await createChainProofResolver(noRead)(lookupWithNonce)).toEqual({ status: 'inconclusive' });
-      expect(await createChainProofResolver(throwing)(lookupWithNonce)).toEqual({ status: 'inconclusive' });
+      expect(await createChainProofResolver(noRead)(identity)).toEqual({ status: 'inconclusive' });
+      expect(await createChainProofResolver(throwing)(identity)).toEqual({ status: 'inconclusive' });
     });
 
-    it('does not spend a nonce read on a verdict that is not an absence claim', async () => {
+    it('does not spend a snapshot read on a verdict that is not an absence claim', async () => {
       // The read is only meaningful for `not-found`. Firing it on every verdict would cost a chain
       // read per held job per tick for no decision.
-      const getFinalizedAccountNonce = vi.fn(async () => SIGNED_NONCE + 1);
-      const publishers = publishersWith(
-        triStateAdapter({ status: 'pending' }, { getFinalizedAccountNonce }),
+      const adapter = triStateAdapter(
+        { status: 'pending' },
+        proofSnapshot({ accountNonce: SIGNED_NONCE + 1, kaMinted: false }),
       );
 
-      expect(await createChainProofResolver(publishers)(lookupWithNonce)).toEqual({ status: 'pending' });
-      expect(getFinalizedAccountNonce).not.toHaveBeenCalled();
+      expect(await createChainProofResolver(publishersWith(adapter))({
+        ...lookupWithNonce,
+        publishIdentityKaId: KA_ID.toString(),
+      })).toEqual({ status: 'pending' });
+      expect(adapter.readFinalizedChainProofSnapshot).not.toHaveBeenCalled();
     });
   });
 
@@ -183,78 +219,189 @@ describe('GH#2270 runner chain-proof resolution', () => {
   // sender other than this process — consumes the very same slot AND performs the publish. A lane
   // that released on the nonce alone would re-run on top of a KA that is already on chain.
   describe('a replacement transaction that PUBLISHED must not read as absence', () => {
-    const KA_ID = ((BigInt(WALLET) << 96n) | 7n).toString();
+    const PINNED_KA_ID = KA_ID.toString();
 
     it('holds when the identity is already on chain, even with the nonce provably consumed', async () => {
       // The reviewer's scenario exactly: different hash, same nonce, and it did the publish.
-      // Both nonce facts point at "release"; the identity is the only thing that says otherwise.
-      const isKnowledgeAssetMinted = vi.fn(async () => true);
-      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, {
-        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1),
-        isKnowledgeAssetMinted,
-      }));
+      // Both nonce facts point at "release"; the identity is the only thing that says otherwise —
+      // and it arrives in the SAME snapshot, so it cannot be a stale answer from another block.
+      const publishers = publishersWith(triStateAdapter(
+        { status: 'not-found' },
+        proofSnapshot({ accountNonce: SIGNED_NONCE + 1, kaMinted: true }),
+      ));
 
       const resolution = await createChainProofResolver(publishers)({
         ...lookupWithNonce,
-        publishIdentityKaId: KA_ID,
+        publishIdentityKaId: PINNED_KA_ID,
       });
 
       expect(resolution).toEqual({ status: 'inconclusive' });
       expect(resolution.status).not.toBe('not-found');
-      expect(isKnowledgeAssetMinted).toHaveBeenCalledWith(BigInt(KA_ID));
     });
 
     it('releases only when the identity is provably NOT on chain', async () => {
-      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, {
-        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1),
-        isKnowledgeAssetMinted: vi.fn(async () => false),
-      }));
+      const publishers = publishersWith(triStateAdapter(
+        { status: 'not-found' },
+        proofSnapshot({ accountNonce: SIGNED_NONCE + 1, kaMinted: false }),
+      ));
 
       expect(await createChainProofResolver(publishers)({
         ...lookupWithNonce,
-        publishIdentityKaId: KA_ID,
+        publishIdentityKaId: PINNED_KA_ID,
       })).toEqual({ status: 'not-found' });
     });
 
     it('holds when the job pins NO identity — a re-run would mint a fresh one', async () => {
       // A job whose request does not fix its knowledge asset id allocates a new one on every
       // attempt, so a duplicate is neither contract-impossible nor checkable. The release path
-      // narrows to nothing for it rather than the guard weakening.
-      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, {
-        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1),
-        isKnowledgeAssetMinted: vi.fn(async () => false),
-      }));
+      // narrows to nothing for it rather than the guard weakening — and no snapshot is spent on a
+      // job that could never be released by one.
+      const adapter = triStateAdapter(
+        { status: 'not-found' },
+        proofSnapshot({ accountNonce: SIGNED_NONCE + 1, kaMinted: false }),
+      );
 
-      expect(await createChainProofResolver(publishers)(lookupWithNonce)).toEqual({ status: 'inconclusive' });
+      expect(await createChainProofResolver(publishersWith(adapter))(lookupWithNonce))
+        .toEqual({ status: 'inconclusive' });
+      expect(adapter.readFinalizedChainProofSnapshot).not.toHaveBeenCalled();
     });
 
-    it('holds when the identity read cannot answer', async () => {
-      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, {
-        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1),
-        isKnowledgeAssetMinted: vi.fn(async () => null),
-      }));
-      const noRead = publishersWith(triStateAdapter({ status: 'not-found' }, {
-        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1),
-      }));
-      const identity = { ...lookupWithNonce, publishIdentityKaId: KA_ID };
+    it('holds when the minted half of the snapshot cannot answer', async () => {
+      const publishers = publishersWith(triStateAdapter(
+        { status: 'not-found' },
+        proofSnapshot({ accountNonce: SIGNED_NONCE + 1, kaMinted: null }),
+      ));
+      const identity = { ...lookupWithNonce, publishIdentityKaId: PINNED_KA_ID };
 
       expect(await createChainProofResolver(publishers)(identity)).toEqual({ status: 'inconclusive' });
-      expect(await createChainProofResolver(noRead)(identity)).toEqual({ status: 'inconclusive' });
     });
 
-    it('does not spend an identity read when the nonce is not yet consumed', async () => {
-      // Order matters for cost: the cheap local check gates the second chain read.
+    it('reads BOTH proofs from exactly ONE snapshot — never from the granular pair', async () => {
+      // GH#2270 PR-3 r4 — the anti-splice property itself. A resolver that fell back to
+      // `getFinalizedAccountNonce` + `isKnowledgeAssetMinted` (or issued two snapshot reads)
+      // could combine facts observed at different blocks on different endpoints; the granular
+      // reads here are live and would happily answer, so this row fails on any such fallback.
+      const getFinalizedAccountNonce = vi.fn(async () => SIGNED_NONCE + 1);
       const isKnowledgeAssetMinted = vi.fn(async () => false);
-      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, {
-        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE),
-        isKnowledgeAssetMinted,
+      const adapter = triStateAdapter(
+        { status: 'not-found' },
+        proofSnapshot({ accountNonce: SIGNED_NONCE + 1, kaMinted: false }, {
+          getFinalizedAccountNonce,
+          isKnowledgeAssetMinted,
+        }),
+      );
+
+      expect(await createChainProofResolver(publishersWith(adapter))({
+        ...lookupWithNonce,
+        publishIdentityKaId: PINNED_KA_ID,
+      })).toEqual({ status: 'not-found' });
+      expect(adapter.readFinalizedChainProofSnapshot).toHaveBeenCalledTimes(1);
+      expect(getFinalizedAccountNonce).not.toHaveBeenCalled();
+      expect(isKnowledgeAssetMinted).not.toHaveBeenCalled();
+    });
+  });
+
+  // GH#2270 PR-3 r4 — named-KA UPDATE jobs. A mined update carries `KnowledgeAssetUpdated`, which
+  // the publish parser reports `unrecognized`; and the create-shaped identity check answers
+  // "minted" for every update (the CREATE minted the token years ago). Before this lane, an update
+  // job could therefore never resolve at all.
+  describe('a queued UPDATE resolves through canonical update recognition, never through absence', () => {
+    const PINNED_KA_ID = KA_ID.toString();
+    const INTENDED_ROOT = `0x${'12'.repeat(32)}`;
+    const updateLookup: AsyncLiftChainProofLookup = {
+      ...lookupWithNonce,
+      publishIdentityKaId: PINNED_KA_ID,
+      operationKind: 'update',
+      intendedUpdateRoot: INTENDED_ROOT as `0x${string}`,
+    };
+
+    it('recovers a mined update whose receipt proves OUR txHash installed OUR intended root', async () => {
+      const verifyKAUpdate = vi.fn(async () => ({
+        verified: true,
+        onChainMerkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+        blockNumber: 88,
+        blockHash: `0x${'ef'.repeat(32)}`,
+        txIndex: 2,
+      }));
+      const publishers = publishersWith(triStateAdapter({ status: 'unrecognized' }, {
+        verifyKAUpdate,
+        getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
       }));
 
-      expect(await createChainProofResolver(publishers)({
-        ...lookupWithNonce,
-        publishIdentityKaId: KA_ID,
+      const resolution = await createChainProofResolver(publishers)(updateLookup);
+
+      expect(resolution.status).toBe('recovered');
+      expect(resolution.status === 'recovered' ? resolution.recovery : null).toMatchObject({
+        inclusion: { txHash: TX_HASH, blockNumber: 88 },
+        finalization: {
+          mode: 'published',
+          txHash: TX_HASH,
+          batchId: PINNED_KA_ID,
+          startKAId: PINNED_KA_ID,
+          endKAId: PINNED_KA_ID,
+        },
+      });
+      // The chain was asked about exactly our transaction, our pinned id, our signing wallet.
+      expect(verifyKAUpdate).toHaveBeenCalledWith(TX_HASH, KA_ID, WALLET);
+    });
+
+    it('holds when the verified on-chain root is NOT the root this job intended', async () => {
+      // A mined update for our kaId that installed some OTHER root is someone else's update (or a
+      // different attempt's). Claiming it as ours would finalize this job against evidence that
+      // does not commit to its seal.
+      const publishers = publishersWith(triStateAdapter({ status: 'unrecognized' }, {
+        verifyKAUpdate: vi.fn(async () => ({
+          verified: true,
+          onChainMerkleRoot: Buffer.from('ff'.repeat(32), 'hex'),
+          blockNumber: 88,
+        })),
+        getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
+      }));
+
+      expect(await createChainProofResolver(publishers)(updateLookup)).toEqual({ status: 'inconclusive' });
+    });
+
+    it('holds on an unverified answer, a missing capability, or a lookup with no update identity', async () => {
+      const unverified = publishersWith(triStateAdapter({ status: 'unrecognized' }, {
+        verifyKAUpdate: vi.fn(async () => ({ verified: false })),
+        getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
+      }));
+      const noCapability = publishersWith(triStateAdapter({ status: 'unrecognized' }));
+      const noIdentity = publishersWith(triStateAdapter({ status: 'unrecognized' }, {
+        verifyKAUpdate: vi.fn(async () => ({ verified: true })),
+        getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
+      }));
+
+      expect(await createChainProofResolver(unverified)(updateLookup)).toEqual({ status: 'inconclusive' });
+      expect(await createChainProofResolver(noCapability)(updateLookup)).toEqual({ status: 'inconclusive' });
+      expect(await createChainProofResolver(noIdentity)({
+        ...updateLookup,
+        intendedUpdateRoot: undefined,
       })).toEqual({ status: 'inconclusive' });
-      expect(isKnowledgeAssetMinted).not.toHaveBeenCalled();
+    });
+
+    it('NEVER releases an update by absence — even with the tx not found and the nonce consumed', async () => {
+      // The ABA row, consciously against half the reviewer's suggested direction. An update has no
+      // monotone register to prove absence against: "current root ≠ intended" also describes our
+      // update landing and being superseded by a LATER third-party update — at which point a
+      // release re-signs and re-applies our now-STALE root over the newer state. A create's
+      // token-minted register can never un-happen, which is exactly why absence release is
+      // create-only. This update job stays held for the operator.
+      // The snapshot is scripted to a pair that WOULD release a create-shaped job — so a mutant
+      // that routes updates through the absence path produces `not-found` here and dies on both
+      // assertions, not just the call-count one.
+      const adapter = triStateAdapter(
+        { status: 'not-found' },
+        proofSnapshot({ accountNonce: SIGNED_NONCE + 1, kaMinted: false }),
+      );
+
+      const resolution = await createChainProofResolver(publishersWith(adapter))(updateLookup);
+
+      expect(resolution).toEqual({ status: 'inconclusive' });
+      expect(resolution.status).not.toBe('not-found');
+      // The absence machinery is not even consulted for an update: there is no absence question
+      // it could answer safely.
+      expect(adapter.readFinalizedChainProofSnapshot).not.toHaveBeenCalled();
     });
   });
 
@@ -355,7 +502,11 @@ describe('GH#2270 runner chain-proof resolution', () => {
   // neither can catch a rule that is right on one side of the boundary and wrong at the join.
   // These drive a REAL publisher whose resolver is the real `createChainProofResolver`.
   describe('composed with the publisher dispatcher', () => {
-    async function heldJobOn(chain: Record<string, unknown>, nonce?: number): Promise<{
+    async function heldJobOn(
+      chain: Record<string, unknown>,
+      nonce?: number,
+      requestOverrides: Record<string, unknown> = {},
+    ): Promise<{
       publisher: TripleStoreAsyncLiftPublisher;
       jobId: string;
       status: () => Promise<LiftJob | null>;
@@ -380,6 +531,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
         assertionVersion: '1',
         publicTripleCount: 2,
         privateTripleCount: 0,
+        ...requestOverrides,
         seal: {
           merkleRoot: `0x${'12'.repeat(32)}`,
           authorAddress: WALLET as `0x${string}`,
@@ -442,7 +594,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
       const { publisher, status } = await heldJobOn({
         chainId: 'evm:31337',
         resolvePublishTransaction: vi.fn(async () => ({ status: 'not-found' as const })),
-        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE),
+        ...proofSnapshot({ accountNonce: SIGNED_NONCE, kaMinted: false }),
       }, SIGNED_NONCE);
 
       expect(await publisher.recover()).toBe(0);
@@ -456,8 +608,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
       const { publisher, status } = await heldJobOn({
         chainId: 'evm:31337',
         resolvePublishTransaction: vi.fn(async () => ({ status: 'not-found' as const })),
-        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1),
-        isKnowledgeAssetMinted: vi.fn(async () => false),
+        ...proofSnapshot({ accountNonce: SIGNED_NONCE + 1, kaMinted: false }),
       }, SIGNED_NONCE);
 
       expect((await status())?.status).toBe('failed');
@@ -466,6 +617,60 @@ describe('GH#2270 runner chain-proof resolution', () => {
       const after = await status();
       expect(after?.status).toBe('accepted');
       expect(after?.recovery?.txHashChecked).toBe(TX_HASH);
+    });
+
+    it('an UPDATE job is NEVER released by absence at the join — same facts that release a create', async () => {
+      // GH#2270 PR-3 r4 — the composed ABA row: the real publisher derives the update kind from
+      // the persisted request, the real resolver refuses to earn a not-found for it, and the job
+      // stays exactly where it was. The adapter here answers with the precise pair that releases
+      // the create-shaped sibling in the row above.
+      const { publisher, status } = await heldJobOn(
+        {
+          chainId: 'evm:31337',
+          resolvePublishTransaction: vi.fn(async () => ({ status: 'not-found' as const })),
+          ...proofSnapshot({ accountNonce: SIGNED_NONCE + 1, kaMinted: false }),
+        },
+        SIGNED_NONCE,
+        { vmCurrentAssertion: '12'.repeat(32), assertionVersion: '2' },
+      );
+
+      expect(await publisher.recover()).toBe(0);
+      const after = await status();
+      expect(after?.status).toBe('failed');
+      expect(after?.status).not.toBe('accepted');
+    });
+
+    it('a mined UPDATE that proves the intended root reaches the named finalize lane', async () => {
+      // Composed recognition: the real lookup carries kind + intended root, the real resolver
+      // turns the update-verification answer into `recovered`, and the dispatcher takes the
+      // FINALIZE path — observable here as the named lane holding for local repair (this harness
+      // wires no repair resolver), rather than the job being reset or ignored.
+      const verifyKAUpdate = vi.fn(async () => ({
+        verified: true,
+        onChainMerkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+        blockNumber: 91,
+        blockHash: `0x${'ef'.repeat(32)}`,
+        txIndex: 2,
+      }));
+      const { publisher, status } = await heldJobOn(
+        {
+          chainId: 'evm:31337',
+          resolvePublishTransaction: vi.fn(async () => ({ status: 'unrecognized' as const })),
+          verifyKAUpdate,
+          getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
+        },
+        SIGNED_NONCE,
+        { vmCurrentAssertion: '12'.repeat(32), assertionVersion: '2' },
+      );
+
+      expect(await publisher.recover()).toBe(0);
+
+      // Asked about OUR tx, OUR pinned id, OUR wallet — the derivation composed end to end.
+      expect(verifyKAUpdate).toHaveBeenCalledWith(TX_HASH, (BigInt(WALLET) << 96n) | 7n, WALLET);
+      // Held for repair, not reset: the recognition reached the finalize lane.
+      const after = await status();
+      expect(after?.status).toBe('failed');
+      expect(after?.recovery?.txHashAccounted).toBeUndefined();
     });
   });
 });

@@ -17,6 +17,7 @@ import type {
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
+  FinalizedChainProofSnapshot,
   KAUpdateVerification,
   OnChainPublishResult,
   PublisherPublishPlan,
@@ -559,6 +560,58 @@ export class PublishMethods extends EVMChainAdapterBase {
       return await this.readProvider(
         'finalized account nonce',
         (provider) => provider.getTransactionCount(address, 'finalized'),
+        { signal: options.signal },
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * GH#2270 PR-3 r4 — see {@link ChainAdapter.readFinalizedChainProofSnapshot}.
+   *
+   * Everything happens inside ONE `readProvider` callback, so all three reads — the finalized
+   * block identity, the account nonce and the minted state — are served by the SAME endpoint, and
+   * the two state reads are pinned to that block's NUMBER rather than re-evaluating `finalized`
+   * (which can advance between calls). A transport failure inside the callback fails over to the
+   * next endpoint as a whole, so a snapshot is never spliced across two providers; if no endpoint
+   * can produce the pinned pair the answer is `null`, and the caller holds.
+   *
+   * The minted read reuses the SAME classification as {@link isKnowledgeAssetMinted}: `false`
+   * only for a provable nonexistent-token revert AT the pinned block, `null` for everything else.
+   * A revert is a chain answer, not a transport failure, so it is classified in place rather than
+   * thrown into the failover loop.
+   */
+  async readFinalizedChainProofSnapshot(
+    params: { address: string; kaId?: bigint },
+    options: ChainReadOptions = {},
+  ): Promise<FinalizedChainProofSnapshot | null> {
+    await this.init();
+    try {
+      return await this.readProvider(
+        'finalized chain-proof snapshot',
+        async (provider) => {
+          const block = await provider.getBlock('finalized');
+          if (!block || !block.hash) {
+            throw new Error('endpoint cannot serve a finalized block identity');
+          }
+          const accountNonce = await provider.getTransactionCount(params.address, block.number);
+          if (params.kaId === undefined) {
+            return { blockNumber: block.number, blockHash: block.hash, accountNonce };
+          }
+          let kaMinted: boolean | null = null;
+          const storage = this.contracts.knowledgeAssetStorage;
+          if (storage) {
+            try {
+              const owner: string = await this.rebindContract(storage as Contract, provider)
+                .ownerOf(params.kaId, { blockTag: block.number });
+              kaMinted = ethers.getAddress(owner) !== ethers.ZeroAddress;
+            } catch (err) {
+              kaMinted = isNonexistentTokenRevert(err) ? false : null;
+            }
+          }
+          return { blockNumber: block.number, blockHash: block.hash, accountNonce, kaMinted };
+        },
         { signal: options.signal },
       );
     } catch {

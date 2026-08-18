@@ -8,6 +8,7 @@ import type {
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
   CreateKCParams,
+  FinalizedChainProofSnapshot,
   UpdateKCParams,
   TxResult,
   ChainEvent,
@@ -467,6 +468,25 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   /**
+   * GH#2270 PR-3 r4 — see {@link ChainAdapter.readFinalizedChainProofSnapshot}. The mock's one
+   * finality seam is the declared finalized nonce, so the snapshot exists exactly when a test has
+   * declared one for this address — the same condition under which the old pair of reads could
+   * answer. The minted half comes from the same minted seams as {@link isKnowledgeAssetMinted},
+   * observed in the SAME call, which is the parity the capability exists for.
+   */
+  async readFinalizedChainProofSnapshot(
+    params: { address: string; kaId?: bigint },
+    _options: ChainReadOptions = {},
+  ): Promise<FinalizedChainProofSnapshot | null> {
+    const accountNonce = this.finalizedAccountNonces.get(params.address.toLowerCase());
+    if (accountNonce === undefined) return null;
+    const blockNumber = this.nextBlock;
+    const base = { blockNumber, blockHash: mockBlockHash(blockNumber), accountNonce };
+    if (params.kaId === undefined) return base;
+    return { ...base, kaMinted: await this.isKnowledgeAssetMinted(params.kaId) };
+  }
+
+  /**
    * Test seam — declare that the mock CANNOT answer for this id, the fail-closed shape a real
    * deployment produces when the storage contract is absent or the read is ambiguous.
    */
@@ -638,6 +658,10 @@ export class MockChainAdapter implements ChainAdapter {
       verified: true,
       onChainMerkleRoot: fromHex(match.data.newMerkleRoot as string),
       blockNumber: match.blockNumber,
+      // GH#2270 PR-3 r4 — parity with the EVM adapter, which returns the receipt's blockHash.
+      // Update-job recovery evidence requires the canonical block hash, so a mock without one
+      // silently disqualified every update-recovery path from being drivable in tests.
+      blockHash: mockBlockHash(match.blockNumber),
       txIndex: typeof match.data.txIndex === 'number' ? match.data.txIndex : 0,
       merkleRootCount: match.data.merkleRootCount
         ? BigInt(String(match.data.merkleRootCount))

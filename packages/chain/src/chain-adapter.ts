@@ -330,6 +330,24 @@ export interface TxResult {
   contextGraphId?: string;
 }
 
+/**
+ * GH#2270 PR-3 r4 — one finalized block's answer to the release-by-absence pair. See
+ * {@link ChainAdapter.readFinalizedChainProofSnapshot} for why the facts travel together.
+ */
+export interface FinalizedChainProofSnapshot {
+  /** The finalized block BOTH reads below were evaluated at. */
+  blockNumber: number;
+  /** Its hash — the identity that makes the pin auditable. */
+  blockHash: string;
+  /** `getTransactionCount(address, blockNumber)`: the NEXT nonce as of the pinned block. */
+  accountNonce: number;
+  /**
+   * Minted state of the requested `kaId` AT the pinned block. Present only when a `kaId` was
+   * supplied; `false` only for a provable nonexistent-token answer, `null` for every ambiguity.
+   */
+  kaMinted?: boolean | null;
+}
+
 export interface KAUpdateVerification {
   verified: boolean;
   /** The merkle root stored on-chain for this batch (from KnowledgeBatchUpdated event). */
@@ -1177,6 +1195,28 @@ export interface ChainAdapter {
     kaId: bigint,
     options?: ChainReadOptions,
   ): Promise<boolean | null>;
+
+  /**
+   * GH#2270 PR-3 r4 — the two release-by-absence facts, observed together at ONE finalized block
+   * on ONE provider, or `null` when this deployment cannot produce that pinned pair.
+   *
+   * Read separately ({@link getFinalizedAccountNonce} then {@link isKnowledgeAssetMinted}), the
+   * two proofs can come from different endpoints and different blocks: a nonce that reads as
+   * consumed on a fresh endpoint plus a minted-state read served by a lagging one that has not
+   * seen the replacement's mint yet composes into "consumed and unminted" — a release verdict no
+   * single chain state ever contained. Pinning both reads to one finalized block identity on one
+   * provider makes the pair a fact about A block rather than a splice of two.
+   *
+   * `kaMinted` is present only when `kaId` was asked about: `false` only for the one revert shape
+   * that means "this token does not exist AT the pinned block", `null` for every ambiguity — the
+   * same fail-closed classification {@link isKnowledgeAssetMinted} uses. A `null` RESULT means no
+   * pinned pair could be produced on any endpoint, and the caller must treat the absence question
+   * as unanswerable rather than fall back to unpinned reads.
+   */
+  readFinalizedChainProofSnapshot?(
+    params: { address: string; kaId?: bigint },
+    options?: ChainReadOptions,
+  ): Promise<FinalizedChainProofSnapshot | null>;
 
   /**
    * Recovery-only receipt capability with mandatory canonical ordering.

@@ -25,6 +25,7 @@ import { ethers } from 'ethers';
 import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import type {
   ChainAdapter,
+  FinalizedChainProofSnapshot,
   OnChainPublishResult,
 } from '@origintrail-official/dkg-chain';
 import type {
@@ -92,14 +93,39 @@ export function createChainProofResolver(
 ): (lookup: AsyncLiftChainProofLookup) => Promise<AsyncLiftChainProofResolution> {
   return async (lookup) => {
     const resolution = await resolvePublishTransactionState(lookup, adapters);
+    // GH#2270 PR-3 r4 — a queued UPDATE's mined transaction carries `KnowledgeAssetUpdated`, not a
+    // publish event, so the publish parser reports it `unrecognized` and the job could never
+    // resolve. When the lookup says the queued operation WAS an update, ask the update-verification
+    // machinery whether this exact transaction installed the exact intended root.
+    if (resolution.status === 'unrecognized' && lookup.operationKind === 'update') {
+      return resolveCanonicalUpdateRecognition(lookup, adapters);
+    }
+    if (resolution.status === 'not-found' && lookup.operationKind === 'update') {
+      // Release-by-absence stays CREATE-ONLY, deliberately. A create's identity register is
+      // MONOTONE — a token, once minted, never unmints — so "unminted at a finalized block with
+      // the nonce consumed" is a proof no later event can invalidate. An update has no such
+      // register: any absence statement about it reduces to "the current root is not the intended
+      // root", and that observation cannot distinguish "our update never landed" from "it landed
+      // and a LATER third-party update superseded it" (nor from "still in flight"). Releasing on
+      // it re-signs and re-applies a STALE root over newer state — the ABA hazard. An update whose
+      // transaction cannot be proven canonical therefore stays held, with the operator's by-id
+      // clear as the exit.
+      return { status: 'inconclusive' };
+    }
     if (resolution.status === 'not-found') {
       // TWO independent proofs, and both must hold. Nonce consumption settles that the recorded
       // HASH can never mine; the identity check settles that no OTHER transaction performed this
       // publish. Either one alone is a resend waiting to happen.
-      const cannotMine = await isNonceProvenConsumed(lookup, adapters);
-      if (!cannotMine) return { status: 'inconclusive' };
-      const alreadyPublished = await isPublishIdentityOnChain(lookup, adapters);
-      return alreadyPublished === false ? { status: 'not-found' } : { status: 'inconclusive' };
+      //
+      // GH#2270 PR-3 r4 — both proofs are observed in ONE adapter snapshot, at ONE finalized
+      // block on ONE provider. Read separately they could be served by different endpoints at
+      // different heights, and "nonce consumed" (a fresh endpoint) plus "identity unminted" (a
+      // lagging endpoint that has not seen the replacement's mint) composes into a release
+      // verdict no single chain state ever contained. The DECISION still lives here — the
+      // adapter reports atomically-observed facts; policy decides what they establish.
+      return await isPublishProvenAbsent(lookup, adapters)
+        ? { status: 'not-found' }
+        : { status: 'inconclusive' };
     }
     if (resolution.status !== 'confirmed') return resolution;
     const recovery = await mapConfirmedPublishToLiftRecovery(resolution.publish, resolution.chain);
@@ -112,67 +138,101 @@ export function createChainProofResolver(
 }
 
 /**
- * GH#2270 PR-3 r1 — is this transaction PROVABLY unable to mine?
+ * GH#2270 PR-3 r4 — is this mined-but-unrecognized transaction OUR update, canonically?
  *
- * The adapter has just told us it cannot find the transaction. On its own that means nothing: the
- * lookup is a point-in-time answer from one backend, and the classic loss case is a broadcast
- * whose HTTP response timed out while the node accepted it anyway. Treating that as absence is how
- * a job gets resent while its first transaction is still perfectly capable of mining.
- *
- * What settles it is the nonce. Every signed transaction reserves one slot on its wallet, and the
- * pre-send write-ahead records which. If the wallet's account nonce at a FINALIZED block is
- * strictly greater than that slot, then the slot has been spent — and since the transaction is not
- * on chain, it was spent by something ELSE. It can never mine now, and a resend is safe.
- *
- * Every gap is fail-closed: no recorded nonce (records written before the field existed, and
- * inherited hashes, which name a transaction some earlier attempt signed), no adapter support for
- * the read, an endpoint that cannot serve `finalized`, or a read that throws — all answer `false`,
- * and the job keeps its hold and its operator exit.
+ * `recovered` requires the full chain of custody at once: the receipt fetched BY our recorded
+ * txHash carries an update event for exactly our pinned kaId, the chain-verified new root equals
+ * the root our seal intended to install, and the root history at the receipt block attributes it
+ * to our signing wallet — all of which is what {@link ChainAdapter.verifyKAUpdate} establishes
+ * (it re-reads the receipt and matches the root history itself; nothing here is taken from the
+ * job's own say-so except which transaction and which root to ask about). Every gap — no
+ * capability, no pinned identity or intended root on the lookup, an unverified answer, a root
+ * that does not match, missing block identity — collapses to `inconclusive` and the job stays
+ * held. The evidence mapped here feeds the dispatcher's verdict; the named lane independently
+ * re-resolves through its own recovery resolver before repairing local state.
  */
-/**
- * GH#2270 PR-3 r2 — did SOMETHING already publish this job's identity? `true` / `false` / `null`
- * when it could not be established.
- *
- * This is the half nonce consumption cannot cover. A consumed slot proves the recorded transaction
- * can never mine; it says nothing about whether a DIFFERENT transaction on that same slot — a
- * fee-bumped replacement carrying the same calldata — already did the publish. Releasing on the
- * nonce alone would re-run on top of it.
- *
- * A job whose request pins its knowledge asset id can simply be asked. One `eth_call` on `ownerOf`,
- * against an id the job already persists, answers whoever sent the transaction. A job with no
- * pinned id would allocate a fresh one on re-run, so there is nothing to ask and nothing that would
- * stop a duplicate: it answers `null` here and the caller holds. That is the release path narrowing
- * rather than the guard weakening.
- */
-async function isPublishIdentityOnChain(
+async function resolveCanonicalUpdateRecognition(
   lookup: AsyncLiftChainProofLookup,
   adapters: PublisherChainAdapters,
-): Promise<boolean | null> {
-  if (lookup.publishIdentityKaId === undefined) return null;
+): Promise<AsyncLiftChainProofResolution> {
   const chain = adapters.get(lookup.walletId);
-  if (!chain?.isKnowledgeAssetMinted) return null;
-  try {
-    return await chain.isKnowledgeAssetMinted(BigInt(lookup.publishIdentityKaId));
-  } catch {
-    return null;
+  if (!chain?.verifyKAUpdate || !chain.getDKGKnowledgeAssetsAddress) return { status: 'inconclusive' };
+  if (lookup.publishIdentityKaId === undefined || lookup.intendedUpdateRoot === undefined) {
+    return { status: 'inconclusive' };
   }
+  let kaId: bigint;
+  try {
+    kaId = BigInt(lookup.publishIdentityKaId);
+  } catch {
+    return { status: 'inconclusive' };
+  }
+  let verification;
+  let knowledgeAssetsContract: string;
+  try {
+    verification = await chain.verifyKAUpdate(lookup.txHash, kaId, lookup.walletId);
+    knowledgeAssetsContract = await chain.getDKGKnowledgeAssetsAddress();
+  } catch {
+    return { status: 'inconclusive' };
+  }
+  if (!verification.verified || !verification.onChainMerkleRoot) return { status: 'inconclusive' };
+  if (verification.blockNumber === undefined) return { status: 'inconclusive' };
+  const onChainRoot = ethers.hexlify(verification.onChainMerkleRoot);
+  if (onChainRoot.toLowerCase() !== lookup.intendedUpdateRoot.toLowerCase()) {
+    return { status: 'inconclusive' };
+  }
+  const publisherAddress = asLiftJobHex(lookup.walletId);
+  if (!publisherAddress) return { status: 'inconclusive' };
+  return {
+    status: 'recovered',
+    recovery: {
+      inclusion: { txHash: lookup.txHash, blockNumber: verification.blockNumber },
+      finalization: {
+        mode: 'published',
+        txHash: lookup.txHash,
+        ual: buildKnowledgeAssetUal(chain.chainId, knowledgeAssetsContract, kaId),
+        batchId: kaId.toString() as `${bigint}`,
+        startKAId: kaId.toString() as `${bigint}`,
+        endKAId: kaId.toString() as `${bigint}`,
+        publisherAddress,
+      },
+    },
+  };
 }
 
-async function isNonceProvenConsumed(
+/**
+ * GH#2270 PR-3 r4 — the release-by-absence decision, over ONE pinned snapshot.
+ *
+ * `true` requires every link at once: a recorded nonce slot (else there is no "can never mine"
+ * statement to make), a pinned publish identity (else a re-run would mint a fresh asset with
+ * nothing on chain to object), an adapter that can produce the pinned pair, a snapshot it
+ * actually produced, a nonce strictly past the recorded slot AT the pinned finalized block
+ * (`getTransactionCount` is the NEXT nonce, so equality means the slot is still unspent), and the
+ * identity provably NOT minted at that SAME block. Every gap — no capability, a `null` snapshot
+ * because no endpoint could serve the pinned pair, a `null` minted classification, a malformed
+ * persisted id — answers `false`, and the job keeps its hold and its operator exit.
+ */
+async function isPublishProvenAbsent(
   lookup: AsyncLiftChainProofLookup,
   adapters: PublisherChainAdapters,
 ): Promise<boolean> {
   if (lookup.nonce === undefined) return false;
+  if (lookup.publishIdentityKaId === undefined) return false;
   const chain = adapters.get(lookup.walletId);
-  if (!chain?.getFinalizedAccountNonce) return false;
+  if (!chain?.readFinalizedChainProofSnapshot) return false;
+  let kaId: bigint;
   try {
-    const finalizedNonce = await chain.getFinalizedAccountNonce(lookup.walletId);
-    // `getTransactionCount` is the NEXT nonce, so `> lookup.nonce` means this slot is behind the
-    // finalized frontier. Equality is not enough: the slot is still the next one to be used.
-    return finalizedNonce !== null && finalizedNonce > lookup.nonce;
+    kaId = BigInt(lookup.publishIdentityKaId);
   } catch {
     return false;
   }
+  let snapshot: FinalizedChainProofSnapshot | null;
+  try {
+    snapshot = await chain.readFinalizedChainProofSnapshot({ address: lookup.walletId, kaId });
+  } catch {
+    return false;
+  }
+  if (!snapshot) return false;
+  return snapshot.accountNonce > lookup.nonce && snapshot.kaMinted === false;
 }
 
 /**

@@ -93,6 +93,41 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
 }
 
 /**
+ * GH#2270 PR-3 r4 — what this job's queued transaction was TRYING to do, derived from the
+ * persisted request alone. Structural, not policy: the disposition module and the lookup builder
+ * both read it, and what a kind PERMITS (which recognitions, which releases) is decided there.
+ *
+ * The derivation errs toward 'update', because the two misclassifications are not symmetric.
+ * A create read as an update merely narrows what can settle it: update recognition will not match
+ * a mint receipt and the create-only absence release is withheld — the job stays held for the
+ * operator, which is safe. An update read as a create is the dangerous direction, so 'create'
+ * requires proof:
+ *  - a named-KA VM job is a create only when its request records NO prior VM assertion
+ *    (`vmCurrentAssertion` is what the queued executor branches on) AND its assertion version
+ *    does not advance past 1 (the executor may still take the update branch off the LIVE
+ *    lifecycle pointer when the request field is absent — but then the identity check answers
+ *    "minted" and the absence release holds anyway; see the resolver);
+ *  - a raw lift is a create only when its transition type says CREATE (MUTATE/REVOKE rewrite
+ *    existing state and carry the same ABA hazard).
+ */
+export function queuedLiftOperationKind(job: LiftJob): 'create' | 'update' {
+  if (isKnowledgeAssetVmPublishJobRequest(job.request)) {
+    const request = job.request.knowledgeAssetVmPublish;
+    if (request.vmCurrentAssertion !== undefined) return 'update';
+    try {
+      if (request.assertionVersion !== undefined && BigInt(request.assertionVersion) > 1n) {
+        return 'update';
+      }
+    } catch {
+      return 'update';
+    }
+    return 'create';
+  }
+  const rawTransition = (job.request as { lift?: { transitionType?: string } }).lift?.transitionType;
+  return rawTransition === 'CREATE' ? 'create' : 'update';
+}
+
+/**
  * GH#2270 — the ONE reset-to-accepted builder for a FAILED job, shared by every reaccept path
  * (claim-time sweep, `retry()`, admission re-submit).
  *
