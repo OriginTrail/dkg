@@ -467,6 +467,92 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.peersSucceeded).toBe(1);
   });
 
+  it('uses selected scheduling for public SWM without promoting an ordinary peer to graph authority', async () => {
+    const selectedFlags: unknown[] = [];
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-public-selected-default', includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: 'peer-curator',
+              authoritativePeerId: 'peer-curator',
+              authoritativeSharedMemoryPeerIds: [],
+              isPrivateContextGraph: false,
+              peerIds: ['peer-curator'],
+              connectedPeers: 1,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory':
+            selectedFlags.push(args[4]);
+            return {
+              kind: 'selected-shared-memory',
+              shared: sharedResult(),
+              selectedScopeComplete: true,
+            };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(selectedFlags).toEqual([true]);
+    expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(1);
+    expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers ?? 0).toBe(0);
+  });
+
+  it('still calls every ordinary peer after a selected-complete local manifest response', async () => {
+    const peerIds = ['peer-ordinary-a', 'peer-ordinary-b'];
+    const sharedCalls: string[] = [];
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-public-selected-union', includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              isPrivateContextGraph: false,
+              authoritativeSharedMemoryPeerIds: [],
+              peerIds,
+              connectedPeers: peerIds.length,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return { ...durableResult(), complete: false, failedPhases: 1 };
+          case 'syncSharedMemory': {
+            expect(args[4]).toBe(true);
+            sharedCalls.push(String(args[0]));
+            return {
+              kind: 'selected-shared-memory',
+              shared: {
+                ...sharedResult(),
+                insertedTriples: 0,
+                fetchedDataTriples: 0,
+                insertedDataTriples: 0,
+                bytesReceived: 0,
+                emptyResponses: 1,
+              },
+              selectedScopeComplete: true,
+            };
+          }
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(sharedCalls.sort()).toEqual([...peerIds].sort());
+    expect(result.peersTried).toBe(peerIds.length);
+    expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers ?? 0).toBe(0);
+  });
+
   it('escalates waves and still caps in-flight peer syncs when no peer proves the plane', async () => {
     const peerIds = Array.from({ length: 20 }, (_, i) => `peer-${i}`);
     // The bound is only observable when the peer set exceeds the cap.
@@ -578,6 +664,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
           durableCalls.push(args[0] as string);
           return { ...durableResult(), complete: false };
         case 'syncSharedMemory':
+          expect(args[4]).toBe(true);
           sharedCalls.push(args[0] as string);
           return sharedResult();
         case 'finalizeCatchup':
@@ -677,6 +764,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
           durableCalls.push(args[0] as string);
           return durableResult();
         case 'syncSharedMemory':
+          expect(args[4]).toBe(true);
           sharedCalls.push(args[0] as string);
           // The curator has nothing; a later member holds the rows.
           if (args[0] === 'peer-0') {
@@ -901,6 +989,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
             verifiedPrivateOnlyResponses: 1,
           };
         case 'syncSharedMemory':
+          expect(args[4]).toBe(false);
           sharedCalls.push(args[0] as string);
           return {
             ...sharedResult(),

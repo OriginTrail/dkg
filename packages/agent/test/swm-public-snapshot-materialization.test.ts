@@ -50,8 +50,12 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
-import type { StoredWorkspaceHeadState } from '../src/sync/requester/swm-snapshot-materializer.js';
+import {
+  runSharedMemorySync,
+  type SharedMemoryMetadataFetcher,
+  type SharedMemorySnapshotWalkContinuation,
+} from '../src/sync/requester/shared-memory-sync.js';
+import type { SharedMemorySnapshotMaterializer, StoredWorkspaceHeadState } from '../src/sync/requester/swm-snapshot-materializer.js';
 
 const CG = 'ws00-snapshot-materialization';
 const WS = contextGraphWorkspaceGraphUri(CG);
@@ -124,9 +128,12 @@ interface HarnessOverrides {
   /** Skip the snapshot-store preseed to force the network (phase='snapshot') fetch. */
   preseedSnapshot?: boolean;
   reconcileImpl?: () => Promise<void>;
+  selectRepairIdentity?: () =>
+    Awaited<ReturnType<SharedMemorySnapshotMaterializer['selectRepairIdentity']>>;
   reconcileDisposition?: 'preserve' | 'suppress-metadata';
   publisherPeerId?: string;
   additionalVerifiedMeta?: Quad[];
+  metadataFetcher?: SharedMemoryMetadataFetcher;
 }
 
 function harness(overrides: HarnessOverrides = {}) {
@@ -172,6 +179,7 @@ function harness(overrides: HarnessOverrides = {}) {
         emptyResponses: 0,
         entityCreators: [],
       }),
+      ...(overrides.metadataFetcher ? { metadataFetcher: overrides.metadataFetcher } : {}),
       ...(overrides.subGraphName
         ? {
             getRegisteredSubGraphNames: async () => [overrides.subGraphName!],
@@ -203,7 +211,7 @@ function harness(overrides: HarnessOverrides = {}) {
         },
         readStoredHead: async () => {
           events.push('version-read');
-          return overrides.storedHead?.() ?? { version: null, needsRepair: false };
+          return overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
         },
         replaceGraph: async (graphUri, quads) => {
           events.push('replaced');
@@ -213,6 +221,19 @@ function harness(overrides: HarnessOverrides = {}) {
         replaceHeadMetadata: async (contextGraphId, descriptor) => {
           events.push('head-swapped');
           headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
+        },
+        // GH#2273 — this fake proves ORDERING, not store state; identity
+        // preservation never fires here (no stored foreign id), so the
+        // decision hook reports "descriptor wins" and the rewrite hook only
+        // records that it ran.
+        selectRepairIdentity: async () => {
+          events.push('repair-identity-selected');
+          return overrides.selectRepairIdentity?.() ?? null;
+        },
+        repairHeadPreservingIdentity: async (contextGraphId, descriptor, winnerShareOperationId) => {
+          events.push('head-repaired-preserving-identity');
+          headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
+          void winnerShareOperationId;
         },
       },
       reconcileFinalizedTwin: async () => {
@@ -254,7 +275,7 @@ describe('public SWM snapshot materialization', () => {
     // head bug. Ordering matters both ways: graph before swap (a crash leaves
     // repairable content, never a head without content), swap before append
     // (the fresh rows land on a clean subject).
-    const h = harness({ storedHead: () => ({ version: '1', needsRepair: false }), contentPresent: () => false });
+    const h = harness({ storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }), contentPresent: () => false });
     await h.run();
     expect(h.events.indexOf('replaced')).toBeGreaterThan(-1);
     expect(h.events.indexOf('head-swapped')).toBeGreaterThan(h.events.indexOf('replaced'));
@@ -282,7 +303,7 @@ describe('public SWM snapshot materialization', () => {
   it('does not recreate SWM head metadata after retiring an already-materialized twin', async () => {
     const h = harness({
       contentPresent: () => true,
-      storedHead: () => ({ version: '1', needsRepair: false }),
+      storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }),
       reconcileDisposition: 'suppress-metadata',
     });
     const summary = await h.run();
@@ -304,6 +325,60 @@ describe('public SWM snapshot materialization', () => {
     const reconciliation = h.events.indexOf('finalized-twin-reconciled');
     expect(reconciliation).toBeGreaterThan(h.events.indexOf('lock-released'));
     expect(h.events.slice(reconciliation + 1)).not.toContain('meta-inserted');
+  });
+
+  it('captures first-round suppression and reapplies it before a resumed bulk metadata insert', async () => {
+    const fx = fixture();
+    const manifest = [{ ref: fx.digest, digest: fx.digest, count: fx.payload.length }];
+    const resolved = new Set<string>();
+    const suppressedByRef = new Map<string, readonly Quad[]>();
+    const walk: SharedMemorySnapshotWalkContinuation = {
+      orderedManifestSnapshot: () => manifest.map((snapshot) => ({ ...snapshot })),
+      isResolved: (ref) => resolved.has(ref),
+      resolvedCount: () => resolved.size,
+      resolvedRefsSnapshot: () => [...resolved],
+      suppressedMetadataRows: (ref) => suppressedByRef.get(ref) ?? [],
+      markResolved: (ref, suppressedRows = []) => {
+        suppressedByRef.set(ref, suppressedRows.map((quad) => ({ ...quad })));
+        resolved.add(ref);
+      },
+    };
+    const metadataFetcher: SharedMemoryMetadataFetcher = {
+      fetch: async () => ({ result: page(fx.meta), continuationYielded: false }),
+      release: () => {},
+      snapshotWalk: () => walk,
+    };
+    const first = harness({
+      reconcileDisposition: 'suppress-metadata',
+      metadataFetcher,
+    });
+
+    const firstSummary = await first.run();
+
+    expect(firstSummary.failedPhases).toBe(0);
+    expect(first.replaced).toHaveLength(1);
+    expect(resolved).toEqual(new Set([fx.digest]));
+    const retiredSubjects = new Set([
+      `${UAL}#dkg-swm-head`,
+      `urn:dkg:share:${CG}:snapshot-materialization-op`,
+    ]);
+    const capturedRows = suppressedByRef.get(fx.digest) ?? [];
+    expect(capturedRows.filter((quad) => retiredSubjects.has(quad.subject)).length)
+      .toBeGreaterThan(0);
+
+    const resumed = harness({
+      metadataFetcher: {
+        ...metadataFetcher,
+      },
+    });
+
+    const resumedSummary = await resumed.run();
+
+    expect(resumedSummary.failedPhases).toBe(0);
+    expect(resumed.replaced).toHaveLength(0);
+    expect(resumed.events).not.toContain('finalized-twin-reconciled');
+    expect(resumed.inserted.flat().filter((quad) => retiredSubjects.has(quad.subject)))
+      .toHaveLength(0);
   });
 
   it('does not alias delimiter-like RDF terms in the suppression ledger', async () => {
@@ -343,7 +418,7 @@ describe('public SWM snapshot materialization', () => {
 
     const h = harness({
       lockMap,
-      storedHead: () => ({ version: storedVersion, needsRepair: false }),
+      storedHead: () => ({ version: storedVersion, needsRepair: false, shareOperationId: null }),
       onLockRequested: () => sawLockRequest(),
     });
 
@@ -379,14 +454,14 @@ describe('public SWM snapshot materialization', () => {
     // storedHead equals the descriptor (the marker exists) but the content
     // check reports absent — a marker-based guard would skip forever; the
     // content-based guard repairs.
-    const h = harness({ storedHead: () => ({ version: '1', needsRepair: false }), contentPresent: () => false });
+    const h = harness({ storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }), contentPresent: () => false });
     await h.run();
     expect(h.replaced).toHaveLength(1);
     expect(h.replaced[0]!.graphUri).toBe(h.fx.assertionGraph);
   });
 
   it('leaves an already-materialized asset alone', async () => {
-    const h = harness({ storedHead: () => ({ version: '1', needsRepair: false }), contentPresent: () => true });
+    const h = harness({ storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }), contentPresent: () => true });
     const summary = await h.run();
     expect(h.events).toContain('content-checked');
     expect(h.events).not.toContain('replaced');
@@ -399,7 +474,7 @@ describe('public SWM snapshot materialization', () => {
     // several version/operation rows (e.g. a prior round failed between the
     // replace and the head swap). The skip must still swap the head, or the
     // ambiguity becomes permanent — every later round skips on content.
-    const h = harness({ storedHead: () => ({ version: '1', needsRepair: true }), contentPresent: () => true });
+    const h = harness({ storedHead: () => ({ version: '1', needsRepair: true, shareOperationId: null }), contentPresent: () => true });
     const summary = await h.run();
     expect(h.events).not.toContain('replaced');
     expect(h.events).toContain('head-swapped');

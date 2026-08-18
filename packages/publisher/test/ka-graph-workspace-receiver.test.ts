@@ -541,4 +541,79 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       expect(outcome.reason, name).toContain(expectedReason);
     }
   });
+
+  it('defers a retryable inbound share while the local head is multi-valued (GH#2273)', async () => {
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+
+    const applied = await handler.handle(v2Request({}), PEER_ID);
+    expect(applied.applied).toBe(true);
+
+    // Fabricate the GH#2273 corruption exactly the way sync produces it: a bare
+    // set-union of a second shareOperationId row onto the head subject.
+    const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH);
+    await store.insert([{
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: '"storage-ack-2273"',
+      graph: metaGraph,
+    }]);
+
+    // The monotonicity gate cannot read a multi-valued head, so NOTHING is written
+    // (fail closed) — but the rejection is TRANSIENT: the corruption is local state
+    // the sync lane's identity-preserving repair heals, and the sender's outbox
+    // retries are budget-bounded, so a permanent drop would lose a valid newer
+    // share that becomes applicable the moment the head converges. Pre-fix the
+    // resolver answered arbitrarily and this share was applied on top of the
+    // corrupt head.
+    const inbound = v2Request({
+      nquads: new TextEncoder().encode(nquad('urn:entity:2', 'two')),
+      shareOperationId: 'rootless-op-2',
+      assertionVersion: '2',
+    });
+    const outcome = await handler.handle(inbound, PEER_ID);
+    expect(outcome.applied).toBe(false);
+    if (outcome.applied) throw new Error('unreachable');
+    expect(outcome.retryable).toBe(true);
+    expect(outcome.reason).toContain('CORRUPT_SWM_HEAD');
+
+    // The corrupt head must be left byte-untouched for the repair lane: still exactly
+    // two shareOperationId rows.
+    const headIds = await store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${metaGraph}> { <${UAL}#dkg-swm-head> <http://dkg.io/ontology/shareOperationId> ?op } }`,
+    );
+    expect(headIds.type).toBe('bindings');
+    if (headIds.type !== 'bindings') throw new Error('expected bindings');
+    expect(headIds.bindings).toHaveLength(2);
+
+    // And the rejected share must not have mutated SWM CONTENT either — the
+    // fail-closed decision fires BEFORE any graph write. A regression that
+    // replaced the assertion graph and then reported the rejection would pass
+    // the two assertions above while local data silently changed.
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const contentRows = await store.query(
+      `SELECT ?s ?o WHERE { GRAPH <${swmGraph}> { ?s <urn:predicate:value> ?o } }`,
+    );
+    expect(contentRows.type).toBe('bindings');
+    if (contentRows.type !== 'bindings') throw new Error('expected bindings');
+    expect(contentRows.bindings).toEqual([{ s: 'urn:entity:1', o: '"one"' }]);
+
+    // The transient contract's second half: after the head is repaired (here by
+    // removing the union residue the way the sync lane's identity-preserving
+    // repair does), the SAME deferred payload applies cleanly — proving the
+    // sender's kept-queued delivery was worth keeping.
+    await store.delete([{
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: '"storage-ack-2273"',
+      graph: metaGraph,
+    }]);
+    const replay = await handler.handle(inbound, PEER_ID);
+    expect(replay.applied).toBe(true);
+  });
 });

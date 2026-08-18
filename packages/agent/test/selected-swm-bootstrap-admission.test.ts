@@ -71,4 +71,24 @@ describe('SelectedSwmBootstrapAdmission', () => {
       phase: 'terminal',
     });
   });
+
+  it('summarizes one graph without returning provider identities', () => {
+    const admission = new SelectedSwmBootstrapAdmission();
+    const otherPeer = `${PEER}-other`;
+    const stalePeer = `${PEER}-stale`;
+
+    admission.request(PEER, ['cg-a', 'cg-b']);
+    completeScope(admission, ['cg-a', 'cg-b']);
+    admission.request(otherPeer, ['cg-a']);
+    admission.request(stalePeer, ['cg-a']);
+
+    expect(admission.summarizeContextGraph('cg-a', [PEER, otherPeer])).toEqual({
+      retryRequiredProviders: 1,
+      terminalProviders: 1,
+    });
+    expect(admission.summarizeContextGraph('cg-b', [PEER, otherPeer])).toEqual({
+      retryRequiredProviders: 0,
+      terminalProviders: 1,
+    });
+  });
 });

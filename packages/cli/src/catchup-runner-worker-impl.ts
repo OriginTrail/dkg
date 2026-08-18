@@ -116,25 +116,37 @@ interface CatchupSharedMemoryPlane {
   readonly deferredBackpressure?: number;
 }
 
+interface CatchupSharedMemoryPolicy {
+  /** Request the selected scheduler/continuation lane for this explicit public CG. */
+  readonly selectedSchedulingRequested: boolean;
+  /** Require a graph-complete provider's typed terminal boundary. */
+  readonly terminalBoundaryRequired: boolean;
+}
+
 function normalizeCatchupSharedMemoryResult(
   result: CatchupSharedMemoryRpcResult,
-  selectedRequested: boolean,
+  policy: CatchupSharedMemoryPolicy,
 ): CatchupSharedMemoryPlane {
   const selected = selectedSharedMemoryResult(result);
   const payload = selected?.shared ?? result as SharedMemorySyncResult;
-  // A selected request that receives an older/raw host response is incomplete,
-  // not ordinary success. That makes rolling upgrades fail closed at the one
-  // boundary where the requested lane is still known.
-  const progress = selectedRequested
+  // Only an operator-pinned graph-complete provider may terminate the whole
+  // selected SWM scope. Every explicitly subscribed PUBLIC CG still uses the
+  // selected scheduler/continuation lane by default, but an ordinary peer's
+  // terminal verdict describes only that peer's local manifest and must not
+  // replace multi-peer union convergence. A complete-provider request that
+  // receives an older/raw host response remains fail-closed.
+  const progress = policy.selectedSchedulingRequested
     ? classifySharedMemoryFreshness(payload, {
-      complete: selected?.selectedScopeComplete ?? false,
+      complete: policy.terminalBoundaryRequired
+        ? selected?.selectedScopeComplete === true
+        : true,
     })
     : classifyDurableProgress(payload);
   return {
     payload,
     progress,
-    terminalBoundaryRequired: selectedRequested,
-    selectedScopeProven: selectedRequested
+    terminalBoundaryRequired: policy.terminalBoundaryRequired,
+    selectedScopeProven: policy.terminalBoundaryRequired
       && selected?.selectedScopeComplete === true
       && progress.completedWithoutFailure,
     deferredBackpressure: payload.deferredBackpressure,
@@ -468,17 +480,26 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     const syncSharedMemory = (
       { priority, source }: CatchupPlaneContext,
     ): Promise<CatchupSharedMemoryPlane> => {
-      const selectedRequested = authoritativeSharedMemoryPeerIds.has(peerId);
+      // A foreground subscribe job is already scoped to one explicit CG. For
+      // public SWM, make RFC-64 selected scheduling and bounded continuation the
+      // default on every candidate peer. This does NOT make every candidate an
+      // authority: only a pinned complete provider may furnish the terminal
+      // whole-scope proof consumed below.
+      const policy: CatchupSharedMemoryPolicy = {
+        selectedSchedulingRequested: request.includeSharedMemory
+          && !prepared.isPrivateContextGraph,
+        terminalBoundaryRequired: authoritativeSharedMemoryPeerIds.has(peerId),
+      };
       return invoke<CatchupSharedMemoryRpcResult>(
         'syncSharedMemory',
         peerId,
         request.contextGraphId,
         priority,
         source,
-        selectedRequested,
+        policy.selectedSchedulingRequested,
       )
-        .then((result) => normalizeCatchupSharedMemoryResult(result, selectedRequested))
-        .catch(() => normalizeCatchupSharedMemoryResult(emptyShared(), selectedRequested));
+        .then((result) => normalizeCatchupSharedMemoryResult(result, policy))
+        .catch(() => normalizeCatchupSharedMemoryResult(emptyShared(), policy));
     };
 
     // Narrow each fallback peer to the planes the AUTHORITY has not already
@@ -533,6 +554,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     const round = await runCatchupPlanesWithPolicy({
       mode: 'foreground',
       includeSharedMemory: needSharedMemory,
+      // Preserve the durable-before-SWM dependency for ordinary candidates.
+      // Only an explicit graph-complete SWM provider earns the shared-first
+      // optimization; selected scheduling still applies when the SWM plane is
+      // admitted below.
       planeOrder: needSharedMemory && authoritativeSharedMemoryPeerIds.has(peerId)
         ? 'shared-first'
         : 'durable-first',

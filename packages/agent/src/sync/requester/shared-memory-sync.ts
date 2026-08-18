@@ -92,6 +92,29 @@ class GraphScopedSnapshotCommitCoordinator {
     for (const quad of rows) this.#writtenKeys.add(metadataQuadKey(quad));
   }
 
+  /**
+   * GH#2273 — ROW-level suppression for identity-preserving decisions. Only
+   * the specific rows named here are withheld from this round's remaining
+   * writes (`insertVerifiedDescriptorMeta` and the bulk append both honour the
+   * same ledger). Deliberately NOT descriptor-level: after a head repair the
+   * head subject holds only what the repair re-inserted, and suppressing a
+   * descriptor's WHOLE metadata there would withhold the four required head
+   * rows too, leaving a head the resolver permanently fails closed on. The
+   * key identity with `verifiedMetaForInsert` holds because canonicalization
+   * only REMOVES rows — a canonicalizer that rewrites rows would silently
+   * break this ledger.
+   */
+  suppressRows(rows: readonly Quad[]): void {
+    for (const quad of rows) {
+      const key = metadataQuadKey(quad);
+      if (this.#verifiedKeys.has(key)) this.#suppressedKeys.add(key);
+    }
+  }
+
+  suppressedRows(rows: readonly Quad[]): Quad[] {
+    return rows.filter((quad) => this.#suppressedKeys.has(metadataQuadKey(quad)));
+  }
+
   #suppress(descriptor: GraphScopedSwmRecoveryDescriptor): void {
     for (const quad of descriptor.metadataQuads) {
       const key = metadataQuadKey(quad);
@@ -252,6 +275,45 @@ export interface SharedMemoryMetadataFetchOutcome {
 }
 
 /**
+ * Selected-provider snapshot progress bound to one exact, ordered manifest.
+ *
+ * The owner keeps only refs whose content was already materialized locally.
+ * A changed manifest replaces the continuation, and a process restart drops
+ * it, so a skipped ref can never outlive the evidence that justified the skip.
+ */
+export interface SharedMemorySnapshotWalkContinuation {
+  /** Take an immutable copy of the exact ordered manifest owning the resolved refs below. */
+  orderedManifestSnapshot(): readonly PublicSnapshotMetadata[];
+  /** Query live owner state without exposing its mutable backing collection. */
+  isResolved(ref: string): boolean;
+  resolvedCount(): number;
+  /** Take an immutable point-in-time view for reporting or batch setup. */
+  resolvedRefsSnapshot(): readonly string[];
+  /** Exact verified metadata rows withheld when this ref was resolved. */
+  suppressedMetadataRows(ref: string): readonly Quad[];
+  markResolved(ref: string, suppressedMetadataRows?: readonly Quad[]): void;
+}
+
+type PublicSnapshotWalkSource =
+  | {
+    /** Ordinary lanes derive their walk from the verified metadata page. */
+    readonly metaQuads: readonly Quad[];
+    readonly recoveryOrder?: 'manifest' | 'recent-balanced';
+    readonly snapshotWalk?: never;
+  }
+  | {
+    /**
+     * Selected lanes pass one manifest-bound continuation value. Keeping the
+     * order and its resolved-ref evidence in the same object makes it
+     * impossible to combine metadata from one manifest with skip evidence
+     * from another.
+     */
+    readonly snapshotWalk: SharedMemorySnapshotWalkContinuation;
+    readonly metaQuads?: never;
+    readonly recoveryOrder?: never;
+  };
+
+/**
  * Strategy boundary for metadata retrieval.
  *
  * The default requester performs one ordinary page fetch. Selected RFC-64 SWM
@@ -261,6 +323,10 @@ export interface SharedMemoryMetadataFetchOutcome {
 export interface SharedMemoryMetadataFetcher {
   fetch(request: SharedMemoryMetadataFetchRequest): Promise<SharedMemoryMetadataFetchOutcome>;
   release(contextGraphId: string): void;
+  snapshotWalk?(
+    contextGraphId: string,
+    orderedManifest: readonly PublicSnapshotMetadata[],
+  ): SharedMemorySnapshotWalkContinuation;
 }
 
 /**
@@ -753,9 +819,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let materializedGraphs = 0;
       let materializationFailures = 0;
       let materializedQuads = 0;
+      const manifestSnapshots = collectPublicSnapshotMetadata(processed.verifiedMeta);
+      const orderedManifestSnapshots = snapshotRecoveryOrder === 'recent-balanced'
+        ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
+        : manifestSnapshots;
+      const snapshotWalk = metadataFetcher?.snapshotWalk?.(pid, orderedManifestSnapshots);
       const materializedKeys = new Set<string>();
       /** Snapshot refs whose every descriptor is locally present. */
-      const materializedRefs = new Set<string>();
+      const materializedRefs = new Set<string>(snapshotWalk?.resolvedRefsSnapshot() ?? []);
+      materializedRefsForCg = materializedRefs.size;
       /** Refs that fetched but could not be written; named in the shortfall. */
       const unresolvedRefSample: string[] = [];
 
@@ -773,6 +845,16 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         processed.verifiedMeta,
         reconcileFinalizedTwin,
       );
+      // A selected continuation skips blob and assertion-graph work for its
+      // verified prefix, but the final bulk metadata append is owned by this
+      // round. Reapply the exact suppression decisions captured with each
+      // resolved ref so a later successful suffix cannot resurrect metadata
+      // that the prefix deliberately withheld.
+      if (snapshotWalk) {
+        for (const resolvedRef of snapshotWalk.resolvedRefsSnapshot()) {
+          snapshotCommit.suppressRows(snapshotWalk.suppressedMetadataRows(resolvedRef));
+        }
+      }
       let contextGraphEnsured = false;
       const ensureContextGraphOnce = async (): Promise<void> => {
         if (contextGraphEnsured) return;
@@ -815,6 +897,61 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         snapshotCommit.recordWritten(rows);
         summary.insertedTriples += rows.length;
         summary.insertedMetaTriples += rows.length;
+      };
+      /**
+       * GH#2273 — every head rewrite on this lane goes through ONE decision:
+       * when the stored operations the head references are identity-equivalent
+       * to the descriptor's (same content commitment, envelope and author under
+       * a different operation id — the storage-ACK/originator residue), repair
+       * PRESERVES a stored identity instead of adopting the descriptor's,
+       * because a queued VM-publish job may have frozen that stored id at
+       * admission and rotating it kills the job terminally. Any genuine
+       * difference routes to `replaceHeadMetadata` — exactly today's behavior,
+       * which is the correct outcome for a real content or policy change.
+       * The loser id row is suppressed so neither the per-KA meta insert nor
+       * the round's bulk append re-stacks it onto the repaired head.
+       */
+      /**
+       * The ONE preserve step: withholding the losing descriptor id from
+       * every later write this round (per-KA meta insert AND the bulk append)
+       * is inseparable from the decision to preserve — a caller that decided
+       * without withholding would let the bulk append re-stack the rejected
+       * id onto the head it just protected. Both preserve paths below go
+       * through here.
+       */
+      /**
+       * The ONE preserve operation: DECIDING is WITHHOLDING. When a stored
+       * identity wins, the losing descriptor id row is suppressed from every
+       * later write this round (per-KA meta insert AND the bulk append) in
+       * the same call that made the decision — no call site can select a
+       * winner and forget the ledger, which would let the bulk append
+       * re-stack the rejected id onto the head it just protected. Returns
+       * the winning stored id, or null when the descriptor wins.
+       */
+      const decideAndWithholdStoredIdentity = async (
+        descriptor: GraphScopedSwmRecoveryDescriptor,
+        how: string,
+      ): Promise<string | null> => {
+        const preserved = await snapshotMaterializer!.selectRepairIdentity(pid, descriptor);
+        if (!preserved) return null;
+        // The materializer returns the complete plan: winner + the exact rows
+        // to withhold. Suppression consumes that plan, not a re-derivation.
+        snapshotCommit.suppressRows(preserved.withholdRows);
+        logInfo(ctx, `SWM sync for "${pid}": ${how} for ${descriptor.kaUal} preserving `
+          + `stored operation identity ${preserved.winnerShareOperationId} `
+          + `(descriptor offered equivalent ${descriptor.shareOperationId})`);
+        return preserved.winnerShareOperationId;
+      };
+      const repairOrReplaceHead = async (
+        descriptor: GraphScopedSwmRecoveryDescriptor,
+      ): Promise<void> => {
+        const winner = await decideAndWithholdStoredIdentity(descriptor, 'repaired head');
+        if (winner !== null) {
+          await snapshotMaterializer!.repairHeadPreservingIdentity(pid, descriptor, winner);
+        } else {
+          await snapshotMaterializer!.replaceHeadMetadata(pid, descriptor);
+        }
+        await insertVerifiedDescriptorMeta(descriptor);
       };
       const materializeReadySnapshot = async (snapshotRef: string): Promise<void> => {
         const descriptors = snapshotDescriptorsByRef.get(snapshotRef);
@@ -880,6 +1017,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                   storedHead.version !== null
                   && storedVersionOutranksDescriptor(storedHead.version, descriptor.assertionVersion)
                 ) {
+                  // GH#2273 — the skipped descriptor's HEAD rows must not reach
+                  // the round's bulk append either: an older version's rows
+                  // union-inserted onto the live head make it multi-VERSIONED,
+                  // which is the overwrite-with-older hazard above arriving via
+                  // the metadata side. Operation-subject rows may still land as
+                  // immutable history; only the head subject is withheld.
+                  snapshotCommit.suppressRows(descriptor.metadataQuads.filter(
+                    (quad) => quad.subject === descriptor.headSubject,
+                  ));
                   materializedKeys.add(graphKey);
                   logDebug(ctx, `SWM sync for "${pid}": snapshot ${snapshotRef} superseded by `
                     + `stored version ${storedHead.version} (descriptor ${descriptor.assertionVersion}); skipping`);
@@ -910,8 +1056,41 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                     storedHead.needsRepair
                     || !headCertifiesDescriptor(storedHead.version, descriptor.assertionVersion)
                   ) {
-                    await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
-                    await insertVerifiedDescriptorMeta(descriptor);
+                    await repairOrReplaceHead(descriptor);
+                  } else if (
+                    storedHead.shareOperationId !== null
+                    && storedHead.shareOperationId !== descriptor.shareOperationId
+                  ) {
+                    // Decision delegated to the materializer's single owner
+                    // (shared with the private recovery lane) via
+                    // decideAndWithholdStoredIdentity below.
+                    // GH#2273 stage 1 — content identical, head healthy, but the
+                    // peer references a DIFFERENT operation id. When the stored
+                    // operation is identity-equivalent (selectRepairIdentity
+                    // compares the full allow-list under the held lock), the
+                    // stored identity wins: suppress the descriptor's head-id
+                    // row so the bulk append cannot union it onto the head —
+                    // that union is what made the head multi-valued and, one
+                    // round later, rotated it to the remote id and terminally
+                    // killed any queued VM-publish job frozen on the local id.
+                    // Non-equivalent (genuine policy/author change): no
+                    // suppression, today's convergence to remote authority.
+                    //
+                    // Preserving is a REWRITE, not a skip: version/id
+                    // cardinality is all this branch checked, but the resolver
+                    // validates MORE head rows than that — a stale extra
+                    // assertionGraph/kaUal row is invisible here yet corrupt to
+                    // the reader, and suppressing the descriptor's id row would
+                    // otherwise freeze that residue in place round after round
+                    // (one clean version + one clean id = this same branch
+                    // forever). The preserving repair rewrites the head from
+                    // the descriptor's rows with the stored winner id, purging
+                    // anything the cardinality check cannot model — the same
+                    // decide-and-enact shape the private recovery lane uses.
+                    const winner = await decideAndWithholdStoredIdentity(descriptor, 'kept head');
+                    if (winner !== null) {
+                      await snapshotMaterializer.repairHeadPreservingIdentity(pid, descriptor, winner);
+                    }
                   }
                   materializedKeys.add(graphKey);
                   return;
@@ -930,12 +1109,17 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // follows lands on a clean subject instead of stacking a second
                 // version onto it (LIMIT-1 head readers would otherwise see an
                 // arbitrary mix).
-                await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
-                // Immediately, and inside this KA's lock: the delete above is
-                // the whole of G7 without it. `storeInsert(processed.verifiedMeta)`
-                // is below the incomplete branch's `continue`, so on a partial
-                // round it never runs and this KA's head would stay deleted.
-                await insertVerifiedDescriptorMeta(descriptor);
+                // GH#2273 — this call site rotates identity too: a KA whose
+                // content was absent but whose head references a live local
+                // operation (the r26 head-present/graph-absent residual) must
+                // not lose that identity when the graph is filled from an
+                // equivalent peer snapshot. Same single decision as the
+                // repair exit above; the meta insert stays immediately after
+                // and inside this KA's lock — the delete inside is the whole
+                // of G7 without it, since `storeInsert(processed.verifiedMeta)`
+                // is below the incomplete branch's `continue` and never runs
+                // on a partial round.
+                await repairOrReplaceHead(descriptor);
                 materializedKeys.add(graphKey);
                 materializedGraphs += 1;
                 materializedQuads += asset.quads.length;
@@ -1020,8 +1204,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         remotePeerId,
         contextGraphId: pid,
         deadline,
-        metaQuads: processed.verifiedMeta,
-        recoveryOrder: snapshotRecoveryOrder,
+        ...(snapshotWalk
+          ? { snapshotWalk }
+          : {
+            metaQuads: processed.verifiedMeta,
+            recoveryOrder: snapshotRecoveryOrder,
+          }),
         publicSnapshotStore,
         fetchSyncPages,
         deleteCheckpoint,
@@ -1055,7 +1243,14 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // vacuity decision — and its `manifestComplete` guard — actually lives.
         // The hook still early-returns when the materializer or the store is
         // absent, so this costs nothing when there is genuinely no wiring.
-        onSnapshotReady: (snapshot: PublicSnapshotMetadata) => materializeReadySnapshot(snapshot.ref),
+        onSnapshotReady: async (snapshot: PublicSnapshotMetadata) => {
+          await materializeReadySnapshot(snapshot.ref);
+          if (materializedRefs.has(snapshot.ref)) {
+            const suppressedRows = (snapshotDescriptorsByRef.get(snapshot.ref) ?? [])
+              .flatMap((descriptor) => snapshotCommit.suppressedRows(descriptor.metadataQuads));
+            snapshotWalk?.markResolved(snapshot.ref, suppressedRows);
+          }
+        },
       });
       if (materializedGraphs > 0) {
         // Reporting only — the counters were already added per KA, inside the
@@ -1320,8 +1515,6 @@ export async function syncPublicSnapshotsForMeta(params: {
   remotePeerId: string;
   contextGraphId: string;
   deadline: number;
-  metaQuads: readonly Quad[];
-  recoveryOrder?: 'manifest' | 'recent-balanced';
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
@@ -1335,7 +1528,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     snapshot: PublicSnapshotMetadata,
     source: 'cache' | 'network',
   ) => Promise<void>;
-}): Promise<{
+} & PublicSnapshotWalkSource): Promise<{
   bytesReceived: number;
   resumedPhases: number;
   timedOutPhases: number;
@@ -1361,10 +1554,14 @@ export async function syncPublicSnapshotsForMeta(params: {
    */
   yieldedAtDeadline: boolean;
 }> {
-  const manifestSnapshots = collectPublicSnapshotMetadata(params.metaQuads);
-  const snapshots = params.recoveryOrder === 'recent-balanced'
-    ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
-    : manifestSnapshots;
+  const manifestSnapshots = params.snapshotWalk
+    ? []
+    : collectPublicSnapshotMetadata(params.metaQuads);
+  const snapshots = params.snapshotWalk
+    ? params.snapshotWalk.orderedManifestSnapshot()
+    : params.recoveryOrder === 'recent-balanced'
+      ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
+      : manifestSnapshots;
   if (snapshots.length === 0) {
     return {
       bytesReceived: 0,
@@ -1427,6 +1624,16 @@ export async function syncPublicSnapshotsForMeta(params: {
   };
 
   for (const [index, snapshot] of snapshots.entries()) {
+    // A selected transfer owner may carry exact, manifest-bound evidence from
+    // an earlier bounded slice. Skipping these refs is intentionally cheaper
+    // than re-reading and re-hashing every snapshot blob and assertion graph:
+    // that O(prefix) replay eventually consumed the whole slice and fixed the
+    // continuation at N/N+K forever. The owner is in-memory and resets on any
+    // manifest change, expiry, release or process restart.
+    if (params.snapshotWalk?.isResolved(snapshot.ref)) {
+      readySnapshots += 1;
+      continue;
+    }
     // Yield BETWEEN Knowledge Assets, and check the clock BEFORE doing any work
     // for this one. Both halves matter:
     //

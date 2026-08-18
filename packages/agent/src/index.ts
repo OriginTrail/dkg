@@ -83,6 +83,9 @@ export {
   type SharedMemoryFreshnessSummary,
 } from './sync/shared-memory-freshness.js';
 export {
+  type Rfc64SelectedSwmGraphSyncStatus,
+} from './sync/selected-swm-graph-sync-status.js';
+export {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,

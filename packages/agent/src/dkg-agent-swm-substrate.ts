@@ -916,6 +916,18 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     return true;
   }
 
+  /**
+   * Snapshot the agent's LIVE explicit sync scope for status/preflight callers.
+   *
+   * `subscribeToContextGraph()` mutates this runtime scope without mutating the
+   * daemon's startup `DkgConfig`, so projecting startup configuration would make
+   * an exact-CG preflight stale immediately after a successful subscription.
+   * Return a copy so diagnostics cannot mutate scheduling state.
+   */
+  public getSyncContextGraphIds(this: DKGAgent): readonly string[] {
+    return Object.freeze([...(this.config.syncContextGraphs ?? [])]);
+  }
+
   getOrCreateGossipPublishHandler(this: DKGAgent): GossipPublishHandler {
     if (!this.gossipPublishHandler) {
       this.gossipPublishHandler = new GossipPublishHandler(

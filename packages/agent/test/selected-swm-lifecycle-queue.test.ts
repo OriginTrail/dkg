@@ -129,11 +129,13 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
     let firstBlocked = false;
     const harness = createSelectedSwmLifecycleHarness({
       // The first selected call is a clean empty 0/0 graph. The queued second
-      // call owns this two-ref manifest and yields after materializing one ref,
-      // so it remains genuinely incomplete after zero-ref completion became
-      // explicit terminal evidence.
+      // call owns a five-ref manifest and its four bounded admissions each
+      // materialize one ref, so it remains genuinely incomplete after
+      // zero-ref completion became explicit terminal evidence. Five is
+      // intentional: selected snapshot continuation now skips the resolved
+      // prefix, so a two-ref fixture correctly completes on its second pass.
       contextGraphs: { public: incompleteCg },
-      manifest: snapshotManifest(incompleteCg, 2),
+      manifest: snapshotManifest(incompleteCg, 5),
       clock: { now: () => wallNow, deadline: () => wallNow + 1 },
       reportEmptyResponse: true,
       beforeAdmissionRun: async ({ contextGraphId }) => {
@@ -178,8 +180,8 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       });
       expect(incompleteSummary.swmCoverage).toMatchObject({
         contextGraphId: incompleteCg,
-        snapshotsResolved: 1,
-        snapshotsTotal: 2,
+        snapshotsResolved: 4,
+        snapshotsTotal: 5,
       });
       expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     } finally {

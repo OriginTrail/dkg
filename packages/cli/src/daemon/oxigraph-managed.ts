@@ -100,7 +100,24 @@ interface ConfigLike {
   sharedMemoryPublicSnapshotStorage?: {
     enabled?: boolean;
     directory?: string;
+    gc?: SnapshotGarbageCollectionConfigLike;
   };
+}
+
+interface SnapshotGarbageCollectionConfigLike {
+  enabled?: boolean;
+  intervalMs?: number;
+  triggerFreeBytes?: number;
+  targetFreeBytes?: number;
+  hardReserveBytes?: number;
+  minAgeMs?: number;
+  staleTempAgeMs?: number;
+}
+
+interface ManagedSnapshotStorageConfig {
+  enabled: boolean;
+  directory: string;
+  gc?: SnapshotGarbageCollectionConfigLike;
 }
 
 export interface ManagedOxigraphPlan {
@@ -143,7 +160,7 @@ export interface ManagedOxigraphPlan {
    * explicit `directory` would fail validateStoreConfig(). Defaulted to
    * the same `swm-public-snapshots` dir createPublicSnapshotStore() uses.
    */
-  sharedMemoryPublicSnapshotStorage?: { enabled: boolean; directory: string };
+  sharedMemoryPublicSnapshotStorage?: ManagedSnapshotStorageConfig;
 }
 
 /**
@@ -195,6 +212,9 @@ export function planManagedOxigraph(
           directory:
             config.sharedMemoryPublicSnapshotStorage.directory ??
             join(dataDir, 'swm-public-snapshots'),
+          ...(config.sharedMemoryPublicSnapshotStorage.gc === undefined
+            ? {}
+            : { gc: config.sharedMemoryPublicSnapshotStorage.gc }),
         }
       : undefined;
 
@@ -238,7 +258,7 @@ export interface ManagedOxigraphResult {
   };
   largeLiteralStorage: { enabled: boolean; thresholdBytes?: number; directory: string };
   /** Set only when the operator enabled the feature (else leave config as-is). */
-  sharedMemoryPublicSnapshotStorage?: { enabled: boolean; directory: string };
+  sharedMemoryPublicSnapshotStorage?: ManagedSnapshotStorageConfig;
 }
 
 export interface StartManagedOxigraphOptions {

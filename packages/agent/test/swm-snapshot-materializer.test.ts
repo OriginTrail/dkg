@@ -37,7 +37,7 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
+import { operationIdentityKey, parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -164,14 +164,17 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
     it('is null/clean when no head exists', async () => {
       const store = new OxigraphStore();
       const { materializer } = materializerFor(store);
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: null, needsRepair: false });
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: null, needsRepair: false, shareOperationId: null });
     });
 
     it('reads a single-version head without flagging repair', async () => {
       const store = new OxigraphStore();
       await store.insert([...v1.meta]);
       const { materializer } = materializerFor(store);
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: '1', needsRepair: false });
+      // GH#2273 — the single unambiguous id is exposed so catch-up can compare
+      // it against a descriptor's id before deciding whether the head may be
+      // rewritten at all.
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: '1', needsRepair: false, shareOperationId: 'op-v1' });
     });
 
     it('returns the NEWEST version (MAX) for union-insert residue and flags repair', async () => {
@@ -182,7 +185,10 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       await store.insert([...v1.meta]);
       await store.insert([...v2.meta]);
       const { materializer } = materializerFor(store);
-      expect(await materializer.readStoredHead(descriptorFor(v2))).toEqual({ version: '2', needsRepair: true });
+      // GH#2273 — with residue on the head, ANY sampled id would be an
+      // arbitrary pick (the exact failure the field exists to prevent), so
+      // ambiguity reads as null and the decision routes through repair.
+      expect(await materializer.readStoredHead(descriptorFor(v2))).toEqual({ version: '2', needsRepair: true, shareOperationId: null });
     });
   });
 

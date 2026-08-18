@@ -360,6 +360,10 @@ import {
   type SelectedSwmContinuationUnit,
 } from './sync/selected-swm-continuation.js';
 import {
+  projectRfc64SelectedSwmGraphSyncStatus,
+  type Rfc64SelectedSwmGraphSyncStatus,
+} from './sync/selected-swm-graph-sync-status.js';
+import {
   applySelectedSwmFreshnessResolution,
   mergeSharedMemoryFreshnessDiagnostics,
 } from './sync/shared-memory-freshness.js';
@@ -1278,7 +1282,13 @@ interface RecoverContextGraphSwmFromPeerDependencies {
   fetchSyncPages: RecoverContextGraphSwmOptions['fetchSyncPages'];
   processSharedMemoryBatch: RecoverContextGraphSwmOptions['processSharedMemoryBatch'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
-  isGraphAssetMaterialized: NonNullable<RecoverContextGraphSwmOptions['isGraphAssetMaterialized']>;
+  /**
+   * GH#2273 — the materializer owns BOTH the skip predicate and the
+   * preserve-identity decision (one capability over one store and lock
+   * map). REQUIRED at this production boundary: removing a
+   * construction-site wiring is a COMPILE error.
+   */
+  snapshotMaterializer: NonNullable<RecoverContextGraphSwmOptions['snapshotMaterializer']>;
   recordDrops: OversizeGuardHooks['recordDrops'];
   invalidateListContextGraphsCache: () => void;
   markMetaProjectionDirty: (quads: Quad[]) => void;
@@ -4217,6 +4227,35 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ).filter((contextGraphId) => selected.has(contextGraphId));
   }
 
+  /**
+   * Project the selected RFC-64 retry owner into a graph-scoped, identity-safe
+   * operator status. `continuing` means automatic continuation is still
+   * required; it deliberately does not claim a transfer is in flight at this
+   * exact instant.
+   */
+  getRfc64SelectedSwmGraphSyncStatus(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Rfc64SelectedSwmGraphSyncStatus {
+    const selected = (this.config.syncContextGraphs ?? []).includes(contextGraphId);
+    const providerPeerIds = [
+      ...new Set(this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId)),
+    ];
+    const summary = this.selectedSwmBootstrapAdmission.summarizeContextGraph(
+      contextGraphId,
+      providerPeerIds,
+    );
+    const sharedMemorySynced =
+      this.subscribedContextGraphs.get(contextGraphId)?.sharedMemorySynced === true;
+    return projectRfc64SelectedSwmGraphSyncStatus({
+      selected,
+      configuredProviderCount: providerPeerIds.length,
+      retryRequiredProviderCount: summary.retryRequiredProviders,
+      terminalProviderCount: summary.terminalProviders,
+      sharedMemorySynced,
+    });
+  }
+
   queueSyncFromPeerOnConnect(
     this: DKGAgent,
     remotePeer: string,
@@ -6745,19 +6784,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
           this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
         publicSnapshotStore: this.publicSnapshotStore,
-        isGraphAssetMaterialized: async (asset) => {
-          const result = await this.store.query(
-            `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
-              `<${assertSafeIri(asset.headSubject)}> ` +
-              `<http://dkg.io/ontology/assertionGraph> ` +
-              `<${assertSafeIri(asset.assertionGraph)}> . } }`,
-            {
-              priority: 'background',
-              source: 'agent.swmRecovery.isGraphAssetMaterialized',
-            },
-          );
-          return result.type === 'boolean' && result.value;
-        },
+        snapshotMaterializer: createSharedMemorySnapshotMaterializer({
+          store: this.store,
+          writeLocks: this.writeLocks,
+          invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+        }),
         recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
         invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
         markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
@@ -7280,19 +7311,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
             this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
           publicSnapshotStore: this.publicSnapshotStore,
-          isGraphAssetMaterialized: async (asset) => {
-            const result = await this.store.query(
-              `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
-                `<${assertSafeIri(asset.headSubject)}> ` +
-                `<http://dkg.io/ontology/assertionGraph> ` +
-                `<${assertSafeIri(asset.assertionGraph)}> . } }`,
-              {
-                priority: 'background',
-                source: 'agent.swmRecovery.isGraphAssetMaterialized',
-              },
-            );
-            return result.type === 'boolean' && result.value;
-          },
+          snapshotMaterializer: createSharedMemorySnapshotMaterializer({
+            store: this.store,
+            writeLocks: this.writeLocks,
+            invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+          }),
           recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
           invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
           markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
@@ -10060,7 +10083,7 @@ async function runRecoverContextGraphSwmFromPeer(
     fetchSyncPages: dependencies.fetchSyncPages,
     processSharedMemoryBatch: dependencies.processSharedMemoryBatch,
     publicSnapshotStore: dependencies.publicSnapshotStore,
-    isGraphAssetMaterialized: dependencies.isGraphAssetMaterialized,
+    snapshotMaterializer: dependencies.snapshotMaterializer,
     // SwmRecoveryStore: invalidate the list cache + mark the meta projection
     // dirty on insert (parity with runSharedMemorySync's
     // insertSyncedQuadsAndInvalidateListCache); deletes pass through to the store.
@@ -10164,43 +10187,8 @@ async function runRecoverContextGraphSwmFromPeer(
         }
       }
     },
-    replaceMetaForGraphAssets: async (assets) => {
-      for (const asset of assets) {
-        const linkedOperations = await dependencies.store.query(
-          `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
-            `<${assertSafeIri(asset.headSubject)}> <http://dkg.io/ontology/shareOperationId> ?shareId . ` +
-            `?op <http://dkg.io/ontology/shareOperationId> ?shareId ; ` +
-            `<http://dkg.io/ontology/kaUal> <${assertSafeIri(asset.kaUal)}> . } }`,
-          {
-            priority: 'background',
-            source: 'agent.swmRecovery.replaceMetaForGraphAssets.findOperations',
-          },
-        );
-        const operationSubjects = new Set<string>([asset.operationSubject]);
-        if (linkedOperations.type === 'bindings') {
-          for (const row of linkedOperations.bindings) {
-            const operation = row['op'];
-            if (operation) operationSubjects.add(operation);
-          }
-        }
-        await dependencies.store.deleteByPattern(
-          { graph: asset.metaGraph, subject: asset.headSubject },
-          {
-            priority: 'background',
-            source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteHead',
-          },
-        );
-        for (const operationSubject of operationSubjects) {
-          await dependencies.store.deleteByPattern(
-            { graph: asset.metaGraph, subject: operationSubject },
-            {
-              priority: 'background',
-              source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteOperation',
-            },
-          );
-        }
-      }
-    },
+    replaceMetaForGraphAssets: (assets) =>
+      dependencies.snapshotMaterializer.replaceMetaForGraphAssets(assets),
     ensureContextGraph: async (cgId) => {
       const graphManager = new GraphManager(dependencies.store);
       await graphManager.ensureContextGraph(cgId);

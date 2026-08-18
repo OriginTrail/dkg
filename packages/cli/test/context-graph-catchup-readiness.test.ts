@@ -206,7 +206,7 @@ describe('context graph catch-up readiness classification', () => {
     });
 
     expect(classification).toMatchObject({
-      jobStatus: 'unreachable',
+      jobStatus: 'partial',
       readinessPatch: {
         durableVerified: false,
         sharedMemoryVerified: false,
@@ -235,7 +235,7 @@ describe('context graph catch-up readiness classification', () => {
     });
 
     expect(classification).toMatchObject({
-      jobStatus: 'unreachable',
+      jobStatus: 'partial',
       statePatch: {
         // The existing compatibility/write-readiness bit may be opened by a
         // persisted usable plane; the terminal job verdict may not.
@@ -763,8 +763,8 @@ describe('T16 — terminal readiness strings are byte-identical', () => {
     r.diagnostics!.durable.insertedDataTriples = 5;
     r.diagnostics!.durable.timedOutPhases = 1;
     const c = classify(r);
-    expect(c.jobStatus).toBe('unreachable');
-    expect(c.error).toBe('Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.');
+    expect(c.jobStatus).toBe('partial');
+    expect(c.error).toBe('Verified data was inserted, but this bounded catch-up job ended before the requested plane was complete. The incomplete plane remains unready; graph-level synchronization may continue independently.');
   });
 
   it('pins the private missing-graph-proof string', () => {
@@ -860,7 +860,7 @@ describe('T16 — terminal readiness strings are byte-identical', () => {
  * the ones that reach it.
  */
 describe('T16b — the shared-memory shortfall clause (#2050)', () => {
-  const INCOMPLETE_PROGRESS = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.';
+  const INCOMPLETE_PROGRESS = 'Verified data was inserted, but this bounded catch-up job ended before the requested plane was complete. The incomplete plane remains unready; graph-level synchronization may continue independently.';
 
   const r26: SwmSnapshotCoverage = {
     contextGraphId: 'medical-research',
@@ -943,7 +943,7 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
       readinessBeforeCatchup: { version: 0, durableVerified: false, sharedMemoryVerified: false, updatedAt: 0 },
     });
 
-    expect(c.jobStatus).toBe('unreachable');
+    expect(c.jobStatus).toBe('partial');
     // Whole-string equality: the prefix pin in T16 cannot see the append.
     expect(c.error).toBe(INCOMPLETE_PROGRESS + swmShortfallClause(r26, 2));
     expect(c.error).toContain('178/250');
@@ -1037,7 +1037,7 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
  */
 describe('T16b — the shortfall clause reaches the terminal message', () => {
   const before = { version: 0, durableVerified: false, sharedMemoryVerified: false, updatedAt: 0 };
-  const PREFIX = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.';
+  const PREFIX = 'Verified data was inserted, but this bounded catch-up job ended before the requested plane was complete. The incomplete plane remains unready; graph-level synchronization may continue independently.';
 
   /** The r26 shape: data inserted, plane unproven, coverage 72 short. */
   function shortfallResult(over: Partial<{

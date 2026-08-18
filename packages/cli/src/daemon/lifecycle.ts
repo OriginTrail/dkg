@@ -1647,6 +1647,7 @@ export async function runDaemonInner(
     dkgDir(),
     { sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage },
     snapshotPageIndexStore,
+    log,
   );
   const chainCursorScope = chainBase?.type === 'mock'
     ? (chainBase.chainId ?? 'mock:31337')

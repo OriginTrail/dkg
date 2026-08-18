@@ -71,6 +71,7 @@ import {
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
   storeWorkspaceOperationPublicQuads,
+  tryResolveKnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { ethers } from 'ethers';
@@ -8962,15 +8963,30 @@ export class DKGPublisher implements Publisher {
           || !seal.kaUal
           || !seal.assertionVersion
         ) continue;
-        const head = await resolveKnowledgeAssetWorkspaceHead({
+        // GH#2273 — the resolver fails closed on a multi-valued head. The head here feeds
+        // only the advisory keep-the-recovery-seal decision, and discard is a plausible
+        // operator remedy for a KA whose head is exactly in that corrupt state — so a throw
+        // must not abort the discard. On corruption we cannot prove the seal does NOT match
+        // the live SWM content, so fail toward RETENTION: archive the seal (benign extra
+        // storage) rather than risk destroying the only recovery artifact for content that
+        // is genuinely resident.
+        const headResolution = await tryResolveKnowledgeAssetWorkspaceHead({
           store: this.store,
           graphManager: this.graphManager,
           contextGraphId,
           kaUal: seal.kaUal,
           subGraphName,
         });
-        preserveSwmRecoverySeal = head?.kaUal === seal.kaUal
-          && head.assertionVersion === seal.assertionVersion;
+        if (headResolution.status === 'corrupt') {
+          this.log.warn(
+            createOperationContext('system'),
+            `assertionDiscard: SWM head for ${seal.kaUal} is corrupt; retaining recovery seal (${headResolution.error.message})`,
+          );
+        }
+        preserveSwmRecoverySeal = headResolution.status === 'corrupt'
+          || (headResolution.status === 'resolved'
+            && headResolution.head.kaUal === seal.kaUal
+            && headResolution.head.assertionVersion === seal.assertionVersion);
         if (preserveSwmRecoverySeal) {
           await this.archiveAssertionSeal(
             contextGraphId,

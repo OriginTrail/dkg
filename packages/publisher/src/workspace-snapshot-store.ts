@@ -1,5 +1,16 @@
-import { mkdir, open, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  stat,
+  statfs,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import type { Dirent } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -7,6 +18,45 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 export interface SharedMemoryPublicSnapshotStorageConfig {
   enabled?: boolean;
   directory?: string;
+  gc?: SharedMemoryPublicSnapshotGarbageCollectionConfig;
+}
+
+export interface SharedMemoryPublicSnapshotGarbageCollectionConfig {
+  /** Disabled by default so operators opt in to the v1 age-based policy. */
+  enabled?: boolean;
+  /** How often the background pressure check runs. Default: 5 minutes. */
+  intervalMs?: number;
+  /** Start snapshot eviction below this amount of available space. Default: 15 GiB. */
+  triggerFreeBytes?: number;
+  /** Continue snapshot eviction until this amount is available. Default: 25 GiB. */
+  targetFreeBytes?: number;
+  /** Preserve this capacity for the triple store and other node state. Default: 5 GiB. */
+  hardReserveBytes?: number;
+  /** Never age-evict snapshots newer than this. Default: 7 days. */
+  minAgeMs?: number;
+  /** Remove abandoned atomic-write files after this age. Default: 1 hour. */
+  staleTempAgeMs?: number;
+}
+
+export interface SnapshotGarbageCollectionResult {
+  readonly triggered: boolean;
+  readonly availableBytesBefore: number;
+  readonly availableBytesAfter: number;
+  readonly deletedSnapshots: number;
+  readonly deletedSnapshotBytes: number;
+  readonly deletedTempFiles: number;
+  readonly deletedTempBytes: number;
+  readonly skippedActiveFiles: number;
+  readonly failedDeletions: number;
+}
+
+export interface FileWorkspacePublicSnapshotStoreOptions {
+  readonly gc?: SharedMemoryPublicSnapshotGarbageCollectionConfig;
+  readonly log?: (message: string) => void;
+  /** Test seam; production callers use statfs(2). */
+  readonly getAvailableBytes?: (directory: string) => Promise<number>;
+  /** Test seam; production callers use Date.now(). */
+  readonly now?: () => number;
 }
 
 export interface WorkspacePublicSnapshotStore {
@@ -47,6 +97,53 @@ export interface SnapshotPageIndexStore {
 const SNAPSHOT_PAGE_INDEX_VERSION = 1;
 const SNAPSHOT_PAGE_INDEX_STRIDE = 128;
 const SNAPSHOT_PAGE_INDEX_CACHE_MAX = 64;
+const GIB = 1024 ** 3;
+const DEFAULT_SNAPSHOT_GC_INTERVAL_MS = 5 * 60 * 1_000;
+const DEFAULT_SNAPSHOT_GC_TRIGGER_FREE_BYTES = 15 * GIB;
+const DEFAULT_SNAPSHOT_GC_TARGET_FREE_BYTES = 25 * GIB;
+const DEFAULT_SNAPSHOT_GC_HARD_RESERVE_BYTES = 5 * GIB;
+const DEFAULT_SNAPSHOT_GC_MIN_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
+const DEFAULT_SNAPSHOT_GC_STALE_TEMP_AGE_MS = 60 * 60 * 1_000;
+const SNAPSHOT_FILE_PATTERN = /^([a-f0-9]{64})\.(?:nq|json)$/i;
+const SNAPSHOT_TEMP_FILE_PATTERN = /^([a-f0-9]{64})\.(?:nq|json)\.\d+\.\d+\.tmp$/i;
+const SNAPSHOT_FILE_STAT_CONCURRENCY = 64;
+
+interface ResolvedSnapshotGarbageCollectionConfig {
+  enabled: boolean;
+  intervalMs: number;
+  triggerFreeBytes: number;
+  targetFreeBytes: number;
+  hardReserveBytes: number;
+  minAgeMs: number;
+  staleTempAgeMs: number;
+}
+
+interface SnapshotStoreFile {
+  path: string;
+  name: string;
+  hash: string;
+}
+
+interface SnapshotStoreFileMetadata extends SnapshotStoreFile {
+  size: number;
+  mtimeMs: number;
+}
+
+export class SnapshotStorageCapacityError extends Error {
+  readonly code = 'SNAPSHOT_STORAGE_CAPACITY';
+
+  constructor(
+    readonly availableBytes: number,
+    readonly requiredBytes: number,
+    readonly hardReserveBytes: number,
+  ) {
+    super(
+      `Insufficient shared-memory snapshot storage capacity: ${availableBytes} bytes available, `
+      + `${requiredBytes} bytes required, ${hardReserveBytes} byte hard reserve`,
+    );
+    this.name = 'SnapshotStorageCapacityError';
+  }
+}
 
 interface SnapshotPageIndexCore {
   version: typeof SNAPSHOT_PAGE_INDEX_VERSION;
@@ -65,27 +162,92 @@ interface SnapshotFileFingerprint {
 
 export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshotStore {
   private readonly pageIndexCache = new Map<string, Promise<SnapshotPageIndexCore>>();
+  private readonly pendingWrites = new Map<
+    string,
+    Promise<{ readonly ref: string; readonly byteLength: number }>
+  >();
+  private readonly activeSnapshots = new Map<string, number>();
+  private readonly gcConfig: ResolvedSnapshotGarbageCollectionConfig;
+  private readonly log?: (message: string) => void;
+  private readonly getAvailableBytes: (directory: string) => Promise<number>;
+  private readonly now: () => number;
+  private readonly gcTimer?: NodeJS.Timeout;
+  private garbageCollectionRun?: Promise<SnapshotGarbageCollectionResult>;
+  private garbageCollectionRequiredWriteBytes = 0;
 
   constructor(
     private readonly directory: string,
     private readonly pageIndexStore?: SnapshotPageIndexStore,
-  ) {}
+    options: FileWorkspacePublicSnapshotStoreOptions = {},
+  ) {
+    this.gcConfig = resolveSnapshotGarbageCollectionConfig(options.gc);
+    this.log = options.log;
+    this.getAvailableBytes = options.getAvailableBytes ?? filesystemAvailableBytes;
+    this.now = options.now ?? Date.now;
+    if (this.gcConfig.enabled) {
+      this.gcTimer = setInterval(() => {
+        void this.collectGarbage().then((result) => {
+          if (
+            result.triggered
+            || result.deletedSnapshots > 0
+            || result.deletedTempFiles > 0
+            || result.failedDeletions > 0
+          ) {
+            this.logGarbageCollection(result);
+          }
+        }).catch((error) => {
+          this.log?.(`[SWM-SNAPSHOT-GC] periodic collection failed: ${errorMessage(error)}`);
+        });
+      }, this.gcConfig.intervalMs);
+      this.gcTimer.unref();
+    }
+  }
 
   async putSnapshot(input: {
     readonly digest: string;
     readonly quads: readonly Quad[];
   }): Promise<{ readonly ref: string; readonly byteLength: number }> {
     const hash = snapshotHash(input.digest);
+    const pending = this.pendingWrites.get(hash);
+    if (pending) return pending;
+
+    const operation = this.withActiveSnapshot(hash, () => this.putSnapshotOnce(input, hash));
+    this.pendingWrites.set(hash, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.pendingWrites.get(hash) === operation) this.pendingWrites.delete(hash);
+    }
+  }
+
+  private async putSnapshotOnce(
+    input: { readonly digest: string; readonly quads: readonly Quad[] },
+    hash: string,
+  ): Promise<{ readonly ref: string; readonly byteLength: number }> {
     const filePath = snapshotPath(this.directory, hash, 'nq');
+    const existingByteLength = await existingFileSize(filePath);
+    if (existingByteLength !== null) {
+      return { ref: input.digest, byteLength: existingByteLength };
+    }
+
     const { payload, offsets, fileBytes } = serializeWorkspacePublicSnapshotWithIndex(input.quads);
 
     await mkdir(dirname(filePath), { recursive: true });
+    await this.ensureWriteCapacity(fileBytes);
     const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(tempPath, payload, 'utf8');
-    await rename(tempPath, filePath).catch(async (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EEXIST') return;
-      throw err;
-    });
+    try {
+      await writeFile(tempPath, payload, 'utf8');
+      await rename(tempPath, filePath).catch(async (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EEXIST') return;
+        throw err;
+      });
+    } finally {
+      await unlink(tempPath).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') {
+          this.log?.(`[SWM-SNAPSHOT-GC] failed to remove write temp file ${tempPath}: ${error.message}`);
+        }
+      });
+    }
 
     const fingerprint = await stat(filePath);
     const index: SnapshotPageIndexCore = {
@@ -107,16 +269,18 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
 
   async getSnapshot(ref: string): Promise<Quad[] | null> {
     const hash = snapshotHash(ref);
-    const nquadsPath = snapshotPath(this.directory, hash, 'nq');
-    let raw: string;
-    try {
-      raw = await readFile(nquadsPath, 'utf8');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      return this.getLegacyJsonSnapshot(ref, hash);
-    }
+    return this.withActiveSnapshot(hash, async () => {
+      const nquadsPath = snapshotPath(this.directory, hash, 'nq');
+      let raw: string;
+      try {
+        raw = await readFile(nquadsPath, 'utf8');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        return this.getLegacyJsonSnapshot(ref, hash);
+      }
 
-    return parseWorkspacePublicSnapshotNQuads(raw, ref);
+      return parseWorkspacePublicSnapshotNQuads(raw, ref);
+    });
   }
 
   async getSnapshotPage(
@@ -129,56 +293,235 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     const safeLimit = Math.max(0, Math.floor(limit));
     if (safeLimit === 0) return [];
     const hash = snapshotHash(ref);
-    const nquadsPath = snapshotPath(this.directory, hash, 'nq');
-    let file: Awaited<ReturnType<typeof open>>;
-    try {
-      file = await open(nquadsPath, 'r');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      const legacy = await this.getLegacyJsonSnapshot(ref, hash);
-      return legacy?.slice(safeOffset, safeOffset + safeLimit) ?? null;
-    }
-
-    let startRow = 0;
-    let startByte = 0;
-    try {
-      const index = await this.getPageIndex(ref, nquadsPath);
-      const checkpoint = Math.min(
-        Math.floor(safeOffset / index.stride),
-        Math.max(0, index.offsets.length - 1),
-      );
-      startRow = checkpoint * index.stride;
-      startByte = index.offsets[checkpoint] ?? 0;
-    } catch {
-      // Page indexes are derived data. The already-open snapshot remains the
-      // source of truth, so index failures fall back to scanning from row zero.
-    }
-
-    const input = file.createReadStream({
-      encoding: 'utf8',
-      autoClose: false,
-      start: startByte,
-      signal: options?.signal,
-    });
-    const lines = createInterface({ input, crlfDelay: Infinity });
-    const page: Quad[] = [];
-    let row = startRow;
-    try {
-      for await (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line) continue;
-        if (row >= safeOffset) {
-          page.push(parseNQuadLine(line, ref, row));
-          if (page.length >= safeLimit) break;
-        }
-        row += 1;
+    return this.withActiveSnapshot(hash, async () => {
+      const nquadsPath = snapshotPath(this.directory, hash, 'nq');
+      let file: Awaited<ReturnType<typeof open>>;
+      try {
+        file = await open(nquadsPath, 'r');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        const legacy = await this.getLegacyJsonSnapshot(ref, hash);
+        return legacy?.slice(safeOffset, safeOffset + safeLimit) ?? null;
       }
-      return page;
-    } finally {
-      lines.close();
-      input.destroy();
-      await file.close().catch(() => {});
+
+      let startRow = 0;
+      let startByte = 0;
+      try {
+        const index = await this.getPageIndex(ref, nquadsPath);
+        const checkpoint = Math.min(
+          Math.floor(safeOffset / index.stride),
+          Math.max(0, index.offsets.length - 1),
+        );
+        startRow = checkpoint * index.stride;
+        startByte = index.offsets[checkpoint] ?? 0;
+      } catch {
+        // Page indexes are derived data. The already-open snapshot remains the
+        // source of truth, so index failures fall back to scanning from row zero.
+      }
+
+      const input = file.createReadStream({
+        encoding: 'utf8',
+        autoClose: false,
+        start: startByte,
+        signal: options?.signal,
+      });
+      const lines = createInterface({ input, crlfDelay: Infinity });
+      const page: Quad[] = [];
+      let row = startRow;
+      try {
+        for await (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          if (row >= safeOffset) {
+            page.push(parseNQuadLine(line, ref, row));
+            if (page.length >= safeLimit) break;
+          }
+          row += 1;
+        }
+        return page;
+      } finally {
+        lines.close();
+        input.destroy();
+        await file.close().catch(() => {});
+      }
+    });
+  }
+
+  stopGarbageCollection(): void {
+    if (this.gcTimer) clearInterval(this.gcTimer);
+  }
+
+  async collectGarbage(
+    options: { readonly requiredWriteBytes?: number } = {},
+  ): Promise<SnapshotGarbageCollectionResult> {
+    if (!this.gcConfig.enabled) return emptyGarbageCollectionResult();
+    const requiredWriteBytes = Math.max(0, options.requiredWriteBytes ?? 0);
+    if (this.garbageCollectionRun) {
+      const runningRequiredWriteBytes = this.garbageCollectionRequiredWriteBytes;
+      const result = await this.garbageCollectionRun;
+      return requiredWriteBytes > runningRequiredWriteBytes
+        ? this.collectGarbage({ requiredWriteBytes })
+        : result;
     }
+
+    const run = this.collectGarbageOnce(requiredWriteBytes);
+    this.garbageCollectionRequiredWriteBytes = requiredWriteBytes;
+    this.garbageCollectionRun = run;
+    try {
+      return await run;
+    } finally {
+      if (this.garbageCollectionRun === run) {
+        this.garbageCollectionRun = undefined;
+        this.garbageCollectionRequiredWriteBytes = 0;
+      }
+    }
+  }
+
+  private async collectGarbageOnce(
+    requiredWriteBytes: number,
+  ): Promise<SnapshotGarbageCollectionResult> {
+    await mkdir(this.directory, { recursive: true });
+    const availableBytesBefore = await this.getAvailableBytes(this.directory);
+    let availableBytesAfter = availableBytesBefore;
+    let deletedSnapshots = 0;
+    let deletedSnapshotBytes = 0;
+    let deletedTempFiles = 0;
+    let deletedTempBytes = 0;
+    let skippedActiveFiles = 0;
+    let failedDeletions = 0;
+    const now = this.now();
+    const files = await listSnapshotStoreFiles(this.directory);
+    const tempFiles = files.filter((file) => SNAPSHOT_TEMP_FILE_PATTERN.test(file.name));
+    const staleTempFiles = await statSnapshotStoreFiles(
+      tempFiles,
+      now - this.gcConfig.staleTempAgeMs,
+    );
+
+    for (const file of staleTempFiles) {
+      if (this.isSnapshotActive(file.hash)) {
+        skippedActiveFiles += 1;
+        continue;
+      }
+      try {
+        await unlink(file.path);
+        deletedTempFiles += 1;
+        deletedTempBytes += file.size;
+        availableBytesAfter += file.size;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failedDeletions += 1;
+      }
+    }
+
+    const triggered = availableBytesBefore < this.gcConfig.triggerFreeBytes
+      || availableBytesBefore - requiredWriteBytes < this.gcConfig.hardReserveBytes;
+    if (triggered) {
+      const targetAvailableBytes = Math.max(
+        this.gcConfig.targetFreeBytes,
+        this.gcConfig.hardReserveBytes + requiredWriteBytes,
+      );
+      const snapshotFiles = files.filter((file) => SNAPSHOT_FILE_PATTERN.test(file.name));
+      const candidates = await statSnapshotStoreFiles(
+        snapshotFiles,
+        now - this.gcConfig.minAgeMs,
+      );
+      candidates.sort(
+        (left, right) => left.mtimeMs - right.mtimeMs || left.path.localeCompare(right.path),
+      );
+
+      for (const file of candidates) {
+        if (availableBytesAfter >= targetAvailableBytes) break;
+        if (this.isSnapshotActive(file.hash)) {
+          skippedActiveFiles += 1;
+          continue;
+        }
+        try {
+          await unlink(file.path);
+          deletedSnapshots += 1;
+          deletedSnapshotBytes += file.size;
+          availableBytesAfter += file.size;
+          this.forgetPageIndex(file.hash);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failedDeletions += 1;
+        }
+      }
+    }
+
+    return {
+      triggered,
+      availableBytesBefore,
+      availableBytesAfter,
+      deletedSnapshots,
+      deletedSnapshotBytes,
+      deletedTempFiles,
+      deletedTempBytes,
+      skippedActiveFiles,
+      failedDeletions,
+    };
+  }
+
+  private async ensureWriteCapacity(requiredWriteBytes: number): Promise<void> {
+    if (!this.gcConfig.enabled) return;
+    const availableBytes = await this.getAvailableBytes(this.directory);
+    const needsCollection = availableBytes < this.gcConfig.triggerFreeBytes
+      || availableBytes - requiredWriteBytes < this.gcConfig.hardReserveBytes;
+    const result = needsCollection
+      ? await this.collectGarbage({ requiredWriteBytes })
+      : undefined;
+    // Admission is based on a fresh filesystem reading, not projected file
+    // sizes: an unlinked file held open by another process may not have
+    // released its blocks yet.
+    const availableAfterCollection = result
+      ? await this.getAvailableBytes(this.directory)
+      : availableBytes;
+    if (availableAfterCollection - requiredWriteBytes < this.gcConfig.hardReserveBytes) {
+      throw new SnapshotStorageCapacityError(
+        availableAfterCollection,
+        requiredWriteBytes,
+        this.gcConfig.hardReserveBytes,
+      );
+    }
+    if (
+      result
+      && (
+        result.triggered
+        || result.deletedSnapshots > 0
+        || result.deletedTempFiles > 0
+        || result.failedDeletions > 0
+      )
+    ) {
+      this.logGarbageCollection(result);
+    }
+  }
+
+  private async withActiveSnapshot<T>(hash: string, operation: () => Promise<T>): Promise<T> {
+    this.activeSnapshots.set(hash, (this.activeSnapshots.get(hash) ?? 0) + 1);
+    try {
+      return await operation();
+    } finally {
+      const remaining = (this.activeSnapshots.get(hash) ?? 1) - 1;
+      if (remaining > 0) this.activeSnapshots.set(hash, remaining);
+      else this.activeSnapshots.delete(hash);
+    }
+  }
+
+  private isSnapshotActive(hash: string): boolean {
+    return (this.activeSnapshots.get(hash) ?? 0) > 0;
+  }
+
+  private forgetPageIndex(hash: string): void {
+    for (const ref of this.pageIndexCache.keys()) {
+      if (snapshotHash(ref) === hash) this.pageIndexCache.delete(ref);
+    }
+  }
+
+  private logGarbageCollection(result: SnapshotGarbageCollectionResult): void {
+    this.log?.(
+      `[SWM-SNAPSHOT-GC] triggered=${result.triggered} snapshots=${result.deletedSnapshots} `
+      + `snapshotBytes=${result.deletedSnapshotBytes} tempFiles=${result.deletedTempFiles} `
+      + `tempBytes=${result.deletedTempBytes} availableBefore=${result.availableBytesBefore} `
+      + `availableAfter=${result.availableBytesAfter} activeSkipped=${result.skippedActiveFiles} `
+      + `failed=${result.failedDeletions}`,
+    );
   }
 
   private getPageIndex(ref: string, nquadsPath: string): Promise<SnapshotPageIndexCore> {
@@ -291,6 +634,157 @@ function canonicalSnapshotDigest(ref: string): string {
 
 function snapshotPath(directory: string, hash: string, extension: 'json' | 'nq'): string {
   return join(directory, hash.slice(0, 2), hash.slice(2, 4), `${hash}.${extension}`);
+}
+
+function resolveSnapshotGarbageCollectionConfig(
+  config: SharedMemoryPublicSnapshotGarbageCollectionConfig | undefined,
+): ResolvedSnapshotGarbageCollectionConfig {
+  const enabled = config?.enabled ?? false;
+  if (typeof enabled !== 'boolean') {
+    throw new Error('sharedMemoryPublicSnapshotStorage.gc.enabled must be a boolean');
+  }
+  const resolved = {
+    enabled,
+    intervalMs: snapshotGcInteger(
+      config?.intervalMs,
+      DEFAULT_SNAPSHOT_GC_INTERVAL_MS,
+      'intervalMs',
+      1,
+    ),
+    triggerFreeBytes: snapshotGcInteger(
+      config?.triggerFreeBytes,
+      DEFAULT_SNAPSHOT_GC_TRIGGER_FREE_BYTES,
+      'triggerFreeBytes',
+      0,
+    ),
+    targetFreeBytes: snapshotGcInteger(
+      config?.targetFreeBytes,
+      DEFAULT_SNAPSHOT_GC_TARGET_FREE_BYTES,
+      'targetFreeBytes',
+      0,
+    ),
+    hardReserveBytes: snapshotGcInteger(
+      config?.hardReserveBytes,
+      DEFAULT_SNAPSHOT_GC_HARD_RESERVE_BYTES,
+      'hardReserveBytes',
+      0,
+    ),
+    minAgeMs: snapshotGcInteger(
+      config?.minAgeMs,
+      DEFAULT_SNAPSHOT_GC_MIN_AGE_MS,
+      'minAgeMs',
+      0,
+    ),
+    staleTempAgeMs: snapshotGcInteger(
+      config?.staleTempAgeMs,
+      DEFAULT_SNAPSHOT_GC_STALE_TEMP_AGE_MS,
+      'staleTempAgeMs',
+      0,
+    ),
+  };
+  if (resolved.targetFreeBytes < resolved.triggerFreeBytes) {
+    throw new Error(
+      'sharedMemoryPublicSnapshotStorage.gc.targetFreeBytes must be greater than or equal to triggerFreeBytes',
+    );
+  }
+  if (resolved.hardReserveBytes >= resolved.triggerFreeBytes) {
+    throw new Error(
+      'sharedMemoryPublicSnapshotStorage.gc.hardReserveBytes must be less than triggerFreeBytes',
+    );
+  }
+  return resolved;
+}
+
+function snapshotGcInteger(
+  value: number | undefined,
+  defaultValue: number,
+  field: string,
+  minimum: number,
+): number {
+  const resolved = value ?? defaultValue;
+  if (!Number.isSafeInteger(resolved) || resolved < minimum) {
+    throw new Error(
+      `sharedMemoryPublicSnapshotStorage.gc.${field} must be a safe integer greater than or equal to ${minimum}`,
+    );
+  }
+  return resolved;
+}
+
+async function filesystemAvailableBytes(directory: string): Promise<number> {
+  const filesystem = await statfs(directory);
+  return filesystem.bavail * filesystem.bsize;
+}
+
+async function existingFileSize(filePath: string): Promise<number | null> {
+  try {
+    return (await stat(filePath)).size;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function listSnapshotStoreFiles(directory: string): Promise<SnapshotStoreFile[]> {
+  let entries: Dirent<string>[];
+  try {
+    entries = await readdir(directory, { recursive: true, withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const files: SnapshotStoreFile[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const match = entry.name.match(SNAPSHOT_FILE_PATTERN)
+      ?? entry.name.match(SNAPSHOT_TEMP_FILE_PATTERN);
+    if (!match?.[1]) continue;
+    files.push({
+      path: join(entry.parentPath, entry.name),
+      name: entry.name,
+      hash: match[1].toLowerCase(),
+    });
+  }
+  return files;
+}
+
+async function statSnapshotStoreFiles(
+  files: readonly SnapshotStoreFile[],
+  latestMtimeMs: number,
+): Promise<SnapshotStoreFileMetadata[]> {
+  const result: SnapshotStoreFileMetadata[] = [];
+  for (let offset = 0; offset < files.length; offset += SNAPSHOT_FILE_STAT_CONCURRENCY) {
+    const batch = files.slice(offset, offset + SNAPSHOT_FILE_STAT_CONCURRENCY);
+    const metadata = await Promise.all(batch.map(async (file) => {
+      try {
+        const fileStat = await stat(file.path);
+        if (!fileStat.isFile() || fileStat.mtimeMs > latestMtimeMs) return null;
+        return { ...file, size: fileStat.size, mtimeMs: fileStat.mtimeMs };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error;
+      }
+    }));
+    result.push(...metadata.filter((value): value is SnapshotStoreFileMetadata => value !== null));
+  }
+  return result;
+}
+
+function emptyGarbageCollectionResult(): SnapshotGarbageCollectionResult {
+  return {
+    triggered: false,
+    availableBytesBefore: 0,
+    availableBytesAfter: 0,
+    deletedSnapshots: 0,
+    deletedSnapshotBytes: 0,
+    deletedTempFiles: 0,
+    deletedTempBytes: 0,
+    skippedActiveFiles: 0,
+    failedDeletions: 0,
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function serializeWorkspacePublicSnapshotWithIndex(quads: readonly Quad[]): {
