@@ -91,7 +91,34 @@ export async function publishOffering(nodeBase: string, token: string, ob: Offer
     .then(() => call(`/api/knowledge-assets/${mk.ka}/wm/finalize`, { contextGraphId: a.contextGraphId, subGraphName: sg }))
     .then(() => call(`/api/knowledge-assets/${mk.ka}/swm/share`, { contextGraphId: a.contextGraphId, subGraphName: sg }))
     .catch(() => null);
-  await call(`/api/knowledge-assets/${ka}/wm/write`, { quads, contextGraphId: a.contextGraphId, subGraphName: sg });
+  try {
+    await call(`/api/knowledge-assets/${ka}/wm/write`, { quads, contextGraphId: a.contextGraphId, subGraphName: sg });
+  } catch (e) {
+    // Idempotent republish (found by Hermes, event 16c1a650): a FINALIZED KA
+    // refuses wm/write with "not an active Working Memory draft". Verify the
+    // existing KA carries the SAME content we would publish (SPARQL over the
+    // key fields) — identical ⇒ the publish is already done, return its UAL;
+    // different ⇒ refuse loudly (a stale listing needs a KA edit flow, which
+    // this rail deliberately does not improvise).
+    if (!/not an active Working Memory draft/i.test(String((e as Error).message))) throw e;
+    const want = new Map(quads.filter((x) => x.subject === `urn:nsm:model-offering:${ob.offering.id}`)
+      .map((x) => [x.predicate, x.object]));
+    const sparql = `SELECT ?p ?o WHERE { GRAPH ?g { <urn:nsm:model-offering:${ob.offering.id}> ?p ?o } }`;
+    const res = await call("/api/query", { sparql, contextGraphId: a.contextGraphId, includeSharedMemory: true, includeContextGraphPartitions: true });
+    const rows = ((res as { result?: { bindings?: Array<{ p: string; o: string }> } }).result?.bindings ?? []);
+    const have = new Map(rows.map((r) => [r.p, r.o]));
+    const diffs: string[] = [];
+    for (const [pred, val] of want) {
+      const got = have.get(pred);
+      if (got === undefined) { diffs.push(`missing ${pred}`); continue; }
+      // literals come back quoted; IRIs raw — compare on normalized forms
+      const norm = (v: string) => { const m = v.match(/^"(.*)"(\^\^.*)?$/s); return m ? JSON.stringify(m[1]) : v; };
+      if (norm(got) !== norm(String(val))) diffs.push(`${pred}: have ${String(got).slice(0, 60)} want ${String(val).slice(0, 60)}`);
+    }
+    if (have.size === 0) throw e;   // KA not resolvable — the original error stands
+    if (diffs.length > 0) throw new Error(`E_PUBLISH_STALE_KA: existing ${ka} differs from current config — ${diffs.slice(0, 3).join("; ")} (KA edit flow required; not improvised)`);
+    return { ka, ual: `did:dkg:context-graph:${a.contextGraphId}/${ka}`, alreadyPublished: true } as { ka: string; ual: string };
+  }
   await call(`/api/knowledge-assets/${ka}/wm/finalize`, { contextGraphId: a.contextGraphId, subGraphName: sg });
   await call(`/api/knowledge-assets/${ka}/swm/share`, { contextGraphId: a.contextGraphId, subGraphName: sg });
   return { ka, ual: `did:dkg:context-graph:${a.contextGraphId}/${ka}` };
