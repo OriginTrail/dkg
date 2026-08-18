@@ -17,13 +17,15 @@ import { ethers } from 'ethers';
 import {
   MockChainAdapter,
   type PreBroadcastSignal,
+  type OnChainPublishResult,
   type TxResult,
+  type V10PublishParams,
   type V10UpdateKAParams,
 } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
-import { buildUpdateSeal, mockSealCtx } from './_helpers/seal.js';
+import { buildUpdateSeal, mockSealCtx, withSeal } from './_helpers/seal.js';
 
 const PRODUCER = new ethers.Wallet(
   '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
@@ -153,5 +155,129 @@ describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
     release();
     await running;
     expect(chain.sent).toBe(true);
+  });
+});
+
+/**
+ * The PUBLISH bridge, not the update one. Both signing paths carry the same write-ahead ordering,
+ * and until now only `update` was covered — a regression on the publish side would have shipped
+ * green.
+ */
+class PublishSignalRecordingChain extends MockChainAdapter {
+  sent = false;
+
+  constructor() {
+    super('mock:31337', AUTHOR);
+  }
+
+  override async createKnowledgeAssets(params: V10PublishParams): Promise<OnChainPublishResult> {
+    await params.onBroadcast?.({ txHash: TX_HASH, nonce: NONCE });
+    this.sent = true;
+    return super.createKnowledgeAssets(params);
+  }
+}
+
+async function publishOver(chain: PublishSignalRecordingChain): Promise<DKGPublisher> {
+  const store = new OxigraphStore();
+  chain.minimumRequiredSignatures = 0;
+  return new DKGPublisher({
+    store,
+    chain,
+    eventBus: new TypedEventBus(),
+    keypair: await generateEd25519Keypair(),
+    publisherPrivateKey: PRODUCER.privateKey,
+    publisherNodeIdentityId: 1n,
+  });
+}
+
+async function publishArgs() {
+  return withSeal({
+    contextGraphId: CG_ID,
+    quads: [
+      { subject: 'urn:atomic', predicate: 'http://schema.org/name', object: '"v1"', graph: '' },
+    ] as Quad[],
+    publisherPeerId: 'peer-1',
+    // The publisher refuses an on-chain publish with no ACKs collected, and the mock accepts any
+    // signature (minimumRequiredSignatures = 0). One stub ACK is what carries the publish far
+    // enough to reach the chain at all — the POSITIVE CONTROL row below is what proves it does.
+    v10ACKProvider: async () => [{
+      peerId: 'peer-core-1',
+      signatureR: new Uint8Array(32),
+      signatureVS: new Uint8Array(32),
+      nodeIdentityId: 1n,
+    }],
+  }, PRODUCER, mockSealCtx());
+}
+
+describe('DKGPublisher.publish awaits the pre-broadcast signal [GH#2270]', () => {
+  it('POSITIVE CONTROL: a plain publish reaches the chain and fires the signal', async () => {
+    // Without this, every row below could pass vacuously by never reaching the adapter at all.
+    const chain = new PublishSignalRecordingChain();
+    const publisher = await publishOver(chain);
+    const received: PreBroadcastSignal[] = [];
+
+    const result = await publisher.publish({ ...(await publishArgs()), onBeforeBroadcast: (sig) => { received.push(sig); } });
+
+    expect(result.status).not.toBe('failed');
+    expect(chain.sent).toBe(true);
+    expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE }]);
+  });
+
+  it('does not send when the signal handler is still in flight', async () => {
+    const chain = new PublishSignalRecordingChain();
+    const publisher = await publishOver(chain);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+
+    const running = publisher.publish({
+      ...(await publishArgs()),
+      onBeforeBroadcast: () => gate,
+    }).catch(() => undefined);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(chain.sent).toBe(false);
+
+    release();
+    await running;
+    expect(chain.sent).toBe(true);
+  });
+
+  it('does not send when the signal handler REJECTS', async () => {
+    const chain = new PublishSignalRecordingChain();
+    const publisher = await publishOver(chain);
+
+    await publisher.publish({
+      ...(await publishArgs()),
+      onBeforeBroadcast: async () => {
+        await Promise.resolve();
+        throw new Error('could not persist the write-ahead');
+      },
+    }).catch(() => undefined);
+
+    expect(chain.sent).toBe(false);
+  });
+
+  it('runs no fallible instrumentation between the durable record and the send', async () => {
+    // The ordering hole. `onPhase` is caller-supplied and awaited, so a rejecting listener aborts
+    // the broadcast. When the durable callback ran FIRST, that abort left a persisted 'broadcast'
+    // for a transaction that was never sent — the exact phantom the write-ahead exists to prevent,
+    // reintroduced by instrumentation. The record and the send must agree.
+    const chain = new PublishSignalRecordingChain();
+    const publisher = await publishOver(chain);
+    let recorded = false;
+
+    await publisher.publish({
+      ...(await publishArgs()),
+      onBeforeBroadcast: () => { recorded = true; },
+      onPhase: (phase) => {
+        if (phase.startsWith('chain:txsigned:')) throw new Error('a listener blew up');
+      },
+    }).catch(() => undefined);
+
+    // Neither happened: the throw came before anything durable was written.
+    expect(recorded).toBe(false);
+    expect(chain.sent).toBe(false);
+    // The load-bearing invariant, stated as the pair that must never disagree.
+    expect(recorded).toBe(chain.sent);
   });
 });

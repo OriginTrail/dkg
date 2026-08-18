@@ -2554,4 +2554,110 @@ describe('Query views', () => {
     expect(mergedSubjects.some((s: string) => s.includes('canonical'))).toBe(true);
     expect(mergedSubjects.some((s: string) => s.includes('shared'))).toBe(true);
   }, 15_000);
+
+  /**
+   * GH#2270 PR-3 r3 — the pre-send write-ahead must survive the REAL queued-agent handler, on
+   * BOTH of its branches.
+   *
+   * Everything else in this chain proves the signal once it reaches `publisher.publish` /
+   * `publisher.update`. Between the queue and those calls sits
+   * `publishQueuedKnowledgeAssetVmPublish`, which rebuilds its option bag field by field — and a
+   * field-by-field rebuild silently drops anything nobody thought to name. It HAD dropped it on
+   * the update branch, so every named-KA update sent its transaction with nothing on disk
+   * recording it. A stubbed handler cannot see that; this drives the real one, over a real chain,
+   * and reads the persisted job.
+   */
+  it('records the signed nonce through the real queued handler, on create AND update [GH#2270]', async () => {
+    const agent = await createAgent('WriteAheadBoundaryBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Write-Ahead Boundary' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-writeahead-both-branches';
+    const root = `${ENTITY_BASE}:queued-writeahead`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"v1"' },
+    ]);
+    await agent.assertion.promote(CG_ID, name);
+
+    const runQueued = async () => {
+      const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+      const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+        knowledgeAssetVmPublishHandler: {
+          preflight: async ({ request }) =>
+            agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+          execute: async ({ request, publishOptions }) =>
+            agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+        },
+      });
+      await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
+      return asyncPublisher.processNext('wallet-1');
+    };
+
+    // CREATE branch — no prior vmCurrentAssertion.
+    const intentForUpdate = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const created = await runQueued();
+    expect(created?.status).toBe('finalized');
+    expect(created?.broadcast?.txHash).toMatch(/^0x[0-9a-f]+$/i);
+    // The write-ahead fired with a REAL signed nonce, carried from the adapter through the agent.
+    expect(typeof created?.broadcast?.nonce).toBe('number');
+    expect(created!.broadcast!.nonce!).toBeGreaterThanOrEqual(0);
+    expect((await agent.assertion.history(CG_ID, name))?.vmCurrentAssertion).toBeDefined();
+
+    // UPDATE branch — the hop that actually dropped it. Driving a second real publish would need
+    // a fresh full share, so this pins the forwarding itself, at both hops, with the real methods
+    // under test: the queued handler must hand `this.update` the callback, and `agent.update` must
+    // hand it on to the publisher. `pre-broadcast-signal-await.test.ts` covers what the publisher
+    // does with it from there.
+    const updateSpy = vi.spyOn(agent as never, 'update' as never)
+      .mockResolvedValue({ status: 'confirmed', kaId: 1n, ual: 'did:dkg:test', merkleRoot: new Uint8Array(32), kaManifest: [] } as never);
+    const recorder = () => {};
+    try {
+      await agent.publishQueuedKnowledgeAssetVmPublish(
+        { ...intentForUpdate, vmCurrentAssertion: intentForUpdate.sealMerkleRoot.slice(2) },
+        {
+          quads: [{ subject: root, predicate: 'http://schema.org/name', object: '"v1"', graph: '' }],
+          publisherPeerId: 'queued-update-branch',
+          onBeforeBroadcast: recorder,
+        } as never,
+      ).catch(() => undefined);
+      expect(updateSpy).toHaveBeenCalled();
+      const forwarded = (updateSpy.mock.calls[0] as unknown[])[4] as { onBeforeBroadcast?: unknown };
+      expect(forwarded.onBeforeBroadcast).toBe(recorder);
+    } finally {
+      updateSpy.mockRestore();
+    }
+  }, 180_000);
+
+  it('a rejecting write-ahead stops the queued publish from sending [GH#2270]', async () => {
+    // Fail-closed across the same real boundary: if the durable record cannot be written, no
+    // transaction may go out.
+    const agent = await createAgent('WriteAheadBoundaryBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Write-Ahead Boundary' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-writeahead-fail-closed';
+    const root = `${ENTITY_BASE}:queued-writeahead-fail`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"v1"' },
+    ]);
+    await agent.assertion.promote(CG_ID, name);
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+
+    let signalled = 0;
+    const result = await agent.publishQueuedKnowledgeAssetVmPublish(intent, {
+      quads: [{ subject: root, predicate: 'http://schema.org/name', object: '"v1"', graph: '' }],
+      publisherPeerId: 'queued-writeahead-fail',
+      onBeforeBroadcast: () => {
+        signalled += 1;
+        throw new Error('could not persist the write-ahead');
+      },
+    } as never).catch((err: unknown) => err);
+
+    // The handler reached the durable boundary and then refused to publish.
+    expect(signalled).toBe(1);
+    expect(result).toBeInstanceOf(Error);
+    expect((await agent.assertion.history(CG_ID, name))?.vmCurrentAssertion).toBeUndefined();
+  }, 180_000);
 });
