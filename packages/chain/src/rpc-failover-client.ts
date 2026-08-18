@@ -39,6 +39,7 @@
  * telemetry have one owner.
  */
 
+import type { SignedTransactionEnvelope } from './chain-adapter.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { withTimeout, isRetryableRpcError, isThrottleRpcError, isKnownTransactionError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
@@ -174,7 +175,7 @@ class ProviderSetExhaustedError extends ChainRpcTransportError {
 export type SignPopulatedFn = (
   signer: Wallet,
   populated: ethers.TransactionRequest,
-) => Promise<{ signedTx: string; txHash: string }>;
+) => Promise<SignedTransactionEnvelope>;
 
 /** Optional per-endpoint transport preflight, e.g. static-network chain-id validation. */
 export type ValidateEndpointFn = (endpoint: RpcEndpoint) => Promise<void>;
@@ -462,7 +463,7 @@ export class RpcFailoverClient {
     signer: Wallet,
     label: string,
     opts?: { gasLimitBufferBps?: number },
-  ): Promise<{ signedTx: string; txHash: string }> {
+  ): Promise<SignedTransactionEnvelope> {
     const canonical = this.getEndpoints();
     // 'nonceWrite': the state machine starts a fresh-nonce populate on a backend
     // ONLY if a prior populate proved it (else canonical primary-first = the
