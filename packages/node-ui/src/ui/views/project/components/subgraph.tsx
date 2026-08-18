@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useCallback, useEffect, Suspense } from 'react';
-import { executeQuery, fetchSubGraphs, type SubGraphInfo } from '../../../api.js';
+import { executeQuery, fetchSubGraphs, type QueryExecutionView, type SubGraphInfo } from '../../../api.js';
 import { useMemoryEntities, canonicalEntityUri, type TrustLevel, type MemoryEntity, type Triple, type LayeredTriple } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
@@ -1403,12 +1403,18 @@ export function SubGraphDetailView({
     setQueryError(null);
   }, []);
 
-  const runQuery = useCallback(async (q: { slug: string; sparql: string; resultColumn: string; name: string }) => {
+  const runQuery = useCallback(async (q: {
+    slug: string;
+    sparql: string;
+    resultColumn: string;
+    name: string;
+    view?: QueryExecutionView;
+  }) => {
     setQueryLoading(true);
     setQueryError(null);
     setActiveQuerySlug(q.slug);
     try {
-      const r = await executeQuery(q.sparql, contextGraphId);
+      const r = await executeQuery(q.sparql, contextGraphId, undefined, undefined, q.view);
       const bindings = (r as any)?.result?.bindings ?? [];
       const col = q.resultColumn || 'uri';
       const ids = new Set<string>();

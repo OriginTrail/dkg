@@ -625,12 +625,14 @@ export function postQueryDeduped(body: Record<string, unknown>): Promise<{ resul
   return promise;
 }
 
+export type QueryExecutionView = 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
+
 export const executeQuery = (
   sparql: string,
   contextGraphId?: string,
   includeSharedMemory?: boolean,
   graphSuffix?: '_shared_memory',
-  view?: 'verified-memory' | 'shared-working-memory',
+  view?: QueryExecutionView,
   // Opt the CG-scoped allow-list into the assertion partitions. Without it the
   // daemon restricts `GRAPH ?g { … }` to the static set
   // { <cg>, <cg>/_meta, <cg>/_shared_memory_meta } (see the long note on
@@ -679,6 +681,20 @@ export const writeProfileQueryCatalog = (
   post<any>('/api/profile/query-catalog/write', {
     contextGraphId,
     quads,
+  });
+
+export interface ProfileQueryCatalogReadResponse {
+  contextGraphId: string;
+  graph: string;
+  result: {
+    type: 'bindings';
+    bindings: Array<Record<string, unknown>>;
+  };
+}
+
+export const readProfileQueryCatalog = (contextGraphId: string) =>
+  post<ProfileQueryCatalogReadResponse>('/api/profile/query-catalog/read', {
+    contextGraphId,
   });
 
 // --- Knowledge Assets (OT-RFC-43 §10.5 — GitHub-shaped KA surface) ---

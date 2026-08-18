@@ -1,7 +1,7 @@
 import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { useFetch } from '../../../hooks.js';
-import { executeQuery, writeProfileQueryCatalog } from '../../../api.js';
+import { executeQuery, writeProfileQueryCatalog, type QueryExecutionView } from '../../../api.js';
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
 
@@ -287,6 +287,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   const defaultQuery = useMemo(() => contextGraphQueryTemplate(contextGraphId), [contextGraphId]);
   const [draftQuery, setDraftQuery] = useState(defaultQuery);
   const [activeQuery, setActiveQuery] = useState(defaultQuery);
+  const [activeQueryView, setActiveQueryView] = useState<QueryExecutionView | undefined>();
   const [activeCatalogQueryKey, setActiveCatalogQueryKey] = useState<string | null>(null);
   const [localSavedCatalogs, setLocalSavedCatalogs] = useState<QueryCatalog[]>([]);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -308,6 +309,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   useEffect(() => {
     setDraftQuery(defaultQuery);
     setActiveQuery(defaultQuery);
+    setActiveQueryView(undefined);
     setActiveCatalogQueryKey(null);
     setLocalSavedCatalogs([]);
     setSaveOpen(false);
@@ -318,8 +320,8 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   }, [defaultQuery]);
 
   const { data, loading, error, refresh } = useFetch(
-    () => executeQuery(activeQuery, contextGraphId),
-    [activeQuery, contextGraphId],
+    () => executeQuery(activeQuery, contextGraphId, undefined, undefined, activeQueryView),
+    [activeQuery, activeQueryView, contextGraphId],
     0,
   );
 
@@ -349,35 +351,41 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     setActiveCatalogQueryKey(null);
     setSaveMessage(null);
     setSaveError(null);
-    if (next === activeQuery) {
+    if (next === activeQuery && activeQueryView === undefined) {
       refresh();
       return;
     }
+    setActiveQueryView(undefined);
     setActiveQuery(next);
-  }, [activeQuery, draftQuery, refresh]);
+  }, [activeQuery, activeQueryView, draftQuery, refresh]);
 
   const resetQuery = useCallback(() => {
     setDraftQuery(defaultQuery);
     setActiveCatalogQueryKey(null);
     setSaveMessage(null);
     setSaveError(null);
-    if (activeQuery === defaultQuery) refresh();
-    else setActiveQuery(defaultQuery);
-  }, [activeQuery, defaultQuery, refresh]);
+    if (activeQuery === defaultQuery && activeQueryView === undefined) {
+      refresh();
+      return;
+    }
+    setActiveQueryView(undefined);
+    setActiveQuery(defaultQuery);
+  }, [activeQuery, activeQueryView, defaultQuery, refresh]);
 
-  const runCatalogQuery = useCallback((key: string, sparql: string) => {
+  const runCatalogQuery = useCallback((key: string, sparql: string, view?: QueryExecutionView) => {
     const next = sparql.trim();
     if (!next) return;
     setActiveCatalogQueryKey(key);
     setDraftQuery(next);
     setSaveMessage(null);
     setSaveError(null);
-    if (activeQuery === next) {
+    if (activeQuery === next && activeQueryView === view) {
       refresh();
       return;
     }
+    setActiveQueryView(view);
     setActiveQuery(next);
-  }, [activeQuery, refresh]);
+  }, [activeQuery, activeQueryView, refresh]);
 
   const openSaveForm = useCallback(() => {
     const firstLine = draftQuery.trim().split('\n').find(line => line.trim());
@@ -495,7 +503,9 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                   <div className="v10-cg-query-list">
                     {catalog.queries.map((q) => {
                       const key = `${q.subGraph}|${q.catalogSlug}|${q.slug}`;
-                      const isActive = activeCatalogQueryKey === key && activeQuery === q.sparql;
+                      const isActive = activeCatalogQueryKey === key
+                        && activeQuery === q.sparql
+                        && activeQueryView === q.view;
                       const chipLabel = q.description ? `${q.name}. ${q.description}` : q.name;
                       return (
                         <button
@@ -504,7 +514,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                           className={`v10-cg-query-chip${isActive ? ' active' : ''}`}
                           title={chipLabel}
                           aria-label={`Load query: ${chipLabel}`}
-                          onClick={() => runCatalogQuery(key, q.sparql)}
+                          onClick={() => runCatalogQuery(key, q.sparql, q.view)}
                         >
                           <span className="v10-cg-query-chip-title">{q.name}</span>
                           {q.description && <span className="v10-cg-query-chip-desc">{q.description}</span>}
@@ -651,4 +661,3 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     </div>
   );
 }
-

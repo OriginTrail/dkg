@@ -24,6 +24,7 @@ import {
   fetchSuccessRates,
   fetchExtractionStatus,
   executeQuery,
+  readProfileQueryCatalog,
   listAssertions,
   ensureContextGraphOnChain,
   fetchAssertionUals,
@@ -316,6 +317,26 @@ describe('UI API tests', () => {
       const body = JSON.parse(call?.body ?? '{}');
       expect(body.sparql).toBe('SELECT * WHERE { ?s ?p ?o }');
       expect(body.contextGraphId).toBe('cg-1');
+    });
+
+    it('executeQuery sends the daemon working-memory view', async () => {
+      await executeQuery(
+        'SELECT ?incident WHERE { ?incident ?p ?o }',
+        'cg-listenerboi',
+        undefined,
+        undefined,
+        'working-memory',
+      );
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
+      expect(JSON.parse(call?.body ?? '{}').view).toBe('working-memory');
+    });
+
+    it('readProfileQueryCatalog uses the dedicated profile endpoint', async () => {
+      await readProfileQueryCatalog('cg-listenerboi');
+      const call = requestLog.find(
+        r => r.method === 'POST' && r.url.includes('/api/profile/query-catalog/read'),
+      );
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({ contextGraphId: 'cg-listenerboi' });
     });
 
     it('knowledgeAssetPublish rejects non-decimal publisher identity overrides before POSTing', async () => {

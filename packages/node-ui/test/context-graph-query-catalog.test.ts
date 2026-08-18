@@ -198,6 +198,7 @@ describe('ContextGraphQueryView', () => {
           sparql: 'SELECT ?doc WHERE { GRAPH ?g { ?doc <http://schema.org/name> ?name } } LIMIT 5',
           resultColumn: 'doc',
           rank: 1,
+          view: 'working-memory',
         }],
       }],
     });
@@ -231,6 +232,13 @@ describe('ContextGraphQueryView', () => {
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     expect(textarea.value).toContain('schema.org/name');
+    expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
+      expect.stringContaining('schema.org/name'),
+      'cg-test',
+      undefined,
+      undefined,
+      'working-memory',
+    );
 
     await act(async () => { root.unmount(); });
   });

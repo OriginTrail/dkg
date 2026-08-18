@@ -6,14 +6,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildQueryCatalogState, useProjectProfile, type ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
 import { ROOT_SLUG_SENTINEL } from '../src/ui/lib/subGraphs.js';
+import { readProfileQueryCatalog } from '../src/ui/api.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock('../src/ui/api.js', () => ({
-  // The hook fires four SPARQL queries on mount; every one resolves to
-  // empty so the profile falls back to defaults (which is all we need
-  // for the resolver-level Root assertion).
   executeQuery: vi.fn(async () => ({ result: { bindings: [] } })),
+  readProfileQueryCatalog: vi.fn(async () => ({
+    contextGraphId: 'cg-test',
+    graph: 'did:dkg:context-graph:cg-test/meta/query-catalog',
+    result: { type: 'bindings', bindings: [] },
+  })),
 }));
 
 describe('buildQueryCatalogState', () => {
@@ -114,6 +117,11 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     document.body.appendChild(container);
     root = createRoot(container);
     captured = null;
+    vi.mocked(readProfileQueryCatalog).mockResolvedValue({
+      contextGraphId: 'cg-test',
+      graph: 'did:dkg:context-graph:cg-test/meta/query-catalog',
+      result: { type: 'bindings', bindings: [] },
+    });
   });
 
   afterEach(() => {
@@ -162,5 +170,60 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     expect(binding!.slug).toBe('recipes');
     expect(binding!.displayName).toBe('recipes');
     expect(binding!.icon).toBe('•');
+  });
+
+  it('loads saved queries through the dedicated profile catalog endpoint', async () => {
+    vi.mocked(readProfileQueryCatalog).mockResolvedValueOnce({
+      contextGraphId: 'cg-test',
+      graph: 'did:dkg:context-graph:cg-test/meta/query-catalog',
+      result: {
+        type: 'bindings',
+        bindings: [{
+          q: 'urn:listenerboi:query:open-incidents',
+          subGraph: 'incidents',
+          catalog: 'urn:listenerboi:catalog:investigations',
+          name: 'Open incidents',
+          description: 'Find incidents that still need attention.',
+          sparql: 'SELECT ?incident WHERE { ?incident ?p ?o }',
+          resultColumn: 'incident',
+          rank: '1',
+          catalogName: 'ListenerBoi investigations',
+          catalogDescription: 'Reusable incident investigation queries.',
+          catalogRank: '2',
+        }],
+      },
+    });
+
+    await act(async () => {
+      root.render(React.createElement(Probe, { contextGraphId: 'cg-test' }));
+    });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(readProfileQueryCatalog).toHaveBeenCalledWith('cg-test');
+    expect(captured!.error).toBeUndefined();
+    expect(captured!.queryCatalogs).toEqual([expect.objectContaining({
+      slug: 'investigations',
+      name: 'ListenerBoi investigations',
+      description: 'Reusable incident investigation queries.',
+      rank: 2,
+      queries: [expect.objectContaining({
+        slug: 'open-incidents',
+        name: 'Open incidents',
+        resultColumn: 'incident',
+        view: 'working-memory',
+      })],
+    })]);
+  });
+
+  it('surfaces catalog read failures instead of reporting an empty catalog', async () => {
+    vi.mocked(readProfileQueryCatalog).mockRejectedValueOnce(new Error('catalog read failed'));
+
+    await act(async () => {
+      root.render(React.createElement(Probe, { contextGraphId: 'cg-test' }));
+    });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(captured!.error).toBe('catalog read failed');
+    expect(captured!.loading).toBe(false);
   });
 });

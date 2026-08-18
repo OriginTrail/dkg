@@ -11,7 +11,7 @@
  * default profile — this keeps the UI functional for any project.
  */
 import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { executeQuery } from '../api.js';
+import { executeQuery, readProfileQueryCatalog, type QueryExecutionView } from '../api.js';
 import { ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 
 async function runProjectQuery(
@@ -24,6 +24,13 @@ async function runProjectQuery(
   // Preserve the raw shape here — `stripLiteral` / `stripIri` normalise
   // each cell via `bindingValue`, which handles both.
   return ((r?.result?.bindings as any[]) ?? []) as Array<Record<string, unknown>>;
+}
+
+async function readProjectQueryCatalog(
+  contextGraphId: string,
+): Promise<Array<Record<string, unknown>>> {
+  const response = await readProfileQueryCatalog(contextGraphId);
+  return response.result.bindings;
 }
 
 export interface SubGraphBinding {
@@ -103,6 +110,8 @@ export interface SavedQuery {
   sparql: string;
   resultColumn: string;
   rank: number;
+  /** Memory projection required by this query contract. */
+  view?: QueryExecutionView;
 }
 
 export interface QueryCatalog {
@@ -271,43 +280,33 @@ WHERE {
 GROUP BY ?chip ?subGraph ?type ?predicate ?label`;
 }
 
-function buildQueryCatalogsQuery(contextGraphId: string): string {
-  return `PREFIX prof: <${PROFILE_NS}>
-PREFIX schema: <http://schema.org/>
-SELECT ?catalog ?subGraph ?name ?description ?rank
-WHERE {
-  GRAPH ?g {
-    ?catalog a prof:QueryCatalog ;
-             prof:forSubGraph ?subGraph .
-    OPTIONAL { ?catalog prof:displayName ?name }
-    OPTIONAL { ?catalog schema:description ?description }
-    OPTIONAL { ?catalog prof:rank ?rank }
-  }
-  ${metaGraphFilter(contextGraphId)}
-}`;
-}
-
-function buildSavedQueriesQuery(contextGraphId: string): string {
-  return `PREFIX prof: <${PROFILE_NS}>
-PREFIX schema: <http://schema.org/>
-SELECT ?q ?subGraph ?catalog ?name ?description ?sparql ?column ?rank
-WHERE {
-  GRAPH ?g {
-    ?q a prof:SavedQuery ;
-       prof:forSubGraph ?subGraph ;
-       prof:sparqlQuery ?sparql .
-    OPTIONAL { ?q prof:inCatalog ?catalog }
-    OPTIONAL { ?q prof:displayName ?name }
-    OPTIONAL { ?q schema:description ?description }
-    OPTIONAL { ?q prof:resultColumn ?column }
-    OPTIONAL { ?q prof:rank ?rank }
-  }
-  ${metaGraphFilter(contextGraphId)}
-}`;
-}
-
 interface QueryCatalogRowShape extends Record<string, unknown> {}
 interface SavedQueryRowShape extends Record<string, unknown> {}
+
+function savedQueryExecutionView(
+  row: SavedQueryRowShape,
+  queryIri: string,
+  catalogIri: string,
+): QueryExecutionView | undefined {
+  const declared = stripLiteral(row.executionView ?? row.view);
+  if (
+    declared === 'working-memory'
+    || declared === 'shared-working-memory'
+    || declared === 'verifiable-memory'
+  ) {
+    return declared;
+  }
+
+  // ListenerBoi's query contracts are authored against its projected working
+  // memory. The Rust typed adapter already pins this same view; keep the Node
+  // UI compatible with existing v1-v3 catalogs, which predate an explicit
+  // executionView triple in the profile schema.
+  if (queryIri.startsWith('urn:listenerboi:query:') || catalogIri.startsWith('urn:listenerboi:catalog:')) {
+    return 'working-memory';
+  }
+
+  return undefined;
+}
 
 export function buildQueryCatalogState(
   catalogRows: readonly QueryCatalogRowShape[],
@@ -354,6 +353,7 @@ export function buildQueryCatalogState(
         sparql: stripLiteral(row.sparql),
         resultColumn: stripLiteral(row.column) || '',
         rank: parseInt10(row.rank) || 99,
+        view: savedQueryExecutionView(row, qIri, catalogIri),
       };
     })
     .filter(q => q.subGraph && q.sparql)
@@ -494,14 +494,17 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
       setLoading(true);
       setError(undefined);
       try {
-        const [rootRows, sgRows, typeRows, viewRows, chipRows, catalogRows, queryRows] = await Promise.all([
+        const [rootRows, sgRows, typeRows, viewRows, chipRows, queryCatalogRows] = await Promise.all([
           runProjectQuery(buildProfileRootQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildSubGraphBindingsQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildTypeBindingsQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildViewConfigsQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildFilterChipsQuery(contextGraphId), contextGraphId).catch(() => []),
-          runProjectQuery(buildQueryCatalogsQuery(contextGraphId), contextGraphId).catch(() => []),
-          runProjectQuery(buildSavedQueriesQuery(contextGraphId), contextGraphId).catch(() => []),
+          // Query catalogs live in the local `.../meta/query-catalog` graph,
+          // which is intentionally outside the scoped `/api/query` graph
+          // allow-list. Use the dedicated profile endpoint so persisted
+          // catalogs are not silently mistaken for an empty result.
+          readProjectQueryCatalog(contextGraphId),
         ]);
         if (cancelled) return;
 
@@ -597,6 +600,17 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
         }
         chipsBySgRef.current = chipsBySg;
 
+        const catalogRows = queryCatalogRows.map(row => ({
+          catalog: row.catalog,
+          subGraph: row.subGraph,
+          name: row.catalogName,
+          description: row.catalogDescription,
+          rank: row.catalogRank,
+        }));
+        const queryRows = queryCatalogRows.map(row => ({
+          ...row,
+          column: row.resultColumn,
+        }));
         const queryCatalogState = buildQueryCatalogState(catalogRows, queryRows);
         setQueryCatalogs(queryCatalogState.queryCatalogs);
         setSavedQueries(queryCatalogState.savedQueries);
