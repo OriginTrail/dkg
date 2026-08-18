@@ -113,12 +113,29 @@ both operator-gated.
 | Refund | **BROADCAST** — 999,146 µ exact, operator-gated, tx `0x4bd7027674691…f02e355b6d`, Base block 50141217, status 1; release journaled against the close digest (re-stamped 2026-08-18, was "pending") |
 | 404 probes | `withdraw/settle/credit/release` all 404 post-upgrade; Hermes's seat has **no public HTTP surface at all** (`directUrl: null` in his signed quote) |
 
+### Act C — Hermes as buyer vs okf (recovered into the record 2026-08-18)
+
+This act ran FIRST (2026-08-17) and was **missing from this report's first
+edition** — recovered when the operator's CP5 click-through of the Operate
+view surfaced an unexplained tab row. That is the review gate doing its job,
+and the omission is logged as bug #12.
+
+| step | evidence |
+|---|---|
+| Deposit | **Hermes's own 1.0 TRAC** → okf, tx `0xe3917be30fe699a0…660050ca`, block 50090726; consumed by `tab/open` → `tab_1dfe28cb7d6ada35` |
+| Purchases | 4 legs, all countersigned (4/0/0): three ⛓ inferences 258 µ + 258 µ + 240 µ + metered query 5 µ = **761 µ** |
+| Close | digest `sha256:694fb6ba497b8c63…3ce5b98db0`, 2026-08-17 14:02 UTC |
+| Conservation | `1,000,000 = 761 + 999,239 + 0` |
+| Refund | **OUTSTANDING at re-stamp time** — never broadcast (proven by full on-chain transfer scan from block 50090000). His deposit was commingled into okf's operational wallet and consumed by routine publish fees. Refund of exactly 999,239 µ okf → `0x8A87ea7c…` is operator-gated and ARMED, pending a wallet top-up in flight |
+
 ## 4. The counterparty as adversarial verifier — the defect ledger
 
-Eleven protocol/build defects were found during this run — **zero by end
-users, all at gates built to catch exactly their class**, four by Hermes
-operating strictly fail-closed. Full ledger with fixes:
-`nsm-v35-evidence/bug-ledger.json`. Highlights:
+Twelve defects were found during this run — eleven protocol/build defects
+plus one honesty/accounting defect (#12, the Act C omission above) — **zero
+by end users, all at gates built to catch exactly their class**: four by
+Hermes operating strictly fail-closed, and #12 by the operator's CP5
+click-through. Full ledger with fixes: `nsm-v35-evidence/bug-ledger.json`.
+Highlights:
 
 - **#2 transports dropped at load** (his quote self-check, `833d6ef0`): a
   lane-only seller could not issue an honest quote. His refusal to publish a
@@ -153,13 +170,15 @@ operating strictly fail-closed. Full ledger with fixes:
 
 ## 6. Not achieved, stated plainly
 
-- ~~Hermes's refund broadcast~~ — **RESOLVED 2026-08-18** (this row is
-  re-stamped, per the report's own convention). Both refunds landed:
-  Hermes's 999,239 µ (block 50141013) and okf's 999,146 µ (block 50141217),
-  each behind its human's exact-transaction gate. The buyer wallet closes at
-  1.998385 TRAC — the full money circle (fund → deposit → metered spend →
-  signed close → exact refund) verified from both seats. Total real cost of
-  the two funded acts: **1,615 µTRAC** (761 + 854).
+- ~~Hermes's refund broadcast~~ — Acts A and B **RESOLVED 2026-08-18**: both
+  refunds landed (Hermes's 999,239 µ block 50141013; okf's 999,146 µ block
+  50141217), each behind its human's exact-transaction gate. The buyer
+  wallet closes at 1.998385 TRAC; real cost of Acts A+B: **1,615 µTRAC**.
+  An earlier edition of this row claimed the *full* money circle was closed
+  — **that claim was false**: Act C's 999,239 µ refund to Hermes was still
+  outstanding and this report didn't even record the act. Second re-stamp
+  same day; the corrected refund is armed behind its operator gate (see
+  Act C). The circle is closed only when that tx lands.
 - **KA edit flow** — okf's v3-era offering KAs still lack `modelRef`; a
   republish would rightly refuse (`E_PUBLISH_STALE_KA`). The catalog shows
   them as legacy-grouped cards. Editing finalized KAs is real future work.
