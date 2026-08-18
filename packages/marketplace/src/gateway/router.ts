@@ -142,7 +142,32 @@ export async function handleGateway(deps: GatewayDeps, req: Req & AsyncIterable<
       const finish = (payload: unknown) => { w.write(`data: ${JSON.stringify(payload)}\n\n`); w.write("data: [DONE]\n\n"); res.end(); };
       if (up.status !== 200 || !up.body.nsm) { finish({ error: up.status === 402 ? "E_402" : "E_UPSTREAM", detail: up.body.error ?? up.status }); return true; }
       const sLeg = (up.body.nsm as { leg: Record<string, unknown> }).leg;
-      if (!up.stream?.ok) {
+      if (up.stream === undefined) {
+        // seller answered with plain JSON (v3 front, or a build without wire
+        // streaming): that is an HONEST non-streamed completion, not a broken
+        // chain — verify it classically and finish over the SSE framing we
+        // already opened. Withholding here would punish honesty.
+        const content = String((up.body.choices as Array<{ message: { content: string } }>)[0]?.message?.content ?? "");
+        const verdict = verifyInferenceLegV3({
+          leg: sLeg, deliveredBytes: Buffer.from(content, "utf8"),
+          promptMessages: parsed.messages, offering: off.expectation, engine: off.engine,
+          provenanceClass: off.provenanceClass,
+        });
+        if (verdict.decision === "withhold") {
+          const code = verdict.violations[0].code;
+          await deps.client.withhold(String(sLeg.legId), code, verdict.violations[0].detail);
+          deps.log(`gateway WITHHOLD ${sLeg.legId} ${code} (plain over stream request)`);
+          finish({ error: "E_LEG_WITHHELD", code, violations: verdict.violations, legId: sLeg.legId });
+          return true;
+        }
+        await deps.client.countersign(String(sLeg.legId));
+        const cost = Number((sLeg.pricing as { costMicroTrac: number }).costMicroTrac);
+        recordKeyUsage(deps.home, { keyId: auth.record.keyId, legId: String(sLeg.legId), costMicroTrac: cost, kind: "inference" });
+        deps.log(`gateway countersign ${sLeg.legId} ${cost}µ key=${auth.record.keyId} (non-streamed seller over stream request)`);
+        finish({ final: { ...up.body, nsm: { leg: sLeg, decision: "countersigned", keyId: auth.record.keyId, stream: { verified: false, nonStreamingSeller: true } } } });
+        return true;
+      }
+      if (!up.stream.ok) {
         // chain broke — the counts/bytes no longer reproduce from the wire
         await deps.client.withhold(String(sLeg.legId), "E_RECOUNT_MISMATCH", up.stream?.detail ?? "stream chain unverifiable");
         deps.log(`gateway WITHHOLD ${sLeg.legId} E_RECOUNT_MISMATCH (stream: ${up.stream?.detail ?? "no claims"})`);
