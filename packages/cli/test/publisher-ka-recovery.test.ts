@@ -8,9 +8,11 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   createChainProofResolver,
   createKnowledgeAssetVmPublishRecoveryResolver,
+  type PublisherChainAdapters,
   scopeKnowledgeAssetVmPublishHandler,
 } from '../src/publisher-runner.js';
 
@@ -54,14 +56,13 @@ describe('named KA publisher recovery wiring', () => {
         knowledgeAssetsContract: '0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD',
       },
     }));
-    const publisher = {
-      chain: {
-        chainId: 'evm:31337',
-        resolvePublishByTxHash,
-        resolveCanonicalFinalizationReceipt,
-      },
-    } as unknown as DKGPublisher;
-    const publishers = new Map([[walletId, publisher]]);
+    // GH#2270 PR-3 r2 — the factories take a wallet→ADAPTER map, so tests supply one directly
+    // instead of a publisher whose private `chain` field had to be asserted through.
+    const publishers: PublisherChainAdapters = new Map([[walletId, {
+      chainId: 'evm:31337',
+      resolvePublishByTxHash,
+      resolveCanonicalFinalizationReceipt,
+    } as unknown as ChainAdapter]]);
     const resolver = createKnowledgeAssetVmPublishRecoveryResolver(publishers);
 
     const job = {
@@ -145,7 +146,7 @@ describe('named KA publisher recovery wiring', () => {
       })),
       getDKGKnowledgeAssetsAddress: vi.fn(async () => '0x2222222222222222222222222222222222222222'),
     };
-    const publisher = { chain } as unknown as DKGPublisher;
+    const publisher = chain as unknown as ChainAdapter;
 
     const resolved = await createKnowledgeAssetVmPublishRecoveryResolver(new Map([[walletId, publisher]]))({
       status: 'broadcast',
@@ -163,40 +164,38 @@ describe('named KA publisher recovery wiring', () => {
     const walletId = '0x1111111111111111111111111111111111111111';
     const kaId = 42n;
     const publisher = {
-      chain: {
-        chainId: 'evm:31337',
-        resolveCanonicalFinalizationReceipt: vi.fn(async () => ({
-          status: 'confirmed' as const,
-          receipt: {
-            txHash,
-            blockNumber: 9,
-            blockHash: `0x${'bc'.repeat(32)}`,
-            merkleRoot: Buffer.from('12'.repeat(32), 'hex'),
-            publisherAddress: walletId,
-            authorAddress: walletId,
-            batchId: kaId,
-            kaId,
-            startKAId: kaId,
-            endKAId: kaId,
-            knowledgeAssetsContract: '0x2222222222222222222222222222222222222222',
-          },
-        })),
-        resolvePublishByTxHash: vi.fn(async () => ({
-          batchId: kaId,
-          kaId,
-          knowledgeAssetsContract: '0x2222222222222222222222222222222222222222',
-          startKAId: kaId,
-          endKAId: kaId,
-          merkleRoot: Buffer.from('12'.repeat(32), 'hex'),
-          authorAddress: walletId,
+      chainId: 'evm:31337',
+      resolveCanonicalFinalizationReceipt: vi.fn(async () => ({
+        status: 'confirmed' as const,
+        receipt: {
           txHash,
           blockNumber: 9,
-          blockTimestamp: 1_700_000_009,
+          blockHash: `0x${'bc'.repeat(32)}`,
+          merkleRoot: Buffer.from('12'.repeat(32), 'hex'),
           publisherAddress: walletId,
-        })),
-      },
-    } as unknown as DKGPublisher;
-    const publishers = new Map([[walletId, publisher]]);
+          authorAddress: walletId,
+          batchId: kaId,
+          kaId,
+          startKAId: kaId,
+          endKAId: kaId,
+          knowledgeAssetsContract: '0x2222222222222222222222222222222222222222',
+        },
+      })),
+      resolvePublishByTxHash: vi.fn(async () => ({
+        batchId: kaId,
+        kaId,
+        knowledgeAssetsContract: '0x2222222222222222222222222222222222222222',
+        startKAId: kaId,
+        endKAId: kaId,
+        merkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+        authorAddress: walletId,
+        txHash,
+        blockNumber: 9,
+        blockTimestamp: 1_700_000_009,
+        publisherAddress: walletId,
+      })),
+    } as unknown as ChainAdapter;
+    const publishers: PublisherChainAdapters = new Map([[walletId, publisher]]);
     const job = {
       status: 'broadcast',
       broadcast: { txHash, walletId },

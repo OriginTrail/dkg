@@ -195,6 +195,9 @@ export class MockChainAdapter implements ChainAdapter {
    * the mock has no finality, so it reports `null` and recovery stays fail-closed.
    */
   private finalizedAccountNonces = new Map<string, number>();
+  /** GH#2270 PR-3 r2 — ids a test declared minted, and ids the mock must refuse to answer for. */
+  private mintedKaIds = new Set<string>();
+  private unknownMintedIds = new Set<string>();
   /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
   private reservedRangesByPublisher = new Map<string, Array<{ startId: bigint; endId: bigint }>>();
   /** Publisher addresses this mock is explicitly allowed to attribute V10 publishes to. */
@@ -451,6 +454,29 @@ export class MockChainAdapter implements ChainAdapter {
     _options: ChainReadOptions = {},
   ): Promise<number | null> {
     return this.finalizedAccountNonces.get(address.toLowerCase()) ?? null;
+  }
+
+  /**
+   * GH#2270 PR-3 r2 — see {@link ChainAdapter.isKnowledgeAssetMinted}. The mock's collections map
+   * IS its minted set, so this is an exact answer rather than a stub, and `null` is reserved for
+   * the case a test declares explicitly.
+   */
+  async isKnowledgeAssetMinted(kaId: bigint, _options: ChainReadOptions = {}): Promise<boolean | null> {
+    if (this.unknownMintedIds.has(kaId.toString())) return null;
+    return this.collections.has(kaId) || this.mintedKaIds.has(kaId.toString());
+  }
+
+  /**
+   * Test seam — declare that the mock CANNOT answer for this id, the fail-closed shape a real
+   * deployment produces when the storage contract is absent or the read is ambiguous.
+   */
+  __setKnowledgeAssetMintedUnknown(kaId: bigint): void {
+    this.unknownMintedIds.add(kaId.toString());
+  }
+
+  /** Test seam — declare an id as already minted without driving a full publish. */
+  __setKnowledgeAssetMinted(kaId: bigint): void {
+    this.mintedKaIds.add(kaId.toString());
   }
 
   /**

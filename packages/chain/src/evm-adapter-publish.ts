@@ -36,6 +36,27 @@ import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 
 type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
 
+/**
+ * GH#2270 PR-3 r2 — does this error mean "that ERC-721 token does not exist"?
+ *
+ * Deliberately narrow. A `false` from the caller authorises a resend, so only the shapes OpenZeppelin
+ * and ethers produce for a nonexistent token qualify: the typed `ERC721NonexistentToken` custom
+ * error, or the classic `ERC721: invalid token ID` / `owner query for nonexistent token` strings.
+ * Every other CALL_EXCEPTION — a paused contract, a decode failure, an endpoint returning garbage —
+ * is left to the caller's `null`, which holds.
+ */
+function isNonexistentTokenRevert(err: unknown): boolean {
+  const e = err as { code?: unknown; reason?: unknown; shortMessage?: unknown; message?: unknown };
+  if (e?.code !== 'CALL_EXCEPTION') return false;
+  const text = [e.reason, e.shortMessage, e.message]
+    .filter((v): v is string => typeof v === 'string')
+    .join(' ')
+    .toLowerCase();
+  return text.includes('erc721nonexistenttoken')
+    || text.includes('invalid token id')
+    || text.includes('nonexistent token');
+}
+
 export class PublishMethods extends EVMChainAdapterBase {
   async resolvePublisherPublishPlan(
     request: PublisherPublishPlanRequest,
@@ -458,8 +479,10 @@ export class PublishMethods extends EVMChainAdapterBase {
     await this.init();
 
     try {
-      const state = await this.resolvePublishReceiptState(txHash, options);
-      return state.status === 'confirmed' ? state.publish : null;
+      // Projection: receipt-only, one RPC round trip. Every non-confirmed state is discarded
+      // here anyway, so this surface never pays for the transaction-presence lookup.
+      const { receipt, publish } = await this.readPublishReceipt(txHash, options);
+      return receipt && receipt.status === 1 ? publish : null;
     } catch (err: any) {
       const msg = err?.message ?? '';
       if (msg.includes('could not find') || msg.includes('not found') || msg.includes('unknown transaction')) {
@@ -488,11 +511,36 @@ export class PublishMethods extends EVMChainAdapterBase {
   ): Promise<PublishTransactionResolution> {
     await this.init();
 
-    const state = await this.resolvePublishReceiptState(txHash, options);
-    if (state.status !== 'no-receipt') return state;
-
+    const { receipt, publish } = await this.readPublishReceipt(txHash, options);
+    if (receipt) {
+      if (receipt.status !== 1) return { status: 'reverted' };
+      return publish ? { status: 'confirmed', publish } : { status: 'unrecognized' };
+    }
+    // The SECOND step, paid only on this surface and only when there is no receipt — it is what
+    // separates a transaction the node is holding from one it has never seen.
     const transaction = await this.getTransactionWithFailover(txHash, options);
     return transaction ? { status: 'pending' } : { status: 'not-found' };
+  }
+
+  /**
+   * GH#2270 PR-3 r2 — see {@link ChainAdapter.isKnowledgeAssetMinted}.
+   *
+   * ERC-721 `ownerOf` REVERTS for an unminted token, so "not published" arrives as a thrown
+   * CALL_EXCEPTION rather than a value. Only that exact shape — a call exception naming a
+   * nonexistent/invalid token — is read as `false`; anything else (an RPC failure, a revert
+   * carrying other data, no deployed storage contract) is `null`, and the caller holds. Getting
+   * that classification wrong in the permissive direction would authorise a resend, so it errs the
+   * other way by construction.
+   */
+  async isKnowledgeAssetMinted(kaId: bigint, _options: ChainReadOptions = {}): Promise<boolean | null> {
+    await this.init();
+    if (!this.contracts.knowledgeAssetStorage) return null;
+    try {
+      const owner = await this.getKnowledgeAssetOwner(kaId);
+      return owner !== ethers.ZeroAddress;
+    } catch (err) {
+      return isNonexistentTokenRevert(err) ? false : null;
+    }
   }
 
   /**
@@ -519,30 +567,45 @@ export class PublishMethods extends EVMChainAdapterBase {
   }
 
   /**
-   * Everything the RECEIPT alone can settle. `no-receipt` is deliberately not a
-   * `PublishTransactionResolution` member: on its own it is not a chain fact
-   * about the publish, and only the caller that follows it with a transaction
-   * lookup may turn it into `pending` or `not-found`.
+   * GH#2270 PR-3 r2 — the ONE receipt read the three publish-resolution surfaces project from.
+   *
+   * They had drifted into three separate walks of the same data: two shared a helper, the canonical
+   * one re-implemented the receipt fetch, the status check and the V10/V9 parse fallthrough
+   * inline. Three copies of "what does this receipt say about a publish" is three places for the
+   * V9 fallback, or the meaning of `status !== 1`, to be updated in two.
+   *
+   * What it returns is deliberately RAW: the receipt as fetched, plus the parsed publish when one
+   * could be read. Every judgement — is a missing receipt an absence, does a mismatched block hash
+   * mean reorg, is an unparseable publish a rejection or merely unrecognized — belongs to the
+   * projection, because the three surfaces genuinely answer differently and only one of them has
+   * the caller's expected block identity to compare against.
+   *
+   * `receipt: null` means the node had no receipt. It is NOT a verdict: only a caller that follows
+   * it with a transaction lookup may turn it into `pending` or `not-found`.
    */
-  private async resolvePublishReceiptState(
+  private async readPublishReceipt(
     txHash: string,
     options: ChainReadOptions,
-  ): Promise<PublishTransactionResolution | { status: 'no-receipt' }> {
+    logLabel?: string,
+  ): Promise<{
+    receipt: ethers.TransactionReceipt | null;
+    publish: OnChainPublishResult | null;
+  }> {
     const receipt = await this.getTransactionReceiptWithFailover(txHash, {
       signal: options.signal,
+      ...(logLabel ? { logLabel } : {}),
     });
-    if (!receipt) return { status: 'no-receipt' };
-    if (receipt.status !== 1) return { status: 'reverted' };
+    if (!receipt || receipt.status !== 1) return { receipt, publish: null };
 
     const v10 = this.contracts.knowledgeAssetStorage
       ? await this.parseV10PublishReceipt(receipt, options)
       : null;
-    if (v10) return { status: 'confirmed', publish: v10 };
+    if (v10) return { receipt, publish: v10 };
 
     const v9 = this.contracts.knowledgeAssetsStorage
       ? await this.parseV9PublishReceipt(receipt, options)
       : null;
-    return v9 ? { status: 'confirmed', publish: v9 } : { status: 'unrecognized' };
+    return { receipt, publish: v9 };
   }
 
   async resolveCanonicalFinalizationReceipt(
@@ -550,10 +613,11 @@ export class PublishMethods extends EVMChainAdapterBase {
     options: CanonicalFinalizationReceiptReadOptions = {},
   ): Promise<CanonicalFinalizationReceiptResolution> {
     await this.init();
-    const receipt = await this.getTransactionReceiptWithFailover(txHash, {
-      signal: options.signal,
-      logLabel: 'canonical finalization receipt',
-    });
+    const { receipt, publish: parsedPublish } = await this.readPublishReceipt(
+      txHash,
+      options,
+      'canonical finalization receipt',
+    );
     if (!receipt) {
       const transaction = await this.getTransactionWithFailover(txHash, options);
       return transaction ? { status: 'pending' } : { status: 'not-found' };
@@ -568,14 +632,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       return { status: 'reorged' };
     }
 
-    const publish = this.contracts.knowledgeAssetStorage
-      ? await this.parseV10PublishReceipt(receipt, options)
-      : null;
-    const legacyPublish = publish ?? (
-      this.contracts.knowledgeAssetsStorage
-        ? await this.parseV9PublishReceipt(receipt, options)
-        : null
-    );
+    const legacyPublish = parsedPublish;
     if (
       !legacyPublish
       || !legacyPublish.merkleRoot

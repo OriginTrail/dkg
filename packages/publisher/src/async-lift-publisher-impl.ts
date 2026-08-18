@@ -1,3 +1,4 @@
+import type { PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -158,6 +159,54 @@ function lifecycleKeyOfJob(job: LiftJob): string | null {
   }
 }
 
+/**
+ * GH#2270 PR-3 r2 — a config carrying the pre-rename `chainRecoveryResolver` key is REJECTED, not
+ * ignored.
+ *
+ * The repo does not ship backwards-compatibility shims, and this is not one: nothing accepts the
+ * old key. But the rename is invisible to JavaScript, and BOTH halves changed — the field name and
+ * the callback's signature — so a consumer that missed it would construct a publisher with no
+ * resolver at all and lose chain recovery in total silence, or pass one that is handed a lookup
+ * where it expects a job and throws mid-tick. An explicit failure at construction names the
+ * replacement and the issue, and happens before any job can be held on a lane that will not run.
+ */
+function assertNoLegacyChainRecoveryResolver(config: AsyncLiftPublisherConfig): void {
+  if (!Object.prototype.hasOwnProperty.call(config, 'chainRecoveryResolver')) return;
+  throw new Error(
+    'AsyncLiftPublisherConfig.chainRecoveryResolver was removed in GH#2270 PR-3: use '
+    + '`chainProofResolver`, whose resolver takes an AsyncLiftChainProofLookup '
+    + '({ txHash, walletId, nonce }) and returns an AsyncLiftChainProofResolution verdict '
+    + '(recovered / reverted / unrecognized / pending / not-found / inconclusive) instead of '
+    + 'taking a job and returning a recovery result or null.',
+  );
+}
+
+/**
+ * GH#2270 PR-3 r2 — the knowledge asset id a re-run of this job would mint, if its request pins
+ * one.
+ *
+ * Only a job whose request carries a seal with `reservedKaId` has a FIXED identity: that id is
+ * threaded verbatim back into the mint, so a re-run either mints exactly it or reverts against a
+ * mint that already happened. A job without one allocates a fresh id on every attempt, which is
+ * precisely why it cannot be released by absence — a replacement transaction could have published
+ * it already and the re-run would mint a SECOND asset over the same content, with nothing on chain
+ * to object.
+ *
+ * `undefined` on anything malformed or absent: this feeds a guard, so it fails closed.
+ */
+function pinnedPublishIdentityKaId(job: LiftJob): string | undefined {
+  const request = job.request as { knowledgeAssetVmPublish?: { seal?: { reservedKaId?: unknown } } };
+  const raw = request?.knowledgeAssetVmPublish?.seal?.reservedKaId
+    ?? (job.request as { lift?: { seal?: { reservedKaId?: unknown } } })?.lift?.seal?.reservedKaId;
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  try {
+    const kaId = BigInt(raw);
+    return kaId > 0n ? kaId.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 type AsyncLiftJobHandler = {
   readonly inspectPreparedPayload: (job: LiftJob) => Promise<AsyncPreparedPublishPayload | null>;
   readonly process: (claimed: LiftJob, walletId: string) => Promise<LiftJob>;
@@ -301,7 +350,7 @@ export class TripleStoreAsyncLiftPublisher
   private readonly now: () => number;
   private readonly idGenerator: () => string;
   private readonly rand: () => number;
-  private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
+  private readonly chainProofResolver?: AsyncLiftPublisherRecoveryResolver;
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
@@ -372,7 +421,8 @@ export class TripleStoreAsyncLiftPublisher
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.rand = config.rand ?? (() => Math.random());
-    this.chainRecoveryResolver = config.chainRecoveryResolver;
+    assertNoLegacyChainRecoveryResolver(config);
+    this.chainProofResolver = config.chainProofResolver;
     this.knowledgeAssetVmPublishRecoveryResolver = config.knowledgeAssetVmPublishRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
     this.knowledgeAssetVmPublishHandler = resolveKnowledgeAssetVmPublishHandler(config);
@@ -680,13 +730,12 @@ export class TripleStoreAsyncLiftPublisher
         jobId: claimed.jobId,
         walletId,
         publicByteSize,
-        delegate: prepared.publishOptions.onPhase,
       });
       const publishResult = await this.publishExecutor({
         walletId,
         publishOptions: {
           ...prepared.publishOptions,
-          onPhase: broadcastRecorder.onPhase,
+          onBeforeBroadcast: broadcastRecorder.onBeforeBroadcast,
         },
       });
       return await this.recordPublishResult(claimed.jobId, publishResult, {
@@ -754,7 +803,6 @@ export class TripleStoreAsyncLiftPublisher
       walletId,
       merkleRoot: request.sealMerkleRoot,
       publicByteSize,
-      delegate: prepared.publishOptions.onPhase,
     });
     let publishResult!: PublishResult;
     try {
@@ -771,7 +819,7 @@ export class TripleStoreAsyncLiftPublisher
         resolved: validated.resolved,
         publishOptions: {
           ...prepared.publishOptions,
-          onPhase: broadcastRecorder.onPhase,
+          onBeforeBroadcast: broadcastRecorder.onBeforeBroadcast,
         },
       };
       publishResult = await this.knowledgeAssetVmPublishHandler.execute(executionInput);
@@ -818,7 +866,7 @@ export class TripleStoreAsyncLiftPublisher
     if (job.status !== 'broadcast' && job.status !== 'included') {
       return false;
     }
-    if (!this.chainRecoveryResolver) {
+    if (!this.chainProofResolver) {
       if (job.status === 'broadcast') {
         await this.releaseWalletLockForJob(job);
         await this.writeJob(this.resetJobToAccepted(job, 'broadcast', getLiftJobTransactionEvidence(job)), 'recover-reset');
@@ -835,7 +883,7 @@ export class TripleStoreAsyncLiftPublisher
     // starts once this gate has already fired.
     // A LIVE broadcast always has its metadata, so the lookup is direct here — no derivation
     // and nothing to fail to derive.
-    const resolution = await this.chainRecoveryResolver({
+    const resolution = await this.chainProofResolver({
       txHash: recoverable.broadcast.txHash,
       walletId: recoverable.broadcast.walletId,
       nonce: recoverable.broadcast.nonce,
@@ -1052,11 +1100,22 @@ export class TripleStoreAsyncLiftPublisher
     }
     await this.assertActiveClaimLock(current);
 
-    const mapped = mapPublishResultToLiftJobSuccess({
+    const mappedResult = mapPublishResultToLiftJobSuccess({
       publishResult,
       walletId: current.claim.walletId,
       publicByteSize: options.publicByteSize,
     });
+    // GH#2270 PR-3 r2 — the publish RESULT has no nonce to report; only the pre-send write-ahead
+    // ever knew it. Every transition below replaces `broadcast` wholesale, so without this the
+    // nonce recorded before the send is silently dropped the moment the executor returns — and a
+    // job that later fails from 'included' would carry a hash with no way to prove its absence.
+    // Carried only when the hash MATCHES, so a mismatched result (refused just below) can never
+    // graft this job's nonce onto another transaction.
+    const mapped = mappedResult.broadcast
+      && current.broadcast?.nonce !== undefined
+      && current.broadcast.txHash === mappedResult.broadcast.txHash
+      ? { ...mappedResult, broadcast: { ...mappedResult.broadcast, nonce: current.broadcast.nonce } }
+      : mappedResult;
 
     let next: LiftJob = current;
     if (mapped.status === 'finalized' && mapped.finalization.mode === 'local') {
@@ -1188,7 +1247,7 @@ export class TripleStoreAsyncLiftPublisher
     // must not do either. The interrupted half above deliberately keeps running while paused: it
     // repairs jobs this node has ALREADY broadcast, where stopping would leave a live transaction
     // unreconciled — the phantom the pre-send write-ahead exists to make visible.
-    if (this.paused || !this.chainRecoveryResolver) return 0;
+    if (this.paused || !this.chainProofResolver) return 0;
 
     const heldJobs = (await this.list({ status: 'failed' }))
       .filter(isFailedJob)
@@ -1221,8 +1280,8 @@ export class TripleStoreAsyncLiftPublisher
     job: PersistedFailedJob,
     lookup: AsyncLiftChainProofLookup,
   ): Promise<number> {
-    if (!this.chainRecoveryResolver) return 0;
-    const resolution = await this.chainRecoveryResolver(lookup);
+    if (!this.chainProofResolver) return 0;
+    const resolution = await this.chainProofResolver(lookup);
     const disposition = decideChainProofDisposition(job, resolution.status);
 
     switch (disposition.action) {
@@ -1843,47 +1902,41 @@ export class TripleStoreAsyncLiftPublisher
     walletId: string;
     merkleRoot?: LiftJobHex;
     publicByteSize?: number;
-    delegate?: PhaseCallback;
-  }): { onPhase: PhaseCallback; readonly outcome: PreSendOutcome } {
-    // #1864 — the pre-send write-ahead outcome is tracked in this closure (like
-    // `recordedTxHash`) rather than threaded as a mutable out-parameter through the publish
-    // path. The processKnowledgeAssetVmPublish catch reads `.outcome` to decide recovery vs
-    // terminal. It stays 'not-reached' unless the write-ahead hook actually fires.
+  }): { onBeforeBroadcast: (signal: PreBroadcastSignal) => Promise<void>; readonly outcome: PreSendOutcome } {
+    // #1864 — the pre-send write-ahead outcome is tracked in this closure (like `recordedTxHash`)
+    // rather than threaded as a mutable out-parameter through the publish path. The
+    // processKnowledgeAssetVmPublish catch reads `.outcome` to decide recovery vs terminal. It
+    // stays 'not-reached' unless the write-ahead hook actually fires.
+    //
+    // GH#2270 PR-3 r2 — the TRIGGER is now the adapter's typed `onBeforeBroadcast`, not a parsed
+    // phase string. The durability guarantee is unchanged and so is everything below it; what went
+    // away is a contract that lived in a naming convention and in the ORDER two breadcrumbs were
+    // emitted. The nonce arrives as a field on the signal, so there is nothing left to correlate.
     let outcome: PreSendOutcome = 'not-reached';
-    let recordedTxHash: LiftJobHex | undefined;
-    // GH#2270 PR-3 r1 — the adapter emits the nonce breadcrumb strictly BEFORE the hash one, so by
-    // the time the hash triggers the single durable write this is already set. A signing path that
-    // cannot report a nonce simply never sets it, and the record carries none — recovery then has
-    // no proof of absence for that job and holds, which is the safe direction.
-    let signedNonce: number | undefined;
-    const onPhase: PhaseCallback = async (phase, status) => {
-      await (params.delegate?.(phase, status) as unknown as Promise<void> | void);
-      if (status !== 'start') return;
-      const nonce = nonceFromSignedPhase(phase);
-      if (nonce !== undefined && !recordedTxHash) signedNonce = nonce;
-      const txHash = txHashFromSignedPhase(phase);
-      if (!txHash || recordedTxHash) return;
-      recordedTxHash = txHash;
+    let recordedTxHash: string | undefined;
+    const onBeforeBroadcast = async (signal: PreBroadcastSignal): Promise<void> => {
+      if (recordedTxHash) return;
+      recordedTxHash = signal.txHash;
       try {
         await this.recordBroadcastProgressBeforeSend({
           jobId: params.jobId,
           walletId: params.walletId,
-          txHash,
-          nonce: signedNonce,
+          txHash: signal.txHash as LiftJobHex,
+          nonce: signal.nonce,
           merkleRoot: params.merkleRoot,
           publicByteSize: params.publicByteSize,
         });
         // The transition is fsync-durable (or was already durable): the tx is about to send.
         outcome = 'recorded-durable';
       } catch (error) {
-        // recordDurableBroadcastBeforeSend rolled the transition back before re-throwing (or
-        // the write-ahead never durably mutated state): the tx was never sent.
+        // recordDurableBroadcastBeforeSend rolled the transition back before re-throwing (or the
+        // write-ahead never durably mutated state): the tx was never sent.
         outcome = 'rolled-back-pre-send';
         throw error;
       }
     };
     return {
-      onPhase,
+      onBeforeBroadcast,
       get outcome() {
         return outcome;
       },
@@ -2318,7 +2371,12 @@ export class TripleStoreAsyncLiftPublisher
     const txHash = getLiftJobTransactionEvidence(job);
     const walletId = job.broadcast?.walletId ?? job.claim?.walletId;
     if (!txHash || !walletId) return null;
-    return { txHash, walletId, nonce: job.broadcast?.nonce };
+    return {
+      txHash,
+      walletId,
+      nonce: job.broadcast?.nonce,
+      publishIdentityKaId: pinnedPublishIdentityKaId(job),
+    };
   }
 
   private failProvenRevertedJob(
@@ -2497,23 +2555,4 @@ function canonicalizeTerm(term: string, canonicalRootMap: Readonly<Record<string
     }
   }
   return term;
-}
-
-function txHashFromSignedPhase(phase: string): LiftJobHex | null {
-  const match = phase.match(/^chain:txsigned:tx-(0x[0-9a-fA-F]+)$/);
-  return match ? (match[1] as LiftJobHex) : null;
-}
-
-/**
- * GH#2270 PR-3 r1 — the nonce breadcrumb the adapter emits just before the hash one.
- *
- * Anchored like its sibling, and deliberately in the SAME `chain:txsigned:` family: consumers that
- * do not care about this family already ignore it wholesale, and the two anchors cannot collide
- * (`tx-` vs `nonce-`), so neither parser can mistake one breadcrumb for the other.
- */
-function nonceFromSignedPhase(phase: string): number | undefined {
-  const match = phase.match(/^chain:txsigned:nonce-(\d+)$/);
-  if (!match) return undefined;
-  const nonce = Number(match[1]);
-  return Number.isSafeInteger(nonce) && nonce >= 0 ? nonce : undefined;
 }

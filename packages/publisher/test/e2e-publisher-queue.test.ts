@@ -9,7 +9,7 @@
  * 6. Clear finalized/failed jobs
  * 7. Stats reflect live queue state
  * 8. Wallet lock contention — two wallets claim independently
- * 9. Recovery from broadcast state when chainRecoveryResolver succeeds
+ * 9. Recovery from broadcast state when chainProofResolver succeeds
  * 10. Recovery from broadcast state when the chain-proof verdict stays inconclusive → fails
  */
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -60,7 +60,7 @@ describe('Async Lift Publisher Queue — E2E Pipeline', () => {
     const publisher = new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver: chainProof === undefined ? undefined : async () => chainProof,
+      chainProofResolver: chainProof === undefined ? undefined : async () => chainProof,
       publishExecutor: opts.publishExecutor,
     });
     return withLegacyRawLiftTestSeeder(publisher, store, {
@@ -348,7 +348,7 @@ describe('Async Lift Publisher Queue — Recovery', () => {
     const publisher = new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver: chainProof === undefined ? undefined : async () => chainProof,
+      chainProofResolver: chainProof === undefined ? undefined : async () => chainProof,
     });
     return withLegacyRawLiftTestSeeder(publisher, store, {
       now: clock,

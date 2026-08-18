@@ -521,16 +521,19 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   const publishers = new Map<string, DKGPublisher>(
     wallets.map((wallet) => [wallet.address, wallet.publisher]),
   );
-  const hasChainRecovery = [...publishers.values()].some(hasChainPublishLookup);
+  // GH#2270 PR-3 r2 — the recovery factories take adapters, not publishers. Built here, from the
+  // wallets, where `chain` is a public field rather than something to assert through.
+  const chainAdapters = chainAdaptersForWallets(wallets);
+  const hasChainRecovery = [...chainAdapters.values()].some(hasChainPublishLookup);
 
   const scopedKnowledgeAssetVmPublishHandler = scopeKnowledgeAssetVmPublishHandler(
     publishers,
     args.knowledgeAssetVmPublishHandler,
   );
   const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
-    chainRecoveryResolver: hasChainRecovery ? createChainProofResolver(publishers) : undefined,
+    chainProofResolver: hasChainRecovery ? createChainProofResolver(chainAdapters) : undefined,
     knowledgeAssetVmPublishRecoveryResolver: hasChainRecovery
-      ? createKnowledgeAssetVmPublishRecoveryResolver(publishers)
+      ? createKnowledgeAssetVmPublishRecoveryResolver(chainAdapters)
       : undefined,
     maxRetries: args.maxRetries,
     // GH#2270 — spread rather than four copied fields, so a knob added to
@@ -763,12 +766,30 @@ function createV10ACKProviderForPublisher(
  * must not silently lose chain recovery; an adapter offering only the legacy
  * `resolvePublishByTxHash` keeps the recovery it has always had.
  */
-export function hasChainPublishLookup(publisher: DKGPublisher): boolean {
-  const chain = (publisher as unknown as {
-    chain?: { resolvePublishByTxHash?: unknown; resolvePublishTransaction?: unknown };
-  }).chain;
-  return typeof chain?.resolvePublishByTxHash === 'function'
-    || typeof chain?.resolvePublishTransaction === 'function';
+export function hasChainPublishLookup(chain: ChainAdapter): boolean {
+  return typeof chain.resolvePublishByTxHash === 'function'
+    || typeof chain.resolvePublishTransaction === 'function';
+}
+
+/**
+ * GH#2270 PR-3 r2 — wallet id to the chain adapter that signs for it.
+ *
+ * The recovery factories used to take the publisher map and reach through each `DKGPublisher` for
+ * its `chain` with an `as unknown as { chain?: ChainAdapter }` cast — a private field, read through
+ * an assertion the compiler cannot check, in six places. Rename that field and every cast keeps
+ * compiling while silently answering `undefined`, which reads as "no chain recovery available" and
+ * holds every job forever.
+ *
+ * The map is built once at the wiring site from `ConfiguredPublisherWallet[]`, where the adapter is
+ * a real public field, and capability detection lives beside it.
+ */
+export type PublisherChainAdapters = ReadonlyMap<string, ChainAdapter>;
+
+/** The wallet→adapter map for the recovery factories, from the wallets the runtime configured. */
+export function chainAdaptersForWallets(
+  wallets: readonly { readonly address: string; readonly chain: ChainAdapter }[],
+): PublisherChainAdapters {
+  return new Map(wallets.map((wallet) => [wallet.address, wallet.chain]));
 }
 
 /**
@@ -792,14 +813,18 @@ export function hasChainPublishLookup(publisher: DKGPublisher): boolean {
  * EARNED here, from nonce consumption at finality, or it is downgraded.
  */
 export function createChainProofResolver(
-  publishers: Map<string, DKGPublisher>,
+  adapters: PublisherChainAdapters,
 ): (lookup: AsyncLiftChainProofLookup) => Promise<AsyncLiftChainProofResolution> {
   return async (lookup) => {
-    const resolution = await resolvePublishTransactionState(lookup, publishers);
+    const resolution = await resolvePublishTransactionState(lookup, adapters);
     if (resolution.status === 'not-found') {
-      return await isNonceProvenConsumed(lookup, publishers)
-        ? { status: 'not-found' }
-        : { status: 'inconclusive' };
+      // TWO independent proofs, and both must hold. Nonce consumption settles that the recorded
+      // HASH can never mine; the identity check settles that no OTHER transaction performed this
+      // publish. Either one alone is a resend waiting to happen.
+      const cannotMine = await isNonceProvenConsumed(lookup, adapters);
+      if (!cannotMine) return { status: 'inconclusive' };
+      const alreadyPublished = await isPublishIdentityOnChain(lookup, adapters);
+      return alreadyPublished === false ? { status: 'not-found' } : { status: 'inconclusive' };
     }
     if (resolution.status !== 'confirmed') return resolution;
     const recovery = await mapConfirmedPublishToLiftRecovery(resolution.publish, resolution.chain);
@@ -829,12 +854,41 @@ export function createChainProofResolver(
  * the read, an endpoint that cannot serve `finalized`, or a read that throws — all answer `false`,
  * and the job keeps its hold and its operator exit.
  */
+/**
+ * GH#2270 PR-3 r2 — did SOMETHING already publish this job's identity? `true` / `false` / `null`
+ * when it could not be established.
+ *
+ * This is the half nonce consumption cannot cover. A consumed slot proves the recorded transaction
+ * can never mine; it says nothing about whether a DIFFERENT transaction on that same slot — a
+ * fee-bumped replacement carrying the same calldata — already did the publish. Releasing on the
+ * nonce alone would re-run on top of it.
+ *
+ * A job whose request pins its knowledge asset id can simply be asked. One `eth_call` on `ownerOf`,
+ * against an id the job already persists, answers whoever sent the transaction. A job with no
+ * pinned id would allocate a fresh one on re-run, so there is nothing to ask and nothing that would
+ * stop a duplicate: it answers `null` here and the caller holds. That is the release path narrowing
+ * rather than the guard weakening.
+ */
+async function isPublishIdentityOnChain(
+  lookup: AsyncLiftChainProofLookup,
+  adapters: PublisherChainAdapters,
+): Promise<boolean | null> {
+  if (lookup.publishIdentityKaId === undefined) return null;
+  const chain = adapters.get(lookup.walletId);
+  if (!chain?.isKnowledgeAssetMinted) return null;
+  try {
+    return await chain.isKnowledgeAssetMinted(BigInt(lookup.publishIdentityKaId));
+  } catch {
+    return null;
+  }
+}
+
 async function isNonceProvenConsumed(
   lookup: AsyncLiftChainProofLookup,
-  publishers: Map<string, DKGPublisher>,
+  adapters: PublisherChainAdapters,
 ): Promise<boolean> {
   if (lookup.nonce === undefined) return false;
-  const chain = (publishers.get(lookup.walletId) as unknown as { chain?: ChainAdapter } | undefined)?.chain;
+  const chain = adapters.get(lookup.walletId);
   if (!chain?.getFinalizedAccountNonce) return false;
   try {
     const finalizedNonce = await chain.getFinalizedAccountNonce(lookup.walletId);
@@ -847,10 +901,10 @@ async function isNonceProvenConsumed(
 }
 
 export function createKnowledgeAssetVmPublishRecoveryResolver(
-  publishers: Map<string, DKGPublisher>,
+  adapters: PublisherChainAdapters,
 ): AsyncKnowledgeAssetVmPublishRecoveryResolver {
   return async (job) => {
-    const recovered = await resolveCanonicalOnChainPublish(job, publishers);
+    const recovered = await resolveCanonicalOnChainPublish(job, adapters);
     if (!recovered) return null;
     const evidence = mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
       recovered.receipt,
@@ -886,15 +940,13 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
 
 async function resolveCanonicalOnChainPublish(
   job: LiftJobBroadcast | LiftJobIncluded,
-  publishers: Map<string, DKGPublisher>,
+  adapters: PublisherChainAdapters,
 ): Promise<{
   receipt: CanonicalFinalizationReceipt;
   chain: ChainAdapter;
   knowledgeAssetsContract: string;
 } | null> {
-  const publisher = publishers.get(job.broadcast.walletId);
-  if (!publisher) return null;
-  const chain = (publisher as unknown as { chain?: ChainAdapter }).chain;
+  const chain = adapters.get(job.broadcast.walletId);
   if (!chain?.resolveCanonicalFinalizationReceipt) return null;
 
   let resolution;
@@ -1012,14 +1064,12 @@ function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
  */
 async function resolvePublishTransactionState(
   lookup: AsyncLiftChainProofLookup,
-  publishers: Map<string, DKGPublisher>,
+  adapters: PublisherChainAdapters,
 ): Promise<
   | { status: 'confirmed'; publish: OnChainPublishResult; chain: ChainAdapter }
   | Exclude<AsyncLiftChainProofResolution, { status: 'recovered' }>
 > {
-  const publisher = publishers.get(lookup.walletId);
-  if (!publisher) return { status: 'inconclusive' };
-  const chain = (publisher as unknown as { chain?: ChainAdapter }).chain;
+  const chain = adapters.get(lookup.walletId);
   if (!chain) return { status: 'inconclusive' };
 
   try {

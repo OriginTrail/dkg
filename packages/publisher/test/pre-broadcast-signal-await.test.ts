@@ -1,0 +1,157 @@
+/**
+ * GH#2270 PR-3 r2 — `DKGPublisher` must AWAIT `onBeforeBroadcast` before the transaction is sent.
+ *
+ * The recovery lane's whole safety argument is that the write-ahead is durable before anything can
+ * be on the wire. The adapter awaits its `onBroadcast` hook, and its own row pins that — but the
+ * publisher sits between the two, and if it merely fires the callback and moves on, the hook the
+ * adapter awaits resolves immediately and the guarantee is gone with no visible symptom: the happy
+ * path still passes, the record still usually lands, and only a crash in the widened window loses
+ * a transaction.
+ *
+ * These drive the REAL publisher over a mock chain that reports when the send actually happened,
+ * because that ordering is the only observable that distinguishes an awaited callback from a
+ * fired-and-forgotten one.
+ */
+import { describe, expect, it } from 'vitest';
+import { ethers } from 'ethers';
+import {
+  MockChainAdapter,
+  type PreBroadcastSignal,
+  type TxResult,
+  type V10UpdateKAParams,
+} from '@origintrail-official/dkg-chain';
+import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { DKGPublisher } from '../src/dkg-publisher.js';
+import { buildUpdateSeal, mockSealCtx } from './_helpers/seal.js';
+
+const PRODUCER = new ethers.Wallet(
+  '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
+);
+const AUTHOR = PRODUCER.address;
+const KA_ID = (BigInt(AUTHOR) << 96n) | 7n;
+const CG_ID = '42';
+const DATA_GRAPH = `did:dkg:context-graph:${CG_ID}`;
+const TX_HASH = `0x${'ab'.repeat(32)}`;
+const NONCE = 19;
+
+/**
+ * A chain that fires the pre-broadcast hook with a known signal and records whether the "send"
+ * happened afterwards. `sent` is the observable: it can only be false after the hook threw if the
+ * publisher actually awaited it.
+ */
+class SignalRecordingChain extends MockChainAdapter {
+  sent = false;
+  hookSettled = false;
+
+  constructor() {
+    super('mock:31337', AUTHOR);
+  }
+
+  override async getKnowledgeAssetOwner(kaId: bigint): Promise<string> {
+    if (kaId === KA_ID) return ethers.getAddress(AUTHOR);
+    return super.getKnowledgeAssetOwner(kaId);
+  }
+
+  override async updateKnowledgeCollectionV10(params: V10UpdateKAParams): Promise<TxResult> {
+    await params.onBroadcast?.({ txHash: TX_HASH, nonce: NONCE });
+    this.hookSettled = true;
+    this.sent = true;
+    return { success: true, hash: TX_HASH, blockNumber: 1 } as TxResult;
+  }
+}
+
+async function publisherOver(chain: SignalRecordingChain): Promise<{
+  publisher: DKGPublisher;
+  quads: Quad[];
+  precomputedUpdateAttestation: Awaited<ReturnType<typeof buildUpdateSeal>>;
+}> {
+  const store = new OxigraphStore();
+  const publisher = new DKGPublisher({
+    store,
+    chain,
+    eventBus: new TypedEventBus(),
+    keypair: await generateEd25519Keypair(),
+    publisherPrivateKey: PRODUCER.privateKey,
+    publisherNodeIdentityId: 1n,
+  });
+  const quads: Quad[] = [
+    { subject: 'urn:atomic', predicate: 'http://schema.org/name', object: '"v2"', graph: DATA_GRAPH },
+  ];
+  const precomputedUpdateAttestation = await buildUpdateSeal({
+    kaId: KA_ID,
+    quads,
+    author: PRODUCER,
+    ctx: mockSealCtx(),
+  });
+  return { publisher, quads, precomputedUpdateAttestation };
+}
+
+describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
+  it('delivers the adapter signal verbatim, before the send', async () => {
+    const chain = new SignalRecordingChain();
+    const { publisher, quads, precomputedUpdateAttestation } = await publisherOver(chain);
+    const received: PreBroadcastSignal[] = [];
+    let sentWhenSignalled = true;
+
+    await publisher.update(KA_ID, {
+      contextGraphId: CG_ID,
+      quads,
+      precomputedUpdateAttestation,
+      onBeforeBroadcast: (signal) => {
+        received.push(signal);
+        sentWhenSignalled = chain.sent;
+      },
+    });
+
+    expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE }]);
+    // The signal arrived while the transaction was still unsent — that is what "write-ahead" means.
+    expect(sentWhenSignalled).toBe(false);
+    expect(chain.sent).toBe(true);
+  });
+
+  it('does not send when the signal handler REJECTS', async () => {
+    // The mutation this row exists for: dropping the `await` turns the rejection into an unhandled
+    // one and the publish sails past it, so `sent` flips to true and the transaction goes out with
+    // nothing durable recording it.
+    const chain = new SignalRecordingChain();
+    const { publisher, quads, precomputedUpdateAttestation } = await publisherOver(chain);
+
+    // This mock invokes the hook directly, so the rejection escapes as a throw; the real EVM
+    // adapter rewraps it as `chain:writeahead hook failed before ... broadcast`. Either way the
+    // load-bearing assertion is the same one: nothing was sent.
+    await expect(publisher.update(KA_ID, {
+      contextGraphId: CG_ID,
+      quads,
+      precomputedUpdateAttestation,
+      onBeforeBroadcast: async () => {
+        await Promise.resolve();
+        throw new Error('could not persist the write-ahead');
+      },
+    })).rejects.toThrow(/could not persist the write-ahead/);
+
+    expect(chain.sent).toBe(false);
+  });
+
+  it('does not send when the handler is still in flight', async () => {
+    // A handler that never settles must block the send outright rather than let it race ahead.
+    const chain = new SignalRecordingChain();
+    const { publisher, quads, precomputedUpdateAttestation } = await publisherOver(chain);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+
+    const running = publisher.update(KA_ID, {
+      contextGraphId: CG_ID,
+      quads,
+      precomputedUpdateAttestation,
+      onBeforeBroadcast: () => gate,
+    }).catch(() => undefined);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(chain.sent).toBe(false);
+
+    release();
+    await running;
+    expect(chain.sent).toBe(true);
+  });
+});

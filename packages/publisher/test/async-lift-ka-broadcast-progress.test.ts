@@ -52,7 +52,7 @@ describe('KA async VM publish broadcast progress', () => {
     const publisher = createPublisher({
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
-          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${txHash}`, 'start');
+          await input.publishOptions.onBeforeBroadcast?.({ txHash });
           statusDuringExecutor = await publisher.getStatus(jobId);
           throw new Error('process crashed after tx submit');
         },

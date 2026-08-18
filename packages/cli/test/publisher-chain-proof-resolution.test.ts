@@ -11,13 +11,14 @@
  * this module can produce comes out `inconclusive` and never `not-found`.
  */
 import { describe, expect, it, vi } from 'vitest';
-import type { PublishTransactionResolution } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, PublishTransactionResolution } from '@origintrail-official/dkg-chain';
 import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
 import type { AsyncLiftChainProofLookup, DKGPublisher, LiftJob } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   createChainProofResolver,
   hasChainPublishLookup,
+  type PublisherChainAdapters,
 } from '../src/publisher-runner.js';
 
 const TX_HASH = `0x${'ab'.repeat(32)}` as `0x${string}`;
@@ -42,9 +43,9 @@ function onChainPublish() {
   };
 }
 
-/** A publisher whose adapter exposes exactly the members passed in — nothing else. */
-function publishersWith(chain: Record<string, unknown> | undefined): Map<string, DKGPublisher> {
-  return new Map([[WALLET, { chain } as unknown as DKGPublisher]]);
+/** The wallet→adapter map the factories take, exposing exactly the members passed in. */
+function publishersWith(chain: Record<string, unknown> | undefined): PublisherChainAdapters {
+  return new Map(chain ? [[WALLET, chain as unknown as ChainAdapter]] : []);
 }
 
 function triStateAdapter(resolution: PublishTransactionResolution, extra: Record<string, unknown> = {}) {
@@ -119,11 +120,16 @@ describe('GH#2270 runner chain-proof resolution', () => {
       // The other polarity, and the only difference is the recorded nonce plus a finalized account
       // nonce past it: the slot was consumed by something else, so this transaction can never mine.
       const getFinalizedAccountNonce = vi.fn(async () => SIGNED_NONCE + 1);
-      const publishers = publishersWith(
-        triStateAdapter({ status: 'not-found' }, { getFinalizedAccountNonce }),
-      );
+      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, {
+        getFinalizedAccountNonce,
+        // The identity half, covered in its own describe below: no other transaction published it.
+        isKnowledgeAssetMinted: vi.fn(async () => false),
+      }));
 
-      expect(await createChainProofResolver(publishers)(lookupWithNonce)).toEqual({ status: 'not-found' });
+      expect(await createChainProofResolver(publishers)({
+        ...lookupWithNonce,
+        publishIdentityKaId: ((BigInt(WALLET) << 96n) | 7n).toString(),
+      })).toEqual({ status: 'not-found' });
       expect(getFinalizedAccountNonce).toHaveBeenCalledWith(WALLET);
     });
 
@@ -169,6 +175,86 @@ describe('GH#2270 runner chain-proof resolution', () => {
 
       expect(await createChainProofResolver(publishers)(lookupWithNonce)).toEqual({ status: 'pending' });
       expect(getFinalizedAccountNonce).not.toHaveBeenCalled();
+    });
+  });
+
+  // Nonce consumption proves the recorded HASH can never mine. It does NOT prove the PUBLISH did
+  // not happen: a same-calldata replacement — a fee bump from an operator, a shared signer, any
+  // sender other than this process — consumes the very same slot AND performs the publish. A lane
+  // that released on the nonce alone would re-run on top of a KA that is already on chain.
+  describe('a replacement transaction that PUBLISHED must not read as absence', () => {
+    const KA_ID = ((BigInt(WALLET) << 96n) | 7n).toString();
+
+    it('holds when the identity is already on chain, even with the nonce provably consumed', async () => {
+      // The reviewer's scenario exactly: different hash, same nonce, and it did the publish.
+      // Both nonce facts point at "release"; the identity is the only thing that says otherwise.
+      const isKnowledgeAssetMinted = vi.fn(async () => true);
+      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, {
+        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1),
+        isKnowledgeAssetMinted,
+      }));
+
+      const resolution = await createChainProofResolver(publishers)({
+        ...lookupWithNonce,
+        publishIdentityKaId: KA_ID,
+      });
+
+      expect(resolution).toEqual({ status: 'inconclusive' });
+      expect(resolution.status).not.toBe('not-found');
+      expect(isKnowledgeAssetMinted).toHaveBeenCalledWith(BigInt(KA_ID));
+    });
+
+    it('releases only when the identity is provably NOT on chain', async () => {
+      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, {
+        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1),
+        isKnowledgeAssetMinted: vi.fn(async () => false),
+      }));
+
+      expect(await createChainProofResolver(publishers)({
+        ...lookupWithNonce,
+        publishIdentityKaId: KA_ID,
+      })).toEqual({ status: 'not-found' });
+    });
+
+    it('holds when the job pins NO identity — a re-run would mint a fresh one', async () => {
+      // A job whose request does not fix its knowledge asset id allocates a new one on every
+      // attempt, so a duplicate is neither contract-impossible nor checkable. The release path
+      // narrows to nothing for it rather than the guard weakening.
+      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, {
+        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1),
+        isKnowledgeAssetMinted: vi.fn(async () => false),
+      }));
+
+      expect(await createChainProofResolver(publishers)(lookupWithNonce)).toEqual({ status: 'inconclusive' });
+    });
+
+    it('holds when the identity read cannot answer', async () => {
+      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, {
+        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1),
+        isKnowledgeAssetMinted: vi.fn(async () => null),
+      }));
+      const noRead = publishersWith(triStateAdapter({ status: 'not-found' }, {
+        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1),
+      }));
+      const identity = { ...lookupWithNonce, publishIdentityKaId: KA_ID };
+
+      expect(await createChainProofResolver(publishers)(identity)).toEqual({ status: 'inconclusive' });
+      expect(await createChainProofResolver(noRead)(identity)).toEqual({ status: 'inconclusive' });
+    });
+
+    it('does not spend an identity read when the nonce is not yet consumed', async () => {
+      // Order matters for cost: the cheap local check gates the second chain read.
+      const isKnowledgeAssetMinted = vi.fn(async () => false);
+      const publishers = publishersWith(triStateAdapter({ status: 'not-found' }, {
+        getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE),
+        isKnowledgeAssetMinted,
+      }));
+
+      expect(await createChainProofResolver(publishers)({
+        ...lookupWithNonce,
+        publishIdentityKaId: KA_ID,
+      })).toEqual({ status: 'inconclusive' });
+      expect(isKnowledgeAssetMinted).not.toHaveBeenCalled();
     });
   });
 
@@ -252,18 +338,15 @@ describe('GH#2270 runner chain-proof resolution', () => {
     });
 
     it('hasChainPublishLookup accepts either lookup and rejects an adapter with neither', () => {
-      const withLegacy = { chain: { resolvePublishByTxHash: () => null } } as unknown as DKGPublisher;
-      const withTriState = { chain: { resolvePublishTransaction: () => null } } as unknown as DKGPublisher;
-      const withBoth = {
-        chain: { resolvePublishByTxHash: () => null, resolvePublishTransaction: () => null },
-      } as unknown as DKGPublisher;
-      const withNeither = { chain: { chainId: 'evm:31337' } } as unknown as DKGPublisher;
+      const asAdapter = (c: Record<string, unknown>) => c as unknown as ChainAdapter;
 
-      expect(hasChainPublishLookup(withLegacy)).toBe(true);
-      expect(hasChainPublishLookup(withTriState)).toBe(true);
-      expect(hasChainPublishLookup(withBoth)).toBe(true);
-      expect(hasChainPublishLookup(withNeither)).toBe(false);
-      expect(hasChainPublishLookup({} as unknown as DKGPublisher)).toBe(false);
+      expect(hasChainPublishLookup(asAdapter({ resolvePublishByTxHash: () => null }))).toBe(true);
+      expect(hasChainPublishLookup(asAdapter({ resolvePublishTransaction: () => null }))).toBe(true);
+      expect(hasChainPublishLookup(asAdapter({
+        resolvePublishByTxHash: () => null, resolvePublishTransaction: () => null,
+      }))).toBe(true);
+      expect(hasChainPublishLookup(asAdapter({ chainId: 'evm:31337' }))).toBe(false);
+      expect(hasChainPublishLookup(asAdapter({}))).toBe(false);
     });
   });
 
@@ -284,7 +367,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
       const publisher = new TripleStoreAsyncLiftPublisher(store, {
         now: () => ++now,
         idGenerator: () => `job-${++ids}`,
-        chainRecoveryResolver: createChainProofResolver(publishers),
+        chainProofResolver: createChainProofResolver(publishers),
         knowledgeAssetVmPublishRecoveryResolver: async () => null,
       });
       const jobId = await publisher.enqueueKnowledgeAssetVmPublish({
@@ -302,6 +385,9 @@ describe('GH#2270 runner chain-proof resolution', () => {
           authorAddress: WALLET as `0x${string}`,
           signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
           schemeVersion: 1,
+          // Pins the id a re-run would mint — without it there is no identity to check and the
+          // dispatcher must hold, which is its own row below.
+          reservedKaId: ((BigInt(WALLET) << 96n) | 7n).toString(),
         },
         sealChainId: '31337',
         sealKav10Address: '0x2222222222222222222222222222222222222222',
@@ -371,6 +457,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
         chainId: 'evm:31337',
         resolvePublishTransaction: vi.fn(async () => ({ status: 'not-found' as const })),
         getFinalizedAccountNonce: vi.fn(async () => SIGNED_NONCE + 1),
+        isKnowledgeAssetMinted: vi.fn(async () => false),
       }, SIGNED_NONCE);
 
       expect((await status())?.status).toBe('failed');

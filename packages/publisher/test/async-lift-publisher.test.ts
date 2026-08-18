@@ -127,7 +127,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   function createPublisher(
     options: {
       chainProof?: AsyncLiftChainProofResolution;
-      config?: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainRecoveryResolver'>;
+      config?: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainProofResolver'>;
     } = {},
   ) {
     const clock = () => ++now;
@@ -139,7 +139,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const publisher = new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver: chainProof === undefined ? undefined : async () => chainProof,
+      chainProofResolver: chainProof === undefined ? undefined : async () => chainProof,
       ...options.config,
     });
     return withLegacyRawLiftTestSeeder(publisher, store, {
@@ -1904,7 +1904,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const publisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver: async () => resolverResult,
+      chainProofResolver: async () => resolverResult,
       recoveryLookupTimeoutMs: 50,
     }), store, { now: clock, idGenerator: nextId });
 
@@ -1954,7 +1954,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const publisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver: async () => resolverResult,
+      chainProofResolver: async () => resolverResult,
       recoveryLookupTimeoutMs: 50,
     }), store, { now: clock, idGenerator: nextId });
 

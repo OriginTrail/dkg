@@ -176,13 +176,11 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'sendContractTransactionUnlocked',
   'parseV10PublishReceipt',
   'parseV9PublishReceipt',
-  // GH#2270 — TS-private receipt-only half of `resolvePublishTransaction`,
-  // shared with `resolvePublishByTxHash` so that cheaper path keeps its single
-  // RPC round trip. The PUBLIC `resolvePublishTransaction` IS mirrored on the
-  // mock; this helper is EVM receipt plumbing over
-  // `getTransactionReceiptWithFailover` — same category as the two parse
-  // helpers above.
-  'resolvePublishReceiptState',
+  // GH#2270 — TS-private single receipt read the three publish-resolution surfaces project from
+  // (`resolvePublishByTxHash`, `resolvePublishTransaction`, `resolveCanonicalFinalizationReceipt`).
+  // All three PUBLIC surfaces are mirrored on the mock; this is EVM receipt plumbing over
+  // `getTransactionReceiptWithFailover` — same category as the two parse helpers above.
+  'readPublishReceipt',
   // TS-private V10 TRAC-allowance helper backing publish/update. Encodes
   // the `chain.approvalPolicy` dispatch and the `transferFrom(..., 1n)`
   // floor; the mock has no ERC-20 allowance surface to mirror.

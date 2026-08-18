@@ -766,7 +766,7 @@ export interface V10PublishParams {
    * callers in TypeScript, so an `async () => ...` hook passed in
    * here would otherwise race the broadcast.
    */
-  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
+  onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
 }
 
 export interface V10UpdateKAParams {
@@ -817,7 +817,7 @@ export interface V10UpdateKAParams {
    * {@link V10PublishParams.onBroadcast} for full semantics
    * (fail-closed contract, exactly-once, Promise return, etc.).
    */
-  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
+  onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
 }
 
 /**
@@ -988,6 +988,27 @@ export interface OperationalWalletRegistrationResult {
 }
 
 /** Optional cancellation boundary for caller-owned, read-only chain work. */
+/**
+ * GH#2270 PR-3 — what the adapter knows about a transaction it has SIGNED and is about to send.
+ *
+ * Delivered to `onBeforeBroadcast`, awaited strictly before `eth_sendRawTransaction`, and
+ * fail-closed: a throw aborts the broadcast with the signed transaction still local, so a caller
+ * that could not make this durable never has a transaction on the wire.
+ *
+ * The shape lives in the chain package because the chain package is what produces it. It used to
+ * be smuggled to listeners as two parsed phase STRINGS, which made a durability guarantee depend
+ * on a naming convention, on emission order, and on nobody else claiming the same prefix.
+ */
+export interface PreBroadcastSignal {
+  /** The signed transaction's hash, known before it is sent. */
+  readonly txHash: string;
+  /**
+   * The account nonce the signed transaction reserved. Absent only when it could not be read —
+   * recovery treats that as "no proof of absence available" rather than guessing.
+   */
+  readonly nonce?: number;
+}
+
 export interface ChainReadOptions {
   signal?: AbortSignal;
 }
@@ -1120,6 +1141,25 @@ export interface ChainAdapter {
     address: string,
     options?: ChainReadOptions,
   ): Promise<number | null>;
+
+  /**
+   * GH#2270 PR-3 r2 — has this exact knowledge asset id already been minted? `true` / `false` /
+   * `null` when the chain could not say.
+   *
+   * Recovery needs this because nonce consumption proves only that a recorded transaction HASH can
+   * never mine — not that the publish did not happen. A same-calldata replacement (a fee bump from
+   * outside this process, a shared signer) consumes the same nonce slot AND performs the publish,
+   * and a lane that released on nonce evidence alone would re-run on top of it.
+   *
+   * Asking by IDENTITY closes that: the id a job would re-mint is fixed by its seal, so if it is
+   * already minted the publish happened, whoever sent it. `null` is the fail-closed answer for
+   * every ambiguity — an RPC error, an undeployed storage contract, a revert carrying data — and
+   * the caller keeps holding rather than guessing.
+   */
+  isKnowledgeAssetMinted?(
+    kaId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<boolean | null>;
 
   /**
    * Recovery-only receipt capability with mandatory canonical ordering.

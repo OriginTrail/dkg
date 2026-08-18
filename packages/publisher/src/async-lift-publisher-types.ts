@@ -356,6 +356,20 @@ export interface AsyncLiftChainProofLookup {
    * proven absence, because without it a null lookup is not proof.
    */
   readonly nonce?: number;
+  /**
+   * GH#2270 PR-3 r2 — the knowledge asset id a re-run of this job would mint, as a decimal string,
+   * when the job's request FIXES one.
+   *
+   * Nonce consumption proves the recorded transaction hash can never mine. It does NOT prove the
+   * publish did not happen: a same-calldata replacement (a fee bump from outside this process, a
+   * shared signer) consumes the same slot and performs the publish. This is what closes that —
+   * asking whether the identity is already on chain, rather than asking about a hash.
+   *
+   * Present only when the request pins the id (the seal's `reservedKaId`). A job that would
+   * allocate a FRESH id on re-run has no identity to check and therefore no safe release by
+   * absence: the resolver holds it instead.
+   */
+  readonly publishIdentityKaId?: string;
 }
 
 export type AsyncLiftPublisherRecoveryResolver = (
@@ -390,7 +404,15 @@ export interface AsyncLiftPublisherConfig {
   idGenerator?: () => string;
   /** Jitter source, injectable for determinism exactly like `now`/`idGenerator`. Defaults to Math.random. */
   rand?: () => number;
-  chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
+  /**
+   * GH#2270 PR-3 — the chain-proof resolver. RENAMED from `chainRecoveryResolver` in r2 along
+   * with its signature: it now takes an {@link AsyncLiftChainProofLookup} and answers a
+   * VERDICT, where the old field took a job and answered `result | null`. A config still
+   * carrying the old key is REJECTED at construction rather than ignored — see the constructor
+   * guard. Both changes are silent at runtime in JavaScript, and a publisher that quietly lost
+   * its resolver would hold every job forever with nothing to say why.
+   */
+  chainProofResolver?: AsyncLiftPublisherRecoveryResolver;
   knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
   knowledgeAssetVmPublishHandler?: AsyncKnowledgeAssetVmPublishJobHandler;

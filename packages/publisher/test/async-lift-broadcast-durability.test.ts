@@ -101,7 +101,7 @@ describe('async lift publisher broadcast durability', () => {
   function firesBroadcastThenStops(): NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler']> {
     return {
       execute: async (input) => {
-        await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+        await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
         throw new Error('stop after the durable write-ahead');
       },
     };
@@ -122,7 +122,7 @@ describe('async lift publisher broadcast durability', () => {
           // accepted (enqueue) / claimed (claimNext) / validated (update) have all
           // run by now and must not have fsync'd.
           flushCountBeforeBroadcast = flushCount;
-          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
           throw new Error('stop after the durable write-ahead');
         },
       },
@@ -219,7 +219,7 @@ describe('async lift publisher broadcast durability', () => {
         execute: async (input) => {
           try {
             // Records 'broadcast' (write-ahead) -> flush (rejects) -> rollback.
-            await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+            await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
           } catch (hookErr) {
             // Mirror the adapter's fail-closed rewrap (evm-adapter-base.ts:1609):
             // a rejected write-ahead hook aborts the broadcast, tx never sent.
@@ -366,7 +366,7 @@ describe('async lift publisher broadcast durability', () => {
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           try {
-            await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+            await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
           } catch (hookErr) {
             throw new Error(`chain:writeahead hook failed before publish broadcast: ${(hookErr as Error).message}`);
           }
@@ -396,7 +396,7 @@ describe('async lift publisher broadcast durability', () => {
   ): NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler']> {
     return {
       execute: async (input) => {
-        await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+        await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
         throw error;
       },
     };
@@ -616,8 +616,8 @@ describe('async lift publisher broadcast durability', () => {
   });
 
   // GH#2270 — the RAW LIFT path took no pre-send write-ahead at all. It handed
-  // `prepared.publishOptions` to the executor untouched, so the `chain:txsigned:tx-<hash>`
-  // breadcrumb the chain adapter fires with the SIGNED hash, strictly before the tx goes on
+  // `prepared.publishOptions` to the executor untouched, so the typed `onBeforeBroadcast` signal
+  // the chain adapter fires with the SIGNED transaction's identity, strictly before it goes on
   // the wire, had no listener. A daemon that died anywhere in the send window left the job at
   // 'validated' with nothing on disk naming the transaction: recover() reset it to 'accepted'
   // and the next attempt published the same content under a fresh hash while the first was
@@ -668,7 +668,7 @@ describe('async lift publisher broadcast durability', () => {
       txHash: string = TX_HASH,
     ): NonNullable<AsyncLiftPublisherConfig['publishExecutor']> {
       return async (input) => {
-        await input.publishOptions.onPhase?.(`chain:txsigned:tx-${txHash}`, 'start');
+        await input.publishOptions.onBeforeBroadcast?.({ txHash });
         throw new Error('stop after the durable write-ahead');
       };
     }
@@ -717,7 +717,7 @@ describe('async lift publisher broadcast durability', () => {
       let crashWindowJob: LiftJob | null = null;
       const publisher1 = createPublisher(store1, {
         publishExecutor: async (input) => {
-          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
           // The tx would be on the wire on the next line.
           crashWindowJob = await createPublisher(new OxigraphStore(persistPath)).getStatus(jobId);
           throw new Error('daemon died in the send window');
@@ -748,7 +748,7 @@ describe('async lift publisher broadcast durability', () => {
       const publisher = createPublisher(store, {
         publishExecutor: async (input) => {
           flushCountBeforeBroadcast = flushCount;
-          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
           throw new Error('stop after the durable write-ahead');
         },
       });
@@ -770,7 +770,7 @@ describe('async lift publisher broadcast durability', () => {
       const publisher = createPublisher(store, {
         publishExecutor: async (input) => {
           try {
-            await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+            await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
           } catch (hookErr) {
             // The adapter's fail-closed rewrap: a rejected write-ahead aborts the broadcast.
             throw new Error(
@@ -808,7 +808,7 @@ describe('async lift publisher broadcast durability', () => {
       // job finalizes through the pre-recorded 'broadcast' state rather than stalling in it.
       const publisher = createPublisher(store, {
         publishExecutor: async (input) => {
-          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
           return {
             kaId: 11n,
             ual: 'did:dkg:mock:31337/0xdef/11',
@@ -850,7 +850,7 @@ describe('async lift publisher broadcast durability', () => {
       expect(otherTx).not.toBe(TX_HASH);
       const publisher = createPublisher(store, {
         publishExecutor: async (input) => {
-          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
           return {
             kaId: 11n,
             ual: 'did:dkg:mock:31337/0xdef/11',
