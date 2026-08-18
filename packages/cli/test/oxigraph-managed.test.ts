@@ -52,6 +52,11 @@ const srv = http.createServer((req, res) => {
     res.end(JSON.stringify(args));
     return;
   }
+  if (req.url === '/pid') {
+    res.statusCode = 200;
+    res.end(String(process.pid));
+    return;
+  }
   res.statusCode = 200;
   res.setHeader('Content-Type', 'application/sparql-results+json');
   res.end(JSON.stringify({ head: {}, boolean: true }));
@@ -104,8 +109,10 @@ describe('planManagedOxigraph', () => {
     });
     expect(plan!.storeConfigTemplate).toEqual({
       backend: 'sparql-http',
-      options: { managedByDkg: true },
+      options: { managedByDkg: true, managedOxigraph: true, timeout: 30_000 },
     });
+    expect(plan!.queryTimeoutS).toBe(25);
+    expect(plan!.clientTimeoutMs).toBe(30_000);
   });
 
   it('honours operator overrides for port, location and cacheDir', () => {
@@ -139,7 +146,7 @@ describe('planManagedOxigraph', () => {
     expect(plan!.storeConfigTemplate.options.timeout).toBe(40_000);
   });
 
-  it('honours an independent HTTP client timeout without enabling the native Oxigraph timeout', () => {
+  it('derives a native Oxigraph deadline before a configured HTTP client timeout', () => {
     const plan = planManagedOxigraph(
       {
         store: {
@@ -149,7 +156,7 @@ describe('planManagedOxigraph', () => {
       },
       '/data',
     );
-    expect(plan!.queryTimeoutS).toBeUndefined();
+    expect(plan!.queryTimeoutS).toBe(175);
     expect(plan!.clientTimeoutMs).toBe(180_000);
     expect(plan!.storeConfigTemplate.options.timeout).toBe(180_000);
   });
@@ -167,6 +174,36 @@ describe('planManagedOxigraph', () => {
     expect(plan!.queryTimeoutS).toBe(35);
     expect(plan!.clientTimeoutMs).toBe(120_000);
     expect(plan!.storeConfigTemplate.options.timeout).toBe(120_000);
+  });
+
+  it('extends an unsafe client deadline so the native timeout fires first', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { queryTimeoutS: 35, clientTimeoutMs: 30_000 },
+        },
+      },
+      '/data',
+    );
+    expect(plan!.queryTimeoutS).toBe(35);
+    expect(plan!.clientTimeoutMs).toBe(40_000);
+    expect(plan!.storeConfigTemplate.options.timeout).toBe(40_000);
+  });
+
+  it('keeps even a very short configured client deadline behind a native timeout', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { clientTimeoutMs: 2_000 },
+        },
+      },
+      '/data',
+    );
+    expect(plan!.queryTimeoutS).toBe(1);
+    expect(plan!.clientTimeoutMs).toBe(6_000);
+    expect(plan!.storeConfigTemplate.options.timeout).toBe(6_000);
   });
 
   it('plans finite managed Oxigraph memory limits independently of the daemon service', () => {
@@ -216,7 +253,7 @@ describe('planManagedOxigraph', () => {
       },
       '/data',
     );
-    expect(plan!.queryTimeoutS).toBe(4_294_967);
+    expect(plan!.queryTimeoutS).toBe(2_147_478);
     expect(plan!.clientTimeoutMs).toBe(2_147_483_647);
     expect(plan!.storeConfigTemplate.options.timeout).toBe(2_147_483_647);
   });
@@ -231,11 +268,12 @@ describe('planManagedOxigraph', () => {
       },
       '/data',
     );
+    expect(plan!.queryTimeoutS).toBe(2_147_478);
     expect(plan!.clientTimeoutMs).toBe(2_147_483_647);
     expect(plan!.storeConfigTemplate.options.timeout).toBe(2_147_483_647);
   });
 
-  it('ignores invalid managed Oxigraph timeout options', () => {
+  it('falls back to safe managed Oxigraph deadlines for invalid timeout options', () => {
     const plan = planManagedOxigraph(
       {
         store: {
@@ -246,9 +284,13 @@ describe('planManagedOxigraph', () => {
       '/data',
     );
     expect(plan!.readyTimeoutMs).toBeUndefined();
-    expect(plan!.queryTimeoutS).toBeUndefined();
-    expect(plan!.clientTimeoutMs).toBeUndefined();
-    expect(plan!.storeConfigTemplate.options).toEqual({ managedByDkg: true });
+    expect(plan!.queryTimeoutS).toBe(25);
+    expect(plan!.clientTimeoutMs).toBe(30_000);
+    expect(plan!.storeConfigTemplate.options).toEqual({
+      managedByDkg: true,
+      managedOxigraph: true,
+      timeout: 30_000,
+    });
   });
 
   it('resolveManagedOxigraphPort rejects out-of-range values', () => {
@@ -393,6 +435,11 @@ async function fetchManagedArgs(port: number): Promise<string[]> {
   return await res.json() as string[];
 }
 
+async function fetchManagedPid(port: number): Promise<number> {
+  const res = await fetch(`http://127.0.0.1:${port}/pid`);
+  return Number(await res.text());
+}
+
 describe('startManagedOxigraph (real download + real server)', () => {
   it('returns null for non-managed backends', async () => {
     // Contract: a non-managed backend is a no-op — null result, and nothing
@@ -432,7 +479,7 @@ describe('startManagedOxigraph (real download + real server)', () => {
     }
   });
 
-  it('forwards an independent client timeout without passing --timeout-s to Oxigraph', async () => {
+  it('forwards the native deadline derived from a configured client timeout', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
     const port = await freePort();
 
@@ -451,7 +498,80 @@ describe('startManagedOxigraph (real download + real server)', () => {
       expect(result).not.toBeNull();
       expect(result!.storeConfig.options.timeout).toBe(180_000);
       const args = await fetchManagedArgs(port);
-      expect(args).not.toContain('--timeout-s');
+      const timeoutIndex = args.indexOf('--timeout-s');
+      expect(timeoutIndex).toBeGreaterThanOrEqual(0);
+      expect(args[timeoutIndex + 1]).toBe('175');
+    } finally {
+      await result?.handle.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('wires query and construct timeouts to recovery while filtering mutations', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
+    const port = await freePort();
+    const result = await startManagedOxigraph({
+      config: {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { port, readyTimeoutMs: 5_000 },
+        },
+      },
+      dataDir,
+      platform: 'freebsd',
+      log: () => {},
+    });
+    try {
+      const onClientTimeout = result!.storeConfig.options.onClientTimeout as (operation: string) => void;
+      const getRecoveryState = result!.storeConfig.options.getRecoveryState as () => {
+        recovering: boolean;
+        generation: number;
+      };
+      const pid1 = await fetchManagedPid(port);
+
+      onClientTimeout('insert');
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(await fetchManagedPid(port)).toBe(pid1);
+      expect(getRecoveryState().generation).toBe(0);
+
+      onClientTimeout('query');
+      // Ownership verification is asynchronous; an unverified request is not
+      // yet a recovery generation and must not be exposed as one.
+      expect(getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+      let pid2 = 0;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        try {
+          pid2 = await fetchManagedPid(port);
+          if (pid2 !== pid1) break;
+        } catch {
+          /* server is between processes */
+        }
+      }
+      expect(pid2).toBeGreaterThan(0);
+      expect(pid2).not.toBe(pid1);
+      for (let i = 0; i < 50 && getRecoveryState().recovering; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(getRecoveryState()).toEqual({ recovering: false, generation: 1 });
+
+      onClientTimeout('construct');
+      let pid3 = 0;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        try {
+          pid3 = await fetchManagedPid(port);
+          if (pid3 !== pid2) break;
+        } catch {
+          /* server is between processes */
+        }
+      }
+      expect(pid3).toBeGreaterThan(0);
+      expect(pid3).not.toBe(pid2);
+      for (let i = 0; i < 50 && getRecoveryState().recovering; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(getRecoveryState()).toEqual({ recovering: false, generation: 2 });
     } finally {
       await result?.handle.stop();
       await rm(dataDir, { recursive: true, force: true });
@@ -527,8 +647,12 @@ describe('startManagedOxigraph (real download + real server)', () => {
           backend: 'sparql-http',
           options: {
             managedByDkg: true,
+            managedOxigraph: true,
+            timeout: 30_000,
             queryEndpoint: `http://127.0.0.1:${port}/query`,
             updateEndpoint: `http://127.0.0.1:${port}/update`,
+            getRecoveryState: expect.any(Function),
+            onClientTimeout: expect.any(Function),
           },
         });
         expect(result!.largeLiteralStorage.directory).toBe(join(dataDir, 'literal-blobs'));

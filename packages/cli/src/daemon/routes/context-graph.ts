@@ -446,7 +446,7 @@ function respondReconcileError(res: ServerResponse, err: unknown): void {
 /**
  * Refuse to mint a new catch-up job because the daemon is shutting down.
  *
- * Shaped after `respondIfApiQueryStoreBusy` — retryable 503 plus `Retry-After`
+ * Shaped after `respondIfStoreUnavailable` — retryable 503 plus `Retry-After`
  * — because that is what this is: the request is fine, the node just cannot
  * take on new work it will never drain. Returned from BOTH mint sites, which
  * is why I7's `result` vocabulary needed a seventh value; a 503 that clamped

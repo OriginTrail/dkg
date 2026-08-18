@@ -39,6 +39,8 @@ import {
   isWritableQuad,
   validateQuadObjectTerms,
   respondIfReconcileUnavailable,
+  respondIfStoreUnavailable,
+  classifyStoreUnavailable,
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
   validateWritableQuadLiteralSizes,
@@ -226,6 +228,7 @@ function respondAssertionError(res: RequestContext["res"], e: any): void {
     jsonResponse(res, 413, payloadTooLargeResponseBody(e));
     return;
   }
+  if (respondIfStoreUnavailable(res, e)) return;
   if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
     jsonResponse(res, 409, {
       error: e.message,
@@ -1063,6 +1066,28 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       }
 
       const errors: Array<{ phase: string; error: string }> = [];
+      const respondWithPartialStoreFailure = (
+        error: unknown,
+        phase: 'swm-share' | 'vm-publish',
+      ): boolean => {
+        const classified = classifyStoreUnavailable(error);
+        if (!classified) return false;
+        jsonResponse(
+          res,
+          503,
+          {
+            created: true,
+            ...result,
+            phase,
+            ...classified.body,
+            retryAction: 'retry_same_knowledge_asset',
+            retryKnowledgeAssetName: name,
+          },
+          undefined,
+          { 'Retry-After': '1' },
+        );
+        return true;
+      };
       if (alsoShareSwm === true) {
         try {
           // Carry the same resolved author into the share. The asset is already
@@ -1088,6 +1113,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             recordActivityAndNotify(ctx, { contextGraphId: resolvedContextGraphId, kind: "promoted", actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
           }
         } catch (e: any) {
+          if (respondWithPartialStoreFailure(e, 'swm-share')) return;
           errors.push({ phase: "swm-share", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
       }
@@ -1120,6 +1146,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           }
           recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
         } catch (e: any) {
+          if (respondWithPartialStoreFailure(e, 'vm-publish')) return;
           errors.push({ phase: "vm-publish", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
       }
@@ -1132,6 +1159,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (e?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
       }
+      if (respondIfStoreUnavailable(res, e)) return;
       // Transient KA-number-floor reconcile failure (rate-limited RPC) -> 503.
       if (respondIfReconcileUnavailable(res, e)) return;
       return jsonResponse(res, 500, { error: e?.message ?? String(e) });
@@ -1719,6 +1747,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // relabel an author-selection failure whose message happens to contain
         // "is not finalized" as a generic VM_PUBLISH_PRECONDITION.
         if (respondAuthorSelectionError(res, e)) return;
+        if (respondIfStoreUnavailable(res, e)) return;
         if (e?.code === "PUBLISH_NOT_FULL_SHARE" || /is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {
           return jsonResponse(res, 409, { code: e?.code === "PUBLISH_NOT_FULL_SHARE" ? "PUBLISH_NOT_FULL_SHARE" : "VM_PUBLISH_PRECONDITION", error: msg });
         }

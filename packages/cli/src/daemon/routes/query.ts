@@ -72,7 +72,6 @@ import {
   LlmClient,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
-import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import {
   loadConfig,
   saveConfig,
@@ -228,6 +227,7 @@ import {
   deriveBlockExplorerUrl,
   classifyClientError,
   sanitizeRevertMessage,
+  respondIfStoreUnavailable,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -386,26 +386,6 @@ export function createApiQueryRequestLifecycle(
       res.removeListener('close', abortDisconnectedQuery);
     },
   };
-}
-
-/** Map retryable, pre-dispatch read shedding without changing write routes. */
-export function respondIfApiQueryStoreBusy(res: ServerResponse, err: unknown): boolean {
-  if (!(err instanceof StoreSchedulerBusyError)) return false;
-
-  jsonResponse(
-    res,
-    503,
-    {
-      error: err.message,
-      code: err.code,
-      reason: err.reason,
-      priority: err.priority,
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '1' },
-  );
-  return true;
 }
 
 function parseVerifyTimeoutMs(
@@ -707,11 +687,13 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         if (!res.writableEnded) res.end();
         return;
       }
-      if (respondIfApiQueryStoreBusy(res, err)) {
-        // Admission shedding means the operation never reached the store. Keep
-        // it visible with the scheduler reason, but do not count it as an
-        // execution failure in dashboard health rates.
-        tracker.cancel(ctx, err);
+      const storeUnavailableOutcome = respondIfStoreUnavailable(res, err);
+      if (storeUnavailableOutcome !== null) {
+        // Pre-dispatch shedding is a cancellation; a store deadline may have
+        // executed and remains an operation failure even though both map to a
+        // retryable 503 for the caller.
+        if (storeUnavailableOutcome === 'not_started') tracker.cancel(ctx, err);
+        else tracker.fail(ctx, err);
         return;
       }
       tracker.fail(ctx, err);
@@ -814,7 +796,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       );
       if (typeT) entityRdfType = typeT.o;
     } catch (err: any) {
-      if (respondIfApiQueryStoreBusy(res, err)) return;
+      if (respondIfStoreUnavailable(res, err) !== null) return;
       return jsonResponse(res, 500, {
         error: `Failed to fetch entity triples: ${err.message}`,
       });
