@@ -4990,3 +4990,48 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     expect(signSpy.calls).toEqual([]);
   });
 });
+
+/**
+ * GH#2270 PR-3 r1 — `getFinalizedAccountNonce` must read at the FINALIZED block.
+ *
+ * The block tag is the whole guarantee. Recovery releases a held job for a re-run when this nonce
+ * has moved past the slot the job's transaction reserved; read at `latest`, a reorg can undo that
+ * conclusion AFTER the resend has already gone out, which is the double publish the lane exists to
+ * prevent. Nothing else in the tree can see the tag — the mock adapter has no block tags at all
+ * and the recovery-side stubs are hand-written — so it is pinned here, at the one place the
+ * argument is actually passed.
+ */
+describe('EVMChainAdapter.getFinalizedAccountNonce [GH#2270]', () => {
+  const WALLET = '0x1111111111111111111111111111111111111111';
+
+  function adapterWith(getTransactionCount: (...args: any[]) => Promise<number>) {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.initialized = true;
+    a.init = async () => {};
+    a.providers = [{ getTransactionCount }];
+    return a;
+  }
+
+  it('asks for the nonce at the finalized block, never at latest', async () => {
+    const calls: any[][] = [];
+    const a = adapterWith(async (...args: any[]) => {
+      calls.push(args);
+      return 42;
+    });
+
+    await expect(a.getFinalizedAccountNonce(WALLET)).resolves.toBe(42);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![1]).toBe('finalized');
+    expect(calls[0]![1]).not.toBe('latest');
+  });
+
+  it('answers null when the endpoint cannot serve the finalized tag', async () => {
+    // Fail-closed: the caller reads null as "no proof" and keeps the job held. Falling back to a
+    // nearer block here would be worse than not answering.
+    const a = adapterWith(async () => {
+      throw new Error('unsupported block tag: finalized');
+    });
+
+    await expect(a.getFinalizedAccountNonce(WALLET)).resolves.toBeNull();
+  });
+});

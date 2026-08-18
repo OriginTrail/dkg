@@ -294,6 +294,7 @@ export {
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,
+  type AsyncLiftChainProofLookup,
   type AsyncLiftChainProofResolution,
   type VmPublishIntentRecoveryPublisher,
   type VmPublishIntentIndexBackfiller,

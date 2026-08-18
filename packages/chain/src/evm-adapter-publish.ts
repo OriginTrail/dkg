@@ -496,6 +496,29 @@ export class PublishMethods extends EVMChainAdapterBase {
   }
 
   /**
+   * GH#2270 PR-3 r1 — see {@link ChainAdapter.getFinalizedAccountNonce}.
+   *
+   * `null` on ANY failure, an endpoint that rejects the `finalized` tag included, because the
+   * caller reads `null` as "no proof" and keeps holding. Falling back to a `latest` nonce would
+   * hand recovery a conclusion a reorg can take back, which is the one thing this must not do.
+   */
+  async getFinalizedAccountNonce(
+    address: string,
+    options: ChainReadOptions = {},
+  ): Promise<number | null> {
+    await this.init();
+    try {
+      return await this.readProvider(
+        'finalized account nonce',
+        (provider) => provider.getTransactionCount(address, 'finalized'),
+        { signal: options.signal },
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Everything the RECEIPT alone can settle. `no-receipt` is deliberately not a
    * `PublishTransactionResolution` member: on its own it is not a chain fact
    * about the publish, and only the caller that follows it with a transaction

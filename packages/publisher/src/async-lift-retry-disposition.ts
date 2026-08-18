@@ -26,6 +26,10 @@ import {
 } from './async-lift-publisher-utils.js';
 import { getLiftJobFailurePolicy, isTerminalLiftJobState } from './lift-job.js';
 import type { LiftJob, LiftJobFailureCode } from './lift-job.js';
+// Type-only, and erased at emit — the reverse edge (types importing `LiftJobRetryProjection`
+// from here) is type-only too, so nothing circular survives into the JavaScript. The verdict
+// vocabulary stays defined once, beside the resolver contract that produces it.
+import type { AsyncLiftChainProofResolution } from './async-lift-publisher-types.js';
 
 /**
  * Might a transaction have been submitted for this job? Keyed on persisted EVIDENCE, never on the
@@ -346,4 +350,71 @@ export function deriveLiftJobRetryProjection(
 ): LiftJobRetryProjection {
   if (!isFailedJob(job)) return { autoRetryEligible: false };
   return describeRetryProjection(job, options);
+}
+
+/**
+ * GH#2270 PR-3 — what the dispatcher DOES with one held job once the chain has answered.
+ *
+ * The command, not the effect. Persistence, wallet locks and journal writes stay in the publisher;
+ * what is decided here is the mapping from a chain fact to a disposition, which is failed-job
+ * policy and belongs beside the predicates that define the hold in the first place. Splitting it
+ * out is also what makes the decision testable without a store: every row below is a pure
+ * (job, verdict) pair.
+ */
+export type ChainProofDisposition =
+  /** The chain carries the publish. Finalize this job from the evidence the verdict carries. */
+  | { readonly action: 'finalize' }
+  /**
+   * Nothing of this job's is on chain. Release it for a re-run under the same jobId, through the
+   * evidence-preserving reset — proven absence, or a revert of a transaction some EARLIER attempt
+   * sent (this job failed before signing anything of its own).
+   */
+  | { readonly action: 'reset' }
+  /**
+   * This job's OWN transaction reverted. Re-record it as `tx_reverted`: the registry's
+   * proven-ineffective verdict releases the hold through {@link isProvenIneffectiveLiftFailure},
+   * and the job stays terminal rather than being re-run on the node's money.
+   */
+  | { readonly action: 'refail_reverted'; readonly failedFromState: 'broadcast' | 'included' }
+  /** Nothing was established. Keep holding; the next pass asks again. */
+  | { readonly action: 'hold' };
+
+/**
+ * The dispatcher's decision table, over the job and the chain's verdict alone.
+ *
+ * `reverted` is the only verdict whose disposition depends on the JOB, and the question it asks is
+ * whose transaction reverted. A job that failed from 'broadcast'/'included' signed that one
+ * itself, so `tx_reverted` is a true statement about it and releases the hold the registry's way.
+ * A job holding an INHERITED hash failed before signing anything — the reverted transaction
+ * belongs to an earlier attempt, `LIFT_JOB_FAILURE_ALLOWED_STATES` rejects `tx_reverted` from a
+ * pre-send state for exactly that reason, and the honest release is the same reset a proven
+ * absence gets.
+ *
+ * `unrecognized` sits with `pending`/`inconclusive` and not with the absences: a mined transaction
+ * carrying no publish this adapter can parse is a fact about THAT transaction, not proof that no
+ * publish happened — an adapter with unwired publish contracts lands there too.
+ */
+export function decideChainProofDisposition(
+  job: PersistedFailedJob,
+  verdict: AsyncLiftChainProofResolution['status'],
+): ChainProofDisposition {
+  switch (verdict) {
+    case 'recovered':
+      return { action: 'finalize' };
+    case 'not-found':
+      return { action: 'reset' };
+    case 'reverted':
+      return job.failure.failedFromState === 'broadcast' || job.failure.failedFromState === 'included'
+        ? { action: 'refail_reverted', failedFromState: job.failure.failedFromState }
+        : { action: 'reset' };
+    case 'pending':
+    case 'unrecognized':
+    case 'inconclusive':
+      return { action: 'hold' };
+    default: {
+      // A new verdict must choose its disposition here rather than inherit a silent hold.
+      const unhandled: never = verdict;
+      return unhandled;
+    }
+  }
 }

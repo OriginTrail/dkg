@@ -1105,6 +1105,23 @@ export interface ChainAdapter {
   ): Promise<PublishTransactionResolution>;
 
   /**
+   * GH#2270 PR-3 — the account nonce of `address` as of the latest FINALIZED block, or `null` when
+   * this deployment cannot answer that question (no finalized tag, an endpoint that rejects it, a
+   * chain with no finality notion).
+   *
+   * `finalized` is load-bearing, not an optimisation. Recovery uses this to prove a transaction can
+   * NEVER mine: if the wallet's nonce has moved past the slot a signed transaction reserved, and
+   * that transaction is still not on chain, something else spent the slot and this one is
+   * permanently unminable. Read at `latest` that conclusion can be reorged away, and the job would
+   * be resent while the original is still viable — so a deployment that cannot serve `finalized`
+   * must answer `null` and leave recovery holding rather than guess from a nearer block.
+   */
+  getFinalizedAccountNonce?(
+    address: string,
+    options?: ChainReadOptions,
+  ): Promise<number | null>;
+
+  /**
    * Recovery-only receipt capability with mandatory canonical ordering.
    * Adapters that omit it are explicitly unsupported for durable graph-scoped
    * finalization recovery; callers must not fabricate missing fields.

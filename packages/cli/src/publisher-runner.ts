@@ -31,6 +31,7 @@ import {
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type AsyncLiftChainProofLookup,
   type AsyncLiftChainProofResolution,
   type AsyncLiftPublisherRecoveryResult,
   type VmPublisherControl,
@@ -784,12 +785,22 @@ export function hasChainPublishLookup(publisher: DKGPublisher): boolean {
  *
  * The publisher holds forever on `inconclusive`, so an unknown that leaked in here as `not-found`
  * would become a resend of a transaction that may be in flight.
+ *
+ * PR-3 r1 — and the adapter's own `not-found` is NOT one of those establishings. A transaction
+ * lookup is point-in-time and backend-local: a broadcast whose response timed out can be sitting
+ * in a mempool this endpoint cannot see, and be mined a minute later. `not-found` is therefore
+ * EARNED here, from nonce consumption at finality, or it is downgraded.
  */
 export function createChainProofResolver(
   publishers: Map<string, DKGPublisher>,
-): (job: LiftJobBroadcast | LiftJobIncluded) => Promise<AsyncLiftChainProofResolution> {
-  return async (job) => {
-    const resolution = await resolvePublishTransactionState(job, publishers);
+): (lookup: AsyncLiftChainProofLookup) => Promise<AsyncLiftChainProofResolution> {
+  return async (lookup) => {
+    const resolution = await resolvePublishTransactionState(lookup, publishers);
+    if (resolution.status === 'not-found') {
+      return await isNonceProvenConsumed(lookup, publishers)
+        ? { status: 'not-found' }
+        : { status: 'inconclusive' };
+    }
     if (resolution.status !== 'confirmed') return resolution;
     const recovery = await mapConfirmedPublishToLiftRecovery(resolution.publish, resolution.chain);
     // The chain confirmed a publish this node cannot turn into recovery evidence
@@ -798,6 +809,41 @@ export function createChainProofResolver(
     // absence.
     return recovery ? { status: 'recovered', recovery } : { status: 'inconclusive' };
   };
+}
+
+/**
+ * GH#2270 PR-3 r1 — is this transaction PROVABLY unable to mine?
+ *
+ * The adapter has just told us it cannot find the transaction. On its own that means nothing: the
+ * lookup is a point-in-time answer from one backend, and the classic loss case is a broadcast
+ * whose HTTP response timed out while the node accepted it anyway. Treating that as absence is how
+ * a job gets resent while its first transaction is still perfectly capable of mining.
+ *
+ * What settles it is the nonce. Every signed transaction reserves one slot on its wallet, and the
+ * pre-send write-ahead records which. If the wallet's account nonce at a FINALIZED block is
+ * strictly greater than that slot, then the slot has been spent — and since the transaction is not
+ * on chain, it was spent by something ELSE. It can never mine now, and a resend is safe.
+ *
+ * Every gap is fail-closed: no recorded nonce (records written before the field existed, and
+ * inherited hashes, which name a transaction some earlier attempt signed), no adapter support for
+ * the read, an endpoint that cannot serve `finalized`, or a read that throws — all answer `false`,
+ * and the job keeps its hold and its operator exit.
+ */
+async function isNonceProvenConsumed(
+  lookup: AsyncLiftChainProofLookup,
+  publishers: Map<string, DKGPublisher>,
+): Promise<boolean> {
+  if (lookup.nonce === undefined) return false;
+  const chain = (publishers.get(lookup.walletId) as unknown as { chain?: ChainAdapter } | undefined)?.chain;
+  if (!chain?.getFinalizedAccountNonce) return false;
+  try {
+    const finalizedNonce = await chain.getFinalizedAccountNonce(lookup.walletId);
+    // `getTransactionCount` is the NEXT nonce, so `> lookup.nonce` means this slot is behind the
+    // finalized frontier. Equality is not enough: the slot is still the next one to be used.
+    return finalizedNonce !== null && finalizedNonce > lookup.nonce;
+  } catch {
+    return false;
+  }
 }
 
 export function createKnowledgeAssetVmPublishRecoveryResolver(
@@ -965,26 +1011,26 @@ function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
  * that cannot see the mempool can never authorise a resend.
  */
 async function resolvePublishTransactionState(
-  job: LiftJobBroadcast | LiftJobIncluded,
+  lookup: AsyncLiftChainProofLookup,
   publishers: Map<string, DKGPublisher>,
 ): Promise<
   | { status: 'confirmed'; publish: OnChainPublishResult; chain: ChainAdapter }
   | Exclude<AsyncLiftChainProofResolution, { status: 'recovered' }>
 > {
-  const publisher = publishers.get(job.broadcast.walletId);
+  const publisher = publishers.get(lookup.walletId);
   if (!publisher) return { status: 'inconclusive' };
   const chain = (publisher as unknown as { chain?: ChainAdapter }).chain;
   if (!chain) return { status: 'inconclusive' };
 
   try {
     if (chain.resolvePublishTransaction) {
-      const resolution = await chain.resolvePublishTransaction(job.broadcast.txHash);
+      const resolution = await chain.resolvePublishTransaction(lookup.txHash);
       return resolution.status === 'confirmed'
         ? { status: 'confirmed', publish: resolution.publish, chain }
         : resolution;
     }
     if (!chain.resolvePublishByTxHash) return { status: 'inconclusive' };
-    const publish = await chain.resolvePublishByTxHash(job.broadcast.txHash);
+    const publish = await chain.resolvePublishByTxHash(lookup.txHash);
     return publish ? { status: 'confirmed', publish, chain } : { status: 'inconclusive' };
   } catch {
     // Transient RPC/provider errors establish nothing — report that rather than

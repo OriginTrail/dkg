@@ -246,6 +246,21 @@ export interface LiftJobBroadcastMetadata {
   readonly walletId: string;
   readonly merkleRoot?: LiftJobHex;
   readonly publicByteSize?: number;
+  /**
+   * GH#2270 PR-3 — the account nonce the signed transaction reserved, written in the same pre-send
+   * write-ahead as `txHash`.
+   *
+   * This is what lets recovery PROVE absence. A null transaction lookup is point-in-time and
+   * backend-local: a broadcast whose response timed out can still be accepted and mined later, so
+   * "the node does not have it" is never on its own proof that nothing published. Once this slot
+   * is spent at a FINALIZED block and the transaction is still missing, it can never mine — that
+   * is proof, and it is the only thing that releases a held job by absence.
+   *
+   * Optional because it is only as available as the signing path makes it: records written before
+   * this field existed, and any signed transaction whose nonce could not be parsed, carry none.
+   * Recovery reads a missing nonce as no proof and keeps holding.
+   */
+  readonly nonce?: number;
 }
 
 export interface LiftJobInclusionMetadata {
