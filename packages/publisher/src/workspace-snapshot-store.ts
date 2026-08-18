@@ -22,7 +22,7 @@ export interface SharedMemoryPublicSnapshotStorageConfig {
 }
 
 export interface SharedMemoryPublicSnapshotGarbageCollectionConfig {
-  /** Disabled by default so operators opt in to the v1 age-based policy. */
+  /** Enabled by default. Set false to opt out of the v1 age-based policy. */
   enabled?: boolean;
   /** How often the background pressure check runs. Default: 5 minutes. */
   intervalMs?: number;
@@ -53,8 +53,13 @@ export interface SnapshotGarbageCollectionResult {
 export interface FileWorkspacePublicSnapshotStoreOptions {
   readonly gc?: SharedMemoryPublicSnapshotGarbageCollectionConfig;
   readonly log?: (message: string) => void;
-  /** Test seam; production callers use statfs(2). */
+  /** Test seam; production callers use statfs(2). Prefer getFilesystemSpace. */
   readonly getAvailableBytes?: (directory: string) => Promise<number>;
+  /** Test seam for capacity-aware default watermarks; production callers use statfs(2). */
+  readonly getFilesystemSpace?: (directory: string) => Promise<{
+    readonly availableBytes: number;
+    readonly totalBytes: number;
+  }>;
   /** Test seam; production callers use Date.now(). */
   readonly now?: () => number;
 }
@@ -104,12 +109,14 @@ const DEFAULT_SNAPSHOT_GC_TARGET_FREE_BYTES = 25 * GIB;
 const DEFAULT_SNAPSHOT_GC_HARD_RESERVE_BYTES = 5 * GIB;
 const DEFAULT_SNAPSHOT_GC_MIN_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 const DEFAULT_SNAPSHOT_GC_STALE_TEMP_AGE_MS = 60 * 60 * 1_000;
+const DEFAULT_SNAPSHOT_GC_REFERENCE_FILESYSTEM_BYTES = 75 * GIB;
 const SNAPSHOT_FILE_PATTERN = /^([a-f0-9]{64})\.(?:nq|json)$/i;
 const SNAPSHOT_TEMP_FILE_PATTERN = /^([a-f0-9]{64})\.(?:nq|json)\.\d+\.\d+\.tmp$/i;
 const SNAPSHOT_FILE_STAT_CONCURRENCY = 64;
 
 interface ResolvedSnapshotGarbageCollectionConfig {
   enabled: boolean;
+  scaleDefaultWatermarksToFilesystem: boolean;
   intervalMs: number;
   triggerFreeBytes: number;
   targetFreeBytes: number;
@@ -169,7 +176,10 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
   private readonly activeSnapshots = new Map<string, number>();
   private readonly gcConfig: ResolvedSnapshotGarbageCollectionConfig;
   private readonly log?: (message: string) => void;
-  private readonly getAvailableBytes: (directory: string) => Promise<number>;
+  private readonly getFilesystemSpace: (directory: string) => Promise<{
+    readonly availableBytes: number;
+    readonly totalBytes: number;
+  }>;
   private readonly now: () => number;
   private readonly gcTimer?: NodeJS.Timeout;
   private garbageCollectionRun?: Promise<SnapshotGarbageCollectionResult>;
@@ -182,7 +192,14 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
   ) {
     this.gcConfig = resolveSnapshotGarbageCollectionConfig(options.gc);
     this.log = options.log;
-    this.getAvailableBytes = options.getAvailableBytes ?? filesystemAvailableBytes;
+    const getAvailableBytes = options.getAvailableBytes;
+    this.getFilesystemSpace = options.getFilesystemSpace
+      ?? (getAvailableBytes
+        ? async (path) => ({
+          availableBytes: await getAvailableBytes(path),
+          totalBytes: DEFAULT_SNAPSHOT_GC_REFERENCE_FILESYSTEM_BYTES,
+        })
+        : filesystemSpace);
     this.now = options.now ?? Date.now;
     if (this.gcConfig.enabled) {
       this.gcTimer = setInterval(() => {
@@ -381,7 +398,12 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     requiredWriteBytes: number,
   ): Promise<SnapshotGarbageCollectionResult> {
     await mkdir(this.directory, { recursive: true });
-    const availableBytesBefore = await this.getAvailableBytes(this.directory);
+    const filesystem = await this.getFilesystemSpace(this.directory);
+    const availableBytesBefore = filesystem.availableBytes;
+    const watermarks = snapshotGarbageCollectionWatermarks(
+      this.gcConfig,
+      filesystem.totalBytes,
+    );
     let availableBytesAfter = availableBytesBefore;
     let deletedSnapshots = 0;
     let deletedSnapshotBytes = 0;
@@ -412,12 +434,12 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
       }
     }
 
-    const triggered = availableBytesBefore < this.gcConfig.triggerFreeBytes
-      || availableBytesBefore - requiredWriteBytes < this.gcConfig.hardReserveBytes;
+    const triggered = availableBytesBefore < watermarks.triggerFreeBytes
+      || availableBytesBefore - requiredWriteBytes < watermarks.hardReserveBytes;
     if (triggered) {
       const targetAvailableBytes = Math.max(
-        this.gcConfig.targetFreeBytes,
-        this.gcConfig.hardReserveBytes + requiredWriteBytes,
+        watermarks.targetFreeBytes,
+        watermarks.hardReserveBytes + requiredWriteBytes,
       );
       const snapshotFiles = files.filter((file) => SNAPSHOT_FILE_PATTERN.test(file.name));
       const candidates = await statSnapshotStoreFiles(
@@ -461,9 +483,14 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
 
   private async ensureWriteCapacity(requiredWriteBytes: number): Promise<void> {
     if (!this.gcConfig.enabled) return;
-    const availableBytes = await this.getAvailableBytes(this.directory);
-    const needsCollection = availableBytes < this.gcConfig.triggerFreeBytes
-      || availableBytes - requiredWriteBytes < this.gcConfig.hardReserveBytes;
+    const filesystem = await this.getFilesystemSpace(this.directory);
+    const availableBytes = filesystem.availableBytes;
+    const watermarks = snapshotGarbageCollectionWatermarks(
+      this.gcConfig,
+      filesystem.totalBytes,
+    );
+    const needsCollection = availableBytes < watermarks.triggerFreeBytes
+      || availableBytes - requiredWriteBytes < watermarks.hardReserveBytes;
     const result = needsCollection
       ? await this.collectGarbage({ requiredWriteBytes })
       : undefined;
@@ -471,13 +498,13 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     // sizes: an unlinked file held open by another process may not have
     // released its blocks yet.
     const availableAfterCollection = result
-      ? await this.getAvailableBytes(this.directory)
+      ? (await this.getFilesystemSpace(this.directory)).availableBytes
       : availableBytes;
-    if (availableAfterCollection - requiredWriteBytes < this.gcConfig.hardReserveBytes) {
+    if (availableAfterCollection - requiredWriteBytes < watermarks.hardReserveBytes) {
       throw new SnapshotStorageCapacityError(
         availableAfterCollection,
         requiredWriteBytes,
-        this.gcConfig.hardReserveBytes,
+        watermarks.hardReserveBytes,
       );
     }
     if (
@@ -639,12 +666,15 @@ function snapshotPath(directory: string, hash: string, extension: 'json' | 'nq')
 function resolveSnapshotGarbageCollectionConfig(
   config: SharedMemoryPublicSnapshotGarbageCollectionConfig | undefined,
 ): ResolvedSnapshotGarbageCollectionConfig {
-  const enabled = config?.enabled ?? false;
+  const enabled = config?.enabled ?? true;
   if (typeof enabled !== 'boolean') {
     throw new Error('sharedMemoryPublicSnapshotStorage.gc.enabled must be a boolean');
   }
   const resolved = {
     enabled,
+    scaleDefaultWatermarksToFilesystem: config?.triggerFreeBytes === undefined
+      && config?.targetFreeBytes === undefined
+      && config?.hardReserveBytes === undefined,
     intervalMs: snapshotGcInteger(
       config?.intervalMs,
       DEFAULT_SNAPSHOT_GC_INTERVAL_MS,
@@ -695,6 +725,31 @@ function resolveSnapshotGarbageCollectionConfig(
   return resolved;
 }
 
+function snapshotGarbageCollectionWatermarks(
+  config: ResolvedSnapshotGarbageCollectionConfig,
+  totalBytes: number,
+): Pick<
+  ResolvedSnapshotGarbageCollectionConfig,
+  'triggerFreeBytes' | 'targetFreeBytes' | 'hardReserveBytes'
+> {
+  if (!config.scaleDefaultWatermarksToFilesystem) return config;
+  const safeTotalBytes = Math.max(1, Math.floor(totalBytes));
+  const triggerFreeBytes = Math.max(
+    1,
+    Math.min(config.triggerFreeBytes, Math.floor(safeTotalBytes / 5)),
+  );
+  const targetFreeBytes = Math.max(
+    triggerFreeBytes,
+    Math.min(config.targetFreeBytes, Math.floor(safeTotalBytes / 3)),
+  );
+  const hardReserveBytes = Math.min(
+    triggerFreeBytes - 1,
+    config.hardReserveBytes,
+    Math.floor(safeTotalBytes / 15),
+  );
+  return { triggerFreeBytes, targetFreeBytes, hardReserveBytes };
+}
+
 function snapshotGcInteger(
   value: number | undefined,
   defaultValue: number,
@@ -710,9 +765,15 @@ function snapshotGcInteger(
   return resolved;
 }
 
-async function filesystemAvailableBytes(directory: string): Promise<number> {
+async function filesystemSpace(directory: string): Promise<{
+  readonly availableBytes: number;
+  readonly totalBytes: number;
+}> {
   const filesystem = await statfs(directory);
-  return filesystem.bavail * filesystem.bsize;
+  return {
+    availableBytes: filesystem.bavail * filesystem.bsize,
+    totalBytes: filesystem.blocks * filesystem.bsize,
+  };
 }
 
 async function existingFileSize(filePath: string): Promise<number | null> {

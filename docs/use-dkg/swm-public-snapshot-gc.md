@@ -1,9 +1,10 @@
 # SWM public snapshot garbage collection
 
-The file-backed shared-memory (SWM) public snapshot store supports an opt-in,
-pressure-based garbage collector. GC v1 is an incident guardrail: it bounds disk
-growth using file age and free-space watermarks. It does not inspect RDF
-references or replication proofs.
+The file-backed shared-memory (SWM) public snapshot store enables a
+pressure-based garbage collector by default. GC v1 is an incident guardrail: it
+bounds disk growth using file age and free-space watermarks. It does not inspect
+RDF references or replication proofs. Set `gc.enabled` to `false` for an
+explicit per-node opt-out.
 
 ## Recommended 75 GiB node configuration
 
@@ -25,7 +26,7 @@ references or replication proofs.
 }
 ```
 
-GC is disabled unless `gc.enabled` is `true`. When enabled, the store:
+GC is enabled unless `gc.enabled` is `false`. When enabled, the store:
 
 1. Checks the snapshot filesystem every `intervalMs` and before a write that
    could cross a watermark.
@@ -40,9 +41,11 @@ GC is disabled unless `gc.enabled` is `true`. When enabled, the store:
 
 The hard reserve protects the triple store and other node state from an
 `ENOSPC` cascade. It should be lower than the trigger; the target should be at
-least as high as the trigger. Defaults are 5 GiB, 15 GiB, and 25 GiB
-respectively, but operators must size them for the filesystem hosting the
-configured snapshot directory.
+least as high as the trigger. On filesystems of 75 GiB or more, the automatic
+defaults are a 5 GiB reserve, 15 GiB trigger, and 25 GiB target. On smaller
+filesystems, all three automatic watermarks scale together to 1/15, 1/5, and
+1/3 of total filesystem capacity. Supplying any watermark opts into fixed byte
+values, with omitted watermarks retaining their unscaled defaults.
 
 ## V1 safety boundary
 
