@@ -126,7 +126,7 @@ and the omission is logged as bug #12.
 | Purchases | 4 legs, all countersigned (4/0/0): three ⛓ inferences 258 µ + 258 µ + 240 µ + metered query 5 µ = **761 µ** |
 | Close | digest `sha256:694fb6ba497b8c63…3ce5b98db0`, 2026-08-17 14:02 UTC |
 | Conservation | `1,000,000 = 761 + 999,239 + 0` |
-| Refund | **OUTSTANDING at re-stamp time** — never broadcast (proven by full on-chain transfer scan from block 50090000). His deposit was commingled into okf's operational wallet and consumed by routine publish fees. Refund of exactly 999,239 µ okf → `0x8A87ea7c…` is operator-gated and ARMED, pending a wallet top-up in flight |
+| Refund | **BROADCAST + verified 2026-08-19** — exactly 999,239 µ, tx `0x3866aeb707566e81…b60e49f85b`, Base block 50151367, status 1; landed to the µ (his wallet +0.999239 exact). Was outstanding for two days after his close: never broadcast (proven by full on-chain transfer scan), deposit commingled into okf's ops wallet and consumed by publish fees. Operator-gated after his 40 TRAC ops top-up funded the wallet; release journaled against the close digest |
 
 ## 4. The counterparty as adversarial verifier — the defect ledger
 
@@ -177,8 +177,11 @@ Highlights:
   An earlier edition of this row claimed the *full* money circle was closed
   — **that claim was false**: Act C's 999,239 µ refund to Hermes was still
   outstanding and this report didn't even record the act. Second re-stamp
-  same day; the corrected refund is armed behind its operator gate (see
-  Act C). The circle is closed only when that tx lands.
+  same day; third re-stamp 2026-08-19: Act C's refund broadcast and
+  verified (tx `0x3866aeb7…`, block 50151367). **The money circle is now
+  closed for every funded tab** — three engagements, three exact refunds,
+  each side keeping only countersigned earnings: okf 1,615 µ (Acts B+C),
+  Hermes 761 µ (Act A).
 - **KA edit flow** — okf's v3-era offering KAs still lack `modelRef`; a
   republish would rightly refuse (`E_PUBLISH_STALE_KA`). The catalog shows
   them as legacy-grouped cards. Editing finalized KAs is real future work.
