@@ -75,6 +75,8 @@ interface Mounted {
   configDigestish: string;
 }
 let mounted: Mounted | null = null;
+let mountInFlight: Promise<Mounted> | null = null;   // single-flight: concurrent
+// requests during a mount must NOT each start hashing multi-GB weights
 let laneStarted = false;
 
 async function mount(cfg: MarketplaceConfig, ctx: RequestContext, log: (l: string) => void): Promise<Mounted> {
@@ -218,7 +220,11 @@ export const plugin: RoutePlugin = {
     const log = (line: string) => console.log(`[marketplace] ${line}`);
     const digestish = JSON.stringify([cfg.enabled, cfg.offerings.length, cfg.providerAddress ?? null, cfg.apiBase ?? null, cfg.rpcUrl ?? null, buyerCfgStamp()]);
     if (!mounted || mounted.configDigestish !== digestish) {
-      mounted = await mount(cfg, ctx, log);
+      // single-flight: N concurrent requests during a (re)mount must share ONE
+      // mount — parallel mounts each hashed the multi-GB GGUF and starved the
+      // event loop until health probes aborted (okf 14B, live)
+      if (!mountInFlight) mountInFlight = mount(cfg, ctx, log).finally(() => { mountInFlight = null; });
+      mounted = await mountInFlight;
     }
 
     // ── SWM lane executor (DKG-native transport): start once, on the first

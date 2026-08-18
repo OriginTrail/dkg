@@ -42,7 +42,9 @@ export async function connectLlamaCpp(cfg: LlamaCppConnectorConfig): Promise<Lla
   if (!existsSync(cfg.tokenizerDir)) throw new Error(`E_CONNECTOR_TOKENIZER_ABSENT: ${cfg.tokenizerDir}`);
 
   // health + identity from the server itself
-  const res = await fetch(cfg.baseUrl.replace(/\/$/, "") + "/v1/models", { signal: AbortSignal.timeout(5000) });
+  // 30s: a 5s probe aborted spuriously while a concurrent mount hashed a
+  // 9 GB GGUF on the same event loop (okf 14B mount failure, live)
+  const res = await fetch(cfg.baseUrl.replace(/\/$/, "") + "/v1/models", { signal: AbortSignal.timeout(30_000) });
   if (!res.ok) throw new Error(`E_CONNECTOR_UNHEALTHY: /v1/models → ${res.status}`);
   const body = (await res.json()) as { data?: Array<{ id?: string }> };
   // llama.cpp reports the model file path as the id — never leak local paths
