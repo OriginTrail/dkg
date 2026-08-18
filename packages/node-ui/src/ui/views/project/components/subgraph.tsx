@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useCallback, useEffect, Suspense } from 'react';
-import { executeQuery, type SubGraphInfo } from '../../../api.js';
+import { executeQuery, type QueryExecutionView, type SubGraphInfo } from '../../../api.js';
 // PR #2131 review — route through api-wrapper so the cards resolve in mock
 // mode (see SubGraphBar.tsx). `withFallback` only diverts when mock mode is
 // latched, so a real transient failure still rejects into `setFetchError`.
@@ -1407,12 +1407,18 @@ export function SubGraphDetailView({
     setQueryError(null);
   }, []);
 
-  const runQuery = useCallback(async (q: { slug: string; sparql: string; resultColumn: string; name: string }) => {
+  const runQuery = useCallback(async (q: {
+    slug: string;
+    sparql: string;
+    resultColumn: string;
+    name: string;
+    view?: QueryExecutionView;
+  }) => {
     setQueryLoading(true);
     setQueryError(null);
     setActiveQuerySlug(q.slug);
     try {
-      const r = await executeQuery(q.sparql, contextGraphId);
+      const r = await executeQuery(q.sparql, contextGraphId, undefined, undefined, q.view);
       const bindings = (r as any)?.result?.bindings ?? [];
       const col = q.resultColumn || 'uri';
       const ids = new Set<string>();
