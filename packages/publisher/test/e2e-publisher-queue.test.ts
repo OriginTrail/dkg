@@ -10,7 +10,7 @@
  * 7. Stats reflect live queue state
  * 8. Wallet lock contention — two wallets claim independently
  * 9. Recovery from broadcast state when chainRecoveryResolver succeeds
- * 10. Recovery from broadcast state when chainRecoveryResolver returns null → fails
+ * 10. Recovery from broadcast state when the chain-proof verdict stays inconclusive → fails
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -20,7 +20,7 @@ import {
   DKGPublisher,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
-  type AsyncLiftPublisherRecoveryResult,
+  type AsyncLiftChainProofResolution,
   type LiftRequest,
 } from '../src/index.js';
 import { withLegacyRawLiftTestSeeder } from './_helpers/legacy-raw-lift.js';
@@ -51,17 +51,16 @@ describe('Async Lift Publisher Queue — E2E Pipeline', () => {
   });
 
   function create(opts: {
-    recoveryResult?: AsyncLiftPublisherRecoveryResult | null;
+    chainProof?: AsyncLiftChainProofResolution;
     publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   } = {}) {
     const clock = () => ++time;
     const nextId = () => `job-${++ids}`;
+    const chainProof = opts.chainProof;
     const publisher = new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver: opts.recoveryResult === undefined
-        ? undefined
-        : async () => opts.recoveryResult ?? null,
+      chainRecoveryResolver: chainProof === undefined ? undefined : async () => chainProof,
       publishExecutor: opts.publishExecutor,
     });
     return withLegacyRawLiftTestSeeder(publisher, store, {
@@ -342,15 +341,14 @@ describe('Async Lift Publisher Queue — Recovery', () => {
     ids = 0;
   });
 
-  function create(opts: { recoveryResult?: AsyncLiftPublisherRecoveryResult | null } = {}) {
+  function create(opts: { chainProof?: AsyncLiftChainProofResolution } = {}) {
     const clock = () => ++time;
     const nextId = () => `job-${++ids}`;
+    const chainProof = opts.chainProof;
     const publisher = new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver: opts.recoveryResult === undefined
-        ? undefined
-        : async () => opts.recoveryResult ?? null,
+      chainRecoveryResolver: chainProof === undefined ? undefined : async () => chainProof,
     });
     return withLegacyRawLiftTestSeeder(publisher, store, {
       now: clock,
@@ -360,9 +358,12 @@ describe('Async Lift Publisher Queue — Recovery', () => {
 
   it('recover finalizes broadcast jobs when resolver succeeds', async () => {
     const pub = create({
-      recoveryResult: {
-        inclusion: { txHash: '0xrecovered' as `0x${string}`, blockNumber: 100 },
-        finalization: { mode: 'published', txHash: '0xrecovered' as `0x${string}` },
+      chainProof: {
+        status: 'recovered',
+        recovery: {
+          inclusion: { txHash: '0xrecovered' as `0x${string}`, blockNumber: 100 },
+          finalization: { mode: 'published', txHash: '0xrecovered' as `0x${string}` },
+        },
       },
     });
 
@@ -379,7 +380,7 @@ describe('Async Lift Publisher Queue — Recovery', () => {
   });
 
   it('recover fails broadcast jobs when resolver returns null and timeout elapses', async () => {
-    const pub = create({ recoveryResult: null });
+    const pub = create({ chainProof: { status: 'inconclusive' } });
 
     const jobId = await pub.seedLegacyRawLift(makeLiftRequest());
     await pub.claimNext('wallet-1');

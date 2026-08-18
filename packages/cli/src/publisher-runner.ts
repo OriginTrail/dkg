@@ -31,6 +31,7 @@ import {
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type AsyncLiftChainProofResolution,
   type AsyncLiftPublisherRecoveryResult,
   type VmPublisherControl,
   type LiftJobBroadcast,
@@ -526,7 +527,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     args.knowledgeAssetVmPublishHandler,
   );
   const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
-    chainRecoveryResolver: hasChainRecovery ? createChainRecoveryResolver(publishers) : undefined,
+    chainRecoveryResolver: hasChainRecovery ? createChainProofResolver(publishers) : undefined,
     knowledgeAssetVmPublishRecoveryResolver: hasChainRecovery
       ? createKnowledgeAssetVmPublishRecoveryResolver(publishers)
       : undefined,
@@ -770,47 +771,23 @@ export function hasChainPublishLookup(publisher: DKGPublisher): boolean {
 }
 
 /**
- * GH#2270 — what the runner established about a broadcast job's transaction.
+ * GH#2270 — the runner's implementation of the publisher's chain-proof contract.
  *
- * `AsyncLiftPublisherRecoveryResolver` answers `AsyncLiftPublisherRecoveryResult | null`,
- * and that `null` fuses "the chain proved this transaction does not exist" with
- * "we could not find out" — a distinction the publisher's retry decision turns
- * on, because only the first makes a resend safe. This is the un-fused form.
+ * The VERDICT VOCABULARY is not defined here: `AsyncLiftChainProofResolution` belongs to the
+ * publisher, which is what dispatches on it. This module's job is the one rule that union cannot
+ * state — that an absence must be ESTABLISHED. Every unknown this side can produce collapses into
+ * `inconclusive` and never into `not-found`: an RPC error, a wallet with no publisher, an adapter
+ * with no publish lookup, a contract address that would not resolve, a chain result the lift mapper
+ * rejected, and — deliberately — a `null` from an adapter offering only the two-state
+ * {@link ChainAdapter.resolvePublishByTxHash}, which cannot tell a mempool transaction from an
+ * unknown one.
  *
- * `inconclusive` is the fail-closed member and the one every unknown collapses
- * into: an RPC error, a wallet with no publisher, an adapter with no publish
- * lookup, a contract address that would not resolve, a chain result the lift
- * mapper rejected, and — deliberately — a `null` from an adapter that only
- * offers the two-state {@link ChainAdapter.resolvePublishByTxHash}. Such an
- * adapter cannot distinguish a mempool transaction from an unknown one, so it
- * may never contribute `not-found`.
- */
-export type ChainProofResolution =
-  /** The chain carries a publish, and it mapped to usable lift recovery evidence. */
-  | { status: 'recovered'; recovery: AsyncLiftPublisherRecoveryResult }
-  /** Mined with a failure receipt: proven ineffective, permanently. */
-  | { status: 'reverted' }
-  /** Mined and successful, but carrying no publish this adapter recognizes. */
-  | { status: 'unrecognized' }
-  /** The node holds the transaction and has not mined it. Never absence. */
-  | { status: 'pending' }
-  /** The node was asked for the TRANSACTION and does not have it: proven absence. */
-  | { status: 'not-found' }
-  /** Nothing was established. Never absence, never proof. */
-  | { status: 'inconclusive' };
-
-/**
- * GH#2270 — the truthful chain lookup behind {@link createChainRecoveryResolver}.
- *
- * It exists separately because the publisher's resolver contract is still
- * two-state: this one reports the chain fact, and the resolver below collapses
- * it. Everything that is not `recovered` collapses to the same `null` there, so
- * wiring this in changes nothing today; the dispatcher that consumes the
- * distinction replaces the collapse, not the lookup.
+ * The publisher holds forever on `inconclusive`, so an unknown that leaked in here as `not-found`
+ * would become a resend of a transaction that may be in flight.
  */
 export function createChainProofResolver(
   publishers: Map<string, DKGPublisher>,
-): (job: LiftJobBroadcast | LiftJobIncluded) => Promise<ChainProofResolution> {
+): (job: LiftJobBroadcast | LiftJobIncluded) => Promise<AsyncLiftChainProofResolution> {
   return async (job) => {
     const resolution = await resolvePublishTransactionState(job, publishers);
     if (resolution.status !== 'confirmed') return resolution;
@@ -820,19 +797,6 @@ export function createChainProofResolver(
     // gap in what we can USE, not a fact about the chain: it must not read as
     // absence.
     return recovery ? { status: 'recovered', recovery } : { status: 'inconclusive' };
-  };
-}
-
-export function createChainRecoveryResolver(
-  publishers: Map<string, DKGPublisher>,
-): (job: LiftJobBroadcast | LiftJobIncluded) => Promise<AsyncLiftPublisherRecoveryResult | null> {
-  const resolveChainProof = createChainProofResolver(publishers);
-  return async (job) => {
-    const resolution = await resolveChainProof(job);
-    // The pre-#2270 two-state consumption, written as an explicit derivation:
-    // recovered evidence resolves the job, and EVERY other chain fact —
-    // including a proven `not-found` — reads as `null`, exactly as before.
-    return resolution.status === 'recovered' ? resolution.recovery : null;
   };
 }
 
@@ -1005,7 +969,7 @@ async function resolvePublishTransactionState(
   publishers: Map<string, DKGPublisher>,
 ): Promise<
   | { status: 'confirmed'; publish: OnChainPublishResult; chain: ChainAdapter }
-  | Exclude<ChainProofResolution, { status: 'recovered' }>
+  | Exclude<AsyncLiftChainProofResolution, { status: 'recovered' }>
 > {
   const publisher = publishers.get(job.broadcast.walletId);
   if (!publisher) return { status: 'inconclusive' };

@@ -1,20 +1,22 @@
 /**
  * GH#2270 — the runner's chain lookup must be able to say WHICH chain fact it found.
  *
- * `createChainRecoveryResolver` answers `AsyncLiftPublisherRecoveryResult | null`, and that
- * `null` covers a reverted tx, a mined non-publish tx, a tx still in the mempool, a tx the
- * node has never heard of, and an RPC that simply failed. The publisher's retry decision
- * turns on telling the fourth apart from the rest: only there is a resend safe. These pin
- * that `createChainProofResolver` reports the distinction, and — just as importantly — that
- * the two-state resolver derived from it still collapses every one of those states to `null`,
- * so wiring the primitive in changes nothing until the dispatcher consumes it.
+ * This resolver used to answer `AsyncLiftPublisherRecoveryResult | null`, and that `null` covered
+ * a reverted tx, a mined non-publish tx, a tx still in the mempool, a tx the node has never heard
+ * of, and an RPC that simply failed. The publisher's dispatcher turns on telling the fourth apart
+ * from the rest: only there is a resend safe.
+ *
+ * The verdict VOCABULARY belongs to the publisher (`AsyncLiftChainProofResolution`); what these
+ * rows pin is the rule this side owns — that an absence must be ESTABLISHED, so every unknown
+ * this module can produce comes out `inconclusive` and never `not-found`.
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { PublishTransactionResolution } from '@origintrail-official/dkg-chain';
-import type { DKGPublisher, LiftJobBroadcast } from '@origintrail-official/dkg-publisher';
+import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
+import type { DKGPublisher, LiftJobBroadcast, LiftJob } from '@origintrail-official/dkg-publisher';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   createChainProofResolver,
-  createChainRecoveryResolver,
   hasChainPublishLookup,
 } from '../src/publisher-runner.js';
 
@@ -68,21 +70,17 @@ describe('GH#2270 runner chain-proof resolution', () => {
       const publishers = publishersWith(triStateAdapter({ status }));
 
       expect(await createChainProofResolver(publishers)(job)).toEqual({ status });
-      // ...and the derived two-state resolver still answers null for it, unchanged.
-      expect(await createChainRecoveryResolver(publishers)(job)).toBeNull();
     });
 
-    it('maps a confirmed publish to recovery evidence, which the derived resolver returns', async () => {
+    it('maps a confirmed publish to the recovery evidence the dispatcher finalizes with', async () => {
       const publishers = publishersWith(
         triStateAdapter({ status: 'confirmed', publish: onChainPublish() as never }),
       );
 
       const resolution = await createChainProofResolver(publishers)(job);
-      const derived = await createChainRecoveryResolver(publishers)(job);
 
       expect(resolution.status).toBe('recovered');
-      expect(resolution.status === 'recovered' ? resolution.recovery : null).toEqual(derived);
-      expect(derived).toMatchObject({
+      expect(resolution.status === 'recovered' ? resolution.recovery : null).toMatchObject({
         inclusion: { txHash: TX_HASH, blockNumber: 77 },
         finalization: { mode: 'published', txHash: TX_HASH, publisherAddress: WALLET },
       });
@@ -181,6 +179,106 @@ describe('GH#2270 runner chain-proof resolution', () => {
       expect(hasChainPublishLookup(withBoth)).toBe(true);
       expect(hasChainPublishLookup(withNeither)).toBe(false);
       expect(hasChainPublishLookup({} as unknown as DKGPublisher)).toBe(false);
+    });
+  });
+
+  // The two halves composed. Everything above tests this module in isolation and everything in
+  // async-lift-chain-proof-dispatch-2270 tests the publisher's dispatch on a hand-written verdict;
+  // neither can catch a rule that is right on one side of the boundary and wrong at the join.
+  // These drive a REAL publisher whose resolver is the real `createChainProofResolver`.
+  describe('composed with the publisher dispatcher', () => {
+    async function heldJobOn(chain: Record<string, unknown>): Promise<{
+      publisher: TripleStoreAsyncLiftPublisher;
+      jobId: string;
+      status: () => Promise<LiftJob | null>;
+    }> {
+      const store = new OxigraphStore();
+      let now = 1_000;
+      let ids = 0;
+      const publishers = publishersWith(chain);
+      const publisher = new TripleStoreAsyncLiftPublisher(store, {
+        now: () => ++now,
+        idGenerator: () => `job-${++ids}`,
+        chainRecoveryResolver: createChainProofResolver(publishers),
+        knowledgeAssetVmPublishRecoveryResolver: async () => null,
+      });
+      const jobId = await publisher.enqueueKnowledgeAssetVmPublish({
+        contextGraphId: 'music-social',
+        name: 'albums',
+        shareOperationId: 'share-op-1',
+        roots: [],
+        contentScopeVersion: 2,
+        kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+        assertionVersion: '1',
+        publicTripleCount: 2,
+        privateTripleCount: 0,
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: WALLET as `0x${string}`,
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+        kaNumber: '7',
+      } as never);
+      await publisher.claimNext(WALLET);
+      await publisher.update(jobId, 'validated', {
+        validation: {
+          canonicalRoots: [],
+          canonicalRootMap: {},
+          swmQuadCount: 2,
+          authorityProofRef: 'proof:owner:1',
+          transitionType: 'CREATE',
+        },
+      });
+      await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId: WALLET } });
+      await publisher.recordPublishFailure(jobId, {
+        error: new Error('RPC endpoint temporarily unavailable'),
+        failedFromState: 'broadcast',
+        errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+      });
+      return { publisher, jobId, status: () => publisher.getStatus(jobId) };
+    }
+
+    it('keeps a held job held when a LEGACY adapter cannot see the mempool', async () => {
+      // The cross-package falsifier. `resolvePublishByTxHash` answering null is the shape a
+      // two-state adapter produces for a transaction it cannot find AND for one sitting in the
+      // mempool. If this module let that read as `not-found`, the publisher would take it as
+      // proof and put the job back on the queue — a second transaction for a KA that may already
+      // be publishing. The rule lives here; the damage would happen there.
+      const { publisher, jobId, status } = await heldJobOn({
+        chainId: 'evm:31337',
+        resolvePublishByTxHash: vi.fn(async () => null),
+      });
+
+      expect((await status())?.status).toBe('failed');
+      expect(await publisher.recover()).toBe(0);
+
+      const after = await status();
+      expect(after?.status).toBe('failed');
+      expect(after?.status).not.toBe('accepted');
+      expect(after?.jobId).toBe(jobId);
+    });
+
+    it('releases a held job when a TRI-STATE adapter establishes the transaction is absent', async () => {
+      // The other polarity, so the row above cannot pass by the dispatcher simply never running.
+      // Same job, same code path, and the only difference is an adapter that actually asked the
+      // node for the transaction.
+      const { publisher, status } = await heldJobOn({
+        chainId: 'evm:31337',
+        resolvePublishTransaction: vi.fn(async () => ({ status: 'not-found' as const })),
+      });
+
+      expect((await status())?.status).toBe('failed');
+      expect(await publisher.recover()).toBe(1);
+
+      const after = await status();
+      expect(after?.status).toBe('accepted');
+      expect(after?.recovery?.txHashChecked).toBe(TX_HASH);
     });
   });
 });

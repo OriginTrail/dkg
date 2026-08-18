@@ -66,10 +66,16 @@ export function isProvenIneffectiveLiftFailure(code: LiftJobFailureCode): boolea
 
 /**
  * A failed job that may have a transaction on chain, with no proof either way. ONE property behind
- * four surfaces, so they cannot answer differently: admission keeps the job bound to its lifecycle
+ * FIVE surfaces, so they cannot answer differently: admission keeps the job bound to its lifecycle
  * subject (a re-submit gets `LiftJobPendingChainProofError` rather than a replacement job), the
- * reaccept writer refuses it, a retry pass reports it as `blockedPendingRecovery`, and bulk clear
- * leaves it alone.
+ * reaccept writer refuses it, a retry pass reports it as `blockedPendingRecovery`, bulk clear
+ * leaves it alone — and, since GH#2270 PR-3, the proof-first dispatcher takes exactly this
+ * population as its WORK QUEUE.
+ *
+ * That last one is what makes the hold releasable without an operator, and it is why the predicate
+ * must stay a single definition: the four surfaces that REFUSE to move a held job and the one that
+ * resolves it have to agree on which jobs those are, or a job could be chased by recovery while
+ * admission still treats it as free, or held forever by admission while nothing asks the chain.
  *
  * NOT limited to retryable failures. A TERMINAL diagnosis like `confirmation_mismatch` is precisely
  * a job whose transaction is unaccounted for; letting its subject fall vacant is how the next
