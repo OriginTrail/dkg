@@ -4569,15 +4569,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
     )
       .map((peer) => peer.toString());
     // Structural curators are authoritative and may contain the only holder.
-    // Ordinary connected peers are opportunistic fallback only: cap that tier
-    // separately so connection churn cannot stretch a negative cycle to 256
-    // elevated prefix downloads.
+    // Ordinary connected peers are opportunistic fallback, but they must all
+    // remain visible inside the bounded proof roster. Capping this tier at the
+    // per-pass transport limit made the same three high-ranked peers the entire
+    // roster forever, so a fourth connected replica could never be reached.
+    // `VmRecoveryProviderPolicy` still caps each physical pass below; retaining
+    // the larger bounded roster only lets subsequent passes continue rotation.
     const boundedCurators = [...new Set(curatorOrder)]
       .slice(0, DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX);
     const curatorSet = new Set(boundedCurators);
-    const ordinaryBudget = Math.min(
-      DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
-      Math.max(0, DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX - boundedCurators.length),
+    const ordinaryBudget = Math.max(
+      0,
+      DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX - boundedCurators.length,
     );
     const boundedOrdinary = ordinaryOrder
       .filter((peerId) => !curatorSet.has(peerId))
