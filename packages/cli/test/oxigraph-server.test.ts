@@ -24,7 +24,8 @@ import { createServer, type Server } from 'node:net';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
+import { fileURLToPath } from 'node:url';
+import { startOxigraphServer, type OxigraphServerIo } from '../src/daemon/oxigraph-server.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';
 import {
@@ -71,6 +72,23 @@ async function portAnswers(port: number): Promise<boolean> {
   }
 }
 
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForProcessesToExit(
+  pids: readonly number[],
+  timeoutMs = 3_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (pids.some(processExists) && Date.now() < deadline) await sleep(20);
+}
+
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'oxi-server-real-'));
   standin = join(dir, 'oxigraph-standin.cjs');
@@ -109,6 +127,9 @@ afterAll(async () => {
 });
 
 function startOpts(port: number, extra: Record<string, unknown> = {}) {
+  const { io: extraIo, ...rest } = extra as {
+    io?: Partial<OxigraphServerIo>;
+  } & Record<string, unknown>;
   return {
     binaryPath: standin,
     location: dir,
@@ -119,7 +140,51 @@ function startOpts(port: number, extra: Record<string, unknown> = {}) {
     restartBackoffBaseMs: 100,
     restartBackoffMaxMs: 200,
     log: () => {},
-    ...extra,
+    io: {
+      // Cross-platform tests simulate the Linux systemd command shape on
+      // hosts where `/proc/<pid>/stat` is unavailable.
+      createLaunchStrategy: (input: Parameters<typeof createOxigraphLaunchStrategy>[0]) =>
+        createOxigraphLaunchStrategy({
+          ...input,
+          parentIdentity: `${process.pid}:test`,
+        }),
+      ...extraIo,
+    },
+    ...rest,
+  };
+}
+
+function createIpcWatchdogLaunchStrategy(
+  input: Parameters<typeof createOxigraphLaunchStrategy>[0],
+) {
+  const watchdogPath = fileURLToPath(new URL(
+    '../src/daemon/oxigraph-parent-watchdog.ts',
+    import.meta.url,
+  ));
+  const tsxLoader = fileURLToPath(new URL(
+    '../../../node_modules/tsx/dist/loader.mjs',
+    import.meta.url,
+  ));
+  const strategy = createOxigraphLaunchStrategy({
+    ...input,
+    platform: 'win32',
+    watchdogPath,
+    nodeExecutable: process.execPath,
+  });
+  return {
+    ...strategy,
+    nextSpawnSpec: (binaryPath: string, binaryArgs: string[]) => {
+      // Exercise the current TypeScript source so a clean unit run cannot use
+      // a missing or stale dist artifact. Windows also needs Node to execute
+      // the shebang-based stand-in used by this portable lifecycle fixture.
+      const spec = process.platform === 'win32'
+        ? strategy.nextSpawnSpec(process.execPath, [standin, ...binaryArgs])
+        : strategy.nextSpawnSpec(binaryPath, binaryArgs);
+      return {
+        ...spec,
+        args: ['--import', tsxLoader, ...spec.args],
+      };
+    },
   };
 }
 
@@ -134,6 +199,73 @@ describe('buildOxigraphSpawnSpec', () => {
       .toEqual({ command: '/opt/oxigraph', args: ['serve'] });
   });
 
+  it('uses a dedicated parent IPC watchdog on Windows', async () => {
+    const strategy = createOxigraphLaunchStrategy({
+      platform: 'win32',
+      parentPid: 42,
+      uid: -1,
+      nodeExecutable: 'C:\\node.exe',
+      watchdogPath: 'C:\\oxigraph-parent-watchdog.js',
+    });
+    const spec = strategy.nextSpawnSpec('C:\\oxigraph.exe', ['serve']);
+    expect(spec).toEqual({
+      command: 'C:\\node.exe',
+      args: [
+        'C:\\oxigraph-parent-watchdog.js',
+        'ipc',
+        '42',
+        'C:\\oxigraph.exe',
+        'serve',
+      ],
+      environment: {
+        DKG_OXIGRAPH_WATCHDOG_STOP_GRACE_MS: '5000',
+      },
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    });
+    let ownership: string | undefined;
+    await strategy.resolveListenerPid({} as never, 7878, '127.0.0.1', async (_child, _port, _host, policy) => {
+      ownership = policy;
+      return 99;
+    });
+    expect(ownership).toBe('process-tree');
+  });
+
+  it('force-kills the complete Windows watchdog process tree', () => {
+    const invocations: Array<{
+      command: string;
+      args: readonly string[];
+      options: Record<string, unknown>;
+    }> = [];
+    const signals: NodeJS.Signals[] = [];
+    const strategy = createOxigraphLaunchStrategy({
+      platform: 'win32',
+      parentPid: 42,
+      uid: -1,
+      io: {
+        spawnSync: ((command: string, args: readonly string[], options: Record<string, unknown>) => {
+          invocations.push({ command, args, options });
+          return { status: 0 };
+        }) as typeof import('node:child_process').spawnSync,
+      },
+    });
+    const child = {
+      pid: 4321,
+      connected: false,
+      kill: (signal: NodeJS.Signals) => {
+        signals.push(signal);
+        return true;
+      },
+    } as unknown as import('node:child_process').ChildProcess;
+
+    expect(strategy.shutdown(child, 'force')).toBe(true);
+    expect(invocations).toEqual([{
+      command: 'taskkill.exe',
+      args: ['/PID', '4321', '/T', '/F'],
+      options: { stdio: 'ignore', windowsHide: true },
+    }]);
+    expect(signals).toEqual([]);
+  });
+
   it('wraps Oxigraph in a finite systemd user scope', () => {
     const strategy = createOxigraphLaunchStrategy({
       memoryLimits: { highMiB: 2048, maxMiB: 3072 },
@@ -142,6 +274,8 @@ describe('buildOxigraphSpawnSpec', () => {
       uid: 1000,
       nodeExecutable: '/opt/node',
       watchdogPath: '/opt/oxigraph-watchdog.js',
+      parentIdentity: '42:1234',
+      stopGraceMs: 750,
     });
     strategy.nextSpawnSpec('/opt/oxigraph', ['serve']);
     strategy.nextSpawnSpec('/opt/oxigraph', ['serve']);
@@ -154,6 +288,7 @@ describe('buildOxigraphSpawnSpec', () => {
     expect(spec.environment).toEqual({
       XDG_RUNTIME_DIR: '/run/user/1000',
       DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      DKG_OXIGRAPH_WATCHDOG_STOP_GRACE_MS: '750',
     });
     expect(spec.args.slice(0, 8)).toEqual([
       '--user', '--scope', '--collect', '--quiet',
@@ -162,10 +297,11 @@ describe('buildOxigraphSpawnSpec', () => {
       '--property=MemoryMax=3072M',
       '--property=MemorySwapMax=0',
     ]);
-    expect(spec.args.slice(-7)).toEqual([
-      '/opt/node', '/opt/oxigraph-watchdog.js', '42',
+    expect(spec.args.slice(-9)).toEqual([
+      '/opt/node', '/opt/oxigraph-watchdog.js', 'process-identity', '42', '42:1234',
       '/opt/oxigraph', 'serve', '--bind', '127.0.0.1:7878',
     ]);
+    expect(strategy.shutdownTimeoutMs(750)).toBe(1_000);
   });
 
   it('fails closed when finite scope limits cannot be enforced', () => {
@@ -201,6 +337,11 @@ describe('startOxigraphServer (real child processes)', () => {
       memoryLimits: { highMiB: 128, maxMiB: 256 },
       platform: 'linux',
       io: {
+        createLaunchStrategy: (input: Parameters<typeof createOxigraphLaunchStrategy>[0]) =>
+          createOxigraphLaunchStrategy({
+            ...input,
+            parentIdentity: `${process.pid}:test`,
+          }),
         spawn: injectedSpawn,
         findListenOwnerPid: async (child: import('node:child_process').ChildProcess, _port: number, _host: string, ownership?: 'child-only' | 'process-tree') => {
           ownershipPolicy = ownership;
@@ -310,6 +451,69 @@ describe('startOxigraphServer (real child processes)', () => {
     // The real process exited and the real socket is released.
     await sleep(100);
     expect(await portAnswers(port)).toBe(false);
+  });
+
+  it('stop() disconnects the real IPC watchdog and reaps wrapper plus listener', async () => {
+    const port = await freePort();
+    let wrapper: import('node:child_process').ChildProcess | undefined;
+    const captureSpawn = ((
+      command: string,
+      args: readonly string[],
+      options: Parameters<typeof spawn>[2],
+    ) => {
+      wrapper = spawn(command, args, options);
+      return wrapper;
+    }) as typeof spawn;
+
+    const handle = await startOxigraphServer(startOpts(port, {
+      platform: 'win32',
+      io: {
+        createLaunchStrategy: createIpcWatchdogLaunchStrategy,
+        spawn: captureSpawn,
+        // On Windows exercise the real process-tree owner lookup. Other CI
+        // hosts still run the real watchdog and socket lifecycle portably.
+        ...(process.platform === 'win32'
+          ? {}
+          : { findListenOwnerPid: async () => await fetchPid(port) }),
+      },
+    }));
+    const listenerPid = await fetchPid(port);
+    const wrapperPid = wrapper!.pid!;
+    expect(listenerPid).not.toBe(wrapperPid);
+
+    await handle.stop();
+
+    expect(await portAnswers(port)).toBe(false);
+    expect(() => process.kill(listenerPid, 0)).toThrow();
+    expect(() => process.kill(wrapperPid, 0)).toThrow();
+  });
+
+  it('killSync() signals the real IPC watchdog without leaving its listener orphaned', async () => {
+    const port = await freePort();
+    let wrapper: import('node:child_process').ChildProcess | undefined;
+    const handle = await startOxigraphServer(startOpts(port, {
+      platform: 'win32',
+      io: {
+        createLaunchStrategy: createIpcWatchdogLaunchStrategy,
+        spawn: ((command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+          wrapper = spawn(command, args, options);
+          return wrapper;
+        }) as typeof spawn,
+        ...(process.platform === 'win32'
+          ? {}
+          : { findListenOwnerPid: async () => await fetchPid(port) }),
+      },
+    }));
+    const listenerPid = await fetchPid(port);
+    const wrapperPid = wrapper!.pid!;
+
+    handle.killSync();
+    for (let i = 0; i < 50 && await portAnswers(port); i++) await sleep(20);
+    await waitForProcessesToExit([listenerPid, wrapperPid]);
+
+    expect(await portAnswers(port)).toBe(false);
+    expect(() => process.kill(listenerPid, 0)).toThrow();
+    expect(() => process.kill(wrapperPid, 0)).toThrow();
   });
 
   it('restarts the child after an unexpected crash (real SIGKILL), with a new pid', async () => {

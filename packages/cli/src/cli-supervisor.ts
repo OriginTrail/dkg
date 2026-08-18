@@ -12,6 +12,11 @@ import {
   sleep, withSelectedDkgHome, selectedDkgHomeForEnv, probeHostForApiHost,
 } from './cli-helpers.js';
 import { resolveDaemonNodeCommand } from './daemon-entrypoint.js';
+import {
+  cleanupDaemonWorker,
+  type WorkerExit,
+} from './daemon/worker-cleanup-policy.js';
+import { createForegroundSignalRelay } from './daemon/foreground-signal-relay.js';
 
 async function appendSupervisorLog(message: string): Promise<void> {
   await ensureDkgDir();
@@ -21,6 +26,62 @@ async function appendSupervisorLog(message: string): Promise<void> {
 function supervisorWarn(message: string): void {
   console.warn(message);
   void appendSupervisorLog(message).catch(() => {});
+}
+
+async function waitForWorkerExit(
+  child: ReturnType<typeof spawn>,
+): Promise<WorkerExit> {
+  return new Promise<WorkerExit>((resolve) => {
+    let settled = false;
+    const finish = (exit: WorkerExit) => {
+      if (settled) return;
+      settled = true;
+      resolve(exit);
+    };
+    child.once('exit', (code, signal) => finish({ code, signal }));
+    child.once('error', () => finish({ code: 1, signal: null }));
+  });
+}
+
+interface FinalizedWorkerExit {
+  cleanupSucceeded: boolean;
+  rawExitCode: number | null;
+  forced: boolean;
+  originalExitCode: number | null;
+}
+
+async function finalizeWorkerExit(
+  workerPid: number | undefined,
+  workerExit: WorkerExit,
+  stopWatcher: () => void,
+  label: string,
+  generation: number,
+): Promise<FinalizedWorkerExit> {
+  stopWatcher();
+  const rawExitCode = workerExit.code;
+  const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
+  const cleanupSucceeded = await cleanupDaemonWorker(
+    workerPid,
+    workerExit,
+    { warn: supervisorWarn },
+    { label, generation },
+  );
+  if (!cleanupSucceeded) {
+    return { cleanupSucceeded, rawExitCode, forced, originalExitCode };
+  }
+  if (workerExit.signal) {
+    supervisorWarn(
+      `[supervisor] ${label} exited by ${workerExit.signal} ` +
+        `(code=${rawExitCode ?? 'null'}).`,
+    );
+  }
+  if (forced) {
+    console.warn(
+      `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
+        `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
+    );
+  }
+  return { cleanupSucceeded, rawExitCode, forced, originalExitCode };
 }
 
 /**
@@ -93,6 +154,7 @@ async function runDaemonSupervisor(): Promise<void> {
   process.env.DKG_HOME = selectedDkgHomeForEnv(process.env);
   const maxCrashRestarts = 5;
   let crashRestartCount = 0;
+  let workerGeneration = 0;
 
   while (true) {
     await removeApiPort().catch((err: any) => {
@@ -101,14 +163,20 @@ async function runDaemonSupervisor(): Promise<void> {
       );
     });
     const daemonCommand = resolveDaemonNodeCommand('daemon-worker');
+    workerGeneration += 1;
     const child = spawn(
       daemonCommand.executable,
       daemonCommand.args,
       {
         stdio: ['ignore', 'ignore', 'ignore'],
         env: withSelectedDkgHome(process.env),
+        // POSIX: make the worker a private session/process-group leader. Its
+        // PID is then the exact PGID the cleanup barrier owns. Windows needs
+        // a Job Object/pipe watchdog instead and keeps the existing shape.
+        detached: process.platform !== 'win32',
       },
     );
+    const workerPid = child.pid;
 
     // Positive-liveness watchdog. Catches the generic zombie shape (HTTP
     // listener dead but process still alive) that the exit-watcher can't
@@ -118,17 +186,19 @@ async function runDaemonSupervisor(): Promise<void> {
     // packages/cli/src/daemon/supervisor-liveness.ts for the full rationale.
     const stopWatcher = await maybeStartSupervisorLivenessWatcher(child);
 
-    const rawExitCode = await new Promise<number | null>((resolve) => {
-      child.once('exit', (code) => resolve(code));
-    });
-    stopWatcher();
-    const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
-    if (forced) {
-      console.warn(
-        `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
-          `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
-      );
+    const workerExit = await waitForWorkerExit(child);
+    const finalizedExit = await finalizeWorkerExit(
+      workerPid,
+      workerExit,
+      stopWatcher,
+      'worker',
+      workerGeneration,
+    );
+    if (!finalizedExit.cleanupSucceeded) {
+      process.exitCode = 1;
+      return;
     }
+    const { originalExitCode } = finalizedExit;
 
     if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
       crashRestartCount = 0;
@@ -147,18 +217,16 @@ async function runDaemonSupervisor(): Promise<void> {
 async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env): Promise<void> {
   const maxCrashRestarts = 5;
   let crashRestartCount = 0;
-  let currentChild: ReturnType<typeof spawn> | null = null;
+  let workerGeneration = 0;
 
-  let signalled = false;
-  const onSignal = (sig: NodeJS.Signals) => {
-    signalled = true;
-    if (currentChild) currentChild.kill(sig);
-  };
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
+  // The worker runs in its own POSIX session, so the tty stops delivering
+  // hangup and job-control signals to it. The relay carries them across that
+  // boundary; without it, closing the terminal would kill only the supervisor
+  // and orphan the worker plus the managed store it owns.
+  const relay = createForegroundSignalRelay({ onTerminate: () => {} });
 
   while (true) {
-    if (signalled) process.exit(0);
+    if (relay.signalled()) process.exit(0);
 
     await removeApiPort().catch((err: any) => {
       supervisorWarn(
@@ -167,37 +235,43 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
     });
 
     const daemonCommand = resolveDaemonNodeCommand('daemon-foreground-worker');
-    currentChild = spawn(
+    workerGeneration += 1;
+    const currentChild = spawn(
       daemonCommand.executable,
       daemonCommand.args,
       {
         stdio: 'inherit',
         env: childEnv,
+        detached: process.platform !== 'win32',
       },
     );
+    const workerPid = currentChild.pid;
+    // Adopting the worker also replays any signal that landed while none was
+    // current, so a Ctrl-C during the pre-spawn await cannot strand it.
+    relay.attach(currentChild);
 
     const stopWatcher = await maybeStartSupervisorLivenessWatcher(currentChild);
 
-    const rawExitCode = await new Promise<number | null>((resolve) => {
-      currentChild!.once('exit', (code) => resolve(code));
-      currentChild!.once('error', () => resolve(1));
-    });
-    stopWatcher();
-    currentChild = null;
-    const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
-    if (forced) {
-      console.warn(
-        `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
-          `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
-      );
+    const workerExit = await waitForWorkerExit(currentChild);
+    relay.detach();
+    const finalizedExit = await finalizeWorkerExit(
+      workerPid,
+      workerExit,
+      stopWatcher,
+      'foreground worker',
+      workerGeneration,
+    );
+    if (!finalizedExit.cleanupSucceeded) {
+      process.exit(1);
     }
+    const { originalExitCode } = finalizedExit;
 
-    if (signalled) process.exit(originalExitCode ?? 0);
+    if (relay.signalled()) process.exit(originalExitCode ?? 0);
 
     if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
       crashRestartCount = 0;
       await sleep(250);
-      if (signalled) process.exit(0);
+      if (relay.signalled()) process.exit(0);
       continue;
     }
 
@@ -206,7 +280,7 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
     crashRestartCount += 1;
     if (crashRestartCount >= maxCrashRestarts) process.exit(originalExitCode ?? 1);
     await sleep(1000);
-    if (signalled) process.exit(0);
+    if (relay.signalled()) process.exit(0);
   }
 }
 

@@ -18,6 +18,26 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
+export type ListenOwnerCommandRunner = (
+  command: string,
+  args: readonly string[],
+  options: { timeout: number },
+) => Promise<{ stdout: string }>;
+
+export interface ListenOwnerLookupOptions {
+  platform?: NodeJS.Platform;
+  runCommand?: ListenOwnerCommandRunner;
+}
+
+const runListenOwnerCommand: ListenOwnerCommandRunner = async (
+  command,
+  args,
+  options,
+) => {
+  const { stdout } = await execFileAsync(command, [...args], options);
+  return { stdout: String(stdout) };
+};
+
 /**
  * Hex port token as it appears in the `local_address` field of
  * `/proc/net/tcp`. Only the IPv4 address is byte-swapped there; the port is
@@ -148,15 +168,60 @@ async function linuxProcessTree(rootPid: number): Promise<Set<number>> {
   return pids;
 }
 
-async function windowsListenOwnerPid(pid: number, port: number): Promise<number | null> {
+async function windowsProcessTree(
+  rootPid: number,
+  runCommand: ListenOwnerCommandRunner,
+): Promise<Set<number>> {
+  const pids = new Set<number>([rootPid]);
   try {
-    const { stdout } = await execFileAsync('netstat', ['-ano'], { timeout: 3_000 });
+    const { stdout } = await runCommand(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        'Get-CimInstance Win32_Process | ForEach-Object { "{0} {1}" -f $_.ProcessId,$_.ParentProcessId }',
+      ],
+      { timeout: 3_000 },
+    );
+    const children = new Map<number, number[]>();
+    for (const line of stdout.split('\n')) {
+      const [rawPid, rawParentPid] = line.trim().split(/\s+/);
+      const pid = Number(rawPid);
+      const parentPid = Number(rawParentPid);
+      if (!Number.isInteger(pid) || !Number.isInteger(parentPid)) continue;
+      const list = children.get(parentPid) ?? [];
+      list.push(pid);
+      children.set(parentPid, list);
+    }
+    const pending = [rootPid];
+    while (pending.length > 0) {
+      for (const childPid of children.get(pending.pop()!) ?? []) {
+        if (pids.has(childPid)) continue;
+        pids.add(childPid);
+        pending.push(childPid);
+      }
+    }
+  } catch {
+    // Fall back to the wrapper PID. Readiness then fails closed rather than
+    // trusting an unrelated listener on the configured port.
+  }
+  return pids;
+}
+
+async function windowsListenOwnerPid(
+  pids: ReadonlySet<number>,
+  port: number,
+  runCommand: ListenOwnerCommandRunner,
+): Promise<number | null> {
+  try {
+    const { stdout } = await runCommand('netstat', ['-ano'], { timeout: 3_000 });
     const suffix = `:${port}`;
     for (const line of stdout.split('\n')) {
       if (!line.includes('LISTENING') || !line.includes(suffix)) continue;
       const parts = line.trim().split(/\s+/);
       const rowPid = Number(parts[parts.length - 1]);
-      if (rowPid === pid) return pid;
+      if (pids.has(rowPid)) return rowPid;
     }
     return null;
   } catch {
@@ -174,6 +239,7 @@ export async function findListenOwnerPid(
   port: number,
   host: string,
   ownership: 'child-only' | 'process-tree' = 'child-only',
+  options: ListenOwnerLookupOptions = {},
 ): Promise<number | null> {
   if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
     return null;
@@ -181,18 +247,24 @@ export async function findListenOwnerPid(
   if (host !== '127.0.0.1' && host !== 'localhost') return child.pid;
 
   const pid = child.pid;
-  const pids = ownership === 'process-tree' && process.platform === 'linux'
-    ? await linuxProcessTree(pid)
+  const platform = options.platform ?? process.platform;
+  const runCommand = options.runCommand ?? runListenOwnerCommand;
+  const pids = ownership === 'process-tree'
+    ? platform === 'linux'
+      ? await linuxProcessTree(pid)
+      : platform === 'win32'
+        ? await windowsProcessTree(pid, runCommand)
+        : new Set([pid])
     : new Set([pid]);
 
-  if (process.platform === 'win32') {
-    return windowsListenOwnerPid(pid, port);
+  if (platform === 'win32') {
+    return windowsListenOwnerPid(pids, port, runCommand);
   }
 
   const lsofOwner = await lsofListenOwnerPid(pids, port);
   if (lsofOwner !== null) return lsofOwner;
 
-  if (process.platform === 'linux') {
+  if (platform === 'linux') {
     const ssOwner = await ssListenOwnerPid(pids, port);
     if (ssOwner !== null) return ssOwner;
     const fuserOwner = await fuserListenOwnerPid(pids, port);
