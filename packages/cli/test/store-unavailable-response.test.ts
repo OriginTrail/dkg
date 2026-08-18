@@ -5,6 +5,7 @@ import {
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
+  classifyStoreUnavailable,
   respondIfStoreUnavailable,
   respondWithDaemonError,
 } from '../src/daemon/http-utils.js';
@@ -37,6 +38,27 @@ function mockResponse(): ServerResponse & {
 }
 
 describe('respondIfStoreUnavailable', () => {
+  it('classifies without rendering so partial-success routes can extend the body', () => {
+    const classified = classifyStoreUnavailable(new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation: 'publish',
+      timeoutMs: 30_000,
+    }));
+
+    expect(classified).toEqual({
+      outcome: 'indeterminate',
+      body: {
+        error: 'oxigraph-server publish exceeded its store deadline after 30000ms',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        outcome: 'indeterminate',
+        backend: 'oxigraph-server',
+        operation: 'publish',
+        timeoutMs: 30_000,
+      },
+    });
+  });
+
   it('maps pre-dispatch scheduler shedding to retryable 503 with a known outcome', () => {
     const res = mockResponse();
     const error = new StoreSchedulerBusyError(

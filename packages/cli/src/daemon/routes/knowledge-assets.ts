@@ -40,6 +40,7 @@ import {
   validateQuadObjectTerms,
   respondIfReconcileUnavailable,
   respondIfStoreUnavailable,
+  classifyStoreUnavailable,
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
   validateWritableQuadLiteralSizes,
@@ -1065,6 +1066,28 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       }
 
       const errors: Array<{ phase: string; error: string }> = [];
+      const respondWithPartialStoreFailure = (
+        error: unknown,
+        phase: 'swm-share' | 'vm-publish',
+      ): boolean => {
+        const classified = classifyStoreUnavailable(error);
+        if (!classified) return false;
+        jsonResponse(
+          res,
+          503,
+          {
+            created: true,
+            ...result,
+            phase,
+            ...classified.body,
+            retryAction: 'retry_same_knowledge_asset',
+            retryKnowledgeAssetName: name,
+          },
+          undefined,
+          { 'Retry-After': '1' },
+        );
+        return true;
+      };
       if (alsoShareSwm === true) {
         try {
           // Carry the same resolved author into the share. The asset is already
@@ -1090,6 +1113,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             recordActivityAndNotify(ctx, { contextGraphId: resolvedContextGraphId, kind: "promoted", actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
           }
         } catch (e: any) {
+          if (respondWithPartialStoreFailure(e, 'swm-share')) return;
           errors.push({ phase: "swm-share", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
       }
@@ -1122,6 +1146,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           }
           recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
         } catch (e: any) {
+          if (respondWithPartialStoreFailure(e, 'vm-publish')) return;
           errors.push({ phase: "vm-publish", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
       }

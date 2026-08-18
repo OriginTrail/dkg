@@ -225,6 +225,80 @@ describe('knowledge-assets publish routes — transport-status mapping (#1329)',
       await done;
       expectStoreUnavailableResponse(res, { code, outcome });
     });
+
+    it('preserves partial-create context when the optional SWM tail is unavailable', async () => {
+      const agent = publishAgent({
+        assertion: {
+          history: async () => null,
+          create: async () => {},
+          write: async () => {},
+          finalize: async () => ({
+            merkleRoot: new Uint8Array(32),
+            authorAddress: '0x0000000000000000000000000000000000000001',
+          }),
+          promote: async () => { throw makeError('promote'); },
+        },
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets',
+        agent,
+        {
+          contextGraphId: 'cg-1',
+          name: 'partial-swm',
+          quads: [{ subject: 'http://s', predicate: 'http://p', object: '"o"' }],
+          alsoShareSwm: true,
+        },
+      );
+
+      await done;
+      expectStoreUnavailableResponse(res, { code, outcome });
+      expect(JSON.parse(res.body)).toMatchObject({
+        created: true,
+        name: 'partial-swm',
+        status: 'wm-sealed',
+        phase: 'swm-share',
+        retryAction: 'retry_same_knowledge_asset',
+        retryKnowledgeAssetName: 'partial-swm',
+      });
+    });
+
+    it('preserves partial-create context when the optional VM tail is unavailable', async () => {
+      const agent = publishAgent({
+        assertion: {
+          history: async () => null,
+          create: async () => {},
+          write: async () => {},
+          finalize: async () => ({
+            merkleRoot: new Uint8Array(32),
+            authorAddress: '0x0000000000000000000000000000000000000001',
+          }),
+        },
+        publishFromFinalizedAssertion: async () => { throw makeError('publish'); },
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets',
+        agent,
+        {
+          contextGraphId: 'cg-1',
+          name: 'partial-vm',
+          quads: [{ subject: 'http://s', predicate: 'http://p', object: '"o"' }],
+          alsoPublishVm: true,
+        },
+      );
+
+      await done;
+      expectStoreUnavailableResponse(res, { code, outcome });
+      expect(JSON.parse(res.body)).toMatchObject({
+        created: true,
+        name: 'partial-vm',
+        status: 'wm-sealed',
+        phase: 'vm-publish',
+        retryAction: 'retry_same_knowledge_asset',
+        retryKnowledgeAssetName: 'partial-vm',
+      });
+    });
   });
 
   describe('POST /api/knowledge-assets/batch-rejections/report', () => {

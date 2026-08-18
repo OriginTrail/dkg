@@ -65,15 +65,23 @@ export function payloadTooLargeResponseBody(err: unknown): Record<string, unknow
  */
 export type StoreUnavailableOutcome = 'not_started' | 'indeterminate';
 
-export function respondIfStoreUnavailable(
-  res: ServerResponse,
+export interface StoreUnavailableClassification {
+  outcome: StoreUnavailableOutcome;
+  body: Record<string, unknown>;
+}
+
+/**
+ * Pure store-failure classification. Routes with partial-success context can
+ * extend `body` before rendering it instead of losing that context through the
+ * ordinary all-or-nothing responder below.
+ */
+export function classifyStoreUnavailable(
   err: unknown,
-): StoreUnavailableOutcome | null {
+): StoreUnavailableClassification | null {
   if (err instanceof StoreSchedulerBusyError) {
-    jsonResponse(
-      res,
-      503,
-      {
+    return {
+      outcome: 'not_started',
+      body: {
         error: err.message,
         code: err.code,
         reason: err.reason,
@@ -81,18 +89,14 @@ export function respondIfStoreUnavailable(
         retryable: true,
         outcome: 'not_started',
       },
-      undefined,
-      { 'Retry-After': '1' },
-    );
-    return 'not_started';
+    };
   }
 
   if (!isStoreOperationTimeoutError(err)) return null;
   const outcome = err.outcome ?? 'indeterminate';
-  jsonResponse(
-    res,
-    503,
-    {
+  return {
+    outcome,
+    body: {
       error: typeof err.message === 'string'
         ? err.message
         : 'Triple-store operation exceeded its deadline',
@@ -103,10 +107,23 @@ export function respondIfStoreUnavailable(
       ...(typeof err.operation === 'string' ? { operation: err.operation } : {}),
       ...(typeof err.timeoutMs === 'number' ? { timeoutMs: err.timeoutMs } : {}),
     },
+  };
+}
+
+export function respondIfStoreUnavailable(
+  res: ServerResponse,
+  err: unknown,
+): StoreUnavailableOutcome | null {
+  const classified = classifyStoreUnavailable(err);
+  if (!classified) return null;
+  jsonResponse(
+    res,
+    503,
+    classified.body,
     undefined,
     { 'Retry-After': '1' },
   );
-  return outcome;
+  return classified.outcome;
 }
 
 /**

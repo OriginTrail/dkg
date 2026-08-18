@@ -184,22 +184,15 @@ export async function startOxigraphServer(
   const restartMax = opts.restartBackoffMaxMs ?? DEFAULT_RESTART_MAX_MS;
   const queryTimeoutS = normalizePositiveInteger(opts.queryTimeoutS);
 
-  interface RestartRequest {
-    child: ChildProcess;
-    listenerPid: number;
-    reason: string;
-    signalAccepted: boolean;
-  }
   type LifecycleState =
-    | { phase: 'starting' }
-    | { phase: 'ready'; listenerPid: number }
-    | { phase: 'restart-requested'; request: RestartRequest }
-    | { phase: 'recovering'; reason: string }
-    | { phase: 'stopping' };
+    | { phase: 'starting'; child: ChildProcess | null; generation: number }
+    | { phase: 'ready'; child: ChildProcess; listenerPid: number; generation: number }
+    | { phase: 'restart-verifying'; child: ChildProcess; listenerPid: number; reason: string; generation: number }
+    | { phase: 'restart-signalled'; child: ChildProcess; listenerPid: number; reason: string; generation: number }
+    | { phase: 'recovering'; child: ChildProcess | null; reason: string; generation: number }
+    | { phase: 'stopping'; child: ChildProcess | null; generation: number };
 
-  let lifecycle: LifecycleState = { phase: 'starting' };
-  let recoveryGeneration = 0;
-  let child: ChildProcess | null = null;
+  let lifecycle: LifecycleState = { phase: 'starting', child: null, generation: 0 };
   let restarts = 0;
   // Tail of the child's stderr, surfaced in the startup error so a bind
   // failure (`Address already in use`) is visible to the operator.
@@ -211,6 +204,11 @@ export async function startOxigraphServer(
   const erroredChildren = new WeakSet<ChildProcess>();
   const oomSnapshots = new WeakMap<ChildProcess, CgroupOomSnapshot>();
   const isStopping = (): boolean => lifecycle.phase === 'stopping';
+  const childAlive = (candidate: ChildProcess | null): candidate is ChildProcess =>
+    candidate != null
+    && !erroredChildren.has(candidate)
+    && candidate.exitCode === null
+    && candidate.signalCode === null;
 
   const spawnChild = (): ChildProcess => {
     const args = ['serve', '--location', opts.location, '--bind', bind];
@@ -244,9 +242,10 @@ export async function startOxigraphServer(
     });
     c.once('exit', (code, signal) => {
       if (lifecycle.phase === 'stopping') return;
-      const requestedRecovery = lifecycle.phase === 'restart-requested'
-        && lifecycle.request.child === c
-        ? lifecycle.request
+      if (lifecycle.child !== c) return;
+      const requestedRecovery = lifecycle.phase === 'restart-verifying'
+        || lifecycle.phase === 'restart-signalled'
+        ? lifecycle
         : null;
       // Two cases land here outside ready/requested-recovery and must NOT (re)start:
       //   1. Startup-phase exit — usually a bind failure (the port is taken
@@ -263,9 +262,8 @@ export async function startOxigraphServer(
       // off to revive(), which respawns and re-proves ownership before
       // restoring `ready`.
       markStoreDown();
-      if (requestedRecovery === null || !requestedRecovery.signalAccepted) {
-        recoveryGeneration += 1;
-      }
+      const generation = lifecycle.generation
+        + (lifecycle.phase === 'restart-signalled' ? 0 : 1);
       // Best-effort OOM classification: `oom_kill` is cgroup-scoped, not
       // per-PID, so use an increment only as supporting evidence for a
       // SIGKILL-compatible child death. This catches MemoryMax/host OOM kills
@@ -284,17 +282,11 @@ export async function startOxigraphServer(
       const recoveryReason = requestedRecovery === null
         ? `server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'}${oomNote})`
         : `server terminated for recovery (${requestedRecovery.reason}; signal=${signal ?? 'null'}${oomNote})`;
-      lifecycle = { phase: 'recovering', reason: recoveryReason };
+      lifecycle = { phase: 'recovering', child: null, reason: recoveryReason, generation };
       scheduleRevive(recoveryReason);
     });
     return c;
   };
-
-  const childAlive = (): boolean =>
-    child != null &&
-    !erroredChildren.has(child) &&
-    child.exitCode === null &&
-    child.signalCode === null;
 
   const captureOomSnapshotForListener = (c: ChildProcess, listenerPid: number): void => {
     if (oomSnapshots.has(c)) return;
@@ -302,9 +294,8 @@ export async function startOxigraphServer(
     if (snapshot) oomSnapshots.set(c, snapshot);
   };
 
-  const probeReady = async (): Promise<number | null> => {
-    const c = child;
-    if (!c || !childAlive()) return null;
+  const probeReady = async (c: ChildProcess): Promise<number | null> => {
+    if (!childAlive(c)) return null;
     try {
       const res = await io.fetch(queryEndpoint, {
         method: 'POST',
@@ -322,7 +313,7 @@ export async function startOxigraphServer(
         host,
         io.findListenOwnerPid,
       );
-      return listenerPid !== null && childAlive() ? listenerPid : null;
+      return listenerPid !== null && childAlive(c) ? listenerPid : null;
     } catch {
       return null;
     }
@@ -333,7 +324,13 @@ export async function startOxigraphServer(
   // re-establish ownership, so a crash-looping binary (or a permanently-taken
   // port) never pegs the CPU.
   const scheduleRevive = (reason: string): void => {
-    if (lifecycle.phase !== 'stopping') lifecycle = { phase: 'recovering', reason };
+    if (lifecycle.phase === 'stopping') return;
+    lifecycle = {
+      phase: 'recovering',
+      child: lifecycle.child,
+      reason,
+      generation: lifecycle.generation,
+    };
     restarts += 1;
     const delay = Math.min(restartMax, restartBase * 2 ** (restarts - 1));
     log(`[oxigraph] ${reason}; restart #${restarts} in ${delay}ms`);
@@ -351,38 +348,55 @@ export async function startOxigraphServer(
   // SPARQL server.
   const revive = async (): Promise<void> => {
     if (isStopping()) return;
-    child = spawnChild();
+    const generation = lifecycle.generation;
+    const reason = lifecycle.phase === 'recovering'
+      ? lifecycle.reason
+      : 'supervised recovery';
+    const candidate = spawnChild();
+    lifecycle = { phase: 'recovering', child: candidate, reason, generation };
     const reviveDeadline = Date.now() + readyTimeoutMs;
     while (Date.now() < reviveDeadline) {
-      if (isStopping()) return;
+      if (
+        lifecycle.phase !== 'recovering'
+        || lifecycle.child !== candidate
+      ) return;
       // Respawned child died (its own exit handler stays out of the way
       // because `ready` is false). Retry with backoff; never adopt whatever
       // may now be answering on the port.
-      if (!childAlive()) break;
-      const verifiedListenerPid = await probeReady();
-      if (verifiedListenerPid !== null && childAlive()) {
-        captureOomSnapshotForListener(child!, verifiedListenerPid);
+      if (!childAlive(candidate)) break;
+      const verifiedListenerPid = await probeReady(candidate);
+      if (verifiedListenerPid !== null && childAlive(candidate)) {
+        captureOomSnapshotForListener(candidate, verifiedListenerPid);
         // Keep the actual listener PID, not the optional systemd-run wrapper,
         // so timeout recovery terminates Oxigraph itself inside its scope.
-        lifecycle = { phase: 'ready', listenerPid: verifiedListenerPid };
+        lifecycle = {
+          phase: 'ready',
+          child: candidate,
+          listenerPid: verifiedListenerPid,
+          generation,
+        };
         restarts = 0;
         log(`[oxigraph] server restarted and healthy on ${bind}.`);
         return;
       }
       await sleep(readyIntervalMs);
     }
-    if (isStopping()) return;
+    if (
+      lifecycle.phase !== 'recovering'
+      || lifecycle.child !== candidate
+    ) return;
     // Timed out with the child still running but unresponsive. Kill it
     // before respawning — otherwise each retry stacks another live
     // `oxigraph serve`, and they fight over the port (self-inflicted
     // EADDRINUSE). Its exit handler won't restart (ready is false).
-    if (childAlive()) {
+    if (childAlive(candidate)) {
       try {
-        child!.kill('SIGKILL');
+        candidate.kill('SIGKILL');
       } catch {
         /* best-effort */
       }
     }
+    lifecycle = { phase: 'recovering', child: null, reason, generation };
     scheduleRevive(`respawned server did not become ready on ${bind}`);
   };
 
@@ -390,16 +404,23 @@ export async function startOxigraphServer(
   // await): signals the child so a fatal `process.exit()` elsewhere in
   // boot doesn't orphan the server. Safe to call alongside `stop()`.
   const killSync = (): void => {
-    lifecycle = { phase: 'stopping' };
+    const candidate = lifecycle.child;
+    lifecycle = {
+      phase: 'stopping',
+      child: candidate,
+      generation: lifecycle.generation,
+    };
     markStoreDown();
     try {
-      if (childAlive()) child!.kill('SIGTERM');
+      if (childAlive(candidate)) candidate.kill('SIGTERM');
     } catch {
       /* best-effort */
     }
   };
 
-  const terminateVerifiedListener = async (request: RestartRequest): Promise<void> => {
+  const terminateVerifiedListener = async (
+    request: Extract<LifecycleState, { phase: 'restart-verifying' }>,
+  ): Promise<void> => {
     let verifiedListenerPid: number | null = null;
     try {
       verifiedListenerPid = await launchStrategy.resolveListenerPid(
@@ -412,40 +433,54 @@ export async function startOxigraphServer(
       /* handled by the fail-closed branch below */
     }
     if (
-      lifecycle.phase !== 'restart-requested'
-      || lifecycle.request !== request
-      || child !== request.child
-      || !childAlive()
+      lifecycle !== request
+      || !childAlive(request.child)
     ) return;
     if (verifiedListenerPid !== request.listenerPid) {
       log('[oxigraph] recovery restart cancelled: verified listener ownership changed');
-      lifecycle = { phase: 'ready', listenerPid: request.listenerPid };
+      lifecycle = {
+        phase: 'ready',
+        child: request.child,
+        listenerPid: request.listenerPid,
+        generation: request.generation,
+      };
       return;
     }
     try {
       const signalled = io.killProcess(request.listenerPid, 'SIGKILL');
       if (!signalled) throw new Error('process signal was not accepted');
-      request.signalAccepted = true;
-      recoveryGeneration += 1;
+      lifecycle = {
+        phase: 'restart-signalled',
+        child: request.child,
+        listenerPid: request.listenerPid,
+        reason: request.reason,
+        generation: request.generation + 1,
+      };
     } catch {
       log('[oxigraph] recovery restart could not signal the verified listener');
-      lifecycle = { phase: 'ready', listenerPid: request.listenerPid };
+      lifecycle = {
+        phase: 'ready',
+        child: request.child,
+        listenerPid: request.listenerPid,
+        generation: request.generation,
+      };
     }
   };
 
   const requestRestart = (reason: string): boolean => {
     if (
       lifecycle.phase !== 'ready'
-      || !childAlive()
+      || !childAlive(lifecycle.child)
     ) return false;
     const normalizedReason = reason.trim().slice(0, 500) || 'unspecified health failure';
-    const request: RestartRequest = {
-      child: child!,
+    const request: Extract<LifecycleState, { phase: 'restart-verifying' }> = {
+      phase: 'restart-verifying',
+      child: lifecycle.child,
       listenerPid: lifecycle.listenerPid,
       reason: normalizedReason,
-      signalAccepted: false,
+      generation: lifecycle.generation,
     };
-    lifecycle = { phase: 'restart-requested', request };
+    lifecycle = request;
     markStoreDown();
     log(`[oxigraph] ${normalizedReason}; terminating server for supervised recovery`);
     void terminateVerifiedListener(request);
@@ -455,16 +490,20 @@ export async function startOxigraphServer(
   const getRecoveryState = (): OxigraphRecoveryState => ({
     recovering: lifecycle.phase === 'recovering'
       || lifecycle.phase === 'stopping'
-      || (lifecycle.phase === 'restart-requested' && lifecycle.request.signalAccepted),
-    generation: recoveryGeneration,
+      || lifecycle.phase === 'restart-signalled',
+    generation: lifecycle.generation,
   });
 
   const stop = async (): Promise<void> => {
     if (lifecycle.phase === 'stopping') return;
-    lifecycle = { phase: 'stopping' };
+    const candidate = lifecycle.child;
+    lifecycle = {
+      phase: 'stopping',
+      child: candidate,
+      generation: lifecycle.generation,
+    };
     markStoreDown();
-    const c = child;
-    child = null;
+    const c = candidate;
     if (!c || c.exitCode !== null || c.signalCode !== null) return;
     await new Promise<void>((resolve) => {
       let settled = false;
@@ -494,7 +533,12 @@ export async function startOxigraphServer(
   );
   const launchSummary = launchStrategy.logSummary();
   if (launchSummary) log(launchSummary);
-  child = spawnChild();
+  const initialChild = spawnChild();
+  lifecycle = {
+    phase: 'starting',
+    child: initialChild,
+    generation: lifecycle.generation,
+  };
 
   const deadline = Date.now() + readyTimeoutMs;
   let attempt = 0;
@@ -504,20 +548,25 @@ export async function startOxigraphServer(
     // Our spawned child exited during startup — almost always a bind
     // failure. Stop probing and fail fast; do NOT adopt whatever may be
     // answering on the port (it could be a foreign SPARQL server).
-    if (!childAlive()) {
+    if (!childAlive(initialChild)) {
       childDied = true;
       break;
     }
-    const verifiedListenerPid = await probeReady();
+    const verifiedListenerPid = await probeReady(initialChild);
     if (verifiedListenerPid !== null) {
       // Only trust a 200 if the child WE spawned is the one still alive
       // and bound — guards the race where a foreign server answers while
       // our child has just died on EADDRINUSE.
-      if (childAlive()) {
-        captureOomSnapshotForListener(child!, verifiedListenerPid);
+      if (childAlive(initialChild)) {
+        captureOomSnapshotForListener(initialChild, verifiedListenerPid);
         // Persist the verified listener owner for targeted timeout recovery.
         // This differs from `child.pid` when Oxigraph runs in a systemd scope.
-        lifecycle = { phase: 'ready', listenerPid: verifiedListenerPid };
+        lifecycle = {
+          phase: 'ready',
+          child: initialChild,
+          listenerPid: verifiedListenerPid,
+          generation: lifecycle.generation,
+        };
         log(`Oxigraph server ready on ${bind} after ${attempt} probe(s).`);
         return {
           host,
