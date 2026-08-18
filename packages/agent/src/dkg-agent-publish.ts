@@ -1937,6 +1937,13 @@ export class PublishMethods extends DKGAgentBase {
       [INTERNAL_ROOTLESS_UPDATE_ORIGIN]?: true;
       accessPolicy?: PublishOptions['accessPolicy'];
       allowedPeers?: PublishOptions['allowedPeers'];
+      /**
+       * GH#2270 PR-3 r3 — the durable pre-send write-ahead. It has to be threaded explicitly:
+       * this option bag is built field by field rather than spread, so anything not named here is
+       * silently dropped, and a dropped write-ahead means a KA update transaction goes out with
+       * nothing on disk recording it.
+       */
+      onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
     },
   ): Promise<PublishResult> {
     return withRootlessUpdateLock(contextGraphId, kaId, async () => {
@@ -2236,6 +2243,7 @@ export class PublishMethods extends DKGAgentBase {
       publishContextGraphId: updateOnChainId ?? undefined,
       operationCtx: ctx,
       onPhase,
+      onBeforeBroadcast: opts?.onBeforeBroadcast,
       subGraphName: opts?.subGraphName,
       precomputedUpdateAttestation: opts.precomputedUpdateAttestation,
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -5358,6 +5366,11 @@ export class PublishMethods extends DKGAgentBase {
         {
           operationCtx: ctx,
           onPhase: opts?.onPhase ?? publishOptions.onPhase,
+          // GH#2270 PR-3 r3 — the queued UPDATE branch dropped this. The publish branch spreads
+          // `publisherPublishOptions` and carried it for free; this one names every field, so the
+          // pre-send write-ahead simply never fired for a named-KA update and its transaction
+          // went out with no durable record. Recovery would then see a job with no evidence.
+          onBeforeBroadcast: publishOptions.onBeforeBroadcast,
           precomputedUpdateAttestation: updateAttestation,
           publisherOverride: publisher,
           subGraphName: request.subGraphName,

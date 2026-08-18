@@ -112,9 +112,14 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
  * Timestamps are rebuilt from scratch rather than merged, so `nextRetryAt` is dropped BY
  * CONSTRUCTION — a reaccepted job carries no stale schedule for the sweep to re-fire on.
  */
-export function resetFailedLiftJobToAccepted(job: PersistedFailedJob, now: number): LiftJobAccepted {
+export function resetFailedLiftJobToAccepted(
+  job: PersistedFailedJob,
+  now: number,
+  options: { readonly txHashAccounted?: boolean } = {},
+): LiftJobAccepted {
   return buildLiftJobAcceptedReset(job, {
     now,
+    ...(options.txHashAccounted ? { txHashAccounted: true } : {}),
     // 'accepted' is the one origin with no prior state to recover from. Stated as that exclusion
     // rather than a list of the rest, so a new active state cannot silently go unrecorded — the
     // compiler rejects one that is not a `LiftJobResettableState`.
@@ -148,6 +153,12 @@ export function buildLiftJobAcceptedReset(
     readonly recoveredFrom: LiftJobResettableState | undefined;
     readonly txHashChecked: LiftJobHex | undefined;
     readonly stampRetriedAt: boolean;
+    /**
+     * GH#2270 PR-3 r3 — the chain has ACCOUNTED for `txHashChecked` and this reset is the decision.
+     * Defaults to absent, so every caller that has not asked the chain keeps carrying an open
+     * question forward, which is the safe direction. Only the proof-first dispatcher passes true.
+     */
+    readonly txHashAccounted?: boolean;
   },
 ): LiftJobAccepted {
   return {
@@ -167,6 +178,7 @@ export function buildLiftJobAcceptedReset(
           action: 'reset_to_accepted',
           recoveredFromStatus: options.recoveredFrom,
           txHashChecked: options.txHashChecked,
+          ...(options.txHashAccounted ? { txHashAccounted: true } : {}),
         }
       : undefined,
     controlPlane: job.controlPlane,

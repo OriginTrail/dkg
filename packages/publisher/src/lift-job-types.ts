@@ -193,6 +193,25 @@ export interface LiftJobRecoveryResetToAccepted {
   readonly action: 'reset_to_accepted';
   readonly recoveredFromStatus: LiftJobResettableState;
   readonly txHashChecked?: LiftJobHex;
+  /**
+   * GH#2270 PR-3 r3 — the chain ACCOUNTED for `txHashChecked`, and this reset is what it decided.
+   *
+   * The hash is kept for audit either way, but it stops being an open question. Without this a
+   * proven-absent release is self-defeating: the reset carries the hash forward so a LATER failure
+   * is still held, which is right while the transaction's fate is unknown — and wrong the moment
+   * recovery has just proven it. The job would go back on the queue, fail again before ever
+   * signing anything, and be held on a transaction the dispatcher itself established does not
+   * exist, with no second proof possible because nothing new was ever sent.
+   *
+   * Written ONLY by the proof-first dispatcher's release paths: a proven absence, and a proven
+   * revert of a transaction some earlier attempt sent. Never by the interrupted-recovery reset,
+   * the retry sweep, or a manual reaccept — none of those has asked the chain anything, and a hash
+   * they carry forward is still genuinely unaccounted for.
+   *
+   * A NEW post-sign failure records fresh `broadcast` metadata, which is unconditional evidence:
+   * this flag only ever speaks about the INHERITED hash it sits beside.
+   */
+  readonly txHashAccounted?: boolean;
   readonly note?: string;
 }
 

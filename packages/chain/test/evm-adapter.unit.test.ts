@@ -5138,3 +5138,75 @@ describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () 
     expect(sent).toBe(false);
   });
 });
+
+/**
+ * GH#2270 PR-3 r3 — `isKnowledgeAssetMinted` is the ONLY production code allowed to answer
+ * `false`, and a `false` is what authorises the recovery lane to resend.
+ *
+ * `ownerOf` reverts for an unminted token, so "not published" arrives as a thrown CALL_EXCEPTION
+ * rather than a value — and so do a paused contract, a decode failure and an endpoint returning
+ * garbage. The whole safety of the release path is that the first is distinguished from the rest.
+ * The negative rows below are the point: ambiguity must become `null`, never `false`.
+ */
+describe('EVMChainAdapter.isKnowledgeAssetMinted [GH#2270]', () => {
+  const KA_ID = 42n;
+
+  function adapterWhere(owner: () => Promise<string>, storage: unknown = { target: '0x1' }) {
+    // NOTE: pass `null` for "not deployed" — an explicit `undefined` would take the default.
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.initialized = true;
+    a.init = async () => {};
+    a.contracts = { knowledgeAssetStorage: storage };
+    a.getKnowledgeAssetOwner = owner;
+    return a;
+  }
+
+  function callException(extra: Record<string, unknown>): Error {
+    return Object.assign(new Error(String(extra.message ?? 'execution reverted')), {
+      code: 'CALL_EXCEPTION',
+      ...extra,
+    });
+  }
+
+  it('answers TRUE for a token with a real owner', async () => {
+    const a = adapterWhere(async () => '0x1111111111111111111111111111111111111111');
+    await expect(a.isKnowledgeAssetMinted(KA_ID)).resolves.toBe(true);
+  });
+
+  it('answers FALSE for the zero address', async () => {
+    const a = adapterWhere(async () => ethers.ZeroAddress);
+    await expect(a.isKnowledgeAssetMinted(KA_ID)).resolves.toBe(false);
+  });
+
+  it.each([
+    ['OpenZeppelin custom error', { reason: 'ERC721NonexistentToken(uint256)' }],
+    ['classic invalid token id', { reason: 'ERC721: invalid token ID' }],
+    ['classic nonexistent token', { message: 'execution reverted: ERC721: owner query for nonexistent token' }],
+    ['shortMessage carrier', { shortMessage: 'execution reverted: ERC721NonexistentToken' }],
+  ])('answers FALSE for a recognized nonexistent-token revert (%s)', async (_label, extra) => {
+    const a = adapterWhere(async () => { throw callException(extra); });
+    await expect(a.isKnowledgeAssetMinted(KA_ID)).resolves.toBe(false);
+  });
+
+  it.each([
+    ['a paused contract', callException({ reason: 'Paused' })],
+    ['an unrelated revert reason', callException({ reason: 'NotAuthorized' })],
+    ['a bare CALL_EXCEPTION with no reason', callException({ message: 'missing revert data' })],
+    ['a decode failure', Object.assign(new Error('could not decode result data'), { code: 'BAD_DATA' })],
+    ['a transport failure', Object.assign(new Error('network unreachable'), { code: 'NETWORK_ERROR' })],
+    ['a timeout', Object.assign(new Error('ETIMEDOUT'), { code: 'TIMEOUT' })],
+    ['a plain Error', new Error('something else entirely')],
+  ])('answers NULL — never false — for %s', async (_label, err) => {
+    // A `false` here would be read as "nothing published" and authorise a resend. Every one of
+    // these is an absence of information, not information about an absence.
+    const a = adapterWhere(async () => { throw err; });
+    const answer = await a.isKnowledgeAssetMinted(KA_ID);
+    expect(answer).toBeNull();
+    expect(answer).not.toBe(false);
+  });
+
+  it('answers NULL when the storage contract is not deployed', async () => {
+    const a = adapterWhere(async () => '0x1111111111111111111111111111111111111111', null);
+    await expect(a.isKnowledgeAssetMinted(KA_ID)).resolves.toBeNull();
+  });
+});

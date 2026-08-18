@@ -24,8 +24,8 @@ import type {
   LiftJob,
   LiftJobHex,
 } from '../src/index.js';
-import type { PersistedFailedJob } from '../src/async-lift-publisher-utils.js';
-import { isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
+import { resetFailedLiftJobToAccepted, type PersistedFailedJob } from '../src/async-lift-publisher-utils.js';
+import { hasBroadcastEvidence, isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
 import {
   DEFAULT_CONTROL_GRAPH_URI,
   jobSubject,
@@ -178,6 +178,8 @@ describe('GH#2270 proof-first chain dispatcher', () => {
         action: 'reset_to_accepted',
         recoveredFromStatus: 'broadcast',
         txHashChecked: TX_HASH,
+        // The dispatcher established this transaction's fate, so the hash is audit, not a hold.
+        txHashAccounted: true,
       });
       // A reset must carry no stale schedule for the claim-time sweep to re-fire on.
       expect(released?.timestamps.nextRetryAt).toBeUndefined();
@@ -581,6 +583,108 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     // The new key constructs normally — so the row above cannot pass by rejecting everything.
     expect(() => createPublisher({ chainProofResolver: async () => ({ status: 'inconclusive' as const }) }))
       .not.toThrow();
+  });
+
+  // GH#2270 PR-3 r3 — a hash the dispatcher ACCOUNTED for must stop reading as an open question.
+  //
+  // The reset deliberately carries the checked hash forward, which is right while the
+  // transaction's fate is unknown. After a PROVEN absence it is the opposite of right: the job
+  // goes back on the queue, and the first pre-send failure it hits would be held again — on a
+  // transaction recovery itself established does not exist, and which can never be proven a
+  // second time because nothing new was ever sent. The audit trail stays; the hold does not.
+  describe('an accounted hash stops holding the job', () => {
+    it('releases, then does NOT re-hold when the next attempt fails before signing', async () => {
+      const publisher = dispatcher({ status: 'not-found' });
+      const failed = await failAfterRecordedTxHash(publisher);
+      expect(isHeldForChainProof(failed)).toBe(true);
+
+      expect(await publisher.recover()).toBe(1);
+      const released = await publisher.getStatus(failed.jobId);
+      expect(released?.status).toBe('accepted');
+      // Audit retained: the hash and the origin are still on the record.
+      expect(released?.recovery?.txHashChecked).toBe(TX_HASH);
+      expect(released?.recovery?.recoveredFromStatus).toBe('broadcast');
+      expect(released?.recovery?.txHashAccounted).toBe(true);
+
+      // The next attempt fails at 'claimed', BEFORE signing anything — the claim-time preflight
+      // rejects — so it adds no new transaction evidence of its own.
+      const reAttempt = h.createCorruptHeadPublisher();
+      const reFailed = expectFailed(await reAttempt.processNext('wallet-again'));
+
+      expect(reFailed.jobId).toBe(failed.jobId);
+      expect(reFailed.failure.failedFromState).toBe('claimed');
+      expect(reFailed.broadcast).toBeUndefined();
+      // The point of the whole round: NOT held. Ordinary retry policy governs it now.
+      expect(hasBroadcastEvidence(reFailed)).toBe(false);
+      expect(isHeldForChainProof(reFailed)).toBe(false);
+      expect(reFailed.failure.resolution).toBe('reset_to_accepted');
+    });
+
+    it('still holds an inherited hash that was never proven', async () => {
+      // The polarity that keeps the mark honest. Same shape of record, same carrier — but this
+      // one came from a reset that never asked the chain anything, so the question is still open.
+      const publisher = createPublisher();
+      const failed = await failAfterRecordedTxHash(publisher);
+      const carried = {
+        ...failed,
+        broadcast: undefined,
+        failure: { ...failed.failure, failedFromState: 'claimed', code: 'workspace_unavailable' },
+        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH },
+      } as unknown as LiftJob;
+      await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(carried, DEFAULT_CONTROL_GRAPH_URI));
+
+      const reread = expectFailed(await publisher.getStatus(failed.jobId));
+      expect(reread.recovery?.txHashAccounted).toBeUndefined();
+      expect(isHeldForChainProof(reread)).toBe(true);
+    });
+
+    it('re-holds when the next attempt DOES sign something', async () => {
+      // The mark speaks only about the inherited hash it sits beside. A new post-sign failure
+      // writes fresh broadcast evidence, and that is unconditional.
+      const publisher = dispatcher({ status: 'not-found' });
+      const failed = await failAfterRecordedTxHash(publisher);
+      expect(await publisher.recover()).toBe(1);
+
+      const claimed = (await publisher.claimNext('wallet-again'))!;
+      await publisher.update(claimed.jobId, 'validated', { validation: KA_VM_VALIDATION });
+      await publisher.update(claimed.jobId, 'broadcast', {
+        broadcast: { txHash: `0x${'ee'.repeat(32)}`, walletId: 'wallet-again', nonce: 7 },
+      });
+      const reFailed = expectFailed(await publisher.recordPublishFailure(claimed.jobId, {
+        error: new Error('RPC endpoint temporarily unavailable'),
+        failedFromState: 'broadcast',
+        errorPayloadRef: `urn:dkg:test:error:${claimed.jobId}`,
+      }));
+
+      expect(reFailed.broadcast?.txHash).toBe(`0x${'ee'.repeat(32)}`);
+      expect(isHeldForChainProof(reFailed)).toBe(true);
+    });
+
+    it('marks the hash accounted on the inherited-revert release too', async () => {
+      // The reverted fall-through releases for the same reason — nothing of this job's is on
+      // chain — so it must leave the same accounting behind.
+      const publisher = dispatcher({ status: 'reverted' });
+      const held = await heldOnRecoveryCarrier(publisher);
+
+      expect(await publisher.recover()).toBe(1);
+
+      const released = await publisher.getStatus(held.jobId);
+      expect(released?.status).toBe('accepted');
+      expect(released?.recovery?.txHashChecked).toBe(TX_HASH);
+      expect(released?.recovery?.txHashAccounted).toBe(true);
+    });
+
+    it('does NOT mark a hash accounted on any reset that did not ask the chain', async () => {
+      // The interrupted-recovery reset and the manual reaccept carry the same hash forward, and
+      // neither has established anything about it. If either marked it accounted, a genuinely
+      // ambiguous transaction would stop holding its job.
+      const publisher = createPublisher();
+      const failed = await failWithUnmetQuorum(publisher);
+      const manual = resetFailedLiftJobToAccepted(failed, 9_000);
+
+      expect(manual.recovery?.txHashAccounted).toBeUndefined();
+    });
   });
 
   it('never touches a failed job that is not held', async () => {

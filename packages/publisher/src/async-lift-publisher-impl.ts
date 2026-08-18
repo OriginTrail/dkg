@@ -1311,9 +1311,16 @@ export class TripleStoreAsyncLiftPublisher
       }
       case 'reset': {
         // The job may re-run, on the SAME jobId, through the one reset builder — which carries the
-        // hash forward in `recovery.txHashChecked`, so a later failure is still correctly held.
+        // hash forward for audit, MARKED ACCOUNTED. This is the ONLY place that mark is written,
+        // and it is what stops a released job from being re-held on a transaction this dispatcher
+        // has just proven does not exist: it could never be proven a second time, because nothing
+        // new was ever sent. A later attempt that actually signs something records fresh broadcast
+        // evidence, and that holds unconditionally.
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(resetFailedLiftJobToAccepted(job, this.now()), 'recover-reset');
+        await this.writeJob(
+          resetFailedLiftJobToAccepted(job, this.now(), { txHashAccounted: true }),
+          'recover-reset',
+        );
         return 1;
       }
       case 'hold':

@@ -3813,20 +3813,24 @@ export class DKGPublisher implements Publisher {
           // already bracketed by `chain:writeahead`), and keeping
           // starts balanced by ends preserves the "every start has a
           // matching end" golden-sequence invariant.
-          // GH#2270 PR-3 r2 — the DURABLE boundary, first and awaited. A throw here propagates out
-          // of the adapter's onBroadcast hook and aborts the send with the transaction still
-          // local, so a caller that could not persist the signal never has one on the wire.
-          if (info?.txHash) {
-            await onBeforeBroadcast?.({ txHash: info.txHash, nonce: info.nonce });
-          }
-          // Everything below is instrumentation: the same breadcrumb WAL listeners have had since
-          // PR #241, now carrying nothing anyone depends on.
+          // Instrumentation runs FIRST. It is caller-supplied and therefore fallible, and it is
+          // awaited, so a rejecting listener aborts the send — which is fine, and even desirable,
+          // as long as nothing durable has been written yet.
           if (info?.txHash) {
             const phase = `chain:txsigned:tx-${info.txHash}`;
             await emitPhase(phase, 'start');
             await emitPhase(phase, 'end');
           }
           await emitPhase('chain:writeahead', 'start');
+          // GH#2270 PR-3 r3 — the DURABLE boundary is LAST, so nothing fallible runs between it
+          // and the send. It used to come first, which meant a rejecting `onPhase` after it threw
+          // out of this hook and aborted the broadcast with the 'broadcast' record already on
+          // disk: a persisted transaction that was never sent, and a recovery lane pointed at a
+          // hash that does not exist. A throw here still aborts the send, and now the two facts
+          // agree — either the record exists and the send was attempted, or neither happened.
+          if (info?.txHash) {
+            await onBeforeBroadcast?.({ txHash: info.txHash, nonce: info.nonce });
+          }
         };
         // OT-RFC-43 Option 1 — reserve the deterministic packed kaId for this
         // author BEFORE the on-chain mint, so the UAL is known pre-tx and the
@@ -5201,16 +5205,17 @@ export class DKGPublisher implements Publisher {
       // phase first so WAL listeners record the signed-but-not-yet-
       // broadcast update tx identity, then the generic
       // `chain:writeahead:start` for legacy consumers.
-      // GH#2270 PR-3 r2 — durable boundary first and awaited, exactly as the publish path above.
-      if (info?.txHash) {
-        await onBeforeBroadcast?.({ txHash: info.txHash, nonce: info.nonce });
-      }
+      // Instrumentation first, durable boundary LAST — exactly as the publish path above, and for
+      // the same reason: nothing fallible may run between the durable record and the send.
       if (info?.txHash) {
         const phase = `chain:txsigned:tx-${info.txHash}`;
         await emitPhase(phase, 'start');
         await emitPhase(phase, 'end');
       }
       await emitPhase('chain:writeahead', 'start');
+      if (info?.txHash) {
+        await onBeforeBroadcast?.({ txHash: info.txHash, nonce: info.nonce });
+      }
     };
     // CRITICAL CORRECTNESS INVARIANT (consensus): the digest fields the
     // peers sign MUST be byte-identical to what the on-chain update tx
