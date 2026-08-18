@@ -28,7 +28,7 @@ export function fmtUsd(usd: number): string {
   if (Math.abs(usd) < 0.01) {
     return `$${usd.toFixed(Math.min(7, Math.max(4, -Math.floor(Math.log10(Math.abs(usd))) + 1)))}`;
   }
-  return `$${usd.toFixed(2)}`;
+  return `$${usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 export function microToUsd(micro: number, rate: number): number {

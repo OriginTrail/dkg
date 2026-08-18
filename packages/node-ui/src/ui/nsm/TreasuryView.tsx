@@ -7,7 +7,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { copy } from './copy.generated.js';
 import { ConservationLine, MiniBar, RadialGauge } from './components.js';
-import { DEFAULT_TRAC_USD, fmtHash, fmtMicro, fmtTrac, fmtUsd, microToTrac } from './format.js';
+import { DEFAULT_TRAC_USD, fmtCompact, fmtHash, fmtMicro, fmtTrac, fmtUsd, microToTrac } from './format.js';
 import { authHeaders } from '../http.js';
 
 interface TreasuryTab {
@@ -68,7 +68,10 @@ export function TreasuryView({ fxRate = DEFAULT_TRAC_USD }: { fxRate?: number })
         <div className="hero">
           <RadialGauge pct={100} mode="ready">
             <div>
-              <div className="mono" style={{ fontSize: 'var(--fs-xl)', fontWeight: 600 }}>{fmtTrac(microToTrac(ringMicro))}</div>
+              {/* ring interior is 120px — compact form there, exact beside it */}
+              <div className="mono" style={{ fontSize: 'var(--fs-xl)', fontWeight: 600 }}>
+                {microToTrac(ringMicro) >= 1000 ? fmtCompact(Math.round(microToTrac(ringMicro))) : fmtTrac(microToTrac(ringMicro))}
+              </div>
               <div className="xs muted">TRAC</div>
             </div>
           </RadialGauge>
