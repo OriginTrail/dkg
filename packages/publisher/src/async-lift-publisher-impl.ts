@@ -638,12 +638,28 @@ export class TripleStoreAsyncLiftPublisher
       });
 
       failureState = 'broadcast';
+      const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
+      // GH#2270 — the same pre-send write-ahead KA VM publish has taken since #1864. The
+      // executor's `chain:txsigned:tx-<hash>` phase fires with the SIGNED hash strictly
+      // before the tx goes on the wire and is awaited, so a crash anywhere in the send
+      // window now finds a durable 'broadcast' record carrying that hash. Without it the
+      // job read back as 'validated', recover() reset it to 'accepted', and it re-published
+      // under a new hash while the first was still in flight.
+      const broadcastRecorder = this.createPreSendBroadcastRecorder({
+        jobId: claimed.jobId,
+        walletId,
+        publicByteSize,
+        delegate: prepared.publishOptions.onPhase,
+      });
       const publishResult = await this.publishExecutor({
         walletId,
-        publishOptions: prepared.publishOptions,
+        publishOptions: {
+          ...prepared.publishOptions,
+          onPhase: broadcastRecorder.onPhase,
+        },
       });
       return await this.recordPublishResult(claimed.jobId, publishResult, {
-        publicByteSize: this.computePublicByteSize(prepared.publishOptions.quads),
+        publicByteSize,
       });
     } catch (error) {
       return await this.recordExecutionFailure(claimed.jobId, failureState, error);
@@ -702,7 +718,7 @@ export class TripleStoreAsyncLiftPublisher
     }
 
     const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
-    const broadcastRecorder = this.createKnowledgeAssetVmPublishBroadcastRecorder({
+    const broadcastRecorder = this.createPreSendBroadcastRecorder({
       jobId: claimed.jobId,
       walletId,
       merkleRoot: request.sealMerkleRoot,
@@ -1661,10 +1677,24 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
-  private createKnowledgeAssetVmPublishBroadcastRecorder(params: {
+  /**
+   * The pre-send write-ahead hook, shared by BOTH publish paths.
+   *
+   * GH#2270 — raw lift used to send its tx with no `onPhase` of its own, so a crash in the
+   * send window left the job at 'validated' with no txHash: recover() reset it to 'accepted'
+   * and it re-broadcast under a fresh hash — a double publish with nothing on disk to
+   * contradict it. It now takes the same boundary KA VM publish has taken since #1864, from
+   * this one implementation rather than a second copy.
+   *
+   * `merkleRoot` is optional because only KA VM publish knows one before the send (the seal
+   * root); raw lift's real root arrives with the publish result and `recordPublishResult`
+   * merges it in. `LiftJobBroadcastMetadata.merkleRoot` is optional for exactly this reason —
+   * the txHash is the evidence that matters here.
+   */
+  private createPreSendBroadcastRecorder(params: {
     jobId: string;
     walletId: string;
-    merkleRoot: LiftJobHex;
+    merkleRoot?: LiftJobHex;
     publicByteSize?: number;
     delegate?: PhaseCallback;
   }): { onPhase: PhaseCallback; readonly outcome: PreSendOutcome } {
@@ -1681,7 +1711,7 @@ export class TripleStoreAsyncLiftPublisher
       if (!txHash || recordedTxHash) return;
       recordedTxHash = txHash;
       try {
-        await this.recordKnowledgeAssetVmPublishBroadcastProgress({
+        await this.recordBroadcastProgressBeforeSend({
           jobId: params.jobId,
           walletId: params.walletId,
           txHash,
@@ -1705,18 +1735,18 @@ export class TripleStoreAsyncLiftPublisher
     };
   }
 
-  private async recordKnowledgeAssetVmPublishBroadcastProgress(params: {
+  private async recordBroadcastProgressBeforeSend(params: {
     jobId: string;
     walletId: string;
     txHash: LiftJobHex;
-    merkleRoot: LiftJobHex;
+    merkleRoot?: LiftJobHex;
     publicByteSize?: number;
   }): Promise<void> {
     const current = await this.getRequiredJob(params.jobId);
     if (current.status === 'broadcast') return;
     if (current.status !== 'validated') {
       throw new Error(
-        `Cannot record knowledge asset VM publish broadcast for job ${params.jobId} from status ${current.status}`,
+        `Cannot record pre-send broadcast for job ${params.jobId} from status ${current.status}`,
       );
     }
     await this.recordDurableBroadcastBeforeSend(current, {

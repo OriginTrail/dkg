@@ -519,10 +519,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   const publishers = new Map<string, DKGPublisher>(
     wallets.map((wallet) => [wallet.address, wallet.publisher]),
   );
-  const hasChainRecovery = [...publishers.values()].some((p) => {
-    const chain = (p as unknown as { chain?: { resolvePublishByTxHash?: unknown } }).chain;
-    return typeof chain?.resolvePublishByTxHash === 'function';
-  });
+  const hasChainRecovery = [...publishers.values()].some(hasChainPublishLookup);
 
   const scopedKnowledgeAssetVmPublishHandler = scopeKnowledgeAssetVmPublishHandler(
     publishers,
@@ -756,18 +753,86 @@ function createV10ACKProviderForPublisher(
   };
 }
 
+/**
+ * Can this publisher's chain adapter be asked whether a broadcast tx published?
+ *
+ * GH#2270 — EITHER lookup qualifies. `resolvePublishTransaction` is the surface
+ * {@link createChainProofResolver} prefers, so an adapter offering only that one
+ * must not silently lose chain recovery; an adapter offering only the legacy
+ * `resolvePublishByTxHash` keeps the recovery it has always had.
+ */
+export function hasChainPublishLookup(publisher: DKGPublisher): boolean {
+  const chain = (publisher as unknown as {
+    chain?: { resolvePublishByTxHash?: unknown; resolvePublishTransaction?: unknown };
+  }).chain;
+  return typeof chain?.resolvePublishByTxHash === 'function'
+    || typeof chain?.resolvePublishTransaction === 'function';
+}
+
+/**
+ * GH#2270 — what the runner established about a broadcast job's transaction.
+ *
+ * `AsyncLiftPublisherRecoveryResolver` answers `AsyncLiftPublisherRecoveryResult | null`,
+ * and that `null` fuses "the chain proved this transaction does not exist" with
+ * "we could not find out" — a distinction the publisher's retry decision turns
+ * on, because only the first makes a resend safe. This is the un-fused form.
+ *
+ * `inconclusive` is the fail-closed member and the one every unknown collapses
+ * into: an RPC error, a wallet with no publisher, an adapter with no publish
+ * lookup, a contract address that would not resolve, a chain result the lift
+ * mapper rejected, and — deliberately — a `null` from an adapter that only
+ * offers the two-state {@link ChainAdapter.resolvePublishByTxHash}. Such an
+ * adapter cannot distinguish a mempool transaction from an unknown one, so it
+ * may never contribute `not-found`.
+ */
+export type ChainProofResolution =
+  /** The chain carries a publish, and it mapped to usable lift recovery evidence. */
+  | { status: 'recovered'; recovery: AsyncLiftPublisherRecoveryResult }
+  /** Mined with a failure receipt: proven ineffective, permanently. */
+  | { status: 'reverted' }
+  /** Mined and successful, but carrying no publish this adapter recognizes. */
+  | { status: 'unrecognized' }
+  /** The node holds the transaction and has not mined it. Never absence. */
+  | { status: 'pending' }
+  /** The node was asked for the TRANSACTION and does not have it: proven absence. */
+  | { status: 'not-found' }
+  /** Nothing was established. Never absence, never proof. */
+  | { status: 'inconclusive' };
+
+/**
+ * GH#2270 — the truthful chain lookup behind {@link createChainRecoveryResolver}.
+ *
+ * It exists separately because the publisher's resolver contract is still
+ * two-state: this one reports the chain fact, and the resolver below collapses
+ * it. Everything that is not `recovered` collapses to the same `null` there, so
+ * wiring this in changes nothing today; the dispatcher that consumes the
+ * distinction replaces the collapse, not the lookup.
+ */
+export function createChainProofResolver(
+  publishers: Map<string, DKGPublisher>,
+): (job: LiftJobBroadcast | LiftJobIncluded) => Promise<ChainProofResolution> {
+  return async (job) => {
+    const resolution = await resolvePublishTransactionState(job, publishers);
+    if (resolution.status !== 'confirmed') return resolution;
+    const recovery = await mapConfirmedPublishToLiftRecovery(resolution.publish, resolution.chain);
+    // The chain confirmed a publish this node cannot turn into recovery evidence
+    // (no knowledge-assets contract, or fields the mapper rejects). That is a
+    // gap in what we can USE, not a fact about the chain: it must not read as
+    // absence.
+    return recovery ? { status: 'recovered', recovery } : { status: 'inconclusive' };
+  };
+}
+
 export function createChainRecoveryResolver(
   publishers: Map<string, DKGPublisher>,
 ): (job: LiftJobBroadcast | LiftJobIncluded) => Promise<AsyncLiftPublisherRecoveryResult | null> {
+  const resolveChainProof = createChainProofResolver(publishers);
   return async (job) => {
-    const recovered = await resolveOnChainPublish(job, publishers);
-    return recovered
-      ? mapOnChainPublishResultToLiftRecovery(
-          recovered.result,
-          recovered.chain.chainId,
-          recovered.knowledgeAssetsContract,
-        )
-      : null;
+    const resolution = await resolveChainProof(job);
+    // The pre-#2270 two-state consumption, written as an explicit derivation:
+    // recovered evidence resolves the job, and EVERY other chain fact —
+    // including a proven `not-found` — reads as `null`, exactly as before.
+    return resolution.status === 'recovered' ? resolution.recovery : null;
   };
 }
 
@@ -925,30 +990,51 @@ function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
   };
 }
 
-async function resolveOnChainPublish(
+/**
+ * The chain lookup for one broadcast job, reported as the chain fact.
+ *
+ * GH#2270 — the adapter's tri-state {@link ChainAdapter.resolvePublishTransaction}
+ * is used when it exists, because it is the only surface that asks the node for
+ * the TRANSACTION and can therefore return a `not-found` that means something.
+ * An adapter offering only `resolvePublishByTxHash` is not downgraded to a
+ * guess: its `null` becomes `inconclusive`, never `not-found`, so an adapter
+ * that cannot see the mempool can never authorise a resend.
+ */
+async function resolvePublishTransactionState(
   job: LiftJobBroadcast | LiftJobIncluded,
   publishers: Map<string, DKGPublisher>,
-): Promise<{
-  result: OnChainPublishResult;
-  chain: ChainAdapter;
-  knowledgeAssetsContract: string;
-} | null> {
+): Promise<
+  | { status: 'confirmed'; publish: OnChainPublishResult; chain: ChainAdapter }
+  | Exclude<ChainProofResolution, { status: 'recovered' }>
+> {
   const publisher = publishers.get(job.broadcast.walletId);
-  if (!publisher) return null;
+  if (!publisher) return { status: 'inconclusive' };
   const chain = (publisher as unknown as { chain?: ChainAdapter }).chain;
-  if (!chain?.resolvePublishByTxHash) return null;
+  if (!chain) return { status: 'inconclusive' };
 
-  let result: OnChainPublishResult | null;
   try {
-    result = await chain.resolvePublishByTxHash(job.broadcast.txHash);
+    if (chain.resolvePublishTransaction) {
+      const resolution = await chain.resolvePublishTransaction(job.broadcast.txHash);
+      return resolution.status === 'confirmed'
+        ? { status: 'confirmed', publish: resolution.publish, chain }
+        : resolution;
+    }
+    if (!chain.resolvePublishByTxHash) return { status: 'inconclusive' };
+    const publish = await chain.resolvePublishByTxHash(job.broadcast.txHash);
+    return publish ? { status: 'confirmed', publish, chain } : { status: 'inconclusive' };
   } catch {
-    // Transient RPC/provider errors — treat as inconclusive (null) so the
-    // recovery timeout mechanism handles it rather than crashing the daemon.
-    return null;
+    // Transient RPC/provider errors establish nothing — report that rather than
+    // crashing the daemon, so the recovery timeout mechanism handles it.
+    return { status: 'inconclusive' };
   }
-  if (!result) return null;
+}
 
-  let knowledgeAssetsContract = result.knowledgeAssetsContract;
+/** The confirmed publish, mapped to lift recovery evidence, or `null` if this node cannot. */
+async function mapConfirmedPublishToLiftRecovery(
+  publish: OnChainPublishResult,
+  chain: ChainAdapter,
+): Promise<AsyncLiftPublisherRecoveryResult | null> {
+  let knowledgeAssetsContract = publish.knowledgeAssetsContract;
   if (!knowledgeAssetsContract && chain.getDKGKnowledgeAssetsAddress) {
     try {
       knowledgeAssetsContract = await chain.getDKGKnowledgeAssetsAddress();
@@ -956,7 +1042,8 @@ async function resolveOnChainPublish(
       return null;
     }
   }
-  return knowledgeAssetsContract ? { result, chain, knowledgeAssetsContract } : null;
+  if (!knowledgeAssetsContract) return null;
+  return mapOnChainPublishResultToLiftRecovery(publish, chain.chainId, knowledgeAssetsContract);
 }
 
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {

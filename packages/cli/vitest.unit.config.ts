@@ -116,6 +116,10 @@ export default defineConfig({
           'test/publisher-runner-ack-transport.test.ts',
           'test/publisher-runtime-snapshot-store-injection.test.ts',
           'test/publisher-ka-recovery.test.ts',
+          // #2270 — the runner's chain lookup reports WHICH chain fact it found
+          // (pending vs proven-absent vs inconclusive), and the two-state
+          // resolver derived from it. Pure logic over stub adapters.
+          'test/publisher-chain-proof-resolution.test.ts',
           // #1836 — publisher.maxRetries must propagate through
           // createPublisherControlFromStore (incl. a literal 0). Pure logic.
           'test/publisher-maxretries-1836.test.ts',

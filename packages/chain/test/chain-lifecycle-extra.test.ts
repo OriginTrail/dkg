@@ -387,6 +387,77 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       expect(resolved).toBeNull();
     });
 
+    // GH#2270 — `resolvePublishByTxHash` answers `null` for a mined-and-reverted
+    // tx, a mined non-publish tx, a tx still in the mempool, and a tx the node
+    // has never seen. Recovery read that `null` as "the publish did not happen"
+    // and resent. These pin that `resolvePublishTransaction` tells them apart
+    // against a real node, and specifically that `pending` comes from asking for
+    // the TRANSACTION — not from inferring anything out of a missing receipt.
+    describe('resolvePublishTransaction separates pending from absent [GH#2270]', () => {
+      it('reports not-found for a hash the node has never seen', async () => {
+        const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+        const bogus = '0x' + 'ab'.repeat(32);
+
+        expect(await adapter.resolvePublishTransaction(bogus)).toEqual({ status: 'not-found' });
+      });
+
+      it('reports pending while unmined and unrecognized once mined — same hash', async () => {
+        // One transaction, two verdicts. The only thing that changes between
+        // them is whether it has been mined, so a resolver that derived its
+        // answer from the absent receipt could not produce both.
+        const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+        const provider = createProvider();
+        const wallet = new Wallet(HARDHAT_KEYS.CORE_OP, provider);
+
+        await provider.send('evm_setAutomine', [false]);
+        let txHash: string;
+        try {
+          const sent = await wallet.sendTransaction({ to: wallet.address, value: 0n });
+          txHash = sent.hash;
+          expect(await adapter.resolvePublishTransaction(txHash)).toEqual({ status: 'pending' });
+        } finally {
+          await provider.send('evm_setAutomine', [true]);
+        }
+        await provider.send('evm_mine', []);
+
+        // Mined and successful, but a plain transfer carries no publish event.
+        expect(await adapter.resolvePublishTransaction(txHash)).toEqual({ status: 'unrecognized' });
+        // The legacy surface collapses that and the pending case to one `null`.
+        expect(await adapter.resolvePublishByTxHash(txHash)).toBeNull();
+      });
+
+      it('reports reverted for a mined failure receipt', async () => {
+        const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+        const provider = createProvider();
+        const wallet = new Wallet(HARDHAT_KEYS.CORE_OP, provider);
+        const { hubAddress } = getSharedContext();
+
+        // Unknown selector against a deployed contract with no fallback. The
+        // explicit gasLimit skips estimateGas, and automine has to be off for
+        // the send itself: Hardhat simulates on eth_sendRawTransaction while
+        // automining and would reject the tx instead of mining a status-0
+        // receipt. Mining it separately produces the failure receipt.
+        await provider.send('evm_setAutomine', [false]);
+        let txHash: string;
+        try {
+          const sent = await wallet.sendTransaction({
+            to: hubAddress,
+            data: '0xdeadbeef',
+            gasLimit: 100_000,
+          });
+          txHash = sent.hash;
+        } finally {
+          await provider.send('evm_setAutomine', [true]);
+        }
+        await provider.send('evm_mine', []).catch(() => undefined);
+
+        expect(await adapter.resolvePublishTransaction(txHash)).toEqual({ status: 'reverted' });
+        // The legacy surface reports this the same way it reports a tx that
+        // never existed — the fusion this whole tri-state exists to undo.
+        expect(await adapter.resolvePublishByTxHash(txHash)).toBeNull();
+      });
+    });
+
     it('verifyKAUpdate returns unverified for an unrelated tx hash', async () => {
       const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
       // Use a random-looking hash that does not exist on-chain.
