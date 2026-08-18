@@ -23,6 +23,7 @@
  * matching the Blazegraph-Docker provisioner's contract.
  */
 import { join } from 'node:path';
+import { DEFAULT_SPARQL_HTTP_TIMEOUT_MS } from '@origintrail-official/dkg-storage';
 import { ensureOxigraphBinary } from './oxigraph-binary.js';
 import {
   startOxigraphServer,
@@ -40,15 +41,15 @@ export const MANAGED_OXIGRAPH_BACKEND = 'oxigraph-server';
 /** Default loopback bind port. Override via `store.options.port`. */
 export const DEFAULT_OXIGRAPH_PORT = 7878;
 
-/** Mirrors SparqlHttpStore's default while making the managed launch invariant explicit. */
-export const DEFAULT_MANAGED_OXIGRAPH_CLIENT_TIMEOUT_MS = 30_000;
-
 const MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS = 5_000;
 // Node timers (and AbortSignal.timeout) coerce any delay above 2^31-1 ms to 1ms
 // with a TimeoutOverflowWarning — aborting the request almost immediately, the
 // opposite of a long timeout. Cap the derived client timeout so an absurd
 // operator-configured queryTimeoutS degrades to "very long", never "instant".
 const MAX_NODE_TIMER_MS = 2_147_483_647;
+const MAX_MANAGED_OXIGRAPH_QUERY_TIMEOUT_S = Math.floor(
+  (MAX_NODE_TIMER_MS - MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS) / 1_000,
+);
 
 /** Same port validation as {@link planManagedOxigraph} — shared with status. */
 export function resolveManagedOxigraphPort(
@@ -74,33 +75,40 @@ function clampNodeTimerMs(value: number): number {
   return Math.min(value, MAX_NODE_TIMER_MS);
 }
 
-function resolveManagedQueryClientTimeoutMs(
-  clientTimeoutMs: number | undefined,
-  queryTimeoutS: number | undefined,
-): number | undefined {
-  if (clientTimeoutMs !== undefined) {
-    const configured = clampNodeTimerMs(clientTimeoutMs);
-    return queryTimeoutS === undefined
-      ? configured
-      : Math.max(
-          configured,
-          clampNodeTimerMs(queryTimeoutS * 1_000 + MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS),
-        );
-  }
-  return queryTimeoutS === undefined
-    ? undefined
-    : clampNodeTimerMs(queryTimeoutS * 1_000 + MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS);
+interface ManagedOxigraphDeadlines {
+  queryTimeoutS: number;
+  clientTimeoutMs: number;
 }
 
-function deriveManagedQueryTimeoutS(clientTimeoutMs: number | undefined): number | undefined {
-  if (clientTimeoutMs === undefined) return undefined;
-  const clampedClientTimeoutMs = clampNodeTimerMs(clientTimeoutMs);
-  return Math.max(
+/** Resolve the required native/client pair and enforce native < client. */
+function resolveManagedOxigraphDeadlines(
+  options: Record<string, unknown> | undefined,
+): ManagedOxigraphDeadlines {
+  const configuredClientTimeoutMs = clampNodeTimerMs(
+    resolvePositiveIntegerOption(options, 'clientTimeoutMs')
+      ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
+  );
+  const derivedQueryTimeoutS = Math.max(
     1,
     Math.floor(
-      (clampedClientTimeoutMs - MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS) / 1_000,
+      (configuredClientTimeoutMs - MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS) / 1_000,
     ),
   );
+  const configuredQueryTimeoutS = resolvePositiveIntegerOption(options, 'queryTimeoutS');
+  const queryTimeoutS = Math.min(
+    configuredQueryTimeoutS ?? derivedQueryTimeoutS,
+    MAX_MANAGED_OXIGRAPH_QUERY_TIMEOUT_S,
+  );
+  const minimumClientTimeoutMs = clampNodeTimerMs(
+    queryTimeoutS * 1_000 + MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS,
+  );
+  return {
+    queryTimeoutS,
+    clientTimeoutMs: configuredQueryTimeoutS !== undefined
+      && configuredQueryTimeoutS > MAX_MANAGED_OXIGRAPH_QUERY_TIMEOUT_S
+      ? MAX_NODE_TIMER_MS
+      : Math.max(configuredClientTimeoutMs, minimumClientTimeoutMs),
+  };
 }
 
 interface StoreConfigLike {
@@ -169,9 +177,9 @@ export interface ManagedOxigraphPlan {
   /** Startup readiness deadline passed to the managed server supervisor. */
   readyTimeoutMs?: number;
   /** Native Oxigraph query timeout, passed as `oxigraph serve --timeout-s`. */
-  queryTimeoutS?: number;
+  queryTimeoutS: number;
   /** SPARQL HTTP client deadline; kept after Oxigraph's native timeout when both exist. */
-  clientTimeoutMs?: number;
+  clientTimeoutMs: number;
   /** Finite limits applied to an isolated systemd user scope. */
   memoryLimits?: OxigraphMemoryLimits;
   /**
@@ -198,18 +206,11 @@ export function planManagedOxigraph(
   const options = config.store.options ?? {};
   const port = resolveManagedOxigraphPort(options);
   const readyTimeoutMs = resolvePositiveIntegerOption(options, 'readyTimeoutMs');
-  const configuredClientTimeoutMs = resolvePositiveIntegerOption(options, 'clientTimeoutMs')
-    ?? DEFAULT_MANAGED_OXIGRAPH_CLIENT_TIMEOUT_MS;
   // A client-only deadline closes the HTTP socket but cannot cancel an
   // evaluation already running inside the Oxigraph server. Derive a native
   // deadline with five seconds of client grace so timed-out queries are
   // interrupted server-side instead of accumulating as zombies.
-  const queryTimeoutS = resolvePositiveIntegerOption(options, 'queryTimeoutS')
-    ?? deriveManagedQueryTimeoutS(configuredClientTimeoutMs);
-  const clientTimeoutMs = resolveManagedQueryClientTimeoutMs(
-    configuredClientTimeoutMs,
-    queryTimeoutS,
-  );
+  const { queryTimeoutS, clientTimeoutMs } = resolveManagedOxigraphDeadlines(options);
   const memoryLimits = normalizeOxigraphMemoryLimits({
     highMiB: options.memoryHighMiB,
     maxMiB: options.memoryMaxMiB,
@@ -254,9 +255,7 @@ export function planManagedOxigraph(
     // we own end-to-end; queryEndpoint/updateEndpoint added at launch.
     options: {
       managedByDkg: true,
-      ...(clientTimeoutMs === undefined
-        ? {}
-        : { timeout: clientTimeoutMs }),
+      timeout: clientTimeoutMs,
     },
   };
   if (graphSetIndex !== undefined) {

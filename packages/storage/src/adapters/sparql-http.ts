@@ -48,7 +48,6 @@ import {
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
-import { readResponseTextBounded } from '../http-response-limit.js';
 import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
@@ -57,12 +56,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import {
-  AbortableStoreWorkLifecycle,
-  composeAbortSignals,
-} from '../abortable-store-work-lifecycle.js';
+import { AbortableStoreWorkLifecycle, composeAbortSignals } from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
+import { readSparqlResponseText } from './sparql-response-policy.js';
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -88,11 +85,7 @@ function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined):
 const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
 const DEFAULT_SLOW_QUERY_SAMPLE_RATE = 1;
 const MANAGED_LIST_GRAPHS_CACHE_MS = 30_000;
-// Oxigraph 0.5.x appends this exact evaluator error to an already-started
-// SELECT/CONSTRUCT response when `serve --timeout-s` cancels the query. Detect
-// the suffix before JSON/N-Quads parsing so a partial response can never be
-// mistaken for a complete result.
-const MANAGED_OXIGRAPH_CANCELLATION_SUFFIX = 'The SPARQL operation has been cancelled';
+export const DEFAULT_SPARQL_HTTP_TIMEOUT_MS = 30_000;
 const monotonicNow = (): number => performance.now();
 
 export interface SparqlHttpQueryOptions extends QueryOptions {
@@ -183,7 +176,7 @@ export class SparqlHttpStore implements TripleStore {
     }
     this.queryEndpoint = options.queryEndpoint.replace(/\/$/, '');
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
-    this.timeout = options.timeout ?? 30_000;
+    this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
     this.atomicUpdates = options.atomicUpdates === true || this.managedByDkg;
     this.now = options.now ?? monotonicNow;
@@ -223,19 +216,6 @@ export class SparqlHttpStore implements TripleStore {
 
   getPressureSnapshot(): StorePressureSnapshot {
     return externalStorePriorityScheduler.snapshot;
-  }
-
-  private throwIfManagedOxigraphQueryCancelled(text: string, operation: string): void {
-    if (
-      this.managedByDkg
-      && text.trimEnd().endsWith(MANAGED_OXIGRAPH_CANCELLATION_SUFFIX)
-    ) {
-      throw new StoreOperationTimeoutError({
-        backend: 'oxigraph-server',
-        operation,
-        message: `Managed Oxigraph ${operation} exceeded its server-side query deadline`,
-      });
-    }
   }
 
   /** {@link GraphWriteGenSource} capability (#1609) — see graph-write-gen.ts. */
@@ -594,18 +574,20 @@ export class SparqlHttpStore implements TripleStore {
           effectiveOptions,
           async (res) => {
             if (!res.ok) {
-              const text = await (effectiveOptions.maxResponseBytes === undefined
-                ? res.text()
-                : readResponseTextBounded(res, effectiveOptions.maxResponseBytes)
-              ).catch(() => '');
-              this.throwIfManagedOxigraphQueryCancelled(text, 'query');
+              const text = await readSparqlResponseText(res, {
+                maxResponseBytes: effectiveOptions.maxResponseBytes,
+                managedOxigraph: this.managedByDkg,
+                operation: 'query',
+                tolerateReadFailure: true,
+              });
               throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
             }
 
-            const text = effectiveOptions.maxResponseBytes === undefined
-              ? await res.text()
-              : await readResponseTextBounded(res, effectiveOptions.maxResponseBytes);
-            this.throwIfManagedOxigraphQueryCancelled(text, 'query');
+            const text = await readSparqlResponseText(res, {
+              maxResponseBytes: effectiveOptions.maxResponseBytes,
+              managedOxigraph: this.managedByDkg,
+              operation: 'query',
+            });
             const json = JSON.parse(text) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
 
             if (isAsk || 'boolean' in json) {
@@ -636,17 +618,19 @@ export class SparqlHttpStore implements TripleStore {
       options,
       async (res) => {
         if (!res.ok) {
-          const text = await (options?.maxResponseBytes === undefined
-            ? res.text()
-            : readResponseTextBounded(res, options.maxResponseBytes)
-          ).catch(() => '');
-          this.throwIfManagedOxigraphQueryCancelled(text, 'construct');
+          const text = await readSparqlResponseText(res, {
+            maxResponseBytes: options?.maxResponseBytes,
+            managedOxigraph: this.managedByDkg,
+            operation: 'construct',
+            tolerateReadFailure: true,
+          });
           throw new Error(`SPARQL HTTP construct failed (${res.status}): ${text.slice(0, 300)}`);
         }
-        const text = options?.maxResponseBytes === undefined
-          ? await res.text()
-          : await readResponseTextBounded(res, options.maxResponseBytes);
-        this.throwIfManagedOxigraphQueryCancelled(text, 'construct');
+        const text = await readSparqlResponseText(res, {
+          maxResponseBytes: options?.maxResponseBytes,
+          managedOxigraph: this.managedByDkg,
+          operation: 'construct',
+        });
         const quads = parseNQuadsTextTolerant(text);
         return { type: 'quads', quads };
       },

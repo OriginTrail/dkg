@@ -79,9 +79,28 @@ describe('respondIfStoreUnavailable', () => {
     });
   });
 
+  it('accepts a code-only timeout crossing a package/prototype boundary', () => {
+    const res = mockResponse();
+
+    expect(respondIfStoreUnavailable(res, {
+      code: 'STORE_OPERATION_TIMEOUT',
+      message: 'wrapped store timeout',
+    })).toBe(true);
+    expect(JSON.parse(res.body ?? '{}')).toEqual({
+      error: 'wrapped store timeout',
+      code: 'STORE_OPERATION_TIMEOUT',
+      retryable: true,
+      outcome: 'indeterminate',
+    });
+  });
+
   it('does not reclassify unrelated failures', () => {
     const res = mockResponse();
     expect(respondIfStoreUnavailable(res, new Error('invalid query'))).toBe(false);
+    expect(respondIfStoreUnavailable(res, {
+      code: 'STORE_OPERATION_TIMEOUT',
+      outcome: 'completed',
+    })).toBe(false);
     expect(res.writableEnded).toBe(false);
   });
 });

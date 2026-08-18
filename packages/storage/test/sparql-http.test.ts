@@ -397,6 +397,38 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('emits complete timeout metadata for a timed-out mutation', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      })) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://example.test/query',
+        updateEndpoint: 'http://example.test/update',
+        timeout: 5,
+      });
+      await expect(store.insert([
+        { subject: 'http://s', predicate: 'http://p', object: '"o"', graph: 'http://g' },
+      ])).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        backend: 'sparql-http',
+        operation: 'insert',
+        timeoutMs: 5,
+        outcome: 'indeterminate',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('rejects a partial managed Oxigraph SELECT response when the native deadline cancels it', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => new Response(
@@ -440,6 +472,53 @@ describe('SparqlHttpStore (test server)', () => {
         backend: 'oxigraph-server',
         operation: 'construct',
       });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('rejects a managed Oxigraph cancellation body on a non-OK response', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      'query failed\nThe SPARQL operation has been cancelled',
+      { status: 500 },
+    )) as typeof fetch;
+    try {
+      const managed = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        managedByDkg: true,
+      });
+      await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'query',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does not apply the managed Oxigraph cancellation policy to generic endpoints', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      'query failed\nThe SPARQL operation has been cancelled',
+      { status: 500 },
+    )) as typeof fetch;
+    try {
+      const generic = new SparqlHttpStore({
+        queryEndpoint: 'http://generic-sparql.test/query',
+      });
+      let failure: unknown;
+      try {
+        await generic.query('SELECT ?s WHERE { ?s ?p ?o }');
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).toMatchObject({
+        message: expect.stringContaining('SPARQL HTTP query failed (500)'),
+      });
+      expect((failure as { code?: unknown }).code).toBeUndefined();
     } finally {
       globalThis.fetch = originalFetch;
     }

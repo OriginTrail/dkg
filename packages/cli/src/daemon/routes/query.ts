@@ -389,9 +389,8 @@ export function createApiQueryRequestLifecycle(
   };
 }
 
-/** Map retryable, pre-dispatch read shedding without changing write routes. */
+/** Map retryable scheduler pressure and store deadlines at local read catches. */
 export function respondIfApiQueryStoreBusy(res: ServerResponse, err: unknown): boolean {
-  if (!(err instanceof StoreSchedulerBusyError)) return false;
   return respondIfStoreUnavailable(res, err);
 }
 
@@ -695,10 +694,11 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         return;
       }
       if (respondIfApiQueryStoreBusy(res, err)) {
-        // Admission shedding means the operation never reached the store. Keep
-        // it visible with the scheduler reason, but do not count it as an
-        // execution failure in dashboard health rates.
-        tracker.cancel(ctx, err);
+        // Pre-dispatch shedding is a cancellation; a store deadline may have
+        // executed and remains an operation failure even though both map to a
+        // retryable 503 for the caller.
+        if (err instanceof StoreSchedulerBusyError) tracker.cancel(ctx, err);
+        else tracker.fail(ctx, err);
         return;
       }
       tracker.fail(ctx, err);

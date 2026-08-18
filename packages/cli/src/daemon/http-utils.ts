@@ -20,6 +20,7 @@ import {
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import type { DKGAgent, ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
 import {
+  STORE_OPERATION_TIMEOUT_CODE,
   StoreSchedulerBusyError,
   isStoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
@@ -82,25 +83,19 @@ export function respondIfStoreUnavailable(res: ServerResponse, err: unknown): bo
   }
 
   if (!isStoreOperationTimeoutError(err)) return false;
-  const shaped = err as {
-    message?: unknown;
-    backend?: unknown;
-    operation?: unknown;
-    timeoutMs?: unknown;
-  };
   jsonResponse(
     res,
     503,
     {
-      error: typeof shaped.message === 'string'
-        ? shaped.message
+      error: typeof err.message === 'string'
+        ? err.message
         : 'Triple-store operation exceeded its deadline',
-      code: 'STORE_OPERATION_TIMEOUT',
+      code: STORE_OPERATION_TIMEOUT_CODE,
       retryable: true,
-      outcome: 'indeterminate',
-      ...(typeof shaped.backend === 'string' ? { backend: shaped.backend } : {}),
-      ...(typeof shaped.operation === 'string' ? { operation: shaped.operation } : {}),
-      ...(typeof shaped.timeoutMs === 'number' ? { timeoutMs: shaped.timeoutMs } : {}),
+      outcome: err.outcome ?? 'indeterminate',
+      ...(typeof err.backend === 'string' ? { backend: err.backend } : {}),
+      ...(typeof err.operation === 'string' ? { operation: err.operation } : {}),
+      ...(typeof err.timeoutMs === 'number' ? { timeoutMs: err.timeoutMs } : {}),
     },
     undefined,
     { 'Retry-After': '1' },

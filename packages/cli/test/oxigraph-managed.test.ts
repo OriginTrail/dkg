@@ -248,7 +248,7 @@ describe('planManagedOxigraph', () => {
       },
       '/data',
     );
-    expect(plan!.queryTimeoutS).toBe(4_294_967);
+    expect(plan!.queryTimeoutS).toBe(2_147_478);
     expect(plan!.clientTimeoutMs).toBe(2_147_483_647);
     expect(plan!.storeConfigTemplate.options.timeout).toBe(2_147_483_647);
   });

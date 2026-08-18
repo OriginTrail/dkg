@@ -117,6 +117,7 @@ function createStoreOperationDeadline(
   timeoutMs: number,
   callerSignal?: AbortSignal,
   operation = 'operation',
+  outcome: () => 'not_started' | 'indeterminate' = () => 'indeterminate',
 ): StoreOperationDeadline {
   const controller = new AbortController();
   const deadlineAt = performance.now() + timeoutMs;
@@ -127,6 +128,7 @@ function createStoreOperationDeadline(
     backend: 'blazegraph',
     operation,
     timeoutMs,
+    outcome: outcome(),
   });
   const detachCaller = () => {
     if (!callerAttached) return;
@@ -220,13 +222,14 @@ export class BlazegraphStore implements TripleStore {
     options: QueryOptions | undefined,
     work: (deadline: StoreOperationDeadline) => Promise<T>,
   ): Promise<T> {
+    let admitted = false;
     const deadline = createStoreOperationDeadline(
       this.operationTimeoutMs,
       options?.signal,
       operation,
+      () => admitted ? 'indeterminate' : 'not_started',
     );
     const source = options?.source ?? `blazegraph.${operation}`;
-    let admitted = false;
     const scheduled = externalStorePriorityScheduler.run(
       options?.priority,
       source,
@@ -457,11 +460,11 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
-    return this.runStoreWork('query', options, async (deadline) => {
-      const trimmed = sparql.trim();
-      const upper = trimmed.toUpperCase();
-      const isAsk = upper.startsWith('ASK');
-      const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+    const trimmed = sparql.trim();
+    const upper = trimmed.toUpperCase();
+    const isAsk = upper.startsWith('ASK');
+    const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+    return this.runStoreWork(isConstruct ? 'construct' : 'query', options, async (deadline) => {
 
       if (isConstruct) {
         return this.queryConstruct(trimmed, deadline, options);

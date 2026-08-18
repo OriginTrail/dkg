@@ -57,6 +57,8 @@ export {
   StoreOperationTimeoutError,
   isStoreOperationTimeoutError,
   type StoreOperationTimeoutErrorOptions,
+  type StoreOperationTimeoutErrorLike,
+  type StoreOperationOutcome,
 } from './store-operation-timeout.js';
 export {
   EXTERNAL_LITERAL_REF_DATATYPE,
@@ -116,6 +118,7 @@ export {
 } from './adapters/blazegraph.js';
 export {
   SparqlHttpStore,
+  DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
   type SparqlHttpStoreOptions,
   type SparqlHttpQueryOptions,
   type SparqlHttpSlowQueryEvent,
