@@ -135,6 +135,33 @@ describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
     expect(chain.sent).toBe(false);
   });
 
+  it('runs no fallible instrumentation between the durable record and the send', async () => {
+    // GH#2270 PR-3 r4 — the UPDATE-branch mirror of the publish-path row below. Both signing
+    // paths now consume the ONE `createWriteAheadHook`, and this row is what fails if the update
+    // branch ever regrows its own copy with the durable callback ahead of the phases: a rejecting
+    // `onPhase` listener must abort the broadcast with NEITHER the durable record written NOR the
+    // send attempted, so the record and the wire always agree.
+    const chain = new SignalRecordingChain();
+    const { publisher, quads, precomputedUpdateAttestation } = await publisherOver(chain);
+    let recorded = false;
+
+    await publisher.update(KA_ID, {
+      contextGraphId: CG_ID,
+      quads,
+      precomputedUpdateAttestation,
+      onBeforeBroadcast: () => { recorded = true; },
+      onPhase: (phase) => {
+        if (phase.startsWith('chain:txsigned:')) throw new Error('a listener blew up');
+      },
+    }).catch(() => undefined);
+
+    // Neither happened: the throw came before anything durable was written.
+    expect(recorded).toBe(false);
+    expect(chain.sent).toBe(false);
+    // The load-bearing invariant, stated as the pair that must never disagree.
+    expect(recorded).toBe(chain.sent);
+  });
+
   it('does not send when the handler is still in flight', async () => {
     // A handler that never settles must block the send outright rather than let it race ahead.
     const chain = new SignalRecordingChain();

@@ -600,6 +600,60 @@ function formatGossipLimit(bytes: number): string {
   return formatBytesAsKb(bytes);
 }
 
+/**
+ * GH#2270 PR-3 r4 — the ONE write-ahead hook for both signing paths.
+ *
+ * `publish` and `update` each carried a private copy of the same three-part contract: a once-only
+ * latch (adapters may invoke `onBroadcast` more than once across retries, the boundary must fire
+ * once), the hash-bearing `chain:txsigned` breadcrumb and `chain:writeahead:start`
+ * instrumentation FIRST, and the durable `onBeforeBroadcast` callback LAST — awaited, so nothing
+ * fallible runs between the durable record and the send, and a throw anywhere in here aborts the
+ * broadcast with the record and the wire still agreeing. Two copies of an ordering contract is
+ * two places for the order to be edited in one; this is the single owner.
+ *
+ * The phase-name-encodes-the-hash convention (PR #241): `PhaseCallback` is a 2-arg function, so
+ * the signed tx identity travels as `chain:txsigned:tx-<hash>`, emitted as a balanced start/end
+ * pair to preserve the golden-sequence "every start has a matching end" invariant. The durable
+ * callback used to run FIRST; a rejecting `onPhase` after it then aborted the broadcast with the
+ * 'broadcast' record already on disk — a persisted transaction that was never sent (r3).
+ *
+ * `didWriteAhead()` is how the call sites keep the surrounding `try/finally` contract: the
+ * balancing `chain:writeahead:end` is emitted only if `:start` actually fired.
+ */
+function createWriteAheadHook(hooks: {
+  onPhase?: PhaseCallback;
+  onBeforeBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
+}): {
+  emitWriteAheadStart: (info?: { txHash?: string; nonce?: number }) => Promise<void>;
+  didWriteAhead: () => boolean;
+} {
+  const { onPhase, onBeforeBroadcast } = hooks;
+  let wroteAhead = false;
+  const emitPhase = async (phase: string, status: 'start' | 'end') => {
+    await (onPhase?.(phase, status) as unknown as Promise<void> | void);
+  };
+  return {
+    didWriteAhead: () => wroteAhead,
+    emitWriteAheadStart: async (info?: { txHash?: string; nonce?: number }) => {
+      if (wroteAhead) return;
+      wroteAhead = true;
+      // Instrumentation runs FIRST. It is caller-supplied and therefore fallible, and it is
+      // awaited, so a rejecting listener aborts the send — which is fine, and even desirable,
+      // as long as nothing durable has been written yet.
+      if (info?.txHash) {
+        const phase = `chain:txsigned:tx-${info.txHash}`;
+        await emitPhase(phase, 'start');
+        await emitPhase(phase, 'end');
+      }
+      await emitPhase('chain:writeahead', 'start');
+      // The DURABLE boundary is LAST, so nothing fallible runs between it and the send.
+      if (info?.txHash) {
+        await onBeforeBroadcast?.({ txHash: info.txHash, nonce: info.nonce });
+      }
+    },
+  };
+}
+
 function recoverCompactMessageSigner(
   message: Uint8Array,
   signature: { r: Uint8Array; vs: Uint8Array },
@@ -3791,47 +3845,10 @@ export class DKGPublisher implements Publisher {
         // emits neither and listeners simply see the parent `chain`
         // phase; adapters upgrading to the new hook regain the
         // precise boundary. See P-1 / P-1.2 in BUGS_FOUND.md.
-        let wroteAhead = false;
-        const emitPhase = async (phase: string, status: 'start' | 'end') => {
-          await (onPhase?.(phase, status) as unknown as Promise<void> | void);
-        };
-        const emitWriteAheadStart = async (info?: { txHash?: string; nonce?: number }) => {
-          if (wroteAhead) return;
-          wroteAhead = true;
-          // PR #241 Codex iter-5: emit a hash-bearing phase BEFORE the
-          // generic `chain:writeahead:start` so WAL listeners can
-          // persist the signed-but-not-yet-broadcast tx identity
-          // (spec axiom 4 / §06 "txHash persisted" requirement, P-1.2
-          // in BUGS_FOUND.md). The phase name encodes the hash because
-          // `PhaseCallback` is a 2-arg function; adding a detail
-          // parameter would be a source-level break for existing
-          // onPhase consumers. Listeners can regex the phase string
-          // to recover the hash, or legacy consumers can ignore it.
-          //
-          // Emit balanced `start` + `end` back-to-back: the phase is a
-          // single-shot breadcrumb (the actual broadcast window is
-          // already bracketed by `chain:writeahead`), and keeping
-          // starts balanced by ends preserves the "every start has a
-          // matching end" golden-sequence invariant.
-          // Instrumentation runs FIRST. It is caller-supplied and therefore fallible, and it is
-          // awaited, so a rejecting listener aborts the send — which is fine, and even desirable,
-          // as long as nothing durable has been written yet.
-          if (info?.txHash) {
-            const phase = `chain:txsigned:tx-${info.txHash}`;
-            await emitPhase(phase, 'start');
-            await emitPhase(phase, 'end');
-          }
-          await emitPhase('chain:writeahead', 'start');
-          // GH#2270 PR-3 r3 — the DURABLE boundary is LAST, so nothing fallible runs between it
-          // and the send. It used to come first, which meant a rejecting `onPhase` after it threw
-          // out of this hook and aborted the broadcast with the 'broadcast' record already on
-          // disk: a persisted transaction that was never sent, and a recovery lane pointed at a
-          // hash that does not exist. A throw here still aborts the send, and now the two facts
-          // agree — either the record exists and the send was attempted, or neither happened.
-          if (info?.txHash) {
-            await onBeforeBroadcast?.({ txHash: info.txHash, nonce: info.nonce });
-          }
-        };
+        // GH#2270 PR-3 r4 — the latch, ordering and durable-boundary contract live in the one
+        // `createWriteAheadHook` builder shared with `update` (see its doc for the full history).
+        const writeAhead = createWriteAheadHook({ onPhase, onBeforeBroadcast });
+        const emitWriteAheadStart = writeAhead.emitWriteAheadStart;
         // OT-RFC-43 Option 1 — reserve the deterministic packed kaId for this
         // author BEFORE the on-chain mint, so the UAL is known pre-tx and the
         // contract _safeMints exactly this id. `undefined` when no allocator is
@@ -3955,7 +3972,7 @@ export class DKGPublisher implements Publisher {
             onBroadcast: emitWriteAheadStart,
           });
         } finally {
-          if (wroteAhead) onPhase?.('chain:writeahead', 'end');
+          if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
         }
 
         onChainResult.tokenAmount = tokenAmount;
@@ -5194,29 +5211,10 @@ export class DKGPublisher implements Publisher {
     // provide the V10 `updateKnowledgeCollectionV10` surface.
     let txResult: { success: boolean; hash: string; blockNumber?: number; txIndex?: number; publisherAddress?: string };
     let earlyReturn: PublishResult | undefined;
-    let wroteAhead = false;
-    const emitPhase = async (phase: string, status: 'start' | 'end') => {
-      await (onPhase?.(phase, status) as unknown as Promise<void> | void);
-    };
-    const emitWriteAheadStart = async (info?: { txHash?: string; nonce?: number }) => {
-      if (wroteAhead) return;
-      wroteAhead = true;
-      // Mirror the publish path (above): emit a balanced, hash-bearing
-      // phase first so WAL listeners record the signed-but-not-yet-
-      // broadcast update tx identity, then the generic
-      // `chain:writeahead:start` for legacy consumers.
-      // Instrumentation first, durable boundary LAST — exactly as the publish path above, and for
-      // the same reason: nothing fallible may run between the durable record and the send.
-      if (info?.txHash) {
-        const phase = `chain:txsigned:tx-${info.txHash}`;
-        await emitPhase(phase, 'start');
-        await emitPhase(phase, 'end');
-      }
-      await emitPhase('chain:writeahead', 'start');
-      if (info?.txHash) {
-        await onBeforeBroadcast?.({ txHash: info.txHash, nonce: info.nonce });
-      }
-    };
+    // GH#2270 PR-3 r4 — the same one write-ahead hook the publish path consumes; the ordering
+    // contract (latch, phases first, durable callback LAST) has exactly one owner now.
+    const writeAhead = createWriteAheadHook({ onPhase, onBeforeBroadcast });
+    const emitWriteAheadStart = writeAhead.emitWriteAheadStart;
     // CRITICAL CORRECTNESS INVARIANT (consensus): the digest fields the
     // peers sign MUST be byte-identical to what the on-chain update tx
     // carries + what the contract reads. We source the on-chain-resolved
@@ -5389,7 +5387,7 @@ export class DKGPublisher implements Publisher {
         throw new Error('Chain adapter does not support V10 updates (updateKnowledgeCollectionV10 missing)');
       }
     } finally {
-      if (wroteAhead) onPhase?.('chain:writeahead', 'end');
+      if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
     }
 
     if (earlyReturn) {

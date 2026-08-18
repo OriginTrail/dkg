@@ -5152,6 +5152,20 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
     const publisher = opts?.publisherOverride ?? this.publisher;
+    // GH#2270 PR-3 r4 — the cross-cutting execution hooks, gathered ONCE and threaded UNCHANGED
+    // through whichever branch (create publish / update) executes the queued transaction. The
+    // update branch used to name its forwarded fields one by one and simply omitted
+    // `onBeforeBroadcast` — so every named-KA update sent its transaction with no durable
+    // write-ahead. One object, spread into both branches, makes "the branch dropped a hook" a
+    // structural impossibility rather than a review item; computed per-branch fields stay
+    // explicit where they are.
+    const executionHooks: {
+      readonly onPhase?: PhaseCallback;
+      readonly onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
+    } = {
+      onPhase: opts?.onPhase ?? publishOptions.onPhase,
+      onBeforeBroadcast: publishOptions.onBeforeBroadcast,
+    };
     if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
@@ -5368,12 +5382,11 @@ export class PublishMethods extends DKGAgentBase {
         snapshotPrivateQuads,
         {
           operationCtx: ctx,
-          onPhase: opts?.onPhase ?? publishOptions.onPhase,
-          // GH#2270 PR-3 r3 — the queued UPDATE branch dropped this. The publish branch spreads
-          // `publisherPublishOptions` and carried it for free; this one names every field, so the
-          // pre-send write-ahead simply never fired for a named-KA update and its transaction
-          // went out with no durable record. Recovery would then see a job with no evidence.
-          onBeforeBroadcast: publishOptions.onBeforeBroadcast,
+          // GH#2270 PR-3 r3/r4 — this branch used to name its hooks field by field and dropped
+          // `onBeforeBroadcast` entirely: the pre-send write-ahead never fired for a named-KA
+          // update and its transaction went out with no durable record. The ONE hooks object is
+          // now spread through both branches, so neither can drop a hook the other carries.
+          ...executionHooks,
           precomputedUpdateAttestation: updateAttestation,
           publisherOverride: publisher,
           subGraphName: request.subGraphName,
@@ -5498,7 +5511,11 @@ export class PublishMethods extends DKGAgentBase {
         ...(snapshotPrivateRoot ? { privateMerkleRoot: snapshotPrivateRoot } : {}),
         privateTripleCount: seal.privateTripleCount,
         operationCtx: ctx,
-        onPhase: opts?.onPhase ?? publishOptions.onPhase,
+        // GH#2270 PR-3 r4 — the same ONE hooks object the update branch spreads. This branch used
+        // to get `onBeforeBroadcast` for free through `publisherPublishOptions` and only re-derive
+        // `onPhase`; spreading the shared object makes the two branches' hook wiring identical by
+        // construction.
+        ...executionHooks,
         skipContextGraphEnsure: true,
         v10ACKProvider: publishOptions.v10ACKProvider ?? this.createV10ACKProvider(request.contextGraphId),
         publishEpochs: request.publishEpochs ?? publishOptions.publishEpochs,

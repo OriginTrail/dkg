@@ -2608,28 +2608,37 @@ describe('Query views', () => {
     expect(created!.broadcast!.nonce!).toBeGreaterThanOrEqual(0);
     expect((await agent.assertion.history(CG_ID, name))?.vmCurrentAssertion).toBeDefined();
 
-    // UPDATE branch — the hop that actually dropped it. Driving a second real publish would need
-    // a fresh full share, so this pins the forwarding itself, at both hops, with the real methods
-    // under test: the queued handler must hand `this.update` the callback, and `agent.update` must
-    // hand it on to the publisher. `pre-broadcast-signal-await.test.ts` covers what the publisher
-    // does with it from there.
-    const updateSpy = vi.spyOn(agent as never, 'update' as never)
-      .mockResolvedValue({ status: 'confirmed', kaId: 1n, ual: 'did:dkg:test', merkleRoot: new Uint8Array(32), kaManifest: [] } as never);
+    // UPDATE branch — the hop that actually dropped it. GH#2270 r4: `agent.update` stays REAL and
+    // the double sits on the underlying PUBLISHER's update entry, so this row pins the whole
+    // agent-side chain of custody — queued handler → the real `agent.update` preconditions → the
+    // publisher — receiving the IDENTICAL callback. Driving the real send would need a fresh full
+    // share/reopen lifecycle, so with the publisher doubled there is no send here to prevent;
+    // rejection-stops-the-send for the update path is proven at the publisher's own boundary in
+    // `pre-broadcast-signal-await.test.ts`, and this row pins callback identity only.
+    const realPublisher = (agent as any).publisher;
+    const publisherUpdateSpy = vi.spyOn(realPublisher, 'updateKnowledgeAssetFromSharedMemory')
+      .mockResolvedValue({ status: 'failed', kaManifest: [] } as never);
     const recorder = () => {};
     try {
       await agent.publishQueuedKnowledgeAssetVmPublish(
-        { ...intentForUpdate, vmCurrentAssertion: intentForUpdate.sealMerkleRoot.slice(2) },
+        {
+          ...intentForUpdate,
+          vmCurrentAssertion: intentForUpdate.sealMerkleRoot.slice(2),
+          // The real update path enforces that the queued version ADVANCES past the published
+          // lifecycle pointer; the create half above published version 1.
+          assertionVersion: '2',
+        },
         {
           quads: [{ subject: root, predicate: 'http://schema.org/name', object: '"v1"', graph: '' }],
           publisherPeerId: 'queued-update-branch',
           onBeforeBroadcast: recorder,
         } as never,
       ).catch(() => undefined);
-      expect(updateSpy).toHaveBeenCalled();
-      const forwarded = (updateSpy.mock.calls[0] as unknown[])[4] as { onBeforeBroadcast?: unknown };
+      expect(publisherUpdateSpy).toHaveBeenCalled();
+      const forwarded = (publisherUpdateSpy.mock.calls[0] as unknown[])[1] as { onBeforeBroadcast?: unknown };
       expect(forwarded.onBeforeBroadcast).toBe(recorder);
     } finally {
-      updateSpy.mockRestore();
+      publisherUpdateSpy.mockRestore();
     }
   }, 180_000);
 
