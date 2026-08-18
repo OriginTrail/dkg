@@ -7,6 +7,7 @@ import {
   rm,
   stat,
   statfs,
+  truncate,
   utimes,
   writeFile,
 } from 'node:fs/promises';
@@ -530,6 +531,75 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
       expect((await stat(snapshotPath(directory))).mtimeMs).toBeCloseTo(oldTime.getTime(), -2);
       expect(pageIndexes.writes).toBe(1);
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('enables GC by default and scales automatic watermarks on smaller filesystems', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-gc-default-'));
+    const oldestDigest = digestFor(91);
+    const olderDigest = digestFor(92);
+    const now = Date.now();
+    const gib = 1024 ** 3;
+    let store: FileWorkspacePublicSnapshotStore | undefined;
+
+    try {
+      const writer = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+        gc: { enabled: false },
+      });
+      await writer.putSnapshot({ digest: oldestDigest, quads: makeQuads(1, 'default-oldest') });
+      await writer.putSnapshot({ digest: olderDigest, quads: makeQuads(1, 'default-older') });
+      await truncate(snapshotPath(directory, oldestDigest), 3 * gib);
+      await truncate(snapshotPath(directory, olderDigest), gib);
+      await utimes(
+        snapshotPath(directory, oldestDigest),
+        new Date(now - 9 * 24 * 60 * 60 * 1_000),
+        new Date(now - 9 * 24 * 60 * 60 * 1_000),
+      );
+      await utimes(
+        snapshotPath(directory, olderDigest),
+        new Date(now - 8 * 24 * 60 * 60 * 1_000),
+        new Date(now - 8 * 24 * 60 * 60 * 1_000),
+      );
+
+      store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+        getFilesystemSpace: async () => ({
+          availableBytes: Math.floor(3.9 * gib),
+          totalBytes: 20 * gib,
+        }),
+        now: () => now,
+      });
+      const result = await store.collectGarbage();
+
+      expect(result).toMatchObject({
+        triggered: true,
+        deletedSnapshots: 1,
+        deletedSnapshotBytes: 3 * gib,
+      });
+      await expect(stat(snapshotPath(directory, oldestDigest)))
+        .rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(stat(snapshotPath(directory, olderDigest))).resolves.toBeTruthy();
+    } finally {
+      store?.stopGarbageCollection();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('retains an explicit GC opt-out', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-gc-disabled-'));
+    const store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+      gc: { enabled: false },
+      getFilesystemSpace: async () => ({ availableBytes: 0, totalBytes: 20 * 1024 ** 3 }),
+    });
+
+    try {
+      await store.putSnapshot({ digest: DIGEST, quads: makeQuads(1, 'disabled') });
+      const result = await store.collectGarbage();
+
+      expect(result).toMatchObject({ triggered: false, deletedSnapshots: 0 });
+      await expect(stat(snapshotPath(directory))).resolves.toBeTruthy();
+    } finally {
+      store.stopGarbageCollection();
       await rm(directory, { recursive: true, force: true });
     }
   });
