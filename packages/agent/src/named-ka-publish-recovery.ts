@@ -255,24 +255,25 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // so falling back to it would stamp stale provenance exactly when the real proof is missing
   // (r12, 3813505553). A job whose proof carries a position therefore DEFERS instead: it stays
   // held, tx-bearing, and the next recovery tick asks again.
+  // r14 (3814016877) — the staleness test comes FIRST and does not depend on how the roots
+  // compare. A view behind this transaction's own position has not seen it, and a lagging view
+  // naturally shows a PREDECESSOR root — so gating the check on "the roots matched" let exactly
+  // that case through and materialized the predecessor as the current version. The transaction is
+  // on chain at this position; any view reporting fewer roots is stale, whatever root it names.
+  if (versionView && proof.merkleRootCount !== undefined
+    && versionView.rootCount < BigInt(proof.merkleRootCount)) {
+    throw inconsistent(
+      'the current KA version view is behind the recovered transaction position; '
+      + 'recovery is deferred rather than treating a stale view as current',
+    );
+  }
   let superseded = versionView
     ? !equalsIgnoreCase(versionView.latestRoot, proof.merkleRoot)
     : !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
   if (!superseded && versionView && proof.merkleRootCount !== undefined) {
-    const position = BigInt(proof.merkleRootCount);
-    // r13 (3813796856) — a view BEHIND this transaction's own position cannot be describing the
-    // current version at all: the transaction is already on chain at that position, so a view that
-    // has not seen it is stale. Concluding "current" from it would be the same mistake as the
-    // count-only fallback, so it defers like any other unestablished answer.
-    if (versionView.rootCount < position) {
-      throw inconsistent(
-        'the current KA version view is behind the recovered transaction position; '
-        + 'recovery is deferred rather than treating a stale view as current',
-      );
-    }
     // Roots match, which alone cannot separate "still current" from "superseded by a later update
     // that restored the same root". The position settles it, from this same view.
-    superseded = versionView.rootCount > position;
+    superseded = versionView.rootCount > BigInt(proof.merkleRootCount);
   }
 
   let materializationAuthor = transactionAuthor;

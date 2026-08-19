@@ -123,7 +123,13 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         blockNumber,
       };
     };
+    // r14 (3814017390) — the cancellation boundary is honoured rather than accepted and ignored:
+    // an already-aborted signal never starts the poll, and an abort mid-poll is what the caller
+    // gets back. The wider point — that this is a second orchestration path next to the canonical
+    // transport — is answered on that thread and queued with the recovery-mixin extraction.
+    if (options.signal?.aborted) return null;
     const settled = await Promise.allSettled(this.providers.map(readOne));
+    if (options.signal?.aborted) return null;
     const views = settled.flatMap((r) => (r.status === 'fulfilled' && r.value ? [r.value] : []));
     // r12 (3813506086) — the poll must be UNANIMOUS. Taking the highest block among the endpoints
     // that happened to answer does not establish currency: the endpoint whose read failed is
@@ -132,7 +138,6 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     // reporting a complete view is "cannot establish", and the caller must defer rather than
     // decide — recovery retries on the next tick, and the operator's by-id clear remains.
     if (views.length !== this.providers.length) return null;
-    void options;
     return views.reduce((best, view) => (view.blockNumber > best.blockNumber ? view : best));
   }
 

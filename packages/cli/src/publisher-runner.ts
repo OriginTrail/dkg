@@ -921,6 +921,22 @@ async function resolveCanonicalOnChainPublish(
   }
   if (resolution.status !== 'confirmed') return null;
 
+  // r14 (3814018304) — the same finality rule every other mined verdict in this chain follows. This
+  // is the CREATE branch's own resolver path: it reads a canonical receipt directly rather than
+  // going through the gated verdict, so without this it could begin finalizing from a receipt a
+  // reorg can still rewrite while every finality row on the update branch stayed green.
+  if (!chain.isReceiptBlockFinalAndCanonical) return null;
+  try {
+    const final = await chain.isReceiptBlockFinalAndCanonical({
+      txHash: lookup.txHash,
+      blockNumber: resolution.receipt.blockNumber,
+      blockHash: resolution.receipt.blockHash,
+    });
+    if (!final) return null;
+  } catch {
+    return null;
+  }
+
   let knowledgeAssetsContract = resolution.receipt.knowledgeAssetsContract;
   if (!knowledgeAssetsContract && chain.getDKGKnowledgeAssetsAddress) {
     try {

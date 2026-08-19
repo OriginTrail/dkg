@@ -396,6 +396,32 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     })).rejects.toThrow(/behind the recovered transaction position/);
   });
 
+  it('DEFERS on a behind view even when it names a DIFFERENT root [r14]', async () => {
+    // 3814016877 — the natural shape of a lagging view is a PREDECESSOR root, not a matching one,
+    // so gating the staleness test on "the roots matched" let exactly that case through: the
+    // recovered transaction looked superseded and the predecessor was materialized as current.
+    // The transaction is on chain at position 3; a view reporting 2 has not seen it, whatever root
+    // it names.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: () => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: `0x${'b2'.repeat(32)}`,
+        rootCount: 2n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 150,
+      });
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '3' },
+      }),
+    })).rejects.toThrow(/behind the recovered transaction position/);
+  });
+
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),

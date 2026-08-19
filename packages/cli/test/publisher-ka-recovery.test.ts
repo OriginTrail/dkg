@@ -61,6 +61,8 @@ describe('named KA publisher recovery wiring', () => {
       chainId: 'evm:31337',
       resolvePublishByTxHash,
       resolveCanonicalFinalizationReceipt,
+      // r14 — the create branch gates on finality like every other mined verdict.
+      isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
     } as unknown as ChainAdapter]]);
     const resolver = createKnowledgeAssetVmPublishRecoveryResolver(publishers);
 
@@ -95,6 +97,7 @@ describe('named KA publisher recovery wiring', () => {
       },
       publishProof: { merkleRoot, authorAddress: walletId, txIndex: 4 },
     });
+
     await expect(createChainProofResolver(publishers)({ txHash, walletId })).resolves.toMatchObject({
       status: 'recovered',
       recovery: {
@@ -202,6 +205,7 @@ describe('named KA publisher recovery wiring', () => {
     const merkleRoot = `0x${'12'.repeat(32)}` as `0x${string}`;
     const chain = {
       chainId: 'evm:31337',
+      isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
       resolveCanonicalFinalizationReceipt: vi.fn(async () => ({
         status: 'confirmed' as const,
         receipt: {
@@ -398,4 +402,50 @@ describe('named KA publisher recovery wiring', () => {
       publisher: publisherB,
     }));
   });
+  it('does not finalize a live CREATE from an unfinalized receipt [r14]', async () => {
+    // 3814018304 — the create branch reads a canonical receipt directly rather than going through
+    // the gated verdict, so it needed the finality rule stated on its own path: a confirmed receipt
+    // whose block is not yet final (or no longer canonical at its height) must not start
+    // finalization, because a reorg can still rewrite it.
+    const txHash = `0x${'ab'.repeat(32)}` as const;
+    const walletId = `0x${'cd'.repeat(20)}`;
+    const isReceiptBlockFinalAndCanonical = vi.fn(async () => false);
+    const publishers: PublisherChainAdapters = new Map([[walletId, {
+      chainId: 'evm:31337',
+      isReceiptBlockFinalAndCanonical,
+      resolveCanonicalFinalizationReceipt: vi.fn(async () => ({
+        status: 'confirmed' as const,
+        receipt: {
+          txHash,
+          blockNumber: 9,
+          blockHash: `0x${'ef'.repeat(32)}`,
+          txIndex: 2,
+          merkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+          publisherAddress: walletId,
+          authorAddress: walletId,
+          batchId: '7',
+          knowledgeAssetsContract: `0x${'11'.repeat(20)}`,
+        },
+      })),
+    } as unknown as ChainAdapter]]);
+
+    const resolved = await createKnowledgeAssetVmPublishRecoveryResolver(publishers)(
+      {
+        status: 'broadcast',
+        request: {
+          jobType: 'knowledge-asset-vm-publish',
+          knowledgeAssetVmPublish: {
+            contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+            kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+          },
+        },
+        broadcast: { txHash, walletId },
+      } as never,
+      { txHash, walletId, operationKind: 'create' } as never,
+    );
+
+    expect(resolved).toBeNull();
+    expect(isReceiptBlockFinalAndCanonical).toHaveBeenCalled();
+  });
+
 });
