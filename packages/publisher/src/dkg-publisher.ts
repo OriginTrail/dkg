@@ -1,5 +1,6 @@
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
+import type { PreBroadcastRecord } from './publisher.js';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
@@ -620,17 +621,6 @@ function formatGossipLimit(bytes: number): string {
  * `didWriteAhead()` is how the call sites keep the surrounding `try/finally` contract: the
  * balancing `chain:writeahead:end` is emitted only if `:start` actually fired.
  */
-/**
- * GH#2270 PR #2300 r3 — what the durable write-ahead records: the chain's own
- * {@link PreBroadcastSignal} (the signed transaction's hash and reserved nonce) plus the branch
- * that produced it. The split is the layering: the adapter knows the TRANSACTION, the publisher
- * knows WHICH OPERATION it signed, and recovery needs both — absence-release is create-only, and
- * a persisted job cannot be re-classified after the fact.
- */
-export interface PreBroadcastRecord extends PreBroadcastSignal {
-  readonly operationKind: 'create' | 'update';
-}
-
 function createWriteAheadHook(hooks: {
   onPhase?: PhaseCallback;
   onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;

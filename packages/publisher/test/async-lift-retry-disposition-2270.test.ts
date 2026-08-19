@@ -568,9 +568,13 @@ describe('GH#2270 failed-job retry disposition', () => {
     }
 
     it('TRUE for a create with a recorded nonce and pinned identity — every world has an exit', async () => {
-      const publisher = createPublisher();
+      // r4 (3811993669) — the lane has to be WIRED for the promise to be honest, so these rows
+      // construct a publisher that can actually move the job.
+      const publisher = createPublisher({ chainProofResolver: async () => ({ status: 'inconclusive' }) });
       const request = kaVmPublishRequest();
-      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-exit', nonce: 41 });
+      // r4 (3811993487) — the marker is REQUIRED here: without it the fixture classifies as an
+      // update and this row silently stopped guarding the create branch it names.
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-exit', nonce: 41, operationKind: 'create' });
 
       expect(hasAutomaticRecoveryExit(held)).toBe(true);
       expect(await admissionRetryable(publisher, request)).toBe(true);
@@ -585,9 +589,27 @@ describe('GH#2270 failed-job retry disposition', () => {
       expect(await admissionRetryable(publisher, request)).toBe(false);
     });
 
+    it('FALSE for a fully eligible record when THIS node has no chain-proof resolver [r4]', async () => {
+      // 3811993669 — the record could not be more eligible: a create, a recorded nonce, a pinned
+      // identity. But a publisher with no resolver wired never looks at it, so promising a retry
+      // would loop the client forever. The record predicate still says yes; the answer the client
+      // gets does not.
+      const publisher = createPublisher();
+      const request = kaVmPublishRequest();
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-unwired', nonce: 41, operationKind: 'create' });
+
+      expect(hasAutomaticRecoveryExit(held)).toBe(true);
+      expect(await admissionRetryable(publisher, request)).toBe(false);
+      // And nothing moves it, which is what the answer is about.
+      expect(await publisher.recover()).toBe(0);
+    });
+
     it('TRUE for an update whose recognition question is fully formed', async () => {
       // Conditional promise, documented as such: recognition converges iff the tx actually mined.
-      const publisher = createPublisher();
+      const publisher = createPublisher({
+        chainProofResolver: async () => ({ status: 'inconclusive' }),
+        knowledgeAssetVmPublishRecoveryResolver: async () => null,
+      });
       const request = kaVmPublishRequest({ vmCurrentAssertion: 'aa'.repeat(32), assertionVersion: '2' });
       const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-upd', nonce: 41 });
 
@@ -600,7 +622,10 @@ describe('GH#2270 failed-job retry disposition', () => {
       // lane is canonical recognition, formed entirely from the hash, the wallet, the pinned
       // identity and the intended root; a legacy update record without the write-ahead nonce
       // keeps its TRUE, and the 503 keeps promising (conditional) convergence.
-      const publisher = createPublisher();
+      const publisher = createPublisher({
+        chainProofResolver: async () => ({ status: 'inconclusive' }),
+        knowledgeAssetVmPublishRecoveryResolver: async () => null,
+      });
       const request = kaVmPublishRequest({ vmCurrentAssertion: 'aa'.repeat(32), assertionVersion: '2' });
       const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-upd-nononce' });
 

@@ -1,6 +1,18 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
-import type { PreBroadcastRecord } from './dkg-publisher.js';
+import type { OnChainPublishResult, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
+
+/**
+ * GH#2270 PR #2300 — what the durable write-ahead records: the chain's own
+ * {@link PreBroadcastSignal} (the signed transaction's hash and reserved nonce) plus the branch
+ * that produced it. The split is the layering: the adapter knows the TRANSACTION, the publisher
+ * knows WHICH OPERATION it signed, and recovery needs both — absence-release is create-only, and a
+ * persisted job cannot be re-classified after the fact. It lives HERE, beside the publish contract
+ * that exposes it (r4, 3811993670), so the concrete implementation depends on the contract and not
+ * the other way round.
+ */
+export interface PreBroadcastRecord extends PreBroadcastSignal {
+  readonly operationKind: 'create' | 'update';
+}
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { TrustedCatalogTripleKeys } from './catalog-trust.js';
 

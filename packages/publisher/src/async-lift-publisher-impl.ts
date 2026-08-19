@@ -1,4 +1,4 @@
-import type { PreBroadcastRecord } from './dkg-publisher.js';
+import type { PreBroadcastRecord } from './publisher.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -199,6 +199,26 @@ function assertNoLegacyChainRecoveryResolver(config: AsyncLiftPublisherConfig): 
  * (PR #2300 r1) the lookup is a discriminated union now, so each kind is CONSTRUCTED as its own
  * variant rather than spread into optional soup.
  */
+/**
+ * PR #2300 r4 (3811993677) — ONE identity for a lookup, derived from the lookup itself.
+ *
+ * The stale-verdict guard used to re-list the fields it cared about, and had already fallen behind
+ * the discriminated model: two update lookups differing only in `intendedUpdateRoot` compared
+ * EQUAL, so a verdict resolved for one could be applied to the other. Fingerprinting every field
+ * the builder can produce means adding a field cannot silently bypass the guard — the same
+ * field-dropping hazard this PR removed from the agent's option pipeline.
+ */
+export function chainProofLookupFingerprint(lookup: AsyncLiftChainProofLookup): string {
+  return [
+    lookup.operationKind,
+    lookup.txHash,
+    lookup.walletId,
+    lookup.nonce ?? '',
+    lookup.publishIdentityKaId ?? '',
+    lookup.operationKind === 'update' ? lookup.intendedUpdateRoot ?? '' : '',
+  ].join('|');
+}
+
 function finishChainProofLookup(
   job: LiftJob,
   base: {
@@ -1300,6 +1320,22 @@ export class TripleStoreAsyncLiftPublisher
    * would have exactly one meaning — "we still have no proof, so resend anyway" — which is the
    * double publish this whole chain exists to prevent.
    */
+  /**
+   * PR #2300 r4 (3811993669) — can THIS publisher actually move that job, as configured?
+   *
+   * {@link hasAutomaticRecoveryExit} answers from the record alone: is there a question the chain
+   * could settle. This adds the other half — whether the components that would ask and act are
+   * wired up. Without a chain-proof resolver the dispatcher returns before it looks at anything,
+   * and an UPDATE additionally needs the named recovery resolver to finalize what recognition
+   * proves; a create's absence release needs only the reset this class already owns.
+   */
+  private automaticExitIsConfiguredFor(job: PersistedFailedJob): boolean {
+    if (!hasAutomaticRecoveryExit(job) || !this.chainProofResolver) return false;
+    if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return true;
+    return queuedLiftOperationKind(job) === 'create'
+      || this.knowledgeAssetVmPublishRecoveryResolver !== undefined;
+  }
+
   private async dispatchFailedJobsOnChainProof(): Promise<number> {
     // The dispatcher RE-QUEUES work (a proven-absent job goes back to 'accepted') and spends a
     // chain read per held job per tick. `pause()` means this node is not driving publishes, so it
@@ -1374,10 +1410,7 @@ export class TripleStoreAsyncLiftPublisher
     if (current.timestamps.failedAt !== before.timestamps.failedAt) return false;
     const currentLookup = this.chainProofLookupFor(current);
     return currentLookup !== null
-      && currentLookup.txHash === lookup.txHash
-      && currentLookup.walletId === lookup.walletId
-      && currentLookup.nonce === lookup.nonce
-      && currentLookup.publishIdentityKaId === lookup.publishIdentityKaId;
+      && chainProofLookupFingerprint(currentLookup) === chainProofLookupFingerprint(lookup);
   }
 
   /** Execute the disposition the policy module decides for a (re-verified) held job. */
@@ -2391,7 +2424,10 @@ export class TripleStoreAsyncLiftPublisher
         job.jobId,
         // PR #2300 r1 — per-job: does an automatic lane exist that can move THIS record, or is
         // the operator's by-id clear its only exit? The HTTP boundary forwards the answer.
-        hasAutomaticRecoveryExit(job),
+        // r4 (3811993669) — record eligibility is only half of it: a publisher with no chain-proof
+        // resolver wired never touches the job, so promising a retry would send clients into a loop
+        // that cannot converge. The answer is the record AND this instance's configured capability.
+        this.automaticExitIsConfiguredFor(job),
       );
     }
     const reset = resetFailedLiftJobToAccepted(job, this.now());
