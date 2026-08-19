@@ -348,16 +348,18 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   const runQuery = useCallback(() => {
     const next = draftQuery.trim();
     if (!next) return;
-    setActiveCatalogQueryKey(null);
+    const rerunningCatalogQuery = activeCatalogQueryKey !== null && next === activeQuery;
+    const nextView = rerunningCatalogQuery ? activeQueryView : undefined;
+    if (!rerunningCatalogQuery) setActiveCatalogQueryKey(null);
     setSaveMessage(null);
     setSaveError(null);
-    if (next === activeQuery && activeQueryView === undefined) {
+    if (next === activeQuery && activeQueryView === nextView) {
       refresh();
       return;
     }
-    setActiveQueryView(undefined);
+    setActiveQueryView(nextView);
     setActiveQuery(next);
-  }, [activeQuery, activeQueryView, draftQuery, refresh]);
+  }, [activeCatalogQueryKey, activeQuery, activeQueryView, draftQuery, refresh]);
 
   const resetQuery = useCallback(() => {
     setDraftQuery(defaultQuery);

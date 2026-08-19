@@ -248,6 +248,35 @@ describe('ContextGraphQueryView', () => {
       'working-memory',
     );
 
+    const runButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Run');
+    expect(runButton).toBeTruthy();
+
+    apiMocks.executeQuery.mockClear();
+    await act(async () => {
+      runButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
+      expect.stringContaining('schema.org/name'),
+      'cg-test',
+      undefined,
+      undefined,
+      'working-memory',
+    );
+
+    apiMocks.executeQuery.mockClear();
+    await act(async () => {
+      setFieldValue(textarea, `${textarea.value}\n# edited`);
+      runButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
+      expect.stringContaining('# edited'),
+      'cg-test',
+      undefined,
+      undefined,
+      undefined,
+    );
+
     await act(async () => { root.unmount(); });
   });
 
