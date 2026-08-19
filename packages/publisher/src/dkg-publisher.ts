@@ -620,36 +620,56 @@ function formatGossipLimit(bytes: number): string {
  * `didWriteAhead()` is how the call sites keep the surrounding `try/finally` contract: the
  * balancing `chain:writeahead:end` is emitted only if `:start` actually fired.
  */
+/**
+ * GH#2270 PR #2300 r3 — what the durable write-ahead records: the chain's own
+ * {@link PreBroadcastSignal} (the signed transaction's hash and reserved nonce) plus the branch
+ * that produced it. The split is the layering: the adapter knows the TRANSACTION, the publisher
+ * knows WHICH OPERATION it signed, and recovery needs both — absence-release is create-only, and
+ * a persisted job cannot be re-classified after the fact.
+ */
+export interface PreBroadcastRecord extends PreBroadcastSignal {
+  readonly operationKind: 'create' | 'update';
+}
+
 function createWriteAheadHook(hooks: {
   onPhase?: PhaseCallback;
-  onBeforeBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
+  /**
+   * GH#2270 PR #2300 r3 — WHICH BRANCH is signing, recorded because it cannot be inferred later.
+   * Recovery's absence-release is create-only, and the job's request does not settle the question:
+   * the queued publish resolves its update branch from `request.vmCurrentAssertion ?? the live
+   * lifecycle pointer`, so a request carrying no pointer of its own can still sign an update. The
+   * one moment the answer is certain is here, at the signing site, and it is a static fact of the
+   * call site: this builder's two consumers ARE the two branches.
+   */
+  operationKind: 'create' | 'update';
 }): {
-  emitWriteAheadStart: (info?: { txHash?: string; nonce?: number }) => Promise<void>;
+  emitWriteAheadStart: (signal: PreBroadcastSignal) => Promise<void>;
   didWriteAhead: () => boolean;
 } {
-  const { onPhase, onBeforeBroadcast } = hooks;
+  const { onPhase, onBeforeBroadcast, operationKind } = hooks;
   let wroteAhead = false;
   const emitPhase = async (phase: string, status: 'start' | 'end') => {
     await (onPhase?.(phase, status) as unknown as Promise<void> | void);
   };
   return {
     didWriteAhead: () => wroteAhead,
-    emitWriteAheadStart: async (info?: { txHash?: string; nonce?: number }) => {
+    // The signal is REQUIRED (r3 3811569467): a call with no signed transaction would latch the
+    // hook, emit the write-ahead phase, skip the durable callback, and then suppress the real
+    // signal that follows — a state the chain interface never produces and this contract must
+    // not permit.
+    emitWriteAheadStart: async (signal: PreBroadcastSignal) => {
       if (wroteAhead) return;
       wroteAhead = true;
       // Instrumentation runs FIRST. It is caller-supplied and therefore fallible, and it is
       // awaited, so a rejecting listener aborts the send — which is fine, and even desirable,
       // as long as nothing durable has been written yet.
-      if (info?.txHash) {
-        const phase = `chain:txsigned:tx-${info.txHash}`;
-        await emitPhase(phase, 'start');
-        await emitPhase(phase, 'end');
-      }
+      const phase = `chain:txsigned:tx-${signal.txHash}`;
+      await emitPhase(phase, 'start');
+      await emitPhase(phase, 'end');
       await emitPhase('chain:writeahead', 'start');
       // The DURABLE boundary is LAST, so nothing fallible runs between it and the send.
-      if (info?.txHash) {
-        await onBeforeBroadcast?.({ txHash: info.txHash, nonce: info.nonce });
-      }
+      await onBeforeBroadcast?.({ ...signal, operationKind });
     },
   };
 }
@@ -2092,7 +2112,7 @@ export class DKGPublisher implements Publisher {
       operationCtx?: OperationContext;
       clearSharedMemoryAfter?: boolean;
       onPhase?: PhaseCallback;
-      onBeforeBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
+      onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
       /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
       publishContextGraphId?: string;
       /** On-chain CG ID for the V10 chain tx (ACK digest + publishDirect). Does NOT trigger remap. */
@@ -3847,7 +3867,7 @@ export class DKGPublisher implements Publisher {
         // precise boundary. See P-1 / P-1.2 in BUGS_FOUND.md.
         // GH#2270 PR-3 r4 — the latch, ordering and durable-boundary contract live in the one
         // `createWriteAheadHook` builder shared with `update` (see its doc for the full history).
-        const writeAhead = createWriteAheadHook({ onPhase, onBeforeBroadcast });
+        const writeAhead = createWriteAheadHook({ onPhase, onBeforeBroadcast, operationKind: 'create' });
         const emitWriteAheadStart = writeAhead.emitWriteAheadStart;
         // OT-RFC-43 Option 1 — reserve the deterministic packed kaId for this
         // author BEFORE the on-chain mint, so the UAL is known pre-tx and the
@@ -5213,7 +5233,7 @@ export class DKGPublisher implements Publisher {
     let earlyReturn: PublishResult | undefined;
     // GH#2270 PR-3 r4 — the same one write-ahead hook the publish path consumes; the ordering
     // contract (latch, phases first, durable callback LAST) has exactly one owner now.
-    const writeAhead = createWriteAheadHook({ onPhase, onBeforeBroadcast });
+    const writeAhead = createWriteAheadHook({ onPhase, onBeforeBroadcast, operationKind: 'update' });
     const emitWriteAheadStart = writeAhead.emitWriteAheadStart;
     // CRITICAL CORRECTNESS INVARIANT (consensus): the digest fields the
     // peers sign MUST be byte-identical to what the on-chain update tx

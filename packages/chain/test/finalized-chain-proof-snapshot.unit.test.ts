@@ -76,20 +76,32 @@ function adapterOver(scripts: ProviderScript[], opts: { storageDeployed?: boolea
       },
     },
   };
-  // The real failover walks endpoints on transport failure; this stand-in preserves exactly the
-  // property under test — one whole callback per provider, first success wins.
-  a.readProvider = async (_label: string, fn: (p: unknown) => Promise<unknown>) => {
+  // The real failover walks endpoints on transport failure AND on an EMPTY result when the caller
+  // asks for that policy (`ReadOpts.isEmptyResult`, which `readProviderRetryingNull` sets). This
+  // stand-in models both, and records the policy it was handed so a row can prove production asked
+  // for empty-result failover rather than merely benefiting from this stub's generosity.
+  const readOpts: Array<{ isEmptyResult?: (v: unknown) => boolean }> = [];
+  a.readProvider = async (
+    _label: string,
+    fn: (p: unknown) => Promise<unknown>,
+    opts?: { isEmptyResult?: (v: unknown) => boolean },
+  ) => {
+    readOpts.push(opts ?? {});
     let lastError: unknown;
+    let sawEmpty = false;
     for (const provider of providers) {
       try {
-        return await fn(provider);
+        const value = await fn(provider);
+        if (opts?.isEmptyResult?.(value)) { sawEmpty = true; continue; }
+        return value;
       } catch (err) {
         lastError = err;
       }
     }
+    if (sawEmpty) return null;
     throw lastError;
   };
-  return { adapter: a, calls };
+  return { adapter: a, calls, readOpts };
 }
 
 function nonexistentTokenRevert(): Error {
@@ -116,6 +128,29 @@ describe('EVMChainAdapter.readFinalizedChainProofSnapshot [GH#2270 r4]', () => {
       { provider: 0, read: 'nonce', blockTag: 90 },
       { provider: 0, read: 'ownerOf', blockTag: 90 },
     ]);
+  });
+
+  it('fails the WHOLE snapshot over when the primary cannot serve a finalized block [PR#2300 r3]', async () => {
+    // 3811568998 — an endpoint without `finalized` support used to synthesize a plain Error, which
+    // the production classifier reads as NON-retryable: one such endpoint blocked every healthy
+    // fallback and the job stayed held forever. An empty view is not a failure, so the snapshot
+    // moves on and the SECOND endpoint answers — whole, never spliced across the two.
+    const { adapter, calls, readOpts } = adapterOver([
+      { finalized: null as never, nonceAt: async () => { throw new Error('never reached'); } },
+      { finalized: { number: 90, hash: BLOCK_HASH }, nonceAt: async () => 42, ownerAt: async () => { throw nonexistentTokenRevert(); } },
+    ]);
+
+    const snapshot = await adapter.readFinalizedChainProofSnapshot({ address: ADDRESS, kaId: KA_ID });
+
+    expect(snapshot).toEqual({ blockNumber: 90, blockHash: BLOCK_HASH, accountNonce: 42, kaMinted: false });
+    // Both state reads came from the endpoint that served the block — the pin against a splice.
+    expect(calls).toEqual([
+      { provider: 1, read: 'nonce', blockTag: 90 },
+      { provider: 1, read: 'ownerOf', blockTag: 90 },
+    ]);
+    // And production ASKED for empty-result failover rather than relying on this harness: the read
+    // carries the policy that classifies a missing snapshot as an empty view.
+    expect(readOpts[0]?.isEmptyResult?.(null)).toBe(true);
   });
 
   it('answers kaMinted TRUE for a real owner at the pinned block', async () => {

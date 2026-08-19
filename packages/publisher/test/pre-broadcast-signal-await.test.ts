@@ -106,7 +106,7 @@ describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
       },
     });
 
-    expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE }]);
+    expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE, operationKind: 'update' }]);
     // The signal arrived while the transaction was still unsent — that is what "write-ahead" means.
     expect(sentWhenSignalled).toBe(false);
     expect(chain.sent).toBe(true);
@@ -150,8 +150,13 @@ describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
       quads,
       precomputedUpdateAttestation,
       onBeforeBroadcast: () => { recorded = true; },
-      onPhase: (phase) => {
-        if (phase.startsWith('chain:txsigned:')) throw new Error('a listener blew up');
+      onPhase: (phase, status) => {
+        // PR #2300 r3 (3811569451) — reject on the LAST fallible phase before the durable
+        // boundary, not on the first hash-bearing one. Throwing at `chain:txsigned:` aborted so
+        // early that the row passed under ANY ordering, including the unsafe one this claims to
+        // forbid (durable callback moved ahead of `chain:writeahead:start`). Letting the hash
+        // phases through and rejecting exactly here is what makes the row discriminate.
+        if (phase === 'chain:writeahead' && status === 'start') throw new Error('a listener blew up');
       },
     }).catch(() => undefined);
 
@@ -247,7 +252,7 @@ describe('DKGPublisher.publish awaits the pre-broadcast signal [GH#2270]', () =>
 
     expect(result.status).not.toBe('failed');
     expect(chain.sent).toBe(true);
-    expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE }]);
+    expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE, operationKind: 'create' }]);
   });
 
   it('does not send when the signal handler is still in flight', async () => {
@@ -296,8 +301,13 @@ describe('DKGPublisher.publish awaits the pre-broadcast signal [GH#2270]', () =>
     await publisher.publish({
       ...(await publishArgs()),
       onBeforeBroadcast: () => { recorded = true; },
-      onPhase: (phase) => {
-        if (phase.startsWith('chain:txsigned:')) throw new Error('a listener blew up');
+      onPhase: (phase, status) => {
+        // PR #2300 r3 (3811569451) — reject on the LAST fallible phase before the durable
+        // boundary, not on the first hash-bearing one. Throwing at `chain:txsigned:` aborted so
+        // early that the row passed under ANY ordering, including the unsafe one this claims to
+        // forbid (durable callback moved ahead of `chain:writeahead:start`). Letting the hash
+        // phases through and rejecting exactly here is what makes the row discriminate.
+        if (phase === 'chain:writeahead' && status === 'start') throw new Error('a listener blew up');
       },
     }).catch(() => undefined);
 

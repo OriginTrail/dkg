@@ -298,7 +298,6 @@ export {
   type AsyncLiftChainProofLookup,
   type AsyncLiftCreateChainProofLookup,
   type AsyncLiftUpdateChainProofLookup,
-  type AsyncLiftUnclassifiedChainProofLookup,
   type AsyncLiftChainProofResolution,
   type VmPublishIntentRecoveryPublisher,
   type VmPublishIntentIndexBackfiller,

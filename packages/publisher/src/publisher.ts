@@ -1,5 +1,6 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { OnChainPublishResult, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
+import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
+import type { PreBroadcastRecord } from './dkg-publisher.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { TrustedCatalogTripleKeys } from './catalog-trust.js';
 
@@ -254,7 +255,7 @@ export interface PublishOptions {
    * fail-closed: a throw aborts the broadcast with the transaction still local. A caller that
    * cannot persist the signal therefore never has one on chain it does not know about.
    */
-  onBeforeBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
   /**
    * Skip the publisher-level context-graph graph creation/ensure step.
    * Only callers that already validated the target context graph should set

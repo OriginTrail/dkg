@@ -127,7 +127,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     const carried = {
       ...failed,
       broadcast: undefined,
-      recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH },
+      recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH, operationKind: 'create' },
       failure: { ...failed.failure, failedFromState: 'claimed', code: 'workspace_unavailable' },
     } as unknown as LiftJob;
     await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
@@ -181,6 +181,9 @@ describe('GH#2270 proof-first chain dispatcher', () => {
         txHashChecked: TX_HASH,
         // The dispatcher established this transaction's fate, so the hash is audit, not a hold.
         txHashAccounted: true,
+        // r3 — and the branch marker rides along too, so the re-run is still classified by what
+        // actually signed rather than falling back to the pre-marker default.
+        operationKind: 'create',
       });
       // A reset must carry no stale schedule for the claim-time sweep to re-fire on.
       expect(released?.timestamps.nextRetryAt).toBeUndefined();
@@ -323,7 +326,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
           transitionType: 'CREATE',
         },
       });
-      await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId } });
+      await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId, operationKind: 'create' } });
 
       await publisher.pause();
       expect(await publisher.recover()).toBe(1);
@@ -607,7 +610,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     await publisher.claimNext(walletId);
     await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
     await publisher.update(jobId, 'broadcast', {
-      broadcast: { txHash: TX_HASH, walletId, nonce: 41 },
+      broadcast: { txHash: TX_HASH, walletId, nonce: 41, operationKind: 'create' },
     });
 
     // A tentative result: the executor returned and the job moves to 'included'.
@@ -705,7 +708,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
         ...failed,
         broadcast: undefined,
         failure: { ...failed.failure, failedFromState: 'claimed', code: 'workspace_unavailable' },
-        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH },
+        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH, operationKind: 'create' },
       } as unknown as LiftJob;
       await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
       await h.store.insert(serializeJob(carried, DEFAULT_CONTROL_GRAPH_URI));
@@ -725,7 +728,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       const claimed = (await publisher.claimNext('wallet-again'))!;
       await publisher.update(claimed.jobId, 'validated', { validation: KA_VM_VALIDATION });
       await publisher.update(claimed.jobId, 'broadcast', {
-        broadcast: { txHash: `0x${'ee'.repeat(32)}`, walletId: 'wallet-again', nonce: 7 },
+        broadcast: { txHash: `0x${'ee'.repeat(32)}`, walletId: 'wallet-again', nonce: 7, operationKind: 'create' },
       });
       const reFailed = expectFailed(await publisher.recordPublishFailure(claimed.jobId, {
         error: new Error('RPC endpoint temporarily unavailable'),

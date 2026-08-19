@@ -593,13 +593,19 @@ export class PublishMethods extends EVMChainAdapterBase {
   ): Promise<FinalizedChainProofSnapshot | null> {
     await this.init();
     try {
-      return await this.readProvider(
+      // PR #2300 r3 (3811568998) — `readProviderRetryingNull`, not `readProvider`: an endpoint that
+      // cannot serve a finalized block identity is an EMPTY VIEW, not a failure, so the whole
+      // pinned snapshot moves to the next endpoint instead of stopping here. Synthesizing an error
+      // did not fail over at all — a plain `Error` carries no code, so the production classifier
+      // reads it as non-retryable and one endpoint without `finalized` support blocked every
+      // healthy fallback. `null` now means every endpoint came up empty, which the policy layer
+      // treats as inconclusive (the job holds), and the snapshot still never splices: each attempt
+      // reads the block, the nonce and the minted state from ONE provider or yields nothing.
+      return await this.readProviderRetryingNull(
         'finalized chain-proof snapshot',
         async (provider) => {
           const block = await provider.getBlock('finalized');
-          if (!block || !block.hash) {
-            throw new Error('endpoint cannot serve a finalized block identity');
-          }
+          if (!block || !block.hash) return null;
           const accountNonce = await provider.getTransactionCount(params.address, block.number);
           let kaMinted: boolean | null = null;
           const storage = this.contracts.knowledgeAssetStorage;

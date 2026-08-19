@@ -1,4 +1,4 @@
-import type { PreBroadcastSignal } from '@origintrail-official/dkg-chain';
+import type { PreBroadcastRecord } from './dkg-publisher.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -107,6 +107,7 @@ import {
   getLiftJobTransactionEvidence,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
+  liftJobOperationKindMarker,
   normalizePersistedLiftJobRequest,
   buildLiftJobAcceptedReset,
   pinnedPublishIdentityKaId,
@@ -1162,10 +1163,17 @@ export class TripleStoreAsyncLiftPublisher
     // job that later fails from 'included' would carry a hash with no way to prove its absence.
     // Carried only when the hash MATCHES, so a mismatched result (refused just below) can never
     // graft this job's nonce onto another transaction.
-    const mapped = mappedResult.broadcast
-      && current.broadcast?.nonce !== undefined
-      && current.broadcast.txHash === mappedResult.broadcast.txHash
-      ? { ...mappedResult, broadcast: { ...mappedResult.broadcast, nonce: current.broadcast.nonce } }
+    // r3 — the branch MARKER travels with the nonce, and for the same reason: both are known only
+    // at the write-ahead, both are wiped by a wholesale `broadcast` replacement, and recovery needs
+    // both (the nonce to prove absence, the marker to know absence-release is even allowed).
+    const preserved = current.broadcast?.txHash === mappedResult.broadcast?.txHash
+      ? {
+          ...(current.broadcast?.nonce !== undefined ? { nonce: current.broadcast.nonce } : {}),
+          ...(current.broadcast?.operationKind ? { operationKind: current.broadcast.operationKind } : {}),
+        }
+      : {};
+    const mapped = mappedResult.broadcast && Object.keys(preserved).length > 0
+      ? { ...mappedResult, broadcast: { ...mappedResult.broadcast, ...preserved } }
       : mappedResult;
 
     let next: LiftJob = current;
@@ -2004,7 +2012,7 @@ export class TripleStoreAsyncLiftPublisher
     walletId: string;
     merkleRoot?: LiftJobHex;
     publicByteSize?: number;
-  }): { onBeforeBroadcast: (signal: PreBroadcastSignal) => Promise<void>; readonly outcome: PreSendOutcome } {
+  }): { onBeforeBroadcast: (record: PreBroadcastRecord) => Promise<void>; readonly outcome: PreSendOutcome } {
     // #1864 — the pre-send write-ahead outcome is tracked in this closure (like `recordedTxHash`)
     // rather than threaded as a mutable out-parameter through the publish path. The
     // processKnowledgeAssetVmPublish catch reads `.outcome` to decide recovery vs terminal. It
@@ -2016,15 +2024,18 @@ export class TripleStoreAsyncLiftPublisher
     // emitted. The nonce arrives as a field on the signal, so there is nothing left to correlate.
     let outcome: PreSendOutcome = 'not-reached';
     let recordedTxHash: string | undefined;
-    const onBeforeBroadcast = async (signal: PreBroadcastSignal): Promise<void> => {
+    const onBeforeBroadcast = async (record: PreBroadcastRecord): Promise<void> => {
       if (recordedTxHash) return;
-      recordedTxHash = signal.txHash;
+      recordedTxHash = record.txHash;
       try {
         await this.recordBroadcastProgressBeforeSend({
           jobId: params.jobId,
           walletId: params.walletId,
-          txHash: signal.txHash as LiftJobHex,
-          nonce: signal.nonce,
+          txHash: record.txHash as LiftJobHex,
+          nonce: record.nonce,
+          // r3 — the branch that signed, persisted with the hash it signed (see
+          // LiftJobBroadcastMetadata.operationKind): it is not recoverable from the request later.
+          operationKind: record.operationKind,
           merkleRoot: params.merkleRoot,
           publicByteSize: params.publicByteSize,
         });
@@ -2050,6 +2061,7 @@ export class TripleStoreAsyncLiftPublisher
     walletId: string;
     txHash: LiftJobHex;
     nonce?: number;
+    operationKind?: 'create' | 'update';
     merkleRoot?: LiftJobHex;
     publicByteSize?: number;
   }): Promise<void> {
@@ -2064,6 +2076,7 @@ export class TripleStoreAsyncLiftPublisher
       txHash: params.txHash,
       walletId: params.walletId,
       nonce: params.nonce,
+      operationKind: params.operationKind,
       merkleRoot: params.merkleRoot,
       publicByteSize: params.publicByteSize,
     });
@@ -2274,6 +2287,7 @@ export class TripleStoreAsyncLiftPublisher
       recoveredFrom: recoveredFromStatus,
       txHashChecked,
       stampRetriedAt: false,
+      ...(liftJobOperationKindMarker(job) ? { operationKind: liftJobOperationKindMarker(job) } : {}),
     });
   }
 

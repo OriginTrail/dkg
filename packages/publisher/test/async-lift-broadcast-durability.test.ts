@@ -207,6 +207,31 @@ describe('async lift publisher broadcast durability', () => {
     expect(recovered?.broadcast?.walletId).toBe('wallet-1');
   });
 
+  it('persists the BRANCH the write-ahead recorded, not only the hash [PR#2300 r3]', async () => {
+    // The marker is what makes absence-release honest (create-only), and it can only be known at
+    // the signing site — so the durable record has to carry it. This drives the recorder with the
+    // record a real send delivers and reads the persisted job back.
+    const store = new OxigraphStore();
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input: { publishOptions: { onBeforeBroadcast?: (r: unknown) => Promise<void> } }) => {
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH, nonce: 41, operationKind: 'create' });
+          throw new Error('stop after the write-ahead');
+        },
+      } as never,
+    });
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.processNext('wallet-marker').catch(() => undefined);
+
+    const persisted = await publisher.getStatus(jobId);
+    expect(persisted?.broadcast?.txHash).toBe(TX_HASH);
+    expect(persisted?.broadcast?.nonce).toBe(41);
+    // A recorder that drops this field leaves recovery unable to tell a create from an update, and
+    // every such job falls back to the safe-but-stuck 'update' answer.
+    expect(persisted?.broadcast?.operationKind).toBe('create');
+  });
+
   it('does not send or leave a phantom broadcast when the write-ahead fsync fails', async () => {
     // Regression (#1851 review): the write-ahead fsync runs AFTER the in-memory
     // 'broadcast' transition. If it throws, the store would show 'broadcast'

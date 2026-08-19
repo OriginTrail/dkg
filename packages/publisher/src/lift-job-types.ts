@@ -212,6 +212,13 @@ export interface LiftJobRecoveryResetToAccepted {
    * this flag only ever speaks about the INHERITED hash it sits beside.
    */
   readonly txHashAccounted?: boolean;
+  /**
+   * GH#2270 PR #2300 r3 — the branch the checked transaction signed, carried across resets exactly
+   * like `txHashChecked` is: a reset rebuilds the job and drops `broadcast`, so without this a job
+   * that signed a CREATE would fall back to the pre-marker default (update, i.e. held) the moment
+   * recovery released it for a re-run.
+   */
+  readonly operationKind?: 'create' | 'update';
   readonly note?: string;
 }
 
@@ -280,6 +287,14 @@ export interface LiftJobBroadcastMetadata {
    * Recovery reads a missing nonce as no proof and keeps holding.
    */
   readonly nonce?: number;
+  /**
+   * GH#2270 PR #2300 r3 — the branch this transaction actually signed, recorded at the write-ahead
+   * because it cannot be recovered from the request afterwards (a queued publish can resolve its
+   * update branch from the LIVE lifecycle pointer, not only from `vmCurrentAssertion`). Recovery's
+   * absence-release is create-only, so this is what makes that decision honest for any job this
+   * build writes; a record without it predates the marker and is treated as an update, i.e. held.
+   */
+  readonly operationKind?: 'create' | 'update';
 }
 
 export interface LiftJobInclusionMetadata {

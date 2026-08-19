@@ -442,21 +442,16 @@ export interface AsyncLiftUpdateChainProofLookup extends AsyncLiftChainProofLook
 }
 
 /**
- * A lookup whose operation kind could not be derived — hand-built legacy callers only; the
- * publisher's own builders ALWAYS stamp a kind ({@link queuedLiftOperationKind} errs toward
- * 'update', because a create misread as an update only narrows what can settle it). Explicit
- * variant rather than optional soup, so the unclassified population is visible at the type level:
- * it is treated as create-shaped for recognition and carries nothing update-only.
+ * PR #2300 r3 — TWO variants, and no escape hatch. An earlier draft carried an 'unclassified'
+ * member for callers that could not derive a kind; it immediately weakened the boundary it was
+ * added to (it made resolver branches non-exhaustive and let the fact that governs absence-release
+ * be omitted), and nothing constructed it: {@link queuedLiftOperationKind} always answers, from the
+ * durable marker or from the safe default. A caller that genuinely cannot classify must DECLINE to
+ * build a lookup — the job then stays held — rather than pass an undiscriminated one.
  */
-export interface AsyncLiftUnclassifiedChainProofLookup extends AsyncLiftChainProofLookupBase {
-  readonly operationKind?: undefined;
-  readonly intendedUpdateRoot?: undefined;
-}
-
 export type AsyncLiftChainProofLookup =
   | AsyncLiftCreateChainProofLookup
-  | AsyncLiftUpdateChainProofLookup
-  | AsyncLiftUnclassifiedChainProofLookup;
+  | AsyncLiftUpdateChainProofLookup;
 
 export type AsyncLiftPublisherRecoveryResolver = (
   lookup: AsyncLiftChainProofLookup,

@@ -137,18 +137,33 @@ export function pinnedPublishIdentityKaId(job: LiftJob): string | undefined {
  *  - a raw lift is a create only when its transition type says CREATE (MUTATE/REVOKE rewrite
  *    existing state and carry the same ABA hazard).
  */
+/**
+ * GH#2270 PR #2300 r3 — the branch a persisted job actually signed, read from the durable marker
+ * written at the write-ahead (`broadcast.operationKind`) or carried across a reset in the recovery
+ * record. Either carrier is the transaction's own testimony; nothing else is.
+ */
+export function liftJobOperationKindMarker(job: LiftJob): 'create' | 'update' | undefined {
+  const broadcast = (job as { broadcast?: { operationKind?: 'create' | 'update' } }).broadcast;
+  const recovery = (job as { recovery?: { operationKind?: 'create' | 'update' } }).recovery;
+  return broadcast?.operationKind ?? recovery?.operationKind;
+}
+
 export function queuedLiftOperationKind(job: LiftJob): 'create' | 'update' {
   if (isKnowledgeAssetVmPublishJobRequest(job.request)) {
-    const request = job.request.knowledgeAssetVmPublish;
-    if (request.vmCurrentAssertion !== undefined) return 'update';
-    try {
-      if (request.assertionVersion !== undefined && BigInt(request.assertionVersion) > 1n) {
-        return 'update';
-      }
-    } catch {
-      return 'update';
-    }
-    return 'create';
+    // The DURABLE marker first: it records what actually signed. Everything else is inference, and
+    // for a named KA the request cannot carry the answer — `publishQueuedKnowledgeAssetVmPublish`
+    // resolves its update branch from `request.vmCurrentAssertion ?? the live lifecycle pointer`,
+    // so a request with no pointer of its own can still sign an update.
+    const signed = liftJobOperationKindMarker(job);
+    if (signed !== undefined) return signed;
+    // No marker: the record predates it. `assertionVersion` was used here and was WRONG — it counts
+    // assertion revisions, not VM publications, so a KA finalized twice before its FIRST publish
+    // reads as version 2 and would be misclassified as an update forever (PR #2300 r3, 3811569441).
+    // With nothing authoritative left, the answer is the SAFE one rather than the likely one:
+    // 'update' only forfeits absence-release (the job holds, with the operator's by-id clear as its
+    // exit), while a wrong 'create' would authorise a resend of an update that may already be on
+    // chain. Every job this build writes carries the marker, so this is a pre-upgrade residual.
+    return 'update';
   }
   const rawTransition = (job.request as { lift?: { transitionType?: string } }).lift?.transitionType;
   return rawTransition === 'CREATE' ? 'create' : 'update';
@@ -182,6 +197,9 @@ export function resetFailedLiftJobToAccepted(
   return buildLiftJobAcceptedReset(job, {
     now,
     ...(options.txHashAccounted ? { txHashAccounted: true } : {}),
+    // The marker rides along with the hash: a released job must not degrade to the pre-marker
+    // default on its next attempt (see LiftJobRecoveryMetadata.operationKind).
+    ...(liftJobOperationKindMarker(job) ? { operationKind: liftJobOperationKindMarker(job) } : {}),
     // 'accepted' is the one origin with no prior state to recover from. Stated as that exclusion
     // rather than a list of the rest, so a new active state cannot silently go unrecorded — the
     // compiler rejects one that is not a `LiftJobResettableState`.
@@ -221,6 +239,8 @@ export function buildLiftJobAcceptedReset(
      * question forward, which is the safe direction. Only the proof-first dispatcher passes true.
      */
     readonly txHashAccounted?: boolean;
+    /** The branch the checked transaction signed; carried forward like the hash itself. */
+    readonly operationKind?: 'create' | 'update';
   },
 ): LiftJobAccepted {
   return {
@@ -241,6 +261,7 @@ export function buildLiftJobAcceptedReset(
           recoveredFromStatus: options.recoveredFrom,
           txHashChecked: options.txHashChecked,
           ...(options.txHashAccounted ? { txHashAccounted: true } : {}),
+          ...(options.operationKind ? { operationKind: options.operationKind } : {}),
         }
       : undefined,
     controlPlane: job.controlPlane,

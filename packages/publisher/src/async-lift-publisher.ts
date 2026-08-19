@@ -15,7 +15,6 @@ export type {
   AsyncLiftChainProofLookup,
   AsyncLiftCreateChainProofLookup,
   AsyncLiftUpdateChainProofLookup,
-  AsyncLiftUnclassifiedChainProofLookup,
   AsyncLiftChainProofResolution,
   AsyncLiftPublisherRecoveryResolver,
   AsyncLiftPublisherRecoveryResult,

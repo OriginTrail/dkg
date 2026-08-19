@@ -123,7 +123,11 @@ export function createAsyncLift2270Harness() {
     const walletId = `wallet-tx-${jobId}`;
     await publisher.claimNext(walletId);
     await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
-    await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId } });
+    // The write-ahead stamps WHICH BRANCH signed; a fixture that reaches 'broadcast' must carry the
+    // same marker a real send would have left, and for these requests the branch is the one the
+    // queued publish would resolve from `vmCurrentAssertion`.
+    const operationKind = request.vmCurrentAssertion !== undefined ? 'update' as const : 'create' as const;
+    await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId, operationKind } });
     return expectFailed(await publisher.recordPublishFailure(jobId, {
       error: new Error('RPC endpoint temporarily unavailable'),
       failedFromState: 'broadcast',
@@ -160,7 +164,11 @@ export function createAsyncLift2270Harness() {
     await publisher.claimNext(walletId);
     await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
     if (options.recordTxHash) {
-      await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId } });
+      // The write-ahead stamps WHICH BRANCH signed; a fixture that reaches 'broadcast' must carry the
+    // same marker a real send would have left, and for these requests the branch is the one the
+    // queued publish would resolve from `vmCurrentAssertion`.
+    const operationKind = request.vmCurrentAssertion !== undefined ? 'update' as const : 'create' as const;
+    await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId, operationKind } });
     }
     return expectFailed(await publisher.recordPublishFailure(jobId, {
       error: new Error('execution reverted'),
@@ -178,7 +186,11 @@ export function createAsyncLift2270Harness() {
     const walletId = `wallet-inc-${jobId}`;
     await publisher.claimNext(walletId);
     await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
-    await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId } });
+    // The write-ahead stamps WHICH BRANCH signed; a fixture that reaches 'broadcast' must carry the
+    // same marker a real send would have left, and for these requests the branch is the one the
+    // queued publish would resolve from `vmCurrentAssertion`.
+    const operationKind = request.vmCurrentAssertion !== undefined ? 'update' as const : 'create' as const;
+    await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId, operationKind } });
     await publisher.update(jobId, 'included', {
       broadcast: { txHash: TX_HASH, walletId },
       inclusion: { txHash: TX_HASH, blockNumber: 42 },

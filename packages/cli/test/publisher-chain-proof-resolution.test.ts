@@ -612,7 +612,12 @@ describe('GH#2270 runner chain-proof resolution', () => {
           transitionType: 'CREATE',
         },
       });
-      await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId: WALLET, nonce } });
+      // The write-ahead stamps WHICH BRANCH signed; this fixture stands in for it, so it records
+      // the branch the queued publish would have resolved for this request.
+      const operationKind = (requestOverrides as { vmCurrentAssertion?: string }).vmCurrentAssertion !== undefined
+        ? 'update' as const
+        : 'create' as const;
+      await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId: WALLET, nonce, operationKind } });
       await publisher.recordPublishFailure(jobId, {
         error: new Error('RPC endpoint temporarily unavailable'),
         failedFromState: 'broadcast',
@@ -845,7 +850,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
       });
       // The daemon "dies" here: the job is live in 'broadcast' with its tx on the wire.
       await publisher.update(jobId, 'broadcast', {
-        broadcast: { txHash: TX_HASH, walletId: WALLET, nonce: SIGNED_NONCE },
+        broadcast: { txHash: TX_HASH, walletId: WALLET, nonce: SIGNED_NONCE, operationKind: 'update' },
       });
 
       // Restart: the interrupted lane runs. The update is verified but NOT final — no fact, no

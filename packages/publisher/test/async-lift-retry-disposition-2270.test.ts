@@ -186,6 +186,8 @@ describe('GH#2270 failed-job retry disposition', () => {
       action: 'reset_to_accepted',
       recoveredFromStatus: 'broadcast',
       txHashChecked: TX_HASH,
+      // r3 — the branch marker is evidence too, and rides the same carrier as the hash.
+      operationKind: 'create',
     });
     // A pre-send failure records its origin with no hash to carry — there is no evidence to keep.
     expect(resetFailedLiftJobToAccepted(quorumFailure, 9_000).recovery).toEqual({
@@ -205,13 +207,15 @@ describe('GH#2270 failed-job retry disposition', () => {
     const carriedInRecoveryOnly = {
       ...failed,
       broadcast: undefined,
-      recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH },
+      recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH, operationKind: 'create' },
     } as unknown as PersistedFailedJob;
 
     expect(resetFailedLiftJobToAccepted(carriedInRecoveryOnly, 9_000).recovery).toEqual({
       action: 'reset_to_accepted',
       recoveredFromStatus: 'broadcast',
       txHashChecked: TX_HASH,
+      // r3 — the branch marker is evidence too, and rides the same carrier as the hash.
+      operationKind: 'create',
     });
     // And that carrier is what keeps the job evidence-bearing at all — the reason to preserve it.
     expect(hasBroadcastEvidence(carriedInRecoveryOnly)).toBe(true);
@@ -428,10 +432,14 @@ describe('GH#2270 failed-job retry disposition', () => {
   // misread (an absence release re-applying stale state). A classifier collapsed back to
   // vmCurrentAssertion-only would call the first two rows 'create' and fail them.
   describe('queuedLiftOperationKind over version-only signals', () => {
-    function jobWithRequest(overrides: Record<string, unknown>): PersistedFailedJob {
+    function jobWithRequest(
+      overrides: Record<string, unknown>,
+      marker?: 'create' | 'update',
+    ): PersistedFailedJob {
       return {
         jobId: 'kind-probe',
         jobSlug: 'kind-probe',
+        ...(marker ? { broadcast: { txHash: TX_HASH, walletId: 'w-kind', operationKind: marker } } : {}),
         request: {
           jobType: 'knowledge-asset-vm-publish',
           knowledgeAssetVmPublish: kaVmPublishRequest(overrides as never),
@@ -451,20 +459,61 @@ describe('GH#2270 failed-job retry disposition', () => {
       } as unknown as PersistedFailedJob;
     }
 
+    // PR #2300 r3 (🔴 3811569441) — this table used to be driven by `assertionVersion`, and that
+    // was wrong: the version counts ASSERTION revisions, not VM publications, so a KA finalized
+    // twice before its first publish (version 2, no vmCurrentAssertion) is a genuine CREATE and was
+    // being frozen out of absence-release forever. The DURABLE MARKER written at the write-ahead is
+    // the only thing that knows what signed; the request cannot know, because the queued publish
+    // resolves its update branch from `vmCurrentAssertion ?? the live lifecycle pointer`. Without a
+    // marker the answer is the SAFE one (update: the job holds and an operator can clear it) rather
+    // than the likely one (create: which would authorise a resend).
     it.each([
-      ['advanced version, no vmCurrentAssertion', { assertionVersion: '2', vmCurrentAssertion: undefined }, 'update'],
-      ['malformed version', { assertionVersion: 'not-a-number', vmCurrentAssertion: undefined }, 'update'],
-      ['vmCurrentAssertion present, version 1', { assertionVersion: '1', vmCurrentAssertion: 'aa'.repeat(32) }, 'update'],
-      ['version 1, no vmCurrentAssertion', { assertionVersion: '1', vmCurrentAssertion: undefined }, 'create'],
-      ['no version at all, no vmCurrentAssertion', { assertionVersion: undefined, vmCurrentAssertion: undefined }, 'create'],
-    ] as const)('classifies %s', (_label, overrides, expected) => {
-      expect(queuedLiftOperationKind(jobWithRequest(overrides as Record<string, unknown>)))
+      ['a CREATE marker, even at an advanced assertion version', { assertionVersion: '2', vmCurrentAssertion: undefined }, 'create' as const, 'create'],
+      ['a CREATE marker, even with a vmCurrentAssertion in the request', { assertionVersion: '2', vmCurrentAssertion: 'aa'.repeat(32) }, 'create' as const, 'create'],
+      ['an UPDATE marker', { assertionVersion: '1', vmCurrentAssertion: undefined }, 'update' as const, 'update'],
+    ] as const)('classifies by what actually signed: %s', (_label, overrides, marker, expected) => {
+      expect(queuedLiftOperationKind(jobWithRequest(overrides as Record<string, unknown>, marker)))
         .toBe(expected);
     });
 
-    it('holds a version-only update on a proven-absent verdict through the dispatcher', async () => {
-      // The behavior the classification exists for: no vmCurrentAssertion anywhere, only the
-      // advanced version — and the writer still refuses the absence release.
+    it.each([
+      ['advanced version, no vmCurrentAssertion (a first publish — held, not released)', { assertionVersion: '2', vmCurrentAssertion: undefined }],
+      ['malformed version', { assertionVersion: 'not-a-number', vmCurrentAssertion: undefined }],
+      ['vmCurrentAssertion present, version 1', { assertionVersion: '1', vmCurrentAssertion: 'aa'.repeat(32) }],
+      ['version 1, no vmCurrentAssertion', { assertionVersion: '1', vmCurrentAssertion: undefined }],
+      ['no version at all, no vmCurrentAssertion', { assertionVersion: undefined, vmCurrentAssertion: undefined }],
+    ] as const)('falls back to the SAFE answer with no marker: %s', (_label, overrides) => {
+      expect(queuedLiftOperationKind(jobWithRequest(overrides as Record<string, unknown>)))
+        .toBe('update');
+    });
+
+    it('RELEASES a first VM publish at assertion version 2 — the marker says CREATE', async () => {
+      // PR #2300 r3 (3811569441), the reviewer's exact scenario: a KA finalized twice before its
+      // FIRST VM publication carries assertionVersion '2' with no vmCurrentAssertion. It is a
+      // create, its transaction is proven absent, and it must go back on the queue — under the old
+      // version heuristic it was classified an update and held forever.
+      const releasing = createPublisher({ chainProofResolver: async () => ({ status: 'not-found' }) });
+      const firstPublish = kaVmPublishRequest({ assertionVersion: '2' });
+      const releasedId = await releasing.enqueueKnowledgeAssetVmPublish(firstPublish);
+      await releasing.claimNext('w-first-publish');
+      await releasing.update(releasedId, 'validated', { validation: KA_VM_VALIDATION });
+      await releasing.update(releasedId, 'broadcast', {
+        broadcast: { txHash: TX_HASH, walletId: 'w-first-publish', nonce: 41, operationKind: 'create' },
+      });
+      expectFailed(await releasing.recordPublishFailure(releasedId, {
+        error: new Error('RPC endpoint temporarily unavailable'),
+        failedFromState: 'broadcast',
+        errorPayloadRef: `urn:dkg:test:error:${releasedId}`,
+      }));
+
+      expect(await releasing.recover()).toBe(1);
+      expect((await releasing.getStatus(releasedId))?.status).toBe('accepted');
+    });
+
+    it('holds that same shape when NOTHING durable says what signed it', async () => {
+      // The pre-marker residual, pinned so it cannot drift into an accident: an identical record
+      // with no marker is treated as an update and stays held, because releasing on a guess is the
+      // one mistake this lane must never make. The operator's by-id clear is its exit.
       const publisher = createPublisher({ chainProofResolver: async () => ({ status: 'not-found' }) });
       const request = kaVmPublishRequest({ assertionVersion: '2' });
       const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
@@ -492,7 +541,7 @@ describe('GH#2270 failed-job retry disposition', () => {
     async function heldJob(
       publisher: ReturnType<typeof createPublisher>,
       request: ReturnType<typeof kaVmPublishRequest>,
-      broadcast: { txHash: typeof TX_HASH; walletId: string; nonce?: number },
+      broadcast: { txHash: typeof TX_HASH; walletId: string; nonce?: number; operationKind?: 'create' | 'update' },
     ): Promise<PersistedFailedJob> {
       const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
       await publisher.claimNext(broadcast.walletId);
@@ -530,7 +579,7 @@ describe('GH#2270 failed-job retry disposition', () => {
     it('FALSE for a legacy create with NO recorded nonce — a dropped tx leaves only the operator', async () => {
       const publisher = createPublisher();
       const request = kaVmPublishRequest();
-      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-legacy' });
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-legacy', operationKind: 'create' });
 
       expect(hasAutomaticRecoveryExit(held)).toBe(false);
       expect(await admissionRetryable(publisher, request)).toBe(false);
