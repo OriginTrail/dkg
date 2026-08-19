@@ -107,6 +107,8 @@ import {
   getLiftJobTransactionEvidence,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
+  liftJobCheckedNonce,
+  liftJobCheckedSigner,
   liftJobOperationKindMarker,
   normalizePersistedLiftJobRequest,
   buildLiftJobAcceptedReset,
@@ -2460,6 +2462,11 @@ export class TripleStoreAsyncLiftPublisher
       txHashChecked,
       stampRetriedAt: false,
       ...(liftJobOperationKindMarker(job) ? { operationKind: liftJobOperationKindMarker(job) } : {}),
+      // r21 (🔴 3812632539) — the signer travels with the hash. Prefer the broadcast this reset
+      // is dropping; otherwise carry forward a signer an earlier reset already preserved. Never
+      // the claim: that is the wallet for the NEXT attempt, not the one that signed this hash.
+      ...(liftJobCheckedSigner(job) ? { walletIdChecked: liftJobCheckedSigner(job) } : {}),
+      ...(liftJobCheckedNonce(job) !== undefined ? { nonceChecked: liftJobCheckedNonce(job) } : {}),
     });
   }
 
@@ -2688,12 +2695,18 @@ export class TripleStoreAsyncLiftPublisher
    */
   private chainProofLookupFor(job: PersistedFailedJob): AsyncLiftChainProofLookup | null {
     const txHash = getLiftJobTransactionEvidence(job);
-    const walletId = job.broadcast?.walletId ?? job.claim?.walletId;
+    // r21 (🔴 3812632539) — the wallet must come from the SAME carrier as the hash. Falling
+    // back to `claim.walletId` paired an INHERITED hash with whatever wallet claimed the job next,
+    // producing a lookup for a transaction/account pair that never existed — and update
+    // recognition then bound the publisher to the wrong wallet, stranding a job whose transaction
+    // had actually mined. A pre-r21 record with no preserved signer is unformable, which is the
+    // fail-closed answer: it stays held and costs no batch slot.
+    const walletId = liftJobCheckedSigner(job);
     if (!txHash || !walletId) return null;
     return finishChainProofLookup(job, {
       txHash,
       walletId,
-      nonce: job.broadcast?.nonce,
+      nonce: liftJobCheckedNonce(job),
       publishIdentityKaId: pinnedPublishIdentityKaId(job),
     });
   }

@@ -148,6 +148,26 @@ export function liftJobOperationKindMarker(job: LiftJob): 'create' | 'update' | 
   return broadcast?.operationKind ?? recovery?.operationKind;
 }
 
+/**
+ * GH#2270 PR #2300 r21 (🔴 3812632539) — the wallet that signed the evidence hash, read from the
+ * SAME carrier the hash came from. `broadcast` is this attempt's; `recovery.walletIdChecked` is
+ * one an earlier reset preserved. `claim.walletId` is deliberately NOT a fallback: it names the
+ * wallet for the next attempt, and pairing it with an inherited hash builds a
+ * transaction/account combination that never existed on chain.
+ */
+export function liftJobCheckedSigner(job: LiftJob): string | undefined {
+  const broadcast = (job as { broadcast?: { txHash?: string; walletId?: string } }).broadcast;
+  if (broadcast?.txHash && broadcast.walletId) return broadcast.walletId;
+  return (job as { recovery?: { walletIdChecked?: string } }).recovery?.walletIdChecked;
+}
+
+/** The nonce that accompanies {@link liftJobCheckedSigner}'s hash, from the same carrier. */
+export function liftJobCheckedNonce(job: LiftJob): number | undefined {
+  const broadcast = (job as { broadcast?: { txHash?: string; nonce?: number } }).broadcast;
+  if (broadcast?.txHash && broadcast.nonce !== undefined) return broadcast.nonce;
+  return (job as { recovery?: { nonceChecked?: number } }).recovery?.nonceChecked;
+}
+
 export function queuedLiftOperationKind(job: LiftJob): 'create' | 'update' {
   if (isKnowledgeAssetVmPublishJobRequest(job.request)) {
     // The DURABLE marker first: it records what actually signed. Everything else is inference, and
@@ -241,6 +261,13 @@ export function buildLiftJobAcceptedReset(
     readonly txHashAccounted?: boolean;
     /** The branch the checked transaction signed; carried forward like the hash itself. */
     readonly operationKind?: 'create' | 'update';
+    /**
+     * r21 (🔴 3812632539) — the signer envelope of `txHashChecked`, preserved with it. A reset
+     * drops `broadcast`, so without this the inherited hash would later be paired with whatever
+     * wallet claims the job next.
+     */
+    readonly walletIdChecked?: string;
+    readonly nonceChecked?: number;
   },
 ): LiftJobAccepted {
   return {
@@ -262,6 +289,8 @@ export function buildLiftJobAcceptedReset(
           txHashChecked: options.txHashChecked,
           ...(options.txHashAccounted ? { txHashAccounted: true } : {}),
           ...(options.operationKind ? { operationKind: options.operationKind } : {}),
+          ...(options.walletIdChecked ? { walletIdChecked: options.walletIdChecked } : {}),
+          ...(options.nonceChecked !== undefined ? { nonceChecked: options.nonceChecked } : {}),
         }
       : undefined,
     controlPlane: job.controlPlane,

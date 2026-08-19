@@ -219,6 +219,18 @@ export interface LiftJobRecoveryResetToAccepted {
    * recovery released it for a re-run.
    */
   readonly operationKind?: 'create' | 'update';
+  /**
+   * GH#2270 PR #2300 r21 (🔴 3812632539) — the WALLET that signed `txHashChecked`, carried
+   * across the reset for the same reason the hash and the operation marker are. A reset drops
+   * `broadcast`, and the job can then be claimed by a DIFFERENT wallet; pairing the inherited hash
+   * with that later claim builds a lookup for a transaction/account combination that never
+   * existed, and update recognition binds the publisher to the wrong wallet — stranding a job
+   * whose transaction actually mined. Absent (a pre-r21 record), the inherited hash has no
+   * authoritative signer and the job stays held rather than being asked about under a guess.
+   */
+  readonly walletIdChecked?: string;
+  /** The nonce that transaction consumed, preserved with its signer for the absence proof. */
+  readonly nonceChecked?: number;
   readonly note?: string;
 }
 

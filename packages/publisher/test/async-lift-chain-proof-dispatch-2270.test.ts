@@ -130,7 +130,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     const carried = {
       ...failed,
       broadcast: undefined,
-      recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH, operationKind: 'create' },
+      recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH, walletIdChecked: 'wallet-tx-job-1', operationKind: 'create' },
       failure: { ...failed.failure, failedFromState: 'claimed', code: 'workspace_unavailable' },
     } as unknown as LiftJob;
     await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
@@ -442,7 +442,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       const held = await failAfterRecordedTxHash(publisher);
       const carrierOnly = { ...held } as unknown as Record<string, unknown>;
       delete carrierOnly.broadcast;
-      carrierOnly.recovery = { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH };
+      carrierOnly.recovery = { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH, walletIdChecked: 'wallet-tx-job-1' };
       await h.store.deleteByPattern({ subject: jobSubject(held.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
       await h.store.insert(serializeJob(carrierOnly as unknown as LiftJob, DEFAULT_CONTROL_GRAPH_URI));
 
@@ -466,7 +466,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       const inherited = {
         ...held,
         broadcast: undefined,
-        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH, operationKind: 'update' },
+        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH, walletIdChecked: 'wallet-tx-job-1', operationKind: 'update' },
         failure: { ...held.failure, failedFromState: 'claimed' },
       } as unknown as LiftJob;
       delete (inherited as unknown as Record<string, unknown>).broadcast;
@@ -847,7 +847,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
         ...failed,
         broadcast: undefined,
         failure: { ...failed.failure, failedFromState: 'claimed', code: 'workspace_unavailable' },
-        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH, operationKind: 'create' },
+        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH, walletIdChecked: 'wallet-tx-job-1', operationKind: 'create' },
       } as unknown as LiftJob;
       await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
       await h.store.insert(serializeJob(carried, DEFAULT_CONTROL_GRAPH_URI));
@@ -1099,6 +1099,76 @@ describe('GH#2270 proof-first chain dispatcher', () => {
   });
 
 
+  describe('an inherited hash is asked about under ITS OWN signer [r21]', () => {
+    // 🔴 3812632539 — a reset drops `broadcast`, and the job can then be claimed by a DIFFERENT
+    // wallet. The lookup used `job.broadcast?.walletId ?? job.claim?.walletId`, so an inherited
+    // hash was paired with the LATER claim: a transaction/account combination that never existed
+    // on chain. Update recognition then bound the publisher to the wrong wallet and a job whose
+    // transaction had actually mined stayed held forever.
+
+    it('uses the wallet preserved WITH the hash, not the wallet that claimed it next', async () => {
+      const asked: Array<{ txHash: string; walletId: string }> = [];
+      const publisher = createPublisher({
+        chainProofResolver: async (lookup) => {
+          asked.push({ txHash: lookup.txHash, walletId: lookup.walletId });
+          return { status: 'inconclusive' };
+        },
+      });
+      const held = await failAfterRecordedTxHash(publisher);
+
+      // Wallet A signed the hash; a reset preserved both; wallet B then claimed the job.
+      const inherited = {
+        ...held,
+        broadcast: undefined,
+        claim: { ...held.claim, walletId: 'wallet-B-claimed-later' },
+        recovery: {
+          action: 'reset_to_accepted',
+          recoveredFromStatus: 'broadcast',
+          txHashChecked: TX_HASH,
+          walletIdChecked: 'wallet-A-signed-it',
+          operationKind: 'create',
+        },
+      } as unknown as LiftJob;
+      await h.store.deleteByPattern({ subject: jobSubject(held.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(inherited, DEFAULT_CONTROL_GRAPH_URI));
+
+      await publisher.recover();
+
+      expect(asked).toEqual([{ txHash: TX_HASH, walletId: 'wallet-A-signed-it' }]);
+    });
+
+    it('a pre-r21 record with NO preserved signer is never asked about at all', async () => {
+      // The fail-closed half: a legacy carrier has no authoritative signer, so guessing one is
+      // exactly the bug. It stays held, and (r19) costs no batch slot doing so.
+      const asked: string[] = [];
+      const publisher = createPublisher({
+        chainProofResolver: async (lookup) => {
+          asked.push(lookup.walletId);
+          return { status: 'inconclusive' };
+        },
+      });
+      const held = await failAfterRecordedTxHash(publisher);
+      const legacy = {
+        ...held,
+        broadcast: undefined,
+        claim: { ...held.claim, walletId: 'wallet-B-claimed-later' },
+        recovery: {
+          action: 'reset_to_accepted',
+          recoveredFromStatus: 'broadcast',
+          txHashChecked: TX_HASH,
+          operationKind: 'create',
+        },
+      } as unknown as LiftJob;
+      await h.store.deleteByPattern({ subject: jobSubject(held.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(legacy, DEFAULT_CONTROL_GRAPH_URI));
+
+      await publisher.recover();
+
+      expect(asked).toEqual([]);
+      expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
+    });
+  });
+
   describe('the sweep is bounded — a held population cannot monopolize startup [r18]', () => {
     // 🔴 3816322914 — the dispatcher spends one RPC round trip PER HELD JOB and
     // `AsyncLiftRunner.start()` awaits `recover()`, so an unbounded pass turns startup into
@@ -1234,6 +1304,9 @@ describe('GH#2270 proof-first chain dispatcher', () => {
         name: 'albums-unformable', shareOperationId: 'share-op-unformable',
         kaUal: KA_VM_KA_UAL.replace(/\/\d+$/, '/900'),
       }));
+      // r21 (3812632539) — with the signer envelope in place, the unformable shape is a record
+      // whose carrier preserves NO wallet: a pre-r21 reset. It is evidence-bearing, so it IS
+      // held and does reach the sweep, but no lookup can be derived for it.
       // The shape that matters: evidence-bearing (so it IS held and does reach the sweep) but with
       // no WALLET in either carrier, so no lookup can be derived. Stripping the hash instead would
       // make it un-held and it would never reach the sweep at all — the row would prove nothing.
