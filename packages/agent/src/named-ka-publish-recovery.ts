@@ -221,7 +221,22 @@ export async function normalizeRecoveredNamedKaPublish(input: {
     throw inconsistent('the configured chain adapter cannot resolve the current KA merkle root');
   }
   const latestMerkleRoot = ethers.hexlify(await chain.getLatestMerkleRoot(reservedKaId));
-  const superseded = !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
+  // GH#2270 PR #2300 r5 (3812275749) — supersession is a question about POSITION in the update
+  // history, and root bytes cannot answer it: an asset updated A -> B -> A makes the FIRST
+  // update's root equal the latest one, so root equality would call that old transaction current
+  // and stamp its provenance and version block over newer state. When the recovery evidence
+  // carries the verified position, compare positions; root equality remains the fallback for
+  // evidence that predates the field or an adapter that cannot count roots, which is no worse
+  // than the behaviour it replaces.
+  let superseded = !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
+  if (proof.merkleRootCount !== undefined && chain.getMerkleRootCount) {
+    try {
+      const currentCount = await chain.getMerkleRootCount(reservedKaId);
+      superseded = currentCount > BigInt(proof.merkleRootCount);
+    } catch {
+      // A count the chain will not serve leaves the root-equality answer standing.
+    }
+  }
   let materializationAuthor = transactionAuthor;
   let materializationPublisher = transactionPublisher;
   let versionBlock = recovery.inclusion.blockNumber;

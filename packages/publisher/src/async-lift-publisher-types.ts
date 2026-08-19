@@ -251,6 +251,13 @@ export interface CanonicalUpdateEvidence {
   readonly blockHash?: LiftJobHex;
   /** The receipt's transaction index, when the verification produced one. */
   readonly txIndex?: number;
+  /**
+   * PR #2300 r5 (3812275749) — WHICH update in the asset's history this transaction wrote, as a
+   * decimal string. Merkle roots are not version identifiers: a history of A → B → A makes the
+   * FIRST update's root equal the latest one, so root equality cannot tell "still current" from
+   * "superseded by a later update that happens to restore the same root". The position can.
+   */
+  readonly merkleRootCount?: string;
 }
 
 export interface AsyncLiftPublisherRecoveryResult {
@@ -270,6 +277,12 @@ export interface AsyncKnowledgeAssetVmPublishRecoveryEvidence
     readonly merkleRoot: LiftJobHex;
     readonly authorAddress: LiftJobHex;
     readonly txIndex: number;
+    /**
+     * PR #2300 r5 — the position this transaction wrote in the asset's update history, decimal.
+     * The finalizer decides supersession from it when present, because a root that reappears
+     * later in the history (A → B → A) makes root equality say "current" about an OLD update.
+     */
+    readonly merkleRootCount?: string;
   };
 }
 

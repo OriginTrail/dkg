@@ -863,6 +863,9 @@ async function resolveCanonicalUpdateRecoveryEvidence(
         kaId,
         onChainRoot: verdictRecovery.canonicalUpdate.onChainRoot,
         blockNumber: verdictRecovery.inclusion.blockNumber,
+        ...(verdictRecovery.canonicalUpdate.merkleRootCount !== undefined
+          ? { merkleRootCount: BigInt(verdictRecovery.canonicalUpdate.merkleRootCount) }
+          : {}),
         blockHash: verdictRecovery.canonicalUpdate.blockHash,
         txIndex: verdictRecovery.canonicalUpdate.txIndex,
       }
@@ -894,6 +897,7 @@ async function resolveCanonicalUpdateRecoveryEvidence(
       merkleRoot: facts.onChainRoot,
       authorAddress,
       txIndex: facts.txIndex,
+      ...(facts.merkleRootCount !== undefined ? { merkleRootCount: facts.merkleRootCount.toString() } : {}),
     },
   };
 }

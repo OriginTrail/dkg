@@ -168,6 +168,8 @@ export interface CanonicalUpdateFacts {
   readonly kaId: bigint;
   readonly onChainRoot: LiftJobHex;
   readonly blockNumber: number;
+  /** r5 — the verified position in the asset's update history; roots repeat, positions do not. */
+  readonly merkleRootCount?: bigint;
   readonly blockHash?: string;
   readonly txIndex?: number;
 }
@@ -216,6 +218,7 @@ export async function verifyCanonicalUpdateFacts(
     kaId,
     onChainRoot,
     blockNumber: verification.blockNumber,
+    ...(verification.merkleRootCount !== undefined ? { merkleRootCount: verification.merkleRootCount } : {}),
     blockHash: verification.blockHash,
     ...(verification.txIndex !== undefined ? { txIndex: verification.txIndex } : {}),
   };
@@ -260,6 +263,7 @@ async function resolveCanonicalUpdateRecognition(
       },
       canonicalUpdate: {
         onChainRoot: facts.onChainRoot,
+        ...(facts.merkleRootCount !== undefined ? { merkleRootCount: facts.merkleRootCount.toString() } : {}),
         ...(blockHash ? { blockHash } : {}),
         ...(facts.txIndex !== undefined ? { txIndex: facts.txIndex } : {}),
       },

@@ -888,6 +888,31 @@ describe('rootless graph-scoped KA lifecycle', () => {
     // held on the recovery carrier alone (`recovery.txHashChecked`, NO `broadcast`). The REAL
     // finalizer must complete lifecycle materialization from `lookup.txHash`; a regression that
     // reads `job.broadcast.txHash` anywhere on this path throws on this input and fails the row.
+    // PR #2300 r5 (3812275752) — reset the lifecycle to its PRE-recovery state first. Without
+    // this the assertions below describe what the earlier invocation already produced, so a
+    // carrier-only call that silently did nothing would still leave the row green.
+    for (const predicate of [
+      `${DKG}publishedUal`,
+      `${DKG}vmCurrentAssertion`,
+      `${DKG}assertionGraph`,
+      `${DKG}memoryLayer`,
+      `${DKG}state`,
+    ]) {
+      await store.deleteByPattern({ subject: lifecycleUri, predicate, graph: metaGraph });
+    }
+    await store.deleteByPattern({ subject: assertionUri, predicate: `${DKG}memoryLayer`, graph: metaGraph });
+    for (const predicate of Object.values(ASSERTION_PUBLISH_RECEIPT_PREDICATES)) {
+      await store.deleteByPattern({ subject: assertionUri, predicate, graph: metaGraph });
+    }
+    await store.insert([
+      { subject: lifecycleUri, predicate: `${DKG}state`, object: '"promoted"', graph: metaGraph },
+      { subject: lifecycleUri, predicate: `${DKG}memoryLayer`, object: `"${MemoryLayer.SharedWorkingMemory}"`, graph: metaGraph },
+      { subject: assertionUri, predicate: `${DKG}memoryLayer`, object: `"${MemoryLayer.SharedWorkingMemory}"`, graph: metaGraph },
+    ]);
+    // The premise: the lifecycle really is un-published again, so anything asserted after the
+    // carrier-only call is that call's own work.
+    expect((await agent.assertion.history(CG_ID, name))?.status).not.toBe('vm-confirmed');
+
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
       ...recoveryInput,
       job: {

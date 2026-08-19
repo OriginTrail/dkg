@@ -199,6 +199,34 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     });
   });
 
+  it('treats a recovered update as SUPERSEDED when the history moved on, even if the root repeats [PR#2300 r5]', async () => {
+    // 3812275749 — merkle roots are not version identifiers. An asset updated A -> B -> A makes the
+    // FIRST update's root equal the LATEST root, so deciding supersession by root bytes calls that
+    // old transaction current and stamps its provenance and version block over newer state. The
+    // verified history POSITION settles it: this proof wrote root #1, the chain now holds #3.
+    const chain = seededChain();
+    (chain as unknown as { getMerkleRootCount: (kaId: bigint) => Promise<bigint> })
+      .getMerkleRootCount = async () => 3n;
+    (chain as unknown as { getLatestMerkleRootAuthor: (kaId: bigint) => Promise<string> })
+      .getLatestMerkleRootAuthor = async () => ethers.getAddress(AUTHOR);
+    (chain as unknown as { getLatestMerkleRootPublisher: (kaId: bigint) => Promise<string> })
+      .getLatestMerkleRootPublisher = async () => ethers.getAddress(PUBLISHER);
+    (chain as unknown as { getBlockNumber: () => Promise<number> }).getBlockNumber = async () => 300;
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
+      }),
+    });
+
+    // The latest root EQUALS this proof's root, so root equality would have said "current".
+    expect(result.materialization.superseded).toBe(true);
+    expect(result.materialization.versionBlock).toBe(300);
+  });
+
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),
