@@ -20,7 +20,7 @@ import { BuyerClient } from "./buyer/client.js";
 import { LaneBuyerClient } from "./lane/client.js";
 import { hfEngine, tiktokenEngine } from "./buyer/bpe.js";
 import { startLaneExecutor } from "./lane/executor.js";
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, existsSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // The buyer gateway mounts from `<home>/buyer.json`, which can appear or change
@@ -113,6 +113,16 @@ async function mount(cfg: MarketplaceConfig, ctx: RequestContext, log: (l: strin
       log(`offering ${off.id} NOT MOUNTED: ${String((e as Error).message).slice(0, 120)}`);
     }
   }
+
+  // restore publish state — offeringUal drives the Operate PUBLISHED column
+  // and must survive restarts; publishing writes <home>/published.json
+  try {
+    const pub = JSON.parse(readFileSync(join(home, "published.json"), "utf8")) as Record<string, string>;
+    for (const [id, ual] of Object.entries(pub)) {
+      const ob = offerings.get(id);
+      if (ob) ob.offeringUal = ual;
+    }
+  } catch { /* nothing persisted yet */ }
 
   // seller side (only if a provider address is known)
   let front: FrontDeps | null = null;
@@ -392,6 +402,14 @@ export const plugin: RoutePlugin = {
             apiBase: cfg.apiBase ?? "",
             contextGraphId: parsed.contextGraphId ?? cfg.laneContextGraphId ?? "nsm-live",
           }) as unknown as Record<string, unknown>;
+          if (!out.error && typeof out.ual === "string" && parsed.offeringId) {
+            ob.offeringUal = out.ual;
+            const p = join(mounted.front.home, "published.json");
+            let cur: Record<string, string> = {};
+            try { cur = JSON.parse(readFileSync(p, "utf8")) as Record<string, string>; } catch { /* first publish */ }
+            cur[parsed.offeringId] = out.ual;
+            writeFileSync(p, JSON.stringify(cur, null, 2) + "\n");
+          }
         }
       } catch (e) {
         out = { error: "E_PUBLISH", detail: String((e as Error).message).slice(0, 160) };
