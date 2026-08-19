@@ -378,6 +378,14 @@ describe('GH#2270 proof-first chain dispatcher', () => {
   // `resolution === 'retry_recovery'` plus live broadcast metadata, which is a strict SUBSET: it
   // missed a job that failed from 'broadcast' with an ordinary retryable code while still holding
   // a persisted txHash, and that job has a transaction unaccounted for just the same.
+  const updateRequestForDispatch = () => kaVmPublishRequest({
+    vmCurrentAssertion: 'aa'.repeat(32),
+    assertionVersion: '2',
+    name: 'reverted-update-album',
+    shareOperationId: 'reverted-update-op',
+    intentKey: `sha256:${'d1'.repeat(32)}`,
+  });
+
   describe('raw lift is dispatched on the same held predicate', () => {
     async function heldRawLiftAfterWriteAhead(
       publisher: ReturnType<typeof createPublisher>,
@@ -443,6 +451,29 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       // The record satisfies its own union: the proven transaction is on it, not merely referenced
       // by the recovery note.
       expect(after?.broadcast?.txHash).toBe(TX_HASH);
+    });
+
+    it('does not requeue an UPDATE on a reverted INHERITED hash [r16]', async () => {
+      // 3814610383 — the reverted branch has two exits, and only one of them was create-guarded.
+      // A revert proves the earlier transaction had no effect; it says nothing about whether this
+      // job's immutable request is still current, so re-queuing an update replays a possibly stale
+      // root over a newer third-party version — the same ABA hazard the absence branch refuses.
+      const publisher = dispatcher({ status: 'reverted' });
+      const held = await failAfterRecordedTxHash(publisher, updateRequestForDispatch());
+      // Pre-send failure carrying an INHERITED hash: the fall-through the guard was missing.
+      const inherited = {
+        ...held,
+        broadcast: undefined,
+        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH, operationKind: 'update' },
+        failure: { ...held.failure, failedFromState: 'claimed' },
+      } as unknown as LiftJob;
+      delete (inherited as unknown as Record<string, unknown>).broadcast;
+      await h.store.deleteByPattern({ subject: jobSubject(held.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(inherited, DEFAULT_CONTROL_GRAPH_URI));
+
+      await publisher.recover();
+
+      expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
     });
 
     it('a raw broadcast that SIGNED is not requeued on a node with no resolver [r8]', async () => {

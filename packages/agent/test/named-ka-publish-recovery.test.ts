@@ -470,6 +470,35 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     expect(result.materialization.versionBlock).toBe(77);
   });
 
+  it('a recovered CREATE is superseded when a later update restored its root [r16]', async () => {
+    // 3814609231 — minting the identity once does not keep the create's ROOT current: an
+    // A -> B -> A history restores it, and root equality would then record the create as the
+    // current version over the third write. A create's position is 1 by construction, so it gets
+    // the same comparison without needing an extra chain read.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: () => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: SEAL_MERKLE_ROOT,
+        rootCount: 3n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 300,
+      });
+    (chain as unknown as { getBlockNumber: () => Promise<number> }).getBlockNumber = async () => 300;
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, operationKind: 'create' },
+      }),
+    });
+
+    expect(result.materialization.superseded).toBe(true);
+    expect(result.materialization.versionBlock).toBe(300);
+  });
+
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),

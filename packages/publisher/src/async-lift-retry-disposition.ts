@@ -479,9 +479,16 @@ export function decideChainProofDisposition(
       // the operator's by-id clear as the exit.
       return queuedLiftOperationKind(job) === 'update' ? { action: 'hold' } : { action: 'reset' };
     case 'reverted':
-      return job.failure.failedFromState === 'broadcast' || job.failure.failedFromState === 'included'
-        ? { action: 'refail_reverted', failedFromState: job.failure.failedFromState }
-        : { action: 'reset' };
+      if (job.failure.failedFromState === 'broadcast' || job.failure.failedFromState === 'included') {
+        return { action: 'refail_reverted', failedFromState: job.failure.failedFromState };
+      }
+      // r16 (3814610383) — the INHERITED-hash fall-through re-queues the job, and re-queuing an
+      // update replays its immutable request. A revert proves the earlier transaction had no
+      // effect; it says nothing about whether that request is still current, so replaying it can
+      // write a stale root over a newer third-party version — the same ABA hazard the `not-found`
+      // branch above refuses to take. The create-only rule therefore applies to both ways of
+      // reaching a reset, not just to absence.
+      return queuedLiftOperationKind(job) === 'update' ? { action: 'hold' } : { action: 'reset' };
     case 'pending':
     case 'unrecognized':
     case 'inconclusive':

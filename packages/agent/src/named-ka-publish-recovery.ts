@@ -255,13 +255,30 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // so falling back to it would stamp stale provenance exactly when the real proof is missing
   // (r12, 3813505553). A job whose proof carries a position therefore DEFERS instead: it stays
   // held, tx-bearing, and the next recovery tick asks again.
+  // r16 (3814609231) — a create's position is 1 BY CONSTRUCTION: the mint writes the first root.
+  // Last round I reasoned that minting once made a create permanently current, which confused
+  // identity permanence with root currency — a later update can restore the create's root bytes,
+  // and root equality would then record the create as current over the newer version. So creates
+  // get the same position comparison, from a position that needs no extra chain read.
+  const recoveredPosition = proof.merkleRootCount !== undefined
+    ? BigInt(proof.merkleRootCount)
+    : (proof.operationKind === 'create' ? 1n : undefined);
+  // Only evidence that SAYS it is an update is held to the position rule. Evidence carrying no
+  // operation kind at all is the pre-marker legacy shape (r15, 3814317919): it keeps the
+  // latest-root comparison it always had, because there is nothing better available for it and
+  // refusing it outright would strand records this build did not write.
+  if (proof.operationKind === 'update' && recoveredPosition === undefined) {
+    throw inconsistent(
+      'a recovered update carries no history position, so its currency cannot be established from '
+      + 'root bytes alone; recovery is deferred',
+    );
+  }
   // r14 (3814016877) — the staleness test comes FIRST and does not depend on how the roots
   // compare. A view behind this transaction's own position has not seen it, and a lagging view
   // naturally shows a PREDECESSOR root — so gating the check on "the roots matched" let exactly
   // that case through and materialized the predecessor as the current version. The transaction is
   // on chain at this position; any view reporting fewer roots is stale, whatever root it names.
-  if (versionView && proof.merkleRootCount !== undefined
-    && versionView.rootCount < BigInt(proof.merkleRootCount)) {
+  if (versionView && recoveredPosition !== undefined && versionView.rootCount < recoveredPosition) {
     throw inconsistent(
       'the current KA version view is behind the recovered transaction position; '
       + 'recovery is deferred rather than treating a stale view as current',
@@ -272,19 +289,14 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // root equality would record it as current over the third. The built-in adapter supplies the
   // position, so this is the fail-closed answer for evidence that does not — a create is different
   // and keeps the root comparison, because a create's identity is minted once and never restored.
-  if (proof.operationKind === 'update' && proof.merkleRootCount === undefined) {
-    throw inconsistent(
-      'a recovered update carries no history position, so its currency cannot be established from '
-      + 'root bytes alone; recovery is deferred',
-    );
-  }
   let superseded = versionView
     ? !equalsIgnoreCase(versionView.latestRoot, proof.merkleRoot)
     : !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
-  if (!superseded && versionView && proof.merkleRootCount !== undefined) {
-    // Roots match, which alone cannot separate "still current" from "superseded by a later update
-    // that restored the same root". The position settles it, from this same view.
-    superseded = versionView.rootCount > BigInt(proof.merkleRootCount);
+  if (!superseded && versionView && recoveredPosition !== undefined) {
+    // Roots match, which alone cannot separate "still current" from "superseded by a later write
+    // that restored the same root" — true for a create whose root a later update restores, just as
+    // for an update. The position settles it, from this same view.
+    superseded = versionView.rootCount > recoveredPosition;
   }
 
   let materializationAuthor = transactionAuthor;

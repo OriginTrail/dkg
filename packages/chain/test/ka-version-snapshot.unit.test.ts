@@ -32,6 +32,8 @@ type Script = {
   blockNumber: number | null;
   /** When true, this endpoint fails chain-id validation (a wrong-chain RPC). */
   wrongChain?: boolean;
+  /** When true, this endpoint never settles — the stalled-RPC case cancellation exists for. */
+  stall?: boolean;
   latestRoot: string | null;
   rootCount: bigint;
   author?: string | null;
@@ -48,6 +50,7 @@ function adapterOver(scripts: Script[], opts: { storageDeployed?: boolean } = {}
     __script: script,
     // r13 — the view is pinned to the FINALIZED block, because it drives a durable decision.
     async getBlock(tag: string) {
+      if (script.stall) return new Promise(() => {}) as never;
       if (tag !== 'finalized') throw new Error(`expected the finalized tag, got ${tag}`);
       if (script.blockNumber === null) throw Object.assign(new Error('no finalized view'), { code: 'NETWORK_ERROR' });
       return { number: script.blockNumber, hash: `0x${'99'.repeat(32)}` };
@@ -165,6 +168,22 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
 
     await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
     expect(validated).toContain(0);
+  });
+
+  it('an abort completes the call rather than waiting out a stalled endpoint [r16]', async () => {
+    // 3814610248 — this poll gates durable recovery and fans out over every provider, so without a
+    // cancellation row a regression could leave recovery waiting on one stalled RPC indefinitely
+    // while every other snapshot row stayed green.
+    const { adapter } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n, stall: true },
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+    ]);
+    const controller = new AbortController();
+
+    const pending = adapter.readKnowledgeAssetVersionSnapshot(KA_ID, { signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).resolves.toBeNull();
   });
 
   it('answers null when no endpoint can produce a view', async () => {
