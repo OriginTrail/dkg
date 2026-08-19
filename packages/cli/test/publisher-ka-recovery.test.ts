@@ -165,7 +165,12 @@ describe('named KA publisher recovery wiring', () => {
     });
     expect(verifyKAUpdate).toHaveBeenCalledWith(txHash, kaId, walletId);
 
-    // A verified update for the WRONG root is someone else's update: null, and the job stays held.
+    // A verified update for the WRONG root is someone else's update: null, and the job stays
+    // held. (PR #2300 r1 — each negative sub-case asks about a DISTINCT transaction: the shared
+    // verifier memoizes a POSITIVE verification per (txHash, kaId, intendedRoot) — that is the
+    // once-only property — so a re-ask about the already-proven transaction above would be
+    // served from the cache by design.)
+    const wrongRootTx = `0x${'e1'.repeat(32)}` as `0x${string}`;
     verifyKAUpdate.mockResolvedValueOnce({
       verified: true,
       onChainMerkleRoot: Buffer.from('ff'.repeat(32), 'hex'),
@@ -173,16 +178,17 @@ describe('named KA publisher recovery wiring', () => {
       blockHash,
       txIndex: 3,
     });
-    await expect(resolver(job, lookup)).resolves.toBeNull();
+    await expect(resolver(job, { ...lookup, txHash: wrongRootTx })).resolves.toBeNull();
 
     // No canonical block hash → no durable evidence → null (fail-closed, not fabricated).
+    const hashlessTx = `0x${'e2'.repeat(32)}` as `0x${string}`;
     verifyKAUpdate.mockResolvedValueOnce({
       verified: true,
       onChainMerkleRoot: Buffer.from('12'.repeat(32), 'hex'),
       blockNumber: 91,
       txIndex: 3,
     });
-    await expect(resolver(job, lookup)).resolves.toBeNull();
+    await expect(resolver(job, { ...lookup, txHash: hashlessTx })).resolves.toBeNull();
   });
 
   it('falls back to the adapter knowledge-assets address when the receipt omits it', async () => {

@@ -16,10 +16,12 @@ import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publish
 import type { AsyncLiftChainProofLookup, DKGPublisher, LiftJob } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
+  createCanonicalUpdateVerifier,
   createChainProofResolver,
   hasChainPublishLookup,
   type PublisherChainAdapters,
 } from '../src/publisher-chain-proof.js';
+import { createKnowledgeAssetVmPublishRecoveryResolver } from '../src/publisher-runner.js';
 
 const TX_HASH = `0x${'ab'.repeat(32)}` as `0x${string}`;
 const WALLET = '0x1111111111111111111111111111111111111111';
@@ -506,6 +508,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
       chain: Record<string, unknown>,
       nonce?: number,
       requestOverrides: Record<string, unknown> = {},
+      publisherConfig: Record<string, unknown> = {},
     ): Promise<{
       publisher: TripleStoreAsyncLiftPublisher;
       jobId: string;
@@ -520,6 +523,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
         idGenerator: () => `job-${++ids}`,
         chainProofResolver: createChainProofResolver(publishers),
         knowledgeAssetVmPublishRecoveryResolver: async () => null,
+        ...publisherConfig,
       });
       const jobId = await publisher.enqueueKnowledgeAssetVmPublish({
         contextGraphId: 'music-social',
@@ -671,6 +675,49 @@ describe('GH#2270 runner chain-proof resolution', () => {
       const after = await status();
       expect(after?.status).toBe('failed');
       expect(after?.recovery?.txHashAccounted).toBeUndefined();
+    });
+
+    it('verifies a recognized update ONCE for the whole recovery — verdict and evidence share it', async () => {
+      // PR #2300 r1 (🟡 3809054830) — the verdict resolver and the named evidence resolver used
+      // to each call verifyKAUpdate for the same transaction: policy duplication that could
+      // drift. With the shared verifier the whole dispatch-and-finalize pass proves the update
+      // exactly once, and the job still finalizes from that one proof.
+      const verifyKAUpdate = vi.fn(async () => ({
+        verified: true,
+        onChainMerkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+        blockNumber: 91,
+        blockHash: `0x${'ef'.repeat(32)}`,
+        txIndex: 2,
+      }));
+      const chain = {
+        chainId: 'evm:31337',
+        resolvePublishTransaction: vi.fn(async () => ({ status: 'unrecognized' as const })),
+        verifyKAUpdate,
+        getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
+      };
+      const publishers = publishersWith(chain);
+      const updateVerifier = createCanonicalUpdateVerifier(publishers);
+      const finalizeRecovered = vi.fn(async () => undefined);
+      const { publisher, status } = await heldJobOn(
+        chain,
+        SIGNED_NONCE,
+        { vmCurrentAssertion: '12'.repeat(32), assertionVersion: '2' },
+        {
+          chainProofResolver: createChainProofResolver(publishers, { updateVerifier }),
+          knowledgeAssetVmPublishRecoveryResolver:
+            createKnowledgeAssetVmPublishRecoveryResolver(publishers, { updateVerifier }),
+          knowledgeAssetVmPublishHandler: {
+            execute: async () => { throw new Error('the dispatcher must never cause a send'); },
+            finalizeRecovered,
+          },
+        },
+      );
+
+      expect(await publisher.recover()).toBe(1);
+
+      expect((await status())?.status).toBe('finalized');
+      expect(finalizeRecovered).toHaveBeenCalledOnce();
+      expect(verifyKAUpdate).toHaveBeenCalledTimes(1);
     });
   });
 });

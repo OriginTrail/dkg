@@ -30,6 +30,7 @@ import type {
 } from '@origintrail-official/dkg-chain';
 import type {
   AsyncLiftChainProofLookup,
+  AsyncLiftUpdateChainProofLookup,
   AsyncLiftChainProofResolution,
   AsyncLiftPublisherRecoveryResult,
   LiftJobHex,
@@ -90,7 +91,11 @@ export function chainAdaptersForWallets(
  */
 export function createChainProofResolver(
   adapters: PublisherChainAdapters,
+  options: { readonly updateVerifier?: CanonicalUpdateVerifier } = {},
 ): (lookup: AsyncLiftChainProofLookup) => Promise<AsyncLiftChainProofResolution> {
+  // PR #2300 r1 (🟡 3809054830) — ONE verifier; the wiring site shares it with the named-KA
+  // evidence resolver so a recognized update is verified once, not once per consumer.
+  const updateVerifier = options.updateVerifier ?? createCanonicalUpdateVerifier(adapters);
   return async (lookup) => {
     const resolution = await resolvePublishTransactionState(lookup, adapters);
     // GH#2270 PR-3 r4 — a queued UPDATE's mined transaction carries `KnowledgeAssetUpdated`, not a
@@ -98,7 +103,7 @@ export function createChainProofResolver(
     // resolve. When the lookup says the queued operation WAS an update, ask the update-verification
     // machinery whether this exact transaction installed the exact intended root.
     if (resolution.status === 'unrecognized' && lookup.operationKind === 'update') {
-      return resolveCanonicalUpdateRecognition(lookup, adapters);
+      return resolveCanonicalUpdateRecognition(lookup, adapters, updateVerifier);
     }
     if (resolution.status === 'not-found' && lookup.operationKind === 'update') {
       // Release-by-absence stays CREATE-ONLY, deliberately. A create's identity register is
@@ -138,46 +143,105 @@ export function createChainProofResolver(
 }
 
 /**
- * GH#2270 PR-3 r4 — is this mined-but-unrecognized transaction OUR update, canonically?
+ * PR #2300 r1 (🟡 3809054830) — the canonically verified facts of ONE queued update, established
+ * ONCE and shared by every consumer.
  *
- * `recovered` requires the full chain of custody at once: the receipt fetched BY our recorded
- * txHash carries an update event for exactly our pinned kaId, the chain-verified new root equals
- * the root our seal intended to install, and the root history at the receipt block attributes it
- * to our signing wallet — all of which is what {@link ChainAdapter.verifyKAUpdate} establishes
- * (it re-reads the receipt and matches the root history itself; nothing here is taken from the
- * job's own say-so except which transaction and which root to ask about). Every gap — no
- * capability, no pinned identity or intended root on the lookup, an unverified answer, a root
- * that does not match, missing block identity — collapses to `inconclusive` and the job stays
- * held. The evidence mapped here feeds the dispatcher's verdict; the named lane independently
- * re-resolves through its own recovery resolver before repairing local state.
+ * The verdict resolver and the named-KA evidence resolver used to each call
+ * {@link ChainAdapter.verifyKAUpdate} for the same transaction — genuine policy duplication with
+ * drift risk: two call sites deciding "is this mined update OURS" can disagree about the binding
+ * rules. This verifier is the one place that asks, and the one place that binds the answer: the
+ * receipt fetched BY our recorded txHash carries an update event for exactly our pinned kaId, the
+ * chain-verified new root equals the root our seal intended to install, and the root history at
+ * the receipt block attributes it to our signing wallet (all established inside `verifyKAUpdate`;
+ * nothing is taken from the job's say-so except which transaction and which root to ask about).
+ *
+ * Positive results are MEMOIZED per (txHash, kaId, intendedRoot): update recognition only runs
+ * after the finality gate, so verified facts describe a final, canonical receipt and can never be
+ * invalidated — which is what makes "verify once, consume twice" sound rather than a staleness
+ * hazard. Failures are never cached (a pending update must be re-asked next tick).
+ */
+export interface CanonicalUpdateFacts {
+  readonly kaId: bigint;
+  readonly onChainRoot: LiftJobHex;
+  readonly blockNumber: number;
+  readonly blockHash?: string;
+  readonly txIndex?: number;
+}
+
+export interface CanonicalUpdateVerifier {
+  verify(lookup: AsyncLiftUpdateChainProofLookup): Promise<CanonicalUpdateFacts | null>;
+}
+
+export function createCanonicalUpdateVerifier(
+  adapters: PublisherChainAdapters,
+): CanonicalUpdateVerifier {
+  const verified = new Map<string, CanonicalUpdateFacts>();
+  return {
+    async verify(lookup) {
+      const chain = adapters.get(lookup.walletId);
+      if (!chain?.verifyKAUpdate) return null;
+      if (lookup.publishIdentityKaId === undefined || lookup.intendedUpdateRoot === undefined) {
+        return null;
+      }
+      let kaId: bigint;
+      try {
+        kaId = BigInt(lookup.publishIdentityKaId);
+      } catch {
+        return null;
+      }
+      const key = `${lookup.txHash.toLowerCase()}|${kaId}|${lookup.intendedUpdateRoot.toLowerCase()}`;
+      const cached = verified.get(key);
+      if (cached) return cached;
+
+      let verification;
+      try {
+        verification = await chain.verifyKAUpdate(lookup.txHash, kaId, lookup.walletId);
+      } catch {
+        return null;
+      }
+      if (!verification.verified || !verification.onChainMerkleRoot) return null;
+      if (verification.blockNumber === undefined) return null;
+      const onChainRoot = asLiftJobHex(ethers.hexlify(verification.onChainMerkleRoot));
+      if (!onChainRoot || onChainRoot.toLowerCase() !== lookup.intendedUpdateRoot.toLowerCase()) {
+        return null;
+      }
+      const facts: CanonicalUpdateFacts = {
+        kaId,
+        onChainRoot,
+        blockNumber: verification.blockNumber,
+        ...(verification.blockHash !== undefined ? { blockHash: verification.blockHash } : {}),
+        ...(verification.txIndex !== undefined ? { txIndex: verification.txIndex } : {}),
+      };
+      // Bounded: one entry per distinct held update this process ever proves — evict oldest past
+      // a cap so a long-lived daemon cannot grow it without bound.
+      if (verified.size >= 64) {
+        const oldest = verified.keys().next().value;
+        if (oldest !== undefined) verified.delete(oldest);
+      }
+      verified.set(key, facts);
+      return facts;
+    },
+  };
+}
+
+/**
+ * GH#2270 PR-3 r4 — is this mined-but-unrecognized transaction OUR update, canonically? The
+ * establishment lives in {@link createCanonicalUpdateVerifier}; this maps the verified facts to
+ * the dispatcher's verdict. Every gap collapses to `inconclusive` and the job stays held.
  */
 async function resolveCanonicalUpdateRecognition(
-  lookup: AsyncLiftChainProofLookup,
+  lookup: AsyncLiftUpdateChainProofLookup,
   adapters: PublisherChainAdapters,
+  updateVerifier: CanonicalUpdateVerifier,
 ): Promise<AsyncLiftChainProofResolution> {
   const chain = adapters.get(lookup.walletId);
-  if (!chain?.verifyKAUpdate || !chain.getDKGKnowledgeAssetsAddress) return { status: 'inconclusive' };
-  if (lookup.publishIdentityKaId === undefined || lookup.intendedUpdateRoot === undefined) {
-    return { status: 'inconclusive' };
-  }
-  let kaId: bigint;
-  try {
-    kaId = BigInt(lookup.publishIdentityKaId);
-  } catch {
-    return { status: 'inconclusive' };
-  }
-  let verification;
+  if (!chain?.getDKGKnowledgeAssetsAddress) return { status: 'inconclusive' };
+  const facts = await updateVerifier.verify(lookup);
+  if (!facts) return { status: 'inconclusive' };
   let knowledgeAssetsContract: string;
   try {
-    verification = await chain.verifyKAUpdate(lookup.txHash, kaId, lookup.walletId);
     knowledgeAssetsContract = await chain.getDKGKnowledgeAssetsAddress();
   } catch {
-    return { status: 'inconclusive' };
-  }
-  if (!verification.verified || !verification.onChainMerkleRoot) return { status: 'inconclusive' };
-  if (verification.blockNumber === undefined) return { status: 'inconclusive' };
-  const onChainRoot = ethers.hexlify(verification.onChainMerkleRoot);
-  if (onChainRoot.toLowerCase() !== lookup.intendedUpdateRoot.toLowerCase()) {
     return { status: 'inconclusive' };
   }
   const publisherAddress = asLiftJobHex(lookup.walletId);
@@ -185,14 +249,14 @@ async function resolveCanonicalUpdateRecognition(
   return {
     status: 'recovered',
     recovery: {
-      inclusion: { txHash: lookup.txHash, blockNumber: verification.blockNumber },
+      inclusion: { txHash: lookup.txHash, blockNumber: facts.blockNumber },
       finalization: {
         mode: 'published',
         txHash: lookup.txHash,
-        ual: buildKnowledgeAssetUal(chain.chainId, knowledgeAssetsContract, kaId),
-        batchId: kaId.toString() as `${bigint}`,
-        startKAId: kaId.toString() as `${bigint}`,
-        endKAId: kaId.toString() as `${bigint}`,
+        ual: buildKnowledgeAssetUal(chain.chainId, knowledgeAssetsContract, facts.kaId),
+        batchId: facts.kaId.toString() as `${bigint}`,
+        startKAId: facts.kaId.toString() as `${bigint}`,
+        endKAId: facts.kaId.toString() as `${bigint}`,
         publisherAddress,
       },
     },

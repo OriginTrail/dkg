@@ -34,9 +34,14 @@ export class AsyncLiftJobConflictError extends Error {
 
 /**
  * GH#2270 — admission refused to republish a failed job that may already have submitted a
- * transaction. The job is untouched and keeps its lifecycle subject (`existingJobId`); it becomes
- * republishable only once chain proof resolves it, so the condition is TRANSIENT — HTTP callers
- * map it to a retryable 503, never a permanent conflict.
+ * transaction. The job is untouched and keeps its lifecycle subject (`existingJobId`).
+ *
+ * PR #2300 r1 (🟡 3809054821) — `retryable` is JOB-SPECIFIC now, computed at the throw site from
+ * the policy module's `hasAutomaticRecoveryExit`: `true` promises that an automatic lane exists
+ * that can move THIS job (canonical recognition, or the create-only absence release), so
+ * re-submitting converges without an operator; `false` says the record has no automatic exit —
+ * only the operator's by-id clear moves it — and a client that keeps retrying will keep getting
+ * the 503 forever. A constant `true` made that promise to jobs the lane can never touch.
  */
 export class LiftJobPendingChainProofError extends Error {
   readonly code = 'LIFT_JOB_PENDING_CHAIN_PROOF';
@@ -44,6 +49,7 @@ export class LiftJobPendingChainProofError extends Error {
   constructor(
     message: string,
     readonly existingJobId: string,
+    readonly retryable: boolean,
   ) {
     super(message);
     this.name = 'LiftJobPendingChainProofError';
@@ -359,7 +365,7 @@ export type AsyncLiftChainProofResolution =
  * or wallet cannot be derived is never looked up at all — it stays held. Nothing here is cast to
  * something it is not.
  */
-export interface AsyncLiftChainProofLookup {
+interface AsyncLiftChainProofLookupBase {
   /** The transaction to ask about, from either evidence carrier. */
   readonly txHash: LiftJobHex;
   /** The wallet that signed it — the account whose nonce proves consumption. */
@@ -384,32 +390,54 @@ export interface AsyncLiftChainProofLookup {
    * absence: the resolver holds it instead.
    */
   readonly publishIdentityKaId?: string;
+}
+
+/**
+ * PR #2300 r1 (🟡 3809054838) — a lookup for a queued CREATE. What the queued transaction was
+ * TRYING to do decides which proofs can ever settle the job, so the kind is the DISCRIMINANT of
+ * the union rather than optional soup: update-only facts live on the update variant, and a
+ * create lookup carrying an intended update root stops compiling instead of silently carrying a
+ * fact no lane may read.
+ */
+export interface AsyncLiftCreateChainProofLookup extends AsyncLiftChainProofLookupBase {
+  readonly operationKind: 'create';
+  readonly intendedUpdateRoot?: undefined;
+}
+
+/**
+ * A lookup for a queued UPDATE. A mined update carries `KnowledgeAssetUpdated`, which the publish
+ * parser reports `unrecognized` — canonical recognition goes through the update-verification
+ * machinery instead, bound to {@link intendedUpdateRoot}. The absence release is CREATE-ONLY: an
+ * update has no monotone register to prove absence against ("the intended root is not current"
+ * also describes our update landing and being superseded — the ABA hazard), so an update lookup
+ * can never authorise a release by absence.
+ */
+export interface AsyncLiftUpdateChainProofLookup extends AsyncLiftChainProofLookupBase {
+  readonly operationKind: 'update';
   /**
-   * GH#2270 PR-3 r4 — what the queued transaction was TRYING to do: mint a fresh asset, or
-   * install a new root on one that exists.
-   *
-   * The distinction decides which proofs can ever settle the job. A mined UPDATE carries
-   * `KnowledgeAssetUpdated`, which the publish parser reports `unrecognized` — so canonical
-   * recognition for an update goes through the update-verification machinery instead. And the
-   * absence release is CREATE-ONLY: a create's identity register (token minted-ness) is monotone,
-   * so "unminted at a finalized block with the nonce consumed" can never be invalidated later; an
-   * update has no such register, and any absence statement about it is an ABA hazard — "the
-   * intended root is not current" also describes our update landing and being superseded.
-   *
-   * Derived conservatively from the persisted request. Absent (legacy resolvers, hand-built
-   * lookups) reads as 'create' for recognition purposes but the derivation errs toward 'update'
-   * for anything not provably a create, because misclassifying a create as an update only narrows
-   * what can release it.
-   */
-  readonly operationKind?: 'create' | 'update';
-  /**
-   * GH#2270 PR-3 r4 — for an UPDATE job, the assertion root its seal intended to install (the
-   * request's `sealMerkleRoot`). Canonical update recognition requires the chain-verified new
-   * root to equal exactly this; an update lookup without it can never be recognized and stays
-   * held.
+   * The assertion root the queued seal intended to install (the request's `sealMerkleRoot`).
+   * Canonical update recognition requires the chain-verified new root to equal exactly this; an
+   * update lookup without it can never be recognized and stays held.
    */
   readonly intendedUpdateRoot?: LiftJobHex;
 }
+
+/**
+ * A lookup whose operation kind could not be derived — hand-built legacy callers only; the
+ * publisher's own builders ALWAYS stamp a kind ({@link queuedLiftOperationKind} errs toward
+ * 'update', because a create misread as an update only narrows what can settle it). Explicit
+ * variant rather than optional soup, so the unclassified population is visible at the type level:
+ * it is treated as create-shaped for recognition and carries nothing update-only.
+ */
+export interface AsyncLiftUnclassifiedChainProofLookup extends AsyncLiftChainProofLookupBase {
+  readonly operationKind?: undefined;
+  readonly intendedUpdateRoot?: undefined;
+}
+
+export type AsyncLiftChainProofLookup =
+  | AsyncLiftCreateChainProofLookup
+  | AsyncLiftUpdateChainProofLookup
+  | AsyncLiftUnclassifiedChainProofLookup;
 
 export type AsyncLiftPublisherRecoveryResolver = (
   lookup: AsyncLiftChainProofLookup,

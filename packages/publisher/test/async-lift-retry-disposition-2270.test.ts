@@ -7,6 +7,7 @@ import {
 import {
   classifyRetryAction,
   describeRetryProjection,
+  hasAutomaticRecoveryExit,
   hasBroadcastEvidence,
 } from '../src/async-lift-retry-disposition.js';
 import {
@@ -417,5 +418,83 @@ describe('GH#2270 failed-job retry disposition', () => {
       expect([autoRetryEnabled, await publisher.retryDetailed()])
         .toEqual([autoRetryEnabled, { retried: 1, blockedPendingRecovery: 0, skipped: 0 }]);
     }
+  });
+
+  // PR #2300 r1 (🟡 3809054821) — `retryable` on the pending-chain-proof 503 is JOB-SPECIFIC:
+  // does an automatic lane exist that can move THIS record? These rows pin the matrix AND that
+  // admission carries the answer on the thrown error, which is what the HTTP boundary forwards.
+  describe('hasAutomaticRecoveryExit decides the per-job retryable answer', () => {
+    async function heldJob(
+      publisher: ReturnType<typeof createPublisher>,
+      request: ReturnType<typeof kaVmPublishRequest>,
+      broadcast: { txHash: typeof TX_HASH; walletId: string; nonce?: number },
+    ): Promise<PersistedFailedJob> {
+      const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+      await publisher.claimNext(broadcast.walletId);
+      await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+      await publisher.update(jobId, 'broadcast', { broadcast });
+      return expectFailed(await publisher.recordPublishFailure(jobId, {
+        error: new Error('RPC endpoint temporarily unavailable'),
+        failedFromState: 'broadcast',
+        errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+      }));
+    }
+
+    async function admissionRetryable(
+      publisher: ReturnType<typeof createPublisher>,
+      request: ReturnType<typeof kaVmPublishRequest>,
+    ): Promise<boolean> {
+      try {
+        await publisher.enqueueKnowledgeAssetVmPublish(request);
+      } catch (err) {
+        expect((err as { code?: string }).code).toBe('LIFT_JOB_PENDING_CHAIN_PROOF');
+        return (err as { retryable: boolean }).retryable;
+      }
+      throw new Error('expected admission to refuse the held job');
+    }
+
+    it('TRUE for a create with a recorded nonce and pinned identity — every world has an exit', async () => {
+      const publisher = createPublisher();
+      const request = kaVmPublishRequest();
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-exit', nonce: 41 });
+
+      expect(hasAutomaticRecoveryExit(held)).toBe(true);
+      expect(await admissionRetryable(publisher, request)).toBe(true);
+    });
+
+    it('FALSE for a legacy create with NO recorded nonce — a dropped tx leaves only the operator', async () => {
+      const publisher = createPublisher();
+      const request = kaVmPublishRequest();
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-legacy' });
+
+      expect(hasAutomaticRecoveryExit(held)).toBe(false);
+      expect(await admissionRetryable(publisher, request)).toBe(false);
+    });
+
+    it('TRUE for an update whose recognition question is fully formed', async () => {
+      // Conditional promise, documented as such: recognition converges iff the tx actually mined.
+      const publisher = createPublisher();
+      const request = kaVmPublishRequest({ vmCurrentAssertion: 'aa'.repeat(32), assertionVersion: '2' });
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-upd', nonce: 41 });
+
+      expect(hasAutomaticRecoveryExit(held)).toBe(true);
+      expect(await admissionRetryable(publisher, request)).toBe(true);
+    });
+
+    it('FALSE when no recognition question can be formed at all', async () => {
+      // No pinned identity: recognition cannot name a token and no absence proof exists either —
+      // for BOTH kinds this is the operator-only cell.
+      const publisher = createPublisher();
+      const base = kaVmPublishRequest({ vmCurrentAssertion: 'aa'.repeat(32), assertionVersion: '2' });
+      const request = {
+        ...base,
+        seal: { ...base.seal, reservedKaId: undefined },
+        kaNumber: undefined,
+      } as ReturnType<typeof kaVmPublishRequest>;
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-noid', nonce: 41 });
+
+      expect(hasAutomaticRecoveryExit(held)).toBe(false);
+      expect(await admissionRetryable(publisher, request)).toBe(false);
+    });
   });
 });

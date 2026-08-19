@@ -22,6 +22,7 @@ import {
   compareAcceptedJobs,
   getLiftJobTransactionEvidence,
   isFailedJob,
+  pinnedPublishIdentityKaId,
   queuedLiftOperationKind,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
@@ -100,6 +101,45 @@ export function isProvenIneffectiveLiftFailure(code: LiftJobFailureCode): boolea
  */
 export function isHeldForChainProof(job: PersistedFailedJob): boolean {
   return hasBroadcastEvidence(job) && !isProvenIneffectiveLiftFailure(job.failure.code);
+}
+
+/**
+ * PR #2300 r1 (🟡 3809054821) — does an AUTOMATIC lane exist that can move THIS held job, or is
+ * the operator's by-id clear its only exit? The pending-chain-proof 503 advertises `retryable`
+ * from this answer, per job, instead of a constant `true` that promised convergence to jobs no
+ * automatic lane can ever touch.
+ *
+ * The matrix, from the record alone (chain truth — did the transaction actually mine, was the
+ * slot consumed — is not observable here, and the cells say what each answer PROMISES):
+ *
+ *  - CREATE with a recorded nonce and a pinned identity → TRUE, and the promise is
+ *    unconditional: if the transaction mined, canonical recognition finalizes it; if it can never
+ *    mine, the three-proof absence release re-runs it. Every chain-truth world has an exit.
+ *  - CREATE without a recorded nonce (legacy pre-write-ahead records, inherited hashes) or
+ *    without a pinned identity → FALSE: recognition would move it only in the world where the
+ *    transaction mined, and no absence proof exists to release it in the other — a dropped
+ *    transaction leaves it holding until an operator clears it, so `retryable: true` would be a
+ *    promise the lane cannot keep.
+ *  - UPDATE whose recognition question is fully formed (pinned identity + intended root) → TRUE,
+ *    but the promise is CONDITIONAL and documented as such: canonical recognition converges iff
+ *    the transaction actually mined. An update has no absence lane at all (the ABA hazard), so a
+ *    dropped update keeps answering 503 until the operator acts — the record cannot distinguish
+ *    that world from the about-to-converge one, and this cell is where the honest per-job answer
+ *    bottoms out.
+ *  - UPDATE without a derivable recognition identity, and any job whose lookup cannot even be
+ *    formed (no hash, no wallet) → FALSE: nothing automatic can ever ask a question about it.
+ */
+export function hasAutomaticRecoveryExit(job: PersistedFailedJob): boolean {
+  if (!getLiftJobTransactionEvidence(job)) return false;
+  if (!(job.broadcast?.walletId ?? job.claim?.walletId)) return false;
+  const pinnedId = pinnedPublishIdentityKaId(job);
+  if (pinnedId === undefined) return false;
+  if (queuedLiftOperationKind(job) === 'create') {
+    return job.broadcast?.nonce !== undefined;
+  }
+  const intendedRoot = (job.request as { knowledgeAssetVmPublish?: { sealMerkleRoot?: unknown } })
+    .knowledgeAssetVmPublish?.sealMerkleRoot;
+  return typeof intendedRoot === 'string' && intendedRoot.length > 0;
 }
 
 /**

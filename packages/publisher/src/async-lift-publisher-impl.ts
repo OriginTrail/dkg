@@ -59,6 +59,7 @@ import {
   isBulkClearableTerminalLiftJob,
   isClearableTerminalLiftJob,
   decideChainProofDisposition,
+  hasAutomaticRecoveryExit,
   isHeldForChainProof,
   selectLifecycleBindingJobs,
   type LiftJobRetryProjection,
@@ -108,6 +109,7 @@ import {
   isFailedJob,
   normalizePersistedLiftJobRequest,
   buildLiftJobAcceptedReset,
+  pinnedPublishIdentityKaId,
   queuedLiftOperationKind,
   resetFailedLiftJobToAccepted,
   rawLiftRequestFromJobRequest,
@@ -183,47 +185,33 @@ function assertNoLegacyChainRecoveryResolver(config: AsyncLiftPublisherConfig): 
   );
 }
 
-/**
- * GH#2270 PR-3 r2 — the knowledge asset id a re-run of this job would mint, if its request pins
- * one.
- *
- * Only a job whose request carries a seal with `reservedKaId` has a FIXED identity: that id is
- * threaded verbatim back into the mint, so a re-run either mints exactly it or reverts against a
- * mint that already happened. A job without one allocates a fresh id on every attempt, which is
- * precisely why it cannot be released by absence — a replacement transaction could have published
- * it already and the re-run would mint a SECOND asset over the same content, with nothing on chain
- * to object.
- *
- * `undefined` on anything malformed or absent: this feeds a guard, so it fails closed.
- */
-function pinnedPublishIdentityKaId(job: LiftJob): string | undefined {
-  const request = job.request as { knowledgeAssetVmPublish?: { seal?: { reservedKaId?: unknown } } };
-  const raw = request?.knowledgeAssetVmPublish?.seal?.reservedKaId
-    ?? (job.request as { lift?: { seal?: { reservedKaId?: unknown } } })?.lift?.seal?.reservedKaId;
-  if (typeof raw !== 'string' || raw.length === 0) return undefined;
-  try {
-    const kaId = BigInt(raw);
-    return kaId > 0n ? kaId.toString() : undefined;
-  } catch {
-    return undefined;
-  }
-}
+// PR #2300 r1 — `pinnedPublishIdentityKaId` moved to async-lift-publisher-utils.ts: the
+// retryability policy in the disposition module reads the same derivation now, and two copies of
+// "which id would a re-run mint" is how they would drift.
 
 /**
- * GH#2270 PR-3 r4 — the operation facts a chain-proof lookup carries: what the queued transaction
- * was trying to DO, and (for an update) the root it intended to install. The kind derivation is
- * {@link queuedLiftOperationKind}; the intended root is the seal root the update would have
- * committed, read from the same immutable request. Both lookup builders spread this, so the live
- * lane and the failed-job dispatcher cannot describe the same job differently.
+ * GH#2270 PR-3 r4 — finish a chain-proof lookup with the operation facts: what the queued
+ * transaction was trying to DO, and (for an update) the root it intended to install. The kind
+ * derivation is {@link queuedLiftOperationKind}; the intended root is the seal root the update
+ * would have committed, read from the same immutable request. Both lookup builders finish here,
+ * so the live lane and the failed-job dispatcher cannot describe the same job differently — and
+ * (PR #2300 r1) the lookup is a discriminated union now, so each kind is CONSTRUCTED as its own
+ * variant rather than spread into optional soup.
  */
-function chainProofOperationFacts(
+function finishChainProofLookup(
   job: LiftJob,
-): { operationKind: 'create' | 'update'; intendedUpdateRoot?: LiftJobHex } {
+  base: {
+    readonly txHash: LiftJobHex;
+    readonly walletId: string;
+    readonly nonce?: number;
+    readonly publishIdentityKaId?: string;
+  },
+): AsyncLiftChainProofLookup {
   const operationKind = queuedLiftOperationKind(job);
-  if (operationKind === 'create') return { operationKind };
+  if (operationKind === 'create') return { ...base, operationKind };
   const root = (job.request as { knowledgeAssetVmPublish?: { sealMerkleRoot?: LiftJobHex } })
     .knowledgeAssetVmPublish?.sealMerkleRoot;
-  return { operationKind, ...(root ? { intendedUpdateRoot: root } : {}) };
+  return { ...base, operationKind, ...(root ? { intendedUpdateRoot: root } : {}) };
 }
 
 /**
@@ -253,13 +241,12 @@ function liveChainRecoveryOrigin(job: LiftJobBroadcast | LiftJobIncluded): Chain
   return {
     recoveredFromStatus: job.status,
     txHash: job.broadcast.txHash,
-    lookup: {
+    lookup: finishChainProofLookup(job, {
       txHash: job.broadcast.txHash,
       walletId: job.broadcast.walletId,
       nonce: job.broadcast.nonce,
       publishIdentityKaId: pinnedPublishIdentityKaId(job),
-      ...chainProofOperationFacts(job),
-    },
+    }),
   };
 }
 
@@ -2384,6 +2371,9 @@ export class TripleStoreAsyncLiftPublisher
         `LiftJob ${job.jobId} failed as ${job.failure.code} after a transaction may have been submitted; `
           + 'it cannot be republished until chain recovery proves the transaction absent',
         job.jobId,
+        // PR #2300 r1 — per-job: does an automatic lane exist that can move THIS record, or is
+        // the operator's by-id clear its only exit? The HTTP boundary forwards the answer.
+        hasAutomaticRecoveryExit(job),
       );
     }
     const reset = resetFailedLiftJobToAccepted(job, this.now());
@@ -2499,13 +2489,12 @@ export class TripleStoreAsyncLiftPublisher
     const txHash = getLiftJobTransactionEvidence(job);
     const walletId = job.broadcast?.walletId ?? job.claim?.walletId;
     if (!txHash || !walletId) return null;
-    return {
+    return finishChainProofLookup(job, {
       txHash,
       walletId,
       nonce: job.broadcast?.nonce,
       publishIdentityKaId: pinnedPublishIdentityKaId(job),
-      ...chainProofOperationFacts(job),
-    };
+    });
   }
 
   private failProvenRevertedJob(

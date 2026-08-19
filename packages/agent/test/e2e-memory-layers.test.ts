@@ -884,6 +884,34 @@ describe('rootless graph-scoped KA lifecycle', () => {
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     expect(recoveryCleanup).not.toHaveBeenCalled();
 
+    // PR #2300 r1 (🟡 3809054841) — the record shape item 5 exists for: a persisted FAILED job
+    // held on the recovery carrier alone (`recovery.txHashChecked`, NO `broadcast`). The REAL
+    // finalizer must complete lifecycle materialization from `lookup.txHash`; a regression that
+    // reads `job.broadcast.txHash` anywhere on this path throws on this input and fails the row.
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      job: {
+        jobId: 'carrier-only-recovery-job',
+        jobSlug: 'carrier-only-recovery-job',
+        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: recoveryRequest },
+        status: 'failed',
+        failure: {
+          failedFromState: 'claimed',
+          code: 'workspace_unavailable',
+          retryable: true,
+          resolution: 'reset_to_accepted',
+          message: 'held on the recovery carrier alone',
+          errorPayloadRef: 'urn:dkg:test:error:carrier-only',
+          occurredAt: 3,
+        },
+        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: txHash },
+        timestamps: { acceptedAt: 1, failedAt: 3, updatedAt: 3 },
+        retries: { retryCount: 0, maxRetries: 10 },
+        controlPlane: {},
+      },
+    } as any);
+    expect((await agent.assertion.history(CG_ID, name))?.status).toBe('vm-confirmed');
+
     const history = await agent.assertion.history(CG_ID, name);
     expect(history?.state).toBe('published');
     expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);

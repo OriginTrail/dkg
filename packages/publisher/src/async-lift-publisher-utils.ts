@@ -93,6 +93,33 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
 }
 
 /**
+ * GH#2270 PR-3 r2 — the knowledge asset id a re-run of this job would mint, if its request pins
+ * one. (PR #2300 r1: moved here from the impl so the disposition module's retryability policy
+ * reads the SAME derivation as the lookup builder.)
+ *
+ * Only a job whose request carries a seal with `reservedKaId` has a FIXED identity: that id is
+ * threaded verbatim back into the mint, so a re-run either mints exactly it or reverts against a
+ * mint that already happened. A job without one allocates a fresh id on every attempt, which is
+ * precisely why it cannot be released by absence — a replacement transaction could have published
+ * it already and the re-run would mint a SECOND asset over the same content, with nothing on
+ * chain to object.
+ *
+ * `undefined` on anything malformed or absent: this feeds a guard, so it fails closed.
+ */
+export function pinnedPublishIdentityKaId(job: LiftJob): string | undefined {
+  const request = job.request as { knowledgeAssetVmPublish?: { seal?: { reservedKaId?: unknown } } };
+  const raw = request?.knowledgeAssetVmPublish?.seal?.reservedKaId
+    ?? (job.request as { lift?: { seal?: { reservedKaId?: unknown } } })?.lift?.seal?.reservedKaId;
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  try {
+    const kaId = BigInt(raw);
+    return kaId > 0n ? kaId.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * GH#2270 PR-3 r4 — what this job's queued transaction was TRYING to do, derived from the
  * persisted request alone. Structural, not policy: the disposition module and the lookup builder
  * both read it, and what a kind PERMITS (which recognitions, which releases) is decided there.

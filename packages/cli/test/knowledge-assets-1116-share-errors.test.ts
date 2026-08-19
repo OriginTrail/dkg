@@ -512,6 +512,9 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           'LiftJob job-7 failed as rpc_unavailable after a transaction may have been submitted; '
             + 'it cannot be republished until chain recovery proves the transaction absent',
           'job-7',
+          // PR #2300 r1 — retryable is JOB-SPECIFIC, computed at the publisher's throw site from
+          // hasAutomaticRecoveryExit; the route forwards whatever the error carries.
+          true,
         );
       },
     });
@@ -519,9 +522,9 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     const res = await post('vm/publish-async', { contextGraphId: CG_ID });
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('LIFT_JOB_PENDING_CHAIN_PROOF');
-    // GH#2270 PR-3 — TRUE now that the proof-first dispatcher re-checks a held KA VM job on
-    // every recover() tick and releases it on a proven verdict. Retrying this enqueue converges
-    // without an operator, which is exactly what `retryable` promises.
+    // GH#2270 PR-3 — TRUE when the proof-first dispatcher has a lane for this job (it re-checks
+    // it every recover() tick and releases it on a proven verdict). Retrying this enqueue then
+    // converges without an operator, which is exactly what `retryable` promises.
     expect(res.body.retryable).toBe(true);
     expect(res.body.retryable).not.toBe(false);
     expect(res.body.existingJobId).toBe('job-7');
@@ -532,6 +535,52 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(String(res.body.error)).toContain('job-7');
     // The pre-PR-3 wording promised nobody was coming.
     expect(String(res.body.error)).not.toContain('No automatic lane resolves this');
+  });
+
+  it('vm/publish-async: LIFT_JOB_PENDING_CHAIN_PROOF forwards retryable: FALSE for an operator-only record [PR#2300 r1]', async () => {
+    // The other polarity, so the route cannot pass by hardcoding `true`: a record with no
+    // automatic exit (legacy no-nonce create, an update with no formable recognition) carries
+    // false from the throw site, and the body stops promising convergence and points straight at
+    // the by-id clear.
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'pending-proof-op-false',
+        roots: ['urn:test:root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        throw new LiftJobPendingChainProofError(
+          'LiftJob job-8 failed as rpc_unavailable after a transaction may have been submitted; '
+            + 'it cannot be republished until chain recovery proves the transaction absent',
+          'job-8',
+          false,
+        );
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('LIFT_JOB_PENDING_CHAIN_PROOF');
+    expect(res.body.retryable).toBe(false);
+    expect(res.body.existingJobId).toBe('job-8');
+    expect(String(res.body.error)).toContain('no automatic exit');
+    expect(String(res.body.error)).toContain('/api/publisher/clear-job');
+    expect(String(res.body.error)).toContain('job-8');
+    expect(String(res.body.error)).not.toContain('Chain recovery re-checks this job');
   });
 
   // GH#1778 — the disambiguation error surfaces as a 409 with the candidate

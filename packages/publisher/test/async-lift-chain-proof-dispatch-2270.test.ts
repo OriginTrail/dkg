@@ -377,6 +377,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
   describe('raw lift is dispatched on the same held predicate', () => {
     async function heldRawLiftAfterWriteAhead(
       publisher: ReturnType<typeof createPublisher>,
+      transitionType: 'CREATE' | 'MUTATE' | 'REVOKE' = 'CREATE',
     ): Promise<PersistedFailedJob> {
       await stageKnowledgeAssetShareSnapshot({ store: h.store });
       const jobId = await seedLegacyRawLiftTestJob(h.store, {
@@ -391,12 +392,61 @@ describe('GH#2270 proof-first chain dispatcher', () => {
         publicTripleCount: 2,
         privateTripleCount: 0,
         scope: 'full',
-        transitionType: 'CREATE',
+        transitionType,
         authority: { type: 'owner', proofRef: 'proof:owner:1' },
       });
       await publisher.processNext('wallet-raw');
       return expectFailed(await publisher.getStatus(jobId));
     }
+
+    // PR #2300 r1 (🟡 3809054845) — the create-only release rule over RAW transition types,
+    // pinned. `queuedLiftOperationKind` reads a raw lift's `transitionType`: CREATE derives
+    // 'create'; MUTATE and REVOKE rewrite existing state, carry the same re-apply-stale-state
+    // hazard as a named update, and derive 'update' — so a proven-absent verdict releases the
+    // CREATE and holds the other two. A regression that classified every raw job as a create
+    // would release all three and fail these rows. (A MUTATE/REVOKE cannot be DRIVEN to held
+    // through the executor — its validation fails pre-send — so the rows rewrite a genuinely
+    // held CREATE's persisted transition type, which is exactly the shape a persisted legacy
+    // mutation job restores as.)
+    it.each(['MUTATE', 'REVOKE'] as const)(
+      'holds a raw %s job on a proven-absent verdict — no absence release for state rewrites',
+      async (transitionType) => {
+        const publisher = dispatcher({ status: 'not-found' }, {
+          publishExecutor: async (input) => {
+            await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
+            throw new Error('ETIMEDOUT: request timed out');
+          },
+        });
+        const held = await heldRawLiftAfterWriteAhead(publisher);
+        const request = held.request as { jobType: 'lift'; lift: Record<string, unknown> };
+        const mutated = {
+          ...held,
+          request: { ...request, lift: { ...request.lift, transitionType } },
+        } as unknown as LiftJob;
+        await h.store.deleteByPattern({ subject: jobSubject(held.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+        await h.store.insert(serializeJob(mutated, DEFAULT_CONTROL_GRAPH_URI));
+        expect(isHeldForChainProof(expectFailed(await publisher.getStatus(held.jobId)))).toBe(true);
+
+        expect(await publisher.recover()).toBe(0);
+
+        const after = expectFailed(await publisher.getStatus(held.jobId));
+        expect(after.status).toBe('failed');
+        expect(isHeldForChainProof(after)).toBe(true);
+      },
+    );
+
+    it('POSITIVE CONTROL: the raw CREATE sibling releases on the very same verdict', async () => {
+      const publisher = dispatcher({ status: 'not-found' }, {
+        publishExecutor: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
+          throw new Error('ETIMEDOUT: request timed out');
+        },
+      });
+      const held = await heldRawLiftAfterWriteAhead(publisher, 'CREATE');
+
+      expect(await publisher.recover()).toBe(1);
+      expect((await publisher.getStatus(held.jobId))?.status).toBe('accepted');
+    });
 
     it('asks the chain about a raw job that failed AFTER the pre-send write-ahead', async () => {
       // The exact gap: the send timed out post-signing, so the job failed from 'broadcast' with a

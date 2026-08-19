@@ -1622,23 +1622,26 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // transaction. Deliberately NOT the 409 below: nothing is wrong with the client's
         // request, and the job KEEPS its lifecycle subject (`existingJobId`).
         //
-        // PR-3 landed the proof-first dispatcher, so `retryable` is TRUE again. A held KA VM
-        // publish job is now re-checked against the chain on every recover() tick
-        // (`canRetryFailedRecovery` is the held predicate for that handler, not `false`), and a
-        // verdict of proven-absent or proven-reverted releases the hold with no operator at all.
-        // A client that keeps retrying this enqueue therefore converges as soon as the chain can
-        // answer, which is exactly what `retryable: true` promises. What it does NOT promise is a
-        // deadline: the hold never expires into a blind reset, so while the chain stays silent
-        // (`pending`/`inconclusive`) the 503 keeps coming, and the by-id clear stays the exit for
-        // an operator who has checked the transaction themselves and does not want to wait.
+        // PR #2300 r1 (🟡 3809054821) — `retryable` is JOB-SPECIFIC, carried on the error from
+        // the policy module's hasAutomaticRecoveryExit: `true` means an automatic lane exists
+        // that can move THIS job (the proof-first dispatcher re-checks it every recover() tick —
+        // canonical recognition, or the create-only absence release), so re-submitting converges
+        // without an operator; it is still not a deadline — while the chain stays silent the 503
+        // keeps coming. `false` means the record has no automatic exit (a legacy no-nonce create,
+        // an update with no formable recognition question): retrying will 503 forever, and the
+        // by-id clear is the only move.
         if (err instanceof LiftJobPendingChainProofError) {
           return jsonResponse(res, 503, {
             code: err.code,
-            error: `${err.message}. Chain recovery re-checks this job and releases it once the `
-              + 'transaction\'s fate is established — retry this request, or, if you have checked '
-              + `the transaction yourself, clear the job with POST /api/publisher/clear-job `
-              + `{"jobId":"${err.existingJobId}"}.`,
-            retryable: true,
+            error: `${err.message}. ${err.retryable
+              ? 'Chain recovery re-checks this job and releases it once the transaction\'s fate '
+                + 'is established — retry this request, or, if you have checked the transaction '
+                + 'yourself, clear the job with '
+              : 'This job\'s record gives chain recovery no automatic exit (no provable absence '
+                + 'and no formable recognition), so retrying will not release it. Check the '
+                + 'transaction yourself, then clear the job with '
+            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}"}.`,
+            retryable: err.retryable,
             existingJobId: err.existingJobId,
           });
         }
