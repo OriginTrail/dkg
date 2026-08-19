@@ -1,22 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * GH#2270 PR #2300 r9 (3812794297) — the coherence guarantee of
- * {@link ChainAdapter.readKnowledgeAssetVersionSnapshot}, tested where it is PRODUCED.
+ * GH#2270 PR #2300 — the guarantees of {@link ChainAdapter.readKnowledgeAssetVersionSnapshot},
+ * tested where they are PRODUCED.
  *
- * Recovery decides whether a recovered update is still current from the latest root and the root
- * count together. Read from endpoints at different heights, a fresh root beside a lagging count
- * says "current" about an old transaction in an A -> B -> A history — so the whole point of this
- * method is that both facts come from ONE provider at ONE pinned block. Tests that inject an
- * already-coherent pair cannot see that guarantee break; these drive the adapter itself.
+ * Recovery asks this one question: is a recovered transaction still the current version? Getting
+ * that wrong in the permissive direction stamps an old transaction's provenance over newer state,
+ * so the view it answers with must be both COHERENT (every fact from one endpoint at one pinned
+ * block) and CURRENT (the most advanced endpoint, not merely the first that replies). Consumers
+ * that inject an already-good view cannot see either guarantee break; these drive the adapter.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 
 const KA_ID = 7n;
-
-/** Anvil's well-known deterministic test key, as used by the sibling snapshot suite. */
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 function minimalConfig() {
@@ -32,10 +30,14 @@ function minimalConfig() {
 type Script = {
   blockNumber: number | null;
   latestRoot: string | null;
-  rootCount: bigint | null;
+  rootCount: bigint;
+  author?: string | null;
+  publisher?: string | null;
 };
 
-/** Ordered providers with the production empty-result policy modelled (see readProviderRetryingNull). */
+const AUTHOR = `0x${'11'.repeat(20)}`;
+const PUBLISHER = `0x${'22'.repeat(20)}`;
+
 function adapterOver(scripts: Script[], opts: { storageDeployed?: boolean } = {}) {
   const reads: Array<{ provider: number; call: string; blockTag: unknown }> = [];
   const providers = scripts.map((script, index) => ({
@@ -50,91 +52,102 @@ function adapterOver(scripts: Script[], opts: { storageDeployed?: boolean } = {}
   const a: any = new EVMChainAdapter(minimalConfig());
   a.initialized = true;
   a.init = async () => {};
-  a.contracts = {
-    knowledgeAssetStorage: opts.storageDeployed === false ? undefined : {},
+  a.contracts = { knowledgeAssetStorage: opts.storageDeployed === false ? undefined : {} };
+  a.providers = providers;
+  a.rebindContract = (_c: unknown, provider: (typeof providers)[number]) => {
+    const record = (call: string, overrides: { blockTag?: unknown }) =>
+      reads.push({ provider: provider.__index, call, blockTag: overrides?.blockTag });
+    return {
+      async getLatestMerkleRoot(_kaId: bigint, o: { blockTag?: unknown }) {
+        record('getLatestMerkleRoot', o);
+        return provider.__script.latestRoot;
+      },
+      async getKnowledgeAssetUpdateContext(_kaId: bigint, o: { blockTag?: unknown }) {
+        record('getKnowledgeAssetUpdateContext', o);
+        return { merkleRootsCount: provider.__script.rootCount };
+      },
+      async getLatestMerkleRootAuthor(_kaId: bigint, o: { blockTag?: unknown }) {
+        record('getLatestMerkleRootAuthor', o);
+        return provider.__script.author === undefined ? AUTHOR : provider.__script.author;
+      },
+      async getLatestMerkleRootPublisher(_kaId: bigint, o: { blockTag?: unknown }) {
+        record('getLatestMerkleRootPublisher', o);
+        return provider.__script.publisher === undefined ? PUBLISHER : provider.__script.publisher;
+      },
+    };
   };
-  a.rebindContract = (_c: unknown, provider: (typeof providers)[number]) => ({
-    async getLatestMerkleRoot(_kaId: bigint, overrides: { blockTag?: unknown }) {
-      reads.push({ provider: provider.__index, call: 'getLatestMerkleRoot', blockTag: overrides?.blockTag });
-      if (provider.__script.latestRoot === null) return null;
-      return provider.__script.latestRoot;
-    },
-    async getKnowledgeAssetUpdateContext(_kaId: bigint, overrides: { blockTag?: unknown }) {
-      reads.push({ provider: provider.__index, call: 'getKnowledgeAssetUpdateContext', blockTag: overrides?.blockTag });
-      return { merkleRootsCount: provider.__script.rootCount ?? 0n };
-    },
-  });
-  const readOpts: Array<{ skipPreferred?: boolean }> = [];
-  a.readProviderRetryingNull = async (
-    _label: string,
-    fn: (p: unknown) => Promise<unknown>,
-    opts?: { skipPreferred?: boolean },
-  ) => {
-    readOpts.push(opts ?? {});
-    let sawEmpty = false;
-    for (const provider of providers) {
-      try {
-        const value = await fn(provider);
-        if (value == null) { sawEmpty = true; continue; }
-        return value;
-      } catch {
-        sawEmpty = true;
-      }
-    }
-    return sawEmpty ? null : undefined;
-  };
-  return { adapter: a, reads, readOpts };
+  return { adapter: a, reads };
 }
 
-describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300 r9]', () => {
-  it('reads the root AND the count from ONE provider at ONE pinned block', async () => {
+describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', () => {
+  it('takes every fact for an endpoint at ONE pinned block', async () => {
     const { adapter, reads } = adapterOver([
       { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
     ]);
 
-    const snapshot = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
+    const view = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
 
-    expect(snapshot).toEqual({ latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n, blockNumber: 500 });
-    // The coherence guarantee: same endpoint, same pinned height, for both facts. A regression that
-    // drops the blockTag (or re-reads the head between calls) lets the pair straddle two blocks.
-    expect(reads).toEqual([
-      { provider: 0, call: 'getLatestMerkleRoot', blockTag: 500 },
-      { provider: 0, call: 'getKnowledgeAssetUpdateContext', blockTag: 500 },
-    ]);
+    expect(view).toEqual({
+      latestRoot: `0x${'aa'.repeat(32)}`,
+      rootCount: 3n,
+      latestAuthor: AUTHOR,
+      latestPublisher: PUBLISHER,
+      blockNumber: 500,
+    });
+    // Coherence: every read pinned to the SAME height. Re-reading the head between calls, or
+    // dropping a blockTag, lets the view straddle two blocks — which is how a stale root ends up
+    // beside a newer count.
+    expect(reads.every((r) => r.blockTag === 500)).toBe(true);
+    expect(reads.every((r) => r.provider === 0)).toBe(true);
+    expect(reads).toHaveLength(4);
   });
 
-  it('asks for a TIP read, so endpoint stickiness cannot serve a stale-but-coherent pair [r10]', async () => {
-    // 3812960544 — coherence is not currency. A preferred endpoint stuck at the first update
-    // returns a perfectly coherent {root: A, count: 1} while the chain is at A -> B -> A with
-    // count 3, and recovery would then read an old transaction as current. This is a
-    // current-state question, so the read must skip endpoint preference.
-    const { adapter, readOpts } = adapterOver([
-      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+  it('takes the MOST ADVANCED endpoint, not the first that answers [r11]', async () => {
+    // A healthy endpoint can still be behind. First-success ordering would hand recovery a
+    // perfectly coherent but stale view — {root A, count 1} while the chain is at A -> B -> A —
+    // and an old transaction would read as current.
+    const { adapter } = adapterOver([
+      { blockNumber: 100, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 1n },
+      { blockNumber: 103, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
     ]);
 
-    await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
+    const view = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
 
-    expect(readOpts[0]?.skipPreferred).toBe(true);
+    expect(view?.blockNumber).toBe(103);
+    expect(view?.rootCount).toBe(3n);
   });
 
-  it('fails the WHOLE pair over to the next endpoint rather than splicing', async () => {
-    const { adapter, reads } = adapterOver([
-      { blockNumber: null, latestRoot: null, rootCount: null },
+  it('an endpoint that cannot produce a COMPLETE view does not compete', async () => {
+    const { adapter } = adapterOver([
+      { blockNumber: null, latestRoot: null, rootCount: 0n },
       { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
     ]);
 
-    const snapshot = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
-
-    expect(snapshot).toEqual({ latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n, blockNumber: 900 });
-    // Nothing was taken from the failed endpoint, so the returned pair cannot mix two views.
-    expect(reads.every((r) => r.provider === 1)).toBe(true);
-    expect(reads.map((r) => r.blockTag)).toEqual([900, 900]);
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toEqual({
+      latestRoot: `0x${'bb'.repeat(32)}`,
+      rootCount: 5n,
+      latestAuthor: AUTHOR,
+      latestPublisher: PUBLISHER,
+      blockNumber: 900,
+    });
   });
 
-  it('answers null when no endpoint can produce the pair, never a partial one', async () => {
+  it('a partial view is never returned — a missing attribution disqualifies its endpoint', async () => {
     const { adapter } = adapterOver([
-      { blockNumber: null, latestRoot: null, rootCount: null },
-      { blockNumber: null, latestRoot: null, rootCount: null },
+      { blockNumber: 999, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 9n, author: null },
+      { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
+    ]);
+
+    // The disqualified endpoint is the MOST ADVANCED one, so this also proves currency never
+    // overrides completeness.
+    const view = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
+    expect(view?.blockNumber).toBe(900);
+  });
+
+  it('answers null when no endpoint can produce a view', async () => {
+    const { adapter } = adapterOver([
+      { blockNumber: null, latestRoot: null, rootCount: 0n },
+      { blockNumber: null, latestRoot: null, rootCount: 0n },
     ]);
 
     await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();

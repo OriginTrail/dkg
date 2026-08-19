@@ -1818,13 +1818,25 @@ export interface ChainAdapter {
    * position and root against these. Read separately they can come from endpoints at different
    * heights, and a lagging COUNT beside a fresh ROOT is exactly the combination that makes an old
    * transaction in an A -> B -> A history look current — so the pair has to be observed together
-   * or not at all. `null` means no endpoint could produce the pair, and the caller must not
+   * or not at all. `null` means no endpoint could produce the view, and the caller must not
    * conclude anything from that.
+   *
+   * PR #2300 r11 — it also carries the version's ATTRIBUTION, and it is taken from the MOST
+   * ADVANCED endpoint rather than the first that answers. Both follow from the same requirement:
+   * a caller deciding "is this recovered transaction still current" must not mix a root from one
+   * view with an author, a publisher or a block height from another, and a healthy-but-lagging
+   * endpoint answering first would make an old transaction look current.
    */
   readKnowledgeAssetVersionSnapshot?(
     kaId: bigint,
     options?: ChainReadOptions,
-  ): Promise<{ latestRoot: string; rootCount: bigint; blockNumber: number } | null>;
+  ): Promise<{
+    latestRoot: string;
+    rootCount: bigint;
+    latestAuthor: string;
+    latestPublisher: string;
+    blockNumber: number;
+  } | null>;
 
   /**
    * Constant-cost scalar update context for a KA. Consumers that need version

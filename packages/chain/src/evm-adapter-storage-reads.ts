@@ -10,7 +10,7 @@
  */
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
-import { Contract, ethers } from 'ethers';
+import { Contract, ethers, type JsonRpcProvider } from 'ethers';
 import type { ChainReadOptions, KnowledgeAssetUpdateContext } from './chain-adapter.js';
 import {
   decodeKnowledgeAssetMerkleRootCount,
@@ -73,39 +73,54 @@ export class StorageReadMethods extends EVMChainAdapterBase {
    * and the count can never come from endpoints at different heights; an endpoint that cannot
    * produce the pair yields nothing and the whole snapshot moves to the next one.
    */
+  /**
+   * GH#2270 PR #2300 — see {@link ChainAdapter.readKnowledgeAssetVersionSnapshot}.
+   *
+   * Every read for ONE endpoint happens at the SAME pinned block, so a view can never mix a root
+   * with a count, an author or a publisher from a different height — that mixture is what let an
+   * old transaction in an A -> B -> A history read as current. And because a healthy endpoint can
+   * still be BEHIND, every configured endpoint is asked and the MOST ADVANCED complete view wins
+   * (r11): first-success ordering would have re-introduced the same staleness through a different
+   * door. An endpoint that cannot produce a complete view simply does not compete.
+   */
   async readKnowledgeAssetVersionSnapshot(
     kaId: bigint,
     options: ChainReadOptions = {},
-  ): Promise<{ latestRoot: string; rootCount: bigint; blockNumber: number } | null> {
+  ): Promise<{
+    latestRoot: string;
+    rootCount: bigint;
+    latestAuthor: string;
+    latestPublisher: string;
+    blockNumber: number;
+  } | null> {
     await this.init();
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
-    try {
-      return await this.readProviderRetryingNull(
-        'knowledge asset version snapshot',
-        async (provider) => {
-          const blockNumber = await provider.getBlockNumber();
-          if (typeof blockNumber !== 'number') return null;
-          const bound = this.rebindContract(kas as Contract, provider);
-          const latestRoot: string = await bound.getLatestMerkleRoot(kaId, { blockTag: blockNumber });
-          const context = await bound.getKnowledgeAssetUpdateContext(kaId, { blockTag: blockNumber });
-          if (!latestRoot) return null;
-          return {
-            latestRoot,
-            rootCount: decodeKnowledgeAssetMerkleRootCount(context, kaId),
-            blockNumber,
-          };
-        },
-        // PR #2300 r10 (3812960544) — TIP-SENSITIVE: this answers "what is the asset's version
-        // NOW", so endpoint stickiness must not serve it. A preferred endpoint stuck at the first
-        // update returns a perfectly COHERENT but stale pair, and coherence is not currency: the
-        // supersession check would compare position 1 against a stale count of 1 and call an old
-        // transaction current. `skipPreferred` is the repo's existing idiom for exactly this.
-        { signal: options.signal, skipPreferred: true },
-      );
-    } catch {
-      return null;
-    }
+    const readOne = async (provider: JsonRpcProvider) => {
+      const blockNumber = await provider.getBlockNumber();
+      if (typeof blockNumber !== 'number') return null;
+      const bound = this.rebindContract(kas as Contract, provider);
+      const at = { blockTag: blockNumber };
+      const [latestRoot, context, latestAuthor, latestPublisher] = await Promise.all([
+        bound.getLatestMerkleRoot(kaId, at) as Promise<string>,
+        bound.getKnowledgeAssetUpdateContext(kaId, at),
+        bound.getLatestMerkleRootAuthor(kaId, at) as Promise<string>,
+        bound.getLatestMerkleRootPublisher(kaId, at) as Promise<string>,
+      ]);
+      if (!latestRoot || !latestAuthor || !latestPublisher) return null;
+      return {
+        latestRoot,
+        rootCount: decodeKnowledgeAssetMerkleRootCount(context, kaId),
+        latestAuthor,
+        latestPublisher,
+        blockNumber,
+      };
+    };
+    const settled = await Promise.allSettled(this.providers.map(readOne));
+    const views = settled.flatMap((r) => (r.status === 'fulfilled' && r.value ? [r.value] : []));
+    if (views.length === 0) return null;
+    void options;
+    return views.reduce((best, view) => (view.blockNumber > best.blockNumber ? view : best));
   }
 
   async getMerkleLeafCount(kaId: bigint): Promise<number> {

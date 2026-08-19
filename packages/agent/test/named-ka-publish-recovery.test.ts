@@ -206,7 +206,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     // verified history POSITION settles it: this proof wrote root #1, the chain now holds #3.
     const chain = seededChain();
     (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint) => Promise<unknown> })
-      .readKnowledgeAssetVersionSnapshot = async () => ({ latestRoot: SEAL_MERKLE_ROOT, rootCount: 3n, blockNumber: 300 });
+      .readKnowledgeAssetVersionSnapshot = async () => ({ latestRoot: SEAL_MERKLE_ROOT, rootCount: 3n, latestAuthor: AUTHOR, latestPublisher: PUBLISHER, blockNumber: 300 });
     (chain as unknown as { getLatestMerkleRootAuthor: (kaId: bigint) => Promise<string> })
       .getLatestMerkleRootAuthor = async () => ethers.getAddress(AUTHOR);
     (chain as unknown as { getLatestMerkleRootPublisher: (kaId: bigint) => Promise<string> })
@@ -236,11 +236,16 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     const chain = seededChain();
     (chain as unknown as { getLatestMerkleRoot: (kaId: bigint) => Promise<Uint8Array> })
       .getLatestMerkleRoot = async () => ethers.getBytes(`0x${'cd'.repeat(32)}`);
-    // A lagging pair is still a COHERENT pair — root and count from one pinned view — so the
-    // row now says: this endpoint genuinely saw root A at position 1, while the fresh latest-root
-    // read saw a different root. The mismatch already proved supersession and must stand.
+    // r11 — the view is now the ONE source, so this pins the property inside it: a root that
+    // differs proves supersession, and an equal count cannot talk it back down.
     (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint) => Promise<unknown> })
-      .readKnowledgeAssetVersionSnapshot = async () => ({ latestRoot: SEAL_MERKLE_ROOT, rootCount: 1n, blockNumber: 100 });
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: `0x${'cd'.repeat(32)}`,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 100,
+      });
     (chain as unknown as { getLatestMerkleRootAuthor: (kaId: bigint) => Promise<string> })
       .getLatestMerkleRootAuthor = async () => ethers.getAddress(AUTHOR);
     (chain as unknown as { getLatestMerkleRootPublisher: (kaId: bigint) => Promise<string> })
@@ -294,7 +299,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     // update as historical and stamp the latest-version attribution over its own.
     const chain = seededChain();
     (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint) => Promise<unknown> })
-      .readKnowledgeAssetVersionSnapshot = async () => ({ latestRoot: SEAL_MERKLE_ROOT, rootCount: 3n, blockNumber: 300 });
+      .readKnowledgeAssetVersionSnapshot = async () => ({ latestRoot: SEAL_MERKLE_ROOT, rootCount: 3n, latestAuthor: AUTHOR, latestPublisher: PUBLISHER, blockNumber: 300 });
 
     const result = await normalizeRecoveredNamedKaPublish({
       chain,
@@ -308,6 +313,44 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     expect(result.materialization.superseded).toBe(false);
     // …and the version stays the recovered transaction's own inclusion block, not the head.
     expect(result.materialization.versionBlock).toBe(77);
+  });
+
+  it('materializes the ROOT from the same view that decided supersession [r11]', async () => {
+    // 3813210019 — the decision and the materialized facts must come from ONE observation. Before
+    // this, supersession could be decided from a newer view while the record was materialized with
+    // the root from an earlier read and attribution from a third — a lifecycle version that never
+    // existed on chain. Here the standalone latest-root read still answers the OLD root A; the
+    // view has moved to B, and everything materialized must follow the view.
+    const chain = seededChain();
+    const NEWER_ROOT = `0x${'cd'.repeat(32)}`;
+    const NEWER_AUTHOR = `0x${'12'.repeat(20)}`;
+    const NEWER_PUBLISHER = `0x${'34'.repeat(20)}`;
+    (chain as unknown as { getLatestMerkleRoot: (kaId: bigint) => Promise<Uint8Array> })
+      .getLatestMerkleRoot = async () => ethers.getBytes(SEAL_MERKLE_ROOT);
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint) => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: NEWER_ROOT,
+        rootCount: 2n,
+        latestAuthor: NEWER_AUTHOR,
+        latestPublisher: NEWER_PUBLISHER,
+        blockNumber: 250,
+      });
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
+      }),
+    });
+
+    expect(result.materialization.superseded).toBe(true);
+    // Root, attribution and version all from the view that made the call — never mixed.
+    expect(result.materialization.merkleRoot).toBe(NEWER_ROOT);
+    expect(result.materialization.authorAddress).toBe(ethers.getAddress(NEWER_AUTHOR));
+    expect(result.materialization.publisherAddress).toBe(ethers.getAddress(NEWER_PUBLISHER));
+    expect(result.materialization.versionBlock).toBe(250);
   });
 
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {

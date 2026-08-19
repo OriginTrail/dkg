@@ -2240,14 +2240,24 @@ export class MockChainAdapter implements ChainAdapter {
     return (await this.getKnowledgeAssetUpdateContext(kaId)).merkleRootsCount;
   }
 
-  /** GH#2270 PR #2300 r8 — the mock has one state, so its pair is coherent by construction. */
+  /** GH#2270 PR #2300 — the mock has ONE state, so its view is coherent and current by construction. */
   async readKnowledgeAssetVersionSnapshot(
     kaId: bigint,
-  ): Promise<{ latestRoot: string; rootCount: bigint; blockNumber: number } | null> {
+  ): Promise<{
+    latestRoot: string;
+    rootCount: bigint;
+    latestAuthor: string;
+    latestPublisher: string;
+    blockNumber: number;
+  } | null> {
     try {
-      const latestRoot = ethers.hexlify(await this.getLatestMerkleRoot(kaId));
-      const rootCount = await this.getMerkleRootCount(kaId);
-      return { latestRoot, rootCount, blockNumber: 1 };
+      return {
+        latestRoot: ethers.hexlify(await this.getLatestMerkleRoot(kaId)),
+        rootCount: await this.getMerkleRootCount(kaId),
+        latestAuthor: await this.getLatestMerkleRootAuthor(kaId),
+        latestPublisher: await this.getLatestMerkleRootPublisher(kaId),
+        blockNumber: 1,
+      };
     } catch {
       return null;
     }

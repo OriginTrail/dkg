@@ -233,31 +233,48 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // a lagging count that merely fails to prove supersession must not overturn a root read that
   // already did — that would materialize an old transaction as current and stamp its provenance
   // over newer state, which is the exact failure the position check was added to prevent.
-  let superseded = !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
-  if (!superseded && proof.merkleRootCount !== undefined) {
-    // The root bytes matched, and alone they cannot distinguish "still current" from "superseded
-    // by a later update that RESTORED the same root" (an A -> B -> A history). The position can —
-    // but only from a view where the root and the count were observed TOGETHER. Read separately,
-    // a fresh root beside a lagging count is precisely the combination that makes the old
-    // transaction look current (r8, 3812585216), so an uncorroborated count is not consulted at
-    // all: without the pinned pair this stays at the root answer, which is where it started.
-    const snapshot = await chain.readKnowledgeAssetVersionSnapshot?.(reservedKaId).catch(() => null);
-    if (snapshot) {
-      superseded = snapshot.rootCount > BigInt(proof.merkleRootCount)
-        || !equalsIgnoreCase(snapshot.latestRoot, proof.merkleRoot);
-    }
+  // GH#2270 PR #2300 r11 (3813210019) — ONE view decides everything about the CURRENT version.
+  // Root, count, author, publisher and height used to come from four independent reads, so a
+  // decision could be made on one observation and then materialized with facts from another: the
+  // stale root paired with the newer version's attribution, which is a lifecycle record that never
+  // existed on chain. When the adapter can produce a complete pinned view, it is the only thing
+  // consulted; without one this falls back to the pre-existing latest-root comparison, which is no
+  // worse than what it replaced and is documented as such.
+  const versionView = await chain.readKnowledgeAssetVersionSnapshot?.(reservedKaId).catch(() => null);
+  let superseded = versionView
+    ? !equalsIgnoreCase(versionView.latestRoot, proof.merkleRoot)
+    : !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
+  if (!superseded && versionView && proof.merkleRootCount !== undefined) {
+    // Roots match, and alone they cannot distinguish "still current" from "superseded by a later
+    // update that RESTORED the same root" (an A -> B -> A history). The position settles it, from
+    // this same view.
+    superseded = versionView.rootCount > BigInt(proof.merkleRootCount);
   }
+
   let materializationAuthor = transactionAuthor;
   let materializationPublisher = transactionPublisher;
   let versionBlock = recovery.inclusion.blockNumber;
 
   if (superseded) {
-    if (!chain.getLatestMerkleRootAuthor || !chain.getLatestMerkleRootPublisher || !chain.getBlockNumber) {
+    // r11 — the pinned view already carries the attribution and the height, so the legacy
+    // per-fact getters are required only on the fallback path that still needs them.
+    if (!versionView
+      && (!chain.getLatestMerkleRootAuthor || !chain.getLatestMerkleRootPublisher || !chain.getBlockNumber)) {
       throw inconsistent('the configured chain adapter cannot safely materialize a superseding KA version');
     }
-    materializationAuthor = ethers.getAddress(await chain.getLatestMerkleRootAuthor(reservedKaId));
-    materializationPublisher = ethers.getAddress(await chain.getLatestMerkleRootPublisher(reservedKaId));
-    versionBlock = await chain.getBlockNumber();
+    if (versionView) {
+      materializationAuthor = ethers.getAddress(versionView.latestAuthor);
+      materializationPublisher = ethers.getAddress(versionView.latestPublisher);
+      versionBlock = versionView.blockNumber;
+    } else if (chain.getLatestMerkleRootAuthor && chain.getLatestMerkleRootPublisher && chain.getBlockNumber) {
+      materializationAuthor = ethers.getAddress(await chain.getLatestMerkleRootAuthor(reservedKaId));
+      materializationPublisher = ethers.getAddress(await chain.getLatestMerkleRootPublisher(reservedKaId));
+      versionBlock = await chain.getBlockNumber();
+    } else {
+      // Unreachable: the guard above already rejected this combination. Narrowing it here keeps
+      // the fallback's capability requirement expressed in one place at the type level too.
+      throw inconsistent('the configured chain adapter cannot safely materialize a superseding KA version');
+    }
     if (materializationAuthor === ethers.ZeroAddress || materializationPublisher === ethers.ZeroAddress) {
       throw inconsistent('the superseding KA version has an invalid author or publisher');
     }
@@ -276,7 +293,7 @@ export async function normalizeRecoveredNamedKaPublish(input: {
       txIndex: proof.txIndex,
     },
     materialization: {
-      merkleRoot: latestMerkleRoot,
+      merkleRoot: versionView?.latestRoot ?? latestMerkleRoot,
       authorAddress: materializationAuthor,
       publisherAddress: materializationPublisher,
       versionBlock,
