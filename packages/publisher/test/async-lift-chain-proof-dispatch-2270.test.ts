@@ -26,6 +26,7 @@ import type {
   LiftJobHex,
 } from '../src/index.js';
 import { resetFailedLiftJobToAccepted, type PersistedFailedJob } from '../src/async-lift-publisher-utils.js';
+import { chainProofLookupFingerprint } from '../src/async-lift-publisher-impl.js';
 import { hasBroadcastEvidence, isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
 import {
   DEFAULT_CONTROL_GRAPH_URI,
@@ -902,6 +903,24 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(await recovering).toBe(0);
       // NOT resurrected: the operator's clear stands.
       expect(await publisher.getStatus(held.jobId)).toBeNull();
+    });
+
+    it('lookup identity includes EVERY field — an intended-root change is a different question [r5]', async () => {
+      // 3812123709 / 3812123515 — the stale-verdict guard compares this fingerprint, so a verdict
+      // established for the update targeting root A must not pass the guard for a record that now
+      // intends root B. Proved on the identity directly: the dispatcher-level consequence (a stale
+      // verdict being dropped) is already pinned by the clear and successor rows above, but only
+      // this asserts that the ROOT participates — the exact field a hand-listed comparison missed.
+      const base = { txHash: TX_HASH, walletId: 'w', nonce: 41, publishIdentityKaId: '7' } as const;
+      const rootA = chainProofLookupFingerprint({ ...base, operationKind: 'update', intendedUpdateRoot: `0x${'aa'.repeat(32)}` } as AsyncLiftChainProofLookup);
+      const rootB = chainProofLookupFingerprint({ ...base, operationKind: 'update', intendedUpdateRoot: `0x${'b7'.repeat(32)}` } as AsyncLiftChainProofLookup);
+      const rootAAgain = chainProofLookupFingerprint({ ...base, operationKind: 'update', intendedUpdateRoot: `0x${'aa'.repeat(32)}` } as AsyncLiftChainProofLookup);
+
+      expect(rootA).not.toBe(rootB);
+      expect(rootA).toBe(rootAAgain);
+      // and the discriminant itself is part of identity, not just its payload
+      expect(chainProofLookupFingerprint({ ...base, operationKind: 'create' } as AsyncLiftChainProofLookup))
+        .not.toBe(chainProofLookupFingerprint({ ...base, operationKind: 'update' } as AsyncLiftChainProofLookup));
     });
 
     it('does not touch a successor enqueued for the same work mid-lookup', async () => {

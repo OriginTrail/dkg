@@ -589,6 +589,35 @@ describe('GH#2270 failed-job retry disposition', () => {
       expect(await admissionRetryable(publisher, request)).toBe(false);
     });
 
+    it('FALSE for a held UPDATE when only the chain-proof resolver is wired [r5]', async () => {
+      // 3812123595 — the update lane needs BOTH: the resolver that recognizes the transaction and
+      // the named recovery resolver that finalizes what recognition proves. With only the first
+      // wired, recognition can succeed and the job still cannot be completed, so the promise would
+      // be false. This is the solo-removal row for that conjunct.
+      const publisher = createPublisher({ chainProofResolver: async () => ({ status: 'inconclusive' }) });
+      const request = kaVmPublishRequest({ vmCurrentAssertion: 'aa'.repeat(32), assertionVersion: '2' });
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-upd-half', nonce: 41, operationKind: 'update' });
+
+      expect(hasAutomaticRecoveryExit(held)).toBe(true);
+      expect(await admissionRetryable(publisher, request)).toBe(false);
+    });
+
+    it('FALSE for an UNMARKED pre-upgrade record — the kind is a guess, not evidence [r5]', async () => {
+      // 3812123691 — an unmarked record classifies as an update by SAFE FALLBACK. If it was really
+      // a create, update recognition can never recognize it and update absence is deliberately
+      // inconclusive, so every chain outcome leaves it held. The operation-specific promise may
+      // only be made on the durable marker.
+      const publisher = createPublisher({
+        chainProofResolver: async () => ({ status: 'inconclusive' }),
+        knowledgeAssetVmPublishRecoveryResolver: async () => null,
+      });
+      const request = kaVmPublishRequest();
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-unmarked', nonce: 41 });
+
+      expect(hasAutomaticRecoveryExit(held)).toBe(false);
+      expect(await admissionRetryable(publisher, request)).toBe(false);
+    });
+
     it('FALSE for a fully eligible record when THIS node has no chain-proof resolver [r4]', async () => {
       // 3811993669 — the record could not be more eligible: a create, a recorded nonce, a pinned
       // identity. But a publisher with no resolver wired never looks at it, so promising a retry
@@ -611,7 +640,7 @@ describe('GH#2270 failed-job retry disposition', () => {
         knowledgeAssetVmPublishRecoveryResolver: async () => null,
       });
       const request = kaVmPublishRequest({ vmCurrentAssertion: 'aa'.repeat(32), assertionVersion: '2' });
-      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-upd', nonce: 41 });
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-upd', nonce: 41, operationKind: 'update' });
 
       expect(hasAutomaticRecoveryExit(held)).toBe(true);
       expect(await admissionRetryable(publisher, request)).toBe(true);
@@ -627,7 +656,7 @@ describe('GH#2270 failed-job retry disposition', () => {
         knowledgeAssetVmPublishRecoveryResolver: async () => null,
       });
       const request = kaVmPublishRequest({ vmCurrentAssertion: 'aa'.repeat(32), assertionVersion: '2' });
-      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-upd-nononce' });
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-upd-nononce', operationKind: 'update' });
 
       expect(held.broadcast?.nonce).toBeUndefined();
       expect(hasAutomaticRecoveryExit(held)).toBe(true);

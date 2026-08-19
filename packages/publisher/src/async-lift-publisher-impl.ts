@@ -209,14 +209,15 @@ function assertNoLegacyChainRecoveryResolver(config: AsyncLiftPublisherConfig): 
  * field-dropping hazard this PR removed from the agent's option pipeline.
  */
 export function chainProofLookupFingerprint(lookup: AsyncLiftChainProofLookup): string {
-  return [
-    lookup.operationKind,
-    lookup.txHash,
-    lookup.walletId,
-    lookup.nonce ?? '',
-    lookup.publishIdentityKaId ?? '',
-    lookup.operationKind === 'update' ? lookup.intendedUpdateRoot ?? '' : '',
-  ].join('|');
+  // r5 (3812123515) — derived from the WHOLE lookup, not a list someone has to remember to grow.
+  // Keys are sorted so the string is deterministic, and `undefined` is dropped so an absent field
+  // and an explicitly-undefined one agree. A field added to the union is included the moment it is
+  // populated, which is the property a hand-written list kept failing to provide.
+  return JSON.stringify(
+    Object.entries(lookup as unknown as Record<string, unknown>)
+      .filter(([, value]) => value !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  );
 }
 
 function finishChainProofLookup(

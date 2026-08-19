@@ -21,6 +21,7 @@
 import {
   compareAcceptedJobs,
   getLiftJobTransactionEvidence,
+  liftJobOperationKindMarker,
   isFailedJob,
   pinnedPublishIdentityKaId,
   queuedLiftOperationKind,
@@ -134,6 +135,13 @@ export function hasAutomaticRecoveryExit(job: PersistedFailedJob): boolean {
   if (!(job.broadcast?.walletId ?? job.claim?.walletId)) return false;
   const pinnedId = pinnedPublishIdentityKaId(job);
   if (pinnedId === undefined) return false;
+  // PR #2300 r5 (3812123691) — the exit is OPERATION-SPECIFIC, so it may only be promised on
+  // authoritative evidence of which operation ran. `queuedLiftOperationKind` answers 'update' for
+  // an unmarked record as a SAFE fallback, not as a fact: if such a record was really a create,
+  // update recognition can never recognize it and update absence is deliberately inconclusive, so
+  // every chain outcome leaves it held. Promising a retry there sends the client into a loop.
+  // Unmarked means the operator's by-id clear, and the response now says so.
+  if (liftJobOperationKindMarker(job) === undefined) return false;
   if (queuedLiftOperationKind(job) === 'create') {
     return job.broadcast?.nonce !== undefined;
   }

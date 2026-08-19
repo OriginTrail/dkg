@@ -555,17 +555,23 @@ export class PublishMethods extends EVMChainAdapterBase {
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions = {},
   ): Promise<boolean> {
-    return this.readProvider(
+    return (await this.readProviderRetryingNull(
       'publish receipt finality',
       async (provider) => {
         const finalized = await provider.getBlock('finalized');
-        if (!finalized || finalized.number < receipt.blockNumber) return false;
+        // PR #2300 r5 (3812123699) — an endpoint that cannot serve the finalized tag is an EMPTY
+        // view, not a verdict. Returning `false` here answered SUCCESSFULLY, so ordinary failover
+        // stopped and a capable fallback was never consulted: one incapable primary pinned every
+        // held job at `pending` forever. `null` lets the whole attempt move to the next endpoint;
+        // all-null collapses to false below, which is the honest "nobody could establish it".
+        if (!finalized) return null;
+        if (finalized.number < receipt.blockNumber) return false;
         const atHeight = await provider.getBlock(receipt.blockNumber);
         return !!atHeight?.hash
           && atHeight.hash.toLowerCase() === receipt.blockHash.toLowerCase();
       },
       { signal: options.signal },
-    );
+    )) ?? false;
   }
 
   /**
