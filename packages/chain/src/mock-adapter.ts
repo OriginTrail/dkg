@@ -461,6 +461,19 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   /**
+   * PR #2300 r2 — see {@link ChainAdapter.isReceiptBlockFinalAndCanonical}. The mock's finality
+   * is its per-transaction seam, so the advisory `txHash` is the key here: a receipt whose
+   * transaction is declared unfinalized is not final; everything else is finalized-instantly,
+   * which is the mock's block model.
+   */
+  async isReceiptBlockFinalAndCanonical(
+    receipt: { txHash?: string; blockNumber: number; blockHash: string },
+    _options: ChainReadOptions = {},
+  ): Promise<boolean> {
+    return !(receipt.txHash !== undefined && this.unfinalizedTxHashes.has(receipt.txHash));
+  }
+
+  /**
    * GH#2270 PR-3 r4 — see {@link ChainAdapter.readFinalizedChainProofSnapshot}. The mock's one
    * finality seam is the declared finalized nonce (`__setFinalizedAccountNonce` declares the
    * chain FACT, and survives PR #2300 r1's deletion of the granular read methods it once also

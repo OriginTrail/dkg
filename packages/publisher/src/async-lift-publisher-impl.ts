@@ -436,8 +436,8 @@ export class TripleStoreAsyncLiftPublisher
     // reaccept writer, the retry projection and bulk clear, rather than a second rule that could
     // disagree with them.
     canRetryFailedRecovery: (job) => isHeldForChainProof(job),
-    finalizeProvenPublish: async (job, origin) =>
-      await this.finalizeProvenKnowledgeAssetVmPublish(job, origin) === 'finalized',
+    finalizeProvenPublish: async (job, origin, recovery) =>
+      await this.finalizeProvenKnowledgeAssetVmPublish(job, origin, recovery) === 'finalized',
     shouldPromoteFinalizedPrivateStaging: () => false,
   };
 
@@ -992,9 +992,13 @@ export class TripleStoreAsyncLiftPublisher
   private async finalizeProvenKnowledgeAssetVmPublish(
     job: LiftJob,
     origin: ChainRecoveryOrigin,
+    // PR #2300 r2 — the dispatcher's verdict recovery, threaded through so a `recovered` update
+    // verdict's canonical evidence is consumed at finalize rather than re-proven. The live
+    // interrupted lane passes nothing (no verdict ran there) and the resolver verifies once.
+    verdictRecovery?: AsyncLiftPublisherRecoveryResult,
   ): Promise<'finalized' | 'unresolved' | 'repair-deferred' | 'unsupported'> {
     if (!this.knowledgeAssetVmPublishRecoveryResolver) return 'unresolved';
-    const resolved = await this.knowledgeAssetVmPublishRecoveryResolver(job, origin.lookup);
+    const resolved = await this.knowledgeAssetVmPublishRecoveryResolver(job, origin.lookup, verdictRecovery);
     if (!resolved) return 'unresolved';
     if (
       !this.knowledgeAssetVmPublishHandler?.finalizeRecovered

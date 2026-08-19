@@ -123,10 +123,13 @@ describe('named KA publisher recovery wiring', () => {
       txIndex: 3,
     }));
     // No publish-receipt surfaces at all: an update must not need them, and reaching for them
-    // would prove the lane fell through to the create path.
+    // would prove the lane fell through to the create path. This drives the resolver with NO
+    // verdict recovery — the LIVE-lane path — so it verifies once itself, behind the finality
+    // gate (PR #2300 r2).
     const publishers: PublisherChainAdapters = new Map([[walletId, {
       chainId: 'evm:31337',
       verifyKAUpdate,
+      isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
     } as unknown as ChainAdapter]]);
     const resolver = createKnowledgeAssetVmPublishRecoveryResolver(publishers);
 

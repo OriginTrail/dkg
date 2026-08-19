@@ -1164,6 +1164,23 @@ export interface ChainAdapter {
   ): Promise<PublishTransactionResolution>;
 
   /**
+   * PR #2300 r2 — is this receipt's block both FINAL and still CANONICAL? Promoted from an
+   * adapter-internal gate to a capability because update recognition (CLI-side) must establish
+   * the same finality before treating a verified update as fact: `resolvePublishTransaction`
+   * consumes it for its mined verdicts, and `verifyKAUpdate`-based recognition consumes it for
+   * the same reason — a merely-mined update receipt can be reorged onto a chain where the same
+   * signed transaction lands differently.
+   *
+   * Depth alone is not the test: the hash at the receipt's height must still be the receipt's.
+   * `txHash` is advisory — the EVM adapter answers from block identity alone; the mock keys its
+   * finality seam on it. A throw propagates (a gate that cannot answer resolves nothing).
+   */
+  isReceiptBlockFinalAndCanonical?(
+    receipt: { txHash?: string; blockNumber: number; blockHash: string },
+    options?: ChainReadOptions,
+  ): Promise<boolean>;
+
+  /**
    * GH#2270 PR-3 r4 — the two release-by-absence facts, observed together at ONE finalized block
    * on ONE provider, or `null` when this deployment cannot produce that pinned pair.
    *

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { type LiftJob } from '../src/index.js';
 import {
+  queuedLiftOperationKind,
   resetFailedLiftJobToAccepted,
   type PersistedFailedJob,
 } from '../src/async-lift-publisher-utils.js';
@@ -420,6 +421,70 @@ describe('GH#2270 failed-job retry disposition', () => {
     }
   });
 
+  // PR #2300 r2 (🟡 3809616685) — the operation-kind classifier over VERSION-ONLY signals,
+  // table-driven. The queued executor branches on `vmCurrentAssertion`, but a persisted request
+  // can carry an advanced (or malformed) `assertionVersion` with no vmCurrentAssertion at all —
+  // and the derivation must still err toward 'update', because update-as-create is the dangerous
+  // misread (an absence release re-applying stale state). A classifier collapsed back to
+  // vmCurrentAssertion-only would call the first two rows 'create' and fail them.
+  describe('queuedLiftOperationKind over version-only signals', () => {
+    function jobWithRequest(overrides: Record<string, unknown>): PersistedFailedJob {
+      return {
+        jobId: 'kind-probe',
+        jobSlug: 'kind-probe',
+        request: {
+          jobType: 'knowledge-asset-vm-publish',
+          knowledgeAssetVmPublish: kaVmPublishRequest(overrides as never),
+        },
+        status: 'failed',
+        failure: {
+          failedFromState: 'broadcast',
+          code: 'rpc_unavailable',
+          retryable: true,
+          resolution: 'reset_to_accepted',
+          message: 'x',
+          errorPayloadRef: 'urn:x',
+          occurredAt: 1,
+        },
+        timestamps: { acceptedAt: 1, failedAt: 2, updatedAt: 2 },
+        retries: { retryCount: 0, maxRetries: 10 },
+      } as unknown as PersistedFailedJob;
+    }
+
+    it.each([
+      ['advanced version, no vmCurrentAssertion', { assertionVersion: '2', vmCurrentAssertion: undefined }, 'update'],
+      ['malformed version', { assertionVersion: 'not-a-number', vmCurrentAssertion: undefined }, 'update'],
+      ['vmCurrentAssertion present, version 1', { assertionVersion: '1', vmCurrentAssertion: 'aa'.repeat(32) }, 'update'],
+      ['version 1, no vmCurrentAssertion', { assertionVersion: '1', vmCurrentAssertion: undefined }, 'create'],
+      ['no version at all, no vmCurrentAssertion', { assertionVersion: undefined, vmCurrentAssertion: undefined }, 'create'],
+    ] as const)('classifies %s', (_label, overrides, expected) => {
+      expect(queuedLiftOperationKind(jobWithRequest(overrides as Record<string, unknown>)))
+        .toBe(expected);
+    });
+
+    it('holds a version-only update on a proven-absent verdict through the dispatcher', async () => {
+      // The behavior the classification exists for: no vmCurrentAssertion anywhere, only the
+      // advanced version — and the writer still refuses the absence release.
+      const publisher = createPublisher({ chainProofResolver: async () => ({ status: 'not-found' }) });
+      const request = kaVmPublishRequest({ assertionVersion: '2' });
+      const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+      await publisher.claimNext('w-version-only');
+      await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+      await publisher.update(jobId, 'broadcast', {
+        broadcast: { txHash: TX_HASH, walletId: 'w-version-only', nonce: 41 },
+      });
+      const held = expectFailed(await publisher.recordPublishFailure(jobId, {
+        error: new Error('RPC endpoint temporarily unavailable'),
+        failedFromState: 'broadcast',
+        errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+      }));
+      expect(hasBroadcastEvidence(held)).toBe(true);
+
+      expect(await publisher.recover()).toBe(0);
+      expect(expectFailed(await publisher.getStatus(jobId)).status).toBe('failed');
+    });
+  });
+
   // PR #2300 r1 (🟡 3809054821) — `retryable` on the pending-chain-proof 503 is JOB-SPECIFIC:
   // does an automatic lane exist that can move THIS record? These rows pin the matrix AND that
   // admission carries the answer on the thrown error, which is what the HTTP boundary forwards.
@@ -477,6 +542,20 @@ describe('GH#2270 failed-job retry disposition', () => {
       const request = kaVmPublishRequest({ vmCurrentAssertion: 'aa'.repeat(32), assertionVersion: '2' });
       const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-upd', nonce: 41 });
 
+      expect(hasAutomaticRecoveryExit(held)).toBe(true);
+      expect(await admissionRetryable(publisher, request)).toBe(true);
+    });
+
+    it('TRUE for an update with NO recorded nonce — recognition needs no nonce [PR#2300 r2]', async () => {
+      // 🟡 3809616687 — the nonce feeds only the create-side absence proof. An update's automatic
+      // lane is canonical recognition, formed entirely from the hash, the wallet, the pinned
+      // identity and the intended root; a legacy update record without the write-ahead nonce
+      // keeps its TRUE, and the 503 keeps promising (conditional) convergence.
+      const publisher = createPublisher();
+      const request = kaVmPublishRequest({ vmCurrentAssertion: 'aa'.repeat(32), assertionVersion: '2' });
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-upd-nononce' });
+
+      expect(held.broadcast?.nonce).toBeUndefined();
       expect(hasAutomaticRecoveryExit(held)).toBe(true);
       expect(await admissionRetryable(publisher, request)).toBe(true);
     });

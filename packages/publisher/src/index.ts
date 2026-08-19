@@ -294,6 +294,7 @@ export {
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,
+  type CanonicalUpdateEvidence,
   type AsyncLiftChainProofLookup,
   type AsyncLiftCreateChainProofLookup,
   type AsyncLiftUpdateChainProofLookup,

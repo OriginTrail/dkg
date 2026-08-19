@@ -19,6 +19,7 @@ export type {
   AsyncLiftChainProofResolution,
   AsyncLiftPublisherRecoveryResolver,
   AsyncLiftPublisherRecoveryResult,
+  CanonicalUpdateEvidence,
   VmPublishIntentRecoveryPublisher,
   VmPublishIntentIndexBackfiller,
   VmPublishAdmissionJournalReader,

@@ -64,11 +64,10 @@ import {
   asLiftJobBigInt,
   asLiftJobHex,
   chainAdaptersForWallets,
-  createCanonicalUpdateVerifier,
   createChainProofResolver,
   hasChainPublishLookup,
   mapOnChainPublishResultToLiftRecovery,
-  type CanonicalUpdateVerifier,
+  verifyCanonicalUpdateFacts,
   type PublisherChainAdapters,
 } from './publisher-chain-proof.js';
 
@@ -543,17 +542,13 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     publishers,
     args.knowledgeAssetVmPublishHandler,
   );
-  // PR #2300 r1 (🟡 3809054830) — ONE canonical-update verifier shared by the verdict resolver
-  // and the named-KA evidence resolver: a recognized update is verified once per recovery, and
-  // the same bound facts feed both consumers instead of two independent verifyKAUpdate calls
-  // that could drift.
-  const updateVerifier = createCanonicalUpdateVerifier(chainAdapters);
+  // PR #2300 r2 (🟡 3809616683) — no shared verifier instance: the `recovered` verdict CARRIES
+  // its canonical update evidence to the finalizer, so a recognized update is verified once per
+  // recovery by construction, with no cache and no temporal coupling between the factories.
   const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
-    chainProofResolver: hasChainRecovery
-      ? createChainProofResolver(chainAdapters, { updateVerifier })
-      : undefined,
+    chainProofResolver: hasChainRecovery ? createChainProofResolver(chainAdapters) : undefined,
     knowledgeAssetVmPublishRecoveryResolver: hasChainRecovery
-      ? createKnowledgeAssetVmPublishRecoveryResolver(chainAdapters, { updateVerifier })
+      ? createKnowledgeAssetVmPublishRecoveryResolver(chainAdapters)
       : undefined,
     maxRetries: args.maxRetries,
     // GH#2270 — spread rather than four copied fields, so a knob added to
@@ -781,17 +776,16 @@ function createV10ACKProviderForPublisher(
 
 export function createKnowledgeAssetVmPublishRecoveryResolver(
   adapters: PublisherChainAdapters,
-  options: { readonly updateVerifier?: CanonicalUpdateVerifier } = {},
 ): AsyncKnowledgeAssetVmPublishRecoveryResolver {
-  // PR #2300 r1 (🟡 3809054830) — the SAME verifier the verdict resolver used, so the facts a
-  // recognized update was verified against are the facts its evidence carries; see the wiring
-  // site in createPublisherRuntime.
-  const updateVerifier = options.updateVerifier ?? createCanonicalUpdateVerifier(adapters);
-  return async (job, lookup) => {
+  return async (job, lookup, verdictRecovery) => {
     // GH#2270 PR-3 r4 — an UPDATE transaction has no publish receipt to resolve canonically; its
-    // proof is the update-verification machinery, against the exact root the queued seal intended.
+    // proof is the update-verification machinery, against the exact root the queued seal
+    // intended. PR #2300 r2 — when the dispatcher's verdict already CARRIES the canonical
+    // evidence, it is consumed directly (one verification per recovery, no shared state); the
+    // LIVE interrupted lane arrives with no verdict and verifies once here, behind the same
+    // finality gate.
     if (lookup.operationKind === 'update') {
-      return resolveCanonicalUpdateRecoveryEvidence(job, lookup, updateVerifier);
+      return resolveCanonicalUpdateRecoveryEvidence(job, lookup, adapters, verdictRecovery);
     }
     const recovered = await resolveCanonicalOnChainPublish(lookup, adapters);
     if (!recovered) return null;
@@ -841,7 +835,8 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
 async function resolveCanonicalUpdateRecoveryEvidence(
   job: LiftJob,
   lookup: AsyncLiftUpdateChainProofLookup,
-  updateVerifier: CanonicalUpdateVerifier,
+  adapters: PublisherChainAdapters,
+  verdictRecovery: AsyncLiftPublisherRecoveryResult | undefined,
 ): Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null> {
   const request = job.request?.jobType === 'knowledge-asset-vm-publish'
     ? job.request.knowledgeAssetVmPublish
@@ -849,10 +844,29 @@ async function resolveCanonicalUpdateRecoveryEvidence(
   if (
     request?.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
     || request.kaUal === undefined
+    || lookup.publishIdentityKaId === undefined
   ) {
     return null;
   }
-  const facts = await updateVerifier.verify(lookup);
+  // PR #2300 r2 — the verdict's canonical evidence is the SAME verification this recovery was
+  // dispatched on; consume it rather than re-proving the transaction. The kaId comes from the
+  // lookup the verification was bound to. Only a verdict-less arrival (the LIVE interrupted
+  // lane) verifies here — once, behind the same finality gate.
+  let kaId: bigint;
+  try {
+    kaId = BigInt(lookup.publishIdentityKaId);
+  } catch {
+    return null;
+  }
+  const facts = verdictRecovery?.canonicalUpdate
+    ? {
+        kaId,
+        onChainRoot: verdictRecovery.canonicalUpdate.onChainRoot,
+        blockNumber: verdictRecovery.inclusion.blockNumber,
+        blockHash: verdictRecovery.canonicalUpdate.blockHash,
+        txIndex: verdictRecovery.canonicalUpdate.txIndex,
+      }
+    : await verifyCanonicalUpdateFacts(lookup, adapters);
   if (!facts) return null;
   if (facts.txIndex === undefined) return null;
   const blockHash = facts.blockHash ? asLiftJobHex(facts.blockHash) : null;

@@ -236,9 +236,28 @@ export interface VmPublisherControl
     AsyncLiftDetailedRetrier,
     AsyncLiftRetryStateReader {}
 
+/**
+ * PR #2300 r2 (🟡 3809616683) — the canonical facts UPDATE recognition established for the
+ * `recovered` verdict, carried ON the verdict so the named finalizer consumes the SAME
+ * verification instead of re-proving the transaction. This is what replaced the shared-verifier
+ * memo: no cache, no shared instance, no temporal coupling — the evidence travels with the
+ * verdict that earned it. The CREATE side deliberately does NOT get an equivalent: its
+ * `publishProof` remains the finalizer's own canonical-receipt read (settled position).
+ */
+export interface CanonicalUpdateEvidence {
+  /** The chain-verified new root — already proven equal to the root the queued seal intended. */
+  readonly onChainRoot: LiftJobHex;
+  /** The receipt's canonical block hash, when the verification produced one. */
+  readonly blockHash?: LiftJobHex;
+  /** The receipt's transaction index, when the verification produced one. */
+  readonly txIndex?: number;
+}
+
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;
   finalization: LiftJobFinalizationMetadata;
+  /** Present exactly when the verdict came from canonical UPDATE recognition. */
+  canonicalUpdate?: CanonicalUpdateEvidence;
 }
 
 /** Required immutable transaction evidence for named-KA lifecycle recovery. */
@@ -446,6 +465,13 @@ export type AsyncLiftPublisherRecoveryResolver = (
 export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
   job: LiftJob,
   lookup: AsyncLiftChainProofLookup,
+  /**
+   * PR #2300 r2 — the dispatcher's verdict recovery, when this finalize follows one. For an
+   * UPDATE whose verdict carried {@link CanonicalUpdateEvidence}, the resolver consumes it
+   * directly instead of re-verifying the transaction; the LIVE interrupted lane passes nothing
+   * (no verdict ran) and the resolver verifies once itself.
+   */
+  verdictRecovery?: AsyncLiftPublisherRecoveryResult,
 ) => Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null>;
 
 export interface AsyncLiftPublisherConfig {

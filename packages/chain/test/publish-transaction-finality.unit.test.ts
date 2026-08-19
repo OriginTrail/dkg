@@ -188,4 +188,37 @@ describe('MockChainAdapter finality parity [PR#2300 r1]', () => {
     mock.__setTransactionUnfinalized(TX_HASH, false);
     expect(await mock.resolvePublishTransaction(TX_HASH)).toEqual({ status: 'unrecognized' });
   });
+
+  it('gates the CONFIRMED-publish branch too: a real mock publish reads pending until final [PR#2300 r2]', async () => {
+    // 🟡 3809616692 — the seam rows above drive declared states; this drives the mock's OWN
+    // publish fixture (the event-log-backed confirmed branch), the one a recovery test actually
+    // exercises, and proves the gate covers it in both polarities.
+    const mock = new MockChainAdapter('mock:31337', WALLET);
+    mock.minimumRequiredSignatures = 0;
+    const { contextGraphId } = await mock.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1, // open
+    });
+    const published = await mock.publishToContextGraph({
+      contextGraphId,
+      kaCount: 1,
+      publisherNodeIdentityId: 1n,
+      merkleRoot: new Uint8Array(32),
+      publicByteSize: 1n,
+      epochs: 1,
+      tokenAmount: 1n,
+      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      receiverSignatures: [],
+      participantSignatures: [{ identityId: 1n, r: new Uint8Array(32), vs: new Uint8Array(32) }],
+      merkleLeafCount: 1,
+    });
+
+    mock.__setTransactionUnfinalized(published.txHash);
+    const gated = await mock.resolvePublishTransaction(published.txHash);
+    expect(gated).toEqual({ status: 'pending' });
+    expect(gated.status).not.toBe('confirmed');
+
+    mock.__setTransactionUnfinalized(published.txHash, false);
+    expect((await mock.resolvePublishTransaction(published.txHash)).status).toBe('confirmed');
+  });
 });

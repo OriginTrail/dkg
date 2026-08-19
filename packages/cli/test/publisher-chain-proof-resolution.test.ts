@@ -16,7 +16,6 @@ import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publish
 import type { AsyncLiftChainProofLookup, DKGPublisher, LiftJob } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
-  createCanonicalUpdateVerifier,
   createChainProofResolver,
   hasChainPublishLookup,
   type PublisherChainAdapters,
@@ -317,20 +316,31 @@ describe('GH#2270 runner chain-proof resolution', () => {
       intendedUpdateRoot: INTENDED_ROOT as `0x${string}`,
     };
 
-    it('recovers a mined update whose receipt proves OUR txHash installed OUR intended root', async () => {
-      const verifyKAUpdate = vi.fn(async () => ({
-        verified: true,
-        onChainMerkleRoot: Buffer.from('12'.repeat(32), 'hex'),
-        blockNumber: 88,
-        blockHash: `0x${'ef'.repeat(32)}`,
-        txIndex: 2,
-      }));
-      const publishers = publishersWith(triStateAdapter({ status: 'unrecognized' }, {
-        verifyKAUpdate,
+    /**
+     * The update-recognition stub, finality INCLUDED by default (PR #2300 r2 — recognition only
+     * yields facts past the shared finality gate, so a stub without the capability can only ever
+     * answer inconclusive and every negative row would stop discriminating its own reason).
+     */
+    function updateChain(extra: Record<string, unknown> = {}) {
+      return triStateAdapter({ status: 'unrecognized' }, {
         getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
-      }));
+        isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
+        ...extra,
+      });
+    }
+    const verifiedAnswer = () => ({
+      verified: true,
+      onChainMerkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+      blockNumber: 88,
+      blockHash: `0x${'ef'.repeat(32)}`,
+      txIndex: 2,
+    });
 
-      const resolution = await createChainProofResolver(publishers)(updateLookup);
+    it('recovers a mined update whose receipt proves OUR txHash installed OUR intended root', async () => {
+      const verifyKAUpdate = vi.fn(async () => verifiedAnswer());
+      const adapter = updateChain({ verifyKAUpdate });
+
+      const resolution = await createChainProofResolver(publishersWith(adapter))(updateLookup);
 
       expect(resolution.status).toBe('recovered');
       expect(resolution.status === 'recovered' ? resolution.recovery : null).toMatchObject({
@@ -342,36 +352,76 @@ describe('GH#2270 runner chain-proof resolution', () => {
           startKAId: PINNED_KA_ID,
           endKAId: PINNED_KA_ID,
         },
+        // PR #2300 r2 — the verdict CARRIES the canonical evidence, which is what lets the named
+        // finalizer consume this one verification instead of re-proving the transaction.
+        canonicalUpdate: {
+          onChainRoot: INTENDED_ROOT,
+          blockHash: `0x${'ef'.repeat(32)}`,
+          txIndex: 2,
+        },
       });
-      // The chain was asked about exactly our transaction, our pinned id, our signing wallet.
+      // The chain was asked about exactly our transaction, our pinned id, our signing wallet —
+      // and the finality gate was consulted with the verified receipt's identity.
       expect(verifyKAUpdate).toHaveBeenCalledWith(TX_HASH, KA_ID, WALLET);
+      expect(adapter.isReceiptBlockFinalAndCanonical).toHaveBeenCalledWith({
+        txHash: TX_HASH,
+        blockNumber: 88,
+        blockHash: `0x${'ef'.repeat(32)}`,
+      });
+    });
+
+    it('holds a verified update whose receipt block is NOT yet final — a mined update is not a fact', async () => {
+      // PR #2300 r2 (🔴 3809616675) — the reorg polarity: same verified answer, but the block
+      // carrying it is unfinalized (or no longer canonical at its height, which the shared
+      // primitive folds into the same false). Treating it as fact would finalize a job from a
+      // receipt a reorg can still rewrite.
+      const verifyKAUpdate = vi.fn(async () => verifiedAnswer());
+      const adapter = updateChain({
+        verifyKAUpdate,
+        isReceiptBlockFinalAndCanonical: vi.fn(async () => false),
+      });
+
+      expect(await createChainProofResolver(publishersWith(adapter))(updateLookup))
+        .toEqual({ status: 'inconclusive' });
+      expect(verifyKAUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it('caches NOTHING from an unfinalized ask — finality later yields a fresh verification', async () => {
+      // PR #2300 r2 — no stale fact can survive, trivially: nothing unfinalized ever becomes a
+      // fact, and there is no cache at all any more. The second ask re-verifies from scratch and
+      // recovers once the gate answers true.
+      const verifyKAUpdate = vi.fn(async () => verifiedAnswer());
+      const gate = vi.fn(async () => false);
+      const adapter = updateChain({ verifyKAUpdate, isReceiptBlockFinalAndCanonical: gate });
+      const resolve = createChainProofResolver(publishersWith(adapter));
+
+      expect(await resolve(updateLookup)).toEqual({ status: 'inconclusive' });
+      gate.mockResolvedValue(true);
+      expect((await resolve(updateLookup)).status).toBe('recovered');
+      expect(verifyKAUpdate).toHaveBeenCalledTimes(2);
     });
 
     it('holds when the verified on-chain root is NOT the root this job intended', async () => {
       // A mined update for our kaId that installed some OTHER root is someone else's update (or a
       // different attempt's). Claiming it as ours would finalize this job against evidence that
       // does not commit to its seal.
-      const publishers = publishersWith(triStateAdapter({ status: 'unrecognized' }, {
+      const publishers = publishersWith(updateChain({
         verifyKAUpdate: vi.fn(async () => ({
-          verified: true,
+          ...verifiedAnswer(),
           onChainMerkleRoot: Buffer.from('ff'.repeat(32), 'hex'),
-          blockNumber: 88,
         })),
-        getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
       }));
 
       expect(await createChainProofResolver(publishers)(updateLookup)).toEqual({ status: 'inconclusive' });
     });
 
     it('holds on an unverified answer, a missing capability, or a lookup with no update identity', async () => {
-      const unverified = publishersWith(triStateAdapter({ status: 'unrecognized' }, {
+      const unverified = publishersWith(updateChain({
         verifyKAUpdate: vi.fn(async () => ({ verified: false })),
-        getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
       }));
       const noCapability = publishersWith(triStateAdapter({ status: 'unrecognized' }));
-      const noIdentity = publishersWith(triStateAdapter({ status: 'unrecognized' }, {
-        verifyKAUpdate: vi.fn(async () => ({ verified: true })),
-        getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
+      const noIdentity = publishersWith(updateChain({
+        verifyKAUpdate: vi.fn(async () => verifiedAnswer()),
       }));
 
       expect(await createChainProofResolver(unverified)(updateLookup)).toEqual({ status: 'inconclusive' });
@@ -662,6 +712,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
           resolvePublishTransaction: vi.fn(async () => ({ status: 'unrecognized' as const })),
           verifyKAUpdate,
           getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
+          isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
         },
         SIGNED_NONCE,
         { vmCurrentAssertion: '12'.repeat(32), assertionVersion: '2' },
@@ -677,11 +728,12 @@ describe('GH#2270 runner chain-proof resolution', () => {
       expect(after?.recovery?.txHashAccounted).toBeUndefined();
     });
 
-    it('verifies a recognized update ONCE for the whole recovery — verdict and evidence share it', async () => {
-      // PR #2300 r1 (🟡 3809054830) — the verdict resolver and the named evidence resolver used
-      // to each call verifyKAUpdate for the same transaction: policy duplication that could
-      // drift. With the shared verifier the whole dispatch-and-finalize pass proves the update
-      // exactly once, and the job still finalizes from that one proof.
+    it('verifies a recognized update ONCE for the whole recovery — the verdict CARRIES the evidence', async () => {
+      // PR #2300 r2 (🟡 3809616683) — no shared verifier, no memo, no temporal coupling: the two
+      // factories are constructed independently, and the once-only property holds by DESIGN
+      // because the recovered verdict carries the canonical evidence to the finalizer. A
+      // regression that drops the evidence from the verdict forces the finalizer to re-verify
+      // and fails this call count.
       const verifyKAUpdate = vi.fn(async () => ({
         verified: true,
         onChainMerkleRoot: Buffer.from('12'.repeat(32), 'hex'),
@@ -694,18 +746,18 @@ describe('GH#2270 runner chain-proof resolution', () => {
         resolvePublishTransaction: vi.fn(async () => ({ status: 'unrecognized' as const })),
         verifyKAUpdate,
         getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
+        isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
       };
       const publishers = publishersWith(chain);
-      const updateVerifier = createCanonicalUpdateVerifier(publishers);
       const finalizeRecovered = vi.fn(async () => undefined);
       const { publisher, status } = await heldJobOn(
         chain,
         SIGNED_NONCE,
         { vmCurrentAssertion: '12'.repeat(32), assertionVersion: '2' },
         {
-          chainProofResolver: createChainProofResolver(publishers, { updateVerifier }),
+          chainProofResolver: createChainProofResolver(publishers),
           knowledgeAssetVmPublishRecoveryResolver:
-            createKnowledgeAssetVmPublishRecoveryResolver(publishers, { updateVerifier }),
+            createKnowledgeAssetVmPublishRecoveryResolver(publishers),
           knowledgeAssetVmPublishHandler: {
             execute: async () => { throw new Error('the dispatcher must never cause a send'); },
             finalizeRecovered,
@@ -718,6 +770,102 @@ describe('GH#2270 runner chain-proof resolution', () => {
       expect((await status())?.status).toBe('finalized');
       expect(finalizeRecovered).toHaveBeenCalledOnce();
       expect(verifyKAUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a LIVE interrupted update tx-bearing while its receipt block is unfinalized', async () => {
+      // PR #2300 r2 (🔴 3809616675) — the lane the round-1 class sweep missed: a daemon restart
+      // finds the update job still in 'broadcast', the interrupted lane resolves it through the
+      // SAME recovery resolver with no verdict having run, and a merely-mined receipt must NOT
+      // finalize it. The verifier's own finality gate is what every consumer inherits.
+      const verifyKAUpdate = vi.fn(async () => ({
+        verified: true,
+        onChainMerkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+        blockNumber: 91,
+        blockHash: `0x${'ef'.repeat(32)}`,
+        txIndex: 2,
+      }));
+      const gate = vi.fn(async () => false);
+      const chain = {
+        chainId: 'evm:31337',
+        resolvePublishTransaction: vi.fn(async () => ({ status: 'pending' as const })),
+        verifyKAUpdate,
+        getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
+        isReceiptBlockFinalAndCanonical: gate,
+      };
+      const publishers = publishersWith(chain);
+      const finalizeRecovered = vi.fn(async () => undefined);
+      const store = new OxigraphStore();
+      let now = 1_000;
+      let ids = 0;
+      const publisher = new TripleStoreAsyncLiftPublisher(store, {
+        now: () => ++now,
+        idGenerator: () => `job-${++ids}`,
+        chainProofResolver: createChainProofResolver(publishers),
+        knowledgeAssetVmPublishRecoveryResolver:
+          createKnowledgeAssetVmPublishRecoveryResolver(publishers),
+        knowledgeAssetVmPublishHandler: {
+          execute: async () => { throw new Error('the recovery lane must never cause a send'); },
+          finalizeRecovered,
+        },
+      });
+      const jobId = await publisher.enqueueKnowledgeAssetVmPublish({
+        contextGraphId: 'music-social',
+        name: 'albums',
+        shareOperationId: 'share-op-live',
+        roots: [],
+        contentScopeVersion: 2,
+        kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+        assertionVersion: '2',
+        vmCurrentAssertion: '12'.repeat(32),
+        publicTripleCount: 2,
+        privateTripleCount: 0,
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: WALLET as `0x${string}`,
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+          reservedKaId: ((BigInt(WALLET) << 96n) | 7n).toString(),
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+        kaNumber: '7',
+      } as never);
+      await publisher.claimNext(WALLET);
+      await publisher.update(jobId, 'validated', {
+        validation: {
+          canonicalRoots: [],
+          canonicalRootMap: {},
+          swmQuadCount: 2,
+          authorityProofRef: 'proof:owner:1',
+          transitionType: 'CREATE',
+        },
+      });
+      // The daemon "dies" here: the job is live in 'broadcast' with its tx on the wire.
+      await publisher.update(jobId, 'broadcast', {
+        broadcast: { txHash: TX_HASH, walletId: WALLET, nonce: SIGNED_NONCE },
+      });
+
+      // Restart: the interrupted lane runs. The update is verified but NOT final — no fact, no
+      // finalize, and the job keeps its transaction evidence.
+      await publisher.recover();
+
+      const after = await publisher.getStatus(jobId);
+      expect(after?.status).not.toBe('finalized');
+      expect(finalizeRecovered).not.toHaveBeenCalled();
+      expect(verifyKAUpdate).toHaveBeenCalled();
+      expect(gate).toHaveBeenCalled();
+      // Tx-bearing, whatever state the lane parked it in: the evidence survives.
+      expect(
+        after?.broadcast?.txHash ?? after?.recovery?.txHashChecked,
+      ).toBe(TX_HASH);
+
+      // Finality arrives; the SAME lane now finalizes from a fresh verification.
+      gate.mockResolvedValue(true);
+      await publisher.recover();
+      expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
     });
   });
 });

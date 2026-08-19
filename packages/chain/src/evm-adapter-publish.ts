@@ -545,9 +545,14 @@ export class PublishMethods extends EVMChainAdapterBase {
    * height belongs to a different block (the receipt was fetched before the reorg settled), and a
    * verdict about the orphaned copy would be a verdict about a chain that no longer exists. A
    * throw propagates: the caller's contract is that lookup failures reject rather than resolve.
+   *
+   * PR #2300 r2 — PUBLIC now (see {@link ChainAdapter.isReceiptBlockFinalAndCanonical}): update
+   * recognition consumes the same gate before treating a verified update as fact, so the
+   * primitive is shared rather than duplicated. `txHash` on the receipt is advisory here — block
+   * identity is the whole truth for a real chain.
    */
-  protected async isReceiptBlockFinalAndCanonical(
-    receipt: { blockNumber: number; blockHash: string },
+  async isReceiptBlockFinalAndCanonical(
+    receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions = {},
   ): Promise<boolean> {
     return this.readProvider(
