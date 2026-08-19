@@ -567,8 +567,12 @@ export class PublishMethods extends EVMChainAdapterBase {
         if (!finalized) return null;
         if (finalized.number < receipt.blockNumber) return false;
         const atHeight = await provider.getBlock(receipt.blockNumber);
-        return !!atHeight?.hash
-          && atHeight.hash.toLowerCase() === receipt.blockHash.toLowerCase();
+        // r8 (3812585310) — the same empty-view rule as the frontier read above: an endpoint that
+        // cannot serve the receipt's (older, possibly pruned) block has no opinion, and answering
+        // `false` there would stop the walk and strand the job behind an incomplete primary.
+        // `false` is reserved for a block that IS served and whose hash does not match.
+        if (!atHeight?.hash) return null;
+        return atHeight.hash.toLowerCase() === receipt.blockHash.toLowerCase();
       },
       { signal: options.signal },
     )) ?? false;

@@ -404,6 +404,11 @@ describe('GH#2270 runner chain-proof resolution', () => {
         updateLookup,
         verdictRecovery,
       );
+
+      // The result is the point of the row: a null here would satisfy an optional-chained field
+      // assertion, so non-nullness is asserted first and the field second.
+      expect(named).not.toBeNull();
+      expect(named?.publishProof.merkleRootCount).toBe('1');
     });
 
     it('holds a verified update whose receipt block is NOT yet final — a mined update is not a fact', async () => {

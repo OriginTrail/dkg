@@ -933,11 +933,23 @@ export class TripleStoreAsyncLiftPublisher
       return false;
     }
     if (!this.chainProofResolver) {
-      if (job.status === 'broadcast') {
+      // PR #2300 r8 (3812585483) — a 'broadcast' raw job used to be reset here on the reasoning
+      // that it had probably not sent anything. The pre-send write-ahead this PR added makes that
+      // reasoning false: reaching 'broadcast' now means a transaction was SIGNED and durably
+      // recorded before the send, so a crash in that window leaves a record whose transaction may
+      // be in the mempool or already mined. Resetting it hands the next worker a fresh signature
+      // over the same content — the double publish this chain exists to prevent — and with no
+      // resolver there is nothing that can establish the first transaction's fate. It therefore
+      // stays where it is, transaction-bearing and unclaimable, until a node with a chain-proof
+      // resolver reconciles it or an operator clears it by id.
+      if (job.status === 'broadcast' && !getLiftJobTransactionEvidence(job)) {
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.resetJobToAccepted(job, 'broadcast', getLiftJobTransactionEvidence(job)), 'recover-reset');
+        await this.writeJob(this.resetJobToAccepted(job, 'broadcast', undefined), 'recover-reset');
         return true;
       }
+      // Evidence-bearing (or 'included'): release the wallet so the node is not wedged, but leave
+      // the job itself alone.
+      await this.releaseWalletLockForJob(job);
       return false;
     }
 

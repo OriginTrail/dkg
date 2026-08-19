@@ -67,6 +67,42 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     return decodeKnowledgeAssetMerkleRootCount(context, kaId);
   }
 
+  /**
+   * GH#2270 PR #2300 r8 — see {@link ChainAdapter.readKnowledgeAssetVersionSnapshot}. Both reads
+   * happen inside ONE `readProvider` callback and carry the SAME pinned block number, so the root
+   * and the count can never come from endpoints at different heights; an endpoint that cannot
+   * produce the pair yields nothing and the whole snapshot moves to the next one.
+   */
+  async readKnowledgeAssetVersionSnapshot(
+    kaId: bigint,
+    options: ChainReadOptions = {},
+  ): Promise<{ latestRoot: string; rootCount: bigint; blockNumber: number } | null> {
+    await this.init();
+    const kas = this.contracts.knowledgeAssetStorage;
+    if (!kas) return null;
+    try {
+      return await this.readProviderRetryingNull(
+        'knowledge asset version snapshot',
+        async (provider) => {
+          const blockNumber = await provider.getBlockNumber();
+          if (typeof blockNumber !== 'number') return null;
+          const bound = this.rebindContract(kas as Contract, provider);
+          const latestRoot: string = await bound.getLatestMerkleRoot(kaId, { blockTag: blockNumber });
+          const context = await bound.getKnowledgeAssetUpdateContext(kaId, { blockTag: blockNumber });
+          if (!latestRoot) return null;
+          return {
+            latestRoot,
+            rootCount: decodeKnowledgeAssetMerkleRootCount(context, kaId),
+            blockNumber,
+          };
+        },
+        { signal: options.signal },
+      );
+    } catch {
+      return null;
+    }
+  }
+
   async getMerkleLeafCount(kaId: bigint): Promise<number> {
     await this.init();
     const kas = this.requireKCStorage();

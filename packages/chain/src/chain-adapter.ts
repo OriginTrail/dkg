@@ -1810,6 +1810,23 @@ export interface ChainAdapter {
   getMerkleRootCount?(kaId: bigint, options?: ChainReadOptions): Promise<bigint>;
 
   /**
+   * GH#2270 PR #2300 r8 — the asset's CURRENT version state as ONE coherent view: the latest
+   * merkle root and the number of roots written, read from a single provider at a single pinned
+   * block.
+   *
+   * Recovery decides whether a recovered transaction is still current by comparing its own
+   * position and root against these. Read separately they can come from endpoints at different
+   * heights, and a lagging COUNT beside a fresh ROOT is exactly the combination that makes an old
+   * transaction in an A -> B -> A history look current — so the pair has to be observed together
+   * or not at all. `null` means no endpoint could produce the pair, and the caller must not
+   * conclude anything from that.
+   */
+  readKnowledgeAssetVersionSnapshot?(
+    kaId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<{ latestRoot: string; rootCount: bigint; blockNumber: number } | null>;
+
+  /**
    * Constant-cost scalar update context for a KA. Consumers that need version
    * plus sizing data should prefer this over separate root-count and leaf-count
    * reads so one RPC supplies the complete recovery descriptor. Sizing hints

@@ -164,6 +164,20 @@ describe('isReceiptBlockFinalAndCanonical [PR#2300 r1]', () => {
     expect(readOpts[0]?.isEmptyResult?.(null)).toBe(true);
   });
 
+  it('an endpoint missing the RECEIPT block also fails over, rather than answering false [r8]', async () => {
+    // 3812585310 — the frontier read already treated a missing view as empty; the block-at-height
+    // read did not, so a pruned or incomplete primary that serves `finalized` but not the older
+    // receipt block answered `false` and stranded the job. `false` is now reserved for a block
+    // that IS served and whose hash differs.
+    const { chain, seen } = chainOverProviders([
+      { finalized: { number: 200, hash: `0x${'ee'.repeat(32)}` }, atHeight: null },
+      { finalized: { number: 200, hash: `0x${'ee'.repeat(32)}` }, atHeight: { number: 123, hash: BLOCK_HASH } },
+    ]);
+
+    await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
+    expect(seen).toContain(1);
+  });
+
   it('true only when the height is behind the finalized frontier AND the hash still matches', async () => {
     const chain = chainOver({
       finalized: { number: 200, hash: `0x${'ee'.repeat(32)}` },

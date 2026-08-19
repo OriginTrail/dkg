@@ -403,6 +403,41 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       return expectFailed(await publisher.getStatus(jobId));
     }
 
+    it('a raw broadcast that SIGNED is not requeued on a node with no resolver [r8]', async () => {
+      // 3812585483 — before the pre-send write-ahead, reaching 'broadcast' did not imply a signed
+      // transaction, so recovery reset such a job on a resolver-less node. It does now: the hash is
+      // durable BEFORE the send, so a crash in that window leaves a transaction that may be in the
+      // mempool or already mined, and resetting hands the next worker a second signature over the
+      // same content. With no resolver nothing can establish the first one's fate.
+      // No chainProofResolver — but the same executor the sibling rows use, so the write-ahead
+      // actually fires and the job carries a signed transaction.
+      const publisher = createPublisher({
+        publishExecutor: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
+          throw new Error('crash after the write-ahead, before the result');
+        },
+      });
+      const held = await heldRawLiftAfterWriteAhead(publisher);
+      expect(held.broadcast?.txHash ?? held.recovery?.txHashChecked).toBe(TX_HASH);
+
+      // Put it back into the shape a crash leaves behind: interrupted at 'broadcast', hash recorded.
+      const interrupted = {
+        ...held,
+        status: 'broadcast',
+        broadcast: { txHash: TX_HASH, walletId: 'wallet-raw' },
+      } as unknown as LiftJob;
+      delete (interrupted as unknown as Record<string, unknown>).failure;
+      await h.store.deleteByPattern({ subject: jobSubject(held.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(interrupted, DEFAULT_CONTROL_GRAPH_URI));
+
+      // This publisher has NO chainProofResolver — the branch under test.
+      await publisher.recover();
+
+      const after = await publisher.getStatus(held.jobId);
+      expect(after?.status).toBe('broadcast');
+      expect(after?.broadcast?.txHash).toBe(TX_HASH);
+    });
+
     // PR #2300 r1 (🟡 3809054845) — the create-only release rule over RAW transition types,
     // pinned. `queuedLiftOperationKind` reads a raw lift's `transitionType`: CREATE derives
     // 'create'; MUTATE and REVOKE rewrite existing state, carry the same re-apply-stale-state

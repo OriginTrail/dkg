@@ -205,8 +205,8 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     // old transaction current and stamps its provenance and version block over newer state. The
     // verified history POSITION settles it: this proof wrote root #1, the chain now holds #3.
     const chain = seededChain();
-    (chain as unknown as { getMerkleRootCount: (kaId: bigint) => Promise<bigint> })
-      .getMerkleRootCount = async () => 3n;
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint) => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({ latestRoot: SEAL_MERKLE_ROOT, rootCount: 3n, blockNumber: 300 });
     (chain as unknown as { getLatestMerkleRootAuthor: (kaId: bigint) => Promise<string> })
       .getLatestMerkleRootAuthor = async () => ethers.getAddress(AUTHOR);
     (chain as unknown as { getLatestMerkleRootPublisher: (kaId: bigint) => Promise<string> })
@@ -236,8 +236,11 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     const chain = seededChain();
     (chain as unknown as { getLatestMerkleRoot: (kaId: bigint) => Promise<Uint8Array> })
       .getLatestMerkleRoot = async () => ethers.getBytes(`0x${'cd'.repeat(32)}`);
-    (chain as unknown as { getMerkleRootCount: (kaId: bigint) => Promise<bigint> })
-      .getMerkleRootCount = async () => 1n;
+    // A lagging pair is still a COHERENT pair — root and count from one pinned view — so the
+    // row now says: this endpoint genuinely saw root A at position 1, while the fresh latest-root
+    // read saw a different root. The mismatch already proved supersession and must stand.
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint) => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({ latestRoot: SEAL_MERKLE_ROOT, rootCount: 1n, blockNumber: 100 });
     (chain as unknown as { getLatestMerkleRootAuthor: (kaId: bigint) => Promise<string> })
       .getLatestMerkleRootAuthor = async () => ethers.getAddress(AUTHOR);
     (chain as unknown as { getLatestMerkleRootPublisher: (kaId: bigint) => Promise<string> })
@@ -254,6 +257,35 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     });
 
     expect(result.materialization.superseded).toBe(true);
+  });
+
+  it('will not conclude "current" from a count observed apart from the root [r8]', async () => {
+    // 3812585216 — the skew the pinned pair exists to exclude: the real history is A -> B -> A at
+    // position 3, and the proof is root A at position 1. A fresh latest-root read answers A, so
+    // root bytes alone say "current"; an independently served count from a lagging endpoint would
+    // answer 1 and confirm that wrong conclusion. With no coherent pair available the finalizer
+    // must not consult a count at all — it stays with the root answer rather than promoting a
+    // lagging observation into proof of currency.
+    const chain = seededChain();
+    (chain as unknown as { getMerkleRootCount: (kaId: bigint) => Promise<bigint> })
+      .getMerkleRootCount = async () => 3n;
+    // …and this adapter cannot produce the pair, which is the condition under test.
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot?: unknown })
+      .readKnowledgeAssetVersionSnapshot = undefined;
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
+      }),
+    });
+
+    // The bare count says 3 > 1 and WOULD flip this to superseded — which is the point: it is
+    // ignored, because a count observed apart from the root cannot be trusted in either
+    // direction. The answer is the root comparison's, exactly as before the position work.
+    expect(result.materialization.superseded).toBe(false);
   });
 
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {

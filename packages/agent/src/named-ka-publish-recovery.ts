@@ -234,14 +234,17 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // already did — that would materialize an old transaction as current and stamp its provenance
   // over newer state, which is the exact failure the position check was added to prevent.
   let superseded = !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
-  if (!superseded && proof.merkleRootCount !== undefined && chain.getMerkleRootCount) {
-    try {
-      const currentCount = await chain.getMerkleRootCount(reservedKaId);
-      // The root bytes matched, which alone cannot distinguish "still current" from "superseded by
-      // a later update that restored the same root". A strictly greater count settles it.
-      superseded = currentCount > BigInt(proof.merkleRootCount);
-    } catch {
-      // A count the chain will not serve leaves the root-equality answer standing.
+  if (!superseded && proof.merkleRootCount !== undefined) {
+    // The root bytes matched, and alone they cannot distinguish "still current" from "superseded
+    // by a later update that RESTORED the same root" (an A -> B -> A history). The position can —
+    // but only from a view where the root and the count were observed TOGETHER. Read separately,
+    // a fresh root beside a lagging count is precisely the combination that makes the old
+    // transaction look current (r8, 3812585216), so an uncorroborated count is not consulted at
+    // all: without the pinned pair this stays at the root answer, which is where it started.
+    const snapshot = await chain.readKnowledgeAssetVersionSnapshot?.(reservedKaId).catch(() => null);
+    if (snapshot) {
+      superseded = snapshot.rootCount > BigInt(proof.merkleRootCount)
+        || !equalsIgnoreCase(snapshot.latestRoot, proof.merkleRoot);
     }
   }
   let materializationAuthor = transactionAuthor;
