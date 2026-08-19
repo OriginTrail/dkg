@@ -137,6 +137,18 @@ import {
  * - `'rolled-back-pre-send'` the write-ahead was attempted but the fsync/transition failed
  *                            and was rolled back to `'validated'`; the tx was never sent.
  */
+/**
+ * GH#2270 PR-3 r18 (🔴 3816322914) — the chain-proof backoff schedule. Not configurable: these
+ * govern how often a HELD job is re-asked, which is a protocol-pacing question rather than a
+ * deployment one, and the two knobs that do vary by deployment (batch size, time budget) are on
+ * the config. The ceiling matters as much as the growth — a job held across a long incident must
+ * still be asked periodically, never deferred to effectively never.
+ */
+const CHAIN_PROOF_BACKOFF_BASE_MS = 30_000;
+const CHAIN_PROOF_BACKOFF_MAX_MS = 10 * 60_000;
+/** Jitter as a FRACTION of the computed backoff, so spread scales with the wait it spreads. */
+const CHAIN_PROOF_BACKOFF_JITTER = 0.25;
+
 type PreSendOutcome = 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send';
 
 /**
@@ -417,6 +429,20 @@ export class TripleStoreAsyncLiftPublisher
   private readonly idGenerator: () => string;
   private readonly rand: () => number;
   private readonly chainProofResolver?: AsyncLiftPublisherRecoveryResolver;
+  private readonly chainProofDispatchBatchSize: number;
+  private readonly chainProofDispatchTimeBudgetMs: number;
+  /**
+   * r18 (🔴 3816322914) — when a held job's turn establishes nothing, asking again on the very
+   * next tick spends another round trip for the same answer. This defers it, so a large held
+   * population rotates through the batch instead of the head of the list monopolizing every pass.
+   *
+   * Deliberately IN-MEMORY, not persisted: a due time on disk would be a durable-shape change on
+   * records already on running nodes, and it is not needed for the bound. A restart simply makes
+   * everything due again, which is safe — asking the chain is idempotent — and still costs at most
+   * one batch per pass. What must never happen is the inverse, and does not: skipping a job is a
+   * pure no-op, so a DELAYED lookup can never itself authorize a resend.
+   */
+  private readonly chainProofNextDueAt = new Map<string, { dueAt: number; attempts: number }>();
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
@@ -489,6 +515,8 @@ export class TripleStoreAsyncLiftPublisher
     this.rand = config.rand ?? (() => Math.random());
     assertNoLegacyChainRecoveryResolver(config);
     this.chainProofResolver = config.chainProofResolver;
+    this.chainProofDispatchBatchSize = config.chainProofDispatchBatchSize ?? 25;
+    this.chainProofDispatchTimeBudgetMs = config.chainProofDispatchTimeBudgetMs ?? 15_000;
     this.knowledgeAssetVmPublishRecoveryResolver = config.knowledgeAssetVmPublishRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
     this.knowledgeAssetVmPublishHandler = resolveKnowledgeAssetVmPublishHandler(config);
@@ -1361,12 +1389,29 @@ export class TripleStoreAsyncLiftPublisher
     // unreconciled — the phantom the pre-send write-ahead exists to make visible.
     if (this.paused || !this.chainProofResolver) return 0;
 
+    // r18 (🔴 3816322914) — this pass costs one RPC round trip PER HELD JOB, and
+    // `AsyncLiftRunner.start()` awaits `recover()`. Unbounded, an incident that leaves a large
+    // held population behind slow endpoints turns startup into `held jobs x RPC timeout` and
+    // re-pays it every cadence, with normal queue processing unable to begin meanwhile. Three
+    // bounds apply, and none of them changes a job's DISPOSITION: a job that is not asked is left
+    // exactly as held, so no bound can authorize a resend.
+    const startedAt = this.now();
     const heldJobs = (await this.list({ status: 'failed' }))
       .filter(isFailedJob)
       .filter((job) => this.jobHandlerFor(job.request).canRetryFailedRecovery(job));
 
+    // Bound 1 — only jobs whose backoff has elapsed. Jobs asked recently that established nothing
+    // are deferred, so the population ROTATES through the batch rather than the head of the list
+    // being re-asked every pass. No cursor is needed: the due times are the rotation.
+    const dueJobs = heldJobs.filter((job) => (this.chainProofNextDueAt.get(job.jobId)?.dueAt ?? 0) <= startedAt);
+
     let dispatched = 0;
-    for (const job of heldJobs) {
+    // Bound 2 — at most one batch of RPCs per pass.
+    for (const job of dueJobs.slice(0, Math.max(0, this.chainProofDispatchBatchSize))) {
+      // Bound 3 — the wall-clock ceiling. Batch size bounds the CALL COUNT; when each call is slow
+      // it is time that startup readiness actually depends on. Checked before each turn so a pass
+      // cannot start a new round trip once the budget is spent; the rest are asked next cadence.
+      if (this.now() - startedAt >= this.chainProofDispatchTimeBudgetMs) break;
       // Derive the lookup ONCE, before anything is called with this job. A held job's hash lives
       // in whichever carrier it has, and its wallet in `broadcast` or the claim; a job missing
       // either cannot be asked about at all, so it stays held rather than being handed to a
@@ -1379,12 +1424,37 @@ export class TripleStoreAsyncLiftPublisher
       // A job whose turn ended in an exception simply stays held and is asked again next tick,
       // which is the same disposition as any other unestablished answer.
       try {
-        dispatched += await this.dispatchOneHeldJob(job, lookup);
+        const settled = await this.dispatchOneHeldJob(job, lookup);
+        dispatched += settled;
+        if (settled > 0) this.chainProofNextDueAt.delete(job.jobId);
+        else this.deferNextChainProofAttempt(job.jobId);
       } catch {
+        // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
+        // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
+        // every pass and crowd out jobs that could actually settle.
+        this.deferNextChainProofAttempt(job.jobId);
         continue;
       }
     }
     return dispatched;
+  }
+
+  /**
+   * r18 (🔴 3816322914) — a turn that established nothing defers the next one, capped and
+   * jittered. Capped so a long-held job is still asked periodically rather than drifting to never;
+   * jittered so a population held by ONE incident — which is how they arrive — does not come due
+   * in lockstep and rebuild the thundering herd the batch bound exists to prevent.
+   */
+  private deferNextChainProofAttempt(jobId: string): void {
+    const attempts = (this.chainProofNextDueAt.get(jobId)?.attempts ?? 0) + 1;
+    const backoffMs = Math.min(
+      CHAIN_PROOF_BACKOFF_BASE_MS * 2 ** (attempts - 1),
+      CHAIN_PROOF_BACKOFF_MAX_MS,
+    );
+    this.chainProofNextDueAt.set(jobId, {
+      dueAt: this.now() + backoffMs + Math.floor(this.rand() * backoffMs * CHAIN_PROOF_BACKOFF_JITTER),
+      attempts,
+    });
   }
 
   /** One held job's turn: ask the chain, then execute the disposition the policy module decides. */

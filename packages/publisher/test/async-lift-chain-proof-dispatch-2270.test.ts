@@ -1097,4 +1097,122 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(released?.recovery?.txHashAccounted).toBe(true);
     });
   });
+
+  describe('the sweep is bounded — a held population cannot monopolize startup [r18]', () => {
+    // 🔴 3816322914 — the dispatcher spends one RPC round trip PER HELD JOB and
+    // `AsyncLiftRunner.start()` awaits `recover()`, so an unbounded pass turns startup into
+    // `held jobs x RPC timeout` after exactly the kind of incident that creates held jobs, and
+    // re-pays it every cadence. These rows pin the three bounds AND the invariant they must not
+    // buy: a job that is not asked is left held, never reset.
+
+    /** Seeds `count` genuinely held, evidence-bearing jobs and returns their ids in seed order. */
+    async function heldPopulation(
+      publisher: ReturnType<typeof createPublisher>,
+      count: number,
+    ): Promise<string[]> {
+      // Distinct requests: the same KA UAL resolves to the SAME job through the intent index, so
+      // a repeated default request would re-accept the first held job rather than seed a second.
+      const ids: string[] = [];
+      for (let i = 0; i < count; i += 1) {
+        ids.push((await failAfterRecordedTxHash(publisher, kaVmPublishRequest({
+          name: `albums-${i}`,
+          shareOperationId: `share-op-${i}`,
+          kaUal: KA_VM_KA_UAL.replace(/\/\d+$/, `/${100 + i}`),
+        }))).jobId);
+      }
+      return ids;
+    }
+
+    it('asks at most one configured BATCH per pass, however many jobs are held', async () => {
+      const asked: string[] = [];
+      const publisher = createPublisher({
+        chainProofDispatchBatchSize: 2,
+        chainProofResolver: async (lookup) => {
+          asked.push(lookup.walletId);
+          return { status: 'inconclusive' };
+        },
+      });
+      const ids = await heldPopulation(publisher, 6);
+
+      expect(await publisher.recover()).toBe(0);
+
+      // Six held jobs, two round trips. Without the bound this pass makes six.
+      expect(asked).toHaveLength(2);
+      // And the four it did not ask are untouched — the bound skips a LOOKUP, never decides a
+      // disposition. This is the half that must survive every future change to the pacing.
+      for (const jobId of ids) {
+        expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+      }
+    });
+
+    it('stops a pass when the TIME budget is spent, even inside the batch', async () => {
+      // The harness clock advances one tick per read, so a budget of 1 is spent by the first
+      // check: the pass makes no round trip at all. That is the point — batch size bounds the
+      // CALL COUNT, and this bounds the time those calls are allowed to take, which is what
+      // startup readiness depends on when each call is slow.
+      const asked: string[] = [];
+      const publisher = createPublisher({
+        chainProofDispatchBatchSize: 50,
+        chainProofDispatchTimeBudgetMs: 1,
+        chainProofResolver: async (lookup) => {
+          asked.push(lookup.walletId);
+          return { status: 'inconclusive' };
+        },
+      });
+      const ids = await heldPopulation(publisher, 3);
+
+      expect(await publisher.recover()).toBe(0);
+
+      expect(asked).toHaveLength(0);
+      for (const jobId of ids) {
+        expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+      }
+    });
+
+    it('ROTATES the population — a second pass asks the jobs the first one did not', async () => {
+      // Without per-job backoff the batch bound alone would re-ask the same head of the list on
+      // every pass, and the tail would never be settled at all. The deferral is what turns a cap
+      // into a rotation.
+      const asked: string[][] = [];
+      const publisher = createPublisher({
+        chainProofDispatchBatchSize: 2,
+        chainProofResolver: async (lookup) => {
+          asked[asked.length - 1].push(lookup.walletId);
+          return { status: 'inconclusive' };
+        },
+      });
+      await heldPopulation(publisher, 4);
+
+      asked.push([]);
+      await publisher.recover();
+      asked.push([]);
+      await publisher.recover();
+
+      expect(asked[0]).toHaveLength(2);
+      expect(asked[1]).toHaveLength(2);
+      // Disjoint: the second pass asked about transactions the first did not.
+      expect(asked[1].some((walletId) => asked[0].includes(walletId))).toBe(false);
+    });
+
+    it('a resolver that THROWS earns the same backoff as one that establishes nothing', async () => {
+      // Otherwise a job whose resolver reliably throws consumes a batch slot every pass forever
+      // and crowds out jobs that could actually settle — the batch bound would be spent on the
+      // one population guaranteed never to make progress.
+      const asked: string[] = [];
+      const publisher = createPublisher({
+        chainProofDispatchBatchSize: 1,
+        chainProofResolver: async (lookup) => {
+          asked.push(lookup.walletId);
+          throw new Error('RPC down');
+        },
+      });
+      await heldPopulation(publisher, 2);
+
+      await publisher.recover();
+      await publisher.recover();
+
+      expect(asked).toHaveLength(2);
+      expect(asked[0]).not.toBe(asked[1]);
+    });
+  });
 });

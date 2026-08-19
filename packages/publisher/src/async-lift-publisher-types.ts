@@ -521,6 +521,21 @@ export interface AsyncLiftPublisherConfig {
    * its resolver would hold every job forever with nothing to say why.
    */
   chainProofResolver?: AsyncLiftPublisherRecoveryResolver;
+  /**
+   * GH#2270 PR-3 r18 (🔴 3816322914) — the chain-proof sweep costs one RPC round trip per held
+   * job, and `AsyncLiftRunner.start()` awaits `recover()`. Unbounded, an incident that leaves a
+   * large held population behind slow endpoints turns startup into `held jobs x RPC timeout` and
+   * re-pays it every cadence. A pass therefore resolves at most this many jobs, resuming where
+   * the previous pass stopped so coverage stays round-robin rather than always re-asking the head
+   * of the list.
+   */
+  chainProofDispatchBatchSize?: number;
+  /**
+   * The wall-clock ceiling for one chain-proof pass. The batch size bounds RPC COUNT; this bounds
+   * TIME, which is what startup readiness actually depends on when each call is slow. A pass that
+   * exhausts the budget stops and the remaining jobs are asked on the next cadence.
+   */
+  chainProofDispatchTimeBudgetMs?: number;
   knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
   knowledgeAssetVmPublishHandler?: AsyncKnowledgeAssetVmPublishJobHandler;
