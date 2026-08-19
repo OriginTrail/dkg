@@ -403,6 +403,29 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       return expectFailed(await publisher.getStatus(jobId));
     }
 
+    it('does not persist a finalized job that is missing the metadata that shape requires [r9]', async () => {
+      // 3812794019 — a published-finalized record REQUIRES claim, validation, broadcast and
+      // inclusion. A job held on the recovery carrier alone, re-claimed and failed BEFORE
+      // validation, has none of the middle two, so finalizing it would write a `finalized` record
+      // that does not satisfy its own exported union. It stays held instead — the transaction is
+      // still accounted for by the evidence it carries, and the by-id clear is the operator's exit.
+      const publisher = dispatcher(RECOVERED);
+      const held = await failAfterRecordedTxHash(publisher);
+      const stripped = {
+        ...held,
+        validation: undefined,
+        failure: { ...held.failure, failedFromState: 'claimed' },
+      } as unknown as LiftJob;
+      delete (stripped as unknown as Record<string, unknown>).validation;
+      await h.store.deleteByPattern({ subject: jobSubject(held.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(stripped, DEFAULT_CONTROL_GRAPH_URI));
+
+      await publisher.recover();
+
+      const after = await publisher.getStatus(held.jobId);
+      expect(after?.status).toBe('failed');
+    });
+
     it('a raw broadcast that SIGNED is not requeued on a node with no resolver [r8]', async () => {
       // 3812585483 — before the pre-send write-ahead, reaching 'broadcast' did not imply a signed
       // transaction, so recovery reset such a job on a resolver-less node. It does now: the hash is

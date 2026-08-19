@@ -288,6 +288,28 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     expect(result.materialization.superseded).toBe(false);
   });
 
+  it('stays CURRENT when the pinned pair reports this proof as the latest position [r9]', async () => {
+    // 3812794155 — the equality polarity of the position comparison. This update IS the latest:
+    // same root, same count. `>` must not become `>=`, which would classify a current recovered
+    // update as historical and stamp the latest-version attribution over its own.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint) => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({ latestRoot: SEAL_MERKLE_ROOT, rootCount: 3n, blockNumber: 300 });
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '3' },
+      }),
+    });
+
+    expect(result.materialization.superseded).toBe(false);
+    // …and the version stays the recovered transaction's own inclusion block, not the head.
+    expect(result.materialization.versionBlock).toBe(77);
+  });
+
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),

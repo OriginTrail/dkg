@@ -1437,6 +1437,15 @@ export class TripleStoreAsyncLiftPublisher
     switch (disposition.action) {
       case 'finalize': {
         if (resolution.status !== 'recovered') return 0;
+        // PR #2300 r9 (3812794019) — a published-finalized record REQUIRES claim, validation,
+        // broadcast and inclusion, and both lanes finalize by rebuilding from the record they are
+        // given. A held job can legitimately lack the first two: reset to a carrier-only record,
+        // re-claimed, and failed again BEFORE validation. Finalizing that would persist a
+        // `finalized` job that does not satisfy its own exported union, which every consumer is
+        // entitled to rely on. There is nothing here to invent, so it stays held — the transaction
+        // is still accounted for by the evidence it carries, and the by-id clear is the exit. The
+        // LIVE lane cannot reach this state, which is why the check belongs here and not there.
+        if (!job.claim || !job.validation) return 0;
         // The record goes to the handler AS PERSISTED. Where it is recovering from is stated
         // separately, from the two places a failed job actually keeps it — the failure's origin
         // state and the evidence carrier the lookup was derived from. Nothing is restored,
