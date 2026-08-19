@@ -505,6 +505,16 @@ export class PublishMethods extends EVMChainAdapterBase {
    *
    * A lookup failure throws rather than resolving to a status: an RPC error is
    * an absence of information, never information about an absence.
+   *
+   * PR #2300 r1 — a MINED receipt is only evidence about the block it sits in, and every mined
+   * verdict this surface emits authorises a real action somewhere downstream: `reverted` releases
+   * the job's lifecycle hold as proven-ineffective, `confirmed` finalizes it as published, and
+   * `unrecognized` feeds update recognition. A status-0 receipt in an UNFINALIZED block is not
+   * permanent proof — a reorg can re-include the very same signed transaction on a chain where it
+   * SUCCEEDS, and the released job would then double-publish. So no mined verdict is emitted
+   * until the receipt's block is FINAL and CANONICAL (its hash still occupies its height); until
+   * then the answer is `pending`, which is the honest state: the transaction's fate is literally
+   * not final. The finality read itself failing propagates as a rejection, per the rule above.
    */
   async resolvePublishTransaction(
     txHash: string,
@@ -514,6 +524,9 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     const { receipt, publish } = await this.readPublishReceipt(txHash, options);
     if (receipt) {
+      if (!(await this.isReceiptBlockFinalAndCanonical(receipt, options))) {
+        return { status: 'pending' };
+      }
       if (receipt.status !== 1) return { status: 'reverted' };
       return publish ? { status: 'confirmed', publish } : { status: 'unrecognized' };
     }
@@ -524,47 +537,30 @@ export class PublishMethods extends EVMChainAdapterBase {
   }
 
   /**
-   * GH#2270 PR-3 r2 — see {@link ChainAdapter.isKnowledgeAssetMinted}.
+   * PR #2300 r1 — is this receipt's block both FINAL and still CANONICAL?
    *
-   * ERC-721 `ownerOf` REVERTS for an unminted token, so "not published" arrives as a thrown
-   * CALL_EXCEPTION rather than a value. Only that exact shape — a call exception naming a
-   * nonexistent/invalid token — is read as `false`; anything else (an RPC failure, a revert
-   * carrying other data, no deployed storage contract) is `null`, and the caller holds. Getting
-   * that classification wrong in the permissive direction would authorise a resend, so it errs the
-   * other way by construction.
+   * One `readProvider` callback, so the finalized frontier and the block-at-height read come from
+   * the SAME endpoint — the same pinning discipline as {@link readFinalizedChainProofSnapshot}.
+   * Depth alone is not the test: a receipt can sit at a finalized HEIGHT while the hash at that
+   * height belongs to a different block (the receipt was fetched before the reorg settled), and a
+   * verdict about the orphaned copy would be a verdict about a chain that no longer exists. A
+   * throw propagates: the caller's contract is that lookup failures reject rather than resolve.
    */
-  async isKnowledgeAssetMinted(kaId: bigint, _options: ChainReadOptions = {}): Promise<boolean | null> {
-    await this.init();
-    if (!this.contracts.knowledgeAssetStorage) return null;
-    try {
-      const owner = await this.getKnowledgeAssetOwner(kaId);
-      return owner !== ethers.ZeroAddress;
-    } catch (err) {
-      return isNonexistentTokenRevert(err) ? false : null;
-    }
-  }
-
-  /**
-   * GH#2270 PR-3 r1 — see {@link ChainAdapter.getFinalizedAccountNonce}.
-   *
-   * `null` on ANY failure, an endpoint that rejects the `finalized` tag included, because the
-   * caller reads `null` as "no proof" and keeps holding. Falling back to a `latest` nonce would
-   * hand recovery a conclusion a reorg can take back, which is the one thing this must not do.
-   */
-  async getFinalizedAccountNonce(
-    address: string,
+  protected async isReceiptBlockFinalAndCanonical(
+    receipt: { blockNumber: number; blockHash: string },
     options: ChainReadOptions = {},
-  ): Promise<number | null> {
-    await this.init();
-    try {
-      return await this.readProvider(
-        'finalized account nonce',
-        (provider) => provider.getTransactionCount(address, 'finalized'),
-        { signal: options.signal },
-      );
-    } catch {
-      return null;
-    }
+  ): Promise<boolean> {
+    return this.readProvider(
+      'publish receipt finality',
+      async (provider) => {
+        const finalized = await provider.getBlock('finalized');
+        if (!finalized || finalized.number < receipt.blockNumber) return false;
+        const atHeight = await provider.getBlock(receipt.blockNumber);
+        return !!atHeight?.hash
+          && atHeight.hash.toLowerCase() === receipt.blockHash.toLowerCase();
+      },
+      { signal: options.signal },
+    );
   }
 
   /**
@@ -577,13 +573,17 @@ export class PublishMethods extends EVMChainAdapterBase {
    * next endpoint as a whole, so a snapshot is never spliced across two providers; if no endpoint
    * can produce the pinned pair the answer is `null`, and the caller holds.
    *
-   * The minted read reuses the SAME classification as {@link isKnowledgeAssetMinted}: `false`
-   * only for a provable nonexistent-token revert AT the pinned block, `null` for everything else.
-   * A revert is a chain answer, not a transport failure, so it is classified in place rather than
-   * thrown into the failover loop.
+   * The minted classification (PR #2300 r1 — private to the adapter now; the public
+   * `isKnowledgeAssetMinted` it came from is deleted): ERC-721 `ownerOf` REVERTS for an unminted
+   * token, so "not published" arrives as a thrown CALL_EXCEPTION. Only the exact
+   * nonexistent-token shape is read as `false`; every other CHAIN answer (a paused contract, a
+   * decode failure, an undeployed storage contract) is `null`, and the caller holds. A TRANSPORT
+   * failure on the minted read is neither: it says nothing about the token, so it RETHROWS and
+   * the whole pinned snapshot fails over to the next endpoint — swallowing it as `null` would let
+   * one flaky read on an otherwise healthy endpoint block a provable release.
    */
   async readFinalizedChainProofSnapshot(
-    params: { address: string; kaId?: bigint },
+    params: { address: string; kaId: bigint },
     options: ChainReadOptions = {},
   ): Promise<FinalizedChainProofSnapshot | null> {
     await this.init();
@@ -596,9 +596,6 @@ export class PublishMethods extends EVMChainAdapterBase {
             throw new Error('endpoint cannot serve a finalized block identity');
           }
           const accountNonce = await provider.getTransactionCount(params.address, block.number);
-          if (params.kaId === undefined) {
-            return { blockNumber: block.number, blockHash: block.hash, accountNonce };
-          }
           let kaMinted: boolean | null = null;
           const storage = this.contracts.knowledgeAssetStorage;
           if (storage) {
@@ -607,6 +604,14 @@ export class PublishMethods extends EVMChainAdapterBase {
                 .ownerOf(params.kaId, { blockTag: block.number });
               kaMinted = ethers.getAddress(owner) !== ethers.ZeroAddress;
             } catch (err) {
+              // A revert (CALL_EXCEPTION) or a decode failure (BAD_DATA) is a CHAIN answer for
+              // this endpoint and classifies in place. Anything else — NETWORK_ERROR, a timeout,
+              // a bare fetch failure — is an absence of information about THIS endpoint, so it
+              // RETHROWS and the whole pinned snapshot fails over to the next one; swallowing it
+              // as `null` would let one flaky read on an otherwise healthy endpoint block a
+              // provable release, and no fallback here can splice (the snapshot restarts whole).
+              const code = (err as { code?: unknown })?.code;
+              if (code !== 'CALL_EXCEPTION' && code !== 'BAD_DATA') throw err;
               kaMinted = isNonexistentTokenRevert(err) ? false : null;
             }
           }

@@ -12,6 +12,7 @@
  * snapshot is that endpoint's own consistent pair rather than a mix.
  */
 import { describe, expect, it } from 'vitest';
+import { ethers } from 'ethers';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 
@@ -148,15 +149,92 @@ describe('EVMChainAdapter.readFinalizedChainProofSnapshot [GH#2270 r4]', () => {
     expect(snapshot).toEqual({ blockNumber: 90, blockHash: BLOCK_HASH, accountNonce: 7, kaMinted: null });
   });
 
-  it('omits kaMinted entirely when no kaId was asked about', async () => {
-    const { adapter, calls } = adapterOver([{
-      finalized: { number: 90, hash: BLOCK_HASH },
-      nonceAt: async () => 7,
-    }]);
-    const snapshot = await adapter.readFinalizedChainProofSnapshot({ address: ADDRESS });
-    expect(snapshot).toEqual({ blockNumber: 90, blockHash: BLOCK_HASH, accountNonce: 7 });
-    expect(snapshot && 'kaMinted' in snapshot).toBe(false);
-    expect(calls.filter((c) => c.read === 'ownerOf')).toHaveLength(0);
+  // PR #2300 r1 — the classifier matrix, moved here from the deleted public
+  // `isKnowledgeAssetMinted`. `kaMinted: false` is what authorises the recovery lane to resend,
+  // so only the exact nonexistent-token revert shapes may produce it; every other CHAIN answer is
+  // `null`. TRANSPORT shapes are deliberately NOT in the null matrix any more: they say nothing
+  // about the token on any endpoint, so they fail the WHOLE pinned snapshot over (rows below).
+  describe('the minted classification at the pinned block', () => {
+    function snapshotWhere(ownerAt: () => Promise<string>) {
+      return adapterOver([{
+        finalized: { number: 90, hash: BLOCK_HASH },
+        nonceAt: async () => 7,
+        ownerAt,
+      }]).adapter.readFinalizedChainProofSnapshot({ address: ADDRESS, kaId: KA_ID });
+    }
+
+    function callException(extra: Record<string, unknown>): Error {
+      return Object.assign(new Error(String(extra.message ?? 'execution reverted')), {
+        code: 'CALL_EXCEPTION',
+        ...extra,
+      });
+    }
+
+    it('answers FALSE for the zero address', async () => {
+      expect((await snapshotWhere(async () => ethers.ZeroAddress))?.kaMinted).toBe(false);
+    });
+
+    it.each([
+      ['OpenZeppelin custom error', { reason: 'ERC721NonexistentToken(uint256)' }],
+      ['classic invalid token id', { reason: 'ERC721: invalid token ID' }],
+      ['classic nonexistent token', { message: 'execution reverted: ERC721: owner query for nonexistent token' }],
+      ['shortMessage carrier', { shortMessage: 'execution reverted: ERC721NonexistentToken' }],
+    ])('answers FALSE for a recognized nonexistent-token revert (%s)', async (_label, extra) => {
+      expect((await snapshotWhere(async () => { throw callException(extra); }))?.kaMinted).toBe(false);
+    });
+
+    it.each([
+      ['a paused contract', callException({ reason: 'Paused' })],
+      ['an unrelated revert reason', callException({ reason: 'NotAuthorized' })],
+      ['a bare CALL_EXCEPTION with no reason', callException({ message: 'missing revert data' })],
+      ['a decode failure', Object.assign(new Error('could not decode result data'), { code: 'BAD_DATA' })],
+    ])('answers NULL — never false — for %s', async (_label, err) => {
+      // A `false` here would be read as "nothing published" and authorise a resend. Each of these
+      // IS a chain answer (the endpoint executed the call), just not one that proves absence.
+      const snapshot = await snapshotWhere(async () => { throw err; });
+      expect(snapshot?.kaMinted).toBeNull();
+      expect(snapshot?.kaMinted).not.toBe(false);
+    });
+
+    it.each([
+      ['a transport failure', Object.assign(new Error('network unreachable'), { code: 'NETWORK_ERROR' })],
+      ['a timeout', Object.assign(new Error('ETIMEDOUT'), { code: 'TIMEOUT' })],
+      ['a plain Error', new Error('something else entirely')],
+    ])('fails the WHOLE snapshot over for %s — never a classified answer from a broken read', async (_label, err) => {
+      // These say nothing about the token. With no healthy fallback the snapshot is null (the
+      // caller holds); the row below proves that WITH one, the whole pinned trio is re-served.
+      const snapshot = await snapshotWhere(async () => { throw err; });
+      expect(snapshot).toBeNull();
+    });
+  });
+
+  it('a transport failure on ONLY the minted read fails over to a fully healthy endpoint', async () => {
+    // PR #2300 r1 (🟡 3809054824) — the primary serves the finalized block and the nonce, then
+    // dies with a transport error on ownerOf. Swallowing that as kaMinted:null would let one
+    // flaky read block a provable release; instead the WHOLE pinned snapshot retries on the
+    // secondary, which serves all three reads at ITS pin — no splice, and a classified answer.
+    const { adapter, calls } = adapterOver([
+      {
+        finalized: { number: 90, hash: `0x${'02'.repeat(32)}` },
+        nonceAt: async () => 8,
+        ownerAt: async () => {
+          throw Object.assign(new Error('socket hang up'), { code: 'NETWORK_ERROR' });
+        },
+      },
+      {
+        finalized: { number: 90, hash: BLOCK_HASH },
+        nonceAt: async () => 8,
+        ownerAt: async () => { throw nonexistentTokenRevert(); },
+      },
+    ]);
+
+    const snapshot = await adapter.readFinalizedChainProofSnapshot({ address: ADDRESS, kaId: KA_ID });
+
+    expect(snapshot).toEqual({ blockNumber: 90, blockHash: BLOCK_HASH, accountNonce: 8, kaMinted: false });
+    expect(calls.filter((c) => c.provider === 1)).toEqual([
+      { provider: 1, read: 'nonce', blockTag: 90 },
+      { provider: 1, read: 'ownerOf', blockTag: 90 },
+    ]);
   });
 
   it('returns NULL when no endpoint can serve a finalized block identity', async () => {
@@ -226,10 +304,12 @@ describe('MockChainAdapter.readFinalizedChainProofSnapshot — parity [GH#2270 r
     expect(snapshot?.kaMinted).not.toBe(false);
   });
 
-  it('omits kaMinted when no kaId was asked about', async () => {
+  it('classifies an undeclared id as FALSE — the mock event log IS the chain', async () => {
+    // PR #2300 r1 — `kaId` is required now, so the mock's parity answer for an id nothing minted
+    // and nothing declared unknowable is the provable `false` a real unminted token produces.
     const mock = new MockChainAdapter('mock:31337', ADDRESS);
     mock.__setFinalizedAccountNonce(ADDRESS, 9);
-    const snapshot = await mock.readFinalizedChainProofSnapshot({ address: ADDRESS });
-    expect(snapshot && 'kaMinted' in snapshot).toBe(false);
+    const snapshot = await mock.readFinalizedChainProofSnapshot({ address: ADDRESS, kaId: 777n });
+    expect(snapshot?.kaMinted).toBe(false);
   });
 });

@@ -196,6 +196,7 @@ export class MockChainAdapter implements ChainAdapter {
    * the mock has no finality, so it reports `null` and recovery stays fail-closed.
    */
   private finalizedAccountNonces = new Map<string, number>();
+  private unfinalizedTxHashes = new Set<string>();
   /** GH#2270 PR-3 r2 — ids a test declared minted, and ids the mock must refuse to answer for. */
   private mintedKaIds = new Set<string>();
   private unknownMintedIds = new Set<string>();
@@ -415,13 +416,19 @@ export class MockChainAdapter implements ChainAdapter {
     txHash: string,
     _options: ChainReadOptions = {},
   ): Promise<PublishTransactionResolution> {
+    // PR #2300 r1 — parity with the EVM adapter's finality gate: a MINED verdict (confirmed,
+    // reverted, unrecognized) is only emitted for a receipt whose block is final and canonical;
+    // until then the honest answer is `pending`. The mock mines-and-finalizes instantly by
+    // default, so nothing changes for a test that does not declare otherwise; the seam below
+    // declares the not-yet-final window.
+    const unfinalized = this.unfinalizedTxHashes.has(txHash);
     const publish = await this.resolvePublishByTxHash(txHash);
-    if (publish) return { status: 'confirmed', publish };
+    if (publish) return unfinalized ? { status: 'pending' } : { status: 'confirmed', publish };
 
     switch (this.transactionStates.get(txHash)) {
       case 'pending': return { status: 'pending' };
-      case 'reverted': return { status: 'reverted' };
-      case 'mined': return { status: 'unrecognized' };
+      case 'reverted': return unfinalized ? { status: 'pending' } : { status: 'reverted' };
+      case 'mined': return unfinalized ? { status: 'pending' } : { status: 'unrecognized' };
       // Nothing in the event log, nothing declared: the mock genuinely does not
       // have this transaction, which is what `not-found` asserts.
       default: return { status: 'not-found' };
@@ -444,46 +451,35 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   /**
-   * GH#2270 PR-3 r1 — see {@link ChainAdapter.getFinalizedAccountNonce}.
-   *
-   * `null` unless a test declares one. The mock mines instantly and has no finality notion, so it
-   * has no honest finalized nonce to report, and `null` is exactly the fail-closed answer the
-   * recovery side must see from a deployment that cannot prove nonce consumption.
+   * PR #2300 r1 test seam — declare that this transaction's receipt sits in a block that is not
+   * yet final (or was reorged out of its height). Every mined verdict for it reads `pending`
+   * until the seam is cleared, mirroring the EVM adapter's finality gate.
    */
-  async getFinalizedAccountNonce(
-    address: string,
-    _options: ChainReadOptions = {},
-  ): Promise<number | null> {
-    return this.finalizedAccountNonces.get(address.toLowerCase()) ?? null;
-  }
-
-  /**
-   * GH#2270 PR-3 r2 — see {@link ChainAdapter.isKnowledgeAssetMinted}. The mock's collections map
-   * IS its minted set, so this is an exact answer rather than a stub, and `null` is reserved for
-   * the case a test declares explicitly.
-   */
-  async isKnowledgeAssetMinted(kaId: bigint, _options: ChainReadOptions = {}): Promise<boolean | null> {
-    if (this.unknownMintedIds.has(kaId.toString())) return null;
-    return this.collections.has(kaId) || this.mintedKaIds.has(kaId.toString());
+  __setTransactionUnfinalized(txHash: string, unfinalized = true): void {
+    if (unfinalized) this.unfinalizedTxHashes.add(txHash);
+    else this.unfinalizedTxHashes.delete(txHash);
   }
 
   /**
    * GH#2270 PR-3 r4 — see {@link ChainAdapter.readFinalizedChainProofSnapshot}. The mock's one
-   * finality seam is the declared finalized nonce, so the snapshot exists exactly when a test has
-   * declared one for this address — the same condition under which the old pair of reads could
-   * answer. The minted half comes from the same minted seams as {@link isKnowledgeAssetMinted},
-   * observed in the SAME call, which is the parity the capability exists for.
+   * finality seam is the declared finalized nonce (`__setFinalizedAccountNonce` declares the
+   * chain FACT, and survives PR #2300 r1's deletion of the granular read methods it once also
+   * fed), so the snapshot exists exactly when a test has declared one for this address. The
+   * minted half reads the same minted seams (`collections` / `__setKnowledgeAssetMinted` /
+   * `__setKnowledgeAssetMintedUnknown`) in the SAME call, which is the parity the capability
+   * exists for.
    */
   async readFinalizedChainProofSnapshot(
-    params: { address: string; kaId?: bigint },
+    params: { address: string; kaId: bigint },
     _options: ChainReadOptions = {},
   ): Promise<FinalizedChainProofSnapshot | null> {
     const accountNonce = this.finalizedAccountNonces.get(params.address.toLowerCase());
     if (accountNonce === undefined) return null;
     const blockNumber = this.nextBlock;
-    const base = { blockNumber, blockHash: mockBlockHash(blockNumber), accountNonce };
-    if (params.kaId === undefined) return base;
-    return { ...base, kaMinted: await this.isKnowledgeAssetMinted(params.kaId) };
+    const kaMinted = this.unknownMintedIds.has(params.kaId.toString())
+      ? null
+      : this.collections.has(params.kaId) || this.mintedKaIds.has(params.kaId.toString());
+    return { blockNumber, blockHash: mockBlockHash(blockNumber), accountNonce, kaMinted };
   }
 
   /**

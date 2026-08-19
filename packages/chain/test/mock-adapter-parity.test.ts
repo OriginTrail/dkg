@@ -97,6 +97,12 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'nextSigner',
   'nextAuthorizedSigner',
   'findSignerByAddress',
+  // PR #2300 r1 — the finality gate behind resolvePublishTransaction's mined verdicts. TS
+  // `protected`, erased at runtime; it reads real blocks from a real provider, which the mock
+  // has none of — the mock's finality lives in its __setTransactionUnfinalized seam inside
+  // resolvePublishTransaction itself, and the parity that matters (mined verdicts wait for
+  // finality) is pinned by publish-transaction-finality.unit.test.ts on BOTH adapters.
+  'isReceiptBlockFinalAndCanonical',
   'resolvePinnedPublisherSigner', // EVM signer-pool authorization/funding helper; mock has no wallet pool
   'selectFundedSignerOrThrow', // strict funding diagnostic used by EVM publish planning
   'quoteRequiredPublishTokenAmount', // shared protected AskStorage quote behind EVM reads/planning

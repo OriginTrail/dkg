@@ -342,10 +342,13 @@ export interface FinalizedChainProofSnapshot {
   /** `getTransactionCount(address, blockNumber)`: the NEXT nonce as of the pinned block. */
   accountNonce: number;
   /**
-   * Minted state of the requested `kaId` AT the pinned block. Present only when a `kaId` was
-   * supplied; `false` only for a provable nonexistent-token answer, `null` for every ambiguity.
+   * Minted state of the requested `kaId` AT the pinned block: `true` for a real owner, `false`
+   * only for a provable nonexistent-token answer, `null` for every ambiguity (an unclassifiable
+   * revert, an undeployed storage contract). PR #2300 r1 — non-optional, because the snapshot
+   * REQUIRES a `kaId` now: the release decision it feeds is only ever taken over a pinned
+   * identity, so a nonce-only snapshot had no caller and existed only as optional soup.
    */
-  kaMinted?: boolean | null;
+  kaMinted: boolean | null;
 }
 
 export interface KAUpdateVerification {
@@ -1161,60 +1164,30 @@ export interface ChainAdapter {
   ): Promise<PublishTransactionResolution>;
 
   /**
-   * GH#2270 PR-3 — the account nonce of `address` as of the latest FINALIZED block, or `null` when
-   * this deployment cannot answer that question (no finalized tag, an endpoint that rejects it, a
-   * chain with no finality notion).
-   *
-   * `finalized` is load-bearing, not an optimisation. Recovery uses this to prove a transaction can
-   * NEVER mine: if the wallet's nonce has moved past the slot a signed transaction reserved, and
-   * that transaction is still not on chain, something else spent the slot and this one is
-   * permanently unminable. Read at `latest` that conclusion can be reorged away, and the job would
-   * be resent while the original is still viable — so a deployment that cannot serve `finalized`
-   * must answer `null` and leave recovery holding rather than guess from a nearer block.
-   */
-  getFinalizedAccountNonce?(
-    address: string,
-    options?: ChainReadOptions,
-  ): Promise<number | null>;
-
-  /**
-   * GH#2270 PR-3 r2 — has this exact knowledge asset id already been minted? `true` / `false` /
-   * `null` when the chain could not say.
-   *
-   * Recovery needs this because nonce consumption proves only that a recorded transaction HASH can
-   * never mine — not that the publish did not happen. A same-calldata replacement (a fee bump from
-   * outside this process, a shared signer) consumes the same nonce slot AND performs the publish,
-   * and a lane that released on nonce evidence alone would re-run on top of it.
-   *
-   * Asking by IDENTITY closes that: the id a job would re-mint is fixed by its seal, so if it is
-   * already minted the publish happened, whoever sent it. `null` is the fail-closed answer for
-   * every ambiguity — an RPC error, an undeployed storage contract, a revert carrying data — and
-   * the caller keeps holding rather than guessing.
-   */
-  isKnowledgeAssetMinted?(
-    kaId: bigint,
-    options?: ChainReadOptions,
-  ): Promise<boolean | null>;
-
-  /**
    * GH#2270 PR-3 r4 — the two release-by-absence facts, observed together at ONE finalized block
    * on ONE provider, or `null` when this deployment cannot produce that pinned pair.
    *
-   * Read separately ({@link getFinalizedAccountNonce} then {@link isKnowledgeAssetMinted}), the
-   * two proofs can come from different endpoints and different blocks: a nonce that reads as
-   * consumed on a fresh endpoint plus a minted-state read served by a lagging one that has not
-   * seen the replacement's mint yet composes into "consumed and unminted" — a release verdict no
-   * single chain state ever contained. Pinning both reads to one finalized block identity on one
-   * provider makes the pair a fact about A block rather than a splice of two.
+   * Read separately (a finalized account nonce, then a minted-state check), the two proofs can be
+   * served by different endpoints at different heights: a nonce that reads as consumed on a fresh
+   * endpoint plus a minted-state read served by a lagging one that has not seen the replacement's
+   * mint yet composes into "consumed and unminted" — a release verdict no single chain state ever
+   * contained. Pinning both reads to one finalized block identity on one provider makes the pair
+   * a fact about A block rather than a splice of two. PR #2300 r1 — the snapshot is the ONE
+   * surface for these facts: the granular `getFinalizedAccountNonce` / `isKnowledgeAssetMinted`
+   * capabilities it superseded are deleted (they never shipped), and `kaId` is REQUIRED because
+   * the decision this feeds is only ever taken over a pinned identity.
    *
-   * `kaMinted` is present only when `kaId` was asked about: `false` only for the one revert shape
-   * that means "this token does not exist AT the pinned block", `null` for every ambiguity — the
-   * same fail-closed classification {@link isKnowledgeAssetMinted} uses. A `null` RESULT means no
-   * pinned pair could be produced on any endpoint, and the caller must treat the absence question
-   * as unanswerable rather than fall back to unpinned reads.
+   * `finalized` is load-bearing, not an optimisation: the nonce half proves a recorded
+   * transaction can NEVER mine (its slot is behind the finalized frontier), and read at `latest`
+   * that conclusion can be reorged away. The minted half asks by IDENTITY, which is what closes
+   * the same-calldata-replacement hole nonce consumption cannot see. `kaMinted` is `false` only
+   * for the one revert shape that means "this token does not exist AT the pinned block", `null`
+   * for every ambiguity. A `null` RESULT means no pinned pair could be produced on any endpoint,
+   * and the caller must treat the absence question as unanswerable rather than fall back to
+   * unpinned reads.
    */
   readFinalizedChainProofSnapshot?(
-    params: { address: string; kaId?: bigint },
+    params: { address: string; kaId: bigint },
     options?: ChainReadOptions,
   ): Promise<FinalizedChainProofSnapshot | null>;
 

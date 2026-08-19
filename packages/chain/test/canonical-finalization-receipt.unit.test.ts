@@ -21,6 +21,10 @@ function adapter(
     getTransactionWithFailover: vi.fn(async () => null),
     getBlockTimestamp: vi.fn(async () => 1_234_567),
     parseV10PublishReceipt: vi.fn(async () => null),
+    // PR #2300 r1 — `resolvePublishTransaction` gates every mined verdict on receipt-block
+    // finality; these rows are about receipt PROJECTION, so the gate defaults to satisfied and
+    // the dedicated finality rows live in publish-transaction-finality.unit.test.ts.
+    isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
     ...overrides,
   }) as PublishMethods;
   if (useProductionV10Parser) {
