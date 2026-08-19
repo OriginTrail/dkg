@@ -55,6 +55,36 @@ export function hasChainPublishLookup(chain: ChainAdapter): boolean {
 }
 
 /**
+ * GH#2270 PR-3 r22 (🔴 3817363935) — can this adapter settle a job of THIS operation kind, on
+ * every outcome the dispatcher can reach for it? The tri-state lookup is necessary and not
+ * sufficient: it decides `confirmed` / `pending` / `reverted` / `not-found`, but each kind then
+ * needs a different second capability to turn that into a disposition.
+ *
+ * - a CREATE's `not-found` becomes a release only through the finalized nonce/minted snapshot, so
+ *   without `readFinalizedChainProofSnapshot` every tick collapses to `inconclusive` and the job
+ *   is held forever behind a `retryable: true` that nothing can honour.
+ * - an UPDATE's mined transaction is only recognized through `verifyKAUpdate` gated by
+ *   `isReceiptBlockFinalAndCanonical`, and its absence is deliberately inconclusive, so an adapter
+ *   missing either method can never settle one.
+ *
+ * Reporting the capability the adapter actually has is the whole point of the honesty contract:
+ * a promise the wiring cannot keep is worse than an honest operator-clear.
+ */
+export function hasChainRecoveryCapabilityFor(
+  chain: ChainAdapter,
+  operationKind: 'create' | 'update' | undefined,
+): boolean {
+  if (!hasChainPublishLookup(chain)) return false;
+  if (operationKind === 'create') {
+    return typeof chain.readFinalizedChainProofSnapshot === 'function';
+  }
+  // An unmarked record is treated as an update by the same safe fallback the dispatcher uses, so
+  // it is held to the update capability rather than being given the weaker create answer.
+  return typeof chain.verifyKAUpdate === 'function'
+    && typeof chain.isReceiptBlockFinalAndCanonical === 'function';
+}
+
+/**
  * GH#2270 PR-3 r2 — wallet id to the chain adapter that signs for it.
  *
  * The recovery factories used to take the publisher map and reach through each `DKGPublisher` for
@@ -140,7 +170,7 @@ export function createChainProofResolver(
       // lagging endpoint that has not seen the replacement's mint) composes into a release
       // verdict no single chain state ever contained. The DECISION still lives here — the
       // adapter reports atomically-observed facts; policy decides what they establish.
-      return await isPublishProvenAbsent(lookup, adapters)
+      return await isPublishProvenAbsent(lookup, adapters, options)
         ? { status: 'not-found' }
         : { status: 'inconclusive' };
     }

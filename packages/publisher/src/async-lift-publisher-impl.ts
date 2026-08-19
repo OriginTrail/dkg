@@ -431,7 +431,10 @@ export class TripleStoreAsyncLiftPublisher
   private readonly idGenerator: () => string;
   private readonly rand: () => number;
   private readonly chainProofResolver?: AsyncLiftPublisherRecoveryResolver;
-  private readonly chainProofCapableForWallet?: (walletId: string) => boolean;
+  private readonly chainProofCapableForWallet?: (
+    walletId: string,
+    operationKind: 'create' | 'update' | undefined,
+  ) => boolean;
   private readonly chainProofDispatchBatchSize: number;
   private readonly chainProofDispatchTimeBudgetMs: number;
   /**
@@ -1383,7 +1386,12 @@ export class TripleStoreAsyncLiftPublisher
     // be asked about either, which is the same answer for the same reason.
     const walletId = job.broadcast?.walletId ?? job.claim?.walletId;
     if (!walletId) return false;
-    if (this.chainProofCapableForWallet && !this.chainProofCapableForWallet(walletId)) return false;
+    // r22 (🔴 3817363935) — and per OPERATION KIND, not just per wallet. The tri-state lookup
+    // is necessary but not sufficient: a create's absence release needs the finalized snapshot and
+    // an update's recognition needs verification plus the finality gate, so an adapter with the
+    // lookup alone can hold a job forever behind a `retryable: true` nothing can honour.
+    if (this.chainProofCapableForWallet
+      && !this.chainProofCapableForWallet(walletId, liftJobOperationKindMarker(job))) return false;
     if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return true;
     // r12 (3813505773) — a named job needs the recovery resolver whatever its kind. The create
     // case looked exempt because absence-release is create-only and needs nothing but the reset —

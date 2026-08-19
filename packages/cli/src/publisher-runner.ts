@@ -66,6 +66,7 @@ import {
   chainAdaptersForWallets,
   createChainProofResolver,
   hasChainPublishLookup,
+  hasChainRecoveryCapabilityFor,
   mapOnChainPublishResultToLiftRecovery,
   verifyCanonicalUpdateFacts,
   type PublisherChainAdapters,
@@ -551,9 +552,9 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     // adapter with a legacy one the resolvers are installed for the whole node. The honesty
     // contract is per JOB, so admission must ask about the wallet that actually signs it rather
     // than inherit the node-wide answer.
-    chainProofCapableForWallet: (walletId: string) => {
+    chainProofCapableForWallet: (walletId: string, operationKind: 'create' | 'update' | undefined) => {
       const chain = chainAdapters.get(walletId);
-      return chain !== undefined && hasChainPublishLookup(chain);
+      return chain !== undefined && hasChainRecoveryCapabilityFor(chain, operationKind);
     },
     knowledgeAssetVmPublishRecoveryResolver: hasChainRecovery
       ? createKnowledgeAssetVmPublishRecoveryResolver(chainAdapters)

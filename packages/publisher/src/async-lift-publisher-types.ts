@@ -561,7 +561,10 @@ export interface AsyncLiftPublisherConfig {
    * Absent, every wallet is treated as capable — the single-adapter case, where the resolver's own
    * presence is the whole answer.
    */
-  chainProofCapableForWallet?: (walletId: string) => boolean;
+  chainProofCapableForWallet?: (
+    walletId: string,
+    operationKind: 'create' | 'update' | undefined,
+  ) => boolean;
   knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
   knowledgeAssetVmPublishHandler?: AsyncKnowledgeAssetVmPublishJobHandler;

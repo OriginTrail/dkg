@@ -19,6 +19,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   createChainProofResolver,
   hasChainPublishLookup,
+  hasChainRecoveryCapabilityFor,
   type PublisherChainAdapters,
 } from '../src/publisher-chain-proof.js';
 import { createKnowledgeAssetVmPublishRecoveryResolver } from '../src/publisher-runner.js';
@@ -602,6 +603,33 @@ describe('GH#2270 runner chain-proof resolution', () => {
       expect(seen[0]?.aborted).toBe(true);
     });
 
+    it('carries the deadline into the ABSENCE-proof read too [r22]', async () => {
+      // 🔴 3817363940 — the row above only enters the transaction lookup. The create
+      // absence path makes a SECOND network read (the finalized nonce/minted snapshot), and it is
+      // the one that authorizes a resend, so a deadline that stops short of it leaves the most
+      // expensive RPC running after the pass gave up. "Every adapter read" has to mean every one.
+      const snapshotSignals: Array<AbortSignal | undefined> = [];
+      const adapter = {
+        chainId: 'evm:31337',
+        resolvePublishTransaction: vi.fn(async () => ({ status: 'not-found' as const })),
+        getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
+        readFinalizedChainProofSnapshot: vi.fn(
+          async (_params: unknown, opts?: { signal?: AbortSignal }) => {
+            snapshotSignals.push(opts?.signal);
+            return { blockNumber: 100, blockHash: `0x${'aa'.repeat(32)}`, accountNonce: 9, kaMinted: false };
+          },
+        ),
+      } as unknown as ChainAdapter;
+
+      const controller = new AbortController();
+      await createChainProofResolver(publishersWith(adapter))(
+        { ...lookupWithNonce, publishIdentityKaId: KA_ID.toString() },
+        { signal: controller.signal },
+      );
+
+      expect(snapshotSignals).toEqual([controller.signal]);
+    });
+
     it('a legacy-only adapter is inconclusive in BOTH directions [r17]', async () => {
       // 3814893074 — the receipt-only lookup can neither see a mempool (so it may never contribute
       // `not-found`) nor establish that its receipt block is final and canonical: its result has no
@@ -625,6 +653,44 @@ describe('GH#2270 runner chain-proof resolution', () => {
 
       expect(resolution.status).toBe('inconclusive');
       expect(resolvePublishByTxHash).not.toHaveBeenCalled();
+    });
+
+    it('capability is OPERATION-AWARE — the lookup alone settles neither kind [r22]', () => {
+      // 🔴 3817363935 — the tri-state lookup decides confirmed/pending/reverted/not-found, but
+      // turning that into a DISPOSITION needs a different second capability per kind. An adapter
+      // with the lookup alone advertised `retryable: true` and then held the job forever.
+      const asAdapter = (c: Record<string, unknown>) => c as unknown as ChainAdapter;
+      const lookupOnly = asAdapter({ resolvePublishTransaction: () => null });
+
+      // A create's absence release runs entirely through the finalized snapshot.
+      expect(hasChainRecoveryCapabilityFor(lookupOnly, 'create')).toBe(false);
+      expect(hasChainRecoveryCapabilityFor(
+        asAdapter({ resolvePublishTransaction: () => null, readFinalizedChainProofSnapshot: () => null }),
+        'create',
+      )).toBe(true);
+
+      // An update is recognized through verification GATED by finality — both, or neither.
+      expect(hasChainRecoveryCapabilityFor(lookupOnly, 'update')).toBe(false);
+      expect(hasChainRecoveryCapabilityFor(
+        asAdapter({ resolvePublishTransaction: () => null, verifyKAUpdate: () => null }),
+        'update',
+      )).toBe(false);
+      expect(hasChainRecoveryCapabilityFor(
+        asAdapter({
+          resolvePublishTransaction: () => null,
+          verifyKAUpdate: () => null,
+          isReceiptBlockFinalAndCanonical: () => null,
+        }),
+        'update',
+      )).toBe(true);
+
+      // An unmarked record takes the update answer, matching the dispatcher's own safe fallback.
+      expect(hasChainRecoveryCapabilityFor(lookupOnly, undefined)).toBe(false);
+      // And no second capability rescues an adapter without the lookup itself.
+      expect(hasChainRecoveryCapabilityFor(
+        asAdapter({ readFinalizedChainProofSnapshot: () => null, verifyKAUpdate: () => null }),
+        'create',
+      )).toBe(false);
     });
 
     it('hasChainPublishLookup names the lookup this lane ACTUALLY calls [r20]', () => {
