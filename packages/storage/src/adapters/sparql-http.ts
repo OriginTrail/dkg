@@ -646,9 +646,16 @@ export class SparqlHttpStore implements TripleStore {
       const startedAt = this.now();
       throwIfAborted(lifecycleSignal);
       const trimmed = sparql.trim();
-      const upper = trimmed.toUpperCase();
-      const isAsk = upper.startsWith('ASK');
-      const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+      // SPARQL queries commonly begin with PREFIX / BASE declarations. A raw
+      // startsWith check misclassified those CONSTRUCT / DESCRIBE queries as
+      // SELECT and advertised application/sparql-results+json, which causes
+      // standards-compliant endpoints such as Oxigraph to reject the request
+      // with HTTP 406. Use the shared, prologue-aware classifier that already
+      // guards update-vs-query dispatch in this adapter.
+      const operation = classifySparqlOperation(trimmed);
+      const isAsk = operation.kind === 'read' && operation.form === 'ASK';
+      const isConstruct = operation.kind === 'read'
+        && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
 
       try {
         if (isConstruct) {

@@ -226,6 +226,20 @@ export function registerReadTools(
           view,
           includeSharedMemory,
         });
+        if (result.quads !== undefined) {
+          const allQuads = result.quads;
+          const cappedQuads = typeof limit === 'number' ? allQuads.slice(0, limit) : allQuads;
+          const rows = cappedQuads.map((quad) => ({
+            subject: quad.subject,
+            predicate: quad.predicate,
+            object: quad.object,
+            graph: quad.graph ?? '',
+          }));
+          const tail = cappedQuads.length < allQuads.length
+            ? `\n\n_(showing ${cappedQuads.length} of ${allQuads.length} — raise limit to see more)_`
+            : '';
+          return ok(`${bindingsToTable(rows)}${tail}`);
+        }
         const all = result.bindings ?? [];
         const capped = typeof limit === 'number' ? all.slice(0, limit) : all;
         const tail = capped.length < all.length ? `\n\n_(showing ${capped.length} of ${all.length} — raise limit to see more)_` : '';

@@ -41,6 +41,32 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     expect(lastCall.includeSharedMemory).toBe(true);
   });
 
+  it('renders CONSTRUCT quads instead of dropping graph-shaped results', async () => {
+    client = new FakeClient({
+      query: async () => ({
+        bindings: [],
+        quads: [{
+          subject: 'urn:model:05',
+          predicate: 'http://www.w3.org/2000/01/rdf-schema#label',
+          object: '"Catalog Model 05"',
+          graph: 'did:dkg:context-graph:test-cg/model-families/_working_memory/0xabc/5',
+        }],
+      }),
+    });
+    server = new FakeServer();
+    registerReadTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+
+    const result = await server.call('dkg_query', {
+      sparql: 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }',
+      view: 'working-memory',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toContain('| subject | predicate | object | graph |');
+    expect(result.content[0].text).toContain('urn:model:05');
+    expect(result.content[0].text).toContain('Catalog Model 05');
+  });
+
   it.each(['working-memory', 'shared-working-memory', 'verifiable-memory'])(
     'accepts the canonical view enum value %s',
     async (view) => {

@@ -19,6 +19,12 @@ export interface SparqlBinding {
 export interface SparqlResult {
   head?: { vars?: string[] };
   bindings: SparqlBinding[];
+  quads?: Array<{
+    subject: string;
+    predicate: string;
+    object: string;
+    graph?: string;
+  }>;
 }
 
 export interface QueryResponse {
@@ -443,14 +449,13 @@ export class DkgClient {
 
   /**
    * Fetch the daemon's default agent identity. Used by `dkg_memory_search`
-   * to resolve the agent address required for WM view routing — the
-   * daemon scopes WM assertion-graph URIs to the raw peer ID, so a
-   * memory-search call without it would silently route into a
-   * non-existent namespace and return zero hits.
+   * to resolve the agent address required for WM view routing. Modern WM
+   * assertion graphs are keyed by the daemon-resolved agent address (normally
+   * the default EVM wallet); peerId remains the legacy fallback for nodes that
+   * do not expose a default agent.
    *
-   * Returns `agentAddress` (DID-form, e.g. `did:dkg:agent:<peerId>`) and
-   * `peerId` (raw form). For WM view routing pass `peerId`; for
-   * provenance triples (e.g. `prov:wasAttributedTo`) pass `agentAddress`.
+   * Returns `agentAddress` (normally an EVM address), its DID projection in
+   * `agentDid`, and `peerId` (the legacy WM namespace fallback).
    */
   async getAgentIdentity(): Promise<{
     agentAddress?: string;
