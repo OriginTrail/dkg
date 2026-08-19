@@ -28,6 +28,7 @@ function minimalConfig() {
 }
 
 type Script = {
+  /** The endpoint's FINALIZED height, or null when it cannot serve one. */
   blockNumber: number | null;
   latestRoot: string | null;
   rootCount: bigint;
@@ -43,9 +44,11 @@ function adapterOver(scripts: Script[], opts: { storageDeployed?: boolean } = {}
   const providers = scripts.map((script, index) => ({
     __index: index,
     __script: script,
-    async getBlockNumber() {
-      if (script.blockNumber === null) throw Object.assign(new Error('no head'), { code: 'NETWORK_ERROR' });
-      return script.blockNumber;
+    // r13 — the view is pinned to the FINALIZED block, because it drives a durable decision.
+    async getBlock(tag: string) {
+      if (tag !== 'finalized') throw new Error(`expected the finalized tag, got ${tag}`);
+      if (script.blockNumber === null) throw Object.assign(new Error('no finalized view'), { code: 'NETWORK_ERROR' });
+      return { number: script.blockNumber, hash: `0x${'99'.repeat(32)}` };
     },
   }));
 

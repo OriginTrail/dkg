@@ -97,7 +97,14 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
     const readOne = async (provider: JsonRpcProvider) => {
-      const blockNumber = await provider.getBlockNumber();
+      // r13 (3813796492) — pinned to the FINALIZED block, not the head. This view drives a DURABLE
+      // decision: marking a recovered transaction superseded finalizes it receipt-only and hands
+      // the lifecycle to another version. Read at the head, an unfinalized update that later
+      // reorgs out would strip a transaction that is in fact current of its materialization, with
+      // nothing left to re-trigger it. Every other mined verdict in this chain already waits for
+      // finality; this is the same rule for the one read that had escaped it.
+      const finalized = await provider.getBlock('finalized');
+      const blockNumber = finalized?.number;
       if (typeof blockNumber !== 'number') return null;
       const bound = this.rebindContract(kas as Contract, provider);
       const at = { blockTag: blockNumber };

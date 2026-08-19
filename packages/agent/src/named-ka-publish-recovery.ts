@@ -259,9 +259,20 @@ export async function normalizeRecoveredNamedKaPublish(input: {
     ? !equalsIgnoreCase(versionView.latestRoot, proof.merkleRoot)
     : !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
   if (!superseded && versionView && proof.merkleRootCount !== undefined) {
+    const position = BigInt(proof.merkleRootCount);
+    // r13 (3813796856) — a view BEHIND this transaction's own position cannot be describing the
+    // current version at all: the transaction is already on chain at that position, so a view that
+    // has not seen it is stale. Concluding "current" from it would be the same mistake as the
+    // count-only fallback, so it defers like any other unestablished answer.
+    if (versionView.rootCount < position) {
+      throw inconsistent(
+        'the current KA version view is behind the recovered transaction position; '
+        + 'recovery is deferred rather than treating a stale view as current',
+      );
+    }
     // Roots match, which alone cannot separate "still current" from "superseded by a later update
     // that restored the same root". The position settles it, from this same view.
-    superseded = versionView.rootCount > BigInt(proof.merkleRootCount);
+    superseded = versionView.rootCount > position;
   }
 
   let materializationAuthor = transactionAuthor;

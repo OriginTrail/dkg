@@ -371,6 +371,31 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     expect(result.materialization.merkleRoot).toBe(SEAL_MERKLE_ROOT);
   });
 
+  it('DEFERS when the view is BEHIND the recovered position — the third boundary [r13]', async () => {
+    // 3813796856 — greater and equal were covered; this is the case that cannot legitimately
+    // happen: the transaction is on chain at position 3, so a view reporting 2 has not seen it and
+    // is stale by definition. Reading "not greater" as "current" there would stamp this
+    // transaction's provenance from an observation that predates it.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: () => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: SEAL_MERKLE_ROOT,
+        rootCount: 2n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 150,
+      });
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '3' },
+      }),
+    })).rejects.toThrow(/behind the recovered transaction position/);
+  });
+
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),
