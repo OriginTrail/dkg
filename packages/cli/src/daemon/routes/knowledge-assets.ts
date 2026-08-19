@@ -1634,9 +1634,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           return jsonResponse(res, 503, {
             code: err.code,
             error: `${err.message}. ${err.retryable
-              ? 'Chain recovery re-checks this job and releases it once the transaction\'s fate '
-                + 'is established — retry this request, or, if you have checked the transaction '
-                + 'yourself, clear the job with '
+              ? 'Chain recovery re-checks this job every tick and releases it once the chain can '
+                + 'account for the transaction: if it mined, recovery finalizes this job; if it is '
+                + 'provably absent and this job may safely re-run, recovery puts it back on the '
+                + 'queue. A dropped transaction on a job recovery may not re-run blind stays held '
+                + 'until you check it yourself and clear the job with '
               : 'This job\'s record gives chain recovery no automatic exit (no provable absence '
                 + 'and no formable recognition), so retrying will not release it. Check the '
                 + 'transaction yourself, then clear the job with '
