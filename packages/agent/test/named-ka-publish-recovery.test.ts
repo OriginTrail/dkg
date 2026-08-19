@@ -447,6 +447,29 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     })).rejects.toThrow(/carries no history position/);
   });
 
+  it('the LEGACY path still works for an adapter with no coherent view [r15]', async () => {
+    // 3814317919 — the shared mock gained the snapshot capability, so every row exercises the new
+    // path and the retained compatibility path stopped being covered at all. A CREATE proof with no
+    // position, on an adapter that cannot produce a view, still resolves through the latest-root
+    // comparison exactly as it did before this PR.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot?: unknown })
+      .readKnowledgeAssetVersionSnapshot = undefined;
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, operationKind: 'create' },
+      }),
+    });
+
+    expect(result.materialization.superseded).toBe(false);
+    expect(result.materialization.merkleRoot).toBe(SEAL_MERKLE_ROOT);
+    expect(result.materialization.versionBlock).toBe(77);
+  });
+
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),
