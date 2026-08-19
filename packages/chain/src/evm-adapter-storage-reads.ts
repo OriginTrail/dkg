@@ -16,6 +16,22 @@ import {
   decodeKnowledgeAssetMerkleRootCount,
 } from './evm-knowledge-asset-update-context.js';
 
+/**
+ * The numeric chain id this adapter is configured for, parsed from ids like `evm:31337`. Returns
+ * undefined for a configuration that names no numeric chain, where no comparison is possible.
+ */
+function numericChainIdOf(chainId: string | undefined): bigint | undefined {
+  if (!chainId) return undefined;
+  const tail = chainId.includes(':') ? chainId.split(':').pop() : chainId;
+  if (!tail || !/^[0-9]+$/.test(tail)) return undefined;
+  try {
+    const numeric = BigInt(tail);
+    return numeric > 0n ? numeric : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class StorageReadMethods extends EVMChainAdapterBase {
   // =====================================================================
   // KC views (V10 DKGKnowledgeAssets + ContextGraphStorage)
@@ -97,12 +113,21 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
     const readOne = async (provider: JsonRpcProvider) => {
-      // r15 (3814317260) — every endpoint must prove it is THIS chain before its view is eligible.
-      // The fan-out below is deliberate (unanimity cannot be expressed as a first-success read),
-      // but skipping this check meant an accidentally configured wrong-chain RPC could contribute
-      // an ABI-compatible view and WIN the poll by reporting a higher finalized block, after which
-      // recovery would materialize that chain's root and attribution.
+      // r15 (3814317260) / r17 (3814893080) — every endpoint must prove it is THIS chain before its
+      // view is eligible, because the poll trusts the most advanced answer and an accidentally
+      // configured wrong-chain RPC would otherwise supply the durable version decision.
+      //
+      // The shared `ensureConfiguredStaticChainIdValidated` is NOT sufficient here: it returns
+      // immediately when no static chain id is configured, which is exactly the supported
+      // `staticNetwork: false` mode — so relying on it alone made this check a no-op in the mode
+      // most deployments use. The identity is therefore compared explicitly, against the chain id
+      // this adapter was configured with, on every endpoint.
       await this.ensureConfiguredStaticChainIdValidated(provider);
+      const expectedChainId = numericChainIdOf(this.chainId);
+      if (expectedChainId !== undefined) {
+        const network = await provider.getNetwork();
+        if (BigInt(network.chainId) !== expectedChainId) return null;
+      }
       if (options.signal?.aborted) return null;
       // r13 (3813796492) — pinned to the FINALIZED block, not the head. This view drives a DURABLE
       // decision: marking a recovered transaction superseded finalizes it receipt-only and hands

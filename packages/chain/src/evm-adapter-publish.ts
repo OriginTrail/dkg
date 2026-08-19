@@ -387,7 +387,16 @@ export class PublishMethods extends EVMChainAdapterBase {
             [batchId, { blockTag: receipt.blockNumber }],
             { signal: options.signal },
           ) as Array<{ publisher?: string; merkleRoot?: string } | readonly unknown[]>;
+          // r17 (3814893084) — the register entries carry no transaction hash, so a (publisher,
+          // root) match is the only link back to this receipt, and that link is unique only while
+          // the match is unique. Two writes of the SAME root by the SAME publisher in this one
+          // block make the position ambiguous, and picking either one is a guess: the register
+          // cannot say which entry this transaction wrote. The verification itself still stands —
+          // the root IS ours, at this block — so the answer keeps `verified` and DROPS the
+          // position. Downstream an update with no position defers rather than deciding
+          // supersession, which is the fail-closed reading of an ambiguous register.
           let matchedIndex = -1;
+          let matchCount = 0;
           for (let i = roots.length - 1; i >= 0; i--) {
             const root = roots[i] as { publisher?: string; merkleRoot?: string };
             const rootPublisher = root.publisher ?? String((root as readonly unknown[])[0] ?? '');
@@ -396,15 +405,17 @@ export class PublishMethods extends EVMChainAdapterBase {
               rootPublisher.toLowerCase() === publisherAddress.toLowerCase()
               && rootValue.toLowerCase() === ethers.hexlify(onChainMerkleRoot).toLowerCase()
             ) {
-              matchedIndex = i;
-              onChainPublisher = rootPublisher;
-              break;
+              if (matchCount === 0) {
+                matchedIndex = i;
+                onChainPublisher = rootPublisher;
+              }
+              matchCount += 1;
             }
           }
           if (matchedIndex < 0) {
             return { verified: false };
           }
-          merkleRootCount = BigInt(matchedIndex + 1);
+          merkleRootCount = matchCount === 1 ? BigInt(matchedIndex + 1) : undefined;
         } catch (error) {
           if (isChainRpcTransportError(error)) throw error;
           // A latest-state fallback can authenticate a historical receipt with

@@ -30,8 +30,10 @@ import { chainProofLookupFingerprint } from '../src/async-lift-publisher-impl.js
 import { hasBroadcastEvidence, isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
 import {
   DEFAULT_CONTROL_GRAPH_URI,
+  DEFAULT_WALLET_LOCK_GRAPH_URI,
   jobSubject,
   serializeJob,
+  walletLockSubject,
 } from '../src/async-lift-control-plane.js';
 import {
   TX_HASH,
@@ -509,6 +511,34 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       const after = await publisher.getStatus(held.jobId);
       expect(after?.status).toBe('broadcast');
       expect(after?.broadcast?.txHash).toBe(TX_HASH);
+
+      // r17 (🟡 3814892900) — holding the job is only ONE of the two observables this branch
+      // owes. The wallet must not be held hostage to a job that will never move on this node, so
+      // the second is that 'wallet-raw' is usable IMMEDIATELY rather than after its claim lease
+      // expires. Asserted through the queue, because that is the property an operator depends on;
+      // which internal path drops the lock is not.
+      const lock = await h.store.query(`SELECT ?p ?o WHERE {
+        GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+          <${walletLockSubject('wallet-raw')}> ?p ?o .
+        }
+      }`);
+      expect((lock as { bindings: unknown[] }).bindings).toHaveLength(0);
+      const nextJobId = await seedLegacyRawLiftTestJob(h.store, {
+        swmId: 'swm-2',
+        namespace: 'default',
+        contextGraphId: 'music-social',
+        shareOperationId: 'share-op-2',
+        roots: [],
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: KA_VM_KA_UAL,
+        assertionVersion: '1',
+        publicTripleCount: 2,
+        privateTripleCount: 0,
+        scope: 'full',
+        transitionType: 'CREATE',
+        authority: { type: 'owner', proofRef: 'proof:owner:2' },
+      });
+      expect(await publisher.claimNext('wallet-raw')).toMatchObject({ jobId: nextJobId });
     });
 
     // PR #2300 r1 (🟡 3809054845) — the create-only release rule over RAW transition types,

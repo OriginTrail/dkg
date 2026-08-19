@@ -51,6 +51,7 @@ it('rejects an explicitly invalid receipt deadline at the adapter boundary', () 
 describe('EVMChainAdapter historical KA update verification', () => {
   const kaId = 42n;
   const publisher = '0x1111111111111111111111111111111111111111';
+  const other = '0x3333333333333333333333333333333333333333';
   const storageAddress = '0x2222222222222222222222222222222222222222';
   const root = ethers.keccak256(ethers.toUtf8Bytes('historical-update'));
   const blockHash = `0x${'34'.repeat(32)}`;
@@ -97,6 +98,36 @@ describe('EVMChainAdapter historical KA update verification', () => {
       txIndex: 2,
       merkleRootCount: 1n,
     });
+  });
+
+  it('drops the position — but keeps the verification — when the register match is AMBIGUOUS', async () => {
+    // r17 (3814893084) — the register entries carry no transaction hash, so a (publisher, root)
+    // match is this receipt's only link to a position, and that link holds only while the match is
+    // unique. Two identical writes by the same publisher in this one block make the position a
+    // guess. The root is still provably ours at this block, so the verdict stays verified and
+    // simply omits the position; downstream an update with no position defers.
+    const { adapter } = adapterWithHistoricalRead([
+      { publisher, merkleRoot: root },
+      { publisher: other, merkleRoot: ethers.ZeroHash },
+      { publisher, merkleRoot: root },
+    ]);
+
+    const verdict = await adapter.verifyKAUpdate('0xreceipt', kaId, publisher);
+
+    expect(verdict).toMatchObject({ verified: true, blockNumber: 77, blockHash });
+    expect(verdict.merkleRootCount).toBeUndefined();
+  });
+
+  it('still reports the position when exactly one register entry matches', async () => {
+    // The discriminating pair for the row above: same register, one matching entry, and the
+    // position is reported. Without this, dropping the position unconditionally would pass.
+    const { adapter } = adapterWithHistoricalRead([
+      { publisher: other, merkleRoot: ethers.ZeroHash },
+      { publisher, merkleRoot: root },
+    ]);
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher))
+      .resolves.toMatchObject({ verified: true, merkleRootCount: 2n });
   });
 
   it.each([

@@ -502,15 +502,20 @@ describe('GH#2270 runner chain-proof resolution', () => {
     // The load-bearing row. A legacy two-state adapter cannot see the mempool, so its `null`
     // is "we do not know", not "it did not happen". Reading it as `not-found` would authorise
     // a resend of a transaction that is about to be mined.
-    it('reports inconclusive — NOT not-found — for a legacy adapter that answers null', async () => {
-      const resolvePublishByTxHash = vi.fn(async () => null);
-      const publishers = publishersWith({ chainId: 'evm:31337', resolvePublishByTxHash });
+    it('a legacy adapter can never contribute an ABSENCE either [r1, r17]', async () => {
+      // The original property (a receipt-only adapter cannot tell a mempool transaction from an
+      // unknown one, so its null must never become `not-found`) still holds — and since r17 such an
+      // adapter is inconclusive in both directions, so its lookup is not even consulted.
+      const legacy = {
+        chainId: 'evm:31337',
+        resolvePublishByTxHash: vi.fn(async () => null),
+        getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
+      } as unknown as ChainAdapter;
 
-      const resolution = await createChainProofResolver(publishers)(lookup);
+      const resolution = await createChainProofResolver(publishersWith(legacy))(lookupWithNonce);
 
-      expect(resolution).toEqual({ status: 'inconclusive' });
+      expect(resolution.status).toBe('inconclusive');
       expect(resolution.status).not.toBe('not-found');
-      expect(resolvePublishByTxHash).toHaveBeenCalledWith(TX_HASH);
     });
 
     it('reports inconclusive when the lookup throws', async () => {
@@ -567,14 +572,29 @@ describe('GH#2270 runner chain-proof resolution', () => {
       expect(resolvePublishByTxHash).not.toHaveBeenCalled();
     });
 
-    it('still resolves a confirmed publish through a legacy-only adapter', async () => {
-      // The legacy fallback must stay a real path, not a permanently-inconclusive stub.
-      const publishers = publishersWith({
+    it('a legacy-only adapter is inconclusive in BOTH directions [r17]', async () => {
+      // 3814893074 — the receipt-only lookup can neither see a mempool (so it may never contribute
+      // `not-found`) nor establish that its receipt block is final and canonical: its result has no
+      // block hash, so there is nothing to hand the finality primitive. Confirming from it would
+      // finalize a job from state a reorg can still rewrite. Such a node holds its jobs; adapters
+      // implementing the tri-state lookup are unaffected.
+      // The stub answers with a publish precisely so the status alone cannot discriminate: a
+      // downstream that consumed it would still land on `inconclusive` for want of an update
+      // verification. The load-bearing observable is that the legacy lookup is never CONSULTED.
+      const resolvePublishByTxHash = vi.fn(async () => ({
+        blockNumber: 9,
+        merkleRoot: new Uint8Array(32),
+      }));
+      const legacy = {
         chainId: 'evm:31337',
-        resolvePublishByTxHash: vi.fn(async () => onChainPublish()),
-      });
+        resolvePublishByTxHash,
+        getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
+      } as unknown as ChainAdapter;
 
-      expect((await createChainProofResolver(publishers)(lookup)).status).toBe('recovered');
+      const resolution = await createChainProofResolver(publishersWith(legacy))(lookupWithNonce);
+
+      expect(resolution.status).toBe('inconclusive');
+      expect(resolvePublishByTxHash).not.toHaveBeenCalled();
     });
 
     it('hasChainPublishLookup accepts either lookup and rejects an adapter with neither', () => {

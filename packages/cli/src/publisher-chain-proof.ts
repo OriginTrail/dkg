@@ -338,9 +338,16 @@ async function resolvePublishTransactionState(
         ? { status: 'confirmed', publish: resolution.publish, chain }
         : resolution;
     }
-    if (!chain.resolvePublishByTxHash) return { status: 'inconclusive' };
-    const publish = await chain.resolvePublishByTxHash(lookup.txHash);
-    return publish ? { status: 'confirmed', publish, chain } : { status: 'inconclusive' };
+    // r17 (3814893074) — the legacy receipt-only lookup cannot support a confirmation here. Unlike
+    // `resolvePublishTransaction` it never establishes that the receipt's block is final, and its
+    // result carries no block HASH, so canonicality at that height cannot be checked either — there
+    // is nothing to hand the finality primitive. Treating its answer as confirmation would finalize
+    // a job from state a reorg can still rewrite, which is exactly what the tri-state path exists to
+    // prevent, so a legacy-only adapter now contributes `inconclusive` in BOTH directions: it can
+    // neither prove absence (it cannot see a mempool) nor prove a durable publish. Such a node holds
+    // its jobs and the operator's by-id clear remains; adapters that implement the tri-state lookup
+    // are unaffected.
+    return { status: 'inconclusive' };
   } catch {
     // Transient RPC/provider errors establish nothing — report that rather than
     // crashing the daemon, so the recovery timeout mechanism handles it.

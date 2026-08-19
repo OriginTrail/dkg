@@ -24,6 +24,10 @@ describe('named KA publisher recovery wiring', () => {
     const kaId = (BigInt(walletId) << 96n) | kaNumber;
     const graphUal = `did:dkg:evm:31337/${walletId}/${kaNumber}`;
     const merkleRoot = `0x${'12'.repeat(32)}` as `0x${string}`;
+    const resolvePublishTransaction = vi.fn(async (_hash: string) => ({
+      status: 'confirmed' as const,
+      publish: await resolvePublishByTxHash(),
+    }));
     const resolvePublishByTxHash = vi.fn(async () => ({
       batchId: kaId,
       kaId,
@@ -60,6 +64,9 @@ describe('named KA publisher recovery wiring', () => {
     const publishers: PublisherChainAdapters = new Map([[walletId, {
       chainId: 'evm:31337',
       resolvePublishByTxHash,
+      // r17 — a receipt-only adapter is inconclusive in both directions, so a row whose subject is
+      // UAL handling uses the tri-state lookup rather than testing through a shape that now holds.
+      resolvePublishTransaction,
       resolveCanonicalFinalizationReceipt,
       // r14 — the create branch gates on finality like every other mined verdict.
       isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
@@ -106,7 +113,9 @@ describe('named KA publisher recovery wiring', () => {
         },
       },
     });
-    expect(resolvePublishByTxHash).toHaveBeenCalledWith(txHash);
+    // r17 — the receipt-only lookup is no longer consulted at all (it cannot support a durable
+    // finalize), so what this row pins is the UAL handling, not which lookup was called.
+    expect(resolvePublishTransaction).toHaveBeenCalledWith(txHash);
   });
 
   it('resolves a queued UPDATE through verifyKAUpdate, bound to the intended root [GH#2270 r4]', async () => {
@@ -272,18 +281,23 @@ describe('named KA publisher recovery wiring', () => {
           knowledgeAssetsContract: '0x2222222222222222222222222222222222222222',
         },
       })),
-      resolvePublishByTxHash: vi.fn(async () => ({
-        batchId: kaId,
-        kaId,
-        knowledgeAssetsContract: '0x2222222222222222222222222222222222222222',
-        startKAId: kaId,
-        endKAId: kaId,
-        merkleRoot: Buffer.from('12'.repeat(32), 'hex'),
-        authorAddress: walletId,
-        txHash,
-        blockNumber: 9,
-        blockTimestamp: 1_700_000_009,
-        publisherAddress: walletId,
+      // r17 — this row's subject is the generic verdict's UAL/contract handling, so the adapter
+      // offers the tri-state lookup; a receipt-only adapter is inconclusive by design now.
+      resolvePublishTransaction: vi.fn(async () => ({
+        status: 'confirmed' as const,
+        publish: {
+          batchId: kaId,
+          kaId,
+          knowledgeAssetsContract: '0x2222222222222222222222222222222222222222',
+          startKAId: kaId,
+          endKAId: kaId,
+          merkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+          authorAddress: walletId,
+          txHash,
+          blockNumber: 9,
+          blockTimestamp: 1_700_000_009,
+          publisherAddress: walletId,
+        },
       })),
     } as unknown as ChainAdapter;
     const publishers: PublisherChainAdapters = new Map([[walletId, publisher]]);

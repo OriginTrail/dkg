@@ -49,6 +49,9 @@ function adapterOver(scripts: Script[], opts: { storageDeployed?: boolean } = {}
     __index: index,
     __script: script,
     // r13 — the view is pinned to the FINALIZED block, because it drives a durable decision.
+    async getNetwork() {
+      return { chainId: script.wrongChain ? 999n : 31337n };
+    },
     async getBlock(tag: string) {
       if (script.stall) return new Promise(() => {}) as never;
       if (tag !== 'finalized') throw new Error(`expected the finalized tag, got ${tag}`);
@@ -60,8 +63,11 @@ function adapterOver(scripts: Script[], opts: { storageDeployed?: boolean } = {}
   const validated: number[] = [];
   const a: any = new EVMChainAdapter(minimalConfig());
   a.ensureConfiguredStaticChainIdValidated = async (provider: (typeof providers)[number]) => {
+    // r17 (3814893080) — faithful to production: under the supported `staticNetwork: false`
+    // mode this validator returns early WITHOUT comparing anything, so the harness must not
+    // fabricate a rejection here. A wrong-chain endpoint may only be rejected by the explicit
+    // per-endpoint comparison in the snapshot read itself.
     validated.push(provider.__index);
-    if (provider.__script.wrongChain) throw new Error('configured static chainId mismatch');
     return 31337n;
   };
   a.initialized = true;
@@ -155,7 +161,9 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
   });
 
   it('a WRONG-CHAIN endpoint cannot contribute a view, however far ahead it is [r15]', async () => {
-    // 3814317260 — the fan-out skipped the chain-id validation every normal adapter read performs,
+    // 3814317260 / 3814893080 — the fan-out skipped the identity check every normal adapter read
+    // performs, and the shared static-mode validator is a NO-OP under `staticNetwork: false`, so
+    // the endpoint's chain id is now compared explicitly against the configured one.
     // so an accidentally configured RPC for another chain could answer with an ABI-compatible view
     // and WIN the poll by reporting a higher finalized block. Recovery would then materialize that
     // chain's root and attribution. It is now validated per endpoint before its view is eligible —
