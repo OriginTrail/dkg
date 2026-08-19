@@ -20,7 +20,13 @@ import {
  * The numeric chain id this adapter is configured for, parsed from ids like `evm:31337`. Returns
  * undefined for a configuration that names no numeric chain, where no comparison is possible.
  */
-function numericChainIdOf(chainId: string | undefined): bigint | undefined {
+/**
+ * r17 (3814893080) / r19 (3816490449) — EXPORTED so every pinned-snapshot reader can perform the
+ * same check. `ensureConfiguredStaticChainIdValidated` is a no-op under `staticNetwork: false`,
+ * which is the mode these fan-outs run in, so each reader must compare the endpoint's chain id
+ * itself. Sharing the parse is what keeps the two readers from drifting apart again.
+ */
+export function numericChainIdOf(chainId: string | undefined): bigint | undefined {
   if (!chainId) return undefined;
   const tail = chainId.includes(':') ? chainId.split(':').pop() : chainId;
   if (!tail || !/^[0-9]+$/.test(tail)) return undefined;

@@ -1214,5 +1214,107 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(asked).toHaveLength(2);
       expect(asked[0]).not.toBe(asked[1]);
     });
+
+    it('an UNFORMABLE held job costs no batch slot, so it cannot starve the jobs behind it', async () => {
+      // 🔴 3816490915 — r18 sliced the batch BEFORE deriving the lookup, so held records that
+      // cannot form one (legacy or malformed) still consumed a slot, were never backed off, and —
+      // being stably ordered — sat at the front of every pass forever. An actionable job behind
+      // them would never be asked at all: strictly worse than the unbounded sweep, which reached
+      // it. Here the single batch slot must reach the actionable job PAST the unformable one.
+      const asked: string[] = [];
+      const publisher = createPublisher({
+        chainProofDispatchBatchSize: 1,
+        chainProofResolver: async (lookup) => {
+          asked.push(lookup.walletId);
+          return { status: 'inconclusive' };
+        },
+      });
+      const unformable = await failAfterRecordedTxHash(publisher, kaVmPublishRequest({
+        name: 'albums-unformable', shareOperationId: 'share-op-unformable',
+        kaUal: KA_VM_KA_UAL.replace(/\/\d+$/, '/900'),
+      }));
+      // The shape that matters: evidence-bearing (so it IS held and does reach the sweep) but with
+      // no WALLET in either carrier, so no lookup can be derived. Stripping the hash instead would
+      // make it un-held and it would never reach the sweep at all — the row would prove nothing.
+      // The wallet has to go with the BROADCAST: a persisted broadcast always carries one, so the
+      // only shape that is genuinely unformable is evidence on the recovery carrier with no claim,
+      // which is exactly what a reset legacy record restores as.
+      const stripped = {
+        ...unformable,
+        broadcast: undefined,
+        claim: undefined,
+        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH, operationKind: 'create' },
+      } as unknown as LiftJob;
+      await h.store.deleteByPattern({ subject: jobSubject(unformable.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(stripped, DEFAULT_CONTROL_GRAPH_URI));
+
+      const actionable = await failAfterRecordedTxHash(publisher, kaVmPublishRequest({
+        name: 'albums-actionable', shareOperationId: 'share-op-actionable',
+        kaUal: KA_VM_KA_UAL.replace(/\/\d+$/, '/901'),
+      }));
+
+      await publisher.recover();
+
+      // The one slot reached the actionable job, not the unformable one ahead of it.
+      expect(asked).toEqual([`wallet-tx-${actionable.jobId}`]);
+      // And the unformable job is left exactly as it was — skipping it is not a disposition.
+      expect((await publisher.getStatus(unformable.jobId))?.status).toBe('failed');
+    });
+
+    it('a resolver that NEVER settles cannot keep recover() pending past the budget', async () => {
+      // 🔴 3816490904 — r18's budget only gated whether the NEXT lookup started, so one stalled
+      // RPC kept `recover()` — and the startup awaiting it — pending forever: the exact condition
+      // the budget was introduced for. The pass now stops WAITING at the deadline, and hands the
+      // resolver the signal so a cooperating one can cancel rather than leak its socket.
+      let sawSignal: AbortSignal | undefined;
+      const publisher = createPublisher({
+        chainProofDispatchBatchSize: 5,
+        chainProofDispatchTimeBudgetMs: 20,
+        chainProofResolver: async (_lookup, options) => {
+          sawSignal = options?.signal;
+          // Never settles on its own. Only the deadline can end this pass.
+          return new Promise<never>(() => {});
+        },
+      });
+      const ids = await heldPopulation(publisher, 2);
+
+      // The assertion is that this RESOLVES at all — before the fix it hung forever.
+      expect(await publisher.recover()).toBe(0);
+
+      expect(sawSignal?.aborted).toBe(true);
+      // A deadline establishes nothing, so every job is left held.
+      for (const jobId of ids) {
+        expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+      }
+    });
+
+    it('a deferred job becomes due again once its backoff has ELAPSED', async () => {
+      // 🟡 3816490922 — the rotation row proves a deferred job is skipped, which a permanent
+      // deferral would also satisfy. This is the other half: the deferral is a DELAY, not an
+      // eviction, so a job that established nothing is eventually re-asked. The harness clock
+      // advances one tick per read, so the wait is driven by re-reading it rather than by sleeping.
+      const asked: string[] = [];
+      const publisher = createPublisher({
+        chainProofDispatchBatchSize: 1,
+        chainProofResolver: async (lookup) => {
+          asked.push(lookup.walletId);
+          return { status: 'inconclusive' };
+        },
+      });
+      const [onlyJob] = await heldPopulation(publisher, 1);
+
+      await publisher.recover();
+      expect(asked).toHaveLength(1);
+
+      // Immediately after, it is deferred: a second pass asks nothing.
+      await publisher.recover();
+      expect(asked).toHaveLength(1);
+
+      // Advance past the 30s base backoff plus its 25% jitter ceiling.
+      h.advance(40_000);
+
+      await publisher.recover();
+      expect(asked).toEqual([`wallet-tx-${onlyJob}`, `wallet-tx-${onlyJob}`]);
+    });
   });
 });

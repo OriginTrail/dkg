@@ -472,8 +472,24 @@ export type AsyncLiftChainProofLookup =
   | AsyncLiftCreateChainProofLookup
   | AsyncLiftUpdateChainProofLookup;
 
+/**
+ * GH#2270 PR-3 r19 (🔴 3816490904) — the resolver receives the pass DEADLINE as an abort signal.
+ * r18's time budget only gated whether the next lookup STARTED, which is not a ceiling at all: one
+ * resolver that never settles keeps `recover()` — and the startup that awaits it — pending forever,
+ * the exact condition the budget was introduced for.
+ *
+ * The parameter is optional so an existing resolver still type-checks, but a resolver that ignores
+ * it is NOT bounded by its own doing; the publisher additionally stops WAITING at the deadline, so
+ * the pass completes either way. Abandoning a call is strictly worse than cancelling one, which is
+ * why the signal is passed rather than the promise merely detached — a resolver that honours it
+ * releases its socket instead of leaking it for the length of the RPC timeout.
+ *
+ * Aborting establishes nothing, so the job's disposition is unchanged: it stays held and is asked
+ * again on a later pass. A deadline can never authorize a resend.
+ */
 export type AsyncLiftPublisherRecoveryResolver = (
   lookup: AsyncLiftChainProofLookup,
+  options?: { readonly signal?: AbortSignal },
 ) => Promise<AsyncLiftChainProofResolution>;
 
 export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (

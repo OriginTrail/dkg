@@ -10,6 +10,7 @@
  */
 
 import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-base.js';
+import { numericChainIdOf } from './evm-adapter-storage-reads.js';
 import { ethers, Wallet, Contract } from 'ethers';
 import type {
   BatchMintParams,
@@ -630,6 +631,19 @@ export class PublishMethods extends EVMChainAdapterBase {
       return await this.readProviderRetryingNull(
         'finalized chain-proof snapshot',
         async (provider) => {
+          // r19 (🔴 3816490449) — the endpoint's IDENTITY, before any of its facts are believed.
+          // This snapshot authorizes release-by-absence, so a wrong-chain RPC reporting a spent
+          // nonce and an unminted KA id fabricates exactly the conjunction that requeues a job —
+          // and the original transaction can then mine alongside the replacement. r17 closed this
+          // for the version snapshot and did not sweep the sibling readers, which is the whole
+          // reason it is still open here. Note the shared static-mode validator cannot serve:
+          // it returns early under `staticNetwork: false`, the mode this fan-out runs in.
+          // A mismatch is an EMPTY VIEW, not a verdict, so failover reaches a correct endpoint.
+          const expectedChainId = numericChainIdOf(this.chainId);
+          if (expectedChainId !== undefined) {
+            const network = await provider.getNetwork();
+            if (BigInt(network.chainId) !== expectedChainId) return null;
+          }
           const block = await provider.getBlock('finalized');
           if (!block || !block.hash) return null;
           const accountNonce = await provider.getTransactionCount(params.address, block.number);

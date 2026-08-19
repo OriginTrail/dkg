@@ -34,6 +34,8 @@ function minimalConfig() {
 }
 
 type ProviderScript = {
+  /** r19 (3816490449) — this endpoint answers for a DIFFERENT chain than the configured one. */
+  wrongChain?: boolean;
   finalized: { number: number; hash: string } | null | Error;
   nonceAt: (address: string, blockTag: unknown) => Promise<number>;
   ownerAt?: (kaId: bigint, overrides: { blockTag?: unknown }) => Promise<string>;
@@ -47,6 +49,9 @@ type ProviderScript = {
 function adapterOver(scripts: ProviderScript[], opts: { storageDeployed?: boolean } = {}) {
   const calls: Array<{ provider: number; read: string; blockTag: unknown }> = [];
   const providers = scripts.map((script, index) => ({
+    async getNetwork() {
+      return { chainId: script.wrongChain ? 999n : 31337n };
+    },
     async getBlock(tag: string) {
       if (tag !== 'finalized') throw new Error(`expected the finalized tag, got ${tag}`);
       if (script.finalized instanceof Error) throw script.finalized;
@@ -279,6 +284,39 @@ describe('EVMChainAdapter.readFinalizedChainProofSnapshot [GH#2270 r4]', () => {
     ]);
     await expect(adapter.readFinalizedChainProofSnapshot({ address: ADDRESS, kaId: KA_ID }))
       .resolves.toBeNull();
+  });
+
+  it('a WRONG-CHAIN endpoint cannot authorize absence — a correct one must serve it [r19]', async () => {
+    // 🔴 3816490449 — this snapshot directly authorizes RELEASE-BY-ABSENCE, so believing a
+    // wrong-chain endpoint is the most expensive mistake in the module: it fabricates exactly the
+    // `nonce consumed + KA unminted` conjunction that requeues a job, and the original transaction
+    // can then mine alongside the replacement. The scripted primary reports a spent nonce and an
+    // unminted id — the absence conjunction — but for chain 999. Its view must not be used.
+    // (The config is `staticNetwork: false`, the supported mode, in which the shared static-mode
+    // validator returns early and compares nothing; the reader does the comparison itself.)
+    const { adapter, calls } = adapterOver([
+      {
+        wrongChain: true,
+        finalized: { number: 5_000, hash: BLOCK_HASH },
+        nonceAt: async () => 6,
+        ownerAt: async () => ethers.ZeroAddress,
+      },
+      {
+        finalized: { number: 900, hash: BLOCK_HASH },
+        nonceAt: async () => 5,
+        ownerAt: async () => ethers.ZeroAddress,
+      },
+    ]);
+
+    const snapshot = await adapter.readFinalizedChainProofSnapshot({ address: ADDRESS, kaId: KA_ID });
+
+    // The correct-chain endpoint served it, at ITS block and with ITS nonce — not the wrong
+    // chain's more-advanced-looking one.
+    expect(snapshot?.blockNumber).toBe(900);
+    expect(snapshot?.accountNonce).toBe(5);
+    // And the wrong-chain endpoint was never read at all: the identity check precedes every fact,
+    // so its nonce and minted state are never even fetched, let alone believed.
+    expect(calls.some((call) => call.provider === 0)).toBe(false);
   });
 
   it('a lagging fallback endpoint produces ITS OWN consistent pair — never a splice', async () => {

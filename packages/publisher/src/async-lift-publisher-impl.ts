@@ -1405,36 +1405,56 @@ export class TripleStoreAsyncLiftPublisher
     // being re-asked every pass. No cursor is needed: the due times are the rotation.
     const dueJobs = heldJobs.filter((job) => (this.chainProofNextDueAt.get(job.jobId)?.dueAt ?? 0) <= startedAt);
 
+    // r19 (🔴 3816490915) — the lookup is derived BEFORE the batch is taken, because a job that
+    // cannot form one costs no round trip and must therefore cost no batch slot either. Deriving
+    // it after the slice let unformable records — legacy or malformed held jobs, which are stably
+    // ordered and so sit at the front pass after pass — consume the whole batch and starve every
+    // actionable job behind them, permanently. That is strictly worse than the unbounded sweep it
+    // replaced, which at least reached them. The derivation is pure and local, so paying it for
+    // the whole due population buys the fix for nothing.
+    const dispatchable = dueJobs
+      .map((job) => ({ job, lookup: this.chainProofLookupFor(job) }))
+      .filter((candidate): candidate is { job: PersistedFailedJob; lookup: AsyncLiftChainProofLookup } => candidate.lookup !== null);
+
+    // r19 (🔴 3816490904) — one controller for the whole pass. Bound 3 as r18 shipped it only
+    // gated whether the NEXT lookup started, which is not a ceiling: a resolver that never settles
+    // kept `recover()` — and the startup awaiting it — pending forever, the very condition the
+    // budget was introduced for. The signal is handed to the resolver so a cooperating one can
+    // cancel and release its socket, and the publisher additionally stops WAITING at the deadline
+    // so the pass completes even against a resolver that ignores it.
+    const deadline = new AbortController();
+    const deadlineTimer = setTimeout(() => deadline.abort(), Math.max(0, this.chainProofDispatchTimeBudgetMs));
     let dispatched = 0;
-    // Bound 2 — at most one batch of RPCs per pass.
-    for (const job of dueJobs.slice(0, Math.max(0, this.chainProofDispatchBatchSize))) {
-      // Bound 3 — the wall-clock ceiling. Batch size bounds the CALL COUNT; when each call is slow
-      // it is time that startup readiness actually depends on. Checked before each turn so a pass
-      // cannot start a new round trip once the budget is spent; the rest are asked next cadence.
-      if (this.now() - startedAt >= this.chainProofDispatchTimeBudgetMs) break;
-      // Derive the lookup ONCE, before anything is called with this job. A held job's hash lives
-      // in whichever carrier it has, and its wallet in `broadcast` or the claim; a job missing
-      // either cannot be asked about at all, so it stays held rather than being handed to a
-      // resolver as a shape it is not. This is what the resolver used to be given as a cast.
-      const lookup = this.chainProofLookupFor(job);
-      if (!lookup) continue;
-      // One held job must never strand the rest of the pass. The resolver reaches the network and
-      // the handlers reach the store, so either can throw; before this the exception propagated
-      // out of recover() and every job queued behind this one silently stopped being reconciled.
-      // A job whose turn ended in an exception simply stays held and is asked again next tick,
-      // which is the same disposition as any other unestablished answer.
-      try {
-        const settled = await this.dispatchOneHeldJob(job, lookup);
-        dispatched += settled;
-        if (settled > 0) this.chainProofNextDueAt.delete(job.jobId);
-        else this.deferNextChainProofAttempt(job.jobId);
-      } catch {
-        // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
-        // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
-        // every pass and crowd out jobs that could actually settle.
-        this.deferNextChainProofAttempt(job.jobId);
-        continue;
+    try {
+      // Bound 2 — at most one batch of RPCs per pass.
+      for (const { job, lookup } of dispatchable.slice(0, Math.max(0, this.chainProofDispatchBatchSize))) {
+        // Bound 3 — the wall-clock ceiling. Batch size bounds the CALL COUNT; when each call is slow
+        // it is time that startup readiness actually depends on. Checked before each turn so a pass
+        // cannot start a new round trip once the budget is spent; the rest are asked next cadence.
+        if (this.now() - startedAt >= this.chainProofDispatchTimeBudgetMs) break;
+        // One held job must never strand the rest of the pass. The resolver reaches the network and
+        // the handlers reach the store, so either can throw; before this the exception propagated
+        // out of recover() and every job queued behind this one silently stopped being reconciled.
+        // A job whose turn ended in an exception simply stays held and is asked again next tick,
+        // which is the same disposition as any other unestablished answer.
+        try {
+          const settled = await this.dispatchOneHeldJob(job, lookup, deadline);
+          dispatched += settled;
+          if (settled > 0) this.chainProofNextDueAt.delete(job.jobId);
+          else this.deferNextChainProofAttempt(job.jobId);
+        } catch {
+          // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
+          // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
+          // every pass and crowd out jobs that could actually settle.
+          this.deferNextChainProofAttempt(job.jobId);
+          continue;
+        }
       }
+    } finally {
+      // The timer must not keep the process alive past the pass, and the controller must not be
+      // left un-aborted for a lookup that is still in flight after we stopped waiting on it.
+      clearTimeout(deadlineTimer);
+      deadline.abort();
     }
     return dispatched;
   }
@@ -1461,9 +1481,22 @@ export class TripleStoreAsyncLiftPublisher
   private async dispatchOneHeldJob(
     job: PersistedFailedJob,
     lookup: AsyncLiftChainProofLookup,
+    deadline: AbortController,
   ): Promise<number> {
     if (!this.chainProofResolver) return 0;
-    const resolution = await this.chainProofResolver(lookup);
+    // r19 (🔴 3816490904) — the signal goes to the resolver AND the wait is bounded here. A
+    // resolver that honours the signal settles promptly and releases its socket; one that ignores
+    // it is abandoned rather than awaited, which is worse for that socket but leaves the ceiling
+    // real. Either way the deadline establishes NOTHING, so the caller records it exactly like an
+    // inconclusive verdict: the job stays held and is asked again later.
+    const resolution = await Promise.race([
+      this.chainProofResolver(lookup, { signal: deadline.signal }),
+      new Promise<null>((resolve) => {
+        if (deadline.signal.aborted) { resolve(null); return; }
+        deadline.signal.addEventListener('abort', () => resolve(null), { once: true });
+      }),
+    ]);
+    if (resolution === null) return 0;
 
     // GH#2270 PR-3 r4 — the verdict was earned across an RPC await, against a SNAPSHOT of the
     // job. While it was in flight, an operator's `clearTerminalJob` or a client's fresh mandate
