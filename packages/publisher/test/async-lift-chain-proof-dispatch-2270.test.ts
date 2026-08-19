@@ -403,27 +403,46 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       return expectFailed(await publisher.getStatus(jobId));
     }
 
-    it('does not persist a finalized job that is missing the metadata that shape requires [r9]', async () => {
-      // 3812794019 — a published-finalized record REQUIRES claim, validation, broadcast and
-      // inclusion. A job held on the recovery carrier alone, re-claimed and failed BEFORE
-      // validation, has none of the middle two, so finalizing it would write a `finalized` record
-      // that does not satisfy its own exported union. It stays held instead — the transaction is
-      // still accounted for by the evidence it carries, and the by-id clear is the operator's exit.
+    // PR #2300 r10 (3812960758) — table-driven, because the r9 row only stripped `validation` and
+    // therefore proved one third of the guard: a record missing `claim`, or one held on the
+    // recovery carrier with no `broadcast` at all, would still have been persisted as a
+    // `finalized` job that does not satisfy its own union.
+    it.each([
+      ['validation', (j: Record<string, unknown>) => { delete j.validation; }],
+      ['claim', (j: Record<string, unknown>) => { delete j.claim; }],
+    ])('refuses to finalize a held job missing %s [r10]', async (_label, strip) => {
       const publisher = dispatcher(RECOVERED);
       const held = await failAfterRecordedTxHash(publisher);
-      const stripped = {
-        ...held,
-        validation: undefined,
-        failure: { ...held.failure, failedFromState: 'claimed' },
-      } as unknown as LiftJob;
-      delete (stripped as unknown as Record<string, unknown>).validation;
+      const record = { ...held, failure: { ...held.failure, failedFromState: 'claimed' } } as unknown as Record<string, unknown>;
+      strip(record);
       await h.store.deleteByPattern({ subject: jobSubject(held.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
-      await h.store.insert(serializeJob(stripped, DEFAULT_CONTROL_GRAPH_URI));
+      await h.store.insert(serializeJob(record as unknown as LiftJob, DEFAULT_CONTROL_GRAPH_URI));
+
+      await publisher.recover();
+
+      expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
+    });
+
+    it('finalizes a carrier-only record and RECORDS the transaction it proved [r10]', async () => {
+      // The other half of the shape contract. A job held on `recovery.txHashChecked` alone has no
+      // broadcast metadata — an earlier reset dropped it — but that record is finalizable: the
+      // proof is bound to a specific hash and wallet, so the finalized job records them rather
+      // than being written without the metadata its own union requires.
+      const publisher = dispatcher(RECOVERED);
+      const held = await failAfterRecordedTxHash(publisher);
+      const carrierOnly = { ...held } as unknown as Record<string, unknown>;
+      delete carrierOnly.broadcast;
+      carrierOnly.recovery = { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH };
+      await h.store.deleteByPattern({ subject: jobSubject(held.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(carrierOnly as unknown as LiftJob, DEFAULT_CONTROL_GRAPH_URI));
 
       await publisher.recover();
 
       const after = await publisher.getStatus(held.jobId);
-      expect(after?.status).toBe('failed');
+      expect(after?.status).toBe('finalized');
+      // The record satisfies its own union: the proven transaction is on it, not merely referenced
+      // by the recovery note.
+      expect(after?.broadcast?.txHash).toBe(TX_HASH);
     });
 
     it('a raw broadcast that SIGNED is not requeued on a node with no resolver [r8]', async () => {

@@ -164,6 +164,30 @@ describe('isReceiptBlockFinalAndCanonical [PR#2300 r1]', () => {
     expect(readOpts[0]?.isEmptyResult?.(null)).toBe(true);
   });
 
+  it('a LAGGING finalized frontier fails over instead of deciding [r10]', async () => {
+    // 3812960956 — finality is monotone, so an endpoint whose frontier has not reached the receipt
+    // has nothing to say yet; treating that as a negative verdict made the most lagging endpoint
+    // authoritative and held jobs at `pending` while a configured peer already had the proof.
+    const { chain, seen } = chainOverProviders([
+      { finalized: { number: 100, hash: `0x${'ee'.repeat(32)}` }, atHeight: { number: 123, hash: BLOCK_HASH } },
+      { finalized: { number: 200, hash: `0x${'ee'.repeat(32)}` }, atHeight: { number: 123, hash: BLOCK_HASH } },
+    ]);
+
+    await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
+    expect(seen).toContain(1);
+  });
+
+  it('still answers false when NO endpoint has reached the receipt [r10]', async () => {
+    // The polarity that keeps the row above honest: an all-lagging walk is the real "not final
+    // anywhere", and it must not become a silent null at the call site.
+    const { chain } = chainOverProviders([
+      { finalized: { number: 100, hash: `0x${'ee'.repeat(32)}` }, atHeight: { number: 123, hash: BLOCK_HASH } },
+      { finalized: { number: 110, hash: `0x${'ee'.repeat(32)}` }, atHeight: { number: 123, hash: BLOCK_HASH } },
+    ]);
+
+    await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(false);
+  });
+
   it('an endpoint missing the RECEIPT block also fails over, rather than answering false [r8]', async () => {
     // 3812585310 — the frontier read already treated a missing view as empty; the block-at-height
     // read did not, so a pruned or incomplete primary that serves `finalized` but not the older

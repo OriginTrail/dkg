@@ -2491,9 +2491,17 @@ export class TripleStoreAsyncLiftPublisher
   ): LiftJob {
     const now = this.now();
     const { failure: _dropped, ...withoutFailure } = job as LiftJob & { failure?: unknown };
+    // PR #2300 r10 (3812960758) — a published-finalized record must CARRY its broadcast metadata,
+    // and a job held on the recovery carrier alone has none: an earlier reset dropped it and kept
+    // the hash. Recording it from the transaction just proven is not invention — it is the same
+    // hash and wallet the proof was bound to — and without it this writes a `finalized` job that
+    // does not satisfy its own union. The claim is guaranteed by the dispatcher's shape guard.
+    const broadcast = job.broadcast
+      ?? (job.claim ? { txHash: origin.txHash, walletId: job.claim.walletId } : undefined);
     return {
       ...withoutFailure,
       status: 'finalized',
+      ...(broadcast ? { broadcast } : {}),
       inclusion,
       finalization,
       recovery: {

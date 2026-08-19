@@ -96,7 +96,12 @@ export class StorageReadMethods extends EVMChainAdapterBase {
             blockNumber,
           };
         },
-        { signal: options.signal },
+        // PR #2300 r10 (3812960544) — TIP-SENSITIVE: this answers "what is the asset's version
+        // NOW", so endpoint stickiness must not serve it. A preferred endpoint stuck at the first
+        // update returns a perfectly COHERENT but stale pair, and coherence is not currency: the
+        // supersession check would compare position 1 against a stale count of 1 and call an old
+        // transaction current. `skipPreferred` is the repo's existing idiom for exactly this.
+        { signal: options.signal, skipPreferred: true },
       );
     } catch {
       return null;

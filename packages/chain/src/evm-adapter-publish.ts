@@ -565,7 +565,12 @@ export class PublishMethods extends EVMChainAdapterBase {
         // held job at `pending` forever. `null` lets the whole attempt move to the next endpoint;
         // all-null collapses to false below, which is the honest "nobody could establish it".
         if (!finalized) return null;
-        if (finalized.number < receipt.blockNumber) return false;
+        // r10 (3812960956) — a frontier BEHIND the receipt is this endpoint having nothing to say
+        // yet, not a verdict: finality is monotone, so an endpoint further ahead can settle what
+        // this one cannot. Answering `false` here made a lagging endpoint authoritative and held
+        // jobs at `pending` while a configured peer already had the proof. All endpoints coming up
+        // short collapses to `false` at the call site, which is the honest "not final anywhere".
+        if (finalized.number < receipt.blockNumber) return null;
         const atHeight = await provider.getBlock(receipt.blockNumber);
         // r8 (3812585310) — the same empty-view rule as the frontier read above: an endpoint that
         // cannot serve the receipt's (older, possibly pruned) block has no opinion, and answering

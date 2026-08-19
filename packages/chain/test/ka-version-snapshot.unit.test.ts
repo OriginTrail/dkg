@@ -64,7 +64,13 @@ function adapterOver(scripts: Script[], opts: { storageDeployed?: boolean } = {}
       return { merkleRootsCount: provider.__script.rootCount ?? 0n };
     },
   });
-  a.readProviderRetryingNull = async (_label: string, fn: (p: unknown) => Promise<unknown>) => {
+  const readOpts: Array<{ skipPreferred?: boolean }> = [];
+  a.readProviderRetryingNull = async (
+    _label: string,
+    fn: (p: unknown) => Promise<unknown>,
+    opts?: { skipPreferred?: boolean },
+  ) => {
+    readOpts.push(opts ?? {});
     let sawEmpty = false;
     for (const provider of providers) {
       try {
@@ -77,7 +83,7 @@ function adapterOver(scripts: Script[], opts: { storageDeployed?: boolean } = {}
     }
     return sawEmpty ? null : undefined;
   };
-  return { adapter: a, reads };
+  return { adapter: a, reads, readOpts };
 }
 
 describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300 r9]', () => {
@@ -95,6 +101,20 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300 r9]
       { provider: 0, call: 'getLatestMerkleRoot', blockTag: 500 },
       { provider: 0, call: 'getKnowledgeAssetUpdateContext', blockTag: 500 },
     ]);
+  });
+
+  it('asks for a TIP read, so endpoint stickiness cannot serve a stale-but-coherent pair [r10]', async () => {
+    // 3812960544 — coherence is not currency. A preferred endpoint stuck at the first update
+    // returns a perfectly coherent {root: A, count: 1} while the chain is at A -> B -> A with
+    // count 3, and recovery would then read an old transaction as current. This is a
+    // current-state question, so the read must skip endpoint preference.
+    const { adapter, readOpts } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+    ]);
+
+    await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
+
+    expect(readOpts[0]?.skipPreferred).toBe(true);
   });
 
   it('fails the WHOLE pair over to the next endpoint rather than splicing', async () => {
