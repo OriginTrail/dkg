@@ -97,6 +97,13 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
     const readOne = async (provider: JsonRpcProvider) => {
+      // r15 (3814317260) — every endpoint must prove it is THIS chain before its view is eligible.
+      // The fan-out below is deliberate (unanimity cannot be expressed as a first-success read),
+      // but skipping this check meant an accidentally configured wrong-chain RPC could contribute
+      // an ABI-compatible view and WIN the poll by reporting a higher finalized block, after which
+      // recovery would materialize that chain's root and attribution.
+      await this.ensureConfiguredStaticChainIdValidated(provider);
+      if (options.signal?.aborted) return null;
       // r13 (3813796492) — pinned to the FINALIZED block, not the head. This view drives a DURABLE
       // decision: marking a recovered transaction superseded finalizes it receipt-only and hands
       // the lifecycle to another version. Read at the head, an unfinalized update that later
@@ -128,8 +135,16 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     // gets back. The wider point — that this is a second orchestration path next to the canonical
     // transport — is answered on that thread and queued with the recovery-mixin extraction.
     if (options.signal?.aborted) return null;
-    const settled = await Promise.allSettled(this.providers.map(readOne));
-    if (options.signal?.aborted) return null;
+    // An abort must COMPLETE the call, not merely be observed after every endpoint has settled:
+    // one stalled provider would otherwise hold the caller for as long as it stalls.
+    const aborted = options.signal
+      ? new Promise<null>((resolve) => {
+          options.signal?.addEventListener('abort', () => resolve(null), { once: true });
+        })
+      : null;
+    const poll = Promise.allSettled(this.providers.map(readOne));
+    const settled = aborted ? await Promise.race([poll, aborted]) : await poll;
+    if (!settled || options.signal?.aborted) return null;
     const views = settled.flatMap((r) => (r.status === 'fulfilled' && r.value ? [r.value] : []));
     // r12 (3813506086) — the poll must be UNANIMOUS. Taking the highest block among the endpoints
     // that happened to answer does not establish currency: the endpoint whose read failed is

@@ -422,6 +422,31 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     })).rejects.toThrow(/behind the recovered transaction position/);
   });
 
+  it('DEFERS an update whose proof carries no history position [r15]', async () => {
+    // 3814317546 — the A -> B -> A case reached through a different door: evidence verified WITHOUT
+    // a position falls back to root bytes, and the first update's root equals the latest, so it
+    // would be recorded as current over the third. A create keeps the root comparison (its identity
+    // is minted once and never restored); an update without a position defers.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: () => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: SEAL_MERKLE_ROOT,
+        rootCount: 3n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 300,
+      });
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, operationKind: 'update' },
+      }),
+    })).rejects.toThrow(/carries no history position/);
+  });
+
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),

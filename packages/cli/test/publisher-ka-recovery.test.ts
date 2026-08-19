@@ -95,7 +95,7 @@ describe('named KA publisher recovery wiring', () => {
         endKAId: kaId.toString(),
         publisherAddress: walletId,
       },
-      publishProof: { merkleRoot, authorAddress: walletId, txIndex: 4 },
+      publishProof: { merkleRoot, authorAddress: walletId, txIndex: 4, operationKind: 'create' },
     });
 
     await expect(createChainProofResolver(publishers)({ txHash, walletId })).resolves.toMatchObject({
@@ -167,7 +167,7 @@ describe('named KA publisher recovery wiring', () => {
         endKAId: kaId.toString(),
         publisherAddress: walletId,
       },
-      publishProof: { merkleRoot: intendedRoot, authorAddress: author, txIndex: 3 },
+      publishProof: { merkleRoot: intendedRoot, authorAddress: author, txIndex: 3, operationKind: 'update' },
     });
     expect(verifyKAUpdate).toHaveBeenCalledWith(txHash, kaId, walletId);
 

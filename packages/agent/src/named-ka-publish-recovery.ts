@@ -267,6 +267,17 @@ export async function normalizeRecoveredNamedKaPublish(input: {
       + 'recovery is deferred rather than treating a stale view as current',
     );
   }
+  // r15 (3814317546) — an UPDATE with no recorded position cannot be settled by root bytes at all:
+  // that is precisely the A -> B -> A case, where the first update's root equals the latest and
+  // root equality would record it as current over the third. The built-in adapter supplies the
+  // position, so this is the fail-closed answer for evidence that does not — a create is different
+  // and keeps the root comparison, because a create's identity is minted once and never restored.
+  if (proof.operationKind === 'update' && proof.merkleRootCount === undefined) {
+    throw inconsistent(
+      'a recovered update carries no history position, so its currency cannot be established from '
+      + 'root bytes alone; recovery is deferred',
+    );
+  }
   let superseded = versionView
     ? !equalsIgnoreCase(versionView.latestRoot, proof.merkleRoot)
     : !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);

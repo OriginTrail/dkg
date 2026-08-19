@@ -132,6 +132,12 @@ export function isHeldForChainProof(job: PersistedFailedJob): boolean {
  */
 export function hasAutomaticRecoveryExit(job: PersistedFailedJob): boolean {
   if (!getLiftJobTransactionEvidence(job)) return false;
+  // r15 (3814317413) — the promise must match what the DISPATCHER will actually do. It refuses to
+  // finalize a record that cannot form a published-finalized job (claim and validation are part of
+  // that shape), so a record missing them has no automatic exit however complete its proof looks:
+  // every tick would resolve `recovered` and then decline, leaving the operator-only clear the
+  // response said was unnecessary.
+  if (!job.claim || !job.validation) return false;
   if (!(job.broadcast?.walletId ?? job.claim?.walletId)) return false;
   const pinnedId = pinnedPublishIdentityKaId(job);
   if (pinnedId === undefined) return false;

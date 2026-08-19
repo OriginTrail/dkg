@@ -283,6 +283,12 @@ export interface AsyncKnowledgeAssetVmPublishRecoveryEvidence
      * later in the history (A → B → A) makes root equality say "current" about an OLD update.
      */
     readonly merkleRootCount?: string;
+    /**
+     * r15 — which operation this proof was resolved FOR. The finalizer needs it to know when a
+     * missing position is fatal: an update's currency cannot be settled by root bytes (repeated
+     * roots), while a create's identity is minted once and never restored.
+     */
+    readonly operationKind?: 'create' | 'update';
   };
 }
 

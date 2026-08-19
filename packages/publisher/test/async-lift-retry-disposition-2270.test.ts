@@ -635,6 +635,23 @@ describe('GH#2270 failed-job retry disposition', () => {
       expect(await admissionRetryable(publisher, request)).toBe(false);
     });
 
+    it('FALSE for a record the dispatcher can never finalize — no validation [r15]', async () => {
+      // 3814317413 — the promise has to match what the dispatcher will DO. It refuses to finalize a
+      // record that cannot form a published-finalized job, so a carrier-only job missing validation
+      // would resolve `recovered` on every tick and then decline, leaving the operator-only clear
+      // the response said was unnecessary.
+      const publisher = createPublisher({
+        chainProofResolver: async () => ({ status: 'inconclusive' }),
+        knowledgeAssetVmPublishRecoveryResolver: async () => null,
+      });
+      const request = kaVmPublishRequest();
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-noval', nonce: 41, operationKind: 'create' });
+      const stripped = { ...held } as unknown as Record<string, unknown>;
+      delete stripped.validation;
+
+      expect(hasAutomaticRecoveryExit(stripped as never)).toBe(false);
+    });
+
     it('FALSE for a fully eligible record when THIS node has no chain-proof resolver [r4]', async () => {
       // 3811993669 — the record could not be more eligible: a create, a recorded nonce, a pinned
       // identity. But a publisher with no resolver wired never looks at it, so promising a retry

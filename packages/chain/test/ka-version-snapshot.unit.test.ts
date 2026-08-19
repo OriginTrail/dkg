@@ -30,6 +30,8 @@ function minimalConfig() {
 type Script = {
   /** The endpoint's FINALIZED height, or null when it cannot serve one. */
   blockNumber: number | null;
+  /** When true, this endpoint fails chain-id validation (a wrong-chain RPC). */
+  wrongChain?: boolean;
   latestRoot: string | null;
   rootCount: bigint;
   author?: string | null;
@@ -52,7 +54,13 @@ function adapterOver(scripts: Script[], opts: { storageDeployed?: boolean } = {}
     },
   }));
 
+  const validated: number[] = [];
   const a: any = new EVMChainAdapter(minimalConfig());
+  a.ensureConfiguredStaticChainIdValidated = async (provider: (typeof providers)[number]) => {
+    validated.push(provider.__index);
+    if (provider.__script.wrongChain) throw new Error('configured static chainId mismatch');
+    return 31337n;
+  };
   a.initialized = true;
   a.init = async () => {};
   a.contracts = { knowledgeAssetStorage: opts.storageDeployed === false ? undefined : {} };
@@ -79,7 +87,7 @@ function adapterOver(scripts: Script[], opts: { storageDeployed?: boolean } = {}
       },
     };
   };
-  return { adapter: a, reads };
+  return { adapter: a, reads, validated };
 }
 
 describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', () => {
@@ -141,6 +149,22 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     // The incomplete endpoint is the MOST ADVANCED one — precisely the answer that would have
     // mattered — so the poll is inconclusive rather than settling for the endpoint behind it.
     await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+  });
+
+  it('a WRONG-CHAIN endpoint cannot contribute a view, however far ahead it is [r15]', async () => {
+    // 3814317260 — the fan-out skipped the chain-id validation every normal adapter read performs,
+    // so an accidentally configured RPC for another chain could answer with an ABI-compatible view
+    // and WIN the poll by reporting a higher finalized block. Recovery would then materialize that
+    // chain's root and attribution. It is now validated per endpoint before its view is eligible —
+    // and because the poll must be unanimous, a wrong-chain endpoint makes the answer inconclusive
+    // rather than silently handing the decision to the remaining one.
+    const { adapter, validated } = adapterOver([
+      { blockNumber: 5_000, latestRoot: `0x${'ff'.repeat(32)}`, rootCount: 99n, wrongChain: true },
+      { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
+    ]);
+
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+    expect(validated).toContain(0);
   });
 
   it('answers null when no endpoint can produce a view', async () => {

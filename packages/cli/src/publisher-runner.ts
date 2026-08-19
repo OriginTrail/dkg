@@ -898,6 +898,7 @@ async function resolveCanonicalUpdateRecoveryEvidence(
       authorAddress,
       txIndex: facts.txIndex,
       ...(facts.merkleRootCount !== undefined ? { merkleRootCount: facts.merkleRootCount } : {}),
+      operationKind: 'update',
     },
   };
 }
@@ -993,7 +994,7 @@ function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
       endKAId: receipt.endKAId.toString() as `${bigint}`,
       publisherAddress,
     },
-    publishProof: { merkleRoot, authorAddress, txIndex: receipt.txIndex },
+    publishProof: { merkleRoot, authorAddress, txIndex: receipt.txIndex, operationKind: 'create' },
   };
 }
 
