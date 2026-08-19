@@ -16,6 +16,11 @@ export interface KAManifestEntry {
 
 export type PhaseCallback = (phase: string, status: 'start' | 'end') => void;
 
+export interface SignedTransactionRecoveryMaterial {
+  readonly txHash: string;
+  readonly signedTransaction: string;
+}
+
 export type ReceiverSignature = { identityId: bigint; r: Uint8Array; vs: Uint8Array };
 
 /**
@@ -240,6 +245,14 @@ export interface PublishOptions {
   entityProofs?: boolean;
   /** Optional callback invoked at each phase boundary for instrumentation. */
   onPhase?: PhaseCallback;
+  /**
+   * Internal durable-recovery boundary for EVM writes. The signed bytes are
+   * sensitive and must remain node-local: never log, serialize into public job
+   * status, gossip, or return them from an HTTP API.
+   */
+  onTransactionSigned?: (
+    info: SignedTransactionRecoveryMaterial,
+  ) => Promise<void> | void;
   /**
    * Skip the publisher-level context-graph graph creation/ensure step.
    * Only callers that already validated the target context graph should set

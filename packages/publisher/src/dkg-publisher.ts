@@ -3792,9 +3792,21 @@ export class DKGPublisher implements Publisher {
         const emitPhase = async (phase: string, status: 'start' | 'end') => {
           await (onPhase?.(phase, status) as unknown as Promise<void> | void);
         };
-        const emitWriteAheadStart = async (info?: { txHash?: string }) => {
+        const emitWriteAheadStart = async (info?: {
+          txHash?: string;
+          signedTransaction?: string;
+        }) => {
           if (wroteAhead) return;
           wroteAhead = true;
+          // The exact signed bytes are node-local crash-recovery material. Send
+          // them only to the dedicated callback; never encode them into a phase,
+          // log line, lifecycle event, or result object.
+          if (info?.txHash && info.signedTransaction && options.onTransactionSigned) {
+            await options.onTransactionSigned({
+              txHash: info.txHash,
+              signedTransaction: info.signedTransaction,
+            });
+          }
           // PR #241 Codex iter-5: emit a hash-bearing phase BEFORE the
           // generic `chain:writeahead:start` so WAL listeners can
           // persist the signed-but-not-yet-broadcast tx identity

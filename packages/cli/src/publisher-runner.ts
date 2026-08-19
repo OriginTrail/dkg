@@ -735,9 +735,27 @@ export function createChainRecoveryResolver(
 export function createKnowledgeAssetVmPublishRecoveryResolver(
   publishers: Map<string, DKGPublisher>,
 ): AsyncKnowledgeAssetVmPublishRecoveryResolver {
-  return async (job) => {
+  return async (job, signedTransaction) => {
     const recovered = await resolveCanonicalOnChainPublish(job, publishers);
-    if (!recovered) return null;
+    if (!recovered) {
+      if (!signedTransaction) return null;
+      const publisher = publishers.get(job.broadcast.walletId);
+      const chain = (publisher as unknown as { chain?: ChainAdapter } | undefined)?.chain;
+      if (!chain?.rebroadcastSignedTransaction) return null;
+      try {
+        // Exact signed bytes only: the adapter verifies their hash before the
+        // RPC call and never touches a signer. A receipt is resolved on the next
+        // recovery pass, after the chain has had time to include the tx.
+        await chain.rebroadcastSignedTransaction(
+          signedTransaction.signedTransaction,
+          job.broadcast.txHash,
+        );
+      } catch {
+        // RPC rejection/outage stays inconclusive. The durable publisher record
+        // bounds and spaces subsequent identical attempts.
+      }
+      return null;
+    }
     const evidence = mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
       recovered.receipt,
       recovered.chain.chainId,

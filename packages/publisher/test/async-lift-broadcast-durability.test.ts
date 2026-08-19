@@ -196,6 +196,50 @@ describe('async lift publisher broadcast durability', () => {
     expect(recovered?.broadcast?.walletId).toBe('wallet-1');
   });
 
+  it('keeps signed bytes out of job status and durably offers bounded exact re-broadcast recovery', async () => {
+    const signedTransaction = '0x02deadbeef';
+    const recoveryCalls: Array<{ signedTransaction: string; attempt: number } | undefined> = [];
+    const publisher = createPublisher(store, {
+      recoveryLookupTimeoutMs: 1_000_000,
+      knowledgeAssetVmPublishRecoveryResolver: async (_job, recovery) => {
+        recoveryCalls.push(recovery);
+        return null;
+      },
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onTransactionSigned?.({
+            txHash: TX_HASH,
+            signedTransaction,
+          });
+          throw new Error('rpc lost the transaction after durable write-ahead');
+        },
+      },
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+    expect(processed?.status).toBe('broadcast');
+    expect(JSON.stringify(await publisher.getStatus(jobId))).not.toContain(signedTransaction);
+
+    const privateRows = await store.query(
+      'SELECT ?payload WHERE { GRAPH <urn:dkg:publisher:signed-transaction-recovery> { ' +
+      `?job <urn:dkg:publisher:signedTransactionRecoveryPayload> ?payload } }`,
+    );
+    expect(privateRows.type).toBe('bindings');
+    expect(privateRows.type === 'bindings' ? privateRows.bindings : []).toHaveLength(1);
+
+    expect(await publisher.recover()).toBe(0);
+    expect(recoveryCalls).toEqual([{ signedTransaction, attempt: 1 }]);
+    // A second immediate sweep still checks chain state but cannot spam the RPC
+    // with another raw transaction inside the persisted 30-second interval.
+    expect(await publisher.recover()).toBe(0);
+    expect(recoveryCalls).toEqual([
+      { signedTransaction, attempt: 1 },
+      undefined,
+    ]);
+  });
+
   it('does not send or leave a phantom broadcast when the write-ahead fsync fails', async () => {
     // Regression (#1851 review): the write-ahead fsync runs AFTER the in-memory
     // 'broadcast' transition. If it throws, the store would show 'broadcast'
@@ -421,6 +465,35 @@ describe('async lift publisher broadcast durability', () => {
     // recover() must NOT chase or resubmit a never-accepted tx: no work, job stays failed.
     expect(await publisher.recover()).toBe(0);
     expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+  });
+
+  it('erases persisted signed bytes after a definitive pre-acceptance rejection', async () => {
+    const signedTransaction = '0x02deadbeef';
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onTransactionSigned?.({
+            txHash: TX_HASH,
+            signedTransaction,
+          });
+          throw new Error('insufficient funds for gas * price + value');
+        },
+      },
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.code).toBe('insufficient_funds');
+    expect(JSON.stringify(await publisher.getStatus(jobId))).not.toContain(signedTransaction);
+    const privateRows = await store.query(
+      'SELECT ?payload WHERE { GRAPH <urn:dkg:publisher:signed-transaction-recovery> { ' +
+      `?job <urn:dkg:publisher:signedTransactionRecoveryPayload> ?payload } }`,
+    );
+    expect(privateRows.type).toBe('bindings');
+    expect(privateRows.type === 'bindings' ? privateRows.bindings : []).toHaveLength(0);
   });
 
   // #1867 SAFETY (throw-safe classifier) — a pathological, non-stringifiable thrown value

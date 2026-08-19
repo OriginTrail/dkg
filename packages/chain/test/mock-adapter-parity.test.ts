@@ -415,6 +415,25 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(mock.isV10Ready()).toBe(true);
   });
 
+  it('mock exact-byte recovery enforces the same durable hash invariant', async () => {
+    const mock = new MockChainAdapter();
+    const signer = new ethers.Wallet(`0x${'1'.repeat(64)}`);
+    const signedTransaction = await signer.signTransaction({
+      to: '0x1111111111111111111111111111111111111111',
+      value: 0n,
+      nonce: 0,
+      gasLimit: 21_000n,
+      gasPrice: 1n,
+      chainId: 31337,
+    });
+    const txHash = ethers.keccak256(signedTransaction);
+
+    await expect(mock.rebroadcastSignedTransaction(signedTransaction, txHash)).resolves.toBeUndefined();
+    await expect(
+      mock.rebroadcastSignedTransaction(signedTransaction, `0x${'ff'.repeat(32)}`),
+    ).rejects.toThrow(/does not match durable hash/);
+  });
+
   // Codex PR #595 round-4: isShardingTableMember gates VM ACK eligibility.
   // The mock can't model a real sharding table, so it treats every
   // registered (non-zero) identity as a member; tests needing

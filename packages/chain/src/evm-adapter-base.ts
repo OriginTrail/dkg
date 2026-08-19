@@ -1695,14 +1695,17 @@ export class EVMChainAdapterBase {
   protected async dispatchSerializedV10Write(
     signer: Wallet,
     label: 'publish' | 'update',
-    onBroadcast: ((info: { txHash: string }) => Promise<void> | void) | undefined,
+    onBroadcast: ((info: { txHash: string; signedTransaction?: string }) => Promise<void> | void) | undefined,
     buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<{ signedTx: string; txHash: string }>,
     onNullReceipt: (preBroadcastTxHash: string) => never,
   ): Promise<ethers.TransactionReceipt> {
     return this.withSerializedSignerWrite(signer, async (ctx) => {
       const { signedTx, txHash: preBroadcastTxHash } = await buildSignedTx(ctx);
       try {
-        await onBroadcast?.({ txHash: preBroadcastTxHash });
+        await onBroadcast?.({
+          txHash: preBroadcastTxHash,
+          signedTransaction: signedTx,
+        });
       } catch (hookErr) {
         throw new Error(
           `chain:writeahead hook failed before ${label} broadcast: ` +
@@ -1726,6 +1729,29 @@ export class EVMChainAdapterBase {
   ): Promise<ethers.TransactionReceipt> {
     const { signedTx, txHash } = await this.signPopulatedTransaction(signer, populated);
     return this.sendSignedTransactionAndWait(signedTx, txHash, label);
+  }
+
+  /**
+   * Re-submit the exact signed bytes captured by the publisher WAL. Hash
+   * equality is checked locally before any RPC call, making re-signing or a
+   * nonce-changing replacement structurally impossible on this path.
+   */
+  async rebroadcastSignedTransaction(
+    signedTransaction: string,
+    expectedTxHash: string,
+  ): Promise<void> {
+    const actualTxHash = ethers.keccak256(signedTransaction);
+    if (actualTxHash.toLowerCase() !== expectedTxHash.toLowerCase()) {
+      throw new Error(
+        `Refusing recovery broadcast: signed transaction hash ${actualTxHash} ` +
+        `does not match durable hash ${expectedTxHash}`,
+      );
+    }
+    await this.broadcastSignedTransactionWithFailover(
+      signedTransaction,
+      expectedTxHash,
+      'V10 recovery re-broadcast',
+    );
   }
 
   /**

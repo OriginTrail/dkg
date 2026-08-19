@@ -206,6 +206,25 @@ export class MockChainAdapter implements ChainAdapter {
     return [];
   }
 
+  /**
+   * Offline parity for the EVM adapter's exact-byte recovery surface. The
+   * in-memory chain has no RPC transport to re-submit to, but it still enforces
+   * the security-critical invariant that the supplied bytes hash to the
+   * publisher's durable transaction identity.
+   */
+  async rebroadcastSignedTransaction(
+    signedTransaction: string,
+    expectedTxHash: string,
+  ): Promise<void> {
+    const actualTxHash = ethers.keccak256(signedTransaction);
+    if (actualTxHash.toLowerCase() !== expectedTxHash.toLowerCase()) {
+      throw new Error(
+        `Refusing recovery broadcast: signed transaction hash ${actualTxHash} ` +
+        `does not match durable hash ${expectedTxHash}`,
+      );
+    }
+  }
+
   /** RPC-usage capability: the mock has no RPC transport → always-empty window. */
   drainRpcUsage(): RpcUsageWindow {
     return { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };

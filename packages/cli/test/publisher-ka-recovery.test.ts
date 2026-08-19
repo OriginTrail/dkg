@@ -203,6 +203,29 @@ describe('named KA publisher recovery wiring', () => {
     await expect(createKnowledgeAssetVmPublishRecoveryResolver(publishers)(job)).resolves.toBeNull();
   });
 
+  it('re-broadcasts exact durable bytes when the transaction vanished from chain views', async () => {
+    const txHash = `0x${'de'.repeat(32)}` as `0x${string}`;
+    const walletId = '0x1111111111111111111111111111111111111111';
+    const signedTransaction = '0x02deadbeef';
+    const chain = {
+      chainId: 'evm:31337',
+      resolveCanonicalFinalizationReceipt: vi.fn(async () => ({ status: 'absent' as const })),
+      rebroadcastSignedTransaction: vi.fn(async () => undefined),
+    };
+    const publisher = { chain } as unknown as DKGPublisher;
+    const job = {
+      status: 'broadcast',
+      broadcast: { txHash, walletId },
+    } as LiftJobBroadcast;
+
+    await expect(createKnowledgeAssetVmPublishRecoveryResolver(
+      new Map([[walletId, publisher]]),
+    )(job, { signedTransaction, attempt: 1 })).resolves.toBeNull();
+
+    expect(chain.resolveCanonicalFinalizationReceipt).toHaveBeenCalledWith(txHash);
+    expect(chain.rebroadcastSignedTransaction).toHaveBeenCalledWith(signedTransaction, txHash);
+  });
+
   it('forwards the immutable job and wallet-scoped publisher to the agent repair method', async () => {
     const finalizeRecoveredQueuedKnowledgeAssetVmPublish = vi.fn(async () => undefined);
     const handler = createKnowledgeAssetVmPublishHandler({

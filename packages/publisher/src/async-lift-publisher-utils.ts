@@ -40,6 +40,7 @@ export {
   serializeJob,
   serializeJobRecord,
   serializeWalletLock,
+  quad,
   literal,
   parseLiteral,
   requestSubject,

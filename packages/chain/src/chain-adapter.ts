@@ -18,6 +18,17 @@ export interface ConvictionReader {
   requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 }
 
+/**
+ * Exact bytes prepared for one EVM write at the write-ahead boundary.
+ * `signedTransaction` is sensitive local recovery material: callers must never
+ * log it or expose it through an API. Re-broadcasting these byte-identical bytes
+ * is idempotent because it necessarily retains the same hash and nonce.
+ */
+export interface PreparedSignedTransaction {
+  txHash: string;
+  signedTransaction?: string;
+}
+
 /** Inputs for one adapter-owned, cost-aware publisher planning decision. */
 export interface PublisherPublishPlanRequest {
   contextGraphId: bigint;
@@ -737,7 +748,7 @@ export interface V10PublishParams {
    * callers in TypeScript, so an `async () => ...` hook passed in
    * here would otherwise race the broadcast.
    */
-  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
+  onBroadcast?: (info: PreparedSignedTransaction) => Promise<void> | void;
 }
 
 export interface V10UpdateKAParams {
@@ -788,7 +799,7 @@ export interface V10UpdateKAParams {
    * {@link V10PublishParams.onBroadcast} for full semantics
    * (fail-closed contract, exactly-once, Promise return, etc.).
    */
-  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
+  onBroadcast?: (info: PreparedSignedTransaction) => Promise<void> | void;
 }
 
 /**
@@ -1062,6 +1073,16 @@ export interface ChainAdapter {
     txHash: string,
     options?: CanonicalFinalizationReceiptReadOptions,
   ): Promise<CanonicalFinalizationReceiptResolution>;
+
+  /**
+   * Recovery-only re-broadcast of an already signed transaction. Implementations
+   * MUST verify the bytes hash to `expectedTxHash` and MUST NOT re-sign or alter
+   * the nonce, fee, destination, calldata, or value.
+   */
+  rebroadcastSignedTransaction?(
+    signedTransaction: string,
+    expectedTxHash: string,
+  ): Promise<void>;
 
   /**
    * Required TRAC amount for publishing (from stake-weighted ask and byte size).

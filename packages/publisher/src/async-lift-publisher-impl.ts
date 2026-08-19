@@ -32,6 +32,7 @@ import {
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
   AsyncKnowledgeAssetVmPublishRecoveryResolver,
+  AsyncSignedTransactionRecoveryMaterial,
   AsyncLiftPublisherConfig,
   AsyncLiftPublisherRecoveryResolver,
   IntentLookupInput,
@@ -92,6 +93,7 @@ import {
   normalizePersistedLiftJobRequest,
   rawLiftRequestFromJobRequest,
   jobSubject,
+  quad,
   literal,
   parseIntegerLiteral,
   parseLiteral,
@@ -101,6 +103,22 @@ import {
   walletLockSubject,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
+
+// Signed transaction bytes are deliberately isolated from the serialized job
+// payload because `/api/publisher/job` returns that payload. This node-local URN
+// graph is neither synchronized nor read by the status API.
+const SIGNED_TRANSACTION_RECOVERY_GRAPH_URI = 'urn:dkg:publisher:signed-transaction-recovery';
+const SIGNED_TRANSACTION_RECOVERY_PAYLOAD = 'urn:dkg:publisher:signedTransactionRecoveryPayload';
+const SIGNED_TRANSACTION_REBROADCAST_INTERVAL_MS = 30_000;
+const SIGNED_TRANSACTION_MAX_REBROADCASTS = 3;
+
+interface SignedTransactionRecoveryRecord {
+  readonly version: 1;
+  readonly txHash: LiftJobHex;
+  readonly signedTransaction: string;
+  readonly rebroadcastAttempts: number;
+  readonly lastRebroadcastAt?: number;
+}
 
 /**
  * #1864 — outcome of the KA VM-publish pre-send write-ahead boundary
@@ -228,6 +246,7 @@ export class TripleStoreAsyncLiftPublisher
   private readonly graphUri: string;
   private readonly walletLockGraphUri: string;
   private readonly journalGraphUri: string;
+  private readonly signedTransactionRecoveryGraphUri: string;
   private readonly journalWrites: boolean;
   private readonly maxRetries: number;
   private readonly retryBackoffBaseMs: number;
@@ -273,6 +292,7 @@ export class TripleStoreAsyncLiftPublisher
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
     this.walletLockGraphUri = DEFAULT_WALLET_LOCK_GRAPH_URI;
     this.journalGraphUri = DEFAULT_JOURNAL_GRAPH_URI;
+    this.signedTransactionRecoveryGraphUri = SIGNED_TRANSACTION_RECOVERY_GRAPH_URI;
     this.journalWrites = config.journalWrites ?? false;
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
     this.retryBackoffBaseMs = config.retryBackoffBaseMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_BACKOFF_BASE_MS;
@@ -671,6 +691,7 @@ export class TripleStoreAsyncLiftPublisher
         publishOptions: {
           ...prepared.publishOptions,
           onPhase: broadcastRecorder.onPhase,
+          onTransactionSigned: broadcastRecorder.onTransactionSigned,
         },
       };
       publishResult = await this.knowledgeAssetVmPublishHandler.execute(executionInput);
@@ -691,7 +712,13 @@ export class TripleStoreAsyncLiftPublisher
       // ~15-min recovery chase. A failed KA VM job is never chain-recovery-chased
       // (canRetryFailedRecovery === false); its code comes from the publish mapper
       // (insufficient_funds for the whitelisted rejects).
-      return await this.failKnowledgeAssetVmPublishExecution(claimed.jobId, error);
+      const failed = await this.failKnowledgeAssetVmPublishExecution(claimed.jobId, error);
+      // A definitive pre-acceptance rejection cannot land on chain. Once its
+      // terminal failure is durable, erase any exact signed bytes captured by
+      // the write-ahead callback; retaining them would add secret-bearing local
+      // state with no legitimate recovery use.
+      await this.deleteSignedTransactionRecovery(claimed.jobId);
+      return failed;
     }
     try {
       // execute() returned — the tx landed and returned a result. A local recording failure
@@ -746,7 +773,16 @@ export class TripleStoreAsyncLiftPublisher
 
     const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
     if (this.knowledgeAssetVmPublishRecoveryResolver) {
-      const resolved = await this.knowledgeAssetVmPublishRecoveryResolver(recoverable);
+      const signedTransactionRecord = recoverable.status === 'broadcast'
+        ? await this.readSignedTransactionRecovery(recoverable.jobId)
+        : null;
+      const signedTransaction = signedTransactionRecord?.txHash === recoverable.broadcast.txHash
+        ? this.signedTransactionRecoveryMaterial(signedTransactionRecord)
+        : undefined;
+      const resolved = await this.knowledgeAssetVmPublishRecoveryResolver(
+        recoverable,
+        signedTransaction,
+      );
       if (resolved) {
         if (
           this.knowledgeAssetVmPublishHandler?.finalizeRecovered &&
@@ -780,6 +816,7 @@ export class TripleStoreAsyncLiftPublisher
             resolved.inclusion,
             resolved.finalization,
           ), 'recovered-finalize');
+          await this.deleteSignedTransactionRecovery(recoverable.jobId);
           return true;
         }
 
@@ -788,13 +825,21 @@ export class TripleStoreAsyncLiftPublisher
         // than silently marking the queue job finalized.
         await this.releaseWalletLockForJob(job);
         await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable), 'failed');
+        await this.deleteSignedTransactionRecovery(recoverable.jobId);
         return true;
+      }
+      if (signedTransaction && signedTransactionRecord) {
+        await this.markSignedTransactionRebroadcastAttempt(
+          recoverable.jobId,
+          signedTransactionRecord,
+        );
       }
     }
 
     if (!this.hasInconclusiveRecoveryTimedOut(recoverable)) return false;
     await this.releaseWalletLockForJob(job);
     await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable), 'failed');
+    await this.deleteSignedTransactionRecovery(recoverable.jobId);
     return true;
   }
 
@@ -971,6 +1016,7 @@ export class TripleStoreAsyncLiftPublisher
     await this.promoteFinalizedPrivateStaging(next);
     await this.writeJob(next, 'finalized');
     await this.syncWalletLockForJob(next);
+    await this.deleteSignedTransactionRecovery(jobId);
     return next;
   }
 
@@ -1146,7 +1192,89 @@ export class TripleStoreAsyncLiftPublisher
     await this.store.createGraph(this.graphUri);
     await this.store.createGraph(this.walletLockGraphUri);
     await this.store.createGraph(this.journalGraphUri);
+    await this.store.createGraph(this.signedTransactionRecoveryGraphUri);
     this.graphEnsured = true;
+  }
+
+  private async readSignedTransactionRecovery(
+    jobId: string,
+  ): Promise<SignedTransactionRecoveryRecord | null> {
+    const result = await this.store.query(
+      `SELECT ?payload WHERE { GRAPH <${this.signedTransactionRecoveryGraphUri}> { ` +
+      `<${jobSubject(jobId)}> <${SIGNED_TRANSACTION_RECOVERY_PAYLOAD}> ?payload } }`,
+      { source: 'publisher.asyncLift.readSignedTransactionRecovery' },
+    );
+    const payload = expectBindings(result)[0]?.['payload'];
+    if (!payload) return null;
+    try {
+      const parsed = JSON.parse(String(parseLiteral(payload))) as Partial<SignedTransactionRecoveryRecord>;
+      if (
+        parsed.version !== 1
+        || typeof parsed.txHash !== 'string'
+        || !/^0x[0-9a-fA-F]{64}$/.test(parsed.txHash)
+        || typeof parsed.signedTransaction !== 'string'
+        || !/^0x[0-9a-fA-F]+$/.test(parsed.signedTransaction)
+        || !Number.isSafeInteger(parsed.rebroadcastAttempts)
+        || Number(parsed.rebroadcastAttempts) < 0
+        || (parsed.lastRebroadcastAt !== undefined
+          && (!Number.isSafeInteger(parsed.lastRebroadcastAt) || Number(parsed.lastRebroadcastAt) < 0))
+      ) return null;
+      return parsed as SignedTransactionRecoveryRecord;
+    } catch {
+      return null;
+    }
+  }
+
+  private async writeSignedTransactionRecovery(
+    jobId: string,
+    record: SignedTransactionRecoveryRecord,
+  ): Promise<void> {
+    const subject = jobSubject(jobId);
+    await replaceSubjectAtomicallyOrFallback(
+      this.store,
+      this.signedTransactionRecoveryGraphUri,
+      subject,
+      [quad(
+        subject,
+        SIGNED_TRANSACTION_RECOVERY_PAYLOAD,
+        literal(JSON.stringify(record)),
+        this.signedTransactionRecoveryGraphUri,
+      )],
+      'publisher.asyncLift.writeSignedTransactionRecovery',
+    );
+  }
+
+  private async deleteSignedTransactionRecovery(jobId: string): Promise<void> {
+    await this.store.deleteByPattern({
+      subject: jobSubject(jobId),
+      graph: this.signedTransactionRecoveryGraphUri,
+    });
+  }
+
+  private signedTransactionRecoveryMaterial(
+    record: SignedTransactionRecoveryRecord | null,
+  ): AsyncSignedTransactionRecoveryMaterial | undefined {
+    if (!record || record.rebroadcastAttempts >= SIGNED_TRANSACTION_MAX_REBROADCASTS) return undefined;
+    if (
+      record.lastRebroadcastAt !== undefined
+      && this.now() - record.lastRebroadcastAt < SIGNED_TRANSACTION_REBROADCAST_INTERVAL_MS
+    ) return undefined;
+    return {
+      signedTransaction: record.signedTransaction,
+      attempt: record.rebroadcastAttempts + 1,
+    };
+  }
+
+  private async markSignedTransactionRebroadcastAttempt(
+    jobId: string,
+    record: SignedTransactionRecoveryRecord,
+  ): Promise<void> {
+    await this.writeSignedTransactionRecovery(jobId, {
+      ...record,
+      rebroadcastAttempts: record.rebroadcastAttempts + 1,
+      lastRebroadcastAt: this.now(),
+    });
+    await this.store.flush?.();
   }
 
   private async writeJob(job: LiftJob, kind: JournalKind): Promise<void> {
@@ -1383,6 +1511,7 @@ export class TripleStoreAsyncLiftPublisher
   private async deleteJob(jobId: string): Promise<void> {
     await this.store.deleteByPattern({ subject: jobSubject(jobId), graph: this.graphUri });
     await this.store.deleteByPattern({ subject: requestSubject(jobId), graph: this.graphUri });
+    await this.deleteSignedTransactionRecovery(jobId);
   }
 
   private async writeWalletLock(lock: {
@@ -1571,38 +1700,52 @@ export class TripleStoreAsyncLiftPublisher
     merkleRoot: LiftJobHex;
     publicByteSize?: number;
     delegate?: PhaseCallback;
-  }): { onPhase: PhaseCallback; readonly outcome: PreSendOutcome } {
+  }): {
+    onPhase: PhaseCallback;
+    onTransactionSigned: (info: { txHash: string; signedTransaction: string }) => Promise<void>;
+    readonly outcome: PreSendOutcome;
+  } {
     // #1864 — the pre-send write-ahead outcome is tracked in this closure (like
     // `recordedTxHash`) rather than threaded as a mutable out-parameter through the publish
     // path. The processKnowledgeAssetVmPublish catch reads `.outcome` to decide recovery vs
     // terminal. It stays 'not-reached' unless the write-ahead hook actually fires.
     let outcome: PreSendOutcome = 'not-reached';
     let recordedTxHash: LiftJobHex | undefined;
-    const onPhase: PhaseCallback = async (phase, status) => {
-      await (params.delegate?.(phase, status) as unknown as Promise<void> | void);
-      if (status !== 'start') return;
-      const txHash = txHashFromSignedPhase(phase);
-      if (!txHash || recordedTxHash) return;
+    const record = async (txHash: LiftJobHex, signedTransaction?: string) => {
+      if (recordedTxHash) return;
       recordedTxHash = txHash;
       try {
         await this.recordKnowledgeAssetVmPublishBroadcastProgress({
           jobId: params.jobId,
           walletId: params.walletId,
           txHash,
+          signedTransaction,
           merkleRoot: params.merkleRoot,
           publicByteSize: params.publicByteSize,
         });
-        // The transition is fsync-durable (or was already durable): the tx is about to send.
         outcome = 'recorded-durable';
       } catch (error) {
-        // recordDurableBroadcastBeforeSend rolled the transition back before re-throwing (or
-        // the write-ahead never durably mutated state): the tx was never sent.
         outcome = 'rolled-back-pre-send';
         throw error;
       }
     };
+    const onPhase: PhaseCallback = async (phase, status) => {
+      await (params.delegate?.(phase, status) as unknown as Promise<void> | void);
+      if (status !== 'start') return;
+      const txHash = txHashFromSignedPhase(phase);
+      if (txHash) await record(txHash);
+    };
     return {
       onPhase,
+      onTransactionSigned: async ({ txHash, signedTransaction }) => {
+        if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+          throw new Error('Signed transaction recovery callback received an invalid tx hash');
+        }
+        if (!/^0x[0-9a-fA-F]+$/.test(signedTransaction)) {
+          throw new Error('Signed transaction recovery callback received invalid signed bytes');
+        }
+        await record(txHash as LiftJobHex, signedTransaction);
+      },
       get outcome() {
         return outcome;
       },
@@ -1613,6 +1756,7 @@ export class TripleStoreAsyncLiftPublisher
     jobId: string;
     walletId: string;
     txHash: LiftJobHex;
+    signedTransaction?: string;
     merkleRoot: LiftJobHex;
     publicByteSize?: number;
   }): Promise<void> {
@@ -1623,12 +1767,16 @@ export class TripleStoreAsyncLiftPublisher
         `Cannot record knowledge asset VM publish broadcast for job ${params.jobId} from status ${current.status}`,
       );
     }
-    await this.recordDurableBroadcastBeforeSend(current, {
-      txHash: params.txHash,
-      walletId: params.walletId,
-      merkleRoot: params.merkleRoot,
-      publicByteSize: params.publicByteSize,
-    });
+    await this.recordDurableBroadcastBeforeSend(
+      current,
+      {
+        txHash: params.txHash,
+        walletId: params.walletId,
+        merkleRoot: params.merkleRoot,
+        publicByteSize: params.publicByteSize,
+      },
+      params.signedTransaction,
+    );
   }
 
   /**
@@ -1655,8 +1803,19 @@ export class TripleStoreAsyncLiftPublisher
   private async recordDurableBroadcastBeforeSend(
     current: LiftJob,
     broadcast: LiftJobBroadcastMetadata,
+    signedTransaction?: string,
   ): Promise<void> {
+    let wroteSignedTransaction = false;
     try {
+      if (signedTransaction) {
+        await this.writeSignedTransactionRecovery(current.jobId, {
+          version: 1,
+          txHash: broadcast.txHash,
+          signedTransaction,
+          rebroadcastAttempts: 0,
+        });
+        wroteSignedTransaction = true;
+      }
       await this.update(current.jobId, 'broadcast', { broadcast });
       await this.store.flush?.();
     } catch (error) {
@@ -1665,6 +1824,7 @@ export class TripleStoreAsyncLiftPublisher
       // pre-flush 'broadcast' entry already recorded the attempt). The subsequent
       // failure transition emits the terminal entry.
       await this.writeJob(current, 'rollback-noop');
+      if (wroteSignedTransaction) await this.deleteSignedTransactionRecovery(current.jobId);
       throw error;
     }
   }

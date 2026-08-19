@@ -237,8 +237,15 @@ export type AsyncLiftPublisherRecoveryResolver = (
   job: LiftJobBroadcast | LiftJobIncluded,
 ) => Promise<AsyncLiftPublisherRecoveryResult | null>;
 
+/** Sensitive node-local material for byte-identical transaction recovery. */
+export interface AsyncSignedTransactionRecoveryMaterial {
+  readonly signedTransaction: string;
+  readonly attempt: number;
+}
+
 export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
   job: LiftJobBroadcast | LiftJobIncluded,
+  signedTransaction?: AsyncSignedTransactionRecoveryMaterial,
 ) => Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null>;
 
 export interface AsyncLiftPublisherConfig {

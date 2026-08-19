@@ -289,6 +289,53 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     expect(send.calls).toEqual([]);
   });
 
+  it('hands the WAL the exact signed bytes before broadcast', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    const onBroadcast = recorder(async () => undefined);
+    (a as any).sendSignedTransactionAndWait = recorder(async () => fakeReceipt('0xsent'));
+
+    await (a as any).dispatchSerializedV10Write(
+      signer,
+      'publish',
+      onBroadcast,
+      async () => ({ signedTx: '0xsigned-bytes', txHash: '0xpre' }),
+      neverNull,
+    );
+
+    expect(onBroadcast.calls).toEqual([[
+      { txHash: '0xpre', signedTransaction: '0xsigned-bytes' },
+    ]]);
+  });
+
+  it('re-broadcasts only byte-identical signed transactions', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    const signedTransaction = await signer.signTransaction({
+      to: '0x1111111111111111111111111111111111111111',
+      value: 0n,
+      nonce: 0,
+      gasLimit: 21_000n,
+      gasPrice: 1n,
+      chainId: 31337,
+    });
+    const txHash = ethers.keccak256(signedTransaction);
+    const broadcast = recorder(async () => undefined);
+    (a as any).broadcastSignedTransactionWithFailover = broadcast;
+
+    await a.rebroadcastSignedTransaction(signedTransaction, txHash);
+    expect(broadcast.calls).toEqual([[
+      signedTransaction,
+      txHash,
+      'V10 recovery re-broadcast',
+    ]]);
+
+    await expect(
+      a.rebroadcastSignedTransaction(signedTransaction, `0x${'ff'.repeat(32)}`),
+    ).rejects.toThrow(/does not match durable hash/);
+    expect(broadcast.calls).toHaveLength(1);
+  });
+
   it('a failed write does not wedge the wallet — the next same-wallet write still runs', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
