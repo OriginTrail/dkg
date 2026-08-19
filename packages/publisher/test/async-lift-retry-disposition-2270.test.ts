@@ -569,8 +569,13 @@ describe('GH#2270 failed-job retry disposition', () => {
 
     it('TRUE for a create with a recorded nonce and pinned identity — every world has an exit', async () => {
       // r4 (3811993669) — the lane has to be WIRED for the promise to be honest, so these rows
-      // construct a publisher that can actually move the job.
-      const publisher = createPublisher({ chainProofResolver: async () => ({ status: 'inconclusive' }) });
+      // construct a publisher that can actually move the job. r12 — that includes the named
+      // recovery resolver even for a create: absence-release is only one of its two outcomes, and
+      // a MINED create is settled by the finalizer this resolver provides.
+      const publisher = createPublisher({
+        chainProofResolver: async () => ({ status: 'inconclusive' }),
+        knowledgeAssetVmPublishRecoveryResolver: async () => null,
+      });
       const request = kaVmPublishRequest();
       // r4 (3811993487) — the marker is REQUIRED here: without it the fixture classifies as an
       // update and this row silently stopped guarding the create branch it names.
@@ -586,6 +591,18 @@ describe('GH#2270 failed-job retry disposition', () => {
       const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-legacy', operationKind: 'create' });
 
       expect(hasAutomaticRecoveryExit(held)).toBe(false);
+      expect(await admissionRetryable(publisher, request)).toBe(false);
+    });
+
+    it('FALSE for a held CREATE when only the chain-proof resolver is wired [r12]', async () => {
+      // 3813505773 — the create looked exempt because its absence-release needs nothing but the
+      // reset. That is one outcome of two: a MINED create is settled by the named finalizer, so
+      // without that resolver this node cannot see the job through and must not promise it.
+      const publisher = createPublisher({ chainProofResolver: async () => ({ status: 'inconclusive' }) });
+      const request = kaVmPublishRequest();
+      const held = await heldJob(publisher, request, { txHash: TX_HASH, walletId: 'w-create-half', nonce: 41, operationKind: 'create' });
+
+      expect(hasAutomaticRecoveryExit(held)).toBe(true);
       expect(await admissionRetryable(publisher, request)).toBe(false);
     });
 

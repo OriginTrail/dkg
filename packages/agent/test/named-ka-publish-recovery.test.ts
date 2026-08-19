@@ -264,35 +264,6 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     expect(result.materialization.superseded).toBe(true);
   });
 
-  it('will not conclude "current" from a count observed apart from the root [r8]', async () => {
-    // 3812585216 — the skew the pinned pair exists to exclude: the real history is A -> B -> A at
-    // position 3, and the proof is root A at position 1. A fresh latest-root read answers A, so
-    // root bytes alone say "current"; an independently served count from a lagging endpoint would
-    // answer 1 and confirm that wrong conclusion. With no coherent pair available the finalizer
-    // must not consult a count at all — it stays with the root answer rather than promoting a
-    // lagging observation into proof of currency.
-    const chain = seededChain();
-    (chain as unknown as { getMerkleRootCount: (kaId: bigint) => Promise<bigint> })
-      .getMerkleRootCount = async () => 3n;
-    // …and this adapter cannot produce the pair, which is the condition under test.
-    (chain as unknown as { readKnowledgeAssetVersionSnapshot?: unknown })
-      .readKnowledgeAssetVersionSnapshot = undefined;
-
-    const result = await normalizeRecoveredNamedKaPublish({
-      chain,
-      request: baseRequest(),
-      queued: queuedTx(),
-      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
-        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
-      }),
-    });
-
-    // The bare count says 3 > 1 and WOULD flip this to superseded — which is the point: it is
-    // ignored, because a count observed apart from the root cannot be trusted in either
-    // direction. The answer is the root comparison's, exactly as before the position work.
-    expect(result.materialization.superseded).toBe(false);
-  });
-
   it('stays CURRENT when the pinned pair reports this proof as the latest position [r9]', async () => {
     // 3812794155 — the equality polarity of the position comparison. This update IS the latest:
     // same root, same count. `>` must not become `>=`, which would classify a current recovered
@@ -351,6 +322,53 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     expect(result.materialization.authorAddress).toBe(ethers.getAddress(NEWER_AUTHOR));
     expect(result.materialization.publisherAddress).toBe(ethers.getAddress(NEWER_PUBLISHER));
     expect(result.materialization.versionBlock).toBe(250);
+  });
+
+  it('DEFERS instead of deciding when no coherent view can be established [r12]', async () => {
+    // 3813505553 (and subsuming r8's bare-count row: with no view there is nothing to consult) — with a position in the proof there is no weaker answer to fall back to: root
+    // equality cannot tell an old repeated root from the current one, so falling back would stamp
+    // stale provenance exactly when the real proof is missing. The job stays held and the next
+    // tick asks again.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: () => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => null;
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
+      }),
+    })).rejects.toThrow(/could not be established from a single coherent chain view/);
+  });
+
+  it('does not need the standalone root read when it has a view [r12]', async () => {
+    // 3813506089 — the view is the only chain view consulted when it exists, so a failing (or
+    // absent) latest-root read must not abort a recovery the view can already settle.
+    const chain = seededChain();
+    (chain as unknown as { getLatestMerkleRoot: () => Promise<never> })
+      .getLatestMerkleRoot = async () => { throw new Error('standalone read is down'); };
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: () => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: SEAL_MERKLE_ROOT,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 120,
+      });
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
+      }),
+    });
+
+    expect(result.materialization.superseded).toBe(false);
+    expect(result.materialization.merkleRoot).toBe(SEAL_MERKLE_ROOT);
   });
 
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {

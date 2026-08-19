@@ -217,10 +217,23 @@ export async function normalizeRecoveredNamedKaPublish(input: {
     );
   }
 
-  if (!chain.getLatestMerkleRoot) {
+  // r12 (3813506089) — the coherent view is consulted FIRST, and when it exists it is the only
+  // chain view this decision uses. The standalone latest-root read is the legacy path for proofs
+  // that carry no position, so a node whose adapter can produce the view must not be blocked by
+  // that read failing (or by an adapter that lacks it).
+  const versionView = await chain.readKnowledgeAssetVersionSnapshot?.(reservedKaId).catch(() => null);
+  if (!versionView && proof.merkleRootCount !== undefined) {
+    throw inconsistent(
+      'the current KA version could not be established from a single coherent chain view; '
+      + 'recovery is deferred rather than deciding supersession from a weaker signal',
+    );
+  }
+  if (!versionView && !chain.getLatestMerkleRoot) {
     throw inconsistent('the configured chain adapter cannot resolve the current KA merkle root');
   }
-  const latestMerkleRoot = ethers.hexlify(await chain.getLatestMerkleRoot(reservedKaId));
+  const latestMerkleRoot = versionView
+    ? versionView.latestRoot
+    : ethers.hexlify(await chain.getLatestMerkleRoot!(reservedKaId));
   // GH#2270 PR #2300 r5 (3812275749) — supersession is a question about POSITION in the update
   // history, and root bytes cannot answer it: an asset updated A -> B -> A makes the FIRST
   // update's root equal the latest one, so root equality would call that old transaction current
@@ -233,21 +246,21 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // a lagging count that merely fails to prove supersession must not overturn a root read that
   // already did — that would materialize an old transaction as current and stamp its provenance
   // over newer state, which is the exact failure the position check was added to prevent.
-  // GH#2270 PR #2300 r11 (3813210019) — ONE view decides everything about the CURRENT version.
-  // Root, count, author, publisher and height used to come from four independent reads, so a
-  // decision could be made on one observation and then materialized with facts from another: the
-  // stale root paired with the newer version's attribution, which is a lifecycle record that never
-  // existed on chain. When the adapter can produce a complete pinned view, it is the only thing
-  // consulted; without one this falls back to the pre-existing latest-root comparison, which is no
-  // worse than what it replaced and is documented as such.
-  const versionView = await chain.readKnowledgeAssetVersionSnapshot?.(reservedKaId).catch(() => null);
+  // GH#2270 PR #2300 — ONE view decides everything about the CURRENT version, or nothing does.
+  //
+  // Root, count, author, publisher and height must come from a single pinned observation: deciding
+  // from one read and materializing from another writes a lifecycle version that never existed on
+  // chain. And when that observation is unavailable there is no weaker answer to fall back to —
+  // root equality cannot tell an old repeated root from the current one (an A -> B -> A history),
+  // so falling back to it would stamp stale provenance exactly when the real proof is missing
+  // (r12, 3813505553). A job whose proof carries a position therefore DEFERS instead: it stays
+  // held, tx-bearing, and the next recovery tick asks again.
   let superseded = versionView
     ? !equalsIgnoreCase(versionView.latestRoot, proof.merkleRoot)
     : !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
   if (!superseded && versionView && proof.merkleRootCount !== undefined) {
-    // Roots match, and alone they cannot distinguish "still current" from "superseded by a later
-    // update that RESTORED the same root" (an A -> B -> A history). The position settles it, from
-    // this same view.
+    // Roots match, which alone cannot separate "still current" from "superseded by a later update
+    // that restored the same root". The position settles it, from this same view.
     superseded = versionView.rootCount > BigInt(proof.merkleRootCount);
   }
 

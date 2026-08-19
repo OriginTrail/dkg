@@ -118,7 +118,13 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     };
     const settled = await Promise.allSettled(this.providers.map(readOne));
     const views = settled.flatMap((r) => (r.status === 'fulfilled' && r.value ? [r.value] : []));
-    if (views.length === 0) return null;
+    // r12 (3813506086) — the poll must be UNANIMOUS. Taking the highest block among the endpoints
+    // that happened to answer does not establish currency: the endpoint whose read failed is
+    // exactly the one that might have been ahead, so a stale-but-complete view would win and an
+    // old transaction would materialize as current. Anything less than every configured endpoint
+    // reporting a complete view is "cannot establish", and the caller must defer rather than
+    // decide — recovery retries on the next tick, and the operator's by-id clear remains.
+    if (views.length !== this.providers.length) return null;
     void options;
     return views.reduce((best, view) => (view.blockNumber > best.blockNumber ? view : best));
   }

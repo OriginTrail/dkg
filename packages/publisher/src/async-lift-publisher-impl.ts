@@ -1345,8 +1345,12 @@ export class TripleStoreAsyncLiftPublisher
   private automaticExitIsConfiguredFor(job: PersistedFailedJob): boolean {
     if (!hasAutomaticRecoveryExit(job) || !this.chainProofResolver) return false;
     if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return true;
-    return queuedLiftOperationKind(job) === 'create'
-      || this.knowledgeAssetVmPublishRecoveryResolver !== undefined;
+    // r12 (3813505773) — a named job needs the recovery resolver whatever its kind. The create
+    // case looked exempt because absence-release is create-only and needs nothing but the reset —
+    // but that is only ONE of its outcomes. If the transaction MINED, settling it means building
+    // canonical evidence and repairing the lifecycle, which is exactly what this resolver does;
+    // without it a mined create is held forever while the response promised convergence.
+    return this.knowledgeAssetVmPublishRecoveryResolver !== undefined;
   }
 
   private async dispatchFailedJobsOnChainProof(): Promise<number> {

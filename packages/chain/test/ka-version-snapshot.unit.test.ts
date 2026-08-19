@@ -117,19 +117,16 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     expect(view?.rootCount).toBe(3n);
   });
 
-  it('an endpoint that cannot produce a COMPLETE view does not compete', async () => {
+  it('an endpoint that cannot answer makes the whole poll inconclusive [r12]', async () => {
+    // 3813506086 — taking the best of whoever answered does not establish currency: the endpoint
+    // that failed is exactly the one that might have been ahead, so a stale-but-complete view
+    // would win. Anything short of unanimity is "cannot establish", and the caller defers.
     const { adapter } = adapterOver([
       { blockNumber: null, latestRoot: null, rootCount: 0n },
       { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
     ]);
 
-    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toEqual({
-      latestRoot: `0x${'bb'.repeat(32)}`,
-      rootCount: 5n,
-      latestAuthor: AUTHOR,
-      latestPublisher: PUBLISHER,
-      blockNumber: 900,
-    });
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
   });
 
   it('a partial view is never returned — a missing attribution disqualifies its endpoint', async () => {
@@ -138,10 +135,9 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
       { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
     ]);
 
-    // The disqualified endpoint is the MOST ADVANCED one, so this also proves currency never
-    // overrides completeness.
-    const view = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
-    expect(view?.blockNumber).toBe(900);
+    // The incomplete endpoint is the MOST ADVANCED one — precisely the answer that would have
+    // mattered — so the poll is inconclusive rather than settling for the endpoint behind it.
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
   });
 
   it('answers null when no endpoint can produce a view', async () => {
