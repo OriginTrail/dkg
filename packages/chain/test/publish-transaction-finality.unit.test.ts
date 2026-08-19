@@ -107,7 +107,62 @@ describe('isReceiptBlockFinalAndCanonical [PR#2300 r1]', () => {
       isReceiptBlockFinalAndCanonical(r: { blockNumber: number; blockHash: string }): Promise<boolean>;
     };
   }
+  /**
+   * Ordered providers with the production EMPTY-RESULT policy modelled: a callback that yields
+   * nothing moves to the next endpoint (that is what `readProviderRetryingNull` asks the transport
+   * for), and only an all-empty walk answers null. The `readOpts` capture lets a row prove the
+   * production code ASKED for that policy rather than relying on this stub's generosity.
+   */
+  function chainOverProviders(scripts: Array<{
+    finalized: { number: number; hash: string } | null;
+    atHeight: { number: number; hash: string } | null;
+  }>) {
+    const seen: number[] = [];
+    const readOpts: Array<{ isEmptyResult?: (v: unknown) => boolean }> = [];
+    const providers = scripts.map((script, index) => ({
+      getBlock: async (tag: string | number) => {
+        seen.push(index);
+        return tag === 'finalized' ? script.finalized : script.atHeight;
+      },
+    }));
+    const chain = adapter({
+      readProvider: async (
+        _label: string,
+        fn: (p: unknown) => Promise<unknown>,
+        opts?: { isEmptyResult?: (v: unknown) => boolean },
+      ) => {
+        readOpts.push(opts ?? {});
+        let sawEmpty = false;
+        for (const provider of providers) {
+          const value = await fn(provider);
+          if (opts?.isEmptyResult?.(value)) { sawEmpty = true; continue; }
+          return value;
+        }
+        return sawEmpty ? null : undefined;
+      },
+    }) as PublishMethods & {
+      isReceiptBlockFinalAndCanonical(r: { blockNumber: number; blockHash: string }): Promise<boolean>;
+    };
+    return { chain, seen, readOpts };
+  }
+
   const RECEIPT = { blockNumber: 123, blockHash: BLOCK_HASH };
+
+  it('an endpoint with no finalized view fails the gate OVER to a capable one [PR#2300 r5]', async () => {
+    // 3812435954 — the `null` added in r5 exists to trigger failover, and nothing proved it did:
+    // a regression returning `false` would stop at the incapable primary and pin every held job at
+    // `pending` forever. Provider 0 cannot serve `finalized`; provider 1 can, and proves the
+    // receipt final and canonical.
+    const { chain, seen, readOpts } = chainOverProviders([
+      { finalized: null, atHeight: null },
+      { finalized: { number: 200, hash: `0x${'ee'.repeat(32)}` }, atHeight: { number: 123, hash: BLOCK_HASH } },
+    ]);
+
+    await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
+    // The answer came from the SECOND endpoint, and the read asked for empty-result failover.
+    expect(seen).toContain(1);
+    expect(readOpts[0]?.isEmptyResult?.(null)).toBe(true);
+  });
 
   it('true only when the height is behind the finalized frontier AND the hash still matches', async () => {
     const chain = chainOver({

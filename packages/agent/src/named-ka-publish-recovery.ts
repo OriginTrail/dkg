@@ -228,10 +228,17 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // carries the verified position, compare positions; root equality remains the fallback for
   // evidence that predates the field or an adapter that cannot count roots, which is no worse
   // than the behaviour it replaces.
+  // Each signal may only ADD evidence of supersession; neither may erase the other's (r6 review,
+  // 3812436109). The two reads are separate round trips and can observe different chain states, so
+  // a lagging count that merely fails to prove supersession must not overturn a root read that
+  // already did — that would materialize an old transaction as current and stamp its provenance
+  // over newer state, which is the exact failure the position check was added to prevent.
   let superseded = !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
-  if (proof.merkleRootCount !== undefined && chain.getMerkleRootCount) {
+  if (!superseded && proof.merkleRootCount !== undefined && chain.getMerkleRootCount) {
     try {
       const currentCount = await chain.getMerkleRootCount(reservedKaId);
+      // The root bytes matched, which alone cannot distinguish "still current" from "superseded by
+      // a later update that restored the same root". A strictly greater count settles it.
       superseded = currentCount > BigInt(proof.merkleRootCount);
     } catch {
       // A count the chain will not serve leaves the root-equality answer standing.

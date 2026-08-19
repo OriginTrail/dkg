@@ -227,6 +227,35 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     expect(result.materialization.versionBlock).toBe(300);
   });
 
+  it('a lagging COUNT cannot erase a root mismatch that already proved supersession [r7]', async () => {
+    // 3812436109 — the two reads are separate round trips and can observe different chain states.
+    // Here the root read already proves supersession (latest root differs from the proof's), while
+    // a lagging endpoint answers a count equal to the proof's position. Letting the count decide
+    // would flip the answer back to "current" and stamp the old transaction's provenance over
+    // newer state, so each signal may only ADD evidence.
+    const chain = seededChain();
+    (chain as unknown as { getLatestMerkleRoot: (kaId: bigint) => Promise<Uint8Array> })
+      .getLatestMerkleRoot = async () => ethers.getBytes(`0x${'cd'.repeat(32)}`);
+    (chain as unknown as { getMerkleRootCount: (kaId: bigint) => Promise<bigint> })
+      .getMerkleRootCount = async () => 1n;
+    (chain as unknown as { getLatestMerkleRootAuthor: (kaId: bigint) => Promise<string> })
+      .getLatestMerkleRootAuthor = async () => ethers.getAddress(AUTHOR);
+    (chain as unknown as { getLatestMerkleRootPublisher: (kaId: bigint) => Promise<string> })
+      .getLatestMerkleRootPublisher = async () => ethers.getAddress(PUBLISHER);
+    (chain as unknown as { getBlockNumber: () => Promise<number> }).getBlockNumber = async () => 400;
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
+      }),
+    });
+
+    expect(result.materialization.superseded).toBe(true);
+  });
+
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),

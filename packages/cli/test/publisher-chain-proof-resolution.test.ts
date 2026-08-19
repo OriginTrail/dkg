@@ -10,6 +10,7 @@
  * rows pin is the rule this side owns — that an absence must be ESTABLISHED, so every unknown
  * this module can produce comes out `inconclusive` and never `not-found`.
  */
+import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChainAdapter, PublishTransactionResolution } from '@origintrail-official/dkg-chain';
 import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
@@ -368,6 +369,41 @@ describe('GH#2270 runner chain-proof resolution', () => {
         blockNumber: 88,
         blockHash: `0x${'ef'.repeat(32)}`,
       });
+    });
+
+    it('carries the verified history POSITION from verifyKAUpdate to the named publishProof [r7]', async () => {
+      // 3812435587 — the A -> B -> A protection is only as good as the propagation: the position
+      // has to survive verification -> verdict evidence -> named recovery evidence. Injecting it at
+      // the last consumer proves the comparison and nothing about the pipeline, so this drives the
+      // REAL resolvers from a verifyKAUpdate answer that reports it.
+      const verifyKAUpdate = vi.fn(async () => ({ ...verifiedAnswer(), merkleRootCount: 1n }));
+      const adapter = updateChain({ verifyKAUpdate });
+      const publishers = publishersWith(adapter);
+
+      const resolution = await createChainProofResolver(publishers)(updateLookup);
+      expect(resolution.status).toBe('recovered');
+      const verdictRecovery = resolution.status === 'recovered' ? resolution.recovery : undefined;
+      expect(verdictRecovery?.canonicalUpdate?.merkleRootCount).toBe('1');
+
+      // …and through the named lane the dispatcher hands to the agent finalizer.
+      const named = await createKnowledgeAssetVmPublishRecoveryResolver(publishers)(
+        {
+          status: 'failed',
+          request: {
+            jobType: 'knowledge-asset-vm-publish',
+            knowledgeAssetVmPublish: {
+              // contentScopeVersion is a precondition of the named lane; without it the resolver
+              // answers null, which an optional-chained assertion would read as 'no count'.
+              contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+              kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+              seal: { merkleRoot: INTENDED_ROOT, authorAddress: WALLET, reservedKaId: PINNED_KA_ID },
+              sealMerkleRoot: INTENDED_ROOT,
+            },
+          },
+        } as never,
+        updateLookup,
+        verdictRecovery,
+      );
     });
 
     it('holds a verified update whose receipt block is NOT yet final — a mined update is not a fact', async () => {
