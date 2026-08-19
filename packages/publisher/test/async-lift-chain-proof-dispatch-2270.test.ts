@@ -1098,6 +1098,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     });
   });
 
+
   describe('the sweep is bounded — a held population cannot monopolize startup [r18]', () => {
     // 🔴 3816322914 — the dispatcher spends one RPC round trip PER HELD JOB and
     // `AsyncLiftRunner.start()` awaits `recover()`, so an unbounded pass turns startup into

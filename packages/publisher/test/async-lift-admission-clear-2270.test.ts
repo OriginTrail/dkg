@@ -407,4 +407,54 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
     });
     expect((await publisher.getStats()).accepted).toBe(0);
   });
+
+  describe('the automatic-exit promise is per WALLET, not per node [r20]', () => {
+    // 🔴 3815617109 — the refusal above carries `retryable`, which IS the promise of an
+    // automatic exit. The resolvers are installed node-wide (`hasChainRecovery` is `.some(...)`
+    // over the adapters), but the ability to ANSWER belongs to the adapter that signs this job.
+    // On a node mixing a capable wallet with a legacy one, the node-wide answer told clients a job
+    // would converge when its own wallet could only ever return `inconclusive`.
+
+    /** A held CREATE with the nonce its exit requires — without it the promise is false anyway. */
+    async function heldCreateWithNonce(publisher: ReturnType<typeof createPublisher>, request: KnowledgeAssetVmPublishRequest) {
+      const failed = await failAfterRecordedTxHash(publisher, request);
+      const withNonce = {
+        ...failed,
+        broadcast: { ...failed.broadcast, nonce: 7 },
+      } as unknown as LiftJob;
+      await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(withNonce, DEFAULT_CONTROL_GRAPH_URI));
+      return failed;
+    }
+
+    it('IS promised when the job own wallet can be answered', async () => {
+      // The discriminating half, first: without it a `retryable: false` assertion below would pass
+      // for any of the several other reasons an exit can be absent.
+      const publisher = createPublisher({
+        chainProofResolver: async () => ({ status: 'inconclusive' }),
+        knowledgeAssetVmPublishRecoveryResolver: async () => null,
+        chainProofCapableForWallet: () => true,
+      });
+      const request = kaVmPublishRequest();
+      await heldCreateWithNonce(publisher, request);
+
+      await expect(publisher.enqueueKnowledgeAssetVmPublish(request))
+        .rejects.toMatchObject({ code: 'LIFT_JOB_PENDING_CHAIN_PROOF', retryable: true });
+    });
+
+    it('is NOT promised when only OTHER wallets can be answered', async () => {
+      const publisher = createPublisher({
+        chainProofResolver: async () => ({ status: 'inconclusive' }),
+        knowledgeAssetVmPublishRecoveryResolver: async () => null,
+        chainProofCapableForWallet: (walletId) => walletId === 'wallet-capable',
+      });
+      const request = kaVmPublishRequest();
+      const held = await heldCreateWithNonce(publisher, request);
+
+      await expect(publisher.enqueueKnowledgeAssetVmPublish(request))
+        .rejects.toMatchObject({ code: 'LIFT_JOB_PENDING_CHAIN_PROOF', retryable: false });
+      // The refusal itself is unchanged — only the promise attached to it.
+      expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
+    });
+  });
 });

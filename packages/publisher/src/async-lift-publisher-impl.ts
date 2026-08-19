@@ -429,6 +429,7 @@ export class TripleStoreAsyncLiftPublisher
   private readonly idGenerator: () => string;
   private readonly rand: () => number;
   private readonly chainProofResolver?: AsyncLiftPublisherRecoveryResolver;
+  private readonly chainProofCapableForWallet?: (walletId: string) => boolean;
   private readonly chainProofDispatchBatchSize: number;
   private readonly chainProofDispatchTimeBudgetMs: number;
   /**
@@ -515,6 +516,7 @@ export class TripleStoreAsyncLiftPublisher
     this.rand = config.rand ?? (() => Math.random());
     assertNoLegacyChainRecoveryResolver(config);
     this.chainProofResolver = config.chainProofResolver;
+    this.chainProofCapableForWallet = config.chainProofCapableForWallet;
     this.chainProofDispatchBatchSize = config.chainProofDispatchBatchSize ?? 25;
     this.chainProofDispatchTimeBudgetMs = config.chainProofDispatchTimeBudgetMs ?? 15_000;
     this.knowledgeAssetVmPublishRecoveryResolver = config.knowledgeAssetVmPublishRecoveryResolver;
@@ -1372,6 +1374,14 @@ export class TripleStoreAsyncLiftPublisher
    */
   private automaticExitIsConfiguredFor(job: PersistedFailedJob): boolean {
     if (!hasAutomaticRecoveryExit(job) || !this.chainProofResolver) return false;
+    // r20 (🔴 3815617109) — per WALLET, not per node. A resolver's presence is node-wide, but
+    // the ability to answer belongs to the adapter that signs for this job: on a node mixing a
+    // capable adapter with a legacy one, a node-wide answer promised an automatic exit to jobs
+    // whose own wallet could only ever return `inconclusive`. A job with no wallet at all cannot
+    // be asked about either, which is the same answer for the same reason.
+    const walletId = job.broadcast?.walletId ?? job.claim?.walletId;
+    if (!walletId) return false;
+    if (this.chainProofCapableForWallet && !this.chainProofCapableForWallet(walletId)) return false;
     if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return true;
     // r12 (3813505773) — a named job needs the recovery resolver whatever its kind. The create
     // case looked exempt because absence-release is create-only and needs nothing but the reset —

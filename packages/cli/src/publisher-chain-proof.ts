@@ -44,8 +44,14 @@ import type {
  * `resolvePublishByTxHash` keeps the recovery it has always had.
  */
 export function hasChainPublishLookup(chain: ChainAdapter): boolean {
-  return typeof chain.resolvePublishByTxHash === 'function'
-    || typeof chain.resolvePublishTransaction === 'function';
+  // r20 (🔴 3815617109) — the capability must name the lookup this lane ACTUALLY calls, which
+  // r17 narrowed to the tri-state one: a legacy receipt-only result carries no block hash, so its
+  // canonicality cannot be established and it can never support a confirmation. Accepting
+  // `resolvePublishByTxHash` here therefore advertised a recovery lane that was guaranteed to
+  // answer `inconclusive` forever — the runtime installed both resolvers, admission told clients
+  // the job was retryable, and nothing would ever move it. Reporting NO automatic exit is the
+  // honest answer for such a node, and it leaves the operator's by-id clear as the stated one.
+  return typeof chain.resolvePublishTransaction === 'function';
 }
 
 /**

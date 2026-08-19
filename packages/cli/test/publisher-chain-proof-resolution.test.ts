@@ -597,11 +597,19 @@ describe('GH#2270 runner chain-proof resolution', () => {
       expect(resolvePublishByTxHash).not.toHaveBeenCalled();
     });
 
-    it('hasChainPublishLookup accepts either lookup and rejects an adapter with neither', () => {
+    it('hasChainPublishLookup names the lookup this lane ACTUALLY calls [r20]', () => {
+      // 🔴 3815617109 — r17 narrowed the lane to the tri-state lookup, because a legacy
+      // receipt-only result carries no block hash and so can never support a confirmation. The
+      // capability predicate did not follow, so a legacy-only adapter was still advertised as
+      // recovery-capable: the runtime installed both resolvers and admission told clients the job
+      // was retryable, while every lookup was guaranteed to answer `inconclusive` forever. A
+      // capability that cannot be exercised is not a capability.
       const asAdapter = (c: Record<string, unknown>) => c as unknown as ChainAdapter;
 
-      expect(hasChainPublishLookup(asAdapter({ resolvePublishByTxHash: () => null }))).toBe(true);
+      // The load-bearing row: legacy-only is NOT capable, however complete it looks.
+      expect(hasChainPublishLookup(asAdapter({ resolvePublishByTxHash: () => null }))).toBe(false);
       expect(hasChainPublishLookup(asAdapter({ resolvePublishTransaction: () => null }))).toBe(true);
+      // An adapter carrying both is capable through the tri-state one, not the legacy one.
       expect(hasChainPublishLookup(asAdapter({
         resolvePublishByTxHash: () => null, resolvePublishTransaction: () => null,
       }))).toBe(true);

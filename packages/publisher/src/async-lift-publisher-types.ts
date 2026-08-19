@@ -552,6 +552,16 @@ export interface AsyncLiftPublisherConfig {
    * exhausts the budget stops and the remaining jobs are asked on the next cadence.
    */
   chainProofDispatchTimeBudgetMs?: number;
+  /**
+   * GH#2270 PR-3 r20 (🔴 3815617109) — can the chain-proof lane actually settle a job signed by
+   * THIS wallet? A node may mix adapters, and the presence of a resolver is a node-wide fact while
+   * the ability to answer is per adapter: with one capable wallet and one legacy wallet, a
+   * node-wide boolean advertises an automatic exit for jobs that will never get one.
+   *
+   * Absent, every wallet is treated as capable — the single-adapter case, where the resolver's own
+   * presence is the whole answer.
+   */
+  chainProofCapableForWallet?: (walletId: string) => boolean;
   knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
   knowledgeAssetVmPublishHandler?: AsyncKnowledgeAssetVmPublishJobHandler;
