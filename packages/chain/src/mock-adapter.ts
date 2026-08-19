@@ -69,6 +69,13 @@ interface MockBatch {
 type MockTransactionState = 'pending' | 'reverted' | 'mined';
 
 interface MockKnowledgeCollection {
+  /**
+   * r21 (🔴 3816664744) — the block this collection's CURRENT version was written at. The
+   * coherent snapshot used to report a constant 1 while returning the up-to-date root and count,
+   * so a recovered materialization carried an ordering block from a different point in mock-chain
+   * history than the state it described. Stamped on every write, like a real chain.
+   */
+  versionBlockNumber: number;
   merkleRoot: Uint8Array;
   kaCount: number;
   updateContext: KnowledgeAssetUpdateContext;
@@ -628,6 +635,9 @@ export class MockChainAdapter implements ChainAdapter {
     const collection = this.collections.get(params.kaId);
     if (collection) {
       collection.merkleRoot = params.newMerkleRoot;
+      // r21 (🔴 3816664744) — an update MOVES the version, so it re-stamps the ordering block.
+      // Without this the snapshot would report a fresh root against the creation block.
+      collection.versionBlockNumber = this.nextBlock;
       applyV10UpdateContext(collection.updateContext, params);
     }
     const hintedPublisherAddress = params.publisherAddress
@@ -683,6 +693,7 @@ export class MockChainAdapter implements ChainAdapter {
   async createKnowledgeAsset(params: CreateKCParams): Promise<TxResult> {
     const kaId = this.nextBatchId++;
     this.collections.set(kaId, {
+      versionBlockNumber: this.nextBlock,
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsCount,
       updateContext: createLegacyUpdateContext(params.knowledgeAssetsCount, this.rsEpoch),
@@ -711,6 +722,11 @@ export class MockChainAdapter implements ChainAdapter {
     }
 
     existing.merkleRoot = params.newMerkleRoot;
+    // r21 (🔴 3816664744) — the legacy V8 update moves the version too, so it re-stamps the
+    // ordering block alongside the V10 path. Leaving it out would make the snapshot's block
+    // depend on WHICH update entry point a fixture happened to use.
+    const legacyCollection = this.collections.get(params.kaId);
+    if (legacyCollection) legacyCollection.versionBlockNumber = this.nextBlock;
     this.pushEvent('KCUpdated', {
       kaId: params.kaId.toString(),
       newMerkleRoot: toHex(params.newMerkleRoot),
@@ -1798,6 +1814,7 @@ export class MockChainAdapter implements ChainAdapter {
     // fixtures that never set reservedKaId are unaffected).
     const kaId = params.reservedKaId ?? this.nextBatchId++;
     this.collections.set(kaId, {
+      versionBlockNumber: this.nextBlock,
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
       updateContext: createV10UpdateContext(params, this.rsEpoch),
@@ -2009,6 +2026,7 @@ export class MockChainAdapter implements ChainAdapter {
       cgId: input.contextGraphId,
     });
     this.collections.set(input.kaId, {
+      versionBlockNumber: this.nextBlock,
       merkleRoot: fromHex(input.merkleRootHex),
       kaCount: input.chunks.length,
       updateContext: createFixtureUpdateContext({
@@ -2256,7 +2274,7 @@ export class MockChainAdapter implements ChainAdapter {
         rootCount: await this.getMerkleRootCount(kaId),
         latestAuthor: await this.getLatestMerkleRootAuthor(kaId),
         latestPublisher: await this.getLatestMerkleRootPublisher(kaId),
-        blockNumber: 1,
+        blockNumber: this.collections.get(kaId)?.versionBlockNumber ?? this.nextBlock,
       };
     } catch {
       return null;

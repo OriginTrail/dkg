@@ -109,10 +109,15 @@ function adapterOver(scripts: ProviderScript[], opts: { storageDeployed?: boolea
   return { adapter: a, calls, readOpts };
 }
 
+/**
+ * r21 (3816664734) — the shape the tightened classifier accepts as proof of absence: the DECODED
+ * custom-error name. The previous fixture used `reason: 'ERC721NonexistentToken(uint256)'`, which
+ * only ever matched by substring — the very thing that let unrelated reverts authorize a resend.
+ */
 function nonexistentTokenRevert(): Error {
   return Object.assign(new Error('execution reverted'), {
     code: 'CALL_EXCEPTION',
-    reason: 'ERC721NonexistentToken(uint256)',
+    revert: { name: 'ERC721NonexistentToken' },
   });
 }
 
@@ -210,17 +215,38 @@ describe('EVMChainAdapter.readFinalizedChainProofSnapshot [GH#2270 r4]', () => {
       });
     }
 
-    it('answers FALSE for the zero address', async () => {
-      expect((await snapshotWhere(async () => ethers.ZeroAddress))?.kaMinted).toBe(false);
+    it('answers NULL for a SUCCESSFUL zero-address owner [r21]', async () => {
+      // 🔴 3816664734 — a compliant ERC721 REVERTS for a nonexistent token, so a successful
+      // zero owner is an answer this classifier cannot interpret, not proof of absence. Reading it
+      // as `false` would let a malformed reply authorize a resend.
+      const snapshot = await snapshotWhere(async () => ethers.ZeroAddress);
+      expect(snapshot?.kaMinted).toBeNull();
+      expect(snapshot?.kaMinted).not.toBe(false);
     });
 
     it.each([
-      ['OpenZeppelin custom error', { reason: 'ERC721NonexistentToken(uint256)' }],
+      ['the decoded custom-error NAME', { revert: { name: 'ERC721NonexistentToken' } }],
       ['classic invalid token id', { reason: 'ERC721: invalid token ID' }],
-      ['classic nonexistent token', { message: 'execution reverted: ERC721: owner query for nonexistent token' }],
-      ['shortMessage carrier', { shortMessage: 'execution reverted: ERC721NonexistentToken' }],
-    ])('answers FALSE for a recognized nonexistent-token revert (%s)', async (_label, extra) => {
+      ['classic nonexistent token', { reason: 'ERC721: owner query for nonexistent token' }],
+    ])('answers FALSE only for an EXACTLY identified nonexistent token (%s)', async (_label, extra) => {
       expect((await snapshotWhere(async () => { throw callException(extra); }))?.kaMinted).toBe(false);
+    });
+
+    it.each([
+      ['a pause message CONTAINING a recognized phrase',
+        { reason: 'paused: nonexistent token checks unavailable' }],
+      ['a recognized phrase inside a longer message',
+        { message: 'execution reverted: ERC721: owner query for nonexistent token' }],
+      ['a recognized phrase only in shortMessage',
+        { shortMessage: 'execution reverted: ERC721NonexistentToken' }],
+      ['a custom error with a DIFFERENT name', { revert: { name: 'ERC721InvalidOwner' } }],
+    ])('answers NULL for %s — a substring is not an identification [r21]', async (_label, extra) => {
+      // The load-bearing negatives. Each of these was previously classified as PROOF that the KA
+      // was unminted, which with a consumed nonce completes the absence conjunction and resends a
+      // create that may already have published.
+      const snapshot = await snapshotWhere(async () => { throw callException(extra); });
+      expect(snapshot?.kaMinted).toBeNull();
+      expect(snapshot?.kaMinted).not.toBe(false);
     });
 
     it.each([
@@ -299,12 +325,12 @@ describe('EVMChainAdapter.readFinalizedChainProofSnapshot [GH#2270 r4]', () => {
         wrongChain: true,
         finalized: { number: 5_000, hash: BLOCK_HASH },
         nonceAt: async () => 6,
-        ownerAt: async () => ethers.ZeroAddress,
+        ownerAt: async () => { throw nonexistentTokenRevert(); },
       },
       {
         finalized: { number: 900, hash: BLOCK_HASH },
         nonceAt: async () => 5,
-        ownerAt: async () => ethers.ZeroAddress,
+        ownerAt: async () => { throw nonexistentTokenRevert(); },
       },
     ]);
 

@@ -97,9 +97,17 @@ export function chainAdaptersForWallets(
  */
 export function createChainProofResolver(
   adapters: PublisherChainAdapters,
-): (lookup: AsyncLiftChainProofLookup) => Promise<AsyncLiftChainProofResolution> {
-  return async (lookup) => {
-    const resolution = await resolvePublishTransactionState(lookup, adapters);
+): (
+  lookup: AsyncLiftChainProofLookup,
+  options?: { readonly signal?: AbortSignal },
+) => Promise<AsyncLiftChainProofResolution> {
+  // r21 (🔴 3816664753) — the dispatch DEADLINE has to reach the adapter, not stop at this
+  // boundary. r19 gave the publisher an abort signal and proved it against a hand-written
+  // resolver; this factory took no options at all, so in the composed system the signal was
+  // dropped here and the abandoned RPC kept running while `recover()` moved on. Every adapter
+  // read below now carries it, so a cancelled pass actually cancels its work.
+  return async (lookup, options) => {
+    const resolution = await resolvePublishTransactionState(lookup, adapters, options);
     // GH#2270 PR-3 r4 — a queued UPDATE's mined transaction carries `KnowledgeAssetUpdated`, not a
     // publish event, so the publish parser reports it `unrecognized` and the job could never
     // resolve. When the lookup says the queued operation WAS an update, ask the update-verification
@@ -107,7 +115,7 @@ export function createChainProofResolver(
     // the recovered verdict CARRIES the canonical evidence, so the named finalizer consumes this
     // one verification instead of re-proving it (no shared verifier instance, no memo).
     if (resolution.status === 'unrecognized' && lookup.operationKind === 'update') {
-      return resolveCanonicalUpdateRecognition(lookup, adapters);
+      return resolveCanonicalUpdateRecognition(lookup, adapters, options);
     }
     if (resolution.status === 'not-found' && lookup.operationKind === 'update') {
       // Release-by-absence stays CREATE-ONLY, deliberately. A create's identity register is
@@ -187,6 +195,7 @@ export interface CanonicalUpdateFacts {
 export async function verifyCanonicalUpdateFacts(
   lookup: AsyncLiftUpdateChainProofLookup,
   adapters: PublisherChainAdapters,
+  options?: { readonly signal?: AbortSignal },
 ): Promise<CanonicalUpdateFacts | null> {
   const chain = adapters.get(lookup.walletId);
   if (!chain?.verifyKAUpdate || !chain.isReceiptBlockFinalAndCanonical) return null;
@@ -201,7 +210,7 @@ export async function verifyCanonicalUpdateFacts(
   }
   let verification;
   try {
-    verification = await chain.verifyKAUpdate(lookup.txHash, kaId, lookup.walletId);
+    verification = await chain.verifyKAUpdate(lookup.txHash, kaId, lookup.walletId, options);
   } catch {
     return null;
   }
@@ -219,7 +228,7 @@ export async function verifyCanonicalUpdateFacts(
       txHash: lookup.txHash,
       blockNumber: verification.blockNumber,
       blockHash: verification.blockHash,
-    });
+    }, options);
     if (!finalAndCanonical) return null;
   } catch {
     return null;
@@ -244,10 +253,11 @@ export async function verifyCanonicalUpdateFacts(
 async function resolveCanonicalUpdateRecognition(
   lookup: AsyncLiftUpdateChainProofLookup,
   adapters: PublisherChainAdapters,
+  options?: { readonly signal?: AbortSignal },
 ): Promise<AsyncLiftChainProofResolution> {
   const chain = adapters.get(lookup.walletId);
   if (!chain?.getDKGKnowledgeAssetsAddress) return { status: 'inconclusive' };
-  const facts = await verifyCanonicalUpdateFacts(lookup, adapters);
+  const facts = await verifyCanonicalUpdateFacts(lookup, adapters, options);
   if (!facts) return { status: 'inconclusive' };
   let knowledgeAssetsContract: string;
   try {
@@ -296,6 +306,7 @@ async function resolveCanonicalUpdateRecognition(
 async function isPublishProvenAbsent(
   lookup: AsyncLiftChainProofLookup,
   adapters: PublisherChainAdapters,
+  options?: { readonly signal?: AbortSignal },
 ): Promise<boolean> {
   if (lookup.nonce === undefined) return false;
   if (lookup.publishIdentityKaId === undefined) return false;
@@ -309,7 +320,7 @@ async function isPublishProvenAbsent(
   }
   let snapshot: FinalizedChainProofSnapshot | null;
   try {
-    snapshot = await chain.readFinalizedChainProofSnapshot({ address: lookup.walletId, kaId });
+    snapshot = await chain.readFinalizedChainProofSnapshot({ address: lookup.walletId, kaId }, options);
   } catch {
     return false;
   }
@@ -330,6 +341,7 @@ async function isPublishProvenAbsent(
 async function resolvePublishTransactionState(
   lookup: AsyncLiftChainProofLookup,
   adapters: PublisherChainAdapters,
+  options?: { readonly signal?: AbortSignal },
 ): Promise<
   | { status: 'confirmed'; publish: OnChainPublishResult; chain: ChainAdapter }
   | Exclude<AsyncLiftChainProofResolution, { status: 'recovered' }>
@@ -339,7 +351,7 @@ async function resolvePublishTransactionState(
 
   try {
     if (chain.resolvePublishTransaction) {
-      const resolution = await chain.resolvePublishTransaction(lookup.txHash);
+      const resolution = await chain.resolvePublishTransaction(lookup.txHash, options);
       return resolution.status === 'confirmed'
         ? { status: 'confirmed', publish: resolution.publish, chain }
         : resolution;
@@ -365,6 +377,7 @@ async function resolvePublishTransactionState(
 async function mapConfirmedPublishToLiftRecovery(
   publish: OnChainPublishResult,
   chain: ChainAdapter,
+  options?: { readonly signal?: AbortSignal },
 ): Promise<AsyncLiftPublisherRecoveryResult | null> {
   let knowledgeAssetsContract = publish.knowledgeAssetsContract;
   if (!knowledgeAssetsContract && chain.getDKGKnowledgeAssetsAddress) {

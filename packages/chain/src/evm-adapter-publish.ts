@@ -47,16 +47,29 @@ type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: 
  * Every other CALL_EXCEPTION — a paused contract, a decode failure, an endpoint returning garbage —
  * is left to the caller's `null`, which holds.
  */
+const NONEXISTENT_TOKEN_LEGACY_REASONS = new Set([
+  'erc721: invalid token id',
+  'erc721: owner query for nonexistent token',
+]);
+
 function isNonexistentTokenRevert(err: unknown): boolean {
-  const e = err as { code?: unknown; reason?: unknown; shortMessage?: unknown; message?: unknown };
+  const e = err as {
+    code?: unknown;
+    reason?: unknown;
+    revert?: { name?: unknown } | null;
+  };
   if (e?.code !== 'CALL_EXCEPTION') return false;
-  const text = [e.reason, e.shortMessage, e.message]
-    .filter((v): v is string => typeof v === 'string')
-    .join(' ')
-    .toLowerCase();
-  return text.includes('erc721nonexistenttoken')
-    || text.includes('invalid token id')
-    || text.includes('nonexistent token');
+  // r21 (🔴 3816664734) — EXACT identification only. This classifier guards the one path
+  // allowed to resend a held create, so "probably absent" is not good enough: a substring scan
+  // over the joined reason/shortMessage/message accepted unrelated reverts that merely CONTAIN a
+  // recognized phrase — `paused: nonexistent token checks unavailable` matched — and with the
+  // nonce consumed that fabricated the absence conjunction and authorized a second publish.
+  // The decoded custom-error NAME is authoritative; the two legacy strings are matched whole, as
+  // reasons, never as substrings of a longer message. Everything else falls through to the
+  // caller's `null`, which holds the job.
+  if (typeof e.revert?.name === 'string' && e.revert.name === 'ERC721NonexistentToken') return true;
+  return typeof e.reason === 'string'
+    && NONEXISTENT_TOKEN_LEGACY_REASONS.has(e.reason.trim().toLowerCase());
 }
 
 export class PublishMethods extends EVMChainAdapterBase {
@@ -653,7 +666,12 @@ export class PublishMethods extends EVMChainAdapterBase {
             try {
               const owner: string = await this.rebindContract(storage as Contract, provider)
                 .ownerOf(params.kaId, { blockTag: block.number });
-              kaMinted = ethers.getAddress(owner) !== ethers.ZeroAddress;
+              // r21 (🔴 3816664734) — a SUCCESSFUL zero-address owner is not proof of absence.
+              // A compliant ERC721 reverts for a nonexistent token; a zero owner means the
+              // endpoint or contract answered something this classifier cannot interpret, and
+              // interpreting it as "unminted" would authorize a resend on a malformed reply.
+              const ownerAddress = ethers.getAddress(owner);
+              kaMinted = ownerAddress === ethers.ZeroAddress ? null : true;
             } catch (err) {
               // A revert (CALL_EXCEPTION) or a decode failure (BAD_DATA) is a CHAIN answer for
               // this endpoint and classifies in place. Anything else — NETWORK_ERROR, a timeout,

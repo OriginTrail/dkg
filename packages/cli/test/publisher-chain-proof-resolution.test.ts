@@ -155,10 +155,10 @@ describe('GH#2270 runner chain-proof resolution', () => {
         ...lookupWithNonce,
         publishIdentityKaId: KA_ID.toString(),
       })).toEqual({ status: 'not-found' });
-      expect(adapter.readFinalizedChainProofSnapshot).toHaveBeenCalledWith({
-        address: WALLET,
-        kaId: KA_ID,
-      });
+      // r21 (3816664753) — every adapter read now carries the dispatch signal as a second
+      // argument, so the PAYLOAD is the observable, not the call's arity.
+      expect((adapter.readFinalizedChainProofSnapshot as unknown as { mock: { calls: unknown[][] } })
+        .mock.calls[0][0]).toEqual({ address: WALLET, kaId: KA_ID });
     });
 
     it('holds while the finalized nonce still EQUALS the signed slot', async () => {
@@ -363,12 +363,11 @@ describe('GH#2270 runner chain-proof resolution', () => {
       });
       // The chain was asked about exactly our transaction, our pinned id, our signing wallet —
       // and the finality gate was consulted with the verified receipt's identity.
-      expect(verifyKAUpdate).toHaveBeenCalledWith(TX_HASH, KA_ID, WALLET);
-      expect(adapter.isReceiptBlockFinalAndCanonical).toHaveBeenCalledWith({
-        txHash: TX_HASH,
-        blockNumber: 88,
-        blockHash: `0x${'ef'.repeat(32)}`,
-      });
+      expect(verifyKAUpdate.mock.calls[0].slice(0, 3)).toEqual([TX_HASH, KA_ID, WALLET]);
+      expect((adapter.isReceiptBlockFinalAndCanonical as unknown as { mock: { calls: unknown[][] } })
+        .mock.calls[0][0]).toEqual({
+          txHash: TX_HASH, blockNumber: 88, blockHash: `0x${'ef'.repeat(32)}`,
+        });
     });
 
     it('carries the verified history POSITION from verifyKAUpdate to the named publishProof [r7]', async () => {
@@ -570,6 +569,37 @@ describe('GH#2270 runner chain-proof resolution', () => {
       // says the tx is still in the mempool, and that is the answer that must win.
       expect(await createChainProofResolver(publishers)(lookup)).toEqual({ status: 'pending' });
       expect(resolvePublishByTxHash).not.toHaveBeenCalled();
+    });
+
+
+    it('carries the dispatch DEADLINE through to the adapter [r21]', async () => {
+      // 🔴 3816664753 — r19 gave the publisher an abort signal and proved it against a
+      // hand-written resolver, which proved the DOUBLE. The production factory took no options at
+      // all, so in the composed system the signal was dropped at this boundary: `recover()` stopped
+      // waiting, and the abandoned RPC kept running. The observable that matters is that the signal
+      // reaches the ADAPTER, so this row asserts on the real `createChainProofResolver`.
+      const seen: Array<AbortSignal | undefined> = [];
+      const adapter = {
+        chainId: 'evm:31337',
+        resolvePublishTransaction: vi.fn(async (_txHash: string, opts?: { signal?: AbortSignal }) => {
+          seen.push(opts?.signal);
+          return { status: 'pending' as const };
+        }),
+      } as unknown as ChainAdapter;
+
+      const controller = new AbortController();
+      const resolution = await createChainProofResolver(publishersWith(adapter))(
+        lookupWithNonce,
+        { signal: controller.signal },
+      );
+
+      expect(resolution.status).toBe('pending');
+      // Not merely "an options object arrived" — the adapter got THIS pass's signal, so aborting
+      // the pass aborts the adapter's work.
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toBe(controller.signal);
+      controller.abort();
+      expect(seen[0]?.aborted).toBe(true);
     });
 
     it('a legacy-only adapter is inconclusive in BOTH directions [r17]', async () => {
@@ -795,7 +825,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
       expect(await publisher.recover()).toBe(0);
 
       // Asked about OUR tx, OUR pinned id, OUR wallet — the derivation composed end to end.
-      expect(verifyKAUpdate).toHaveBeenCalledWith(TX_HASH, (BigInt(WALLET) << 96n) | 7n, WALLET);
+      expect(verifyKAUpdate.mock.calls[0].slice(0, 3)).toEqual([TX_HASH, (BigInt(WALLET) << 96n) | 7n, WALLET]);
       // Held for repair, not reset: the recognition reached the finalize lane.
       const after = await status();
       expect(after?.status).toBe('failed');

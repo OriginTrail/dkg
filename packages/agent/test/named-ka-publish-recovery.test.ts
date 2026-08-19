@@ -447,6 +447,29 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     })).rejects.toThrow(/carries no history position/);
   });
 
+  it('a MARKED create with no coherent view DEFERS — A -> B -> A cannot be settled by root bytes [r21]', async () => {
+    // 🔴 3816769865 — the discriminating half of the row above. The no-view guard used to key
+    // off a persisted `merkleRootCount`, which a create never carries, so a marked create slipped
+    // through to the root-only comparison whenever the snapshot was briefly unavailable. The
+    // adapter here reports the LATEST root as the create's own root — the A -> B -> A history,
+    // where the current position is 3 — so the fallback would call the create current and stamp
+    // its old author and block over newer state. It must defer instead.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot?: unknown })
+      .readKnowledgeAssetVersionSnapshot = undefined;
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: {
+          merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, operationKind: 'create',
+        },
+      }),
+    })).rejects.toThrow(/single coherent chain view/);
+  });
+
   it('the LEGACY path still works for an adapter with no coherent view [r15]', async () => {
     // 3814317919 — the shared mock gained the snapshot capability, so every row exercises the new
     // path and the retained compatibility path stopped being covered at all. A CREATE proof with no
@@ -461,7 +484,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
       request: baseRequest(),
       queued: queuedTx(),
       recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
-        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, operationKind: 'create' },
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4 },
       }),
     });
 

@@ -115,7 +115,7 @@ describe('named KA publisher recovery wiring', () => {
     });
     // r17 — the receipt-only lookup is no longer consulted at all (it cannot support a durable
     // finalize), so what this row pins is the UAL handling, not which lookup was called.
-    expect(resolvePublishTransaction).toHaveBeenCalledWith(txHash);
+    expect(resolvePublishTransaction.mock.calls[0][0]).toBe(txHash);
   });
 
   it('resolves a queued UPDATE through verifyKAUpdate, bound to the intended root [GH#2270 r4]', async () => {
@@ -178,7 +178,7 @@ describe('named KA publisher recovery wiring', () => {
       },
       publishProof: { merkleRoot: intendedRoot, authorAddress: author, txIndex: 3, operationKind: 'update' },
     });
-    expect(verifyKAUpdate).toHaveBeenCalledWith(txHash, kaId, walletId);
+    expect(verifyKAUpdate.mock.calls[0].slice(0, 3)).toEqual([txHash, kaId, walletId]);
 
     // A verified update for the WRONG root is someone else's update: null, and the job stays
     // held. (PR #2300 r1 — each negative sub-case asks about a DISTINCT transaction: the shared

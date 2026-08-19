@@ -222,7 +222,17 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // that carry no position, so a node whose adapter can produce the view must not be blocked by
   // that read failing (or by an adapter that lacks it).
   const versionView = await chain.readKnowledgeAssetVersionSnapshot?.(reservedKaId).catch(() => null);
-  if (!versionView && proof.merkleRootCount !== undefined) {
+  // r21 (🔴 3816769865) — the position is derived HERE, above the no-view guard, because the
+  // guard has to key off the DERIVED position and not merely a persisted `merkleRootCount`. A
+  // create carries no count but has position 1 by construction, so gating on the field alone let a
+  // marked create fall through to the root-only fallback whenever the coherent view was briefly
+  // unavailable — and in an A -> B -> A history the create's root equals the latest, so it would
+  // be recorded as current and stamp its old author and block over newer state. That is the exact
+  // ambiguity the position comparison exists to remove, reachable through the back door.
+  const recoveredPosition = proof.merkleRootCount !== undefined
+    ? BigInt(proof.merkleRootCount)
+    : (proof.operationKind === 'create' ? 1n : undefined);
+  if (!versionView && recoveredPosition !== undefined) {
     throw inconsistent(
       'the current KA version could not be established from a single coherent chain view; '
       + 'recovery is deferred rather than deciding supersession from a weaker signal',
@@ -260,9 +270,6 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // identity permanence with root currency — a later update can restore the create's root bytes,
   // and root equality would then record the create as current over the newer version. So creates
   // get the same position comparison, from a position that needs no extra chain read.
-  const recoveredPosition = proof.merkleRootCount !== undefined
-    ? BigInt(proof.merkleRootCount)
-    : (proof.operationKind === 'create' ? 1n : undefined);
   // Only evidence that SAYS it is an update is held to the position rule. Evidence carrying no
   // operation kind at all is the pre-marker legacy shape (r15, 3814317919): it keeps the
   // latest-root comparison it always had, because there is nothing better available for it and
