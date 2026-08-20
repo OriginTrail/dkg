@@ -939,11 +939,13 @@ async function resolveCanonicalOnChainPublish(
   // reorg can still rewrite while every finality row on the update branch stayed green.
   if (!chain.isReceiptBlockFinalAndCanonical) return null;
   try {
+    // r25 (🔴 3820711175) — the finality gate takes the pass deadline like every other read on
+    // this branch; it was the one left detached after the receipt lookup was threaded.
     const final = await chain.isReceiptBlockFinalAndCanonical({
       txHash: lookup.txHash,
       blockNumber: resolution.receipt.blockNumber,
       blockHash: resolution.receipt.blockHash,
-    });
+    }, options);
     if (!final) return null;
   } catch {
     return null;

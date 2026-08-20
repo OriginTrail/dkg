@@ -343,7 +343,13 @@ export interface AsyncKnowledgeAssetVmPublishRecoveryInput {
    */
   readonly lookup: AsyncLiftChainProofLookup;
   readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
-  readonly publisher?: DKGPublisher;
+  readonly publisher?: DKGPublisher;
+  /**
+   * GH#2270 PR #2300 r25 — the pass deadline, so a handler that reaches the chain can cancel its
+   * reads rather than leak them once per timed-out pass. The publisher additionally bounds this
+   * whole phase in one race, so the ceiling does not depend on the handler honouring this.
+   */
+  readonly signal?: AbortSignal;
 }
 
 export type AsyncKnowledgeAssetVmPublishPreflightResult =

@@ -472,6 +472,7 @@ describe('named KA publisher recovery wiring', () => {
     // that the pass's EXACT signal reaches the adapter, so it is asserted on the real
     // `createKnowledgeAssetVmPublishRecoveryResolver` rather than a hand-written double.
     const txHash = `0x${'f1'.repeat(32)}` as `0x${string}`;
+    const walletId = '0x1111111111111111111111111111111111111111';
     const seen: Array<AbortSignal | undefined> = [];
     const chain = {
       chainId: 'evm:31337',
@@ -482,7 +483,6 @@ describe('named KA publisher recovery wiring', () => {
         },
       ),
     } as unknown as ChainAdapter;
-    const walletId = '0x1111111111111111111111111111111111111111';
     const publishers: PublisherChainAdapters = new Map([[walletId, chain]]);
 
     const controller = new AbortController();

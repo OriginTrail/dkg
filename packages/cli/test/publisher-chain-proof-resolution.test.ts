@@ -674,11 +674,22 @@ describe('GH#2270 runner chain-proof resolution', () => {
         asAdapter({ resolvePublishTransaction: () => null, resolveCanonicalFinalizationReceipt: () => null }),
         'create',
       )).toBe(false);
+      // r25 (🔴 3820711426) — a mined create is settled behind the FINALITY gate, so an adapter
+      // with the receipt but not the gate stops there forever. Three methods, not two.
       expect(hasChainRecoveryCapabilityFor(
         asAdapter({
           resolvePublishTransaction: () => null,
           readFinalizedChainProofSnapshot: () => null,
           resolveCanonicalFinalizationReceipt: () => null,
+        }),
+        'create',
+      )).toBe(false);
+      expect(hasChainRecoveryCapabilityFor(
+        asAdapter({
+          resolvePublishTransaction: () => null,
+          readFinalizedChainProofSnapshot: () => null,
+          resolveCanonicalFinalizationReceipt: () => null,
+          isReceiptBlockFinalAndCanonical: () => null,
         }),
         'create',
       )).toBe(true);

@@ -81,8 +81,13 @@ export function hasChainRecoveryCapabilityFor(
     // MINED was still advertised as capable: the finalizer returns unresolved every pass and the
     // job is held forever behind `retryable: true`. A capability must cover every outcome the
     // dispatcher can reach for that kind, or it is not a capability.
+    // r25 (🔴 3820711426) — and the FINALITY gate. A mined create is settled by the canonical
+    // receipt behind `isReceiptBlockFinalAndCanonical` (r14), so an adapter missing it stops there
+    // forever. r23 named two of the three methods this path needs, which advertised the capability
+    // for an adapter whose mined-create branch is guaranteed to return unresolved.
     return typeof chain.readFinalizedChainProofSnapshot === 'function'
-      && typeof chain.resolveCanonicalFinalizationReceipt === 'function';
+      && typeof chain.resolveCanonicalFinalizationReceipt === 'function'
+      && typeof chain.isReceiptBlockFinalAndCanonical === 'function';
   }
   // An unmarked record is treated as an update by the same safe fallback the dispatcher uses, so
   // it is held to the update capability rather than being given the weaker create answer.

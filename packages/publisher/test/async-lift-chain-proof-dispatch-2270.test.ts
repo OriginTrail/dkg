@@ -544,6 +544,43 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(await publisher.claimNext('wallet-raw')).toMatchObject({ jobId: nextJobId });
     });
 
+    it('after the recovery timeout it reaches a state the OPERATOR can clear [r25]', async () => {
+      // 🔴 3820711322 — the branch's comment promised "an operator clears it by id", and that
+      // was false: `clearTerminalJob` rejects a nonterminal record, and a job left at 'broadcast'
+      // is unclaimable and never times out on its own. The record was stuck until the deployment
+      // gained a resolver. It now takes the SAME timeout gate the resolver-bearing path uses.
+      const publisher = createPublisher({
+        publishExecutor: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
+          throw new Error('crash after the write-ahead, before the result');
+        },
+      });
+      const held = await heldRawLiftAfterWriteAhead(publisher);
+      const interrupted = {
+        ...held,
+        status: 'broadcast',
+        broadcast: { txHash: TX_HASH, walletId: 'wallet-raw' },
+      } as unknown as LiftJob;
+      delete (interrupted as unknown as Record<string, unknown>).failure;
+      await h.store.deleteByPattern({ subject: jobSubject(held.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(interrupted, DEFAULT_CONTROL_GRAPH_URI));
+
+      // Before the timeout: still held exactly as it was, and NOT resent.
+      await publisher.recover();
+      expect((await publisher.getStatus(held.jobId))?.status).toBe('broadcast');
+
+      // Past the timeout, on a node that still has no resolver.
+      h.advance(60 * 60_000);
+      await publisher.recover();
+
+      const after = await publisher.getStatus(held.jobId);
+      expect(after?.status).toBe('failed');
+      // The transaction is untouched — nothing was resent, the evidence is preserved.
+      expect(after?.broadcast?.txHash ?? after?.recovery?.txHashChecked).toBe(TX_HASH);
+      // And the exit the comment promised now actually exists.
+      expect((await publisher.clearTerminalJob(held.jobId)).outcome).toBe('cleared');
+    });
+
     // PR #2300 r1 (🟡 3809054845) — the create-only release rule over RAW transition types,
     // pinned. `queuedLiftOperationKind` reads a raw lift's `transitionType`: CREATE derives
     // 'create'; MUTATE and REVOKE rewrite existing state, carry the same re-apply-stale-state
@@ -1341,11 +1378,22 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       // own chain reads, so a resolver that answers `recovered` instantly followed by a named
       // finalizer that never settles kept `recover()` — and the startup awaiting it — pending
       // forever, which is exactly the ceiling the budget exists to provide.
+      // r25 (🔴 3820711576) — the stall belongs on the FINALIZER, not the evidence resolver.
+      // Stalling the resolver left the real downstream stage unbounded while the row read as
+      // coverage for it. Evidence now resolves immediately and `finalizeRecovered` — the handler
+      // that actually reaches the chain and repairs the lifecycle — is what never settles.
       const publisher = createPublisher({
         chainProofDispatchTimeBudgetMs: 20,
         chainProofResolver: async () => ({ status: 'recovered', recovery: { txHash: TX_HASH } } as never),
-        // Never settles. Only the deadline can end this pass.
-        knowledgeAssetVmPublishRecoveryResolver: () => new Promise<never>(() => {}),
+        knowledgeAssetVmPublishRecoveryResolver: async () => ({
+          inclusion: { blockNumber: 1, txHash: TX_HASH },
+          finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+        } as never),
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => ({ ok: true } as never),
+          execute: async () => ({ } as never),
+          finalizeRecovered: () => new Promise<never>(() => {}),
+        } as never,
       });
       const held = await failAfterRecordedTxHash(publisher);
 
