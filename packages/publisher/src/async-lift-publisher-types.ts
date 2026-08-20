@@ -246,9 +246,25 @@ export interface AsyncLiftPublisherConfig {
   maxRetries?: number;
   retryBackoffBaseMs?: number;
   retryBackoffMaxMs?: number;
+  /**
+   * GH#2270 — operator kill-switch for the publisher's OWN retry lane (registry `autoRetry`
+   * codes). OFF collapses the lane to pre-#2270 behaviour: nothing is scheduled and nothing
+   * already scheduled is swept. Manual `retry()` and admission reaccept are unaffected.
+   * Defaults to ON.
+   */
+  autoRetryEnabled?: boolean;
+  /**
+   * GH#2270 — symmetric multiplicative jitter ratio `r` for the retry backoff:
+   * `delay · (1 + r·(2·rand()−1))`, so `r` is the fraction of the delay the jitter may add or
+   * subtract. Must satisfy `0 ≤ r < 1` (at `r = 1` the delay can collapse to zero). Defaults
+   * to 0.2.
+   */
+  retryJitterRatio?: number;
   recoveryLookupTimeoutMs?: number;
   now?: () => number;
   idGenerator?: () => string;
+  /** Jitter source, injectable for determinism exactly like `now`/`idGenerator`. Defaults to Math.random. */
+  rand?: () => number;
   chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;

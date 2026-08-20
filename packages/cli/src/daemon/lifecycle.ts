@@ -129,6 +129,8 @@ import {
   resolveContextGraphs,
   resolveContextGraphSubscriptionRehydrationEnabled,
   resolveNetworkDefaultContextGraphs,
+  isPublisherRuntimeEnabled,
+  resolvePublisherRetryTuning,
   resolveRfc64PublicCatalogActivation,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveSharedMemoryTtlMs,
@@ -1298,6 +1300,20 @@ export async function runDaemonInner(
   }
 
   const storageAckTiming = resolveStorageAckTiming(config.storageAck);
+  // GH#2270 — fail the boot here, at the same boundary as StorageACK timing, on
+  // a bad publisher retry knob — but ONLY when the publisher will actually run:
+  // with `publisher.enabled` false no retry scheduler is constructed, and a
+  // typo in a dormant block must not stop the node from serving (operators
+  // disable the publisher precisely to keep the node up while fixing its
+  // config). When enabled, the publisher runtime starts deferred and folds its
+  // construction error into `publisher_startup_failed`, so without this gate a
+  // typo'd knob leaves a node that boots and serves but never publishes,
+  // announced only by one deferred-startup log line.
+  // Validate exactly the configs that will construct a publisher — the
+  // shared predicate is the same one the runner's start gates consult.
+  if (isPublisherRuntimeEnabled(config.publisher)) {
+    resolvePublisherRetryTuning(config.publisher);
+  }
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
     config,
     loadNetworkConfig,

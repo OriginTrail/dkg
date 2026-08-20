@@ -827,6 +827,24 @@ Async publisher wallets need native gas plus PCA agent registration or TRAC for 
 | `POST` | `/api/publisher/retry` | Retry a failed job. Body: `{ jobId }`. |
 | `POST` | `/api/publisher/clear` | Clear completed/failed jobs. |
 
+#### Retry behaviour and its knobs (`config.publisher`)
+
+A failed job is retried by the publisher itself only when the failure is one the publisher classifies as safe to re-run — today `quorum_unmet` (the ACK quorum was not reached) and `workspace_unavailable` (the shared-memory head the job reads was missing or corrupt when the job was claimed). Both are established **before** any transaction is signed, so a re-run cannot double-publish. Failures that may have sent a transaction (`rpc_unavailable`, `nonce_conflict`, the timeout codes) are never retried automatically; they wait for `POST /api/publisher/retry` or a re-submit.
+
+An eligible job gets a `nextRetryAt` and is re-accepted with the **same `jobId`** when it comes due — the queue never mints a replacement job for a retry.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `autoRetryEnabled` | `true` | Kill-switch for the publisher's own retry lane. `false` collapses it to manual-only: nothing new is scheduled and nothing already scheduled is re-accepted. |
+| `retryBackoffBaseMs` | `5000` | Delay before the first retry; doubles per attempt. |
+| `retryBackoffMaxMs` | `60000` | Hard ceiling on the delay, jitter included. |
+| `retryJitterRatio` | `0.2` | Fraction of the delay the jitter may add or subtract (`0` disables jitter, must stay below `1`). Spreads retries so a fleet doesn't stampede a recovering peer. |
+| `maxRetries` | `10` | Retry **budget** per job — see below. |
+
+`maxRetries` is one counter shared by the automatic retries and by every manual `POST /api/publisher/retry` / re-submit reaccept, snapshot when the job is admitted (changing the config does not re-arm jobs already in the queue). With the defaults, a job's automatic recovery window is 10 attempts over roughly 7 minutes; after that it stays `failed` until an operator intervenes.
+
+Two operational notes: turning `autoRetryEnabled` off **strands** jobs that were already scheduled (their `nextRetryAt` passes without firing) — they stay retryable by hand, and turning it back on releases them, at most five per claim; and `retryBackoffBaseMs`/`retryBackoffMaxMs` may be set independently — the daemon validates the **effective** pair (your value combined with the built-in default for the unset one) at startup, so a lone `retryBackoffBaseMs` above the default 60s ceiling is rejected with a message naming both sides. The four retry knobs survive `dkg publisher enable`, which rewrites only the keys it owns (`enabled`, `pollIntervalMs`, `errorBackoffMs`, `maxRetries`).
+
 ### Async promote queue (WM → SWM)
 
 Sibling to the publisher queue, but for the WM→SWM transition that a synchronous `POST /api/knowledge-assets/{name}/swm/share` would otherwise perform inline. Use it when the importer is producing assertions faster than the daemon can promote them (bulk Graphify imports, EPCIS batch loads, etc.); the synchronous route stays available for small interactive cases.

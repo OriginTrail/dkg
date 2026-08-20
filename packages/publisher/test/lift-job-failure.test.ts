@@ -9,6 +9,7 @@ import {
   isRetryableLiftJobFailure,
   isTerminalLiftJobFailure,
   isTimeoutLiftJobFailure,
+  type LiftJobFailureCode,
 } from '../src/lift-job.js';
 
 describe('LiftJob failure classification', () => {
@@ -180,6 +181,74 @@ describe('LiftJob failure classification', () => {
     ).toThrow(
       'Invalid timeout handling for LiftJob failure code tx_submit_timeout: reset_to_accepted. Expected: check_chain_then_finalize_or_reset',
     );
+  });
+
+  // GH#2270 — the allow-list INSTRUMENT for the automatic retry lane. Every expected value is
+  // written out per code instead of derived from the policy table, so a wrong policy cannot make
+  // this row agree with it; and because the actual map is built from LIFT_JOB_FAILURE_CODES, a
+  // 23rd code joining the enum fails here instead of silently inheriting a retry decision.
+  const EXPECTED_AUTO_RETRY: Record<LiftJobFailureCode, boolean> = {
+    workspace_unavailable: true,
+    workspace_slice_not_found: false,
+    publish_intent_stale: false,
+    canonicalization_failed: false,
+    authority_unavailable: false,
+    authority_forbidden: false,
+    validation_timeout: false,
+    wallet_claim_timeout: false,
+    wallet_unavailable: false,
+    quorum_unmet: true,
+    rpc_unavailable: false,
+    tx_submit_timeout: false,
+    tx_reverted: false,
+    insufficient_funds: false,
+    nonce_conflict: false,
+    inclusion_timeout: false,
+    finality_timeout: false,
+    confirmation_mismatch: false,
+    chain_reorg: false,
+    recovery_lookup_timeout: false,
+    recovery_chain_unavailable: false,
+    recovery_state_inconsistent: false,
+  };
+
+  it('allow-lists autoRetry on exactly workspace_unavailable and quorum_unmet', () => {
+    const actual = Object.fromEntries(
+      LIFT_JOB_FAILURE_CODES.map((code) => [code, getLiftJobFailurePolicy(code).autoRetry === true]),
+    );
+
+    expect(actual).toEqual(EXPECTED_AUTO_RETRY);
+  });
+
+  // Conditions 2 and 3 of the `autoRetry` qualification (see LiftJobFailurePolicy): an
+  // auto-retried job must be re-runnable from the start, with no chain evidence to reconcile.
+  it('keeps every autoRetry code retryable and resolvable by reset_to_accepted', () => {
+    const autoRetryCodes = LIFT_JOB_FAILURE_CODES.filter(
+      (code) => getLiftJobFailurePolicy(code).autoRetry === true,
+    );
+
+    expect(autoRetryCodes.length).toBeGreaterThan(0);
+    for (const code of autoRetryCodes) {
+      const policy = getLiftJobFailurePolicy(code);
+      expect([code, policy.retryable, policy.resolution]).toEqual([code, true, 'reset_to_accepted']);
+    }
+  });
+
+  // Condition 1, structurally, for the code that claims it structurally: `workspace_unavailable`
+  // is UNRECORDABLE from either post-send state, so no allow-listed retry can follow a sent
+  // transaction. `quorum_unmet` deliberately does NOT hold this property (its allowed state is
+  // 'broadcast'); its pre-send guarantee comes from its single producer, not from the enum.
+  it('cannot record workspace_unavailable from any post-send state', () => {
+    for (const state of ['broadcast', 'included'] as const) {
+      expect(() =>
+        createLiftJobFailureMetadata({
+          failedFromState: state,
+          code: 'workspace_unavailable',
+          message: 'corrupt head',
+          errorPayloadRef: `urn:error:workspace-${state}`,
+        }),
+      ).toThrow(`Invalid LiftJob failure state for code workspace_unavailable: ${state}`);
+    }
   });
 
   it('rejects failure codes that are incompatible with the failed state', () => {

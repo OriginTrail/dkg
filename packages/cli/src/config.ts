@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
+import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -800,12 +801,45 @@ export interface DkgConfig {
      */
     provenanceEvents?: boolean;
   };
-  /** Async publisher runtime options. */
+  /**
+   * Async publisher runtime options. The retry knobs below are validated by
+   * `resolvePublisherRetryTuning()` at the config boundary: the publisher
+   * constructor THROWS on out-of-range values and it is constructed during
+   * daemon boot, so an unchecked typo would surface as a startup failure
+   * carrying a library message instead of a config error naming the key.
+   */
   publisher?: {
     enabled?: boolean;
     pollIntervalMs?: number;
     errorBackoffMs?: number;
+    /**
+     * Retry budget per job — ONE counter shared by the publisher's automatic
+     * retries and manual reaccepts, snapshot at admission. Default 10.
+     */
     maxRetries?: number;
+    /**
+     * GH#2270 — operator kill-switch for the publisher's OWN retry lane.
+     * `false` collapses it to pre-#2270 behaviour: nothing is scheduled and
+     * nothing already scheduled is swept (jobs scheduled while it was on
+     * strand until it is turned back on). Manual `dkg publisher retry` and
+     * admission reaccept are unaffected. Default `true`.
+     */
+    autoRetryEnabled?: boolean;
+    /**
+     * GH#2270 — symmetric jitter ratio `r` applied to the retry backoff as
+     * `delay · (1 + r·(2·rand()−1))`, i.e. the fraction of the delay the
+     * jitter may add or subtract. Must satisfy `0 <= r < 1`. Default 0.2.
+     */
+    retryJitterRatio?: number;
+    /**
+     * GH#2270 — first retry delay in ms; doubles per attempt up to
+     * `retryBackoffMaxMs`. Default 5000. May be set independently: the
+     * EFFECTIVE pair (explicit value + default for the unset knob) is
+     * validated as `max >= base` at the shared resolver.
+     */
+    retryBackoffBaseMs?: number;
+    /** GH#2270 — hard ceiling on the (jittered) retry delay. Default 60000. */
+    retryBackoffMaxMs?: number;
   };
   /**
    * Async promote queue worker (WM → SWM). Unlike `publisher` which is
@@ -1053,6 +1087,42 @@ export function resolveContextGraphSubscriptionRehydrationEnabled(
     );
   }
   return configValue;
+}
+
+/**
+ * The GH#2270 retry knobs, validated but NOT defaulted: an unset knob stays
+ * `undefined` so the publisher library remains the single source of every
+ * default (same contract `publisher.maxRetries` has had since #1836).
+ *
+ * Validation DELEGATES to the publisher package's `resolveAsyncLiftRetryTuning`
+ * — the same resolver the `TripleStoreAsyncLiftPublisher` constructor runs — so
+ * ranges, the kill-switch's boolean-only rule, and the cross-field backoff
+ * invariant have exactly ONE owner. Because that owner exports the real
+ * defaults, a half-configured backoff pair is validated against the EFFECTIVE
+ * values instead of being rejected outright (the earlier set-together rule is
+ * gone), and an operator error names the `config.json` key.
+ */
+export type PublisherRetryTuning = AsyncLiftRetryTuning;
+
+/**
+ * The ONE definition of "the publisher runtime will start": the runner's
+ * gates and the boot-time validation gate both call this, so the set of
+ * configs that construct a publisher and the set that get validated cannot
+ * drift (truthiness, matching the pre-existing runtime behavior).
+ */
+export function isPublisherRuntimeEnabled(
+  publisher?: DkgConfig['publisher'] | null,
+): publisher is NonNullable<DkgConfig['publisher']> {
+  return Boolean(publisher?.enabled);
+}
+
+export function resolvePublisherRetryTuning(
+  publisher?: DkgConfig['publisher'] | null,
+  label = 'publisher',
+): PublisherRetryTuning {
+  // Pure label adapter: the WHOLE validation boundary, object shape
+  // included, is the publisher-owned resolver.
+  return resolveAsyncLiftRetryTuning(publisher, label);
 }
 
 /** Resolve context graphs from network config. */

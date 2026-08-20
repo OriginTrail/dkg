@@ -488,6 +488,10 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       config: {
         retryBackoffBaseMs: 100,
         retryBackoffMaxMs: 250,
+        // GH#2270 — the backoff is jittered by default (r = 0.2). rand() = 0.5 is the exact
+        // midpoint (multiplier 1.0), so this row keeps pinning the UNJITTERED exponential
+        // sequence and its cap; the jitter itself is measured in async-lift-auto-retry-2270.
+        rand: () => 0.5,
       },
     });
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());

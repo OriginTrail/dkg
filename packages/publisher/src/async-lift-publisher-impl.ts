@@ -6,6 +6,7 @@ import {
   createGraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
 import type { PhaseCallback, PublishResult } from './publisher.js';
+import { resolveEffectiveAsyncLiftRetryTuning } from './async-lift-retry-tuning.js';
 import {
   LIFT_JOB_STATES,
   assertLiftJobTransition,
@@ -222,8 +223,17 @@ export class TripleStoreAsyncLiftPublisher
   private static readonly journalQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
   private static readonly DEFAULT_MAX_RETRIES = 10;
-  private static readonly DEFAULT_RETRY_BACKOFF_BASE_MS = 5_000;
-  private static readonly DEFAULT_RETRY_BACKOFF_MAX_MS = 60_000;
+  // Backoff/jitter defaults live in async-lift-retry-tuning.ts (the shared,
+  // exported owner) so the daemon config boundary validates against the SAME
+  // values this constructor applies.
+  /**
+   * GH#2270 — upper bound on reaccepts per claim-time sweep. The sweep runs INSIDE the claim
+   * lock, so its cost is paid by every enqueue/claim/retry; and re-enabling `autoRetryEnabled`
+   * releases every job that accumulated a past-due `nextRetryAt` at once. Capping the burst
+   * loses no job: `nextRetryAt` stays in the past, so the remainder is reaccepted by the
+   * following sweeps.
+   */
+  private static readonly MAX_REACCEPTS_PER_SWEEP = 5;
 
   private readonly graphUri: string;
   private readonly walletLockGraphUri: string;
@@ -232,10 +242,13 @@ export class TripleStoreAsyncLiftPublisher
   private readonly maxRetries: number;
   private readonly retryBackoffBaseMs: number;
   private readonly retryBackoffMaxMs: number;
+  private readonly autoRetryEnabled: boolean;
+  private readonly retryJitterRatio: number;
   private readonly recoveryLookupTimeoutMs: number;
   private readonly lockLeaseMs: number;
   private readonly now: () => number;
   private readonly idGenerator: () => string;
+  private readonly rand: () => number;
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
@@ -275,18 +288,21 @@ export class TripleStoreAsyncLiftPublisher
     this.journalGraphUri = DEFAULT_JOURNAL_GRAPH_URI;
     this.journalWrites = config.journalWrites ?? false;
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
-    this.retryBackoffBaseMs = config.retryBackoffBaseMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_BACKOFF_BASE_MS;
-    this.retryBackoffMaxMs = config.retryBackoffMaxMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_BACKOFF_MAX_MS;
-    if (!Number.isFinite(this.retryBackoffBaseMs) || this.retryBackoffBaseMs <= 0) {
-      throw new Error('Async lift publisher retryBackoffBaseMs must be greater than zero');
-    }
-    if (!Number.isFinite(this.retryBackoffMaxMs) || this.retryBackoffMaxMs < this.retryBackoffBaseMs) {
-      throw new Error('Async lift publisher retryBackoffMaxMs must be at least retryBackoffBaseMs');
-    }
+    // ONE validation owner for the retry knobs (shared with the daemon config
+    // boundary): ranges, the boolean kill-switch type, and the cross-field
+    // backoff invariant checked against the EFFECTIVE (explicit-or-default)
+    // pair. A non-boolean autoRetryEnabled (e.g. the string "false") throws
+    // here instead of silently enabling the lane.
+    const retryTuning = resolveEffectiveAsyncLiftRetryTuning(config, 'Async lift publisher');
+    this.retryBackoffBaseMs = retryTuning.retryBackoffBaseMs;
+    this.retryBackoffMaxMs = retryTuning.retryBackoffMaxMs;
+    this.autoRetryEnabled = retryTuning.autoRetryEnabled;
+    this.retryJitterRatio = retryTuning.retryJitterRatio;
     this.recoveryLookupTimeoutMs = config.recoveryLookupTimeoutMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS;
     this.lockLeaseMs = 5 * 60 * 1000;
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
+    this.rand = config.rand ?? (() => Math.random());
     this.chainRecoveryResolver = config.chainRecoveryResolver;
     this.knowledgeAssetVmPublishRecoveryResolver = config.knowledgeAssetVmPublishRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
@@ -1865,8 +1881,19 @@ export class TripleStoreAsyncLiftPublisher
     };
   }
 
+  /**
+   * The ONE gate of the automatic lane, read by BOTH the scheduler
+   * (`scheduleRetryIfEligible`, at failure-recording time) and the claim-time sweep
+   * (`reacceptDueFailedJobs`) — so `autoRetryEnabled` belongs here and nowhere else.
+   *
+   * Turning the switch OFF mid-flight therefore STRANDS jobs that were scheduled while it was
+   * on: their `nextRetryAt` passes without ever firing. They stay operator-actionable
+   * (`retry()`, re-submit), and turning it back on releases them, bounded per sweep by
+   * {@link MAX_REACCEPTS_PER_SWEEP}.
+   */
   private isAutomaticallyRetryable(job: PersistedFailedJob): boolean {
-    return getLiftJobFailurePolicy(job.failure.code).autoRetry === true
+    return this.autoRetryEnabled
+      && getLiftJobFailurePolicy(job.failure.code).autoRetry === true
       && job.failure.retryable
       && job.failure.resolution === 'reset_to_accepted'
       && job.retries.retryCount < job.retries.maxRetries;
@@ -1875,6 +1902,7 @@ export class TripleStoreAsyncLiftPublisher
   private async reacceptDueFailedJobs(now: number): Promise<number> {
     let retried = 0;
     for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
+      if (retried >= TripleStoreAsyncLiftPublisher.MAX_REACCEPTS_PER_SWEEP) break;
       if (job.timestamps.nextRetryAt === undefined || job.timestamps.nextRetryAt > now) continue;
       if (!this.isAutomaticallyRetryable(job)) continue;
       await this.reacceptFailedJob(job);
@@ -1883,11 +1911,32 @@ export class TripleStoreAsyncLiftPublisher
     return retried;
   }
 
+  /**
+   * Symmetric multiplicative jitter over the value the CALLER provides — the
+   * scheduler passes the already-capped exponential and clamps the result
+   * back under `retryBackoffMaxMs`, so deep retries spread across
+   * [max·(1−r), max] while the ceiling stays hard (see
+   * `scheduleRetryIfEligible` for the one composition). Rounded because
+   * `nextRetryAt` is persisted as an xsd:integer; floored at 1ms so extreme
+   * downward jitter can never schedule an immediate reaccept.
+   */
+  private jitteredBackoff(delay: number): number {
+    // Floor of 1ms: a tiny configured base with strong downward jitter can
+    // round to 0, which would schedule an IMMEDIATE reaccept and let a tight
+    // failure loop burn the whole retry budget with no backoff at all.
+    return Math.max(1, Math.round(delay * (1 + this.retryJitterRatio * (2 * this.rand() - 1))));
+  }
+
   private scheduleRetryIfEligible(job: LiftJob): LiftJob {
     if (!isFailedJob(job) || !this.isAutomaticallyRetryable(job)) return job;
+    // The ONE composition (documented on jitteredBackoff): jitter the CAPPED
+    // exponential, clamp back under the ceiling — capped retries spread
+    // across [max·(1−r), max] instead of synchronizing at exactly the cap.
     const delay = Math.min(
       this.retryBackoffMaxMs,
-      this.retryBackoffBaseMs * 2 ** job.retries.retryCount,
+      this.jitteredBackoff(
+        Math.min(this.retryBackoffMaxMs, this.retryBackoffBaseMs * 2 ** job.retries.retryCount),
+      ),
     );
     const now = this.now();
     return {
