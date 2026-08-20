@@ -80,3 +80,44 @@ describe('clear-job pending-transaction override authorization', () => {
     expect(calls).toEqual([{ jobId: 'job-1', allowPendingTransaction: false }]);
   });
 });
+
+/**
+ * GH#2270 follow-up (🟡 3823952750) — the daemon-to-runtime bridge itself.
+ *
+ * The `retryable` fix depends on late-bound wiring between two separately constructed publishers,
+ * and the publisher-level rows stub the oracle — so a regression at the exact production seam that
+ * caused the bug would leave them green. These rows exercise the bridge.
+ */
+describe('admission-to-runtime recovery capability bridge', () => {
+  const WALLET = '0xAAaAAa00000000000000000000000000000000Aa';
+
+  it('answers FALSE before the runtime exists, then delegates once it does', async () => {
+    const { createAdmissionRecoveryCapabilityProbe } = await import('../src/publisher-runner.js');
+    const calls: Array<[string, string | undefined]> = [];
+    // The daemon builds the admission instance BEFORE the runtime, so the probe is captured here.
+    const state: { runtime: { canSettleHeldJob: (w: string, k: 'create' | 'update' | undefined) => boolean } | null } = { runtime: null };
+    const probe = createAdmissionRecoveryCapabilityProbe(() => state);
+
+    // 'update', deliberately: a bridge that hardcoded 'create' would forward the right SHAPE with
+    // the wrong value, and a row using 'create' on both sides could never see it.
+    expect(probe(WALLET, 'update')).toBe(false);
+
+    // ...and the runtime starts afterwards.
+    state.runtime = {
+      canSettleHeldJob: (w, k) => { calls.push([w, k]); return true; },
+    };
+
+    expect(probe(WALLET, 'update')).toBe(true);
+    // Both arguments reach the runtime: its answer is per wallet AND per operation, so dropping
+    // either would silently widen the promise.
+    expect(calls).toEqual([[WALLET, 'update']]);
+  });
+
+  it('reports what the runtime says, not merely that one exists', async () => {
+    const { createAdmissionRecoveryCapabilityProbe } = await import('../src/publisher-runner.js');
+    const state = { runtime: { canSettleHeldJob: () => false } };
+    const probe = createAdmissionRecoveryCapabilityProbe(() => state);
+
+    expect(probe(WALLET, 'update')).toBe(false);
+  });
+});
