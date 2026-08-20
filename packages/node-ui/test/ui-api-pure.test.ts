@@ -25,6 +25,7 @@ import {
   fetchExtractionStatus,
   executeQuery,
   readProfileQueryCatalog,
+  writeProfileQueryCatalog,
   listAssertions,
   ensureContextGraphOnChain,
   fetchAssertionUals,
@@ -337,6 +338,19 @@ describe('UI API tests', () => {
         r => r.method === 'POST' && r.url.includes('/api/profile/query-catalog/read'),
       );
       expect(JSON.parse(call?.body ?? '{}')).toEqual({ contextGraphId: 'cg-listenerboi' });
+    });
+
+    it('writeProfileQueryCatalog requests subject-scoped upsert semantics', async () => {
+      const quads = [{ subject: 'urn:q', predicate: 'urn:p', object: '"value"', graph: '' }];
+      await writeProfileQueryCatalog('cg-listenerboi', quads);
+      const call = requestLog.find(
+        r => r.method === 'POST' && r.url.includes('/api/profile/query-catalog/write'),
+      );
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-listenerboi',
+        mode: 'upsert',
+        quads,
+      });
     });
 
     it('knowledgeAssetPublish rejects non-decimal publisher identity overrides before POSTing', async () => {

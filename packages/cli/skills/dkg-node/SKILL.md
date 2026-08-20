@@ -514,13 +514,13 @@ HTTP fallback:
   `sparql`, `queryParameters`, `executionView`, `rank`, `catalogName`,
   `catalogDescription`, and `catalogRank`.
 - `POST /api/profile/query-catalog/write`
-  Body: `{ "contextGraphId": "<contextGraphId>", "quads": [...] }`
+  Body: `{ "contextGraphId": "<contextGraphId>", "mode": "upsert", "quads": [...] }`
   The daemon stores these triples in
   `did:dkg:context-graph:<contextGraphId>/meta/query-catalog` regardless of
-  the incoming quad `graph` field. Prefer `dkg_query_catalog_save` for normal
-  user-requested saves. Raw writes append profile triples; prefer a new
-  saved-query URI for new saved queries and avoid overwriting unrelated
-  catalog/profile metadata.
+  the incoming quad `graph` field. `upsert` atomically replaces each complete
+  query/catalog subject and preserves unrelated subjects, making reinjection
+  idempotent. Omitting `mode` retains the legacy append-only `insert` behavior.
+  Prefer `dkg_query_catalog_save` for normal user-requested saves.
 
 Profile RDF shape for writes:
 
