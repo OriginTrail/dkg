@@ -59,8 +59,15 @@ describe('EVMChainAdapter historical KA update verification', () => {
     'event KnowledgeAssetUpdated(uint256 indexed id, address indexed author, string updateOperationId, bytes32 merkleRoot, uint256 byteSize, uint96 tokenAmount)',
   ]);
 
+  /**
+   * r28 (🔴 3821721213) — the register read is now BLOCK-SENSITIVE: the position is derived
+   * from this receipt's block only, so the harness must answer differently for `blockNumber` and
+   * `blockNumber - 1`. `priorRoots` is the asset's history BEFORE the receipt's block; anything
+   * beyond it in `roots` is what that block wrote.
+   */
   function adapterWithHistoricalRead(
     roots: unknown[] | Error,
+    priorRoots: unknown[] = [],
   ): { adapter: EVMChainAdapter; latestRead: ReturnType<typeof recorder> } {
     const adapter: any = new EVMChainAdapter(minimalConfig());
     adapter.initialized = true;
@@ -81,8 +88,13 @@ describe('EVMChainAdapter historical KA update verification', () => {
       interface: iface,
     };
     const latestRead = recorder(async () => publisher);
-    adapter.readContractWithOptions = async () => {
+    adapter.readContractWithOptions = async (
+      _contract: unknown, label: string, _method: string, args: readonly unknown[],
+    ) => {
       if (roots instanceof Error) throw roots;
+      const blockTag = (args[1] as { blockTag?: number } | undefined)?.blockTag;
+      // The pre-block read: everything written before the receipt's block.
+      if (label === 'kas.getMerkleRootsBeforeUpdateBlock' || blockTag === 76) return priorRoots;
       return roots;
     };
     return { adapter, latestRead };
@@ -98,6 +110,49 @@ describe('EVMChainAdapter historical KA update verification', () => {
       txIndex: 2,
       merkleRootCount: 1n,
     });
+  });
+
+  it('an A -> B -> A history across SEPARATE blocks still yields the third position [r28]', async () => {
+    // 🔴 3821721213 — r17 counted matches across the WHOLE register, which at this blockTag is
+    // the asset's entire history, not this block's writes. One publisher writing A, then B, then A
+    // again in three separate blocks therefore produced two matches for A, dropped the position,
+    // and left the third update permanently held — the exact case this PR exists to settle, made
+    // unrecoverable by its own ambiguity guard. Ambiguity belongs to the RECEIPT'S BLOCK.
+    const { adapter } = adapterWithHistoricalRead(
+      // Full history as of the receipt's block: A(1), B(2), A(3) — the third is this receipt's.
+      [
+        { publisher, merkleRoot: root },
+        { publisher, merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('B')) },
+        { publisher, merkleRoot: root },
+      ],
+      // Everything written BEFORE this block: the first two.
+      [
+        { publisher, merkleRoot: root },
+        { publisher, merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('B')) },
+      ],
+    );
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher)).resolves.toMatchObject({
+      verified: true,
+      merkleRootCount: 3n,
+    });
+  });
+
+  it('two identical writes in the SAME block are still ambiguous [r28]', async () => {
+    // The discriminating half: the guard must keep working for genuine same-block ambiguity, which
+    // is what it was added for. Same history, but both A entries land in the receipt's block.
+    const { adapter } = adapterWithHistoricalRead(
+      [
+        { publisher, merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('B')) },
+        { publisher, merkleRoot: root },
+        { publisher, merkleRoot: root },
+      ],
+      [{ publisher, merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('B')) }],
+    );
+
+    const verdict = await adapter.verifyKAUpdate('0xreceipt', kaId, publisher);
+    expect(verdict).toMatchObject({ verified: true });
+    expect(verdict.merkleRootCount).toBeUndefined();
   });
 
   it('drops the position — but keeps the verification — when the register match is AMBIGUOUS', async () => {

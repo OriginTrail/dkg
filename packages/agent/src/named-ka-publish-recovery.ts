@@ -324,14 +324,32 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // root equality would record it as current over the third. The built-in adapter supplies the
   // position, so this is the fail-closed answer for evidence that does not — a create is different
   // and keeps the root comparison, because a create's identity is minted once and never restored.
-  let superseded = versionView
-    ? !equalsIgnoreCase(versionView.latestRoot, proof.merkleRoot)
-    : !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
-  if (!superseded && versionView && recoveredPosition !== undefined) {
-    // Roots match, which alone cannot separate "still current" from "superseded by a later write
-    // that restored the same root" — true for a create whose root a later update restores, just as
-    // for an update. The position settles it, from this same view.
+  let superseded: boolean;
+  if (versionView && recoveredPosition !== undefined) {
+    // r28 (🔴 3821720818) — with BOTH a coherent view and a position, the POSITION decides,
+    // and the root is a consistency check rather than a second opinion. The three cases are
+    // exhaustive and each has one honest answer:
+    //   count <  position  the view has not seen this transaction yet (handled above: defer).
+    //   count == position  the view describes THIS version, so its root must be ours. A different
+    //                      root at the same position is not a later version — it is a CONTRADICTION
+    //                      (a forked or inconsistent endpoint), and calling it supersession
+    //                      finalizes the job receipt-only while the lifecycle is never repaired.
+    //   count >  position  a later write exists: genuinely superseded.
+    // Deriving supersession from root bytes first, as this did, made the middle case look like the
+    // last one purely because the roots differed.
+    if (versionView.rootCount === recoveredPosition
+      && !equalsIgnoreCase(versionView.latestRoot, proof.merkleRoot)) {
+      throw inconsistent(
+        'the current KA version view reports this transaction position with a DIFFERENT root; '
+        + 'the evidence is contradictory and recovery is deferred rather than assuming supersession',
+      );
+    }
     superseded = versionView.rootCount > recoveredPosition;
+  } else {
+    // No position to compare (legacy evidence, or no coherent view): the root is all there is.
+    superseded = versionView
+      ? !equalsIgnoreCase(versionView.latestRoot, proof.merkleRoot)
+      : !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
   }
 
   let materializationAuthor = transactionAuthor;

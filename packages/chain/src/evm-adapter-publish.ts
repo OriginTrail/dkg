@@ -401,35 +401,59 @@ export class PublishMethods extends EVMChainAdapterBase {
             [batchId, { blockTag: receipt.blockNumber }],
             { signal: options.signal },
           ) as Array<{ publisher?: string; merkleRoot?: string } | readonly unknown[]>;
-          // r17 (3814893084) — the register entries carry no transaction hash, so a (publisher,
-          // root) match is the only link back to this receipt, and that link is unique only while
-          // the match is unique. Two writes of the SAME root by the SAME publisher in this one
-          // block make the position ambiguous, and picking either one is a guess: the register
-          // cannot say which entry this transaction wrote. The verification itself still stands —
-          // the root IS ours, at this block — so the answer keeps `verified` and DROPS the
-          // position. Downstream an update with no position defers rather than deciding
-          // supersession, which is the fail-closed reading of an ambiguous register.
-          let matchedIndex = -1;
-          let matchCount = 0;
-          for (let i = roots.length - 1; i >= 0; i--) {
+          // r17 (3814893084) / r28 (🔴 3821721213) — the register entries carry no transaction
+          // hash, so a (publisher, root) match is the only link back to this receipt. r17 counted
+          // those matches across the WHOLE register, which is the asset's entire history as of
+          // this block — not this block's writes. An A -> B -> A history by one publisher in three
+          // SEPARATE blocks therefore produced two matches for A, dropped the position, and left
+          // the third update permanently held: the exact case this PR exists to settle, made
+          // unrecoverable by its own ambiguity guard.
+          //
+          // Ambiguity is a property of the RECEIPT'S BLOCK. Entries written before it cannot be
+          // this transaction's, so the pre-block count marks where its candidates begin, and only
+          // matches at or after that boundary compete. A genuinely ambiguous same-block pair still
+          // drops the position; a historical repeat no longer can.
+          let preBlockCount = 0;
+          if (receipt.blockNumber > 0) {
+            const before = await this.readContractWithOptions(
+              this.contracts.knowledgeAssetStorage,
+              'kas.getMerkleRootsBeforeUpdateBlock',
+              'getMerkleRoots',
+              [batchId, { blockTag: receipt.blockNumber - 1 }],
+              { signal: options.signal },
+            ) as ReadonlyArray<unknown>;
+            preBlockCount = before.length;
+          }
+          const entryAt = (i: number) => {
             const root = roots[i] as { publisher?: string; merkleRoot?: string };
-            const rootPublisher = root.publisher ?? String((root as readonly unknown[])[0] ?? '');
-            const rootValue = root.merkleRoot ?? String((root as readonly unknown[])[1] ?? '');
-            if (
-              rootPublisher.toLowerCase() === publisherAddress.toLowerCase()
-              && rootValue.toLowerCase() === ethers.hexlify(onChainMerkleRoot).toLowerCase()
-            ) {
-              if (matchCount === 0) {
-                matchedIndex = i;
-                onChainPublisher = rootPublisher;
-              }
-              matchCount += 1;
-            }
+            return {
+              publisher: root.publisher ?? String((root as readonly unknown[])[0] ?? ''),
+              merkleRoot: root.merkleRoot ?? String((root as readonly unknown[])[1] ?? ''),
+            };
+          };
+          const isOurs = (i: number) => {
+            const e = entryAt(i);
+            return e.publisher.toLowerCase() === publisherAddress.toLowerCase()
+              && e.merkleRoot.toLowerCase() === ethers.hexlify(onChainMerkleRoot).toLowerCase();
+          };
+          // `verified` still asks the whole register: the root IS ours somewhere in this asset's
+          // history, which is what authenticates the receipt. Only the POSITION is restricted to
+          // this block's candidates.
+          let matchedIndex = -1;
+          for (let i = roots.length - 1; i >= 0; i--) {
+            if (isOurs(i)) { matchedIndex = i; onChainPublisher = entryAt(i).publisher; break; }
           }
           if (matchedIndex < 0) {
             return { verified: false };
           }
-          merkleRootCount = matchCount === 1 ? BigInt(matchedIndex + 1) : undefined;
+          let blockMatchIndex = -1;
+          let blockMatchCount = 0;
+          for (let i = preBlockCount; i < roots.length; i += 1) {
+            if (!isOurs(i)) continue;
+            if (blockMatchCount === 0) blockMatchIndex = i;
+            blockMatchCount += 1;
+          }
+          merkleRootCount = blockMatchCount === 1 ? BigInt(blockMatchIndex + 1) : undefined;
         } catch (error) {
           if (isChainRpcTransportError(error)) throw error;
           // A latest-state fallback can authenticate a historical receipt with

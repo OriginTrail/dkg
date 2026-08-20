@@ -227,12 +227,20 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     expect(result.materialization.versionBlock).toBe(300);
   });
 
-  it('a lagging COUNT cannot erase a root mismatch that already proved supersession [r7]', async () => {
-    // 3812436109 — the two reads are separate round trips and can observe different chain states.
-    // Here the root read already proves supersession (latest root differs from the proof's), while
-    // a lagging endpoint answers a count equal to the proof's position. Letting the count decide
-    // would flip the answer back to "current" and stamp the old transaction's provenance over
-    // newer state, so each signal may only ADD evidence.
+  it('an equal COUNT with a different root is a CONTRADICTION, not supersession [r7 -> r28]', async () => {
+    // 3812436109 originally, re-aimed by 🔴 3821720818.
+    //
+    // r7 read this fixture as "the root read already proved supersession, and a lagging count must
+    // not talk it back down", because root and count were then SEPARATE round trips that could
+    // observe different chain states. r11 dissolved that premise: both now come from one pinned,
+    // coherent view, so they cannot disagree by being read at different moments.
+    //
+    // Under a coherent view the same numbers mean something else. `rootCount == position` says the
+    // view describes THIS transaction's version, so a different root is not a later write — it is
+    // the view contradicting the proof (a forked or inconsistent endpoint). Calling that
+    // supersession finalizes the job receipt-only while the lifecycle is never repaired. The
+    // safety goal r7 protected — never materialize an old transaction as current — is unchanged
+    // and now rests on the position comparison, where a view BELOW the position defers as stale.
     const chain = seededChain();
     (chain as unknown as { getLatestMerkleRoot: (kaId: bigint) => Promise<Uint8Array> })
       .getLatestMerkleRoot = async () => ethers.getBytes(`0x${'cd'.repeat(32)}`);
@@ -252,16 +260,14 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
       .getLatestMerkleRootPublisher = async () => ethers.getAddress(PUBLISHER);
     (chain as unknown as { getBlockNumber: () => Promise<number> }).getBlockNumber = async () => 400;
 
-    const result = await normalizeRecoveredNamedKaPublish({
+    await expect(normalizeRecoveredNamedKaPublish({
       chain,
       request: baseRequest(),
       queued: queuedTx(),
       recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
         publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
       }),
-    });
-
-    expect(result.materialization.superseded).toBe(true);
+    })).rejects.toThrow(/DIFFERENT root/);
   });
 
   it('stays CURRENT when the pinned pair reports this proof as the latest position [r9]', async () => {
