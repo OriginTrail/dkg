@@ -102,8 +102,11 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // rule meant neither lane could remove it — a permanent dead end, and the release notes named
     // a command that could not work. The operator names the exact job here and owns the
     // consequence; bulk keeps the stricter rule, pinned by the row below.
+    const OWNER = '0xAAaAAa00000000000000000000000000000000Aa';
     const p = createPublisher();
-    const jobId = await driveToTerminalFailed(p);
+    // The real admission shape: a KA VM publish job records the agent lane that admitted it, and
+    // that lane is what the override is scoped to.
+    const jobId = await driveToTerminalFailed(p, { agentAddress: OWNER });
     const job = await p.getStatus(jobId);
     if (!job || !('failure' in job)) throw new Error('expected a failed job');
     const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
@@ -115,8 +118,19 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
-    expect(await p.clearTerminalJob(jobId, { allowPendingTransaction: true }))
-      .toEqual({ outcome: 'cleared' });
+    // 🔴 3824098476 / 🟡 3824098494 — ownership is decided HERE, under the same lock and
+    // after the same safe-id validation as the delete, on the same record. A caller that does not
+    // own the job gets no override however explicitly it asks.
+    expect(await p.clearTerminalJob(jobId, {
+      allowPendingTransaction: true,
+      requireOwnerAgentAddress: '0xnot-the-owner',
+    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect((await p.getStatus(jobId))?.status).toBe('failed');
+
+    expect(await p.clearTerminalJob(jobId, {
+      allowPendingTransaction: true,
+      requireOwnerAgentAddress: OWNER,
+    })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(jobId)).toBeNull();
   });
 

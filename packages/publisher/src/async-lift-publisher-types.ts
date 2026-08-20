@@ -214,7 +214,11 @@ export interface VmPublishTerminalJobClearer {
    */
   clearTerminalJob(
     jobId: string,
-    options?: { readonly allowPendingTransaction?: boolean },
+    options?: {
+      readonly allowPendingTransaction?: boolean;
+      /** The caller's agent address; the override is granted only for a job on that lane. */
+      readonly requireOwnerAgentAddress?: string;
+    },
   ): Promise<TerminalJobClearOutcome>;
 }
 

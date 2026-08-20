@@ -1642,7 +1642,14 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
               : 'This job\'s record gives chain recovery no automatic exit (no provable absence '
                 + 'and no formable recognition), so retrying will not release it. Check the '
                 + 'transaction yourself, then clear the job with '
-            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}"}.`,
+            }POST /api/publisher/clear-job ${err.retryable
+              ? `{"jobId":"${err.existingJobId}"}`
+              // GH#2270 follow-up (🔴 3824098486) — a job with no automatic exit is exactly the
+              // case the plain body cannot clear: its failure is `retry_recovery`, so the targeted
+              // lane needs the explicit override. Handing back a command that returns 409 made the
+              // documented escape hatch unusable.
+              : `{"jobId":"${err.existingJobId}","allowPendingTransaction":true}`
+            }.`,
             retryable: err.retryable,
             existingJobId: err.existingJobId,
           });

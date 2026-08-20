@@ -59,6 +59,7 @@ import {
   isBulkClearableTerminalLiftJob,
   isClearableTerminalLiftJob,
   isTargetedClearableLiftJob,
+  ownsLiftJobAdmissionLane,
   decideChainProofDisposition,
   hasAutomaticRecoveryExit,
   isHeldForChainProof,
@@ -1826,7 +1827,10 @@ export class TripleStoreAsyncLiftPublisher
    */
   async clearTerminalJob(
     jobId: string,
-    options: { readonly allowPendingTransaction?: boolean } = {},
+    options: {
+      readonly allowPendingTransaction?: boolean;
+      readonly requireOwnerAgentAddress?: string;
+    } = {},
   ): Promise<TerminalJobClearOutcome> {
     // Reject an empty OR SPARQL-unsafe jobId as malformed BEFORE building the jobSubject
     // IRI — otherwise an attacker-controlled jobId (from the clear-job HTTP body) with a
@@ -1852,7 +1856,19 @@ export class TripleStoreAsyncLiftPublisher
       }
       if (job === null) return { outcome: 'rejected', reason: 'malformed' };
       if (!LIFT_JOB_STATES.includes(job.status)) return { outcome: 'rejected', reason: 'unknown' };
-      if (!isTargetedClearableLiftJob(job, options)) return { outcome: 'rejected', reason: 'nonterminal' };
+      // GH#2270 follow-up (🔴 3824098476, 🟡 3824098494) — ownership is resolved HERE, not at
+      // the route. Doing it at the route meant an unsafe jobId reached a `getStatus` query before
+      // this method's `isSafeJobId` guard ran, and the ownership read happened outside the claim
+      // lock the clear itself takes — a TOCTOU on the record the decision is about.
+      //
+      // Inside, the job has already been validated and read under that lock, so the check is on
+      // the same record that is about to be deleted. A caller that cannot be matched to the job's
+      // admission lane simply does not get the override; the ordinary terminal clear is untouched.
+      const granted = options.allowPendingTransaction === true
+        && ownsLiftJobAdmissionLane(job, options.requireOwnerAgentAddress);
+      if (!isTargetedClearableLiftJob(job, { allowPendingTransaction: granted })) {
+        return { outcome: 'rejected', reason: 'nonterminal' };
+      }
       await this.releaseWalletLockForJob(job);
       await this.deleteJob(jobId);
       return { outcome: 'cleared' };

@@ -652,26 +652,21 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     if (typeof jobId !== "string" || jobId.trim().length === 0) {
       return jsonResponse(res, 400, { outcome: "rejected", reason: "malformed", error: "Missing jobId" });
     }
-    // GH#2270 follow-up (🔴 3823952704) — clearing a job whose transaction may still land is a
-    // DESTRUCTIVE override, and this route is reachable by every registered agent token with no
-    // ownership check of its own. Widening it for all callers would have let one agent delete
-    // another lifecycle's only chain-recovery record. Two conditions, both required:
-    //   1. the caller ASKS for it explicitly, and
-    //   2. the caller OWNS the job — its admission lane matches the token's agent.
-    // Anything else keeps #1837's rule, so an ordinary terminal clear is unaffected. A job whose
-    // owner cannot be established (no admission lane on the record) is never force-clearable:
-    // fail closed, because the risk being accepted is a double publish.
-    let allowPendingTransaction = false;
-    if (parsed.allowPendingTransaction === true) {
-      const existing = await publisherControl.getStatus(jobId);
-      const owner = (existing?.request as { knowledgeAssetVmPublish?: { agentAddress?: string } })
-        ?.knowledgeAssetVmPublish?.agentAddress;
-      allowPendingTransaction = typeof owner === 'string'
-        && owner.toLowerCase() === requestAgentAddress.toLowerCase();
-    }
+    // GH#2270 follow-up (🔴 3823952704, 🔴 3824098476) — clearing a job whose transaction may
+    // still land is a DESTRUCTIVE override, and this route is open to every registered agent token
+    // with no ownership check of its own. The route therefore states WHO is asking and WHAT they
+    // asked for; it does not look the job up itself.
+    //
+    // That matters: an earlier version read the job here, which put an unvalidated jobId into a
+    // query before `clearTerminalJob`'s safe-id guard ran, and decided ownership outside the claim
+    // lock the clear then takes. Validation, the ownership decision and the delete now happen on
+    // one record behind one boundary.
     return respondTerminalClearOutcome(
       res,
-      await publisherControl.clearTerminalJob(jobId, { allowPendingTransaction }),
+      await publisherControl.clearTerminalJob(jobId, {
+        allowPendingTransaction: parsed.allowPendingTransaction === true,
+        requireOwnerAgentAddress: requestAgentAddress,
+      }),
       jobId,
     );
   }

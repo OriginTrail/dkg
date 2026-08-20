@@ -292,6 +292,23 @@ export function isClearableTerminalLiftJob(job: LiftJob): boolean {
  * caller that has established the right to take that risk for that specific job; without it this
  * is exactly #1837's rule, unchanged for everyone.
  */
+/**
+ * GH#2270 follow-up (🔴 3823952704) — does this caller own the job's admission lane?
+ *
+ * The pending-transaction override is destructive and `/api/publisher/clear-job` is open to every
+ * registered agent token, so the right to accept that risk is per JOB, not per node. A record with
+ * no resolvable lane has no owner to match, and is therefore never force-clearable: fail closed,
+ * because the risk being accepted is a double publish.
+ */
+export function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | undefined): boolean {
+  if (!agentAddress) return false;
+  const owner = (job.request as { knowledgeAssetVmPublish?: { agentAddress?: string } })
+    ?.knowledgeAssetVmPublish?.agentAddress;
+  return typeof owner === 'string'
+    && owner.length > 0
+    && owner.toLowerCase() === agentAddress.toLowerCase();
+}
+
 export function isTargetedClearableLiftJob(
   job: LiftJob,
   options: { readonly allowPendingTransaction?: boolean } = {},

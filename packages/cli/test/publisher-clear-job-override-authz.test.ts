@@ -19,7 +19,7 @@ describe('clear-job pending-transaction override authorization', () => {
   const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
 
   function post(body: unknown, requestAgentAddress: string) {
-    const calls: Array<{ jobId: string; allowPendingTransaction?: boolean }> = [];
+    const calls: Array<{ jobId: string; allowPendingTransaction?: boolean; requireOwnerAgentAddress?: string }> = [];
     const path = '/api/publisher/clear-job';
     const req = Readable.from([]);
     Object.assign(req, {
@@ -31,17 +31,20 @@ describe('clear-job pending-transaction override authorization', () => {
       writeHead(status: number) { this.statusCode = status; return this; },
       end(b?: string) { this.body = b ?? ''; this.writableEnded = true; return this; },
     };
+    // 🔴 3824098476 — the route must NOT read the job itself: that put an unvalidated jobId into
+    // a query ahead of the safe-id guard, and decided ownership outside the claim lock the clear
+    // takes. `getStatus` therefore fails loudly if the route ever calls it again.
     const publisherControl = {
-      // The job under test belongs to OWNER.
-      getStatus: async () => ({
-        status: 'failed',
-        request: { knowledgeAssetVmPublish: { agentAddress: OWNER } },
-      }),
+      getStatus: async () => { throw new Error('route must not query the job'); },
       clearTerminalJob: async (
         jobId: string,
-        options?: { allowPendingTransaction?: boolean },
+        options?: { allowPendingTransaction?: boolean; requireOwnerAgentAddress?: string },
       ) => {
-        calls.push({ jobId, allowPendingTransaction: options?.allowPendingTransaction });
+        calls.push({
+          jobId,
+          allowPendingTransaction: options?.allowPendingTransaction,
+          requireOwnerAgentAddress: options?.requireOwnerAgentAddress,
+        });
         return { outcome: 'cleared' as const };
       },
     } as unknown as RequestContext['publisherControl'];
@@ -63,21 +66,29 @@ describe('clear-job pending-transaction override authorization', () => {
     // The reviewer's scenario: agent B force-clearing agent A's held job.
     const { run, calls } = post({ jobId: 'job-1', allowPendingTransaction: true }, OTHER);
     await run();
-    expect(calls).toEqual([{ jobId: 'job-1', allowPendingTransaction: false }]);
+    // The route forwards WHO is asking; the publisher decides, atomically, on the record it is
+    // about to delete. What matters here is that the caller's identity is not lost on the way.
+    expect(calls).toEqual([
+      { jobId: 'job-1', allowPendingTransaction: true, requireOwnerAgentAddress: OTHER },
+    ]);
   });
 
   it('grants it to the owning agent that explicitly asks', async () => {
     // The discriminating half — without it, refusing everyone would pass the row above.
     const { run, calls } = post({ jobId: 'job-1', allowPendingTransaction: true }, OWNER);
     await run();
-    expect(calls).toEqual([{ jobId: 'job-1', allowPendingTransaction: true }]);
+    expect(calls).toEqual([
+      { jobId: 'job-1', allowPendingTransaction: true, requireOwnerAgentAddress: OWNER },
+    ]);
   });
 
   it('does NOT grant it to the owner who did not ask for it', async () => {
     // Ownership alone is not consent: an ordinary terminal clear must stay ordinary.
     const { run, calls } = post({ jobId: 'job-1' }, OWNER);
     await run();
-    expect(calls).toEqual([{ jobId: 'job-1', allowPendingTransaction: false }]);
+    expect(calls).toEqual([
+      { jobId: 'job-1', allowPendingTransaction: false, requireOwnerAgentAddress: OWNER },
+    ]);
   });
 });
 
@@ -119,5 +130,25 @@ describe('admission-to-runtime recovery capability bridge', () => {
     const probe = createAdmissionRecoveryCapabilityProbe(() => state);
 
     expect(probe(WALLET, 'update')).toBe(false);
+  });
+});
+
+
+/**
+ * GH#2270 follow-up (🔴 3824098486) — the remediation command the daemon hands back must be a
+ * command that WORKS. A job with no automatic exit is exactly the case the plain body cannot
+ * clear (its failure is `retry_recovery`), so an instruction omitting the override returned 409
+ * and the documented escape hatch was unusable.
+ */
+describe('pending-chain-proof remediation instruction', () => {
+  it('includes the override for a job with NO automatic exit, and omits it otherwise', async () => {
+    const src = await import('node:fs').then((fs) => fs.readFileSync(
+      new URL('../src/daemon/routes/knowledge-assets.ts', import.meta.url), 'utf8',
+    ));
+    expect(src).toContain('POST /api/publisher/clear-job');
+    // The retryable branch keeps the plain body: recovery will settle that job itself.
+    expect(src).toContain('{"jobId":"${err.existingJobId}"}');
+    // The no-automatic-exit branch must ask for the override, or it cannot clear the job.
+    expect(src).toContain('"allowPendingTransaction":true');
   });
 });
