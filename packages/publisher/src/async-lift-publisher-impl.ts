@@ -1827,10 +1827,7 @@ export class TripleStoreAsyncLiftPublisher
    */
   async clearTerminalJob(
     jobId: string,
-    options: {
-      readonly allowPendingTransaction?: boolean;
-      readonly requireOwnerAgentAddress?: string;
-    } = {},
+    options: { readonly pendingTransactionOverride?: { readonly requestedBy: string } } = {},
   ): Promise<TerminalJobClearOutcome> {
     // Reject an empty OR SPARQL-unsafe jobId as malformed BEFORE building the jobSubject
     // IRI — otherwise an attacker-controlled jobId (from the clear-job HTTP body) with a
@@ -1864,8 +1861,8 @@ export class TripleStoreAsyncLiftPublisher
       // Inside, the job has already been validated and read under that lock, so the check is on
       // the same record that is about to be deleted. A caller that cannot be matched to the job's
       // admission lane simply does not get the override; the ordinary terminal clear is untouched.
-      const granted = options.allowPendingTransaction === true
-        && ownsLiftJobAdmissionLane(job, options.requireOwnerAgentAddress);
+      const granted = options.pendingTransactionOverride !== undefined
+        && ownsLiftJobAdmissionLane(job, options.pendingTransactionOverride.requestedBy);
       if (!isTargetedClearableLiftJob(job, { allowPendingTransaction: granted })) {
         return { outcome: 'rejected', reason: 'nonterminal' };
       }

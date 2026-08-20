@@ -264,51 +264,19 @@ export function isClearableTerminalLiftJob(job: LiftJob): boolean {
 }
 
 /**
- * GH#2270 — what BULK `clear(status)` may delete: terminal-clearable, MINUS a job
- * {@link isHeldForChainProof}. Deleting a held job is what turns admission's
- * `LiftJobPendingChainProofError` back into a fresh job for the same KA, so bulk cleanup is safe by
- * default; the by-jobId clear (`clearTerminalJob`) stays the operator's deliberate, targeted
- * override — there the operator names the exact job and owns the consequence.
+ * Does this caller own the job's admission lane?
  *
- * A job whose failure PROVES its transaction had no effect is not held, so routine cleanup of
- * reverted and unfunded attempts keeps working. Nothing is lost by clearing either: the #1829
- * journal is append-only and a clear never touches it, so the txHash outlives the job record.
- */
-/**
- * GH#2270 follow-up (🔴 3822987650, then 🔴 3823952704) — what the TARGETED by-id clear may
- * remove, and under what authority.
+ * The pending-transaction override below is destructive and `/api/publisher/clear-job` is open to
+ * every registered agent token, so the right to accept that risk is per JOB, not per node.
  *
- * #1837's single predicate treats a `retry_recovery`-failed job as nonterminal-for-cleanup because
- * periodic recovery may still finalize it from chain. That is right for BULK and it left the
- * chain-proof work without an exit: a held UPDATE has no absence-release path by design, so the
- * by-id clear is its STATED exit, and sharing the bulk rule meant neither lane could remove it.
- *
- * The first attempt at this simply widened the by-id lane for every caller. That was wrong, and
- * worse than the dead end it fixed: `/api/publisher/clear-job` is reachable by any registered
- * agent token and performs no ownership check, so it let one agent delete another lifecycle's only
- * chain-recovery record while its transaction was still unaccounted for.
- *
- * So the override is EXPLICIT and off by default. `allowPendingTransaction` is only ever set by a
- * caller that has established the right to take that risk for that specific job; without it this
- * is exactly #1837's rule, unchanged for everyone.
- */
-/**
- * GH#2270 follow-up (🔴 3823952704) — does this caller own the job's admission lane?
- *
- * The pending-transaction override is destructive and `/api/publisher/clear-job` is open to every
- * registered agent token, so the right to accept that risk is per JOB, not per node. A record with
- * no resolvable lane has no owner to match, and is therefore never force-clearable: fail closed,
- * because the risk being accepted is a double publish.
+ * The owner is the ENQUEUING CALLER, not the resolved author: curated publishing lets those differ
+ * (GH#1778), so a curator may submit for another author and it is the curator who admitted the
+ * job. A record with no `callerAgentAddress` predates that field and has no caller to match, so it
+ * is denied — falling back to the author would grant the override to an identity that did not
+ * enqueue anything, and the risk being accepted is a double publish.
  */
 export function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | undefined): boolean {
   if (!agentAddress) return false;
-  // 🔴 3824353569 — the ENQUEUING CALLER, not the resolved author. Curated publishing lets those
-  // differ on purpose (GH#1778): curator B may submit for author A, and reading `agentAddress`
-  // denied the override to B who actually admitted the job while granting it to A who did not.
-  //
-  // A record without `callerAgentAddress` predates that field, so there is no caller to match:
-  // deny. Falling back to the author would restore exactly the confusion above, and the risk being
-  // accepted here is a double publish.
   const caller = (job.request as { knowledgeAssetVmPublish?: { callerAgentAddress?: string } })
     ?.knowledgeAssetVmPublish?.callerAgentAddress;
   return typeof caller === 'string'
@@ -316,23 +284,42 @@ export function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | un
     && caller.toLowerCase() === agentAddress.toLowerCase();
 }
 
+/**
+ * What the TARGETED by-id clear may remove.
+ *
+ * #1837's base predicate treats a `retry_recovery`-failed job as nonterminal-for-cleanup, because
+ * periodic recovery may still finalize it from chain. That is right for bulk cleanup and it leaves
+ * a held UPDATE with no exit at all: an update has no absence-release path by design, so the by-id
+ * clear is its stated exit. This lane therefore accepts ONE named exception on top of the base.
+ *
+ * The exception is named rather than expressed as the base predicate's complement: written that
+ * way it would silently absorb every future reason a terminal job becomes protected. Additions to
+ * the base policy stay denied here until someone allows them on purpose.
+ *
+ * The caller must also be entitled to it — see {@link ownsLiftJobAdmissionLane}.
+ */
 export function isTargetedClearableLiftJob(
   job: LiftJob,
   options: { readonly allowPendingTransaction?: boolean } = {},
 ): boolean {
   if (isClearableTerminalLiftJob(job)) return true;
-  // 🟡 3824098501 — the override names its exception rather than being "whatever the base
-  // predicate excludes". Written as the complement it would silently absorb every FUTURE reason a
-  // terminal job becomes protected: add a `manual_hold` exclusion to the base tomorrow and
-  // `allowPendingTransaction` would clear that too, despite having nothing to do with a pending
-  // transaction. Deny-by-default means additions to the base policy stay denied here until
-  // someone decides otherwise on purpose.
   return options.allowPendingTransaction === true
     && isTerminalLiftJobState(job.status)
     && isFailedJob(job)
     && job.failure.resolution === 'retry_recovery';
 }
 
+/**
+ * What BULK `clear(status)` may delete: terminal-clearable, MINUS a job {@link isHeldForChainProof}.
+ *
+ * Deleting a held job turns admission's `LiftJobPendingChainProofError` back into a fresh job for
+ * the same KA, so bulk cleanup is safe by default and the targeted lane above is where an operator
+ * accepts that risk deliberately, for one named job.
+ *
+ * A job whose failure PROVES its transaction had no effect is not held, so routine cleanup of
+ * reverted and unfunded attempts keeps working. Nothing is lost either way: the #1829 journal is
+ * append-only and a clear never touches it, so the txHash outlives the job record.
+ */
 export function isBulkClearableTerminalLiftJob(job: LiftJob): boolean {
   return isClearableTerminalLiftJob(job) && !(isFailedJob(job) && isHeldForChainProof(job));
 }

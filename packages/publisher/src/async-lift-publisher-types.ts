@@ -215,9 +215,16 @@ export interface VmPublishTerminalJobClearer {
   clearTerminalJob(
     jobId: string,
     options?: {
-      readonly allowPendingTransaction?: boolean;
-      /** The caller's agent address; the override is granted only for a job on that lane. */
-      readonly requireOwnerAgentAddress?: string;
+      /**
+       * GH#2270 follow-up — opt in to clearing a job whose transaction may still land.
+       *
+       * ONE value rather than a flag beside an identity: the request and the authority to make it
+       * are the same fact, and splitting them let `{ allowPendingTransaction: true }` and
+       * `{ requireOwnerAgentAddress: x }` each compile while silently behaving like an ordinary
+       * clear. Present means "this caller asks"; the publisher grants it only for a job that
+       * caller enqueued.
+       */
+      readonly pendingTransactionOverride?: { readonly requestedBy: string };
     },
   ): Promise<TerminalJobClearOutcome>;
 }

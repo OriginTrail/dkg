@@ -663,10 +663,9 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     // one record behind one boundary.
     return respondTerminalClearOutcome(
       res,
-      await publisherControl.clearTerminalJob(jobId, {
-        allowPendingTransaction: parsed.allowPendingTransaction === true,
-        requireOwnerAgentAddress: requestAgentAddress,
-      }),
+      await publisherControl.clearTerminalJob(jobId, parsed.allowPendingTransaction === true
+        ? { pendingTransactionOverride: { requestedBy: requestAgentAddress } }
+        : {}),
       jobId,
     );
   }

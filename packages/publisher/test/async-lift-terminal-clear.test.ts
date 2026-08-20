@@ -129,14 +129,12 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // The AUTHOR is not the enqueuer, so the author's token gets nothing — this is the exact
     // confusion the previous version had backwards.
     expect(await p.clearTerminalJob(jobId, {
-      allowPendingTransaction: true,
-      requireOwnerAgentAddress: AUTHOR,
+      pendingTransactionOverride: { requestedBy: AUTHOR },
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
     expect(await p.clearTerminalJob(jobId, {
-      allowPendingTransaction: true,
-      requireOwnerAgentAddress: CALLER,
+      pendingTransactionOverride: { requestedBy: CALLER },
     })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(jobId)).toBeNull();
   });

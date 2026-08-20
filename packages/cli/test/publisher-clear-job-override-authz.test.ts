@@ -19,7 +19,7 @@ describe('clear-job pending-transaction override authorization', () => {
   const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
 
   function post(body: unknown, requestAgentAddress: string) {
-    const calls: Array<{ jobId: string; allowPendingTransaction?: boolean; requireOwnerAgentAddress?: string }> = [];
+    const calls: Array<{ jobId: string; requestedBy?: string }> = [];
     const path = '/api/publisher/clear-job';
     const req = Readable.from([]);
     Object.assign(req, {
@@ -38,13 +38,9 @@ describe('clear-job pending-transaction override authorization', () => {
       getStatus: async () => { throw new Error('route must not query the job'); },
       clearTerminalJob: async (
         jobId: string,
-        options?: { allowPendingTransaction?: boolean; requireOwnerAgentAddress?: string },
+        options?: { pendingTransactionOverride?: { requestedBy: string } },
       ) => {
-        calls.push({
-          jobId,
-          allowPendingTransaction: options?.allowPendingTransaction,
-          requireOwnerAgentAddress: options?.requireOwnerAgentAddress,
-        });
+        calls.push({ jobId, requestedBy: options?.pendingTransactionOverride?.requestedBy });
         return { outcome: 'cleared' as const };
       },
     } as unknown as RequestContext['publisherControl'];
@@ -68,27 +64,22 @@ describe('clear-job pending-transaction override authorization', () => {
     await run();
     // The route forwards WHO is asking; the publisher decides, atomically, on the record it is
     // about to delete. What matters here is that the caller's identity is not lost on the way.
-    expect(calls).toEqual([
-      { jobId: 'job-1', allowPendingTransaction: true, requireOwnerAgentAddress: OTHER },
-    ]);
+    expect(calls).toEqual([{ jobId: 'job-1', requestedBy: OTHER }]);
   });
 
   it('grants it to the owning agent that explicitly asks', async () => {
     // The discriminating half — without it, refusing everyone would pass the row above.
     const { run, calls } = post({ jobId: 'job-1', allowPendingTransaction: true }, OWNER);
     await run();
-    expect(calls).toEqual([
-      { jobId: 'job-1', allowPendingTransaction: true, requireOwnerAgentAddress: OWNER },
-    ]);
+    expect(calls).toEqual([{ jobId: 'job-1', requestedBy: OWNER }]);
   });
 
   it('does NOT grant it to the owner who did not ask for it', async () => {
     // Ownership alone is not consent: an ordinary terminal clear must stay ordinary.
     const { run, calls } = post({ jobId: 'job-1' }, OWNER);
     await run();
-    expect(calls).toEqual([
-      { jobId: 'job-1', allowPendingTransaction: false, requireOwnerAgentAddress: OWNER },
-    ]);
+    // No override asked for: the value is absent entirely, not a false flag beside an identity.
+    expect(calls).toEqual([{ jobId: 'job-1', requestedBy: undefined }]);
   });
 });
 
