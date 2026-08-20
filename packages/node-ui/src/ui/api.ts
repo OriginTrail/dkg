@@ -586,6 +586,53 @@ export async function importFile(
 
 // --- Query ---
 
+export type MemoryLayerApiKey = 'wm' | 'swm' | 'vm';
+
+export interface MemoryLayerApiBinding {
+  s: string;
+  p: string;
+  o: string;
+  g: string;
+}
+
+export interface MemoryLayerApiResult {
+  bindings: MemoryLayerApiBinding[];
+  ok: boolean;
+  truncated: boolean;
+}
+
+export interface MemoryLayersApiResponse {
+  contextGraphId: string;
+  layers: Record<MemoryLayerApiKey, MemoryLayerApiResult>;
+}
+
+// Every mounted view of the same CG consumes the same read model. Keep one
+// browser request in flight per CG so DashboardView, ProjectView, strict-mode
+// mounts, and SSE refreshes cannot multiply storage work.
+const inflightMemoryLayers = new Map<string, Promise<MemoryLayersApiResponse>>();
+
+export function fetchMemoryLayersDeduped(contextGraphId: string): Promise<MemoryLayersApiResponse> {
+  const existing = inflightMemoryLayers.get(contextGraphId);
+  if (existing) return existing;
+  const promise = (async () => {
+    const res = await fetch(`${BASE}/api/context-graph/memory-layers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ contextGraphId }),
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
+      throw new HttpError(res.status, msg, errBody);
+    }
+    return res.json() as Promise<MemoryLayersApiResponse>;
+  })().finally(() => {
+    inflightMemoryLayers.delete(contextGraphId);
+  });
+  inflightMemoryLayers.set(contextGraphId, promise);
+  return promise;
+}
+
 // In-flight POST /api/query dedup. Coalesces concurrent identical
 // requests so React strict-mode double-mounts and sibling views asking
 // the same SPARQL against the same CG share one underlying fetch.

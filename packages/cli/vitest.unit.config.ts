@@ -35,6 +35,7 @@ export default defineConfig({
       'test/query-route-lifecycle.test.ts',
           'test/status-command-store.test.ts',
           'test/memory-graph-events.test.ts',
+          'test/context-graph-read-model.test.ts',
           'test/memory-turn-route.test.ts',
           'test/trust-endpoint-validation.test.ts',
           'test/daemon/plugin-loader.test.ts',
