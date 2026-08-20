@@ -1392,7 +1392,12 @@ describe('GH#2270 proof-first chain dispatcher', () => {
         knowledgeAssetVmPublishHandler: {
           preflight: async () => ({ ok: true } as never),
           execute: async () => ({ } as never),
-          finalizeRecovered: () => new Promise<never>(() => {}),
+          // r26 (🔴 3821028709) — the handler HONOURS the deadline, which is what a real one
+          // must do now that the mutating repair is never abandoned. A handler that ignored it
+          // would hold the pass open, deliberately: blocking beats a repair racing the queue.
+          finalizeRecovered: ({ signal }: { signal?: AbortSignal }) => new Promise<never>((_r, reject) => {
+            signal?.addEventListener('abort', () => reject(new Error('deadline')), { once: true });
+          }),
         } as never,
       });
       const held = await failAfterRecordedTxHash(publisher);
@@ -1402,6 +1407,59 @@ describe('GH#2270 proof-first chain dispatcher', () => {
 
       // And the deadline applied no disposition: the job is exactly as held as it was. A verdict
       // is proof about the CHAIN, and the chain did not change because we ran out of time.
+      expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
+    });
+
+    it('a deadline never abandons a MUTATING repair mid-write [r26]', async () => {
+      // 🔴 3821028709 — `Promise.race` bounds the wait, not the loser. r25 raced the lifecycle
+      // repair itself, so an abandoned finalizer could keep stamping state after `recover()` had
+      // returned and released its serialization — overlapping a later pass or live queue work. My
+      // reasoning there ("same tolerance as a crash") was wrong: a crash is fail-STOP, an
+      // abandoned promise is fail-CONTINUE.
+      const mutationsAfterReturn: string[] = [];
+      let recoverReturned = false;
+      let entered = 0;
+      let releaseHandler: (() => void) | undefined;
+
+      const publisher = createPublisher({
+        chainProofDispatchTimeBudgetMs: 20,
+        chainProofResolver: async () => ({ status: 'recovered', recovery: { txHash: TX_HASH } } as never),
+        knowledgeAssetVmPublishRecoveryResolver: async () => ({
+          inclusion: { blockNumber: 1, txHash: TX_HASH },
+          finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+        } as never),
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => ({ ok: true } as never),
+          execute: async () => ({ } as never),
+          finalizeRecovered: async () => {
+            entered += 1;
+            await new Promise<void>((resolve) => { releaseHandler = resolve; });
+            // The mutation the finalizer would perform, attempted AFTER the deadline passed.
+            if (recoverReturned) mutationsAfterReturn.push('lifecycle-write');
+          },
+        } as never,
+      });
+      const held = await failAfterRecordedTxHash(publisher);
+
+      const recovering = publisher.recover();
+      // Let the pass reach the handler and the deadline elapse while it is inside.
+      await new Promise((resolve) => { setTimeout(resolve, 60); });
+      expect(entered).toBe(1);
+
+      // The pass must NOT have returned while the mutator is still running.
+      const settled = await Promise.race([
+        recovering.then(() => 'returned'),
+        new Promise((resolve) => { setTimeout(() => resolve('still-waiting'), 50); }),
+      ]);
+      expect(settled).toBe('still-waiting');
+
+      releaseHandler?.();
+      await recovering;
+      recoverReturned = true;
+
+      // Exactly one entry: no overlapping second invocation, and nothing wrote after the return.
+      expect(entered).toBe(1);
+      expect(mutationsAfterReturn).toEqual([]);
       expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
     });
 

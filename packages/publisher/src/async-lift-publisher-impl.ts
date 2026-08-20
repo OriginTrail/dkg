@@ -450,6 +450,12 @@ export class TripleStoreAsyncLiftPublisher
    * pure no-op, so a DELAYED lookup can never itself authorize a resend.
    */
   private readonly chainProofNextDueAt = new Map<string, { dueAt: number; attempts: number }>();
+  /**
+   * r26 (🔴 3821028709) — jobs whose MUTATING recovery repair is currently running. A deadline
+   * may stop the dispatcher waiting, but it must never let a second pass enter the same repair
+   * while the first is still writing.
+   */
+  private readonly finalizationsInFlight = new Set<string>();
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
@@ -1083,76 +1089,79 @@ export class TripleStoreAsyncLiftPublisher
     options?: { readonly signal?: AbortSignal },
   ): Promise<'finalized' | 'unresolved' | 'repair-deferred' | 'unsupported'> {
     if (!this.knowledgeAssetVmPublishRecoveryResolver) return 'unresolved';
-    // r25 (🔴 3820711175, 🔴 3820711576) — ONE bound over the WHOLE pre-persistence phase,
-    // not a race per call. Rounds 21, 22 and 24 each threaded the signal one layer further and
-    // each missed the next one: the evidence resolver, then the absence read, then the finalize
-    // lane, and still the agent finalizer's own chain reads escaped. Forwarding by hand through N
-    // layers has no checkable "did I get them all", so the bound no longer DEPENDS on it — every
-    // read in this phase is inside a single race, whether or not its layer forwards anything.
+    // r26 (🔴 3821028709) — the race bounds the WAIT, it does not cancel the loser, and r25 put
+    // the MUTATING repair inside it. My reasoning there was wrong in a specific way: I argued the
+    // tolerance was the same as a crash in this window. It is not. A crash is fail-STOP; an
+    // abandoned promise is fail-CONTINUE, and it keeps writing lifecycle state after the pass has
+    // returned and released its serialization — overlapping a later pass or live queue work.
     //
-    // The signal is still handed down, because cancelling a read beats abandoning it. But it is
-    // now an optimisation, not the mechanism.
+    // So the split is by MUTABILITY, not by convenience:
+    //   - evidence resolution is READ-ONLY, so abandoning it costs nothing but a wasted RPC. Raced.
+    //   - `finalizeRecovered` MUTATES, so it is never abandoned. It is given the deadline signal
+    //     and then AWAITED to termination, and an in-flight guard keeps a second pass from
+    //     entering it concurrently even if something else goes wrong.
     //
-    // The split is what makes this safe: everything raced here is evidence gathering and LOCAL
-    // lifecycle repair, both of which the next pass simply redoes — the same tolerance that
-    // already covers a crash in this window, and the same reason the catch below can defer. The
-    // durable job transition happens AFTER the race and is never interrupted, so a timeout can
-    // never leave a record claiming to be finalized on partial evidence.
+    // The honest consequence, stated rather than hidden: a handler that ignores the signal and
+    // never returns holds the pass open. That is deliberate. Blocking is strictly safer than a
+    // repair racing the queue it was supposed to reconcile, and it is a handler defect we would
+    // rather surface than paper over.
     const deadlineReached = Symbol('deadline');
-    const phase = (async (): Promise<
-      { readonly outcome: 'unresolved' | 'unsupported' | 'repair-deferred' }
-      | { readonly outcome: 'ready'; readonly resolved: AsyncLiftPublisherRecoveryResult }
-    > => {
-      const resolved = await this.knowledgeAssetVmPublishRecoveryResolver!(
-        job, origin.lookup, verdictRecovery, options,
-      );
-      if (!resolved) return { outcome: 'unresolved' };
-      if (
-        !this.knowledgeAssetVmPublishHandler?.finalizeRecovered
-        || !isKnowledgeAssetVmPublishJobRequest(job.request)
-      ) {
-        return { outcome: 'unsupported' };
-      }
-      try {
-        await this.knowledgeAssetVmPublishHandler.finalizeRecovered({
-          walletId: origin.lookup.walletId,
-          request: job.request.knowledgeAssetVmPublish,
-          job,
-          lookup: origin.lookup,
-          recovery: resolved,
-          signal: options?.signal,
-        });
-      } catch {
-        // Local lifecycle repair is blocked for now. The caller keeps the job tx-bearing.
-        //
-        // Holding the wallet lock here does not strand the wallet even if the repair never
-        // succeeds: the lock carries the claim lease taken at claim time (`claimLeaseExpiresAt`),
-        // `syncWalletLockForJob` re-writes that same fixed deadline rather than extending it, and
-        // `recover()` sweeps expired locks before it retries. The wallet is freed at the lease
-        // deadline; the job stays tx-bearing regardless.
-        return { outcome: 'repair-deferred' };
-      }
-      return { outcome: 'ready', resolved };
-    })();
+    const awaitDeadline = () => new Promise<typeof deadlineReached>((resolve) => {
+      const signal = options?.signal;
+      if (!signal) return;
+      if (signal.aborted) { resolve(deadlineReached); return; }
+      signal.addEventListener('abort', () => resolve(deadlineReached), { once: true });
+    });
 
-    const raced = await Promise.race([
-      phase,
-      new Promise<typeof deadlineReached>((resolve) => {
-        const signal = options?.signal;
-        if (!signal) return;
-        if (signal.aborted) { resolve(deadlineReached); return; }
-        signal.addEventListener('abort', () => resolve(deadlineReached), { once: true });
-      }),
+    // --- read-only phase: raced, safe to abandon ---
+    const resolvedOrTimeout = await Promise.race([
+      this.knowledgeAssetVmPublishRecoveryResolver(job, origin.lookup, verdictRecovery, options),
+      awaitDeadline(),
     ]);
-    // A deadline establishes nothing, so the job keeps the state it had and the next pass asks
-    // again. Nothing has been persisted at this point, by construction.
-    if (raced === deadlineReached) return 'unresolved';
-    if (raced.outcome !== 'ready') return raced.outcome;
+    if (resolvedOrTimeout === deadlineReached) return 'unresolved';
+    const resolved = resolvedOrTimeout;
+    if (!resolved) return 'unresolved';
+    if (
+      !this.knowledgeAssetVmPublishHandler?.finalizeRecovered
+      || !isKnowledgeAssetVmPublishJobRequest(job.request)
+    ) {
+      return 'unsupported';
+    }
+
+    // --- mutating phase: never raced, never abandoned ---
+    // Nothing STARTS past the deadline; that is what bounds the pass in the common case.
+    if (options?.signal?.aborted) return 'unresolved';
+    if (this.finalizationsInFlight.has(job.jobId)) return 'unresolved';
+    this.finalizationsInFlight.add(job.jobId);
+    try {
+      await this.knowledgeAssetVmPublishHandler.finalizeRecovered({
+        walletId: origin.lookup.walletId,
+        request: job.request.knowledgeAssetVmPublish,
+        job,
+        lookup: origin.lookup,
+        recovery: resolved,
+        signal: options?.signal,
+      });
+    } catch {
+      // Local lifecycle repair is blocked for now. The caller keeps the job tx-bearing.
+      //
+      // Holding the wallet lock here does not strand the wallet even if the repair never
+      // succeeds: the lock carries the claim lease taken at claim time (`claimLeaseExpiresAt`),
+      // `syncWalletLockForJob` re-writes that same fixed deadline rather than extending it, and
+      // `recover()` sweeps expired locks before it retries. The wallet is freed at the lease
+      // deadline; the job stays tx-bearing regardless.
+      return 'repair-deferred';
+    } finally {
+      this.finalizationsInFlight.delete(job.jobId);
+    }
+    // A repair that honoured the deadline did not finish, so it must not be recorded as if it
+    // had: the durable transition below is reserved for a completed repair.
+    if (options?.signal?.aborted) return 'unresolved';
 
     // --- persistence: past the deadline's reach, and deliberately so ---
     await this.releaseWalletLockForJob(job);
     await this.writeJob(
-      this.finalizeRecoveredJob(job, origin, raced.resolved.inclusion, raced.resolved.finalization),
+      this.finalizeRecoveredJob(job, origin, resolved.inclusion, resolved.finalization),
       'recovered-finalize',
     );
     return 'finalized';
