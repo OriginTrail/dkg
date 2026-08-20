@@ -102,11 +102,16 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // rule meant neither lane could remove it — a permanent dead end, and the release notes named
     // a command that could not work. The operator names the exact job here and owns the
     // consequence; bulk keeps the stricter rule, pinned by the row below.
-    const OWNER = '0xAAaAAa00000000000000000000000000000000Aa';
+    // 🔴 3824353569 — the ENQUEUING CALLER owns the override, not the resolved author. Curated
+    // publishing lets those differ (GH#1778), so the fixture makes them differ: the curator who
+    // admitted the job may clear it; an authenticated token for the AUTHOR may not.
+    const CALLER = '0xCCcCCc00000000000000000000000000000000Cc';
+    const AUTHOR = '0xAAaAAa00000000000000000000000000000000Aa';
     const p = createPublisher();
-    // The real admission shape: a KA VM publish job records the agent lane that admitted it, and
-    // that lane is what the override is scoped to.
-    const jobId = await driveToTerminalFailed(p, { agentAddress: OWNER });
+    const jobId = await driveToTerminalFailed(p, {
+      agentAddress: AUTHOR,
+      callerAgentAddress: CALLER,
+    });
     const job = await p.getStatus(jobId);
     if (!job || !('failure' in job)) throw new Error('expected a failed job');
     const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
@@ -121,15 +126,17 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // 🔴 3824098476 / 🟡 3824098494 — ownership is decided HERE, under the same lock and
     // after the same safe-id validation as the delete, on the same record. A caller that does not
     // own the job gets no override however explicitly it asks.
+    // The AUTHOR is not the enqueuer, so the author's token gets nothing — this is the exact
+    // confusion the previous version had backwards.
     expect(await p.clearTerminalJob(jobId, {
       allowPendingTransaction: true,
-      requireOwnerAgentAddress: '0xnot-the-owner',
+      requireOwnerAgentAddress: AUTHOR,
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
     expect(await p.clearTerminalJob(jobId, {
       allowPendingTransaction: true,
-      requireOwnerAgentAddress: OWNER,
+      requireOwnerAgentAddress: CALLER,
     })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(jobId)).toBeNull();
   });

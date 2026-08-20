@@ -302,11 +302,18 @@ export function isClearableTerminalLiftJob(job: LiftJob): boolean {
  */
 export function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | undefined): boolean {
   if (!agentAddress) return false;
-  const owner = (job.request as { knowledgeAssetVmPublish?: { agentAddress?: string } })
-    ?.knowledgeAssetVmPublish?.agentAddress;
-  return typeof owner === 'string'
-    && owner.length > 0
-    && owner.toLowerCase() === agentAddress.toLowerCase();
+  // 🔴 3824353569 — the ENQUEUING CALLER, not the resolved author. Curated publishing lets those
+  // differ on purpose (GH#1778): curator B may submit for author A, and reading `agentAddress`
+  // denied the override to B who actually admitted the job while granting it to A who did not.
+  //
+  // A record without `callerAgentAddress` predates that field, so there is no caller to match:
+  // deny. Falling back to the author would restore exactly the confusion above, and the risk being
+  // accepted here is a double publish.
+  const caller = (job.request as { knowledgeAssetVmPublish?: { callerAgentAddress?: string } })
+    ?.knowledgeAssetVmPublish?.callerAgentAddress;
+  return typeof caller === 'string'
+    && caller.length > 0
+    && caller.toLowerCase() === agentAddress.toLowerCase();
 }
 
 export function isTargetedClearableLiftJob(
@@ -314,7 +321,16 @@ export function isTargetedClearableLiftJob(
   options: { readonly allowPendingTransaction?: boolean } = {},
 ): boolean {
   if (isClearableTerminalLiftJob(job)) return true;
-  return options.allowPendingTransaction === true && isTerminalLiftJobState(job.status);
+  // 🟡 3824098501 — the override names its exception rather than being "whatever the base
+  // predicate excludes". Written as the complement it would silently absorb every FUTURE reason a
+  // terminal job becomes protected: add a `manual_hold` exclusion to the base tomorrow and
+  // `allowPendingTransaction` would clear that too, despite having nothing to do with a pending
+  // transaction. Deny-by-default means additions to the base policy stay denied here until
+  // someone decides otherwise on purpose.
+  return options.allowPendingTransaction === true
+    && isTerminalLiftJobState(job.status)
+    && isFailedJob(job)
+    && job.failure.resolution === 'retry_recovery';
 }
 
 export function isBulkClearableTerminalLiftJob(job: LiftJob): boolean {

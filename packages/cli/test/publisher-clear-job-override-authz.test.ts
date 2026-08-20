@@ -135,20 +135,31 @@ describe('admission-to-runtime recovery capability bridge', () => {
 
 
 /**
- * GH#2270 follow-up (🔴 3824098486) — the remediation command the daemon hands back must be a
- * command that WORKS. A job with no automatic exit is exactly the case the plain body cannot
- * clear (its failure is `retry_recovery`), so an instruction omitting the override returned 409
- * and the documented escape hatch was unusable.
+ * GH#2270 follow-up (🔴 3824098486, then 🔴 3824353564 and 🔴 3824353577) — the remediation
+ * command the daemon hands back must be one that WORKS, for every held job it is handed to.
+ *
+ * The first version omitted the override entirely, so the documented escape hatch returned 409.
+ * The second chose the body from `err.retryable`, but retryability and the `retry_recovery` clear
+ * restriction are independent — a recoverable job can still need the override — so some held jobs
+ * kept getting the unusable command. And the row asserting it only checked that both strings
+ * existed SOMEWHERE, so reversing the branches left it green.
+ *
+ * There is now no branch: one command, always carrying the override. That removes the failure mode
+ * and the untestable-ordering problem together.
  */
 describe('pending-chain-proof remediation instruction', () => {
-  it('includes the override for a job with NO automatic exit, and omits it otherwise', async () => {
-    const src = await import('node:fs').then((fs) => fs.readFileSync(
+  it('always supplies the override, with no branch to get backwards', async () => {
+    const fs = await import('node:fs');
+    const src = fs.readFileSync(
       new URL('../src/daemon/routes/knowledge-assets.ts', import.meta.url), 'utf8',
-    ));
-    expect(src).toContain('POST /api/publisher/clear-job');
-    // The retryable branch keeps the plain body: recovery will settle that job itself.
-    expect(src).toContain('{"jobId":"${err.existingJobId}"}');
-    // The no-automatic-exit branch must ask for the override, or it cannot clear the job.
-    expect(src).toContain('"allowPendingTransaction":true');
+    );
+    const line = src.split(String.fromCharCode(10)).find((l) => l.includes('POST /api/publisher/clear-job'));
+    expect(line).toBeDefined();
+
+    // The command is emitted unconditionally: one template, no ternary choosing the body.
+    expect(line).toContain('"allowPendingTransaction":true');
+    expect(line).not.toContain('err.retryable');
+    // And exactly one clear-job command exists, so there is no second branch to disagree with it.
+    expect(src.split('POST /api/publisher/clear-job').length - 1).toBe(1);
   });
 });
