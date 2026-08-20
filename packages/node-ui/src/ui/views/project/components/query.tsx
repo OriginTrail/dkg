@@ -1,5 +1,11 @@
 import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import type { ReactNode } from 'react';
+import {
+  assertQueryCatalogTemplate,
+  renderQueryCatalogTemplate,
+  serializeQueryCatalogParameters,
+  type QueryCatalogParameterDefinition,
+} from '@origintrail-official/dkg-core/query-catalog-parameters';
 import { useFetch } from '../../../hooks.js';
 import { executeQuery, writeProfileQueryCatalog, type QueryExecutionView } from '../../../api.js';
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
@@ -58,6 +64,7 @@ function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
     catalogDescription: 'Ready-made SPARQL included with the Node UI for common Context Graph checks.',
     catalogRank,
     resultColumn: '',
+    parameters: [],
     ...query,
   });
 
@@ -131,7 +138,14 @@ function intLiteral(value: number): string {
   return `"${value}"^^<${XSD_INTEGER}>`;
 }
 
-function buildSavedQueryWrite(contextGraphId: string, name: string, description: string, sparql: string): {
+function buildSavedQueryWrite(
+  contextGraphId: string,
+  name: string,
+  description: string,
+  sparql: string,
+  parameters: readonly QueryCatalogParameterDefinition[] = [],
+  view?: QueryExecutionView,
+): {
   query: SavedCatalogQuery;
   quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
 } {
@@ -139,6 +153,7 @@ function buildSavedQueryWrite(contextGraphId: string, name: string, description:
   const slug = `${querySlug(name)}-${rank.toString(36)}`;
   const catalogUri = profileUri(contextGraphId, 'catalog', USER_QUERY_CATALOG_SLUG);
   const queryUri = profileUri(contextGraphId, 'query', slug);
+  assertQueryCatalogTemplate(sparql, parameters);
   const query: SavedCatalogQuery = {
     slug,
     subGraph: CONTEXT_GRAPH_QUERY_SUBGRAPH,
@@ -151,6 +166,8 @@ function buildSavedQueryWrite(contextGraphId: string, name: string, description:
     sparql,
     resultColumn: '',
     rank,
+    parameters: [...parameters],
+    view,
   };
   const quads = [
     { subject: catalogUri, predicate: RDF_TYPE, object: `${PROFILE_NS}QueryCatalog`, graph: '' },
@@ -167,6 +184,17 @@ function buildSavedQueryWrite(contextGraphId: string, name: string, description:
   ];
   if (description) {
     quads.push({ subject: queryUri, predicate: `${SCHEMA_NS}description`, object: literal(description), graph: '' });
+  }
+  if (parameters.length > 0) {
+    quads.push({
+      subject: queryUri,
+      predicate: `${PROFILE_NS}queryParameters`,
+      object: literal(serializeQueryCatalogParameters(parameters)),
+      graph: '',
+    });
+  }
+  if (view) {
+    quads.push({ subject: queryUri, predicate: `${PROFILE_NS}executionView`, object: literal(view), graph: '' });
   }
   return { query, quads };
 }
@@ -296,6 +324,8 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [catalogParameterValues, setCatalogParameterValues] = useState<Record<string, string>>({});
+  const [parameterError, setParameterError] = useState<string | null>(null);
   const builtInCatalog = useMemo(() => contextGraphBuiltInCatalog(contextGraphId), [contextGraphId]);
   const queryCatalogs = useMemo(
     () => mergeQueryCatalogs([builtInCatalog, ...localSavedCatalogs, ...(profile?.queryCatalogs ?? [])]),
@@ -305,6 +335,16 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     () => (profile?.loading || profile?.error ? mergeQueryCatalogs([builtInCatalog, ...localSavedCatalogs]) : queryCatalogs),
     [builtInCatalog, localSavedCatalogs, profile?.error, profile?.loading, queryCatalogs],
   );
+  const selectedCatalogQuery = useMemo(() => {
+    if (!activeCatalogQueryKey) return undefined;
+    for (const catalog of queryCatalogs) {
+      for (const query of catalog.queries) {
+        const key = `${query.subGraph}|${query.catalogSlug}|${query.slug}`;
+        if (key === activeCatalogQueryKey) return query;
+      }
+    }
+    return undefined;
+  }, [activeCatalogQueryKey, queryCatalogs]);
 
   useEffect(() => {
     setDraftQuery(defaultQuery);
@@ -317,6 +357,8 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     setSaveDescription('');
     setSaveError(null);
     setSaveMessage(null);
+    setCatalogParameterValues({});
+    setParameterError(null);
   }, [defaultQuery]);
 
   const { data, loading, error, refresh } = useFetch(
@@ -346,11 +388,31 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   }, [rows]);
 
   const runQuery = useCallback(() => {
-    const next = draftQuery.trim();
+    let next = draftQuery.trim();
     if (!next) return;
-    const rerunningCatalogQuery = activeCatalogQueryKey !== null && next === activeQuery;
-    const nextView = rerunningCatalogQuery ? activeQueryView : undefined;
-    if (!rerunningCatalogQuery) setActiveCatalogQueryKey(null);
+    let nextView: QueryExecutionView | undefined;
+    const renderingSelectedTemplate = selectedCatalogQuery
+      && (selectedCatalogQuery.parameters?.length ?? 0) > 0
+      && next === selectedCatalogQuery.sparql.trim();
+    if (renderingSelectedTemplate) {
+      try {
+        next = renderQueryCatalogTemplate(
+          selectedCatalogQuery.sparql,
+          selectedCatalogQuery.parameters ?? [],
+          catalogParameterValues,
+        );
+        nextView = selectedCatalogQuery.view;
+        setParameterError(null);
+      } catch (err: any) {
+        setParameterError(err?.message ?? String(err));
+        return;
+      }
+    } else {
+      const rerunningCatalogQuery = activeCatalogQueryKey !== null && next === activeQuery;
+      nextView = rerunningCatalogQuery ? activeQueryView : undefined;
+      if (!rerunningCatalogQuery) setActiveCatalogQueryKey(null);
+      setParameterError(null);
+    }
     setSaveMessage(null);
     setSaveError(null);
     if (next === activeQuery && activeQueryView === nextView) {
@@ -359,13 +421,15 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     }
     setActiveQueryView(nextView);
     setActiveQuery(next);
-  }, [activeCatalogQueryKey, activeQuery, activeQueryView, draftQuery, refresh]);
+  }, [activeCatalogQueryKey, activeQuery, activeQueryView, catalogParameterValues, draftQuery, refresh, selectedCatalogQuery]);
 
   const resetQuery = useCallback(() => {
     setDraftQuery(defaultQuery);
     setActiveCatalogQueryKey(null);
     setSaveMessage(null);
     setSaveError(null);
+    setCatalogParameterValues({});
+    setParameterError(null);
     if (activeQuery === defaultQuery && activeQueryView === undefined) {
       refresh();
       return;
@@ -374,18 +438,25 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     setActiveQuery(defaultQuery);
   }, [activeQuery, activeQueryView, defaultQuery, refresh]);
 
-  const runCatalogQuery = useCallback((key: string, sparql: string, view?: QueryExecutionView) => {
-    const next = sparql.trim();
+  const runCatalogQuery = useCallback((key: string, query: SavedCatalogQuery) => {
+    const next = query.sparql.trim();
     if (!next) return;
     setActiveCatalogQueryKey(key);
     setDraftQuery(next);
     setSaveMessage(null);
     setSaveError(null);
-    if (activeQuery === next && activeQueryView === view) {
+    setParameterError(null);
+    const parameters = query.parameters ?? [];
+    const values = Object.fromEntries(parameters
+      .filter(parameter => parameter.defaultValue !== undefined)
+      .map(parameter => [parameter.name, String(parameter.defaultValue)]));
+    setCatalogParameterValues(values);
+    if (parameters.length > 0) return;
+    if (activeQuery === next && activeQueryView === query.view) {
       refresh();
       return;
     }
-    setActiveQueryView(view);
+    setActiveQueryView(query.view);
     setActiveQuery(next);
   }, [activeQuery, activeQueryView, refresh]);
 
@@ -416,7 +487,17 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     setSaveError(null);
     setSaveMessage(null);
     try {
-      const { query, quads } = buildSavedQueryWrite(contextGraphId, name, description, sparql);
+      const selectedTemplate = selectedCatalogQuery && selectedCatalogQuery.sparql.trim() === sparql
+        ? selectedCatalogQuery
+        : undefined;
+      const { query, quads } = buildSavedQueryWrite(
+        contextGraphId,
+        name,
+        description,
+        sparql,
+        selectedTemplate?.parameters ?? [],
+        selectedTemplate?.view,
+      );
       await writeProfileQueryCatalog(contextGraphId, quads);
       setLocalSavedCatalogs(prev => appendSavedQueryCatalog(prev, query));
       const key = `${query.subGraph}|${query.catalogSlug}|${query.slug}`;
@@ -433,7 +514,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     } finally {
       setSaving(false);
     }
-  }, [activeQuery, contextGraphId, draftQuery, refresh, saveDescription, saveName]);
+  }, [activeQuery, contextGraphId, draftQuery, refresh, saveDescription, saveName, selectedCatalogQuery]);
 
   return (
     <div className="v10-memory-layer-view v10-cg-query-view">
@@ -505,9 +586,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                   <div className="v10-cg-query-list">
                     {catalog.queries.map((q) => {
                       const key = `${q.subGraph}|${q.catalogSlug}|${q.slug}`;
-                      const isActive = activeCatalogQueryKey === key
-                        && activeQuery === q.sparql
-                        && activeQueryView === q.view;
+                      const isActive = activeCatalogQueryKey === key;
                       const chipLabel = q.description ? `${q.name}. ${q.description}` : q.name;
                       return (
                         <button
@@ -516,7 +595,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                           className={`v10-cg-query-chip${isActive ? ' active' : ''}`}
                           title={chipLabel}
                           aria-label={`Load query: ${chipLabel}`}
-                          onClick={() => runCatalogQuery(key, q.sparql, q.view)}
+                          onClick={() => runCatalogQuery(key, q)}
                         >
                           <span className="v10-cg-query-chip-title">{q.name}</span>
                           {q.description && <span className="v10-cg-query-chip-desc">{q.description}</span>}
@@ -552,6 +631,46 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         </div>
 
       <div className="v10-cg-query-editor">
+        {selectedCatalogQuery && (selectedCatalogQuery.parameters?.length ?? 0) > 0 && (
+          <div className="v10-cg-query-parameters" aria-label="Query parameters">
+            {(selectedCatalogQuery.parameters ?? []).map(parameter => (
+              <label key={parameter.name} className="v10-cg-query-parameter">
+                <span>{parameter.label ?? parameter.name}</span>
+                {parameter.type === 'boolean' ? (
+                  <select
+                    className="v10-form-input"
+                    aria-label={parameter.label ?? parameter.name}
+                    value={catalogParameterValues[parameter.name] ?? ''}
+                    onChange={event => setCatalogParameterValues(previous => ({
+                      ...previous,
+                      [parameter.name]: event.target.value,
+                    }))}
+                  >
+                    <option value="">Choose...</option>
+                    <option value="true">True</option>
+                    <option value="false">False</option>
+                  </select>
+                ) : (
+                  <input
+                    className="v10-form-input"
+                    aria-label={parameter.label ?? parameter.name}
+                    type={parameter.type === 'integer' || parameter.type === 'number' ? 'number' : 'text'}
+                    step={parameter.type === 'integer' ? '1' : parameter.type === 'number' ? 'any' : undefined}
+                    required={parameter.required !== false && parameter.defaultValue === undefined}
+                    value={catalogParameterValues[parameter.name] ?? ''}
+                    placeholder={parameter.description}
+                    onChange={event => setCatalogParameterValues(previous => ({
+                      ...previous,
+                      [parameter.name]: event.target.value,
+                    }))}
+                  />
+                )}
+                {parameter.description && <small>{parameter.description}</small>}
+              </label>
+            ))}
+          </div>
+        )}
+        {parameterError && <span className="v10-cg-query-error-detail">{parameterError}</span>}
         <textarea
           className="v10-cg-query-textarea"
           aria-label="SPARQL editor"
@@ -559,6 +678,8 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           onChange={(e) => {
             setDraftQuery(e.target.value);
             setActiveCatalogQueryKey(null);
+            setCatalogParameterValues({});
+            setParameterError(null);
           }}
           spellCheck={false}
         />

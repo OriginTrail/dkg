@@ -473,8 +473,10 @@ Use this decision order:
    with the selected `context_graph_id` and present the useful candidates.
 6. If the user explicitly asks to run a saved query, call
    `dkg_query_catalog_run` with the selected `context_graph_id` and the saved
-   query slug or exact display name. If the name is ambiguous, list first and
-   ask/choose by slug.
+   query slug or exact display name. Include its declared runtime values in
+   `parameters`. If required values are unknown, ask for them; never substitute
+   example identifiers. If the name is ambiguous, list first and ask/choose by
+   slug.
 7. If the user asks to save the current/query/SPARQL, call
    `dkg_query_catalog_save` with the selected `context_graph_id`, a concise
    `name`, optional `description`, and the exact read-only SPARQL text. If the
@@ -490,17 +492,18 @@ OpenClaw tool path:
 
 - `dkg_query_catalog_list` input: `{ "context_graph_id": "<contextGraphId>" }`
 - `dkg_query_catalog_run` input:
-  `{ "context_graph_id": "<contextGraphId>", "query": "<slug-or-exact-name>" }`
+  `{ "context_graph_id": "<contextGraphId>", "query": "<slug-or-exact-name>", "parameters"?: { "<name>": "<runtime-value>" } }`
 - `dkg_query_catalog_save` input:
   `{ "context_graph_id": "<contextGraphId>", "name": "<display-name>", "sparql": "<read-only-sparql>", "description"?: "...", "result_column"?: "uri" }`
   Optional advanced fields: `sub_graph` (defaults to `__context_graph`),
-  `catalog_slug`, `catalog_name`, and `catalog_description`.
+  `catalog_slug`, `catalog_name`, `catalog_description`, `parameters`, and
+  `execution_view`.
 
 CLI fallback:
 
 ```bash
 dkg query-catalog list <context-graph>
-dkg query-catalog run <context-graph> <query-slug-or-exact-name>
+dkg query-catalog run <context-graph> <query-slug-or-exact-name> --param name=value [--param name=value]
 ```
 
 HTTP fallback:
@@ -508,7 +511,8 @@ HTTP fallback:
 - `POST /api/profile/query-catalog/read`
   Body: `{ "contextGraphId": "<contextGraphId>" }`
   Returns bindings with `q`, `subGraph`, `catalog`, `name`, `description`,
-  `sparql`, `rank`, `catalogName`, `catalogDescription`, and `catalogRank`.
+  `sparql`, `queryParameters`, `executionView`, `rank`, `catalogName`,
+  `catalogDescription`, and `catalogRank`.
 - `POST /api/profile/query-catalog/write`
   Body: `{ "contextGraphId": "<contextGraphId>", "quads": [...] }`
   The daemon stores these triples in
@@ -537,14 +541,20 @@ Profile RDF shape for writes:
   prof:inCatalog <urn:dkg:profile:PROJECT:catalog:CATALOG> ;
   prof:displayName "Saved query name" ;
   schema:description "What this query returns" ;
-  prof:sparqlQuery "SELECT ?uri WHERE { ?uri ?p ?o } LIMIT 50" ;
+  prof:sparqlQuery "SELECT ?uri WHERE { ?uri <urn:configuration> {{configurationId}} }" ;
+  prof:queryParameters "[{\"name\":\"configurationId\",\"type\":\"string\",\"label\":\"Configuration ID\"}]" ;
+  prof:executionView "verifiable-memory" ;
   prof:resultColumn "uri" ;
   prof:rank "100"^^xsd:integer .
 ```
 
 When composing saved SPARQL, keep it read-only (`SELECT`, `ASK`, `CONSTRUCT`,
 or `DESCRIBE`). Prefer returning a stable `?uri` column when the result should
-feed entity-list UI surfaces.
+feed entity-list UI surfaces. A `{{name}}` placeholder represents one complete
+SPARQL term and must have a matching `prof:queryParameters` definition. Runtime
+renderers escape `string` values and validate `integer`, `number`, `boolean`,
+and `iri` values before execution; do not quote placeholders inside the SPARQL
+template and do not perform raw replacement yourself.
 
 ### Operational constraints
 

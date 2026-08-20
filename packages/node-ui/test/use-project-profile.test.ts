@@ -120,6 +120,21 @@ describe('buildQueryCatalogState', () => {
       view: 'verifiable-memory',
     });
   });
+
+  it('parses runtime parameter definitions returned by the profile catalog endpoint', () => {
+    const state = buildQueryCatalogState([], [{
+      q: '<urn:dkg:profile:demo:query:configuration-trace>',
+      subGraph: '__context_graph',
+      name: 'Configuration trace',
+      sparql: 'SELECT ?record WHERE { ?record <urn:configuration> {{configurationId}} }',
+      queryParameters: '[{"name":"configurationId","type":"string","label":"Configuration ID"}]',
+    }]);
+
+    expect(state.queryCatalogs[0].queries[0]).toMatchObject({
+      slug: 'configuration-trace',
+      parameters: [{ name: 'configurationId', type: 'string', label: 'Configuration ID' }],
+    });
+  });
 });
 
 describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () => {

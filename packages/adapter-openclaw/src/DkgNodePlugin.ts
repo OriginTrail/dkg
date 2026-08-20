@@ -73,6 +73,7 @@ import {
   queryCatalogSlug,
   readOnlySparqlOperation,
 } from './dkg-node-plugin-query-catalog.js';
+import { renderQueryCatalogTemplate } from '@origintrail-official/dkg-core/query-catalog-parameters';
 import {
   channelConfigFingerprint,
   extractUserTextFromContent,
@@ -2987,10 +2988,23 @@ export class DkgNodePlugin {
       }
 
       const savedQuery = matches[0];
-      const queryOpts = savedQuery.subGraph && savedQuery.subGraph !== CONTEXT_GRAPH_QUERY_SUBGRAPH
-        ? { contextGraphId, subGraphName: savedQuery.subGraph }
-        : { contextGraphId };
-      const result = await this.client.query(savedQuery.sparql, queryOpts);
+      const rawParameters = args.parameters;
+      if (rawParameters !== undefined && (!rawParameters || typeof rawParameters !== 'object' || Array.isArray(rawParameters))) {
+        return this.error('"parameters" must be an object keyed by saved-query parameter name.');
+      }
+      const sparql = renderQueryCatalogTemplate(
+        savedQuery.sparql,
+        savedQuery.parameters,
+        (rawParameters ?? {}) as Record<string, unknown>,
+      );
+      const queryOpts = {
+        contextGraphId,
+        ...(savedQuery.subGraph && savedQuery.subGraph !== CONTEXT_GRAPH_QUERY_SUBGRAPH
+          ? { subGraphName: savedQuery.subGraph }
+          : {}),
+        ...(savedQuery.view ? { view: savedQuery.view } : {}),
+      };
+      const result = await this.client.query(sparql, queryOpts);
       return this.json({
         contextGraphId,
         savedQuery,
@@ -3024,6 +3038,10 @@ export class DkgNodePlugin {
       const catalogName = optionalString(args.catalog_name) ?? USER_QUERY_CATALOG_NAME;
       const catalogDescription = optionalString(args.catalog_description) ?? USER_QUERY_CATALOG_DESCRIPTION;
       const resultColumn = optionalString(args.result_column)?.replace(/^\?/, '');
+      const requestedView = optionalString(args.execution_view);
+      if (requestedView && !GET_VIEWS.includes(requestedView as GetView)) {
+        return this.error('"execution_view" must be working-memory, shared-working-memory, or verifiable-memory.');
+      }
       const rank = Date.now();
       const { savedQuery, quads } = buildQueryCatalogSaveWrite({
         contextGraphId,
@@ -3037,6 +3055,8 @@ export class DkgNodePlugin {
         resultColumn,
         rank,
         catalogRank: 50,
+        parameters: args.parameters,
+        view: requestedView as GetView | undefined,
       });
       const write = await this.client.writeQueryCatalog(contextGraphId, quads);
       return this.json({

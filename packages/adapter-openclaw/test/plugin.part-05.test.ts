@@ -137,6 +137,42 @@ describe("DkgNodePlugin", () => {
     });
   });
 
+  it('renders declared saved-query parameters and preserves the execution view', async () => {
+    const query = vi.fn(async () => ({ result: { bindings: [] } }));
+    const plugin = new DkgNodePlugin();
+    (plugin as any).client = {
+      readQueryCatalog: vi.fn(async () => ({
+        result: {
+          type: 'bindings',
+          bindings: [{
+            q: 'urn:dkg:profile:cg-1:query:configuration-trace',
+            catalog: 'urn:dkg:profile:cg-1:catalog:kamstrup',
+            name: '"Configuration trace"',
+            sparql: '"SELECT ?record WHERE { ?record <urn:configuration> {{configurationId}} }"',
+            queryParameters: '"[{\\"name\\":\\"configurationId\\",\\"type\\":\\"string\\"}]"',
+            executionView: '"verifiable-memory"',
+            subGraph: '"__context_graph"',
+          }],
+        },
+      })),
+      query,
+    };
+
+    const result = await (plugin as any).handleQueryCatalogRun({
+      context_graph_id: 'cg-1',
+      query: 'configuration-trace',
+      parameters: { configurationId: '748387' },
+    });
+
+    expect(query).toHaveBeenCalledWith(
+      'SELECT ?record WHERE { ?record <urn:configuration> "748387" }',
+      { contextGraphId: 'cg-1', view: 'verifiable-memory' },
+    );
+    expect((result.details as any).savedQuery.parameters).toEqual([
+      { name: 'configurationId', type: 'string' },
+    ]);
+  });
+
 
   it('saves query catalog timestamp ranks as unbounded integer literals', async () => {
     const rank = 1_714_000_000_000;
@@ -149,7 +185,9 @@ describe("DkgNodePlugin", () => {
       const result = await (plugin as any).handleQueryCatalogSave({
         context_graph_id: 'cg-1',
         name: 'Orders',
-        sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+        sparql: 'SELECT ?s WHERE { ?s <urn:order> {{shopOrderNo}} }',
+        parameters: [{ name: 'shopOrderNo', type: 'string', label: 'Shop order' }],
+        execution_view: 'verifiable-memory',
       });
 
       const savedQuery = (result.details as any).savedQuery;
@@ -159,6 +197,22 @@ describe("DkgNodePlugin", () => {
       );
 
       expect(rankQuad?.object).toBe(`"${rank}"^^<http://www.w3.org/2001/XMLSchema#integer>`);
+      expect(savedQuery).toMatchObject({
+        parameters: [{ name: 'shopOrderNo', type: 'string', label: 'Shop order' }],
+        view: 'verifiable-memory',
+      });
+      expect(quads).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          subject: savedQuery.queryUri,
+          predicate: 'http://dkg.io/ontology/profile/queryParameters',
+          object: '"[{\\"name\\":\\"shopOrderNo\\",\\"type\\":\\"string\\",\\"label\\":\\"Shop order\\"}]"',
+        }),
+        expect.objectContaining({
+          subject: savedQuery.queryUri,
+          predicate: 'http://dkg.io/ontology/profile/executionView',
+          object: '"verifiable-memory"',
+        }),
+      ]));
     } finally {
       nowSpy.mockRestore();
     }

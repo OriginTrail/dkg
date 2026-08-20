@@ -15,6 +15,11 @@
       "import": "./dist/project-ontology.js",
       "default": "./dist/project-ontology.js"
     },
+    "./query-catalog-parameters": {
+      "types": "./dist/query-catalog-parameters.d.ts",
+      "import": "./dist/query-catalog-parameters.js",
+      "default": "./dist/query-catalog-parameters.js"
+    },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"
   },

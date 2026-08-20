@@ -406,3 +406,4 @@ export {
   assertNodeTimerDelayMs,
   resolveNodeTimerDelayMs,
 } from './node-timer.js';
+export * from './query-catalog-parameters.js';

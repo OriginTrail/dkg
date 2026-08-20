@@ -11,6 +11,10 @@
  * default profile — this keeps the UI functional for any project.
  */
 import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import {
+  parseQueryCatalogParameters,
+  type QueryCatalogParameterDefinition,
+} from '@origintrail-official/dkg-core/query-catalog-parameters';
 import { executeQuery, readProfileQueryCatalog, type QueryExecutionView } from '../api.js';
 import { ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 
@@ -112,6 +116,8 @@ export interface SavedQuery {
   rank: number;
   /** Memory projection required by this query contract. */
   view?: QueryExecutionView;
+  /** Runtime values required to render this saved SPARQL template. */
+  parameters?: QueryCatalogParameterDefinition[];
 }
 
 export interface QueryCatalog {
@@ -354,6 +360,7 @@ export function buildQueryCatalogState(
         resultColumn: stripLiteral(row.column) || '',
         rank: parseInt10(row.rank) || 99,
         view: savedQueryExecutionView(row, qIri, catalogIri),
+        parameters: parseQueryCatalogParameters(stripLiteral(row.queryParameters) || undefined),
       };
     })
     .filter(q => q.subGraph && q.sparql)

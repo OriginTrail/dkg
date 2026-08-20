@@ -68,7 +68,7 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
       description:
         'List saved SPARQL queries from a context graph profile query catalog. Use this when the user asks ' +
         'what saved/catalog queries are available for a project or before running a saved query by name. ' +
-        'Returns sorted items with slug, display name, catalog, sub-graph, description, and SPARQL text.',
+        'Returns sorted items with slug, display name, catalog, sub-graph, description, SPARQL template, runtime parameters, and execution view.',
       parameters: {
         type: 'object',
         properties: {
@@ -86,7 +86,8 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
       description:
         'Run a saved SPARQL query from a context graph profile query catalog by slug or exact display name. ' +
         'Call dkg_query_catalog_list first if the selector is ambiguous. Executes the saved SPARQL against ' +
-        'the same context graph and saved sub-graph scope using the standard DKG query route.',
+        'the same context graph, saved sub-graph scope, and execution view using the standard DKG query route. ' +
+        'Supply the saved query\'s declared runtime values in parameters.',
       parameters: {
         type: 'object',
         properties: {
@@ -97,6 +98,13 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
           query: {
             type: 'string',
             description: 'Saved query slug or exact display name.',
+          },
+          parameters: {
+            type: 'object',
+            description: 'Runtime values keyed by the parameter names declared by the saved query.',
+            additionalProperties: {
+              type: ['string', 'number', 'boolean'],
+            },
           },
         },
         required: ['context_graph_id', 'query'],
@@ -148,6 +156,27 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
           result_column: {
             type: 'string',
             description: 'Optional SELECT variable name, without "?", that identifies entity URI results for UI entity-list rendering.',
+          },
+          parameters: {
+            type: 'array',
+            description: 'Optional runtime parameter schema for {{name}} placeholders in the saved SPARQL template.',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                type: { type: 'string', enum: ['string', 'integer', 'number', 'boolean', 'iri'] },
+                label: { type: 'string' },
+                description: { type: 'string' },
+                required: { type: 'boolean' },
+                defaultValue: { type: ['string', 'number', 'boolean'] },
+              },
+              required: ['name', 'type'],
+            },
+          },
+          execution_view: {
+            type: 'string',
+            enum: ['working-memory', 'shared-working-memory', 'verifiable-memory'],
+            description: 'Optional memory projection required by this saved query.',
           },
         },
         required: ['context_graph_id', 'name', 'sparql'],

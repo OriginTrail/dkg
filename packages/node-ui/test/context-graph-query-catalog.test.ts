@@ -309,6 +309,84 @@ describe('ContextGraphQueryView', () => {
     await act(async () => { emptyRoot.unmount(); });
   });
 
+  it('collects and safely renders runtime parameters before executing a catalog query', async () => {
+    const parameterizedProfile = profile({
+      queryCatalogs: [{
+        slug: 'kamstrup',
+        subGraph: '__context_graph',
+        name: 'Kamstrup',
+        rank: 1,
+        queries: [{
+          slug: 'configuration-trace',
+          subGraph: '__context_graph',
+          catalogSlug: 'kamstrup',
+          catalogName: 'Kamstrup',
+          catalogRank: 1,
+          name: 'Configuration trace',
+          sparql: 'SELECT ?record WHERE { ?record <urn:configuration> {{configurationId}} }',
+          resultColumn: 'record',
+          rank: 1,
+          view: 'verifiable-memory',
+          parameters: [{
+            name: 'configurationId',
+            type: 'string',
+            label: 'Configuration ID',
+            description: 'Configuration_ID to trace.',
+          }],
+        }],
+      }],
+    });
+    const { container, root } = await renderWithProfile(parameterizedProfile);
+    await waitForText(container, 'Configuration trace');
+    apiMocks.executeQuery.mockClear();
+
+    const catalogButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('Configuration trace'));
+    await act(async () => {
+      catalogButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(apiMocks.executeQuery).not.toHaveBeenCalled();
+    const parameterInput = container.querySelector('input[aria-label="Configuration ID"]') as HTMLInputElement;
+    expect(parameterInput).toBeTruthy();
+    await act(async () => {
+      setFieldValue(parameterInput, '748387" } UNION { ?s ?p ?o');
+    });
+
+    const runButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Run');
+    await act(async () => {
+      runButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
+      expect.stringContaining('"748387\\" } UNION { ?s ?p ?o"'),
+      'cg-test',
+      undefined,
+      undefined,
+      'verifiable-memory',
+    );
+
+    const saveButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Save');
+    await act(async () => {
+      saveButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const nameInput = container.querySelector('input[placeholder="Query name"]') as HTMLInputElement;
+    await act(async () => {
+      setFieldValue(nameInput, 'Reusable configuration trace');
+    });
+    const saveQueryButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Save query');
+    await act(async () => {
+      saveQueryButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const writtenQuads = apiMocks.writeProfileQueryCatalog.mock.calls.at(-1)?.[1] as Array<{ predicate: string }>;
+    expect(writtenQuads.some(quad => quad.predicate.endsWith('/queryParameters'))).toBe(true);
+    expect(writtenQuads.some(quad => quad.predicate.endsWith('/executionView'))).toBe(true);
+    await act(async () => { root.unmount(); });
+  });
+
   it('shows profile errors without also implying an empty catalogue', async () => {
     const { container, root } = await renderWithProfile(profile({ error: 'Profile query failed' }));
 

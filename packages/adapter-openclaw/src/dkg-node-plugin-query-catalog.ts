@@ -7,6 +7,13 @@
  * `DkgNodePlugin.ts` where used.
  */
 import { escapeDkgRdfLiteral, isSafeIri } from '@origintrail-official/dkg-core';
+import {
+  assertQueryCatalogTemplate,
+  normalizeQueryCatalogParameters,
+  parseQueryCatalogParameters,
+  serializeQueryCatalogParameters,
+  type QueryCatalogParameterDefinition,
+} from '@origintrail-official/dkg-core/query-catalog-parameters';
 
 export const CONTEXT_GRAPH_QUERY_SUBGRAPH = '__context_graph';
 export const USER_QUERY_CATALOG_SLUG = 'ui-saved-queries';
@@ -29,6 +36,8 @@ export type QueryCatalogToolItem = {
   catalogDescription?: string;
   catalogRank: number;
   subGraph: string;
+  parameters: QueryCatalogParameterDefinition[];
+  view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
 };
 
 export type QueryCatalogWriteQuad = {
@@ -133,6 +142,10 @@ export function normalizeQueryCatalogItems(response: Record<string, unknown>): Q
         catalogDescription: r.catalogDescription !== undefined ? stripRdfTerm(r.catalogDescription) : undefined,
         catalogRank: Number.parseInt(stripRdfTerm(r.catalogRank) || '999', 10) || 999,
         subGraph: stripRdfTerm(r.subGraph),
+        parameters: parseQueryCatalogParameters(
+          r.queryParameters !== undefined ? stripRdfTerm(r.queryParameters) : undefined,
+        ),
+        view: queryCatalogExecutionView(r.executionView ?? r.view),
       };
     })
     .filter((item): item is QueryCatalogToolItem => item !== null)
@@ -142,6 +155,15 @@ export function normalizeQueryCatalogItems(response: Record<string, unknown>): Q
       || a.rank - b.rank
       || a.name.localeCompare(b.name),
     );
+}
+
+function queryCatalogExecutionView(value: unknown): QueryCatalogToolItem['view'] {
+  const normalized = value === undefined ? '' : stripRdfTerm(value);
+  return normalized === 'working-memory'
+    || normalized === 'shared-working-memory'
+    || normalized === 'verifiable-memory'
+    ? normalized
+    : undefined;
 }
 
 export function queryCatalogSlug(value: string): string {
@@ -221,6 +243,8 @@ export function buildQueryCatalogSaveWrite(input: {
   resultColumn?: string;
   rank: number;
   catalogRank: number;
+  parameters?: unknown;
+  view?: QueryCatalogToolItem['view'];
 }): {
   savedQuery: QueryCatalogToolItem & {
     queryUri: string;
@@ -232,6 +256,8 @@ export function buildQueryCatalogSaveWrite(input: {
   const slug = `${queryCatalogSlug(input.name)}-${input.rank.toString(36)}`;
   const catalogUri = queryCatalogProfileUri(input.contextGraphId, 'catalog', input.catalogSlug);
   const queryUri = queryCatalogProfileUri(input.contextGraphId, 'query', slug);
+  const parameters = normalizeQueryCatalogParameters(input.parameters);
+  assertQueryCatalogTemplate(input.sparql, parameters);
   const quads: QueryCatalogWriteQuad[] = [
     { subject: catalogUri, predicate: RDF_TYPE, object: `${PROFILE_NS}QueryCatalog`, graph: '' },
     { subject: catalogUri, predicate: `${PROFILE_NS}forSubGraph`, object: queryCatalogLiteral(input.subGraph), graph: '' },
@@ -253,6 +279,22 @@ export function buildQueryCatalogSaveWrite(input: {
   if (input.resultColumn) {
     quads.push({ subject: queryUri, predicate: `${PROFILE_NS}resultColumn`, object: queryCatalogLiteral(input.resultColumn), graph: '' });
   }
+  if (parameters.length > 0) {
+    quads.push({
+      subject: queryUri,
+      predicate: `${PROFILE_NS}queryParameters`,
+      object: queryCatalogLiteral(serializeQueryCatalogParameters(parameters)),
+      graph: '',
+    });
+  }
+  if (input.view) {
+    quads.push({
+      subject: queryUri,
+      predicate: `${PROFILE_NS}executionView`,
+      object: queryCatalogLiteral(input.view),
+      graph: '',
+    });
+  }
   return {
     savedQuery: {
       slug,
@@ -268,6 +310,8 @@ export function buildQueryCatalogSaveWrite(input: {
       queryUri,
       catalogUri,
       resultColumn: input.resultColumn,
+      parameters,
+      view: input.view,
     },
     quads,
   };

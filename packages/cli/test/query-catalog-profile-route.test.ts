@@ -53,11 +53,13 @@ describe('/api/profile/query-catalog/read', () => {
       q: { value: 'urn:dkg:profile:kamstrup-testnet:query:trace' },
       subGraph: { value: '__context_graph' },
       sparql: { value: 'SELECT ?record WHERE { ?record ?p ?o }' },
+      queryParameters: { value: '[{"name":"configurationId","type":"string"}]' },
       executionView: { value: 'verifiable-memory' },
       view: { value: 'working-memory' },
     }];
     const query = vi.fn(async (sparql: string) => {
-      expect(sparql).toContain('?executionView ?view');
+      expect(sparql).toContain('?queryParameters ?executionView ?view');
+      expect(sparql).toContain('OPTIONAL { ?q prof:queryParameters ?queryParameters }');
       expect(sparql).toContain('OPTIONAL { ?q prof:executionView ?executionView }');
       expect(sparql).toContain('OPTIONAL { ?q prof:view ?view }');
       return { type: 'bindings' as const, bindings };
