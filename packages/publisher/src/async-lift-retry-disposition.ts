@@ -275,11 +275,17 @@ export function isClearableTerminalLiftJob(job: LiftJob): boolean {
  * author would grant the override to an identity that did not enqueue anything, and the risk being
  * accepted is a double publish.
  *
- * This boundary is generic over job kind on purpose (🟡 3824743779): it reads one typed job-level
- * field and never inspects an operation payload, so a new job variant needs no case here. Legacy
- * records are attributed by the queue's own deserialization — see `backfillLegacyAdmission`.
+ * This boundary is generic over job kind on purpose (3824743779): it reads one typed job-level
+ * field and never inspects an operation payload, so a new job variant needs no case here.
+ *
+ * Attribution comes ONLY from an explicit stamp made at admission (3825162149). There is
+ * deliberately no fallback that reads the publish payload's `callerAgentAddress`: on the
+ * agent's own publish path that field is the AUTHOR, so such a fallback silently handed the
+ * destructive override to a curated-publish signer who enqueued nothing. A record with no
+ * stamp is denied instead, which is the conservative answer and the one this doc has always
+ * claimed.
  */
-export function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | undefined): boolean {
+function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | undefined): boolean {
   if (!agentAddress) return false;
   const admittedBy = job.admission?.byAgentAddress;
   return typeof admittedBy === 'string'
@@ -303,11 +309,22 @@ export function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | un
  */
 export function isTargetedClearableLiftJob(
   job: LiftJob,
-  options: { readonly allowPendingTransaction?: boolean } = {},
+  options: {
+    /**
+     * The override as the CALLER made it: who requested it, not whether someone decided they
+     * may have it (3825162663). Taking a boolean here reduced authenticated authority to a flag at
+     * the call site and left the ownership check as a separate step a future targeted-clear
+     * could forget while still reading the apparently canonical predicate.
+     */
+    readonly pendingTransactionOverride?: { readonly requestedBy?: string };
+  } = {},
 ): boolean {
   if (isClearableTerminalLiftJob(job)) return true;
-  return options.allowPendingTransaction === true
-    && isTerminalLiftJobState(job.status)
+  const override = options.pendingTransactionOverride;
+  if (!override) return false;
+  // Authority and state eligibility are decided together, so neither can be granted alone.
+  if (!ownsLiftJobAdmissionLane(job, override.requestedBy)) return false;
+  return isTerminalLiftJobState(job.status)
     && isFailedJob(job)
     && job.failure.resolution === 'retry_recovery';
 }

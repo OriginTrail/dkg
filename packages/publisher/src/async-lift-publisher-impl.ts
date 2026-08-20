@@ -60,7 +60,6 @@ import {
   isBulkClearableTerminalLiftJob,
   isClearableTerminalLiftJob,
   isTargetedClearableLiftJob,
-  ownsLiftJobAdmissionLane,
   decideChainProofDisposition,
   hasAutomaticRecoveryExit,
   isHeldForChainProof,
@@ -113,7 +112,6 @@ import {
   liftJobCheckedNonce,
   liftJobCheckedSigner,
   liftJobOperationKindMarker,
-  backfillLegacyAdmission,
   normalizePersistedLiftJobRequest,
   buildLiftJobAcceptedReset,
   pinnedPublishIdentityKaId,
@@ -574,9 +572,7 @@ export class TripleStoreAsyncLiftPublisher
         jobId,
         jobSlug: createJobSlug(jobRequest),
         request: jobRequest,
-        ...(admission?.admittedByAgentAddress
-          ? { admission: { byAgentAddress: admission.admittedByAgentAddress } }
-          : {}),
+        ...(admission ? { admission: { byAgentAddress: admission.admittedByAgentAddress } } : {}),
         status: 'accepted',
         timestamps: { acceptedAt: now, updatedAt: now },
         retries: { retryCount: 0, maxRetries: this.maxRetries },
@@ -1869,9 +1865,10 @@ export class TripleStoreAsyncLiftPublisher
       // Inside, the job has already been validated and read under that lock, so the check is on
       // the same record that is about to be deleted. A caller that cannot be matched to the job's
       // admission lane simply does not get the override; the ordinary terminal clear is untouched.
-      const granted = options.pendingTransactionOverride !== undefined
-        && ownsLiftJobAdmissionLane(job, options.pendingTransactionOverride.requestedBy);
-      if (!isTargetedClearableLiftJob(job, { allowPendingTransaction: granted })) {
+      // 3825162663 — ONE decision: the policy takes the override as the caller made it and
+      // settles authority and state eligibility together, so a call site cannot read the
+      // canonical predicate while forgetting the ownership half.
+      if (!isTargetedClearableLiftJob(job, options)) {
         return { outcome: 'rejected', reason: 'nonterminal' };
       }
       await this.releaseWalletLockForJob(job);
@@ -2439,11 +2436,9 @@ export class TripleStoreAsyncLiftPublisher
     const payload = parseLiteral(binding);
     if (typeof payload !== 'string') return null;
     const parsed = JSON.parse(payload) as LiftJob & { request: unknown };
-    const request = normalizePersistedLiftJobRequest(parsed.request);
     return {
       ...parsed,
-      request,
-      ...backfillLegacyAdmission(parsed.admission, request),
+      request: normalizePersistedLiftJobRequest(parsed.request),
     } as LiftJob;
   }
 

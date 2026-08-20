@@ -120,10 +120,14 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     const CALLER = '0xCCcCCc00000000000000000000000000000000Cc';
     const AUTHOR = '0xAAaAAa00000000000000000000000000000000Aa';
     const p = createPublisher();
+    // The curator's `callerAgentAddress` stays in the request (it is the GH#1778 author-resolution
+    // hint), but the ENTITLEMENT comes only from the explicit admission stamp (3825162149) — the
+    // payload hint grants nothing on its own, which is what stops an agent's own publish path
+    // from handing the override to a third-party author.
     const jobId = await driveToTerminalFailed(p, {
       agentAddress: AUTHOR,
       callerAgentAddress: CALLER,
-    });
+    }, { admittedByAgentAddress: CALLER });
     const job = await p.getStatus(jobId);
     if (!job || !('failure' in job)) throw new Error('expected a failed job');
     const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };

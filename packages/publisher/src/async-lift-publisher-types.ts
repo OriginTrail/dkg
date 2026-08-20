@@ -88,8 +88,13 @@ export type IntentLookupResult =
  * so execution and recovery never see it in the payload they act on.
  */
 export interface AsyncLiftAdmissionContext {
-  /** Authenticated identity admitting the job. Absent only for unauthenticated internal callers. */
-  readonly admittedByAgentAddress?: string;
+  /**
+   * The authenticated identity admitting the job. REQUIRED whenever a context is supplied
+   * (3825162430): an authenticated admission has exactly one principal, so `{}` must not compile
+   * into a job that is silently unowned. A caller with no principal omits the whole argument,
+   * which is a different and visible statement.
+   */
+  readonly admittedByAgentAddress: string;
 }
 
 export interface AsyncLiftPublisher {

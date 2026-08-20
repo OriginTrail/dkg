@@ -375,6 +375,20 @@ export interface PublishAsyncOpts extends PublishOpts {
   };
   /** Caller signs typed-data built by the daemon. Requires `authorAgentAddress`. */
   authorSignTypedData?: (typedData: AuthorAttestationTypedData) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
+  /**
+   * GH#2270 follow-up (3825162149) — the AUTHENTICATED identity admitting this job, for
+   * authorization only. A host that authenticated a caller (an EPCIS capture route, a plugin with
+   * a token) passes it here so that caller keeps the by-id force-clear its job may later need.
+   *
+   * Deliberately NOT the author: `authorAgentAddress` and `preSignedAuthorAttestation.authorAddress`
+   * name who SIGNED the assertion, which under curated publishing may be a third party who
+   * enqueued nothing. Granting a destructive clear to them would hand the double-publish decision
+   * to someone who never asked for the publish.
+   *
+   * Omitted → the job is admitted by the node itself (an internal producer such as the Kafka
+   * stream), and the node's default agent owns it; see `publishAsync`.
+   */
+  admittedByAgentAddress?: string;
 }
 
 export interface PublishAsyncQuadEnvelope {

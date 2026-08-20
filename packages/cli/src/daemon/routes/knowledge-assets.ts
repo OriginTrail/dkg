@@ -1599,7 +1599,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // Admission travels BESIDE the request (🟡 3824743779), never inside it: the operation
         // payload that execution and recovery act on carries no authorization principal.
         const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent, {
-          ...(requestAgentAddress ? { admittedByAgentAddress: requestAgentAddress } : {}),
+          admittedByAgentAddress: requestAgentAddress,
         });
         return jsonResponse(res, 202, {
           jobId,

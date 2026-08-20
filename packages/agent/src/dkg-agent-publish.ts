@@ -1591,7 +1591,20 @@ export class PublishMethods extends DKGAgentBase {
       // control instance). Nullish → the publisher's built-in default.
       maxRetries: this.config.publisherMaxRetries,
     });
-    const captureID = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
+    // GH#2270 follow-up (3825162149) — every externally reachable enqueue path must produce an
+    // OWNED job. Ownership is the sole authorization for the by-id force-clear that releases a
+    // `retry_recovery` job automatic recovery cannot settle, so a job admitted here with no
+    // principal would occupy its lifecycle subject permanently, with no manual exit.
+    //
+    // The author is NOT that principal: under curated publishing the signer may be a third party
+    // who enqueued nothing. A host that authenticated a caller passes it in; otherwise this is an
+    // internal producer and the node's own default agent owns the job — the same identity a
+    // node-level token resolves to in the daemon, so the operator keeps the exit.
+    const admittedByAgentAddress = opts?.admittedByAgentAddress ?? this.getDefaultAgentAddress();
+    const captureID = await asyncPublisher.enqueueKnowledgeAssetVmPublish(
+      intent,
+      admittedByAgentAddress ? { admittedByAgentAddress } : undefined,
+    );
     return { captureID };
   }
 
