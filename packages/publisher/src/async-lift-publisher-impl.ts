@@ -1824,7 +1824,10 @@ export class TripleStoreAsyncLiftPublisher
    * subject-scoped to the control-plane graph, so it never touches another job or the
    * #1829 journal. Never throws / never mutates on a reject.
    */
-  async clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome> {
+  async clearTerminalJob(
+    jobId: string,
+    options: { readonly allowPendingTransaction?: boolean } = {},
+  ): Promise<TerminalJobClearOutcome> {
     // Reject an empty OR SPARQL-unsafe jobId as malformed BEFORE building the jobSubject
     // IRI — otherwise an attacker-controlled jobId (from the clear-job HTTP body) with a
     // space/'>'/'{' could break the query out of `<…>` and surface as a 500/injection
@@ -1849,7 +1852,7 @@ export class TripleStoreAsyncLiftPublisher
       }
       if (job === null) return { outcome: 'rejected', reason: 'malformed' };
       if (!LIFT_JOB_STATES.includes(job.status)) return { outcome: 'rejected', reason: 'unknown' };
-      if (!isTargetedClearableLiftJob(job)) return { outcome: 'rejected', reason: 'nonterminal' };
+      if (!isTargetedClearableLiftJob(job, options)) return { outcome: 'rejected', reason: 'nonterminal' };
       await this.releaseWalletLockForJob(job);
       await this.deleteJob(jobId);
       return { outcome: 'cleared' };

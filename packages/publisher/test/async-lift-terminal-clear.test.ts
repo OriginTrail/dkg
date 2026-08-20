@@ -109,7 +109,14 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
     await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
     await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
-    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
+    // 🔴 3823952704 — and it is an EXPLICIT override, off by default. This route is open to
+    // every registered agent token, so a default-on widening would have let one agent delete
+    // another lifecycle's only chain-recovery record.
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect((await p.getStatus(jobId))?.status).toBe('failed');
+
+    expect(await p.clearTerminalJob(jobId, { allowPendingTransaction: true }))
+      .toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(jobId)).toBeNull();
   });
 

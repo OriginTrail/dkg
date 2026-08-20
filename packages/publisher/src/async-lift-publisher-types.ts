@@ -206,7 +206,16 @@ export interface VmPublishAdmissionJournalReader {
  * in the control-plane graph only).
  */
 export interface VmPublishTerminalJobClearer {
-  clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome>;
+  /**
+   * GH#2270 follow-up (🔴 3823952704) — `allowPendingTransaction` opts in to clearing a job whose
+   * transaction may still land. It is OFF by default: the caller must have established the right
+   * to take that risk for this specific job, because the route this is reached through is open to
+   * every registered agent token.
+   */
+  clearTerminalJob(
+    jobId: string,
+    options?: { readonly allowPendingTransaction?: boolean },
+  ): Promise<TerminalJobClearOutcome>;
 }
 
 /**

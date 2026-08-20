@@ -275,22 +275,29 @@ export function isClearableTerminalLiftJob(job: LiftJob): boolean {
  * journal is append-only and a clear never touches it, so the txHash outlives the job record.
  */
 /**
- * GH#2270 follow-up (🔴 3822987650) — what the TARGETED by-id clear may remove.
+ * GH#2270 follow-up (🔴 3822987650, then 🔴 3823952704) — what the TARGETED by-id clear may
+ * remove, and under what authority.
  *
- * #1837's single predicate treats a `retry_recovery`-failed job as nonterminal-for-cleanup,
- * because periodic recovery may still finalize it from chain. That is exactly right for BULK
- * cleanup and wrong for the by-id override, and the chain-proof work made the difference matter: a
- * held UPDATE has no absence-release path by design, so when its transaction is proven absent the
- * dispatcher deliberately keeps it held and the by-id clear is the STATED exit. Sharing the bulk
- * predicate meant that exit returned `nonterminal` — the job could be removed by neither lane, and
- * the guidance in the release notes named a command that could not work.
+ * #1837's single predicate treats a `retry_recovery`-failed job as nonterminal-for-cleanup because
+ * periodic recovery may still finalize it from chain. That is right for BULK and it left the
+ * chain-proof work without an exit: a held UPDATE has no absence-release path by design, so the
+ * by-id clear is its STATED exit, and sharing the bulk rule meant neither lane could remove it.
  *
- * The operator names the exact job here and owns the consequence, which is the whole point of the
- * targeted lane. Terminal state is therefore the only requirement; the bulk lane keeps the
- * stricter rule and is unchanged.
+ * The first attempt at this simply widened the by-id lane for every caller. That was wrong, and
+ * worse than the dead end it fixed: `/api/publisher/clear-job` is reachable by any registered
+ * agent token and performs no ownership check, so it let one agent delete another lifecycle's only
+ * chain-recovery record while its transaction was still unaccounted for.
+ *
+ * So the override is EXPLICIT and off by default. `allowPendingTransaction` is only ever set by a
+ * caller that has established the right to take that risk for that specific job; without it this
+ * is exactly #1837's rule, unchanged for everyone.
  */
-export function isTargetedClearableLiftJob(job: LiftJob): boolean {
-  return isTerminalLiftJobState(job.status);
+export function isTargetedClearableLiftJob(
+  job: LiftJob,
+  options: { readonly allowPendingTransaction?: boolean } = {},
+): boolean {
+  if (isClearableTerminalLiftJob(job)) return true;
+  return options.allowPendingTransaction === true && isTerminalLiftJobState(job.status);
 }
 
 export function isBulkClearableTerminalLiftJob(job: LiftJob): boolean {

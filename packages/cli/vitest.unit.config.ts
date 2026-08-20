@@ -19,6 +19,9 @@ export default defineConfig({
           'test/publisher-job-by-intent-route.test.ts',
           'test/publisher-journal-route.test.ts',
           'test/publisher-clear-job-route.test.ts',
+          // GH#2270 follow-up — who may force-clear a job whose transaction may still land.
+          // A pure route-handler test, no hardhat, so it belongs in this lane.
+          'test/publisher-clear-job-override-authz.test.ts',
           // #1890 — shared request-body boundary for the four publisher admin
           // POST routes (pure handler, no hardhat). Belongs in the fast lane
           // alongside its clear-job sibling above.
