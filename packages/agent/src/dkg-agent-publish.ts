@@ -307,7 +307,10 @@ import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-ha
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { applyPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
-import { normalizeRecoveredNamedKaPublish } from './named-ka-publish-recovery.js';
+import {
+  normalizeRecoveredNamedKaPublish,
+  throwIfRecoveryDeadlineReached,
+} from './named-ka-publish-recovery.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -4954,7 +4957,7 @@ export class PublishMethods extends DKGAgentBase {
     });
 
     const onChainCgId = normalizeOptionalContextGraphId(
-      await this.getContextGraphOnChainId(request.contextGraphId),
+      await this.getContextGraphOnChainId(request.contextGraphId, { signal }),
     );
     if (!onChainCgId) {
       throw Object.assign(
@@ -5027,7 +5030,7 @@ export class PublishMethods extends DKGAgentBase {
       }
       let boundContextGraphId: bigint;
       try {
-        boundContextGraphId = await this.chain.getKAContextGraphId(recovered.reservedKaId);
+        boundContextGraphId = await this.chain.getKAContextGraphId(recovered.reservedKaId, { signal });
       } catch (error) {
         throw Object.assign(
           new Error(
@@ -5047,6 +5050,14 @@ export class PublishMethods extends DKGAgentBase {
           { code: 'KA_VM_RECOVERY_INCONSISTENT' },
         );
       }
+      // r28 (🔴 3821720957) — THE read/write boundary for recovery repair, and the only place
+      // the deadline is consulted on this side. Everything above is read-only and takes the pass
+      // signal, so it is cancellable and abandonable; everything below MUTATES and is therefore
+      // never abandoned (the publisher awaits it under the claim lock). Checking here means a
+      // deadline that arrived during the reads refuses to ENTER the mutation rather than starting
+      // an unbounded write phase late. One boundary, one check — rather than a signal threaded
+      // hopefully through N layers, which is how the last four rounds each missed the next one.
+      throwIfRecoveryDeadlineReached(signal);
       await this._writeQueuedKnowledgeAssetVmPublishReceipt(
         request,
         recovered.txHash,

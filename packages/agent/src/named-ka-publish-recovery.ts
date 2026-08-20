@@ -74,7 +74,7 @@ class RecoveryDeadlineReachedError extends Error {
   }
 }
 
-function throwIfRecoveryDeadlineReached(signal: AbortSignal | undefined): void {
+export function throwIfRecoveryDeadlineReached(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new RecoveryDeadlineReachedError();
 }
 

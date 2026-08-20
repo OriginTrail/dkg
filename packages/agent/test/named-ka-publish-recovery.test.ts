@@ -453,6 +453,38 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     })).rejects.toThrow(/carries no history position/);
   });
 
+  it('a stalled chain read is CANCELLED by the pass deadline, and mutation never begins [r28]', async () => {
+    // 🔴 3821720957 / 🔴 3821721077 — the previous rows proved the publisher hands a signal to
+    // a stub that already honours it. The behaviour that matters is in THIS normalizer: it is the
+    // read-only half of recovery, it runs under the publisher's global claim lock, and a read that
+    // outlives the budget blocks claims, admission and clears for the graph.
+    const chain = seededChain();
+    let sawSignal: AbortSignal | undefined;
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint, o?: { signal?: AbortSignal }) => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = (_kaId, o) => new Promise((_resolve, reject) => {
+        sawSignal = o?.signal;
+        // Settles ONLY when the pass deadline fires — the stalled-endpoint shape.
+        o?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+
+    const controller = new AbortController();
+    const recovering = normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, operationKind: 'create' },
+      }),
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    // It RESOLVES (rejects) rather than hanging — the property the pass budget depends on.
+    await expect(recovering).rejects.toThrow();
+    // And the adapter was actually handed this pass's signal, not merely called.
+    expect(sawSignal).toBe(controller.signal);
+  });
+
   it('a MARKED create with no coherent view DEFERS — A -> B -> A cannot be settled by root bytes [r21]', async () => {
     // 🔴 3816769865 — the discriminating half of the row above. The no-view guard used to key
     // off a persisted `merkleRootCount`, which a create never carries, so a marked create slipped
