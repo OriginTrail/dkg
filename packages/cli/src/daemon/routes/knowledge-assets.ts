@@ -75,7 +75,7 @@ import {
   isSameAgentAddress,
   scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
-import { AsyncLiftJobConflictError, PromoteJobConflictError, isKnowledgeAssetWorkspaceHeadCorruptError } from "@origintrail-official/dkg-publisher";
+import { AsyncLiftJobConflictError, LiftJobPendingChainProofError, PromoteJobConflictError, isKnowledgeAssetWorkspaceHeadCorruptError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import {
   validateAssertionName,
@@ -1615,6 +1615,28 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (err instanceof AsyncLiftJobConflictError) {
           return jsonResponse(res, 409, {
             error: err.message,
+            existingJobId: err.existingJobId,
+          });
+        }
+        // GH#2270 — admission refused to republish a job that may already have sent a
+        // transaction. Deliberately NOT the 409 above: nothing is wrong with the client's
+        // request, and the job KEEPS its lifecycle subject (`existingJobId`). `retryable`
+        // is FALSE on purpose: nothing in this build resolves the hold on its own. The
+        // chain-recovery loop never re-checks a failed KA-VM publish job
+        // (`canRetryFailedRecovery` is false for that handler), so a client that kept retrying
+        // this enqueue would loop until an operator intervened. The status and code stay 503 +
+        // LIFT_JOB_PENDING_CHAIN_PROOF: the condition IS transient in principle and this is not a
+        // client mistake (the 409 below would send them to re-share for nothing) nor a node bug
+        // (without this branch it fell through to a generic 500). The message names the two exits
+        // — chain recovery establishing the transaction's fate, or clearing THAT job by id — and
+        // GH#2270 PR-3's proof-first dispatcher is what flips `retryable` back to true.
+        if (err instanceof LiftJobPendingChainProofError) {
+          return jsonResponse(res, 503, {
+            code: err.code,
+            error: `${err.message}. No automatic lane resolves this: clear the job with `
+              + `POST /api/publisher/clear-job {"jobId":"${err.existingJobId}"} once you have `
+              + 'checked the transaction, or wait for chain recovery to establish its fate.',
+            retryable: false,
             existingJobId: err.existingJobId,
           });
         }

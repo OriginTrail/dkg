@@ -2,13 +2,14 @@ import type { QueryResult } from '@origintrail-official/dkg-storage';
 import {
   LIFT_AUTHORITY_TYPES,
   LIFT_TRANSITION_TYPES,
-  isTerminalLiftJobState,
 } from './lift-job.js';
 import type {
   KnowledgeAssetVmPublishJobRequest,
   KnowledgeAssetVmPublishRequest,
   LiftJob,
+  LiftJobAccepted,
   LiftJobHex,
+  LiftJobResettableState,
   LiftJobRequest,
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
@@ -46,6 +47,12 @@ export {
   walletLockSubject,
 } from './async-lift-control-plane.js';
 
+// STRUCTURAL helpers for a persisted lift job: what it is, what it carries, how it is rebuilt.
+// GH#2270 — the POLICY predicates that used to sit here (evidence, the chain-proof hold, retry
+// eligibility, lifecycle occupancy, clearability) moved to async-lift-retry-disposition.ts, where
+// their one precedence is documented. Each of them reads the same job, and keeping them apart is
+// how they drift.
+
 export type PersistedFailedJob = Extract<LiftJob, { status: 'failed' }>;
 
 export function expectBindings(result: QueryResult): Array<Record<string, string>> {
@@ -61,11 +68,24 @@ export function compareAcceptedJobs(a: LiftJob, b: LiftJob): number {
   return a.jobId.localeCompare(b.jobId);
 }
 
-export function getRecoveryTxHash(job: LiftJob): LiftJobHex | undefined {
+/**
+ * GH#2270 — the ONE reader of a job's transaction hash, over BOTH carriers it can live in:
+ *  - `broadcast.txHash`, while the job still holds its broadcast metadata;
+ *  - `recovery.txHashChecked`, which is where a reset put it — that reset rebuilds the job without
+ *    broadcast metadata, so after one the recovery record is the ONLY carrier.
+ *
+ * Every consumer reads it here: the evidence predicate that decides whether a job is held, and the
+ * resets that must carry the hash into the job they rebuild. Reading only the first carrier is how
+ * a second reset silently dropped a hash the first one had preserved.
+ *
+ * Structural, not policy: this answers "what hash does this job carry", never "what does carrying
+ * it mean" — that is `hasBroadcastEvidence` in the disposition module.
+ */
+export function getLiftJobTransactionEvidence(job: LiftJob): LiftJobHex | undefined {
   if ('broadcast' in job && job.broadcast) {
     return job.broadcast.txHash;
   }
-  return undefined;
+  return job.recovery?.txHashChecked;
 }
 
 export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
@@ -73,29 +93,84 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
 }
 
 /**
- * #1837 — the single terminal-clear authority, reused by both `clear(status)` (bulk) and
- * `clearTerminalJob(jobId)` so they cannot drift. A job is clearable iff it is in a native
- * terminal state (finalized|failed) AND is not a `retry_recovery`-failed job — those may
- * still carry a pending on-chain tx that periodic recovery will finalize, so only explicit
- * cancel removes them. A `retry_recovery`-failed job is therefore treated as
- * NONTERMINAL-for-cleanup.
+ * GH#2270 — the ONE reset-to-accepted builder for a FAILED job, shared by every reaccept path
+ * (claim-time sweep, `retry()`, admission re-submit).
+ *
+ * The recorded origin state is what carries the transaction hash forward
+ * (`recovery.txHashChecked`), so which origins are recorded IS the evidence-preservation rule.
+ * Every origin is recorded except 'accepted', which has no prior state to recover from — stated
+ * as that one exclusion rather than a list of the rest, so a new active state cannot silently go
+ * unrecorded (the compiler rejects one that is not a `LiftJobResettableState`). `included` used to
+ * be excluded, which dropped the recovery record and the hash with it. The origin is recorded even
+ * though every manual path refuses evidence-bearing jobs today: the reset must not be the step
+ * that loses the evidence when the proof-first dispatcher lands.
+ *
+ * The hash itself comes from {@link getLiftJobTransactionEvidence}, i.e. from EITHER carrier: a job
+ * being reset a second time carries its hash in the recovery record left by the first reset, and
+ * reading only `broadcast` dropped it exactly there.
+ *
+ * Timestamps are rebuilt from scratch rather than merged, so `nextRetryAt` is dropped BY
+ * CONSTRUCTION — a reaccepted job carries no stale schedule for the sweep to re-fire on.
  */
-export function isClearableTerminalLiftJob(job: LiftJob): boolean {
-  return isTerminalLiftJobState(job.status)
-    && !(isFailedJob(job) && job.failure.resolution === 'retry_recovery');
+export function resetFailedLiftJobToAccepted(job: PersistedFailedJob, now: number): LiftJobAccepted {
+  return buildLiftJobAcceptedReset(job, {
+    now,
+    // 'accepted' is the one origin with no prior state to recover from. Stated as that exclusion
+    // rather than a list of the rest, so a new active state cannot silently go unrecorded — the
+    // compiler rejects one that is not a `LiftJobResettableState`.
+    recoveredFrom: job.failure.failedFromState === 'accepted' ? undefined : job.failure.failedFromState,
+    txHashChecked: getLiftJobTransactionEvidence(job),
+    // This is a RETRY of the job (sweep, `retry()`, re-submit), so the attempt is stamped.
+    stampRetriedAt: true,
+  });
 }
 
 /**
- * #1828 — whether a job still OCCUPIES its lifecycle subject: any non-terminal
- * state, or a failed job admission would still reaccept (retryable with retries
- * remaining). Admission dedup (findActiveKnowledgeAssetVmPublishJob) and the
- * intent-recovery lookup MUST both partition on this so they cannot drift — an
- * occupying job is the live one to bind; everything else (finalized, exhausted
- * or non-retryable failed) is superseded.
+ * GH#2270 — the ONE shape of a job reset back to 'accepted', for every path that rebuilds one: the
+ * failed-job reaccept above and the interrupted-recovery reset in the publisher. The two used to be
+ * separate literals that had already drifted once (the evidence carrier), which is the whole reason
+ * this exists; their remaining differences are the OPTIONS below rather than two copies to keep in
+ * step by eye.
+ *
+ * The job is rebuilt, never merged, so `nextRetryAt` is dropped BY CONSTRUCTION — a reaccepted job
+ * carries no stale schedule for the sweep to re-fire on — and so are the claim, validation and
+ * broadcast facts of the attempt that failed.
+ *
+ * `recoveredFrom` is the origin state the recovery record names; passing `undefined` records no
+ * recovery at all. It is what carries the transaction hash forward (`txHashChecked`), so which
+ * origins a caller records IS its evidence-preservation rule. `stampRetriedAt` separates a RETRY
+ * (an attempt was spent) from a recovery reset (the job was interrupted, not re-attempted).
  */
-export function isOccupyingLifecycleJob(job: LiftJob): boolean {
-  if (!isTerminalLiftJobState(job.status)) return true;
-  return isFailedJob(job) && job.failure.retryable && job.retries.retryCount < job.retries.maxRetries;
+export function buildLiftJobAcceptedReset(
+  job: LiftJob,
+  options: {
+    readonly now: number;
+    readonly recoveredFrom: LiftJobResettableState | undefined;
+    readonly txHashChecked: LiftJobHex | undefined;
+    readonly stampRetriedAt: boolean;
+  },
+): LiftJobAccepted {
+  return {
+    jobId: job.jobId,
+    jobSlug: job.jobSlug,
+    request: job.request,
+    status: 'accepted',
+    timestamps: {
+      acceptedAt: job.timestamps.acceptedAt,
+      lastRecoveredAt: options.now,
+      updatedAt: options.now,
+      ...(options.stampRetriedAt ? { lastRetriedAt: options.now } : {}),
+    },
+    retries: job.retries,
+    recovery: options.recoveredFrom
+      ? {
+          action: 'reset_to_accepted',
+          recoveredFromStatus: options.recoveredFrom,
+          txHashChecked: options.txHashChecked,
+        }
+      : undefined,
+    controlPlane: job.controlPlane,
+  };
 }
 
 export function createKnowledgeAssetVmPublishSnapshotRequest(

@@ -14,7 +14,11 @@ describe('#1890 publisher admin POST body boundary', () => {
   function control(): RequestContext['publisherControl'] {
     return {
       cancel: async () => {},
+      // GH#2270 — the route reads the DETAILED disposition; `retry` stays on the fake
+      // because it is still the base-contract method (delegating to this one in the real
+      // publisher), and a body-boundary row must not depend on which one the route picked.
       retry: async () => 3,
+      retryDetailed: async () => ({ retried: 3, blockedPendingRecovery: 1, skipped: 2 }),
       clear: async () => 2,
       clearTerminalJob: async () => ({ outcome: 'already_absent' as const }),
     } as unknown as RequestContext['publisherControl'];
@@ -83,16 +87,16 @@ describe('#1890 publisher admin POST body boundary', () => {
 
   describe('retry', () => {
     it('empty object body {} → 200 retried', async () => {
-      expect(await post('/api/publisher/retry', '{}')).toEqual({ status: 200, body: { retried: 3 } });
+      expect(await post('/api/publisher/retry', '{}')).toEqual({ status: 200, body: { retried: 3, blockedPendingRecovery: 1, skipped: 2 } });
     });
     it('empty body → 200 retried (hardened, not a 500)', async () => {
-      expect(await post('/api/publisher/retry', '')).toEqual({ status: 200, body: { retried: 3 } });
+      expect(await post('/api/publisher/retry', '')).toEqual({ status: 200, body: { retried: 3, blockedPendingRecovery: 1, skipped: 2 } });
     });
     it('unsupported status → 400', async () => {
       expect(await post('/api/publisher/retry', JSON.stringify({ status: 'queued' }))).toEqual({ status: 400, body: { error: 'Only status=failed is supported' } });
     });
     it('null body → 200 (hardened, not a 500)', async () => {
-      expect(await post('/api/publisher/retry', 'null')).toEqual({ status: 200, body: { retried: 3 } });
+      expect(await post('/api/publisher/retry', 'null')).toEqual({ status: 200, body: { retried: 3, blockedPendingRecovery: 1, skipped: 2 } });
     });
   });
 

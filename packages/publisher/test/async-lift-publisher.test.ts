@@ -438,7 +438,13 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
   });
 
-  it('reaccepts a compatible retryable failed knowledge asset VM publish when enqueued again', async () => {
+  // GH#2270 — this row used to pin the OPPOSITE: a re-submit blind-reaccepted a job that had
+  // recorded a transaction hash and then failed as `rpc_unavailable` — the broadcast-phase
+  // catch-all that a LANDED transaction whose local recording failed also arrives under.
+  // Re-running such a job publishes the same KA a second time. Admission now refuses,
+  // transiently, and leaves the job and its lifecycle subject exactly as they were for chain
+  // recovery to resolve.
+  it('refuses to reaccept a failed knowledge asset VM publish that may have submitted a transaction', async () => {
     const publisher = createPublisher();
     const intent = kaVmPublishRequest({ subGraphName: 'research' });
 
@@ -471,11 +477,45 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(failed.failure.retryable).toBe(true);
     expect(failed.timestamps.nextRetryAt).toBeUndefined();
 
+    await expect(publisher.enqueueKnowledgeAssetVmPublish(intent)).rejects.toMatchObject({
+      name: 'LiftJobPendingChainProofError',
+      code: 'LIFT_JOB_PENDING_CHAIN_PROOF',
+      existingJobId: jobId,
+    });
+    const untouched = await publisher.getStatus(jobId);
+    expect(untouched?.status).toBe('failed');
+    expect(untouched?.retries.retryCount).toBe(0);
+    // The refusal is not a fall-through: no replacement job was minted for the subject, and
+    // nothing became claimable.
+    expect((await publisher.getStats()).accepted).toBe(0);
+    expect(await publisher.claimNext('wallet-2')).toBeNull();
+  });
+
+  // The polarity of the row above, on the same path: a failure that persisted NO transaction
+  // hash (ACK quorum is collected before the publish tx is signed) is still reaccepted on the
+  // SAME jobId by a byte-identical re-submit.
+  it('reaccepts a compatible retryable failed knowledge asset VM publish with no transaction evidence', async () => {
+    const publisher = createPublisher();
+    const intent = kaVmPublishRequest({ subGraphName: 'research' });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(intent);
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    const failed = await publisher.recordPublishFailure(jobId, {
+      error: new QuorumUnmetError({ collected: 2, required: 3, dialled: 2 }),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:dkg:test:error:quorum-unmet',
+    });
+    expect(failed.status).toBe('failed');
+    if (failed.status !== 'failed') throw new Error('expected failed job');
+    expect(failed.failure.code).toBe('quorum_unmet');
+    expect(failed.broadcast).toBeUndefined();
+
     await expect(publisher.enqueueKnowledgeAssetVmPublish(intent)).resolves.toBe(jobId);
     const reaccepted = await publisher.getStatus(jobId);
     expect(reaccepted?.status).toBe('accepted');
     expect(reaccepted?.retries.retryCount).toBe(1);
-    expect(reaccepted?.retries.lastRetryReason).toBe('rpc_unavailable');
+    expect(reaccepted?.retries.lastRetryReason).toBe('quorum_unmet');
     expect(reaccepted?.timestamps.lastRetriedAt).toBeDefined();
 
     const claimedAgain = await publisher.claimNext('wallet-2');
@@ -1977,7 +2017,12 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(lock.bindings.length).toBeGreaterThan(0);
   });
 
-  it('fails included knowledge asset VM publish jobs as clearable lifecycle recovery failures', async () => {
+  // GH#2270 — this row used to end with bulk clear DELETING the failure. The job is terminal, but
+  // it is a job that broadcast a transaction and whose recovery could not reconcile it: deleting
+  // that record hands the KA's lifecycle subject back to admission, which then mints a second job
+  // for a transaction nobody has accounted for. Bulk clear now leaves it; an operator removes it
+  // by exact id once the transaction's fate is known.
+  it('fails included knowledge asset VM publish jobs and holds them for chain proof', async () => {
     const publisher = createPublisher({
       config: {
         recoveryLookupTimeoutMs: 50,
@@ -2005,7 +2050,9 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.failure?.code).toBe('recovery_state_inconsistent');
     expect(job?.failure?.resolution).toBe('fail_job');
 
-    expect(await publisher.clear('failed')).toBe(1);
+    expect(await publisher.clear('failed')).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    expect(await publisher.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
     expect(await publisher.getStatus(jobId)).toBeNull();
   });
 

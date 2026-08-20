@@ -266,11 +266,24 @@ export {
   type AsyncLiftRetryTuning,
   type AsyncLiftRetryTuningInput,
 } from './async-lift-retry-tuning.js';
+// GH#2270 — only the READ MODEL of the failed-job policy is public (never persisted; see the
+// module header). The predicates and the action vocabulary that produce it — `classifyRetryAction`,
+// `isHeldForChainProof`, `FailedJobRetryAction` — are the publisher's internal decisions: a
+// consumer reads a job's `retryState` off the publisher and the counts off `retryDetailed`, so
+// nothing outside this package re-derives either.
+export {
+  type LiftJobRetryProjection,
+  type LiftJobRetryWaitingReason,
+} from './async-lift-retry-disposition.js';
 export {
   AsyncLiftJobConflictError,
+  LiftJobPendingChainProofError,
   TripleStoreAsyncLiftPublisher,
+  type AsyncLiftDetailedRetrier,
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type AsyncLiftRetryOutcome,
+  type AsyncLiftRetryStateReader,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
   type AsyncKnowledgeAssetVmPublishJobHandler,
   type AsyncKnowledgeAssetVmPublishPreflightInput,

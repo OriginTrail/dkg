@@ -12,6 +12,7 @@ import type {
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
 } from './lift-job.js';
+import type { LiftJobRetryProjection } from './async-lift-retry-disposition.js';
 import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
@@ -28,6 +29,24 @@ export class AsyncLiftJobConflictError extends Error {
   ) {
     super(message);
     this.name = 'AsyncLiftJobConflictError';
+  }
+}
+
+/**
+ * GH#2270 — admission refused to republish a failed job that may already have submitted a
+ * transaction. The job is untouched and keeps its lifecycle subject (`existingJobId`); it becomes
+ * republishable only once chain proof resolves it, so the condition is TRANSIENT — HTTP callers
+ * map it to a retryable 503, never a permanent conflict.
+ */
+export class LiftJobPendingChainProofError extends Error {
+  readonly code = 'LIFT_JOB_PENDING_CHAIN_PROOF';
+
+  constructor(
+    message: string,
+    readonly existingJobId: string,
+  ) {
+    super(message);
+    this.name = 'LiftJobPendingChainProofError';
   }
 }
 
@@ -70,8 +89,55 @@ export interface AsyncLiftPublisher {
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(jobId: string): Promise<void>;
+  /**
+   * Reaccept every failed job the publisher may safely re-run, and return HOW MANY were
+   * reaccepted — a stable operator-visible count, unchanged by GH#2270. Jobs left failed
+   * (evidence-bearing, recovery-owned, terminal, exhausted) are reported by
+   * {@link AsyncLiftDetailedRetrier.retryDetailed}, which this method delegates to; the
+   * evidence safety is in that ONE shared path, never in the caller's choice of method.
+   */
   retry(filter?: { status?: 'failed' }): Promise<number>;
   clear(status: 'finalized' | 'failed'): Promise<number>;
+}
+
+/** GH#2270 — full disposition of one `retry()` pass. The three counts partition the failed set. */
+export interface AsyncLiftRetryOutcome {
+  /** Reaccepted (failed → accepted), same jobId, retry budget consumed. */
+  readonly retried: number;
+  /**
+   * Left failed because a transaction may exist: `retry_recovery`-resolved jobs (which
+   * `recover()` owns) and evidence-bearing jobs awaiting chain proof. Operator-actionable, and
+   * the work queue the proof-first dispatcher will drain.
+   */
+  readonly blockedPendingRecovery: number;
+  /** Left failed with nothing to reaccept: terminal failures and spent retry budgets. */
+  readonly skipped: number;
+}
+
+/**
+ * GH#2270 — the reporting counterpart of `retry()`. Segregated off the base contract (like the
+ * #1828/#1829/#1837 capabilities): the wire-stable count stays on `AsyncLiftPublisher`, and the
+ * paths that report to an operator read the full disposition here.
+ */
+export interface AsyncLiftDetailedRetrier {
+  retryDetailed(filter?: { status?: 'failed' }): Promise<AsyncLiftRetryOutcome>;
+}
+
+/**
+ * GH#2270 — the read-only retry projection of a job the publisher ALREADY returned. It lives on
+ * the publisher (not on the caller) because the derivation reads the effective `autoRetryEnabled`
+ * this instance resolved: a route that re-derived it from config would be free to disagree with
+ * the lane that actually runs (the #1836 bug class). Synchronous — no store access, no writes.
+ *
+ * SCOPE, and the boundary a host must respect: this answers what the CONFIGURED lane would do with
+ * this job. The queue cannot see whether a publisher RUNTIME exists to run that lane — no funded
+ * wallet, a failed startup and a healthy node all look identical from in here — so a host that
+ * knows its runtime state must narrow the answer before serving it (the daemon does exactly that
+ * in its job-detail route). Reporting `backoff` on a node with nothing running promises a retry
+ * that will never fire.
+ */
+export interface AsyncLiftRetryStateReader {
+  describeConfiguredRetryState(job: LiftJob): LiftJobRetryProjection;
 }
 
 /**
@@ -160,7 +226,9 @@ export interface VmPublisherControl
   extends VmPublishIntentRecoveryPublisher,
     VmPublishIntentIndexBackfiller,
     VmPublishAdmissionJournalReader,
-    VmPublishTerminalJobClearer {}
+    VmPublishTerminalJobClearer,
+    AsyncLiftDetailedRetrier,
+    AsyncLiftRetryStateReader {}
 
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;

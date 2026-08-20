@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { resolveAsyncLiftRetryTuning, type LiftJob } from '../src/index.js';
 import {
-  TripleStoreAsyncLiftPublisher,
-  type AsyncLiftPublisherConfig,
-  type LiftJob,
-  resolveAsyncLiftRetryTuning,
-} from '../src/index.js';
+  createAsyncLift2270Harness,
+  confirmedPublishResult,
+  corruptHeadError,
+  scheduledDelay,
+} from './_helpers/async-lift-2270-harness.js';
 import {
   KA_VM_VALIDATION,
   kaVmPublishRequest,
@@ -20,92 +20,15 @@ import {
  * scheduler and the claim-time sweep as they actually run. The claim-time preflight is the
  * cheapest real producer of a pre-send `workspace_unavailable`: it is invoked before any
  * workspace resolution, so failure-only rows need no staged snapshot.
+ *
+ * What a failed job is ALLOWED to do (evidence, the chain-proof hold, the retry disposition) is
+ * async-lift-retry-disposition-2270; admission and cleanup are async-lift-admission-clear-2270.
  */
 describe('GH#2270 async lift automatic retry lane', () => {
-  let now = 1_000;
-  let ids = 0;
-  let store: OxigraphStore;
+  const h = createAsyncLift2270Harness();
+  const { createPublisher, createCorruptHeadPublisher, failWithCorruptHead } = h;
 
-  beforeEach(() => {
-    now = 1_000;
-    ids = 0;
-    store = new OxigraphStore();
-  });
-
-  /** GH#2273 corrupt-head error: the structured code the precondition classifier keys on. */
-  function corruptHeadError(): Error {
-    return Object.assign(
-      new Error('Corrupt graph-scoped SWM head for did:dkg:test/1: head carries 2 shareOperationId values (op-a, storage-ack-b)'),
-      { code: 'KA_WORKSPACE_HEAD_CORRUPT' },
-    );
-  }
-
-  function confirmedPublishResult() {
-    return {
-      kaId: 11n,
-      ual: 'did:dkg:mock:31337/0xdef/11',
-      merkleRoot: new Uint8Array([0xde, 0xf0]),
-      kaManifest: [],
-      status: 'confirmed' as const,
-      onChainResult: {
-        batchId: 11n,
-        startKAId: 11n,
-        endKAId: 11n,
-        txHash: '0xdef',
-        blockNumber: 77,
-        blockTimestamp: 1700000077,
-        publisherAddress: '0x2222222222222222222222222222222222222222',
-      },
-    };
-  }
-
-  function createPublisher(
-    config: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator'> = {},
-  ): TripleStoreAsyncLiftPublisher {
-    return new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++now,
-      idGenerator: () => `job-${++ids}`,
-      ...config,
-    });
-  }
-
-  /** A publisher whose claim-time preflight always rejects with a corrupt head. */
-  function createCorruptHeadPublisher(
-    config: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'knowledgeAssetVmPublishHandler'> = {},
-  ): TripleStoreAsyncLiftPublisher {
-    return createPublisher({
-      ...config,
-      knowledgeAssetVmPublishHandler: {
-        preflight: async () => {
-          throw corruptHeadError();
-        },
-        execute: async () => {
-          throw new Error('executor must not run for a corrupt-head preflight');
-        },
-      },
-    });
-  }
-
-  async function failWithCorruptHead(
-    publisher: TripleStoreAsyncLiftPublisher,
-    walletId: string,
-  ): Promise<LiftJob> {
-    const processed = await publisher.processNext(walletId);
-    if (!processed || processed.status !== 'failed') {
-      throw new Error(`expected a failed job, got ${processed?.status ?? 'null'}`);
-    }
-    if (processed.failure.code !== 'workspace_unavailable') {
-      throw new Error(`expected workspace_unavailable, got ${processed.failure.code}`);
-    }
-    return processed;
-  }
-
-  /** Scheduled delay of the retry, measured the way the pre-existing backoff rows measure it. */
-  function scheduledDelay(job: LiftJob): number | undefined {
-    return job.timestamps.nextRetryAt === undefined
-      ? undefined
-      : job.timestamps.nextRetryAt - job.timestamps.updatedAt;
-  }
+  beforeEach(() => h.reset());
 
   // (a) The end-to-end lane: a claim-time corrupt head schedules a retry, the sweep reaccepts it
   // once due, and the second attempt publishes. The staged snapshot is left byte-identical across
@@ -132,7 +55,7 @@ describe('GH#2270 async lift automatic retry lane', () => {
       },
     });
     await stageKnowledgeAssetShareSnapshot({
-      store,
+      store: h.store,
       shareOperationId,
       assertionVersion: 1,
       accessPolicy: 'public',
@@ -153,7 +76,7 @@ describe('GH#2270 async lift automatic retry lane', () => {
     expect(await publisher.claimNext('wallet-2')).toBeNull();
     expect((await publisher.getStatus(jobId))?.status).toBe('failed');
 
-    now += 100;
+    h.advance(100);
     const finalized = await publisher.processNext('wallet-2');
 
     expect(finalized?.jobId).toBe(jobId);
@@ -174,7 +97,7 @@ describe('GH#2270 async lift automatic retry lane', () => {
     ];
 
     for (const { rand, expected } of cases) {
-      store = new OxigraphStore();
+      h.freshStore();
       const publisher = createCorruptHeadPublisher({
         retryBackoffBaseMs: 100,
         retryBackoffMaxMs: 100_000,
@@ -219,7 +142,7 @@ describe('GH#2270 async lift automatic retry lane', () => {
   // wait (80). Jittering after the cap would schedule 120 here.
   it('clamps upward jitter at retryBackoffMaxMs and still jitters below it', async () => {
     for (const { rand, expected } of [{ rand: 1, expected: 100 }, { rand: 0, expected: 80 }]) {
-      store = new OxigraphStore();
+      h.freshStore();
       const publisher = createCorruptHeadPublisher({
         retryBackoffBaseMs: 100,
         retryBackoffMaxMs: 100,
@@ -273,7 +196,7 @@ describe('GH#2270 async lift automatic retry lane', () => {
     let failed = await failWithCorruptHead(publisher, 'wallet-1');
     // Drive retries until the exponential is far past the cap.
     for (let i = 0; i < 3; i += 1) {
-      now += scheduledDelay(failed)! + 1;
+      h.advance(scheduledDelay(failed)! + 1);
       failed = await failWithCorruptHead(publisher, 'wallet-1');
     }
     // exponential = 100·2^3 = 800 >> cap 200; jittered(200) at rand 0 = 160.
@@ -333,7 +256,7 @@ describe('GH#2270 async lift automatic retry lane', () => {
     const jobId = await enabled.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     const failed = await failWithCorruptHead(enabled, 'wallet-1');
     expect(scheduledDelay(failed)).toBe(100);
-    now += 1_000;
+    h.advance(1_000);
 
     const disabled = createCorruptHeadPublisher({ autoRetryEnabled: false });
     expect(await disabled.claimNext('wallet-2')).toBeNull();
@@ -362,12 +285,12 @@ describe('GH#2270 async lift automatic retry lane', () => {
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
 
     expect(scheduledDelay(await failWithCorruptHead(publisher, 'wallet-1'))).toBe(100);
-    now += 100;
+    h.advance(100);
     const exhausted = await failWithCorruptHead(publisher, 'wallet-2');
 
     expect(exhausted.retries.retryCount).toBe(1);
     expect(exhausted.timestamps.nextRetryAt).toBeUndefined();
-    now += 10_000;
+    h.advance(10_000);
     expect(await publisher.claimNext('wallet-3')).toBeNull();
     expect((await publisher.getStats()).failed).toBe(1);
   });
@@ -378,7 +301,7 @@ describe('GH#2270 async lift automatic retry lane', () => {
     const first = createCorruptHeadPublisher({ retryBackoffBaseMs: 100, retryBackoffMaxMs: 250, rand: () => 0.5 });
     const jobId = await first.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     await failWithCorruptHead(first, 'wallet-1');
-    now += 100;
+    h.advance(100);
 
     const restarted = createCorruptHeadPublisher({ retryBackoffBaseMs: 100, retryBackoffMaxMs: 250, rand: () => 0.5 });
     const claimed = await restarted.claimNext('wallet-2');
@@ -417,7 +340,7 @@ describe('GH#2270 async lift automatic retry lane', () => {
     expect(failed.failure?.code).toBe('rpc_unavailable');
     expect(failed.failure?.retryable).toBe(true);
     expect(failed.timestamps.nextRetryAt).toBeUndefined();
-    now += 10_000;
+    h.advance(10_000);
     expect(await publisher.claimNext('wallet-2')).toBeNull();
     expect((await publisher.getStats()).failed).toBe(1);
   });
@@ -438,7 +361,7 @@ describe('GH#2270 async lift automatic retry lane', () => {
       await failWithCorruptHead(publisher, `wallet-fail-${i}`);
     }
     expect((await publisher.getStats()).failed).toBe(6);
-    now += 10_000;
+    h.advance(10_000);
 
     await publisher.claimNext('wallet-sweep-1');
     const afterFirstSweep = await publisher.getStats();

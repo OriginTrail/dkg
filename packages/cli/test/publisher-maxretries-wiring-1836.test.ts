@@ -10,6 +10,9 @@ import { join } from 'node:path';
 //   • DKGAgent.create (publisherMaxRetries → agent publishAsync: EPCIS/Kafka), and
 //   • createPublisherControlFromStore (daemon HTTP admission — the reported bug).
 // Removing either forwarding makes one of these fail.
+//
+// GH#2270 extends the same seam: the admission instance now also carries the retry
+// knobs, because it derives the `retryState` the job-detail routes serve.
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
   chainResetWipe: vi.fn(),
@@ -71,7 +74,7 @@ function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   db?.close?.();
 }
 
-describe('runDaemonInner publisher.maxRetries wiring (#1836)', () => {
+describe('runDaemonInner publisher admission-config wiring (#1836, #2270)', () => {
   let tempHome: string | undefined;
   let originalDkgHome: string | undefined;
   let uncaughtExceptionListeners: NodeJS.UncaughtExceptionListener[] = [];
@@ -160,7 +163,14 @@ describe('runDaemonInner publisher.maxRetries wiring (#1836)', () => {
     expect(createArg.publisherMaxRetries).toBeUndefined();
   });
 
-  it('forwards config.publisher.maxRetries into createPublisherControlFromStore (daemon HTTP admission)', async () => {
+  /**
+   * Boot far enough to capture the admission-construction call, then stop right there so
+   * the rest of daemon startup needs no faking. Shared by the #1836 budget row and the
+   * GH#2270 retry-knob rows — one seam, one harness.
+   */
+  async function captureAdmissionControlCall(
+    publisher: Record<string, unknown>,
+  ): Promise<{ store: unknown; options: { maxRetries?: number; retryTuning?: Record<string, unknown> }; agentStore: unknown }> {
     const fakeAgent = {
       peerId: 'self-peer',
       multiaddrs: [],
@@ -189,8 +199,6 @@ describe('runDaemonInner publisher.maxRetries wiring (#1836)', () => {
       drainRpcUsage: vi.fn(() => ({ calls: 0, errors: 0, throttledMs: 0, byEndpoint: {} })),
     };
     mocks.agentCreate.mockResolvedValue(fakeAgent);
-    // Record the admission-construction args, then stop the boot cleanly right at
-    // that call so the rest of daemon startup does not need to be faked.
     mocks.createPublisherControlFromStore.mockImplementation(() => {
       throw new Error('after-publisher-control');
     });
@@ -204,7 +212,7 @@ describe('runDaemonInner publisher.maxRetries wiring (#1836)', () => {
       auth: { enabled: false },
       promoteQueue: { enabled: false },
       source: 'monorepo',
-      publisher: { enabled: true, maxRetries: 0 },
+      publisher,
       chain: {
         type: 'evm',
         rpcUrl: 'https://private-rpc.example',
@@ -215,8 +223,50 @@ describe('runDaemonInner publisher.maxRetries wiring (#1836)', () => {
 
     closeDashboardDbFromAgentCreateArg(mocks.agentCreate.mock.calls[0]?.[0]);
     expect(mocks.createPublisherControlFromStore).toHaveBeenCalledTimes(1);
-    const [store, options] = mocks.createPublisherControlFromStore.mock.calls[0] as [unknown, { maxRetries?: number }];
-    expect(store).toBe(fakeAgent.store);
+    const [store, options] = mocks.createPublisherControlFromStore.mock.calls[0] as [
+      unknown,
+      { maxRetries?: number; retryTuning?: Record<string, unknown> },
+    ];
+    return { store, options, agentStore: fakeAgent.store };
+  }
+
+  it('forwards config.publisher.maxRetries into createPublisherControlFromStore (daemon HTTP admission)', async () => {
+    const { store, options, agentStore } = await captureAdmissionControlCall({ enabled: true, maxRetries: 0 });
+    expect(store).toBe(agentStore);
     expect(options.maxRetries).toBe(0);
+  });
+
+  // GH#2270 — the admission instance also DERIVES the `retryState` the job-detail routes
+  // serve, and that derivation reads the effective kill-switch. Without this forwarding the
+  // route would answer "this node will retry it" on a node where the operator switched the
+  // lane off: the #1836 dead-config class again, on a read surface.
+  it('forwards the resolved retry knobs into the admission control (#2270)', async () => {
+    const { options } = await captureAdmissionControlCall({
+      enabled: true,
+      autoRetryEnabled: false,
+      retryJitterRatio: 0.4,
+      retryBackoffBaseMs: 2_000,
+      retryBackoffMaxMs: 90_000,
+    });
+
+    expect(options.retryTuning).toEqual({
+      autoRetryEnabled: false,
+      retryJitterRatio: 0.4,
+      retryBackoffBaseMs: 2_000,
+      retryBackoffMaxMs: 90_000,
+    });
+  });
+
+  // A DORMANT publisher block is never validated at boot (a typo there must not stop a node
+  // that publishes nothing), so it is not resolved here either — and with no runtime there
+  // is no automatic lane, which is exactly what the forced-off switch makes the projection
+  // report. An invalid knob in a disabled block must still boot.
+  it('forces the projection switch off for a disabled publisher, without resolving the block (#2270)', async () => {
+    const { options } = await captureAdmissionControlCall({
+      enabled: false,
+      retryJitterRatio: 5,
+    });
+
+    expect(options.retryTuning).toEqual({ autoRetryEnabled: false });
   });
 });

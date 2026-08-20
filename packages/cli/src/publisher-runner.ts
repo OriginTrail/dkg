@@ -27,6 +27,7 @@ import {
   type ACKTransportFactory,
   type AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   type AsyncKnowledgeAssetVmPublishRecoveryResolver,
+  type AsyncLiftDetailedRetrier,
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
@@ -166,7 +167,14 @@ export function resolveAsyncPublisherAvailability(args: {
 }
 
 export interface PublisherInspector {
-  readonly publisher: AsyncLiftPublisher;
+  /**
+   * GH#2270 — also the detailed retrier, so `dkg publisher retry` reports the same three
+   * counts with or without a running daemon. `AsyncLiftRetryStateReader` is deliberately NOT
+   * exposed here: this instance is built without the operator's `config.publisher` retry
+   * knobs, so its `autoRetryEligible` could contradict the lane that actually runs. The
+   * detailed retry counts carry no such dependency (the manual path ignores the kill-switch).
+   */
+  readonly publisher: AsyncLiftPublisher & AsyncLiftDetailedRetrier;
   readonly stop: () => Promise<void>;
 }
 
@@ -390,7 +398,17 @@ export function createPublisherInspectorFromStore(
 
 export function createPublisherControlFromStore(
   store: TripleStore,
-  options: { publicSnapshotStore?: WorkspacePublicSnapshotStore; maxRetries?: number } = {},
+  options: {
+    publicSnapshotStore?: WorkspacePublicSnapshotStore;
+    maxRetries?: number;
+    /**
+     * GH#2270 — the same knobs the runtime instance gets. This instance runs no
+     * scheduler, but it DERIVES the `retryState` the job-detail routes serve, and that
+     * derivation reads `autoRetryEnabled`: without the knob the route would report a job
+     * as auto-retry-eligible on a node where the operator switched the lane off (#1836).
+     */
+    retryTuning?: PublisherRetryTuning;
+  } = {},
 ): VmPublisherControl {
   // The daemon admission instance also serves the #1828 recovery lookup (route)
   // and the boot index backfill — segregated capabilities the base
@@ -398,6 +416,7 @@ export function createPublisherControlFromStore(
   return new TripleStoreAsyncLiftPublisher(store, {
     publicSnapshotStore: options.publicSnapshotStore,
     maxRetries: options.maxRetries,
+    ...options.retryTuning,
     // #1829 — daemon admission instance: enable append-only journal writes. Left OFF
     // for the CLI inspector + standalone runner so a second OS process never races the
     // node-local per-lineageKey seq allocation.

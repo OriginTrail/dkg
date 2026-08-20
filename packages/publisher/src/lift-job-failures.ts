@@ -112,6 +112,29 @@ export interface LiftJobFailurePolicy {
    * could cover the flag.
    */
   readonly autoRetry?: boolean;
+  /**
+   * GH#2270 — does this failure PROVE the transaction it may have carried had no effect?
+   *
+   * A failed job that persisted a transaction hash is normally HELD: no path republishes it, it
+   * keeps its KA's lifecycle subject, and bulk cleanup leaves it alone, because re-running it
+   * could publish the same Knowledge Asset twice. `true` is the ONLY way out of that hold short of
+   * chain recovery, so it must rest on a guarantee rather than on a plausible reading of the code:
+   *
+   *   - `tx_reverted` — the publish mapper assigns it for an actual revert. The receipt exists and
+   *     says the transaction changed nothing, so a re-run cannot double-publish.
+   *   - `insufficient_funds` — a DEFINITIVE pre-acceptance reject (see
+   *     `isDefinitivePreAcceptanceSendFailure`): the node refused the transaction before it entered
+   *     the mempool. The #1851 pre-send write-ahead may already have persisted a hash for that
+   *     attempt, and this is what lets an operator top the wallet up and re-submit instead of
+   *     waiting for proof that cannot arrive.
+   *
+   * Everything else is `false`, including every timeout and `confirmation_mismatch`, whose whole
+   * meaning is that the local view and the chain disagree. Like `autoRetry` the field is optional
+   * on this PUBLIC interface (external constructors keep compiling) but REQUIRED on every built-in
+   * entry via `BuiltInLiftJobFailurePolicy`, so a new code must state its chain effect instead of
+   * inheriting one by omission.
+   */
+  readonly provenIneffective?: boolean;
   readonly timeoutHandling?: LiftJobTimeoutHandling;
 }
 
@@ -131,46 +154,51 @@ export interface LiftJobFailureMetadata {
 }
 
 /**
- * Table-only strictness: the PUBLIC interface keeps `autoRetry` optional (a
- * required field would source-break external constructors of
- * `LiftJobFailurePolicy`), while every BUILT-IN entry must still declare the
- * decision explicitly — `autoRetry: false` is a policy statement, never an
- * omission.
+ * Table-only strictness: the PUBLIC interface keeps `autoRetry` and `provenIneffective` optional
+ * (required fields would source-break external constructors of `LiftJobFailurePolicy`), while every
+ * BUILT-IN entry must declare both decisions explicitly — `false` is a policy statement, never an
+ * omission. A 23rd code cannot be added without answering "does this retry itself?" and "did its
+ * transaction have no effect?".
  */
-export type BuiltInLiftJobFailurePolicy = LiftJobFailurePolicy & { readonly autoRetry: boolean };
+export type BuiltInLiftJobFailurePolicy = LiftJobFailurePolicy & {
+  readonly autoRetry: boolean;
+  readonly provenIneffective: boolean;
+};
 
 export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, BuiltInLiftJobFailurePolicy> = {
   // autoRetry: pre-send by allowed-states (enforced), transient by cause (a
   // corrupt/unreadable SWM head that sync repair heals) — see the field doc.
-  workspace_unavailable: { code: 'workspace_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: true },
-  workspace_slice_not_found: { code: 'workspace_slice_not_found', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
-  publish_intent_stale: { code: 'publish_intent_stale', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
-  canonicalization_failed: { code: 'canonicalization_failed', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
+  workspace_unavailable: { code: 'workspace_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: true },
+  workspace_slice_not_found: { code: 'workspace_slice_not_found', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
+  publish_intent_stale: { code: 'publish_intent_stale', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
+  canonicalization_failed: { code: 'canonicalization_failed', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   // No production producer (dead-code sweep is a recorded follow-up); autoRetry
   // stays off until a producer exists to witness it.
-  authority_unavailable: { code: 'authority_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: false },
-  authority_forbidden: { code: 'authority_forbidden', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
+  authority_unavailable: { code: 'authority_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
+  authority_forbidden: { code: 'authority_forbidden', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   // DEAD CODE — no production producer; see the dead-code follow-up.
-  validation_timeout: { code: 'validation_timeout', phase: 'validation', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted', autoRetry: false },
+  validation_timeout: { code: 'validation_timeout', phase: 'validation', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
   // DEAD CODE — no production producer; see the dead-code follow-up.
-  wallet_claim_timeout: { code: 'wallet_claim_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted', autoRetry: false },
+  wallet_claim_timeout: { code: 'wallet_claim_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
   // DEAD CODE — no production producer; see the dead-code follow-up.
-  wallet_unavailable: { code: 'wallet_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: false },
-  quorum_unmet: { code: 'quorum_unmet', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: true },
-  rpc_unavailable: { code: 'rpc_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: false },
-  tx_submit_timeout: { code: 'tx_submit_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', autoRetry: false },
-  tx_reverted: { code: 'tx_reverted', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
-  insufficient_funds: { code: 'insufficient_funds', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
-  nonce_conflict: { code: 'nonce_conflict', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: false },
+  wallet_unavailable: { code: 'wallet_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
+  quorum_unmet: { code: 'quorum_unmet', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: true },
+  rpc_unavailable: { code: 'rpc_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
+  tx_submit_timeout: { code: 'tx_submit_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', provenIneffective: false, autoRetry: false },
+  // provenIneffective: the receipt exists and reports failure — the transaction published nothing.
+  tx_reverted: { code: 'tx_reverted', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: true, autoRetry: false },
+  // provenIneffective: a DEFINITIVE pre-acceptance reject — the node refused it before the mempool.
+  insufficient_funds: { code: 'insufficient_funds', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: true, autoRetry: false },
+  nonce_conflict: { code: 'nonce_conflict', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
   // DEAD CODE — no production producer; see the dead-code follow-up.
-  inclusion_timeout: { code: 'inclusion_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', autoRetry: false },
-  finality_timeout: { code: 'finality_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', autoRetry: false },
-  confirmation_mismatch: { code: 'confirmation_mismatch', phase: 'confirmation', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
-  chain_reorg: { code: 'chain_reorg', phase: 'confirmation', mode: 'retryable', retryable: true, resolution: 'check_chain_then_finalize_or_reset', autoRetry: false },
-  recovery_lookup_timeout: { code: 'recovery_lookup_timeout', phase: 'recovery', mode: 'timeout', retryable: true, resolution: 'retry_recovery', timeoutHandling: 'retry_recovery', autoRetry: false },
+  inclusion_timeout: { code: 'inclusion_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', provenIneffective: false, autoRetry: false },
+  finality_timeout: { code: 'finality_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', provenIneffective: false, autoRetry: false },
+  confirmation_mismatch: { code: 'confirmation_mismatch', phase: 'confirmation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
+  chain_reorg: { code: 'chain_reorg', phase: 'confirmation', mode: 'retryable', retryable: true, resolution: 'check_chain_then_finalize_or_reset', provenIneffective: false, autoRetry: false },
+  recovery_lookup_timeout: { code: 'recovery_lookup_timeout', phase: 'recovery', mode: 'timeout', retryable: true, resolution: 'retry_recovery', timeoutHandling: 'retry_recovery', provenIneffective: false, autoRetry: false },
   // DEAD CODE — no production producer; see the dead-code follow-up.
-  recovery_chain_unavailable: { code: 'recovery_chain_unavailable', phase: 'recovery', mode: 'retryable', retryable: true, resolution: 'retry_recovery', autoRetry: false },
-  recovery_state_inconsistent: { code: 'recovery_state_inconsistent', phase: 'recovery', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
+  recovery_chain_unavailable: { code: 'recovery_chain_unavailable', phase: 'recovery', mode: 'retryable', retryable: true, resolution: 'retry_recovery', provenIneffective: false, autoRetry: false },
+  recovery_state_inconsistent: { code: 'recovery_state_inconsistent', phase: 'recovery', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
 };
 
 const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJobActiveState[]> = {

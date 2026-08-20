@@ -185,6 +185,10 @@ export interface LiftJobRetryMetadata {
   readonly lastRetryReason?: string;
 }
 
+// GH#2270 — the DERIVED retry read model (`LiftJobRetryProjection`, `LiftJobRetryWaitingReason`)
+// lives in async-lift-retry-disposition.ts, beside the classifier that produces it. This file is
+// the PERSISTED job shape; nothing derived on read belongs in it.
+
 export interface LiftJobRecoveryResetToAccepted {
   readonly action: 'reset_to_accepted';
   readonly recoveredFromStatus: LiftJobResettableState;
