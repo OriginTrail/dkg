@@ -181,13 +181,25 @@ describe('GH#2270 failed-job retry disposition', () => {
       action: 'reset_to_accepted',
       recoveredFromStatus: 'included',
       txHashChecked: TX_HASH,
+      // r23 — the signer travels from this origin too; an 'included' failure has broadcast
+      // metadata, so there is an authoritative wallet to preserve.
+      walletIdChecked: includedFailure.broadcast?.walletId,
     });
+    // r23 (🔴 3817474299) — the exact-shape assertion is the whole point of this row, so it has
+    // to name EVERY field the contract says travels with the hash. It previously stopped at the
+    // operation marker, which meant dropping the signer and the nonce stayed green — on a
+    // data-integrity boundary where an inherited hash without its signer cannot form a lookup at
+    // all. `toEqual` makes this exhaustive: a field added to the carrier and not to this list
+    // fails here, which is the property that keeps the contract honest.
     expect(resetFailedLiftJobToAccepted(broadcastFailure, 9_000).recovery).toEqual({
       action: 'reset_to_accepted',
       recoveredFromStatus: 'broadcast',
       txHashChecked: TX_HASH,
       // r3 — the branch marker is evidence too, and rides the same carrier as the hash.
       operationKind: 'create',
+      // r21 (3812632539) — and so do the signer and the nonce it consumed.
+      walletIdChecked: broadcastFailure.broadcast?.walletId,
+      nonceChecked: broadcastFailure.broadcast?.nonce,
     });
     // A pre-send failure records its origin with no hash to carry — there is no evidence to keep.
     expect(resetFailedLiftJobToAccepted(quorumFailure, 9_000).recovery).toEqual({

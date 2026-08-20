@@ -220,6 +220,12 @@ export function resetFailedLiftJobToAccepted(
     // The marker rides along with the hash: a released job must not degrade to the pre-marker
     // default on its next attempt (see LiftJobRecoveryMetadata.operationKind).
     ...(liftJobOperationKindMarker(job) ? { operationKind: liftJobOperationKindMarker(job) } : {}),
+    // r23 (🔴 3817474299) — and so do the SIGNER and the nonce, for the same reason. This is
+    // the SECOND reset path (admission re-submit, `retry()`, the claim-time sweep); the recovery
+    // dispatcher has its own. Preserving the envelope in only one of them meant a job reset
+    // through this one lost its signer and could never form a chain-proof lookup again.
+    ...(liftJobCheckedSigner(job) ? { walletIdChecked: liftJobCheckedSigner(job) } : {}),
+    ...(liftJobCheckedNonce(job) !== undefined ? { nonceChecked: liftJobCheckedNonce(job) } : {}),
     // 'accepted' is the one origin with no prior state to recover from. Stated as that exclusion
     // rather than a list of the rest, so a new active state cannot silently go unrecorded — the
     // compiler rejects one that is not a `LiftJobResettableState`.

@@ -302,6 +302,7 @@ type AsyncLiftJobHandler = {
     job: PersistedFailedJob,
     origin: ChainRecoveryOrigin,
     recovery: AsyncLiftPublisherRecoveryResult,
+    options?: { readonly signal?: AbortSignal },
   ) => Promise<boolean>;
   readonly shouldPromoteFinalizedPrivateStaging: (job: LiftJob) => boolean;
 };
@@ -490,8 +491,8 @@ export class TripleStoreAsyncLiftPublisher
     // reaccept writer, the retry projection and bulk clear, rather than a second rule that could
     // disagree with them.
     canRetryFailedRecovery: (job) => isHeldForChainProof(job),
-    finalizeProvenPublish: async (job, origin, recovery) =>
-      await this.finalizeProvenKnowledgeAssetVmPublish(job, origin, recovery) === 'finalized',
+    finalizeProvenPublish: async (job, origin, recovery, options) =>
+      await this.finalizeProvenKnowledgeAssetVmPublish(job, origin, recovery, options) === 'finalized',
     shouldPromoteFinalizedPrivateStaging: () => false,
   };
 
@@ -1065,9 +1066,25 @@ export class TripleStoreAsyncLiftPublisher
     // verdict's canonical evidence is consumed at finalize rather than re-proven. The live
     // interrupted lane passes nothing (no verdict ran there) and the resolver verifies once.
     verdictRecovery?: AsyncLiftPublisherRecoveryResult,
+    // r23 (🔴 3817474007) — the pass deadline, so this lane's own chain reads are bounded by
+    // the same budget the proof was. Optional: the LIVE interrupted lane runs outside a
+    // chain-proof pass and has no deadline to give.
+    options?: { readonly signal?: AbortSignal },
   ): Promise<'finalized' | 'unresolved' | 'repair-deferred' | 'unsupported'> {
     if (!this.knowledgeAssetVmPublishRecoveryResolver) return 'unresolved';
-    const resolved = await this.knowledgeAssetVmPublishRecoveryResolver(job, origin.lookup, verdictRecovery);
+    // Bounded the same way the proof is: a stalled resolver must not hold the pass open. The
+    // job keeps its held state when the deadline wins, so declining to finalize is never a resend.
+    const resolvedOrTimeout = await Promise.race([
+      this.knowledgeAssetVmPublishRecoveryResolver(job, origin.lookup, verdictRecovery),
+      new Promise<'deadline'>((resolve) => {
+        const signal = options?.signal;
+        if (!signal) return;
+        if (signal.aborted) { resolve('deadline'); return; }
+        signal.addEventListener('abort', () => resolve('deadline'), { once: true });
+      }),
+    ]);
+    if (resolvedOrTimeout === 'deadline') return 'unresolved';
+    const resolved = resolvedOrTimeout;
     if (!resolved) return 'unresolved';
     if (
       !this.knowledgeAssetVmPublishHandler?.finalizeRecovered
@@ -1384,7 +1401,9 @@ export class TripleStoreAsyncLiftPublisher
     // capable adapter with a legacy one, a node-wide answer promised an automatic exit to jobs
     // whose own wallet could only ever return `inconclusive`. A job with no wallet at all cannot
     // be asked about either, which is the same answer for the same reason.
-    const walletId = job.broadcast?.walletId ?? job.claim?.walletId;
+    // r23 (🔴 3817434406) — the SIGNER's adapter, from the same carrier as the hash. Reading
+    // the claim here asked whether a wallet that never signed this transaction could settle it.
+    const walletId = liftJobCheckedSigner(job);
     if (!walletId) return false;
     // r22 (🔴 3817363935) — and per OPERATION KIND, not just per wallet. The tri-state lookup
     // is necessary but not sufficient: a create's absence release needs the finalized snapshot and
@@ -1530,7 +1549,7 @@ export class TripleStoreAsyncLiftPublisher
       const current = await this.getStatus(job.jobId);
       if (!current || !isFailedJob(current)) return 0;
       if (!this.isSameHeldFailedJob(job, current, lookup)) return 0;
-      return this.applyChainProofDisposition(current, lookup, resolution);
+      return this.applyChainProofDisposition(current, lookup, resolution, deadline);
     });
   }
 
@@ -1558,6 +1577,7 @@ export class TripleStoreAsyncLiftPublisher
     job: PersistedFailedJob,
     lookup: AsyncLiftChainProofLookup,
     resolution: AsyncLiftChainProofResolution,
+    deadline: AbortController,
   ): Promise<number> {
     const disposition = decideChainProofDisposition(job, resolution.status);
 
@@ -1585,8 +1605,21 @@ export class TripleStoreAsyncLiftPublisher
         // Release the lock BEFORE the handler runs so the wallet is free either way; a handler
         // that cannot finalize yet leaves the job held, and it holds no wallet while it waits.
         await this.releaseWalletLockForJob(job);
+        // r23 (🔴 3817474007) — the budget bounded the PROOF and stopped there. Finalization
+        // does its own chain reads and store writes, so a stalled provider inside it hung
+        // `recover()` — and the startup awaiting it — indefinitely, which is exactly the ceiling
+        // the budget exists to give. Two bounds, both needed:
+        //   1. nothing STARTS once the deadline has passed. The job keeps its held state, the
+        //      verdict is simply not applied this pass, and the next one re-establishes it. This
+        //      is the bound that matters for the queue behind it.
+        //   2. the deadline signal goes INTO the finalizer, so its own reads cancel rather than
+        //      being abandoned. Only reads take it; the persistence step is not interrupted
+        //      mid-write, so a timeout cannot leave a half-applied lifecycle.
+        // The verdict is proof about the CHAIN, and the chain does not change because we ran out
+        // of time — so declining to apply it is always safe, and never a resend.
+        if (deadline.signal.aborted) return 0;
         const finalized = await this.jobHandlerFor(job.request)
-          .finalizeProvenPublish(job, origin, resolution.recovery);
+          .finalizeProvenPublish(job, origin, resolution.recovery, { signal: deadline.signal });
         return finalized ? 1 : 0;
       }
       case 'refail_reverted': {
@@ -2628,8 +2661,14 @@ export class TripleStoreAsyncLiftPublisher
     // the hash. Recording it from the transaction just proven is not invention — it is the same
     // hash and wallet the proof was bound to — and without it this writes a `finalized` job that
     // does not satisfy its own union. The claim is guaranteed by the dispatcher's shape guard.
+    // r23 (🔴 3817434406) — the signer comes from the LOOKUP this verdict was earned about, not
+    // from the claim. A claim names the wallet for the current or next attempt; an inherited hash
+    // was signed by an earlier one, so attributing it to the later claimant writes a finalized
+    // record for a transaction/account pair that never existed on chain. `origin.lookup` is
+    // already built from the evidence carrier (see `chainProofLookupFor`), so it is the same
+    // envelope the hash came from.
     const broadcast = job.broadcast
-      ?? (job.claim ? { txHash: origin.txHash, walletId: job.claim.walletId } : undefined);
+      ?? { txHash: origin.txHash, walletId: origin.lookup.walletId };
     return {
       ...withoutFailure,
       status: 'finalized',

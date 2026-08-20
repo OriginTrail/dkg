@@ -187,6 +187,9 @@ describe('GH#2270 proof-first chain dispatcher', () => {
         // r3 — and the branch marker rides along too, so the re-run is still classified by what
         // actually signed rather than falling back to the pre-marker default.
         operationKind: 'create',
+        // r21 (3812632539) — as does the signer, so a re-run claimed by a DIFFERENT wallet still
+        // asks about this hash under the wallet that actually signed it.
+        walletIdChecked: failed.broadcast?.walletId,
       });
       // A reset must carry no stale schedule for the claim-time sweep to re-fire on.
       expect(released?.timestamps.nextRetryAt).toBeUndefined();
@@ -1137,6 +1140,53 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(asked).toEqual([{ txHash: TX_HASH, walletId: 'wallet-A-signed-it' }]);
     });
 
+    it('the PRODUCTION reset preserves the envelope — not the fixture [r23]', async () => {
+      // 🔴 3817434532 — the two rows above manufacture the carrier they then read, so deleting
+      // the `walletIdChecked`/`nonceChecked` spreads from the reset builders would leave them
+      // green. This one drives the REAL transition: a job broadcast by wallet A with a nonce,
+      // reset through the production helper, re-read from the store, and only then asked about.
+      const asked: Array<{ txHash: string; walletId: string; nonce?: number }> = [];
+      const publisher = createPublisher({
+        chainProofResolver: async (lookup) => {
+          asked.push({ txHash: lookup.txHash, walletId: lookup.walletId, nonce: lookup.nonce });
+          return { status: 'inconclusive' };
+        },
+      });
+
+      // Wallet A signs, with a nonce — the shape the write-ahead records.
+      const signed = await failAfterRecordedTxHash(publisher);
+      const withNonce = {
+        ...signed,
+        broadcast: { ...signed.broadcast, nonce: 41 },
+      } as unknown as LiftJob;
+      await h.store.deleteByPattern({ subject: jobSubject(signed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(withNonce, DEFAULT_CONTROL_GRAPH_URI));
+      const walletA = signed.broadcast!.walletId;
+
+      // The PRODUCTION reset — nothing about the carrier is written by this test.
+      const reset = resetFailedLiftJobToAccepted(
+        expectFailed(await publisher.getStatus(signed.jobId)),
+        9_000,
+      );
+      expect(reset.recovery?.walletIdChecked).toBe(walletA);
+      expect(reset.recovery?.nonceChecked).toBe(41);
+
+      // Persist it, then let a DIFFERENT wallet claim the job before it fails again pre-send.
+      const claimedByB = {
+        ...reset,
+        status: 'failed',
+        claim: { ...signed.claim, walletId: 'wallet-B-claimed-later' },
+        failure: { ...signed.failure, failedFromState: 'claimed', code: 'workspace_unavailable' },
+      } as unknown as LiftJob;
+      await h.store.deleteByPattern({ subject: jobSubject(signed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(claimedByB, DEFAULT_CONTROL_GRAPH_URI));
+
+      await publisher.recover();
+
+      // The lookup names A and A's nonce, both of which survived persistence.
+      expect(asked).toEqual([{ txHash: TX_HASH, walletId: walletA, nonce: 41 }]);
+    });
+
     it('a pre-r21 record with NO preserved signer is never asked about at all', async () => {
       // The fail-closed half: a legacy carrier has no authoritative signer, so guessing one is
       // exactly the bug. It stays held, and (r19) costs no batch slot doing so.
@@ -1284,6 +1334,27 @@ describe('GH#2270 proof-first chain dispatcher', () => {
 
       expect(asked).toHaveLength(2);
       expect(asked[0]).not.toBe(asked[1]);
+    });
+
+    it('a stalled FINALIZER cannot hold the pass open past the budget [r23]', async () => {
+      // 🔴 3817474007 — the budget bounded the proof and stopped there. Finalization does its
+      // own chain reads, so a resolver that answers `recovered` instantly followed by a named
+      // finalizer that never settles kept `recover()` — and the startup awaiting it — pending
+      // forever, which is exactly the ceiling the budget exists to provide.
+      const publisher = createPublisher({
+        chainProofDispatchTimeBudgetMs: 20,
+        chainProofResolver: async () => ({ status: 'recovered', recovery: { txHash: TX_HASH } } as never),
+        // Never settles. Only the deadline can end this pass.
+        knowledgeAssetVmPublishRecoveryResolver: () => new Promise<never>(() => {}),
+      });
+      const held = await failAfterRecordedTxHash(publisher);
+
+      // The assertion is that this RESOLVES at all — before the fix it hung forever.
+      expect(await publisher.recover()).toBe(0);
+
+      // And the deadline applied no disposition: the job is exactly as held as it was. A verdict
+      // is proof about the CHAIN, and the chain did not change because we ran out of time.
+      expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
     });
 
     it('an UNFORMABLE held job costs no batch slot, so it cannot starve the jobs behind it', async () => {

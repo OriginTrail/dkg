@@ -662,10 +662,24 @@ describe('GH#2270 runner chain-proof resolution', () => {
       const asAdapter = (c: Record<string, unknown>) => c as unknown as ChainAdapter;
       const lookupOnly = asAdapter({ resolvePublishTransaction: () => null });
 
-      // A create's absence release runs entirely through the finalized snapshot.
+      // r23 (🔴 3817473895) — a create has TWO outcomes and needs both. The snapshot settles
+      // absence; a create that MINED is settled by the canonical finalization receipt, and an
+      // adapter with only the snapshot would hold such a job forever behind `retryable: true`.
       expect(hasChainRecoveryCapabilityFor(lookupOnly, 'create')).toBe(false);
       expect(hasChainRecoveryCapabilityFor(
         asAdapter({ resolvePublishTransaction: () => null, readFinalizedChainProofSnapshot: () => null }),
+        'create',
+      )).toBe(false);
+      expect(hasChainRecoveryCapabilityFor(
+        asAdapter({ resolvePublishTransaction: () => null, resolveCanonicalFinalizationReceipt: () => null }),
+        'create',
+      )).toBe(false);
+      expect(hasChainRecoveryCapabilityFor(
+        asAdapter({
+          resolvePublishTransaction: () => null,
+          readFinalizedChainProofSnapshot: () => null,
+          resolveCanonicalFinalizationReceipt: () => null,
+        }),
         'create',
       )).toBe(true);
 
@@ -675,11 +689,21 @@ describe('GH#2270 runner chain-proof resolution', () => {
         asAdapter({ resolvePublishTransaction: () => null, verifyKAUpdate: () => null }),
         'update',
       )).toBe(false);
+      // The contract address the recognition is expressed against is part of the workflow too.
       expect(hasChainRecoveryCapabilityFor(
         asAdapter({
           resolvePublishTransaction: () => null,
           verifyKAUpdate: () => null,
           isReceiptBlockFinalAndCanonical: () => null,
+        }),
+        'update',
+      )).toBe(false);
+      expect(hasChainRecoveryCapabilityFor(
+        asAdapter({
+          resolvePublishTransaction: () => null,
+          verifyKAUpdate: () => null,
+          isReceiptBlockFinalAndCanonical: () => null,
+          getDKGKnowledgeAssetsAddress: () => null,
         }),
         'update',
       )).toBe(true);

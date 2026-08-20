@@ -76,12 +76,22 @@ export function hasChainRecoveryCapabilityFor(
 ): boolean {
   if (!hasChainPublishLookup(chain)) return false;
   if (operationKind === 'create') {
-    return typeof chain.readFinalizedChainProofSnapshot === 'function';
+    // r23 (🔴 3817473895) — BOTH outcomes, not just the absence one. r22 checked only the
+    // snapshot, so an adapter that could prove a create absent but could not settle a create that
+    // MINED was still advertised as capable: the finalizer returns unresolved every pass and the
+    // job is held forever behind `retryable: true`. A capability must cover every outcome the
+    // dispatcher can reach for that kind, or it is not a capability.
+    return typeof chain.readFinalizedChainProofSnapshot === 'function'
+      && typeof chain.resolveCanonicalFinalizationReceipt === 'function';
   }
   // An unmarked record is treated as an update by the same safe fallback the dispatcher uses, so
   // it is held to the update capability rather than being given the weaker create answer.
+  // An update needs recognition (verification GATED by finality) and the knowledge-assets contract
+  // address the recognition is expressed against; absence is deliberately inconclusive for an
+  // update, so there is no second outcome to cover.
   return typeof chain.verifyKAUpdate === 'function'
-    && typeof chain.isReceiptBlockFinalAndCanonical === 'function';
+    && typeof chain.isReceiptBlockFinalAndCanonical === 'function'
+    && typeof chain.getDKGKnowledgeAssetsAddress === 'function';
 }
 
 /**
