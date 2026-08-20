@@ -786,7 +786,7 @@ function createV10ACKProviderForPublisher(
 export function createKnowledgeAssetVmPublishRecoveryResolver(
   adapters: PublisherChainAdapters,
 ): AsyncKnowledgeAssetVmPublishRecoveryResolver {
-  return async (job, lookup, verdictRecovery) => {
+  return async (job, lookup, verdictRecovery, options) => {
     // GH#2270 PR-3 r4 — an UPDATE transaction has no publish receipt to resolve canonically; its
     // proof is the update-verification machinery, against the exact root the queued seal
     // intended. PR #2300 r2 — when the dispatcher's verdict already CARRIES the canonical
@@ -794,9 +794,9 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
     // LIVE interrupted lane arrives with no verdict and verifies once here, behind the same
     // finality gate.
     if (lookup.operationKind === 'update') {
-      return resolveCanonicalUpdateRecoveryEvidence(job, lookup, adapters, verdictRecovery);
+      return resolveCanonicalUpdateRecoveryEvidence(job, lookup, adapters, verdictRecovery, options);
     }
-    const recovered = await resolveCanonicalOnChainPublish(lookup, adapters);
+    const recovered = await resolveCanonicalOnChainPublish(lookup, adapters, options);
     if (!recovered) return null;
     const evidence = mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
       recovered.receipt,
@@ -846,6 +846,7 @@ async function resolveCanonicalUpdateRecoveryEvidence(
   lookup: AsyncLiftUpdateChainProofLookup,
   adapters: PublisherChainAdapters,
   verdictRecovery: AsyncLiftPublisherRecoveryResult | undefined,
+  options?: { readonly signal?: AbortSignal },
 ): Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null> {
   const request = job.request?.jobType === 'knowledge-asset-vm-publish'
     ? job.request.knowledgeAssetVmPublish
@@ -878,7 +879,7 @@ async function resolveCanonicalUpdateRecoveryEvidence(
         blockHash: verdictRecovery.canonicalUpdate.blockHash,
         txIndex: verdictRecovery.canonicalUpdate.txIndex,
       }
-    : await verifyCanonicalUpdateFacts(lookup, adapters);
+    : await verifyCanonicalUpdateFacts(lookup, adapters, options);
   if (!facts) return null;
   if (facts.txIndex === undefined) return null;
   const blockHash = facts.blockHash ? asLiftJobHex(facts.blockHash) : null;
@@ -915,6 +916,7 @@ async function resolveCanonicalUpdateRecoveryEvidence(
 async function resolveCanonicalOnChainPublish(
   lookup: AsyncLiftChainProofLookup,
   adapters: PublisherChainAdapters,
+  options?: { readonly signal?: AbortSignal },
 ): Promise<{
   receipt: CanonicalFinalizationReceipt;
   chain: ChainAdapter;
@@ -925,7 +927,7 @@ async function resolveCanonicalOnChainPublish(
 
   let resolution;
   try {
-    resolution = await chain.resolveCanonicalFinalizationReceipt(lookup.txHash);
+    resolution = await chain.resolveCanonicalFinalizationReceipt(lookup.txHash, options);
   } catch {
     return null;
   }

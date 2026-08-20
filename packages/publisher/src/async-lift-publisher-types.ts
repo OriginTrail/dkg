@@ -502,6 +502,13 @@ export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
    * (no verdict ran) and the resolver verifies once itself.
    */
   verdictRecovery?: AsyncLiftPublisherRecoveryResult,
+  /**
+   * GH#2270 PR #2300 r24 — the PASS DEADLINE. r23 bounded how long the dispatcher WAITS on this
+   * resolver, which stops `recover()` hanging but leaves the resolver's own chain reads running
+   * after the pass gave up. Handed through so a cooperating resolver cancels its reads instead of
+   * leaking them once per timed-out pass. Aborting establishes nothing, so the job stays held.
+   */
+  options?: { readonly signal?: AbortSignal },
 ) => Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null>;
 
 export interface AsyncLiftPublisherConfig {

@@ -86,7 +86,9 @@ describe('named KA publisher recovery wiring', () => {
     } as LiftJobBroadcast;
     const resolved = await resolver(job, { txHash, walletId });
 
-    expect(resolveCanonicalFinalizationReceipt).toHaveBeenCalledWith(txHash);
+    // r24 (3820376690) — this read now carries the pass deadline as a second argument, so the
+    // PAYLOAD is the observable rather than the call's arity.
+    expect(resolveCanonicalFinalizationReceipt.mock.calls[0][0]).toBe(txHash);
     expect(resolved).toEqual({
       inclusion: {
         txHash,
@@ -462,4 +464,38 @@ describe('named KA publisher recovery wiring', () => {
     expect(isReceiptBlockFinalAndCanonical).toHaveBeenCalled();
   });
 
+
+  it('carries the pass DEADLINE through to the adapter on the create finalize path [r24]', async () => {
+    // 🟡 3820376690 — r23 bounded how long the dispatcher WAITS on this resolver, which stops
+    // `recover()` hanging but left the resolver's own chain reads running after the pass gave up:
+    // detachment, not cancellation, once per timed-out pass. The observable that settles it is
+    // that the pass's EXACT signal reaches the adapter, so it is asserted on the real
+    // `createKnowledgeAssetVmPublishRecoveryResolver` rather than a hand-written double.
+    const txHash = `0x${'f1'.repeat(32)}` as `0x${string}`;
+    const seen: Array<AbortSignal | undefined> = [];
+    const chain = {
+      chainId: 'evm:31337',
+      resolveCanonicalFinalizationReceipt: vi.fn(
+        async (_txHash: string, opts?: { signal?: AbortSignal }) => {
+          seen.push(opts?.signal);
+          return { status: 'unresolved' as const };
+        },
+      ),
+    } as unknown as ChainAdapter;
+    const walletId = '0x1111111111111111111111111111111111111111';
+    const publishers: PublisherChainAdapters = new Map([[walletId, chain]]);
+
+    const controller = new AbortController();
+    await createKnowledgeAssetVmPublishRecoveryResolver(publishers)(
+      { status: 'failed' } as never,
+      { txHash, walletId, operationKind: 'create' } as never,
+      undefined,
+      { signal: controller.signal },
+    );
+
+    // Not "some options arrived" — THIS pass's signal, so aborting the pass aborts the read.
+    expect(seen).toEqual([controller.signal]);
+    controller.abort();
+    expect(seen[0]?.aborted).toBe(true);
+  });
 });

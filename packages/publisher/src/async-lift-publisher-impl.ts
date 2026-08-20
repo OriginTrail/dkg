@@ -1075,7 +1075,7 @@ export class TripleStoreAsyncLiftPublisher
     // Bounded the same way the proof is: a stalled resolver must not hold the pass open. The
     // job keeps its held state when the deadline wins, so declining to finalize is never a resend.
     const resolvedOrTimeout = await Promise.race([
-      this.knowledgeAssetVmPublishRecoveryResolver(job, origin.lookup, verdictRecovery),
+      this.knowledgeAssetVmPublishRecoveryResolver(job, origin.lookup, verdictRecovery, options),
       new Promise<'deadline'>((resolve) => {
         const signal = options?.signal;
         if (!signal) return;
