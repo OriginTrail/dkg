@@ -4928,7 +4928,7 @@ export class PublishMethods extends DKGAgentBase {
     input: AsyncKnowledgeAssetVmPublishRecoveryInput,
     ctx: OperationContext,
   ): Promise<void> {
-    const { request, job, lookup, recovery } = input;
+    const { request, job, lookup, recovery, signal } = input;
     if (
       request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
       || request.kaUal === undefined
@@ -4947,6 +4947,10 @@ export class PublishMethods extends DKGAgentBase {
       queued: { txHash: lookup.txHash, merkleRoot: job.broadcast?.merkleRoot },
       recovery,
       chain: this.chain,
+      // r27 (🔴 3821200852) — the publisher's pass deadline reaches the chain reads this
+      // normalizer performs. They all precede any mutation, so bounding them is safe and is what
+      // keeps a stalled endpoint from holding the global claim lock past the budget.
+      signal,
     });
 
     const onChainCgId = normalizeOptionalContextGraphId(

@@ -61,6 +61,23 @@ function equalsIgnoreCase(left: string, right: string): boolean {
  * current version for local materialization. A later update must never make the
  * original confirmed publish unrecoverable or regress the VM pointer.
  */
+/**
+ * r27 (🔴 3821200852) — the pass deadline, checked between reads. Throwing is the right shape
+ * here: the caller already treats a throw as "repair blocked, job stays tx-bearing", which is
+ * exactly the disposition a deadline earns. It is deliberately NOT `inconsistent` — nothing about
+ * the chain was found to be wrong, we simply ran out of budget.
+ */
+class RecoveryDeadlineReachedError extends Error {
+  constructor() {
+    super('named-KA recovery deadline reached before the chain reads completed');
+    this.name = 'RecoveryDeadlineReachedError';
+  }
+}
+
+function throwIfRecoveryDeadlineReached(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new RecoveryDeadlineReachedError();
+}
+
 export async function normalizeRecoveredNamedKaPublish(input: {
   readonly request: KnowledgeAssetVmPublishRequest;
   /**
@@ -72,10 +89,17 @@ export async function normalizeRecoveredNamedKaPublish(input: {
    * by rebuilding one; the two things actually read are now simply asked for.
    */
   readonly queued: { readonly txHash: string; readonly merkleRoot?: string };
+  /**
+   * GH#2270 PR #2300 r27 (🔴 3821200852) — the recovery pass DEADLINE. Everything this function
+   * does before the caller mutates anything is read-only chain work, so it belongs inside the
+   * dispatcher's bounded phase. Without it a stalled snapshot read outlived the budget and held
+   * the global claim lock, blocking claims, admission and clears for that graph.
+   */
+  readonly signal?: AbortSignal;
   readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
   readonly chain: ChainAdapter;
 }): Promise<RecoveredNamedKaPublish> {
-  const { request, queued, recovery, chain } = input;
+  const { request, queued, recovery, chain, signal } = input;
   const inconsistent = (message: string): Error => recoveryInconsistent(request.name, message);
 
   if (!equalsIgnoreCase(queued.txHash, recovery.inclusion.txHash)) {
@@ -221,7 +245,11 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // chain view this decision uses. The standalone latest-root read is the legacy path for proofs
   // that carry no position, so a node whose adapter can produce the view must not be blocked by
   // that read failing (or by an adapter that lacks it).
-  const versionView = await chain.readKnowledgeAssetVersionSnapshot?.(reservedKaId).catch(() => null);
+  throwIfRecoveryDeadlineReached(signal);
+  const versionView = await chain
+    .readKnowledgeAssetVersionSnapshot?.(reservedKaId, { signal })
+    .catch(() => null);
+  throwIfRecoveryDeadlineReached(signal);
   // r21 (🔴 3816769865) — the position is derived HERE, above the no-view guard, because the
   // guard has to key off the DERIVED position and not merely a persisted `merkleRootCount`. A
   // create carries no count but has position 1 by construction, so gating on the field alone let a
@@ -243,7 +271,7 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   }
   const latestMerkleRoot = versionView
     ? versionView.latestRoot
-    : ethers.hexlify(await chain.getLatestMerkleRoot!(reservedKaId));
+    : ethers.hexlify(await chain.getLatestMerkleRoot!(reservedKaId, { signal }));
   // GH#2270 PR #2300 r5 (3812275749) — supersession is a question about POSITION in the update
   // history, and root bytes cannot answer it: an asset updated A -> B -> A makes the FIRST
   // update's root equal the latest one, so root equality would call that old transaction current
@@ -322,8 +350,9 @@ export async function normalizeRecoveredNamedKaPublish(input: {
       materializationPublisher = ethers.getAddress(versionView.latestPublisher);
       versionBlock = versionView.blockNumber;
     } else if (chain.getLatestMerkleRootAuthor && chain.getLatestMerkleRootPublisher && chain.getBlockNumber) {
-      materializationAuthor = ethers.getAddress(await chain.getLatestMerkleRootAuthor(reservedKaId));
-      materializationPublisher = ethers.getAddress(await chain.getLatestMerkleRootPublisher(reservedKaId));
+      throwIfRecoveryDeadlineReached(signal);
+      materializationAuthor = ethers.getAddress(await chain.getLatestMerkleRootAuthor(reservedKaId, { signal }));
+      materializationPublisher = ethers.getAddress(await chain.getLatestMerkleRootPublisher(reservedKaId, { signal }));
       versionBlock = await chain.getBlockNumber();
     } else {
       // Unreachable: the guard above already rejected this combination. Narrowing it here keeps

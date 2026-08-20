@@ -1916,7 +1916,7 @@ export interface ChainAdapter {
    * can omit the surface; callers MUST treat `address(0)` as
    * "no attestation on file" rather than as a valid author claim.
    */
-  getLatestMerkleRootAuthor?(kaId: bigint): Promise<string>;
+  getLatestMerkleRootAuthor?(kaId: bigint, options?: ChainReadOptions): Promise<string>;
 
   /**
    * Context graph id that hosts `kaId`, sourced from

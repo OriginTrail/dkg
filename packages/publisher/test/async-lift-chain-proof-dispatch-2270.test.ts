@@ -1463,6 +1463,58 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
     });
 
+    it('two OVERLAPPING passes cannot enter the same repair [r27]', async () => {
+      // 🔴 3821200567 — the neighbouring row observes `entered === 1` with only ONE pass, so
+      // deleting the guard would leave it green. This drives the concurrency the guard exists for.
+      //
+      // It has to go through the LIVE interrupted lane, not the failed-job dispatcher: the
+      // dispatcher applies its disposition inside `withClaimLock`, so a second dispatcher pass
+      // blocks on the lock and never reaches the guard at all. The live lane finalizes OUTSIDE
+      // that lock, which is exactly where two concurrent `recover()` calls can collide.
+      let entered = 0;
+      let releaseFirst: (() => void) | undefined;
+      const publisher = createPublisher({
+        chainProofResolver: async () => ({ status: 'recovered', recovery: { txHash: TX_HASH } } as never),
+        knowledgeAssetVmPublishRecoveryResolver: async () => ({
+          inclusion: { blockNumber: 1, txHash: TX_HASH },
+          finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+        } as never),
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => ({ ok: true } as never),
+          execute: async () => ({ } as never),
+          finalizeRecovered: async () => {
+            entered += 1;
+            await new Promise<void>((resolve) => { releaseFirst = resolve; });
+          },
+        } as never,
+      });
+
+      // A LIVE interrupted job: still at 'broadcast', hash durable, no failure recorded.
+      const held = await failAfterRecordedTxHash(publisher);
+      const live = {
+        ...held,
+        status: 'broadcast',
+        broadcast: { ...held.broadcast, txHash: TX_HASH },
+      } as unknown as LiftJob;
+      delete (live as unknown as Record<string, unknown>).failure;
+      await h.store.deleteByPattern({ subject: jobSubject(held.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(live, DEFAULT_CONTROL_GRAPH_URI));
+
+      const first = publisher.recover();
+      await new Promise((resolve) => { setTimeout(resolve, 40); });
+      expect(entered).toBe(1);
+
+      // Concurrent second pass, while the first is still inside the repair.
+      const second = publisher.recover();
+      await new Promise((resolve) => { setTimeout(resolve, 40); });
+      // The load-bearing assertion: the guard's TRUE branch kept it out.
+      expect(entered).toBe(1);
+
+      releaseFirst?.();
+      await Promise.all([first, second]);
+      expect(entered).toBe(1);
+    });
+
     it('an UNFORMABLE held job costs no batch slot, so it cannot starve the jobs behind it', async () => {
       // 🔴 3816490915 — r18 sliced the batch BEFORE deriving the lookup, so held records that
       // cannot form one (legacy or malformed) still consumed a slot, were never backed off, and —
