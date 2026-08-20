@@ -193,6 +193,44 @@ export interface LiftJobRecoveryResetToAccepted {
   readonly action: 'reset_to_accepted';
   readonly recoveredFromStatus: LiftJobResettableState;
   readonly txHashChecked?: LiftJobHex;
+  /**
+   * GH#2270 PR-3 r3 — the chain ACCOUNTED for `txHashChecked`, and this reset is what it decided.
+   *
+   * The hash is kept for audit either way, but it stops being an open question. Without this a
+   * proven-absent release is self-defeating: the reset carries the hash forward so a LATER failure
+   * is still held, which is right while the transaction's fate is unknown — and wrong the moment
+   * recovery has just proven it. The job would go back on the queue, fail again before ever
+   * signing anything, and be held on a transaction the dispatcher itself established does not
+   * exist, with no second proof possible because nothing new was ever sent.
+   *
+   * Written ONLY by the proof-first dispatcher's release paths: a proven absence, and a proven
+   * revert of a transaction some earlier attempt sent. Never by the interrupted-recovery reset,
+   * the retry sweep, or a manual reaccept — none of those has asked the chain anything, and a hash
+   * they carry forward is still genuinely unaccounted for.
+   *
+   * A NEW post-sign failure records fresh `broadcast` metadata, which is unconditional evidence:
+   * this flag only ever speaks about the INHERITED hash it sits beside.
+   */
+  readonly txHashAccounted?: boolean;
+  /**
+   * GH#2270 PR #2300 r3 — the branch the checked transaction signed, carried across resets exactly
+   * like `txHashChecked` is: a reset rebuilds the job and drops `broadcast`, so without this a job
+   * that signed a CREATE would fall back to the pre-marker default (update, i.e. held) the moment
+   * recovery released it for a re-run.
+   */
+  readonly operationKind?: 'create' | 'update';
+  /**
+   * GH#2270 PR #2300 r21 (🔴 3812632539) — the WALLET that signed `txHashChecked`, carried
+   * across the reset for the same reason the hash and the operation marker are. A reset drops
+   * `broadcast`, and the job can then be claimed by a DIFFERENT wallet; pairing the inherited hash
+   * with that later claim builds a lookup for a transaction/account combination that never
+   * existed, and update recognition binds the publisher to the wrong wallet — stranding a job
+   * whose transaction actually mined. Absent (a pre-r21 record), the inherited hash has no
+   * authoritative signer and the job stays held rather than being asked about under a guess.
+   */
+  readonly walletIdChecked?: string;
+  /** The nonce that transaction consumed, preserved with its signer for the absence proof. */
+  readonly nonceChecked?: number;
   readonly note?: string;
 }
 
@@ -246,6 +284,29 @@ export interface LiftJobBroadcastMetadata {
   readonly walletId: string;
   readonly merkleRoot?: LiftJobHex;
   readonly publicByteSize?: number;
+  /**
+   * GH#2270 PR-3 — the account nonce the signed transaction reserved, written in the same pre-send
+   * write-ahead as `txHash`.
+   *
+   * This is what lets recovery PROVE absence. A null transaction lookup is point-in-time and
+   * backend-local: a broadcast whose response timed out can still be accepted and mined later, so
+   * "the node does not have it" is never on its own proof that nothing published. Once this slot
+   * is spent at a FINALIZED block and the transaction is still missing, it can never mine — that
+   * is proof, and it is the only thing that releases a held job by absence.
+   *
+   * Optional because it is only as available as the signing path makes it: records written before
+   * this field existed, and any signed transaction whose nonce could not be parsed, carry none.
+   * Recovery reads a missing nonce as no proof and keeps holding.
+   */
+  readonly nonce?: number;
+  /**
+   * GH#2270 PR #2300 r3 — the branch this transaction actually signed, recorded at the write-ahead
+   * because it cannot be recovered from the request afterwards (a queued publish can resolve its
+   * update branch from the LIVE lifecycle pointer, not only from `vmCurrentAssertion`). Recovery's
+   * absence-release is create-only, so this is what makes that decision honest for any job this
+   * build writes; a record without it predates the marker and is treated as an update, i.e. held.
+   */
+  readonly operationKind?: 'create' | 'update';
 }
 
 export interface LiftJobInclusionMetadata {

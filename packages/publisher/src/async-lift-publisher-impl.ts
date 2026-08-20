@@ -1,3 +1,4 @@
+import type { PreBroadcastRecord } from './publisher.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -34,7 +35,10 @@ import type {
   AsyncKnowledgeAssetVmPublishRecoveryResolver,
   AsyncLiftDetailedRetrier,
   AsyncLiftPublisherConfig,
+  AsyncLiftChainProofLookup,
+  AsyncLiftChainProofResolution,
   AsyncLiftPublisherRecoveryResolver,
+  AsyncLiftPublisherRecoveryResult,
   AsyncLiftRetryOutcome,
   AsyncLiftRetryStateReader,
   IntentLookupInput,
@@ -54,6 +58,8 @@ import {
   isAutomaticallyRetryableLiftJob,
   isBulkClearableTerminalLiftJob,
   isClearableTerminalLiftJob,
+  decideChainProofDisposition,
+  hasAutomaticRecoveryExit,
   isHeldForChainProof,
   selectLifecycleBindingJobs,
   type LiftJobRetryProjection,
@@ -101,8 +107,13 @@ import {
   getLiftJobTransactionEvidence,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
+  liftJobCheckedNonce,
+  liftJobCheckedSigner,
+  liftJobOperationKindMarker,
   normalizePersistedLiftJobRequest,
   buildLiftJobAcceptedReset,
+  pinnedPublishIdentityKaId,
+  queuedLiftOperationKind,
   resetFailedLiftJobToAccepted,
   rawLiftRequestFromJobRequest,
   jobSubject,
@@ -128,6 +139,18 @@ import {
  * - `'rolled-back-pre-send'` the write-ahead was attempted but the fsync/transition failed
  *                            and was rolled back to `'validated'`; the tx was never sent.
  */
+/**
+ * GH#2270 PR-3 r18 (🔴 3816322914) — the chain-proof backoff schedule. Not configurable: these
+ * govern how often a HELD job is re-asked, which is a protocol-pacing question rather than a
+ * deployment one, and the two knobs that do vary by deployment (batch size, time budget) are on
+ * the config. The ceiling matters as much as the growth — a job held across a long incident must
+ * still be asked periodically, never deferred to effectively never.
+ */
+const CHAIN_PROOF_BACKOFF_BASE_MS = 30_000;
+const CHAIN_PROOF_BACKOFF_MAX_MS = 10 * 60_000;
+/** Jitter as a FRACTION of the computed backoff, so spread scales with the wait it spreads. */
+const CHAIN_PROOF_BACKOFF_JITTER = 0.25;
+
 type PreSendOutcome = 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send';
 
 /**
@@ -155,11 +178,132 @@ function lifecycleKeyOfJob(job: LiftJob): string | null {
   }
 }
 
+/**
+ * GH#2270 PR-3 r2 — a config carrying the pre-rename `chainRecoveryResolver` key is REJECTED, not
+ * ignored.
+ *
+ * The repo does not ship backwards-compatibility shims, and this is not one: nothing accepts the
+ * old key. But the rename is invisible to JavaScript, and BOTH halves changed — the field name and
+ * the callback's signature — so a consumer that missed it would construct a publisher with no
+ * resolver at all and lose chain recovery in total silence, or pass one that is handed a lookup
+ * where it expects a job and throws mid-tick. An explicit failure at construction names the
+ * replacement and the issue, and happens before any job can be held on a lane that will not run.
+ */
+function assertNoLegacyChainRecoveryResolver(config: AsyncLiftPublisherConfig): void {
+  if (!Object.prototype.hasOwnProperty.call(config, 'chainRecoveryResolver')) return;
+  throw new Error(
+    'AsyncLiftPublisherConfig.chainRecoveryResolver was removed in GH#2270 PR-3: use '
+    + '`chainProofResolver`, whose resolver takes an AsyncLiftChainProofLookup '
+    + '({ txHash, walletId, nonce }) and returns an AsyncLiftChainProofResolution verdict '
+    + '(recovered / reverted / unrecognized / pending / not-found / inconclusive) instead of '
+    + 'taking a job and returning a recovery result or null.',
+  );
+}
+
+// PR #2300 r1 — `pinnedPublishIdentityKaId` moved to async-lift-publisher-utils.ts: the
+// retryability policy in the disposition module reads the same derivation now, and two copies of
+// "which id would a re-run mint" is how they would drift.
+
+/**
+ * GH#2270 PR-3 r4 — finish a chain-proof lookup with the operation facts: what the queued
+ * transaction was trying to DO, and (for an update) the root it intended to install. The kind
+ * derivation is {@link queuedLiftOperationKind}; the intended root is the seal root the update
+ * would have committed, read from the same immutable request. Both lookup builders finish here,
+ * so the live lane and the failed-job dispatcher cannot describe the same job differently — and
+ * (PR #2300 r1) the lookup is a discriminated union now, so each kind is CONSTRUCTED as its own
+ * variant rather than spread into optional soup.
+ */
+/**
+ * PR #2300 r4 (3811993677) — ONE identity for a lookup, derived from the lookup itself.
+ *
+ * The stale-verdict guard used to re-list the fields it cared about, and had already fallen behind
+ * the discriminated model: two update lookups differing only in `intendedUpdateRoot` compared
+ * EQUAL, so a verdict resolved for one could be applied to the other. Fingerprinting every field
+ * the builder can produce means adding a field cannot silently bypass the guard — the same
+ * field-dropping hazard this PR removed from the agent's option pipeline.
+ */
+export function chainProofLookupFingerprint(lookup: AsyncLiftChainProofLookup): string {
+  // r5 (3812123515) — derived from the WHOLE lookup, not a list someone has to remember to grow.
+  // Keys are sorted so the string is deterministic, and `undefined` is dropped so an absent field
+  // and an explicitly-undefined one agree. A field added to the union is included the moment it is
+  // populated, which is the property a hand-written list kept failing to provide.
+  return JSON.stringify(
+    Object.entries(lookup as unknown as Record<string, unknown>)
+      .filter(([, value]) => value !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  );
+}
+
+function finishChainProofLookup(
+  job: LiftJob,
+  base: {
+    readonly txHash: LiftJobHex;
+    readonly walletId: string;
+    readonly nonce?: number;
+    readonly publishIdentityKaId?: string;
+  },
+): AsyncLiftChainProofLookup {
+  const operationKind = queuedLiftOperationKind(job);
+  if (operationKind === 'create') return { ...base, operationKind };
+  const root = (job.request as { knowledgeAssetVmPublish?: { sealMerkleRoot?: LiftJobHex } })
+    .knowledgeAssetVmPublish?.sealMerkleRoot;
+  return { ...base, operationKind, ...(root ? { intendedUpdateRoot: root } : {}) };
+}
+
+/**
+ * GH#2270 PR-3 r3 — where a chain-proof recovery is finalizing FROM, stated rather than inferred.
+ *
+ * The two lanes carry the same two facts in different places. A live interrupted job has its
+ * origin in `status` and its transaction in `broadcast`; a FAILED one has them in
+ * `failure.failedFromState` and in whichever evidence carrier survived a reset. The finalize path
+ * used to read them off the record, which only worked for the first shape — so the failed-job
+ * dispatcher fabricated the first shape to hand over: a synthetic status, a rebuilt `broadcast`,
+ * and a cast that asserted a record was something it was not.
+ *
+ * Deriving them at the call site instead lets every caller pass its record exactly as persisted.
+ */
+type ChainRecoveryOrigin = {
+  readonly recoveredFromStatus: 'broadcast' | 'included';
+  readonly txHash: LiftJobHex;
+  readonly lookup: AsyncLiftChainProofLookup;
+};
+
+/**
+ * The origin of a LIVE interrupted job: it is still in the state it is recovering from, and its
+ * transaction is still on its broadcast metadata. The failed-job dispatcher derives the same two
+ * facts from `failure.failedFromState` and the evidence carrier instead.
+ */
+function liveChainRecoveryOrigin(job: LiftJobBroadcast | LiftJobIncluded): ChainRecoveryOrigin {
+  return {
+    recoveredFromStatus: job.status,
+    txHash: job.broadcast.txHash,
+    lookup: finishChainProofLookup(job, {
+      txHash: job.broadcast.txHash,
+      walletId: job.broadcast.walletId,
+      nonce: job.broadcast.nonce,
+      publishIdentityKaId: pinnedPublishIdentityKaId(job),
+    }),
+  };
+}
+
 type AsyncLiftJobHandler = {
   readonly inspectPreparedPayload: (job: LiftJob) => Promise<AsyncPreparedPublishPayload | null>;
   readonly process: (claimed: LiftJob, walletId: string) => Promise<LiftJob>;
   readonly recoverInterrupted: (job: LiftJob) => Promise<boolean>;
   readonly canRetryFailedRecovery: (job: PersistedFailedJob) => boolean;
+  /**
+   * GH#2270 — finalize a FAILED job the dispatcher has proven published, in this job type's own
+   * vocabulary. Raw lift finalizes straight from the generic recovery evidence the verdict
+   * carries; the named lane needs its canonical receipt and its lifecycle repair, so it reads its
+   * own resolver. Returning `false` means "not finalized" — the caller leaves the job held rather
+   * than inventing a disposition it has no proof for.
+   */
+  readonly finalizeProvenPublish: (
+    job: PersistedFailedJob,
+    origin: ChainRecoveryOrigin,
+    recovery: AsyncLiftPublisherRecoveryResult,
+    options?: { readonly signal?: AbortSignal },
+  ) => Promise<boolean>;
   readonly shouldPromoteFinalizedPrivateStaging: (job: LiftJob) => boolean;
 };
 
@@ -287,7 +431,31 @@ export class TripleStoreAsyncLiftPublisher
   private readonly now: () => number;
   private readonly idGenerator: () => string;
   private readonly rand: () => number;
-  private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
+  private readonly chainProofResolver?: AsyncLiftPublisherRecoveryResolver;
+  private readonly chainProofCapableForWallet?: (
+    walletId: string,
+    operationKind: 'create' | 'update' | undefined,
+  ) => boolean;
+  private readonly chainProofDispatchBatchSize: number;
+  private readonly chainProofDispatchTimeBudgetMs: number;
+  /**
+   * r18 (🔴 3816322914) — when a held job's turn establishes nothing, asking again on the very
+   * next tick spends another round trip for the same answer. This defers it, so a large held
+   * population rotates through the batch instead of the head of the list monopolizing every pass.
+   *
+   * Deliberately IN-MEMORY, not persisted: a due time on disk would be a durable-shape change on
+   * records already on running nodes, and it is not needed for the bound. A restart simply makes
+   * everything due again, which is safe — asking the chain is idempotent — and still costs at most
+   * one batch per pass. What must never happen is the inverse, and does not: skipping a job is a
+   * pure no-op, so a DELAYED lookup can never itself authorize a resend.
+   */
+  private readonly chainProofNextDueAt = new Map<string, { dueAt: number; attempts: number }>();
+  /**
+   * r26 (🔴 3821028709) — jobs whose MUTATING recovery repair is currently running. A deadline
+   * may stop the dispatcher waiting, but it must never let a second pass enter the same repair
+   * while the first is still writing.
+   */
+  private readonly finalizationsInFlight = new Set<string>();
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
@@ -301,11 +469,20 @@ export class TripleStoreAsyncLiftPublisher
     inspectPreparedPayload: (job) => this.inspectRawLiftPreparedPayload(job),
     process: (claimed, walletId) => this.processRawLift(claimed, walletId),
     recoverInterrupted: (job) => this.recoverRawLiftInterrupted(job),
+    // GH#2270 PR-3 r1 — the same held predicate the named lane uses. It SUPERSETS the legacy
+    // `retry_recovery` + live-broadcast gate: every job that gate admitted persists a txHash and
+    // is therefore held, while the gate missed jobs that equally have a transaction unaccounted
+    // for — a post-write-ahead `tx_submit_timeout`, or anything held on the recovery carrier
+    // alone. One definition of "this job's transaction is unaccounted for" across both lanes, so
+    // raw lift and named KA cannot answer differently about the same evidence.
     canRetryFailedRecovery: (job) =>
-      rawLiftRequestFromJobRequest(job.request) !== null &&
-      job.failure.resolution === 'retry_recovery' &&
-      'broadcast' in job &&
-      Boolean(job.broadcast),
+      rawLiftRequestFromJobRequest(job.request) !== null && isHeldForChainProof(job),
+    finalizeProvenPublish: async (job, origin, recovery) => {
+      const finalized = this.finalizeRecoveredJob(job, origin, recovery.inclusion, recovery.finalization);
+      await this.promoteFinalizedPrivateStaging(finalized);
+      await this.writeJob(finalized, 'recovered-finalize');
+      return true;
+    },
     shouldPromoteFinalizedPrivateStaging: () => true,
   };
 
@@ -313,7 +490,15 @@ export class TripleStoreAsyncLiftPublisher
     inspectPreparedPayload: async () => null,
     process: (claimed, walletId) => this.processKnowledgeAssetVmPublish(claimed, walletId),
     recoverInterrupted: (job) => this.recoverKnowledgeAssetVmPublishInterrupted(job),
-    canRetryFailedRecovery: () => false,
+    // GH#2270 — the named lane used to answer `false` here, which is what made a held KA VM job
+    // unresolvable without an operator: nothing ever re-asked the chain about it. PR-2's held
+    // population IS this lane's work queue, so the eligibility test is exactly that predicate —
+    // one definition of "this job's transaction is unaccounted for", shared with admission, the
+    // reaccept writer, the retry projection and bulk clear, rather than a second rule that could
+    // disagree with them.
+    canRetryFailedRecovery: (job) => isHeldForChainProof(job),
+    finalizeProvenPublish: async (job, origin, recovery, options) =>
+      await this.finalizeProvenKnowledgeAssetVmPublish(job, origin, recovery, options) === 'finalized',
     shouldPromoteFinalizedPrivateStaging: () => false,
   };
 
@@ -341,7 +526,11 @@ export class TripleStoreAsyncLiftPublisher
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.rand = config.rand ?? (() => Math.random());
-    this.chainRecoveryResolver = config.chainRecoveryResolver;
+    assertNoLegacyChainRecoveryResolver(config);
+    this.chainProofResolver = config.chainProofResolver;
+    this.chainProofCapableForWallet = config.chainProofCapableForWallet;
+    this.chainProofDispatchBatchSize = config.chainProofDispatchBatchSize ?? 25;
+    this.chainProofDispatchTimeBudgetMs = config.chainProofDispatchTimeBudgetMs ?? 15_000;
     this.knowledgeAssetVmPublishRecoveryResolver = config.knowledgeAssetVmPublishRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
     this.knowledgeAssetVmPublishHandler = resolveKnowledgeAssetVmPublishHandler(config);
@@ -638,12 +827,27 @@ export class TripleStoreAsyncLiftPublisher
       });
 
       failureState = 'broadcast';
+      const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
+      // GH#2270 — the same pre-send write-ahead KA VM publish has taken since #1864. The
+      // executor's `chain:txsigned:tx-<hash>` phase fires with the SIGNED hash strictly
+      // before the tx goes on the wire and is awaited, so a crash anywhere in the send
+      // window now finds a durable 'broadcast' record carrying that hash. Without it the
+      // job read back as 'validated', recover() reset it to 'accepted', and it re-published
+      // under a new hash while the first was still in flight.
+      const broadcastRecorder = this.createPreSendBroadcastRecorder({
+        jobId: claimed.jobId,
+        walletId,
+        publicByteSize,
+      });
       const publishResult = await this.publishExecutor({
         walletId,
-        publishOptions: prepared.publishOptions,
+        publishOptions: {
+          ...prepared.publishOptions,
+          onBeforeBroadcast: broadcastRecorder.onBeforeBroadcast,
+        },
       });
       return await this.recordPublishResult(claimed.jobId, publishResult, {
-        publicByteSize: this.computePublicByteSize(prepared.publishOptions.quads),
+        publicByteSize,
       });
     } catch (error) {
       return await this.recordExecutionFailure(claimed.jobId, failureState, error);
@@ -702,12 +906,11 @@ export class TripleStoreAsyncLiftPublisher
     }
 
     const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
-    const broadcastRecorder = this.createKnowledgeAssetVmPublishBroadcastRecorder({
+    const broadcastRecorder = this.createPreSendBroadcastRecorder({
       jobId: claimed.jobId,
       walletId,
       merkleRoot: request.sealMerkleRoot,
       publicByteSize,
-      delegate: prepared.publishOptions.onPhase,
     });
     let publishResult!: PublishResult;
     try {
@@ -724,7 +927,7 @@ export class TripleStoreAsyncLiftPublisher
         resolved: validated.resolved,
         publishOptions: {
           ...prepared.publishOptions,
-          onPhase: broadcastRecorder.onPhase,
+          onBeforeBroadcast: broadcastRecorder.onBeforeBroadcast,
         },
       };
       publishResult = await this.knowledgeAssetVmPublishHandler.execute(executionInput);
@@ -742,9 +945,11 @@ export class TripleStoreAsyncLiftPublisher
       // #1867 — either the tx never left ('not-reached' / 'rolled-back-pre-send'), or a
       // DEFINITIVE pre-acceptance reject (e.g. insufficient funds at eth_sendRawTransaction)
       // on a durably-recorded broadcast: record an immediate terminal failure rather than a
-      // ~15-min recovery chase. A failed KA VM job is never chain-recovery-chased
-      // (canRetryFailedRecovery === false); its code comes from the publish mapper
-      // (insufficient_funds for the whitelisted rejects).
+      // ~15-min recovery chase. Its code comes from the publish mapper (insufficient_funds for
+      // the whitelisted rejects), and GH#2270 PR-3 is why that matters more than it used to: a
+      // failed KA VM job IS chain-recovery-chased now, but only while it is held, and
+      // `insufficient_funds` is proven-ineffective — so a whitelisted reject lands terminal and
+      // stays out of the dispatcher's queue instead of costing a chain read every tick.
       return await this.failKnowledgeAssetVmPublishExecution(claimed.jobId, error);
     }
     try {
@@ -769,20 +974,56 @@ export class TripleStoreAsyncLiftPublisher
     if (job.status !== 'broadcast' && job.status !== 'included') {
       return false;
     }
-    if (!this.chainRecoveryResolver) {
-      if (job.status === 'broadcast') {
+    if (!this.chainProofResolver) {
+      // PR #2300 r8 (3812585483) — a 'broadcast' raw job used to be reset here on the reasoning
+      // that it had probably not sent anything. The pre-send write-ahead this PR added makes that
+      // reasoning false: reaching 'broadcast' now means a transaction was SIGNED and durably
+      // recorded before the send, so a crash in that window leaves a record whose transaction may
+      // be in the mempool or already mined. Resetting it hands the next worker a fresh signature
+      // over the same content — the double publish this chain exists to prevent — and with no
+      // resolver there is nothing that can establish the first transaction's fate. It therefore
+      // stays where it is, transaction-bearing and unclaimable, until a node with a chain-proof
+      // resolver reconciles it or an operator clears it by id.
+      if (job.status === 'broadcast' && !getLiftJobTransactionEvidence(job)) {
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.resetJobToAccepted(job, 'broadcast', getLiftJobTransactionEvidence(job)), 'recover-reset');
+        await this.writeJob(this.resetJobToAccepted(job, 'broadcast', undefined), 'recover-reset');
         return true;
       }
-      return false;
+      // Evidence-bearing (or 'included'): release the wallet so the node is not wedged.
+      await this.releaseWalletLockForJob(job);
+      // r25 (🔴 3820711322) — and then let the SAME timeout gate the resolver-bearing path uses
+      // move it to a held failed state. Leaving it at 'broadcast' made the comment above false: a
+      // non-terminal record is unclaimable, never times out, and `clearTerminalJob` rejects it as
+      // nonterminal — so the operator exit this branch promised did not exist, and the job was
+      // stuck until the deployment gained a resolver. Failing it inconclusively changes nothing
+      // about the transaction (the evidence is preserved, nothing is resent, and it stays held for
+      // chain proof), but it puts the record in the state the rest of the system can act on: the
+      // operator's by-id clear works, and a node that later gains a resolver settles it through
+      // the failed-job lane.
+      const timedOut = job as LiftJobBroadcast | LiftJobIncluded;
+      if (!this.hasInconclusiveRecoveryTimedOut(timedOut)) return false;
+      await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(timedOut), 'failed');
+      return true;
     }
 
     const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
-    const resolved = await this.chainRecoveryResolver(recoverable);
-    if (resolved) {
+    // GH#2270 — the resolver now reports WHICH chain fact it found. This half deliberately acts on
+    // `recovered` alone and lets every other verdict fall through to the timeout gate below: it
+    // governs a job that is still LIVE ('broadcast'/'included'), where that gate is what bounds
+    // time-to-declare-failure. Verdict-driven dispatch belongs to the FAILED-job lane, which only
+    // starts once this gate has already fired.
+    // A LIVE broadcast always has its metadata, so the lookup is direct here — no derivation
+    // and nothing to fail to derive.
+    const origin = liveChainRecoveryOrigin(recoverable);
+    const resolution = await this.chainProofResolver(origin.lookup);
+    if (resolution.status === 'recovered') {
       await this.releaseWalletLockForJob(job);
-      const finalized = this.finalizeRecoveredJob(recoverable, resolved.inclusion, resolved.finalization);
+      const finalized = this.finalizeRecoveredJob(
+        recoverable,
+        origin,
+        resolution.recovery.inclusion,
+        resolution.recovery.finalization,
+      );
       await this.promoteFinalizedPrivateStaging(finalized);
       await this.writeJob(finalized, 'recovered-finalize');
       return true;
@@ -799,57 +1040,131 @@ export class TripleStoreAsyncLiftPublisher
     if (job.status !== 'broadcast' && job.status !== 'included') return false;
 
     const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
-    if (this.knowledgeAssetVmPublishRecoveryResolver) {
-      const resolved = await this.knowledgeAssetVmPublishRecoveryResolver(recoverable);
-      if (resolved) {
-        if (
-          this.knowledgeAssetVmPublishHandler?.finalizeRecovered &&
-          isKnowledgeAssetVmPublishJobRequest(recoverable.request)
-        ) {
-          try {
-            await this.knowledgeAssetVmPublishHandler.finalizeRecovered({
-              walletId: recoverable.broadcast.walletId,
-              request: recoverable.request.knowledgeAssetVmPublish,
-              job: recoverable,
-              recovery: resolved,
-            });
-          } catch {
-            // Chain success is authoritative, but local lifecycle repair may be
-            // temporarily blocked (for example while SWM catch-up is still in
-            // progress). Keep the job tx-bearing and retry recovery later. It
-            // is never safe to reset this job and submit a second transaction.
-            //
-            // Holding the wallet lock here does not strand the wallet even if
-            // the repair never succeeds: the lock carries the claim lease taken
-            // at claim time (`claimLeaseExpiresAt`), `syncWalletLockForJob`
-            // re-writes that same fixed deadline rather than extending it, and
-            // `recover()` sweeps expired locks before it retries. The wallet is
-            // freed at the lease deadline; the job stays tx-bearing regardless.
-            return false;
-          }
-
-          await this.releaseWalletLockForJob(job);
-          await this.writeJob(this.finalizeRecoveredJob(
-            recoverable,
-            resolved.inclusion,
-            resolved.finalization,
-          ), 'recovered-finalize');
-          return true;
-        }
-
-        // A chain resolver without the named-lifecycle finalizer cannot safely
-        // claim local recovery. Preserve the explicit terminal diagnosis rather
-        // than silently marking the queue job finalized.
-        await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable), 'failed');
-        return true;
-      }
+    const outcome = await this.finalizeProvenKnowledgeAssetVmPublish(
+      recoverable,
+      liveChainRecoveryOrigin(recoverable),
+    );
+    if (outcome === 'finalized') return true;
+    // Chain success is authoritative, but local lifecycle repair may be temporarily blocked (for
+    // example while SWM catch-up is still in progress). Keep the job tx-bearing and retry recovery
+    // later; it is never safe to reset this job and submit a second transaction.
+    if (outcome === 'repair-deferred') return false;
+    if (outcome === 'unsupported') {
+      // A chain resolver without the named-lifecycle finalizer cannot safely claim local recovery.
+      // Preserve the explicit terminal diagnosis rather than silently marking the job finalized.
+      await this.releaseWalletLockForJob(job);
+      await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable), 'failed');
+      return true;
     }
 
     if (!this.hasInconclusiveRecoveryTimedOut(recoverable)) return false;
     await this.releaseWalletLockForJob(job);
     await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable), 'failed');
     return true;
+  }
+
+  /**
+   * GH#2270 — the ONE way a named-KA job is finalized from chain proof, shared by the interrupted
+   * lane above and the failed-job dispatcher in {@link recover}. The two used to be a candidate for
+   * a second copy; they differ only in what they do with the non-finalized outcomes, which is why
+   * this returns them rather than acting on them.
+   *
+   * The named lane needs the CANONICAL receipt (block hash, tx index, signed author — the
+   * `publishProof` the generic lift recovery has no field for), so it asks
+   * `knowledgeAssetVmPublishRecoveryResolver` even when the dispatcher has already established a
+   * `recovered` verdict on the generic surface. Those are two different adapter reads by
+   * construction (`resolvePublishTransaction` vs `resolveCanonicalFinalizationReceipt`), and the
+   * second one is paid once, on the terminal transition only.
+   */
+  private async finalizeProvenKnowledgeAssetVmPublish(
+    job: LiftJob,
+    origin: ChainRecoveryOrigin,
+    // PR #2300 r2 — the dispatcher's verdict recovery, threaded through so a `recovered` update
+    // verdict's canonical evidence is consumed at finalize rather than re-proven. The live
+    // interrupted lane passes nothing (no verdict ran there) and the resolver verifies once.
+    verdictRecovery?: AsyncLiftPublisherRecoveryResult,
+    // r23 (🔴 3817474007) — the pass deadline, so this lane's own chain reads are bounded by
+    // the same budget the proof was. Optional: the LIVE interrupted lane runs outside a
+    // chain-proof pass and has no deadline to give.
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<'finalized' | 'unresolved' | 'repair-deferred' | 'unsupported'> {
+    if (!this.knowledgeAssetVmPublishRecoveryResolver) return 'unresolved';
+    // r26 (🔴 3821028709) — the race bounds the WAIT, it does not cancel the loser, and r25 put
+    // the MUTATING repair inside it. My reasoning there was wrong in a specific way: I argued the
+    // tolerance was the same as a crash in this window. It is not. A crash is fail-STOP; an
+    // abandoned promise is fail-CONTINUE, and it keeps writing lifecycle state after the pass has
+    // returned and released its serialization — overlapping a later pass or live queue work.
+    //
+    // So the split is by MUTABILITY, not by convenience:
+    //   - evidence resolution is READ-ONLY, so abandoning it costs nothing but a wasted RPC. Raced.
+    //   - `finalizeRecovered` MUTATES, so it is never abandoned. It is given the deadline signal
+    //     and then AWAITED to termination, and an in-flight guard keeps a second pass from
+    //     entering it concurrently even if something else goes wrong.
+    //
+    // The honest consequence, stated rather than hidden: a handler that ignores the signal and
+    // never returns holds the pass open. That is deliberate. Blocking is strictly safer than a
+    // repair racing the queue it was supposed to reconcile, and it is a handler defect we would
+    // rather surface than paper over.
+    const deadlineReached = Symbol('deadline');
+    const awaitDeadline = () => new Promise<typeof deadlineReached>((resolve) => {
+      const signal = options?.signal;
+      if (!signal) return;
+      if (signal.aborted) { resolve(deadlineReached); return; }
+      signal.addEventListener('abort', () => resolve(deadlineReached), { once: true });
+    });
+
+    // --- read-only phase: raced, safe to abandon ---
+    const resolvedOrTimeout = await Promise.race([
+      this.knowledgeAssetVmPublishRecoveryResolver(job, origin.lookup, verdictRecovery, options),
+      awaitDeadline(),
+    ]);
+    if (resolvedOrTimeout === deadlineReached) return 'unresolved';
+    const resolved = resolvedOrTimeout;
+    if (!resolved) return 'unresolved';
+    if (
+      !this.knowledgeAssetVmPublishHandler?.finalizeRecovered
+      || !isKnowledgeAssetVmPublishJobRequest(job.request)
+    ) {
+      return 'unsupported';
+    }
+
+    // --- mutating phase: never raced, never abandoned ---
+    // Nothing STARTS past the deadline; that is what bounds the pass in the common case.
+    if (options?.signal?.aborted) return 'unresolved';
+    if (this.finalizationsInFlight.has(job.jobId)) return 'unresolved';
+    this.finalizationsInFlight.add(job.jobId);
+    try {
+      await this.knowledgeAssetVmPublishHandler.finalizeRecovered({
+        walletId: origin.lookup.walletId,
+        request: job.request.knowledgeAssetVmPublish,
+        job,
+        lookup: origin.lookup,
+        recovery: resolved,
+        signal: options?.signal,
+      });
+    } catch {
+      // Local lifecycle repair is blocked for now. The caller keeps the job tx-bearing.
+      //
+      // Holding the wallet lock here does not strand the wallet even if the repair never
+      // succeeds: the lock carries the claim lease taken at claim time (`claimLeaseExpiresAt`),
+      // `syncWalletLockForJob` re-writes that same fixed deadline rather than extending it, and
+      // `recover()` sweeps expired locks before it retries. The wallet is freed at the lease
+      // deadline; the job stays tx-bearing regardless.
+      return 'repair-deferred';
+    } finally {
+      this.finalizationsInFlight.delete(job.jobId);
+    }
+    // A repair that honoured the deadline did not finish, so it must not be recorded as if it
+    // had: the durable transition below is reserved for a completed repair.
+    if (options?.signal?.aborted) return 'unresolved';
+
+    // --- persistence: past the deadline's reach, and deliberately so ---
+    await this.releaseWalletLockForJob(job);
+    await this.writeJob(
+      this.finalizeRecoveredJob(job, origin, resolved.inclusion, resolved.finalization),
+      'recovered-finalize',
+    );
+    return 'finalized';
   }
 
   private async findActiveKnowledgeAssetVmPublishJob(
@@ -969,11 +1284,29 @@ export class TripleStoreAsyncLiftPublisher
     }
     await this.assertActiveClaimLock(current);
 
-    const mapped = mapPublishResultToLiftJobSuccess({
+    const mappedResult = mapPublishResultToLiftJobSuccess({
       publishResult,
       walletId: current.claim.walletId,
       publicByteSize: options.publicByteSize,
     });
+    // GH#2270 PR-3 r2 — the publish RESULT has no nonce to report; only the pre-send write-ahead
+    // ever knew it. Every transition below replaces `broadcast` wholesale, so without this the
+    // nonce recorded before the send is silently dropped the moment the executor returns — and a
+    // job that later fails from 'included' would carry a hash with no way to prove its absence.
+    // Carried only when the hash MATCHES, so a mismatched result (refused just below) can never
+    // graft this job's nonce onto another transaction.
+    // r3 — the branch MARKER travels with the nonce, and for the same reason: both are known only
+    // at the write-ahead, both are wiped by a wholesale `broadcast` replacement, and recovery needs
+    // both (the nonce to prove absence, the marker to know absence-release is even allowed).
+    const preserved = current.broadcast?.txHash === mappedResult.broadcast?.txHash
+      ? {
+          ...(current.broadcast?.nonce !== undefined ? { nonce: current.broadcast.nonce } : {}),
+          ...(current.broadcast?.operationKind ? { operationKind: current.broadcast.operationKind } : {}),
+        }
+      : {};
+    const mapped = mappedResult.broadcast && Object.keys(preserved).length > 0
+      ? { ...mappedResult, broadcast: { ...mappedResult.broadcast, ...preserved } }
+      : mappedResult;
 
     let next: LiftJob = current;
     if (mapped.status === 'finalized' && mapped.finalization.mode === 'local') {
@@ -1076,32 +1409,293 @@ export class TripleStoreAsyncLiftPublisher
       }
     }
 
-    // Revisit failed jobs whose resolution is retry_recovery — re-attempt chain lookup
-    // so that a transient RPC outage past the timeout doesn't strand jobs permanently.
-    if (this.chainRecoveryResolver) {
-      const retryRecoveryJobs = (await this.list({ status: 'failed' }))
-        .filter(isFailedJob)
-        .filter((job) => this.jobHandlerFor(job.request).canRetryFailedRecovery(job));
+    recovered += await this.dispatchFailedJobsOnChainProof();
+    return recovered;
+  }
 
-      for (const job of retryRecoveryJobs) {
-        const resolved = await this.chainRecoveryResolver(job as unknown as LiftJobBroadcast);
-        if (resolved) {
-          await this.releaseWalletLockForJob(job);
-          // Restore the pre-failure status so finalizeRecoveredJob records
-          // the correct recoveredFromStatus (could be 'broadcast' or 'included').
-          const restoredStatus = job.failure.failedFromState === 'included' ? 'included' : 'broadcast';
-          const { failure: _staleFailure, ...jobWithoutFailure } = job as unknown as Record<string, unknown>;
-          const recoverable = { ...jobWithoutFailure, status: restoredStatus } as unknown as LiftJobBroadcast;
-          const finalized = this.finalizeRecoveredJob(recoverable, resolved.inclusion, resolved.finalization);
-          await this.promoteFinalizedPrivateStaging(finalized);
-          await this.writeJob(finalized, 'recovered-finalize');
-          recovered += 1;
+  /**
+   * GH#2270 PR-3 — the proof-first dispatcher: for every failed job whose transaction is
+   * unaccounted for, ask the chain and act on the ANSWER.
+   *
+   * Before this, the loop asked a two-state resolver and acted only on a success; every other
+   * answer, including a chain that said the transaction does not exist, was the same `null` and
+   * the job stayed failed. For the named lane it was worse — nothing asked at all
+   * (`canRetryFailedRecovery` was `false`), so a held KA VM job could only be released by an
+   * operator clearing it by id.
+   *
+   * NO TIME-BASED ESCAPE. The hold never expires into a reset. A held job is chased on the
+   * recover() cadence for as long as it takes, at one chain read per held job per tick, and the
+   * only exits are proof or an operator's by-id clear. The raw-lift lane's
+   * `recoveryLookupTimeoutMs` gate is NOT adopted here and the difference is deliberate: that gate
+   * bounds how long a LIVE broadcast may stay unresolved before it is declared failed, and it runs
+   * while the job still holds its wallet. This lane starts AFTER that declaration. An expiry here
+   * would have exactly one meaning — "we still have no proof, so resend anyway" — which is the
+   * double publish this whole chain exists to prevent.
+   */
+  /**
+   * PR #2300 r4 (3811993669) — can THIS publisher actually move that job, as configured?
+   *
+   * {@link hasAutomaticRecoveryExit} answers from the record alone: is there a question the chain
+   * could settle. This adds the other half — whether the components that would ask and act are
+   * wired up. Without a chain-proof resolver the dispatcher returns before it looks at anything,
+   * and an UPDATE additionally needs the named recovery resolver to finalize what recognition
+   * proves; a create's absence release needs only the reset this class already owns.
+   */
+  private automaticExitIsConfiguredFor(job: PersistedFailedJob): boolean {
+    if (!hasAutomaticRecoveryExit(job) || !this.chainProofResolver) return false;
+    // r20 (🔴 3815617109) — per WALLET, not per node. A resolver's presence is node-wide, but
+    // the ability to answer belongs to the adapter that signs for this job: on a node mixing a
+    // capable adapter with a legacy one, a node-wide answer promised an automatic exit to jobs
+    // whose own wallet could only ever return `inconclusive`. A job with no wallet at all cannot
+    // be asked about either, which is the same answer for the same reason.
+    // r23 (🔴 3817434406) — the SIGNER's adapter, from the same carrier as the hash. Reading
+    // the claim here asked whether a wallet that never signed this transaction could settle it.
+    const walletId = liftJobCheckedSigner(job);
+    if (!walletId) return false;
+    // r22 (🔴 3817363935) — and per OPERATION KIND, not just per wallet. The tri-state lookup
+    // is necessary but not sufficient: a create's absence release needs the finalized snapshot and
+    // an update's recognition needs verification plus the finality gate, so an adapter with the
+    // lookup alone can hold a job forever behind a `retryable: true` nothing can honour.
+    if (this.chainProofCapableForWallet
+      && !this.chainProofCapableForWallet(walletId, liftJobOperationKindMarker(job))) return false;
+    if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return true;
+    // r12 (3813505773) — a named job needs the recovery resolver whatever its kind. The create
+    // case looked exempt because absence-release is create-only and needs nothing but the reset —
+    // but that is only ONE of its outcomes. If the transaction MINED, settling it means building
+    // canonical evidence and repairing the lifecycle, which is exactly what this resolver does;
+    // without it a mined create is held forever while the response promised convergence.
+    return this.knowledgeAssetVmPublishRecoveryResolver !== undefined;
+  }
+
+  private async dispatchFailedJobsOnChainProof(): Promise<number> {
+    // The dispatcher RE-QUEUES work (a proven-absent job goes back to 'accepted') and spends a
+    // chain read per held job per tick. `pause()` means this node is not driving publishes, so it
+    // must not do either. The interrupted half above deliberately keeps running while paused: it
+    // repairs jobs this node has ALREADY broadcast, where stopping would leave a live transaction
+    // unreconciled — the phantom the pre-send write-ahead exists to make visible.
+    if (this.paused || !this.chainProofResolver) return 0;
+
+    // r18 (🔴 3816322914) — this pass costs one RPC round trip PER HELD JOB, and
+    // `AsyncLiftRunner.start()` awaits `recover()`. Unbounded, an incident that leaves a large
+    // held population behind slow endpoints turns startup into `held jobs x RPC timeout` and
+    // re-pays it every cadence, with normal queue processing unable to begin meanwhile. Three
+    // bounds apply, and none of them changes a job's DISPOSITION: a job that is not asked is left
+    // exactly as held, so no bound can authorize a resend.
+    const startedAt = this.now();
+    const heldJobs = (await this.list({ status: 'failed' }))
+      .filter(isFailedJob)
+      .filter((job) => this.jobHandlerFor(job.request).canRetryFailedRecovery(job));
+
+    // Bound 1 — only jobs whose backoff has elapsed. Jobs asked recently that established nothing
+    // are deferred, so the population ROTATES through the batch rather than the head of the list
+    // being re-asked every pass. No cursor is needed: the due times are the rotation.
+    const dueJobs = heldJobs.filter((job) => (this.chainProofNextDueAt.get(job.jobId)?.dueAt ?? 0) <= startedAt);
+
+    // r19 (🔴 3816490915) — the lookup is derived BEFORE the batch is taken, because a job that
+    // cannot form one costs no round trip and must therefore cost no batch slot either. Deriving
+    // it after the slice let unformable records — legacy or malformed held jobs, which are stably
+    // ordered and so sit at the front pass after pass — consume the whole batch and starve every
+    // actionable job behind them, permanently. That is strictly worse than the unbounded sweep it
+    // replaced, which at least reached them. The derivation is pure and local, so paying it for
+    // the whole due population buys the fix for nothing.
+    const dispatchable = dueJobs
+      .map((job) => ({ job, lookup: this.chainProofLookupFor(job) }))
+      .filter((candidate): candidate is { job: PersistedFailedJob; lookup: AsyncLiftChainProofLookup } => candidate.lookup !== null);
+
+    // r19 (🔴 3816490904) — one controller for the whole pass. Bound 3 as r18 shipped it only
+    // gated whether the NEXT lookup started, which is not a ceiling: a resolver that never settles
+    // kept `recover()` — and the startup awaiting it — pending forever, the very condition the
+    // budget was introduced for. The signal is handed to the resolver so a cooperating one can
+    // cancel and release its socket, and the publisher additionally stops WAITING at the deadline
+    // so the pass completes even against a resolver that ignores it.
+    const deadline = new AbortController();
+    const deadlineTimer = setTimeout(() => deadline.abort(), Math.max(0, this.chainProofDispatchTimeBudgetMs));
+    let dispatched = 0;
+    try {
+      // Bound 2 — at most one batch of RPCs per pass.
+      for (const { job, lookup } of dispatchable.slice(0, Math.max(0, this.chainProofDispatchBatchSize))) {
+        // Bound 3 — the wall-clock ceiling. Batch size bounds the CALL COUNT; when each call is slow
+        // it is time that startup readiness actually depends on. Checked before each turn so a pass
+        // cannot start a new round trip once the budget is spent; the rest are asked next cadence.
+        if (this.now() - startedAt >= this.chainProofDispatchTimeBudgetMs) break;
+        // One held job must never strand the rest of the pass. The resolver reaches the network and
+        // the handlers reach the store, so either can throw; before this the exception propagated
+        // out of recover() and every job queued behind this one silently stopped being reconciled.
+        // A job whose turn ended in an exception simply stays held and is asked again next tick,
+        // which is the same disposition as any other unestablished answer.
+        try {
+          const settled = await this.dispatchOneHeldJob(job, lookup, deadline);
+          dispatched += settled;
+          if (settled > 0) this.chainProofNextDueAt.delete(job.jobId);
+          else this.deferNextChainProofAttempt(job.jobId);
+        } catch {
+          // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
+          // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
+          // every pass and crowd out jobs that could actually settle.
+          this.deferNextChainProofAttempt(job.jobId);
+          continue;
         }
-        // If still inconclusive, leave in failed state — next recover() will retry again.
+      }
+    } finally {
+      // The timer must not keep the process alive past the pass, and the controller must not be
+      // left un-aborted for a lookup that is still in flight after we stopped waiting on it.
+      clearTimeout(deadlineTimer);
+      deadline.abort();
+    }
+    return dispatched;
+  }
+
+  /**
+   * r18 (🔴 3816322914) — a turn that established nothing defers the next one, capped and
+   * jittered. Capped so a long-held job is still asked periodically rather than drifting to never;
+   * jittered so a population held by ONE incident — which is how they arrive — does not come due
+   * in lockstep and rebuild the thundering herd the batch bound exists to prevent.
+   */
+  private deferNextChainProofAttempt(jobId: string): void {
+    const attempts = (this.chainProofNextDueAt.get(jobId)?.attempts ?? 0) + 1;
+    const backoffMs = Math.min(
+      CHAIN_PROOF_BACKOFF_BASE_MS * 2 ** (attempts - 1),
+      CHAIN_PROOF_BACKOFF_MAX_MS,
+    );
+    this.chainProofNextDueAt.set(jobId, {
+      dueAt: this.now() + backoffMs + Math.floor(this.rand() * backoffMs * CHAIN_PROOF_BACKOFF_JITTER),
+      attempts,
+    });
+  }
+
+  /** One held job's turn: ask the chain, then execute the disposition the policy module decides. */
+  private async dispatchOneHeldJob(
+    job: PersistedFailedJob,
+    lookup: AsyncLiftChainProofLookup,
+    deadline: AbortController,
+  ): Promise<number> {
+    if (!this.chainProofResolver) return 0;
+    // r19 (🔴 3816490904) — the signal goes to the resolver AND the wait is bounded here. A
+    // resolver that honours the signal settles promptly and releases its socket; one that ignores
+    // it is abandoned rather than awaited, which is worse for that socket but leaves the ceiling
+    // real. Either way the deadline establishes NOTHING, so the caller records it exactly like an
+    // inconclusive verdict: the job stays held and is asked again later.
+    const resolution = await Promise.race([
+      this.chainProofResolver(lookup, { signal: deadline.signal }),
+      new Promise<null>((resolve) => {
+        if (deadline.signal.aborted) { resolve(null); return; }
+        deadline.signal.addEventListener('abort', () => resolve(null), { once: true });
+      }),
+    ]);
+    if (resolution === null) return 0;
+
+    // GH#2270 PR-3 r4 — the verdict was earned across an RPC await, against a SNAPSHOT of the
+    // job. While it was in flight, an operator's `clearTerminalJob` or a client's fresh mandate
+    // can have moved or removed the record; writing the disposition against the stale snapshot
+    // would put the old record BACK — a cleared job resurrected by its own verdict, on top of
+    // whatever exists now. So the disposition is applied under the SAME claim lock those
+    // transitions serialize on, against a RE-READ of the record, and only when it is still the
+    // identical held job the chain was asked about — same failure identity, same transaction
+    // evidence. Anything else drops the verdict; the next tick asks about whatever now exists.
+    return this.withClaimLock(async () => {
+      const current = await this.getStatus(job.jobId);
+      if (!current || !isFailedJob(current)) return 0;
+      if (!this.isSameHeldFailedJob(job, current, lookup)) return 0;
+      return this.applyChainProofDisposition(current, lookup, resolution, deadline);
+    });
+  }
+
+  /**
+   * Is `current` still the exact held job the chain was asked about? Same failure identity (origin
+   * state, code, and the failure timestamp — a re-failed successor gets a fresh `failedAt` from
+   * the injected clock) and the same derived transaction evidence, compared field by field so an
+   * inherited-hash successor with different nonce or pinned identity cannot inherit the verdict.
+   */
+  private isSameHeldFailedJob(
+    before: PersistedFailedJob,
+    current: PersistedFailedJob,
+    lookup: AsyncLiftChainProofLookup,
+  ): boolean {
+    if (current.failure.failedFromState !== before.failure.failedFromState) return false;
+    if (current.failure.code !== before.failure.code) return false;
+    if (current.timestamps.failedAt !== before.timestamps.failedAt) return false;
+    const currentLookup = this.chainProofLookupFor(current);
+    return currentLookup !== null
+      && chainProofLookupFingerprint(currentLookup) === chainProofLookupFingerprint(lookup);
+  }
+
+  /** Execute the disposition the policy module decides for a (re-verified) held job. */
+  private async applyChainProofDisposition(
+    job: PersistedFailedJob,
+    lookup: AsyncLiftChainProofLookup,
+    resolution: AsyncLiftChainProofResolution,
+    deadline: AbortController,
+  ): Promise<number> {
+    const disposition = decideChainProofDisposition(job, resolution.status);
+
+    switch (disposition.action) {
+      case 'finalize': {
+        if (resolution.status !== 'recovered') return 0;
+        // PR #2300 r9 (3812794019) — a published-finalized record REQUIRES claim, validation,
+        // broadcast and inclusion, and both lanes finalize by rebuilding from the record they are
+        // given. A held job can legitimately lack the first two: reset to a carrier-only record,
+        // re-claimed, and failed again BEFORE validation. Finalizing that would persist a
+        // `finalized` job that does not satisfy its own exported union, which every consumer is
+        // entitled to rely on. There is nothing here to invent, so it stays held — the transaction
+        // is still accounted for by the evidence it carries, and the by-id clear is the exit. The
+        // LIVE lane cannot reach this state, which is why the check belongs here and not there.
+        if (!job.claim || !job.validation) return 0;
+        // The record goes to the handler AS PERSISTED. Where it is recovering from is stated
+        // separately, from the two places a failed job actually keeps it — the failure's origin
+        // state and the evidence carrier the lookup was derived from. Nothing is restored,
+        // rebuilt or cast.
+        const origin: ChainRecoveryOrigin = {
+          recoveredFromStatus: job.failure.failedFromState === 'included' ? 'included' : 'broadcast',
+          txHash: lookup.txHash,
+          lookup,
+        };
+        // Release the lock BEFORE the handler runs so the wallet is free either way; a handler
+        // that cannot finalize yet leaves the job held, and it holds no wallet while it waits.
+        await this.releaseWalletLockForJob(job);
+        // r23 (🔴 3817474007) — the budget bounded the PROOF and stopped there. Finalization
+        // does its own chain reads and store writes, so a stalled provider inside it hung
+        // `recover()` — and the startup awaiting it — indefinitely, which is exactly the ceiling
+        // the budget exists to give. Two bounds, both needed:
+        //   1. nothing STARTS once the deadline has passed. The job keeps its held state, the
+        //      verdict is simply not applied this pass, and the next one re-establishes it. This
+        //      is the bound that matters for the queue behind it.
+        //   2. the deadline signal goes INTO the finalizer, so its own reads cancel rather than
+        //      being abandoned. Only reads take it; the persistence step is not interrupted
+        //      mid-write, so a timeout cannot leave a half-applied lifecycle.
+        // The verdict is proof about the CHAIN, and the chain does not change because we ran out
+        // of time — so declining to apply it is always safe, and never a resend.
+        if (deadline.signal.aborted) return 0;
+        const finalized = await this.jobHandlerFor(job.request)
+          .finalizeProvenPublish(job, origin, resolution.recovery, { signal: deadline.signal });
+        return finalized ? 1 : 0;
+      }
+      case 'refail_reverted': {
+        await this.releaseWalletLockForJob(job);
+        await this.writeJob(this.failProvenRevertedJob(job, disposition.failedFromState), 'failed');
+        return 1;
+      }
+      case 'reset': {
+        // The job may re-run, on the SAME jobId, through the one reset builder — which carries the
+        // hash forward for audit, MARKED ACCOUNTED. This is the ONLY place that mark is written,
+        // and it is what stops a released job from being re-held on a transaction this dispatcher
+        // has just proven does not exist: it could never be proven a second time, because nothing
+        // new was ever sent. A later attempt that actually signs something records fresh broadcast
+        // evidence, and that holds unconditionally.
+        await this.releaseWalletLockForJob(job);
+        await this.writeJob(
+          resetFailedLiftJobToAccepted(job, this.now(), { txHashAccounted: true }),
+          'recover-reset',
+        );
+        return 1;
+      }
+      case 'hold':
+        return 0;
+      default: {
+        // A new disposition must be executed here rather than silently do nothing.
+        const unhandled: never = disposition;
+        return unhandled;
       }
     }
-
-    return recovered;
   }
 
   async getStats(): Promise<Record<LiftJobState, number>> {
@@ -1661,67 +2255,90 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
-  private createKnowledgeAssetVmPublishBroadcastRecorder(params: {
+  /**
+   * The pre-send write-ahead hook, shared by BOTH publish paths.
+   *
+   * GH#2270 — raw lift used to send its tx with no `onPhase` of its own, so a crash in the
+   * send window left the job at 'validated' with no txHash: recover() reset it to 'accepted'
+   * and it re-broadcast under a fresh hash — a double publish with nothing on disk to
+   * contradict it. It now takes the same boundary KA VM publish has taken since #1864, from
+   * this one implementation rather than a second copy.
+   *
+   * `merkleRoot` is optional because only KA VM publish knows one before the send (the seal
+   * root); raw lift's real root arrives with the publish result and `recordPublishResult`
+   * merges it in. `LiftJobBroadcastMetadata.merkleRoot` is optional for exactly this reason —
+   * the txHash is the evidence that matters here.
+   */
+  private createPreSendBroadcastRecorder(params: {
     jobId: string;
     walletId: string;
-    merkleRoot: LiftJobHex;
+    merkleRoot?: LiftJobHex;
     publicByteSize?: number;
-    delegate?: PhaseCallback;
-  }): { onPhase: PhaseCallback; readonly outcome: PreSendOutcome } {
-    // #1864 — the pre-send write-ahead outcome is tracked in this closure (like
-    // `recordedTxHash`) rather than threaded as a mutable out-parameter through the publish
-    // path. The processKnowledgeAssetVmPublish catch reads `.outcome` to decide recovery vs
-    // terminal. It stays 'not-reached' unless the write-ahead hook actually fires.
+  }): { onBeforeBroadcast: (record: PreBroadcastRecord) => Promise<void>; readonly outcome: PreSendOutcome } {
+    // #1864 — the pre-send write-ahead outcome is tracked in this closure (like `recordedTxHash`)
+    // rather than threaded as a mutable out-parameter through the publish path. The
+    // processKnowledgeAssetVmPublish catch reads `.outcome` to decide recovery vs terminal. It
+    // stays 'not-reached' unless the write-ahead hook actually fires.
+    //
+    // GH#2270 PR-3 r2 — the TRIGGER is now the adapter's typed `onBeforeBroadcast`, not a parsed
+    // phase string. The durability guarantee is unchanged and so is everything below it; what went
+    // away is a contract that lived in a naming convention and in the ORDER two breadcrumbs were
+    // emitted. The nonce arrives as a field on the signal, so there is nothing left to correlate.
     let outcome: PreSendOutcome = 'not-reached';
-    let recordedTxHash: LiftJobHex | undefined;
-    const onPhase: PhaseCallback = async (phase, status) => {
-      await (params.delegate?.(phase, status) as unknown as Promise<void> | void);
-      if (status !== 'start') return;
-      const txHash = txHashFromSignedPhase(phase);
-      if (!txHash || recordedTxHash) return;
-      recordedTxHash = txHash;
+    let recordedTxHash: string | undefined;
+    const onBeforeBroadcast = async (record: PreBroadcastRecord): Promise<void> => {
+      if (recordedTxHash) return;
+      recordedTxHash = record.txHash;
       try {
-        await this.recordKnowledgeAssetVmPublishBroadcastProgress({
+        await this.recordBroadcastProgressBeforeSend({
           jobId: params.jobId,
           walletId: params.walletId,
-          txHash,
+          txHash: record.txHash as LiftJobHex,
+          nonce: record.nonce,
+          // r3 — the branch that signed, persisted with the hash it signed (see
+          // LiftJobBroadcastMetadata.operationKind): it is not recoverable from the request later.
+          operationKind: record.operationKind,
           merkleRoot: params.merkleRoot,
           publicByteSize: params.publicByteSize,
         });
         // The transition is fsync-durable (or was already durable): the tx is about to send.
         outcome = 'recorded-durable';
       } catch (error) {
-        // recordDurableBroadcastBeforeSend rolled the transition back before re-throwing (or
-        // the write-ahead never durably mutated state): the tx was never sent.
+        // recordDurableBroadcastBeforeSend rolled the transition back before re-throwing (or the
+        // write-ahead never durably mutated state): the tx was never sent.
         outcome = 'rolled-back-pre-send';
         throw error;
       }
     };
     return {
-      onPhase,
+      onBeforeBroadcast,
       get outcome() {
         return outcome;
       },
     };
   }
 
-  private async recordKnowledgeAssetVmPublishBroadcastProgress(params: {
+  private async recordBroadcastProgressBeforeSend(params: {
     jobId: string;
     walletId: string;
     txHash: LiftJobHex;
-    merkleRoot: LiftJobHex;
+    nonce?: number;
+    operationKind?: 'create' | 'update';
+    merkleRoot?: LiftJobHex;
     publicByteSize?: number;
   }): Promise<void> {
     const current = await this.getRequiredJob(params.jobId);
     if (current.status === 'broadcast') return;
     if (current.status !== 'validated') {
       throw new Error(
-        `Cannot record knowledge asset VM publish broadcast for job ${params.jobId} from status ${current.status}`,
+        `Cannot record pre-send broadcast for job ${params.jobId} from status ${current.status}`,
       );
     }
     await this.recordDurableBroadcastBeforeSend(current, {
       txHash: params.txHash,
       walletId: params.walletId,
+      nonce: params.nonce,
+      operationKind: params.operationKind,
       merkleRoot: params.merkleRoot,
       publicByteSize: params.publicByteSize,
     });
@@ -1932,6 +2549,12 @@ export class TripleStoreAsyncLiftPublisher
       recoveredFrom: recoveredFromStatus,
       txHashChecked,
       stampRetriedAt: false,
+      ...(liftJobOperationKindMarker(job) ? { operationKind: liftJobOperationKindMarker(job) } : {}),
+      // r21 (🔴 3812632539) — the signer travels with the hash. Prefer the broadcast this reset
+      // is dropping; otherwise carry forward a signer an earlier reset already preserved. Never
+      // the claim: that is the wallet for the NEXT attempt, not the one that signed this hash.
+      ...(liftJobCheckedSigner(job) ? { walletIdChecked: liftJobCheckedSigner(job) } : {}),
+      ...(liftJobCheckedNonce(job) !== undefined ? { nonceChecked: liftJobCheckedNonce(job) } : {}),
     });
   }
 
@@ -2033,6 +2656,12 @@ export class TripleStoreAsyncLiftPublisher
         `LiftJob ${job.jobId} failed as ${job.failure.code} after a transaction may have been submitted; `
           + 'it cannot be republished until chain recovery proves the transaction absent',
         job.jobId,
+        // PR #2300 r1 — per-job: does an automatic lane exist that can move THIS record, or is
+        // the operator's by-id clear its only exit? The HTTP boundary forwards the answer.
+        // r4 (3811993669) — record eligibility is only half of it: a publisher with no chain-proof
+        // resolver wired never touches the job, so promising a retry would send clients into a loop
+        // that cannot converge. The answer is the record AND this instance's configured capability.
+        this.automaticExitIsConfiguredFor(job),
       );
     }
     const reset = resetFailedLiftJobToAccepted(job, this.now());
@@ -2055,18 +2684,49 @@ export class TripleStoreAsyncLiftPublisher
     return reaccepted;
   }
 
+  /**
+   * GH#2270 PR-3 r3 — the ORIGIN is passed in rather than read off the job.
+   *
+   * A live interrupted job carries it in `status` and `broadcast.txHash`; a FAILED one carries it
+   * in `failure.failedFromState` and whichever evidence carrier it has. Reading it off the record
+   * only worked for the first, which is why the dispatcher used to fabricate a broadcast-shaped
+   * job to hand over. Taking it as an argument lets both lanes pass the record exactly as it is.
+   *
+   * `failure` is dropped here rather than by each caller: a finalized job has none, and stripping
+   * it at the one place that produces a finalized record is what makes that true by construction.
+   */
   private finalizeRecoveredJob(
-    job: LiftJobBroadcast | LiftJobIncluded,
+    job: LiftJob,
+    origin: ChainRecoveryOrigin,
     inclusion: LiftJobInclusionMetadata,
     finalization: LiftJobFinalizationMetadata,
   ): LiftJob {
     const now = this.now();
+    const { failure: _dropped, ...withoutFailure } = job as LiftJob & { failure?: unknown };
+    // PR #2300 r10 (3812960758) — a published-finalized record must CARRY its broadcast metadata,
+    // and a job held on the recovery carrier alone has none: an earlier reset dropped it and kept
+    // the hash. Recording it from the transaction just proven is not invention — it is the same
+    // hash and wallet the proof was bound to — and without it this writes a `finalized` job that
+    // does not satisfy its own union. The claim is guaranteed by the dispatcher's shape guard.
+    // r23 (🔴 3817434406) — the signer comes from the LOOKUP this verdict was earned about, not
+    // from the claim. A claim names the wallet for the current or next attempt; an inherited hash
+    // was signed by an earlier one, so attributing it to the later claimant writes a finalized
+    // record for a transaction/account pair that never existed on chain. `origin.lookup` is
+    // already built from the evidence carrier (see `chainProofLookupFor`), so it is the same
+    // envelope the hash came from.
+    const broadcast = job.broadcast
+      ?? { txHash: origin.txHash, walletId: origin.lookup.walletId };
     return {
-      ...job,
+      ...withoutFailure,
       status: 'finalized',
+      ...(broadcast ? { broadcast } : {}),
       inclusion,
       finalization,
-      recovery: { action: 'finalized_from_chain', recoveredFromStatus: job.status, txHashChecked: job.broadcast.txHash },
+      recovery: {
+        action: 'finalized_from_chain',
+        recoveredFromStatus: origin.recoveredFromStatus,
+        txHashChecked: origin.txHash,
+      },
       timestamps: {
         ...job.timestamps,
         failedAt: undefined,
@@ -2096,6 +2756,68 @@ export class TripleStoreAsyncLiftPublisher
       },
     });
 
+    return this.mergeJob(job, 'failed', { failure: failure as any });
+  }
+
+  /**
+   * GH#2270 — re-record a held job's failure as `tx_reverted` once the chain has PROVEN its
+   * transaction reverted.
+   *
+   * The code is not cosmetic: `isHeldForChainProof` is `hasBroadcastEvidence && !provenIneffective`,
+   * and `tx_reverted` is one of the two codes the registry marks proven-ineffective. Writing it is
+   * therefore how the hold is released — through the disposition module's own rule rather than
+   * around it — while the evidence stays on the job (the merge keeps `broadcast`/`recovery`), so
+   * an operator can still see which transaction was checked. `isOccupyingLifecycleJob` then stops
+   * binding the KA's lifecycle, which is what lets the same KA be published again.
+   *
+   * No retry is scheduled: a revert is terminal by registry policy, and re-running it would spend
+   * gas to revert again.
+   */
+  /**
+   * GH#2270 PR-3 — the facts a chain-proof lookup needs, from whichever carrier holds them, or
+   * `null` when this job cannot be asked about at all.
+   *
+   * The hash comes from {@link getLiftJobTransactionEvidence}, so a job whose only carrier is the
+   * recovery record is covered. The wallet comes from `broadcast` when it exists and otherwise
+   * from the claim, because a job reset once has no broadcast metadata left. The nonce is only
+   * ever on live broadcast metadata: an inherited hash carries none, and the resolver reads that
+   * absence as "no proof of absence available" rather than guessing.
+   *
+   * `null` means stay held WITHOUT a chain read — the honest answer for a record we cannot form a
+   * question about, and strictly better than the previous behaviour, which handed the resolver a
+   * failed job cast to `LiftJobBroadcast` and let it throw on the field that was not there.
+   */
+  private chainProofLookupFor(job: PersistedFailedJob): AsyncLiftChainProofLookup | null {
+    const txHash = getLiftJobTransactionEvidence(job);
+    // r21 (🔴 3812632539) — the wallet must come from the SAME carrier as the hash. Falling
+    // back to `claim.walletId` paired an INHERITED hash with whatever wallet claimed the job next,
+    // producing a lookup for a transaction/account pair that never existed — and update
+    // recognition then bound the publisher to the wrong wallet, stranding a job whose transaction
+    // had actually mined. A pre-r21 record with no preserved signer is unformable, which is the
+    // fail-closed answer: it stays held and costs no batch slot.
+    const walletId = liftJobCheckedSigner(job);
+    if (!txHash || !walletId) return null;
+    return finishChainProofLookup(job, {
+      txHash,
+      walletId,
+      nonce: liftJobCheckedNonce(job),
+      publishIdentityKaId: pinnedPublishIdentityKaId(job),
+    });
+  }
+
+  private failProvenRevertedJob(
+    job: PersistedFailedJob,
+    failedFromState: 'broadcast' | 'included',
+  ): LiftJob {
+    const failure = createLiftJobFailureMetadata({
+      failedFromState,
+      code: 'tx_reverted',
+      message:
+        `LiftJob ${job.jobId} previously failed as ${job.failure.code}; chain recovery resolved its `
+        + `transaction ${getLiftJobTransactionEvidence(job) ?? '(unknown)'} to a failure receipt. `
+        + 'The transaction published nothing, so this job no longer holds its lifecycle subject.',
+      errorPayloadRef: `urn:dkg:publisher:error:${job.jobId}:chain-proof-reverted`,
+    });
     return this.mergeJob(job, 'failed', { failure: failure as any });
   }
 
@@ -2259,9 +2981,4 @@ function canonicalizeTerm(term: string, canonicalRootMap: Readonly<Record<string
     }
   }
   return term;
-}
-
-function txHashFromSignedPhase(phase: string): LiftJobHex | null {
-  const match = phase.match(/^chain:txsigned:tx-(0x[0-9a-fA-F]+)$/);
-  return match ? (match[1] as LiftJobHex) : null;
 }

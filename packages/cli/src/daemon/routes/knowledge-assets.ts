@@ -1619,24 +1619,31 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           });
         }
         // GH#2270 — admission refused to republish a job that may already have sent a
-        // transaction. Deliberately NOT the 409 above: nothing is wrong with the client's
-        // request, and the job KEEPS its lifecycle subject (`existingJobId`). `retryable`
-        // is FALSE on purpose: nothing in this build resolves the hold on its own. The
-        // chain-recovery loop never re-checks a failed KA-VM publish job
-        // (`canRetryFailedRecovery` is false for that handler), so a client that kept retrying
-        // this enqueue would loop until an operator intervened. The status and code stay 503 +
-        // LIFT_JOB_PENDING_CHAIN_PROOF: the condition IS transient in principle and this is not a
-        // client mistake (the 409 below would send them to re-share for nothing) nor a node bug
-        // (without this branch it fell through to a generic 500). The message names the two exits
-        // — chain recovery establishing the transaction's fate, or clearing THAT job by id — and
-        // GH#2270 PR-3's proof-first dispatcher is what flips `retryable` back to true.
+        // transaction. Deliberately NOT the 409 below: nothing is wrong with the client's
+        // request, and the job KEEPS its lifecycle subject (`existingJobId`).
+        //
+        // PR #2300 r1 (🟡 3809054821) — `retryable` is JOB-SPECIFIC, carried on the error from
+        // the policy module's hasAutomaticRecoveryExit: `true` means an automatic lane exists
+        // that can move THIS job (the proof-first dispatcher re-checks it every recover() tick —
+        // canonical recognition, or the create-only absence release), so re-submitting converges
+        // without an operator; it is still not a deadline — while the chain stays silent the 503
+        // keeps coming. `false` means the record has no automatic exit (a legacy no-nonce create,
+        // an update with no formable recognition question): retrying will 503 forever, and the
+        // by-id clear is the only move.
         if (err instanceof LiftJobPendingChainProofError) {
           return jsonResponse(res, 503, {
             code: err.code,
-            error: `${err.message}. No automatic lane resolves this: clear the job with `
-              + `POST /api/publisher/clear-job {"jobId":"${err.existingJobId}"} once you have `
-              + 'checked the transaction, or wait for chain recovery to establish its fate.',
-            retryable: false,
+            error: `${err.message}. ${err.retryable
+              ? 'Chain recovery re-checks this job every tick and releases it once the chain can '
+                + 'account for the transaction: if it mined, recovery finalizes this job; if it is '
+                + 'provably absent and this job may safely re-run, recovery puts it back on the '
+                + 'queue. A dropped transaction on a job recovery may not re-run blind stays held '
+                + 'until you check it yourself and clear the job with '
+              : 'This job\'s record gives chain recovery no automatic exit (no provable absence '
+                + 'and no formable recognition), so retrying will not release it. Check the '
+                + 'transaction yourself, then clear the job with '
+            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}"}.`,
+            retryable: err.retryable,
             existingJobId: err.existingJobId,
           });
         }

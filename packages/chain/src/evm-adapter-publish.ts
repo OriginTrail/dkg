@@ -10,6 +10,7 @@
  */
 
 import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-base.js';
+import { numericChainIdOf } from './evm-adapter-storage-reads.js';
 import { ethers, Wallet, Contract } from 'ethers';
 import type {
   BatchMintParams,
@@ -17,10 +18,12 @@ import type {
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
+  FinalizedChainProofSnapshot,
   KAUpdateVerification,
   OnChainPublishResult,
   PublisherPublishPlan,
   PublisherPublishPlanRequest,
+  PublishTransactionResolution,
   ReservedRange,
   TxResult,
   V10UpdateKAParams,
@@ -34,6 +37,40 @@ import { errorMessage } from './evm-adapter-errors.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 
 type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
+
+/**
+ * GH#2270 PR-3 r2 — does this error mean "that ERC-721 token does not exist"?
+ *
+ * Deliberately narrow. A `false` from the caller authorises a resend, so only the shapes OpenZeppelin
+ * and ethers produce for a nonexistent token qualify: the typed `ERC721NonexistentToken` custom
+ * error, or the classic `ERC721: invalid token ID` / `owner query for nonexistent token` strings.
+ * Every other CALL_EXCEPTION — a paused contract, a decode failure, an endpoint returning garbage —
+ * is left to the caller's `null`, which holds.
+ */
+const NONEXISTENT_TOKEN_LEGACY_REASONS = new Set([
+  'erc721: invalid token id',
+  'erc721: owner query for nonexistent token',
+]);
+
+function isNonexistentTokenRevert(err: unknown): boolean {
+  const e = err as {
+    code?: unknown;
+    reason?: unknown;
+    revert?: { name?: unknown } | null;
+  };
+  if (e?.code !== 'CALL_EXCEPTION') return false;
+  // r21 (🔴 3816664734) — EXACT identification only. This classifier guards the one path
+  // allowed to resend a held create, so "probably absent" is not good enough: a substring scan
+  // over the joined reason/shortMessage/message accepted unrelated reverts that merely CONTAIN a
+  // recognized phrase — `paused: nonexistent token checks unavailable` matched — and with the
+  // nonce consumed that fabricated the absence conjunction and authorized a second publish.
+  // The decoded custom-error NAME is authoritative; the two legacy strings are matched whole, as
+  // reasons, never as substrings of a longer message. Everything else falls through to the
+  // caller's `null`, which holds the job.
+  if (typeof e.revert?.name === 'string' && e.revert.name === 'ERC721NonexistentToken') return true;
+  return typeof e.reason === 'string'
+    && NONEXISTENT_TOKEN_LEGACY_REASONS.has(e.reason.trim().toLowerCase());
+}
 
 export class PublishMethods extends EVMChainAdapterBase {
   async resolvePublisherPublishPlan(
@@ -364,24 +401,59 @@ export class PublishMethods extends EVMChainAdapterBase {
             [batchId, { blockTag: receipt.blockNumber }],
             { signal: options.signal },
           ) as Array<{ publisher?: string; merkleRoot?: string } | readonly unknown[]>;
+          // r17 (3814893084) / r28 (🔴 3821721213) — the register entries carry no transaction
+          // hash, so a (publisher, root) match is the only link back to this receipt. r17 counted
+          // those matches across the WHOLE register, which is the asset's entire history as of
+          // this block — not this block's writes. An A -> B -> A history by one publisher in three
+          // SEPARATE blocks therefore produced two matches for A, dropped the position, and left
+          // the third update permanently held: the exact case this PR exists to settle, made
+          // unrecoverable by its own ambiguity guard.
+          //
+          // Ambiguity is a property of the RECEIPT'S BLOCK. Entries written before it cannot be
+          // this transaction's, so the pre-block count marks where its candidates begin, and only
+          // matches at or after that boundary compete. A genuinely ambiguous same-block pair still
+          // drops the position; a historical repeat no longer can.
+          let preBlockCount = 0;
+          if (receipt.blockNumber > 0) {
+            const before = await this.readContractWithOptions(
+              this.contracts.knowledgeAssetStorage,
+              'kas.getMerkleRootsBeforeUpdateBlock',
+              'getMerkleRoots',
+              [batchId, { blockTag: receipt.blockNumber - 1 }],
+              { signal: options.signal },
+            ) as ReadonlyArray<unknown>;
+            preBlockCount = before.length;
+          }
+          const entryAt = (i: number) => {
+            const root = roots[i] as { publisher?: string; merkleRoot?: string };
+            return {
+              publisher: root.publisher ?? String((root as readonly unknown[])[0] ?? ''),
+              merkleRoot: root.merkleRoot ?? String((root as readonly unknown[])[1] ?? ''),
+            };
+          };
+          const isOurs = (i: number) => {
+            const e = entryAt(i);
+            return e.publisher.toLowerCase() === publisherAddress.toLowerCase()
+              && e.merkleRoot.toLowerCase() === ethers.hexlify(onChainMerkleRoot).toLowerCase();
+          };
+          // `verified` still asks the whole register: the root IS ours somewhere in this asset's
+          // history, which is what authenticates the receipt. Only the POSITION is restricted to
+          // this block's candidates.
           let matchedIndex = -1;
           for (let i = roots.length - 1; i >= 0; i--) {
-            const root = roots[i] as { publisher?: string; merkleRoot?: string };
-            const rootPublisher = root.publisher ?? String((root as readonly unknown[])[0] ?? '');
-            const rootValue = root.merkleRoot ?? String((root as readonly unknown[])[1] ?? '');
-            if (
-              rootPublisher.toLowerCase() === publisherAddress.toLowerCase()
-              && rootValue.toLowerCase() === ethers.hexlify(onChainMerkleRoot).toLowerCase()
-            ) {
-              matchedIndex = i;
-              onChainPublisher = rootPublisher;
-              break;
-            }
+            if (isOurs(i)) { matchedIndex = i; onChainPublisher = entryAt(i).publisher; break; }
           }
           if (matchedIndex < 0) {
             return { verified: false };
           }
-          merkleRootCount = BigInt(matchedIndex + 1);
+          let blockMatchIndex = -1;
+          let blockMatchCount = 0;
+          for (let i = preBlockCount; i < roots.length; i += 1) {
+            if (!isOurs(i)) continue;
+            if (blockMatchCount === 0) blockMatchIndex = i;
+            blockMatchCount += 1;
+          }
+          merkleRootCount = blockMatchCount === 1 ? BigInt(blockMatchIndex + 1) : undefined;
         } catch (error) {
           if (isChainRpcTransportError(error)) throw error;
           // A latest-state fallback can authenticate a historical receipt with
@@ -457,20 +529,10 @@ export class PublishMethods extends EVMChainAdapterBase {
     await this.init();
 
     try {
-      const receipt = await this.getTransactionReceiptWithFailover(txHash, {
-        signal: options.signal,
-      });
-      if (!receipt || receipt.status !== 1) return null;
-
-      const v10 = this.contracts.knowledgeAssetStorage
-        ? await this.parseV10PublishReceipt(receipt, options)
-        : null;
-      if (v10) return v10;
-
-      const v9 = this.contracts.knowledgeAssetsStorage
-        ? await this.parseV9PublishReceipt(receipt, options)
-        : null;
-      return v9;
+      // Projection: receipt-only, one RPC round trip. Every non-confirmed state is discarded
+      // here anyway, so this surface never pays for the transaction-presence lookup.
+      const { receipt, publish } = await this.readPublishReceipt(txHash, options);
+      return receipt && receipt.status === 1 ? publish : null;
     } catch (err: any) {
       const msg = err?.message ?? '';
       if (msg.includes('could not find') || msg.includes('not found') || msg.includes('unknown transaction')) {
@@ -480,15 +542,233 @@ export class PublishMethods extends EVMChainAdapterBase {
     }
   }
 
+  /**
+   * GH#2270 — the un-collapsed form of {@link resolvePublishByTxHash}.
+   *
+   * The extra `eth_getTransaction` round trip fires ONLY when there is no
+   * receipt, and it is what makes `not-found` mean something: without it a
+   * missing receipt is indistinguishable from a transaction sitting in the
+   * mempool, and recovery would resend a publish that is about to be mined.
+   * `resolvePublishByTxHash` keeps its cheaper receipt-only path (it discards
+   * every non-confirmed state anyway).
+   *
+   * A lookup failure throws rather than resolving to a status: an RPC error is
+   * an absence of information, never information about an absence.
+   *
+   * PR #2300 r1 — a MINED receipt is only evidence about the block it sits in, and every mined
+   * verdict this surface emits authorises a real action somewhere downstream: `reverted` releases
+   * the job's lifecycle hold as proven-ineffective, `confirmed` finalizes it as published, and
+   * `unrecognized` feeds update recognition. A status-0 receipt in an UNFINALIZED block is not
+   * permanent proof — a reorg can re-include the very same signed transaction on a chain where it
+   * SUCCEEDS, and the released job would then double-publish. So no mined verdict is emitted
+   * until the receipt's block is FINAL and CANONICAL (its hash still occupies its height); until
+   * then the answer is `pending`, which is the honest state: the transaction's fate is literally
+   * not final. The finality read itself failing propagates as a rejection, per the rule above.
+   */
+  async resolvePublishTransaction(
+    txHash: string,
+    options: ChainReadOptions = {},
+  ): Promise<PublishTransactionResolution> {
+    await this.init();
+
+    const { receipt, publish } = await this.readPublishReceipt(txHash, options);
+    if (receipt) {
+      if (!(await this.isReceiptBlockFinalAndCanonical(receipt, options))) {
+        return { status: 'pending' };
+      }
+      if (receipt.status !== 1) return { status: 'reverted' };
+      return publish ? { status: 'confirmed', publish } : { status: 'unrecognized' };
+    }
+    // The SECOND step, paid only on this surface and only when there is no receipt — it is what
+    // separates a transaction the node is holding from one it has never seen.
+    const transaction = await this.getTransactionWithFailover(txHash, options);
+    return transaction ? { status: 'pending' } : { status: 'not-found' };
+  }
+
+  /**
+   * PR #2300 r1 — is this receipt's block both FINAL and still CANONICAL?
+   *
+   * One `readProvider` callback, so the finalized frontier and the block-at-height read come from
+   * the SAME endpoint — the same pinning discipline as {@link readFinalizedChainProofSnapshot}.
+   * Depth alone is not the test: a receipt can sit at a finalized HEIGHT while the hash at that
+   * height belongs to a different block (the receipt was fetched before the reorg settled), and a
+   * verdict about the orphaned copy would be a verdict about a chain that no longer exists. A
+   * throw propagates: the caller's contract is that lookup failures reject rather than resolve.
+   *
+   * PR #2300 r2 — PUBLIC now (see {@link ChainAdapter.isReceiptBlockFinalAndCanonical}): update
+   * recognition consumes the same gate before treating a verified update as fact, so the
+   * primitive is shared rather than duplicated. `txHash` on the receipt is advisory here — block
+   * identity is the whole truth for a real chain.
+   */
+  async isReceiptBlockFinalAndCanonical(
+    receipt: { txHash?: string; blockNumber: number; blockHash: string },
+    options: ChainReadOptions = {},
+  ): Promise<boolean> {
+    return (await this.readProviderRetryingNull(
+      'publish receipt finality',
+      async (provider) => {
+        const finalized = await provider.getBlock('finalized');
+        // PR #2300 r5 (3812123699) — an endpoint that cannot serve the finalized tag is an EMPTY
+        // view, not a verdict. Returning `false` here answered SUCCESSFULLY, so ordinary failover
+        // stopped and a capable fallback was never consulted: one incapable primary pinned every
+        // held job at `pending` forever. `null` lets the whole attempt move to the next endpoint;
+        // all-null collapses to false below, which is the honest "nobody could establish it".
+        if (!finalized) return null;
+        // r10 (3812960956) — a frontier BEHIND the receipt is this endpoint having nothing to say
+        // yet, not a verdict: finality is monotone, so an endpoint further ahead can settle what
+        // this one cannot. Answering `false` here made a lagging endpoint authoritative and held
+        // jobs at `pending` while a configured peer already had the proof. All endpoints coming up
+        // short collapses to `false` at the call site, which is the honest "not final anywhere".
+        if (finalized.number < receipt.blockNumber) return null;
+        const atHeight = await provider.getBlock(receipt.blockNumber);
+        // r8 (3812585310) — the same empty-view rule as the frontier read above: an endpoint that
+        // cannot serve the receipt's (older, possibly pruned) block has no opinion, and answering
+        // `false` there would stop the walk and strand the job behind an incomplete primary.
+        // `false` is reserved for a block that IS served and whose hash does not match.
+        if (!atHeight?.hash) return null;
+        return atHeight.hash.toLowerCase() === receipt.blockHash.toLowerCase();
+      },
+      { signal: options.signal },
+    )) ?? false;
+  }
+
+  /**
+   * GH#2270 PR-3 r4 — see {@link ChainAdapter.readFinalizedChainProofSnapshot}.
+   *
+   * Everything happens inside ONE `readProvider` callback, so all three reads — the finalized
+   * block identity, the account nonce and the minted state — are served by the SAME endpoint, and
+   * the two state reads are pinned to that block's NUMBER rather than re-evaluating `finalized`
+   * (which can advance between calls). A transport failure inside the callback fails over to the
+   * next endpoint as a whole, so a snapshot is never spliced across two providers; if no endpoint
+   * can produce the pinned pair the answer is `null`, and the caller holds.
+   *
+   * The minted classification (PR #2300 r1 — private to the adapter now; the public
+   * `isKnowledgeAssetMinted` it came from is deleted): ERC-721 `ownerOf` REVERTS for an unminted
+   * token, so "not published" arrives as a thrown CALL_EXCEPTION. Only the exact
+   * nonexistent-token shape is read as `false`; every other CHAIN answer (a paused contract, a
+   * decode failure, an undeployed storage contract) is `null`, and the caller holds. A TRANSPORT
+   * failure on the minted read is neither: it says nothing about the token, so it RETHROWS and
+   * the whole pinned snapshot fails over to the next endpoint — swallowing it as `null` would let
+   * one flaky read on an otherwise healthy endpoint block a provable release.
+   */
+  async readFinalizedChainProofSnapshot(
+    params: { address: string; kaId: bigint },
+    options: ChainReadOptions = {},
+  ): Promise<FinalizedChainProofSnapshot | null> {
+    await this.init();
+    try {
+      // PR #2300 r3 (3811568998) — `readProviderRetryingNull`, not `readProvider`: an endpoint that
+      // cannot serve a finalized block identity is an EMPTY VIEW, not a failure, so the whole
+      // pinned snapshot moves to the next endpoint instead of stopping here. Synthesizing an error
+      // did not fail over at all — a plain `Error` carries no code, so the production classifier
+      // reads it as non-retryable and one endpoint without `finalized` support blocked every
+      // healthy fallback. `null` now means every endpoint came up empty, which the policy layer
+      // treats as inconclusive (the job holds), and the snapshot still never splices: each attempt
+      // reads the block, the nonce and the minted state from ONE provider or yields nothing.
+      return await this.readProviderRetryingNull(
+        'finalized chain-proof snapshot',
+        async (provider) => {
+          // r19 (🔴 3816490449) — the endpoint's IDENTITY, before any of its facts are believed.
+          // This snapshot authorizes release-by-absence, so a wrong-chain RPC reporting a spent
+          // nonce and an unminted KA id fabricates exactly the conjunction that requeues a job —
+          // and the original transaction can then mine alongside the replacement. r17 closed this
+          // for the version snapshot and did not sweep the sibling readers, which is the whole
+          // reason it is still open here. Note the shared static-mode validator cannot serve:
+          // it returns early under `staticNetwork: false`, the mode this fan-out runs in.
+          // A mismatch is an EMPTY VIEW, not a verdict, so failover reaches a correct endpoint.
+          const expectedChainId = numericChainIdOf(this.chainId);
+          if (expectedChainId !== undefined) {
+            const network = await provider.getNetwork();
+            if (BigInt(network.chainId) !== expectedChainId) return null;
+          }
+          const block = await provider.getBlock('finalized');
+          if (!block || !block.hash) return null;
+          const accountNonce = await provider.getTransactionCount(params.address, block.number);
+          let kaMinted: boolean | null = null;
+          const storage = this.contracts.knowledgeAssetStorage;
+          if (storage) {
+            try {
+              const owner: string = await this.rebindContract(storage as Contract, provider)
+                .ownerOf(params.kaId, { blockTag: block.number });
+              // r21 (🔴 3816664734) — a SUCCESSFUL zero-address owner is not proof of absence.
+              // A compliant ERC721 reverts for a nonexistent token; a zero owner means the
+              // endpoint or contract answered something this classifier cannot interpret, and
+              // interpreting it as "unminted" would authorize a resend on a malformed reply.
+              const ownerAddress = ethers.getAddress(owner);
+              kaMinted = ownerAddress === ethers.ZeroAddress ? null : true;
+            } catch (err) {
+              // A revert (CALL_EXCEPTION) or a decode failure (BAD_DATA) is a CHAIN answer for
+              // this endpoint and classifies in place. Anything else — NETWORK_ERROR, a timeout,
+              // a bare fetch failure — is an absence of information about THIS endpoint, so it
+              // RETHROWS and the whole pinned snapshot fails over to the next one; swallowing it
+              // as `null` would let one flaky read on an otherwise healthy endpoint block a
+              // provable release, and no fallback here can splice (the snapshot restarts whole).
+              const code = (err as { code?: unknown })?.code;
+              if (code !== 'CALL_EXCEPTION' && code !== 'BAD_DATA') throw err;
+              kaMinted = isNonexistentTokenRevert(err) ? false : null;
+            }
+          }
+          return { blockNumber: block.number, blockHash: block.hash, accountNonce, kaMinted };
+        },
+        { signal: options.signal },
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * GH#2270 PR-3 r2 — the ONE receipt read the three publish-resolution surfaces project from.
+   *
+   * They had drifted into three separate walks of the same data: two shared a helper, the canonical
+   * one re-implemented the receipt fetch, the status check and the V10/V9 parse fallthrough
+   * inline. Three copies of "what does this receipt say about a publish" is three places for the
+   * V9 fallback, or the meaning of `status !== 1`, to be updated in two.
+   *
+   * What it returns is deliberately RAW: the receipt as fetched, plus the parsed publish when one
+   * could be read. Every judgement — is a missing receipt an absence, does a mismatched block hash
+   * mean reorg, is an unparseable publish a rejection or merely unrecognized — belongs to the
+   * projection, because the three surfaces genuinely answer differently and only one of them has
+   * the caller's expected block identity to compare against.
+   *
+   * `receipt: null` means the node had no receipt. It is NOT a verdict: only a caller that follows
+   * it with a transaction lookup may turn it into `pending` or `not-found`.
+   */
+  private async readPublishReceipt(
+    txHash: string,
+    options: ChainReadOptions,
+    logLabel?: string,
+  ): Promise<{
+    receipt: ethers.TransactionReceipt | null;
+    publish: OnChainPublishResult | null;
+  }> {
+    const receipt = await this.getTransactionReceiptWithFailover(txHash, {
+      signal: options.signal,
+      ...(logLabel ? { logLabel } : {}),
+    });
+    if (!receipt || receipt.status !== 1) return { receipt, publish: null };
+
+    const v10 = this.contracts.knowledgeAssetStorage
+      ? await this.parseV10PublishReceipt(receipt, options)
+      : null;
+    if (v10) return { receipt, publish: v10 };
+
+    const v9 = this.contracts.knowledgeAssetsStorage
+      ? await this.parseV9PublishReceipt(receipt, options)
+      : null;
+    return { receipt, publish: v9 };
+  }
+
   async resolveCanonicalFinalizationReceipt(
     txHash: string,
     options: CanonicalFinalizationReceiptReadOptions = {},
   ): Promise<CanonicalFinalizationReceiptResolution> {
     await this.init();
-    const receipt = await this.getTransactionReceiptWithFailover(txHash, {
-      signal: options.signal,
-      logLabel: 'canonical finalization receipt',
-    });
+    const { receipt, publish: parsedPublish } = await this.readPublishReceipt(
+      txHash,
+      options,
+      'canonical finalization receipt',
+    );
     if (!receipt) {
       const transaction = await this.getTransactionWithFailover(txHash, options);
       return transaction ? { status: 'pending' } : { status: 'not-found' };
@@ -503,14 +783,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       return { status: 'reorged' };
     }
 
-    const publish = this.contracts.knowledgeAssetStorage
-      ? await this.parseV10PublishReceipt(receipt, options)
-      : null;
-    const legacyPublish = publish ?? (
-      this.contracts.knowledgeAssetsStorage
-        ? await this.parseV9PublishReceipt(receipt, options)
-        : null
-    );
+    const legacyPublish = parsedPublish;
     if (
       !legacyPublish
       || !legacyPublish.merkleRoot

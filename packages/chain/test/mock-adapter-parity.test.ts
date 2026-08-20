@@ -97,6 +97,8 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'nextSigner',
   'nextAuthorizedSigner',
   'findSignerByAddress',
+  // PR #2300 r2 — isReceiptBlockFinalAndCanonical is a REAL ChainAdapter capability now (update
+  // recognition consumes it), and the mock implements it from its finality seam: no exemption.
   'resolvePinnedPublisherSigner', // EVM signer-pool authorization/funding helper; mock has no wallet pool
   'selectFundedSignerOrThrow', // strict funding diagnostic used by EVM publish planning
   'quoteRequiredPublishTokenAmount', // shared protected AskStorage quote behind EVM reads/planning
@@ -176,6 +178,11 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'sendContractTransactionUnlocked',
   'parseV10PublishReceipt',
   'parseV9PublishReceipt',
+  // GH#2270 — TS-private single receipt read the three publish-resolution surfaces project from
+  // (`resolvePublishByTxHash`, `resolvePublishTransaction`, `resolveCanonicalFinalizationReceipt`).
+  // All three PUBLIC surfaces are mirrored on the mock; this is EVM receipt plumbing over
+  // `getTransactionReceiptWithFailover` — same category as the two parse helpers above.
+  'readPublishReceipt',
   // TS-private V10 TRAC-allowance helper backing publish/update. Encodes
   // the `chain.approvalPolicy` dispatch and the `transferFrom(..., 1n)`
   // floor; the mock has no ERC-20 allowance surface to mirror.

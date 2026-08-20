@@ -392,9 +392,12 @@ describe('Phase-sequence contracts', () => {
         publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
       });
 
-      (chain as unknown as { createKnowledgeAssets: (params: { onBroadcast?: () => void }) => Promise<never> }).createKnowledgeAssets =
+      // PR #2300 — the adapter contract now always hands the write-ahead a signed transaction, and
+      // the hook AWAITS it, so a double that calls it bare (or without awaiting) diverges from the
+      // production path: the durable boundary never runs and the phase it emits never appears.
+      (chain as unknown as { createKnowledgeAssets: (params: { onBroadcast?: (s: { txHash: string; nonce?: number }) => Promise<void> | void }) => Promise<never> }).createKnowledgeAssets =
         async (params) => {
-          params.onBroadcast?.();
+          await params.onBroadcast?.({ txHash: `0x${'ab'.repeat(32)}`, nonce: 1 });
           throw new Error('simulated publish broadcast failure');
         };
 
@@ -431,9 +434,9 @@ describe('Phase-sequence contracts', () => {
       const pub = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads: origQuads });
       expect(pub.status).toBe('confirmed');
 
-      (chain as unknown as { updateKnowledgeCollectionV10: (params: { onBroadcast?: () => void }) => Promise<never> }).updateKnowledgeCollectionV10 =
+      (chain as unknown as { updateKnowledgeCollectionV10: (params: { onBroadcast?: (s: { txHash: string; nonce?: number }) => Promise<void> | void }) => Promise<never> }).updateKnowledgeCollectionV10 =
         async (params) => {
-          params.onBroadcast?.();
+          await params.onBroadcast?.({ txHash: `0x${'cd'.repeat(32)}`, nonce: 2 });
           throw new Error('simulated update broadcast failure');
         };
       if (typeof (chain as { updateKnowledgeAssets?: unknown }).updateKnowledgeAssets === 'function') {

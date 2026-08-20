@@ -18,7 +18,7 @@ import {
   TripleStoreAsyncLiftPublisher,
   createLiftJobFailureMetadata,
   type AsyncLiftPublisherConfig,
-  type AsyncLiftPublisherRecoveryResult,
+  type AsyncLiftChainProofResolution,
   type LiftRequest,
   type Publisher,
 } from '../src/index.js';
@@ -126,17 +126,20 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   function createPublisher(
     options: {
-      recoveryResult?: AsyncLiftPublisherRecoveryResult | null;
-      config?: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainRecoveryResolver'>;
+      chainProof?: AsyncLiftChainProofResolution;
+      config?: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainProofResolver'>;
     } = {},
   ) {
     const clock = () => ++now;
     const nextId = () => `job-${++ids}`;
+    // GH#2270 PR-3 — the resolver reports a VERDICT, so the fixture states one. `undefined`
+    // still means "no resolver configured at all", which is a different thing from a resolver
+    // that establishes nothing (`inconclusive`).
+    const chainProof = options.chainProof;
     const publisher = new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver:
-        options.recoveryResult === undefined ? undefined : async () => options.recoveryResult ?? null,
+      chainProofResolver: chainProof === undefined ? undefined : async () => chainProof,
       ...options.config,
     });
     return withLegacyRawLiftTestSeeder(publisher, store, {
@@ -1783,15 +1786,18 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('recovers interrupted jobs and finalizes broadcast jobs through the resolver', async () => {
     const publisher = createPublisher({
-      recoveryResult: {
-        inclusion: { txHash: '0xbbb', blockNumber: 7 },
-        finalization: {
-          txHash: '0xbbb',
-          ual: 'did:dkg:mock:31337/0xbbb/7',
-          batchId: '7',
-          startKAId: '7',
-          endKAId: '7',
-          publisherAddress: '0x1111111111111111111111111111111111111111',
+      chainProof: {
+        status: 'recovered',
+        recovery: {
+          inclusion: { txHash: '0xbbb', blockNumber: 7 },
+          finalization: {
+            txHash: '0xbbb',
+            ual: 'did:dkg:mock:31337/0xbbb/7',
+            batchId: '7',
+            startKAId: '7',
+            endKAId: '7',
+            publisherAddress: '0x1111111111111111111111111111111111111111',
+          },
         },
       },
     });
@@ -1832,7 +1838,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   });
 
   it('keeps broadcast jobs in place while inconclusive recovery is still within the timeout window', async () => {
-    const publisher = createPublisher({ recoveryResult: null });
+    const publisher = createPublisher({ chainProof: { status: 'inconclusive' } });
     const broadcastId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
@@ -1859,7 +1865,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('fails broadcast jobs once inconclusive recovery exceeds the timeout window', async () => {
     const publisher = createPublisher({
-      recoveryResult: null,
+      chainProof: { status: 'inconclusive' },
       config: {
         recoveryLookupTimeoutMs: 50,
       },
@@ -1892,13 +1898,13 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   });
 
   it('finalizes retry_recovery jobs from broadcast with correct recoveredFromStatus', async () => {
-    let resolverResult: AsyncLiftPublisherRecoveryResult | null = null;
+    let resolverResult: AsyncLiftChainProofResolution = { status: 'inconclusive' };
     const clock = () => ++now;
     const nextId = () => `job-${++ids}`;
     const publisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver: async () => resolverResult,
+      chainProofResolver: async () => resolverResult,
       recoveryLookupTimeoutMs: 50,
     }), store, { now: clock, idGenerator: nextId });
 
@@ -1924,12 +1930,21 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.timestamps?.failedAt).toBeDefined();
 
     resolverResult = {
-      inclusion: { txHash: '0xbcast', blockNumber: 8 },
-      finalization: {
-        txHash: '0xfin', blockNumber: 10, blockTimestamp: now,
-        batchId: 'batch-1', batchRoot: '0xroot', batchSize: 1,
+      status: 'recovered',
+      recovery: {
+        inclusion: { txHash: '0xbcast', blockNumber: 8 },
+        finalization: {
+          txHash: '0xfin', blockNumber: 10, blockTimestamp: now,
+          batchId: 'batch-1', batchRoot: '0xroot', batchSize: 1,
+        },
       },
     };
+    // GH#2270 PR-3 r18 — the chain-proof sweep defers a job that established nothing, so the next
+    // pass is a real pass rather than an immediate re-ask. The base deferral is 30s and the
+    // runner's recovery cadence is 60s, so in a deployment a deferred job is due on the very next
+    // pass and nothing is delayed; only a test calling recover() twice at the SAME clock instant
+    // sees the deferral. Advancing by one cadence is what production does.
+    now += 60_000;
     await publisher.recover();
     job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('finalized');
@@ -1939,13 +1954,13 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   });
 
   it('finalizes retry_recovery jobs from included with correct recoveredFromStatus', async () => {
-    let resolverResult: AsyncLiftPublisherRecoveryResult | null = null;
+    let resolverResult: AsyncLiftChainProofResolution = { status: 'inconclusive' };
     const clock = () => ++now;
     const nextId = () => `job-${++ids}`;
     const publisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver: async () => resolverResult,
+      chainProofResolver: async () => resolverResult,
       recoveryLookupTimeoutMs: 50,
     }), store, { now: clock, idGenerator: nextId });
 
@@ -1974,12 +1989,21 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.timestamps?.failedAt).toBeDefined();
 
     resolverResult = {
-      inclusion: { txHash: '0xincl', blockNumber: 9 },
-      finalization: {
-        txHash: '0xfin2', blockNumber: 12, blockTimestamp: now,
-        batchId: 'batch-2', batchRoot: '0xroot2', batchSize: 1,
+      status: 'recovered',
+      recovery: {
+        inclusion: { txHash: '0xincl', blockNumber: 9 },
+        finalization: {
+          txHash: '0xfin2', blockNumber: 12, blockTimestamp: now,
+          batchId: 'batch-2', batchRoot: '0xroot2', batchSize: 1,
+        },
       },
     };
+    // GH#2270 PR-3 r18 — the chain-proof sweep defers a job that established nothing, so the next
+    // pass is a real pass rather than an immediate re-ask. The base deferral is 30s and the
+    // runner's recovery cadence is 60s, so in a deployment a deferred job is due on the very next
+    // pass and nothing is delayed; only a test calling recover() twice at the SAME clock instant
+    // sees the deferral. Advancing by one cadence is what production does.
+    now += 60_000;
     await publisher.recover();
     job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('finalized');

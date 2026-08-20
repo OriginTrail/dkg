@@ -93,6 +93,103 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
 }
 
 /**
+ * GH#2270 PR-3 r2 — the knowledge asset id a re-run of this job would mint, if its request pins
+ * one. (PR #2300 r1: moved here from the impl so the disposition module's retryability policy
+ * reads the SAME derivation as the lookup builder.)
+ *
+ * Only a job whose request carries a seal with `reservedKaId` has a FIXED identity: that id is
+ * threaded verbatim back into the mint, so a re-run either mints exactly it or reverts against a
+ * mint that already happened. A job without one allocates a fresh id on every attempt, which is
+ * precisely why it cannot be released by absence — a replacement transaction could have published
+ * it already and the re-run would mint a SECOND asset over the same content, with nothing on
+ * chain to object.
+ *
+ * `undefined` on anything malformed or absent: this feeds a guard, so it fails closed.
+ */
+export function pinnedPublishIdentityKaId(job: LiftJob): string | undefined {
+  const request = job.request as { knowledgeAssetVmPublish?: { seal?: { reservedKaId?: unknown } } };
+  const raw = request?.knowledgeAssetVmPublish?.seal?.reservedKaId
+    ?? (job.request as { lift?: { seal?: { reservedKaId?: unknown } } })?.lift?.seal?.reservedKaId;
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  try {
+    const kaId = BigInt(raw);
+    return kaId > 0n ? kaId.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * GH#2270 PR-3 r4 — what this job's queued transaction was TRYING to do, derived from the
+ * persisted request alone. Structural, not policy: the disposition module and the lookup builder
+ * both read it, and what a kind PERMITS (which recognitions, which releases) is decided there.
+ *
+ * The derivation errs toward 'update', because the two misclassifications are not symmetric.
+ * A create read as an update merely narrows what can settle it: update recognition will not match
+ * a mint receipt and the create-only absence release is withheld — the job stays held for the
+ * operator, which is safe. An update read as a create is the dangerous direction, so 'create'
+ * requires proof:
+ *  - a named-KA VM job is a create only when its request records NO prior VM assertion
+ *    (`vmCurrentAssertion` is what the queued executor branches on) AND its assertion version
+ *    does not advance past 1 (the executor may still take the update branch off the LIVE
+ *    lifecycle pointer when the request field is absent — but then the identity check answers
+ *    "minted" and the absence release holds anyway; see the resolver);
+ *  - a raw lift is a create only when its transition type says CREATE (MUTATE/REVOKE rewrite
+ *    existing state and carry the same ABA hazard).
+ */
+/**
+ * GH#2270 PR #2300 r3 — the branch a persisted job actually signed, read from the durable marker
+ * written at the write-ahead (`broadcast.operationKind`) or carried across a reset in the recovery
+ * record. Either carrier is the transaction's own testimony; nothing else is.
+ */
+export function liftJobOperationKindMarker(job: LiftJob): 'create' | 'update' | undefined {
+  const broadcast = (job as { broadcast?: { operationKind?: 'create' | 'update' } }).broadcast;
+  const recovery = (job as { recovery?: { operationKind?: 'create' | 'update' } }).recovery;
+  return broadcast?.operationKind ?? recovery?.operationKind;
+}
+
+/**
+ * GH#2270 PR #2300 r21 (🔴 3812632539) — the wallet that signed the evidence hash, read from the
+ * SAME carrier the hash came from. `broadcast` is this attempt's; `recovery.walletIdChecked` is
+ * one an earlier reset preserved. `claim.walletId` is deliberately NOT a fallback: it names the
+ * wallet for the next attempt, and pairing it with an inherited hash builds a
+ * transaction/account combination that never existed on chain.
+ */
+export function liftJobCheckedSigner(job: LiftJob): string | undefined {
+  const broadcast = (job as { broadcast?: { txHash?: string; walletId?: string } }).broadcast;
+  if (broadcast?.txHash && broadcast.walletId) return broadcast.walletId;
+  return (job as { recovery?: { walletIdChecked?: string } }).recovery?.walletIdChecked;
+}
+
+/** The nonce that accompanies {@link liftJobCheckedSigner}'s hash, from the same carrier. */
+export function liftJobCheckedNonce(job: LiftJob): number | undefined {
+  const broadcast = (job as { broadcast?: { txHash?: string; nonce?: number } }).broadcast;
+  if (broadcast?.txHash && broadcast.nonce !== undefined) return broadcast.nonce;
+  return (job as { recovery?: { nonceChecked?: number } }).recovery?.nonceChecked;
+}
+
+export function queuedLiftOperationKind(job: LiftJob): 'create' | 'update' {
+  if (isKnowledgeAssetVmPublishJobRequest(job.request)) {
+    // The DURABLE marker first: it records what actually signed. Everything else is inference, and
+    // for a named KA the request cannot carry the answer — `publishQueuedKnowledgeAssetVmPublish`
+    // resolves its update branch from `request.vmCurrentAssertion ?? the live lifecycle pointer`,
+    // so a request with no pointer of its own can still sign an update.
+    const signed = liftJobOperationKindMarker(job);
+    if (signed !== undefined) return signed;
+    // No marker: the record predates it. `assertionVersion` was used here and was WRONG — it counts
+    // assertion revisions, not VM publications, so a KA finalized twice before its FIRST publish
+    // reads as version 2 and would be misclassified as an update forever (PR #2300 r3, 3811569441).
+    // With nothing authoritative left, the answer is the SAFE one rather than the likely one:
+    // 'update' only forfeits absence-release (the job holds, with the operator's by-id clear as its
+    // exit), while a wrong 'create' would authorise a resend of an update that may already be on
+    // chain. Every job this build writes carries the marker, so this is a pre-upgrade residual.
+    return 'update';
+  }
+  const rawTransition = (job.request as { lift?: { transitionType?: string } }).lift?.transitionType;
+  return rawTransition === 'CREATE' ? 'create' : 'update';
+}
+
+/**
  * GH#2270 — the ONE reset-to-accepted builder for a FAILED job, shared by every reaccept path
  * (claim-time sweep, `retry()`, admission re-submit).
  *
@@ -112,9 +209,23 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
  * Timestamps are rebuilt from scratch rather than merged, so `nextRetryAt` is dropped BY
  * CONSTRUCTION — a reaccepted job carries no stale schedule for the sweep to re-fire on.
  */
-export function resetFailedLiftJobToAccepted(job: PersistedFailedJob, now: number): LiftJobAccepted {
+export function resetFailedLiftJobToAccepted(
+  job: PersistedFailedJob,
+  now: number,
+  options: { readonly txHashAccounted?: boolean } = {},
+): LiftJobAccepted {
   return buildLiftJobAcceptedReset(job, {
     now,
+    ...(options.txHashAccounted ? { txHashAccounted: true } : {}),
+    // The marker rides along with the hash: a released job must not degrade to the pre-marker
+    // default on its next attempt (see LiftJobRecoveryMetadata.operationKind).
+    ...(liftJobOperationKindMarker(job) ? { operationKind: liftJobOperationKindMarker(job) } : {}),
+    // r23 (🔴 3817474299) — and so do the SIGNER and the nonce, for the same reason. This is
+    // the SECOND reset path (admission re-submit, `retry()`, the claim-time sweep); the recovery
+    // dispatcher has its own. Preserving the envelope in only one of them meant a job reset
+    // through this one lost its signer and could never form a chain-proof lookup again.
+    ...(liftJobCheckedSigner(job) ? { walletIdChecked: liftJobCheckedSigner(job) } : {}),
+    ...(liftJobCheckedNonce(job) !== undefined ? { nonceChecked: liftJobCheckedNonce(job) } : {}),
     // 'accepted' is the one origin with no prior state to recover from. Stated as that exclusion
     // rather than a list of the rest, so a new active state cannot silently go unrecorded — the
     // compiler rejects one that is not a `LiftJobResettableState`.
@@ -148,6 +259,21 @@ export function buildLiftJobAcceptedReset(
     readonly recoveredFrom: LiftJobResettableState | undefined;
     readonly txHashChecked: LiftJobHex | undefined;
     readonly stampRetriedAt: boolean;
+    /**
+     * GH#2270 PR-3 r3 — the chain has ACCOUNTED for `txHashChecked` and this reset is the decision.
+     * Defaults to absent, so every caller that has not asked the chain keeps carrying an open
+     * question forward, which is the safe direction. Only the proof-first dispatcher passes true.
+     */
+    readonly txHashAccounted?: boolean;
+    /** The branch the checked transaction signed; carried forward like the hash itself. */
+    readonly operationKind?: 'create' | 'update';
+    /**
+     * r21 (🔴 3812632539) — the signer envelope of `txHashChecked`, preserved with it. A reset
+     * drops `broadcast`, so without this the inherited hash would later be paired with whatever
+     * wallet claims the job next.
+     */
+    readonly walletIdChecked?: string;
+    readonly nonceChecked?: number;
   },
 ): LiftJobAccepted {
   return {
@@ -167,6 +293,10 @@ export function buildLiftJobAcceptedReset(
           action: 'reset_to_accepted',
           recoveredFromStatus: options.recoveredFrom,
           txHashChecked: options.txHashChecked,
+          ...(options.txHashAccounted ? { txHashAccounted: true } : {}),
+          ...(options.operationKind ? { operationKind: options.operationKind } : {}),
+          ...(options.walletIdChecked ? { walletIdChecked: options.walletIdChecked } : {}),
+          ...(options.nonceChecked !== undefined ? { nonceChecked: options.nonceChecked } : {}),
         }
       : undefined,
     controlPlane: job.controlPlane,

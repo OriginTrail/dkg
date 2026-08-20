@@ -4,6 +4,29 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Async publisher — resolution-aware automatic retries (#2270)
+
+Failed async-publisher jobs that may have submitted a transaction are no longer
+left in indefinite limbo. Recovery asks the chain what actually happened and acts on
+the answer: a transaction proven absent releases the job for a fresh attempt, a
+recognized one is finalized from its on-chain evidence, and anything unproven stays
+held. A job is never re-sent on a guess, so the same Knowledge Asset cannot be
+published twice.
+
+#### Upgrading
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| `AsyncLiftPublisherConfig.chainRecoveryResolver` is replaced by `chainProofResolver` | **Node operators are not affected** — the node wires this itself. This only affects code that constructs `TripleStoreAsyncLiftPublisher` directly from the `@origintrail-official/dkg-publisher` package. The field was renamed and its callback contract changed: it now receives a lookup and returns a verdict (`recovered` / `reverted` / `not-found` / `pending` / `inconclusive`) rather than a job and a nullable result. A configuration still carrying the old key is **rejected at construction** rather than ignored, because a publisher that silently lost its resolver would hold every job forever with nothing to explain why | If you embed the publisher package directly, rename the field and adapt the callback to the verdict contract. If you run a node, no action |
+| Jobs already stuck at upgrade time may need one manual clear | Recovery needs to know whether a held job was creating or updating an asset. Jobs recorded **before** this upgrade do not carry that marker, and the node will not guess: it reports them as needing operator action instead of promising an automatic retry it cannot deliver. Only jobs that were already failed-and-held at the moment of upgrade are affected; everything enqueued afterwards records the marker automatically | Run `dkg publisher jobs --status failed` after upgrading. For any job listed there, verify its transaction on-chain, then clear it by id with `POST /api/publisher/clear-job {"jobId":"<id>"}` (the targeted clear; `dkg publisher clear <status>` is the bulk form and deliberately skips held jobs). Most deployments will have none |
+
+#### Scope
+
+This release implements a deliberately narrow, safe subset of #2270: automatic retry
+is limited to failures that are provably safe to re-run, plus chain-proof resolution
+of transaction-bearing failures. The configurable per-code and per-resolution retry
+policy described in the issue is **not** part of this release.
+
 ## [10.0.14] - 2026-08-14
 
 A selected-public convergence release. An Edge node can opt a bounded set of publicly readable Context Graphs into RFC-64: an operator-approved graph-complete provider drives bounded native Shared Memory recovery, while Verifiable Memory remains independently derived from finalized blockchain inventory. Both lanes continue across partial progress and provider gaps, and VM recovery batches assets by bounded byte/quad footprint instead of treating an arbitrarily large graph as one transfer. Signed SWM inventory remains shadow evidence in this release and does not drive receiver synchronization. RFC-64 remains operator-selected and public-only: a valid non-empty bootstrap manifest activates its selected scope when `enabled` is omitted, while an absent block or explicit `enabled: false` remains dormant. Private encrypted live sharing is unchanged, and private catalog-based cold join is not part of this release. **No smart-contract changes or deployments are required.**

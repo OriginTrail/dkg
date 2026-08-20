@@ -201,6 +201,33 @@ describe('MockChainAdapter KA scalar update context', () => {
     });
   });
 
+  it('the coherent snapshot reports the block the CURRENT version was written at [r21]', async () => {
+    // 🔴 3816664744 — the snapshot returned a constant block 1 alongside an up-to-date root and
+    // count, so a recovered materialization carried an ordering block from a different point in
+    // mock-chain history than the state it described. Create in one block, update in a later one:
+    // the snapshot must move with the version, not stay pinned to the creation.
+    const adapter = new MockChainAdapter();
+    await adapter.createKnowledgeAsset({
+      merkleRoot: new Uint8Array(32).fill(0x11),
+      knowledgeAssetsCount: 1,
+      signatures: [],
+    });
+    const created = await adapter.readKnowledgeAssetVersionSnapshot(1n);
+
+    // The mock advances blocks explicitly, so this is what "updated in a LATER block" means here.
+    adapter.advanceBlock();
+    await adapter.updateKnowledgeAsset({
+      kaId: 1n,
+      newMerkleRoot: new Uint8Array(32).fill(0x22),
+      signatures: [],
+    } as never);
+    const updated = await adapter.readKnowledgeAssetVersionSnapshot(1n);
+
+    // The root moved, and so did the block that orders it.
+    expect(updated?.latestRoot).not.toBe(created?.latestRoot);
+    expect(updated!.blockNumber).toBeGreaterThan(created!.blockNumber);
+  });
+
   it('initializes fixture registration through the grouped scalar context', async () => {
     const adapter = new MockChainAdapter();
     adapter.__registerKC({

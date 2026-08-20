@@ -307,7 +307,10 @@ import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-ha
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { applyPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
-import { normalizeRecoveredNamedKaPublish } from './named-ka-publish-recovery.js';
+import {
+  normalizeRecoveredNamedKaPublish,
+  throwIfRecoveryDeadlineReached,
+} from './named-ka-publish-recovery.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -1937,6 +1940,13 @@ export class PublishMethods extends DKGAgentBase {
       [INTERNAL_ROOTLESS_UPDATE_ORIGIN]?: true;
       accessPolicy?: PublishOptions['accessPolicy'];
       allowedPeers?: PublishOptions['allowedPeers'];
+      /**
+       * GH#2270 PR-3 r3 — the durable pre-send write-ahead. It has to be threaded explicitly:
+       * this option bag is built field by field rather than spread, so anything not named here is
+       * silently dropped, and a dropped write-ahead means a KA update transaction goes out with
+       * nothing on disk recording it.
+       */
+      onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
     },
   ): Promise<PublishResult> {
     return withRootlessUpdateLock(contextGraphId, kaId, async () => {
@@ -2236,6 +2246,7 @@ export class PublishMethods extends DKGAgentBase {
       publishContextGraphId: updateOnChainId ?? undefined,
       operationCtx: ctx,
       onPhase,
+      onBeforeBroadcast: opts?.onBeforeBroadcast,
       subGraphName: opts?.subGraphName,
       precomputedUpdateAttestation: opts.precomputedUpdateAttestation,
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -4920,7 +4931,7 @@ export class PublishMethods extends DKGAgentBase {
     input: AsyncKnowledgeAssetVmPublishRecoveryInput,
     ctx: OperationContext,
   ): Promise<void> {
-    const { request, job, recovery } = input;
+    const { request, job, lookup, recovery, signal } = input;
     if (
       request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
       || request.kaUal === undefined
@@ -4933,13 +4944,20 @@ export class PublishMethods extends DKGAgentBase {
     }
     const recovered = await normalizeRecoveredNamedKaPublish({
       request,
-      job,
+      // GH#2270 PR-3 r3 — the queued transaction comes from the typed lookup, which is derived
+      // from whichever evidence carrier the record has. `broadcast` is only consulted for the
+      // optional merkle-root cross-check, and a job held on the recovery carrier has none.
+      queued: { txHash: lookup.txHash, merkleRoot: job.broadcast?.merkleRoot },
       recovery,
       chain: this.chain,
+      // r27 (🔴 3821200852) — the publisher's pass deadline reaches the chain reads this
+      // normalizer performs. They all precede any mutation, so bounding them is safe and is what
+      // keeps a stalled endpoint from holding the global claim lock past the budget.
+      signal,
     });
 
     const onChainCgId = normalizeOptionalContextGraphId(
-      await this.getContextGraphOnChainId(request.contextGraphId),
+      await this.getContextGraphOnChainId(request.contextGraphId, { signal }),
     );
     if (!onChainCgId) {
       throw Object.assign(
@@ -5012,7 +5030,7 @@ export class PublishMethods extends DKGAgentBase {
       }
       let boundContextGraphId: bigint;
       try {
-        boundContextGraphId = await this.chain.getKAContextGraphId(recovered.reservedKaId);
+        boundContextGraphId = await this.chain.getKAContextGraphId(recovered.reservedKaId, { signal });
       } catch (error) {
         throw Object.assign(
           new Error(
@@ -5032,6 +5050,18 @@ export class PublishMethods extends DKGAgentBase {
           { code: 'KA_VM_RECOVERY_INCONSISTENT' },
         );
       }
+      // r29 (🔴 3822354184) — a deadline check immediately before THIS mutation. r28 called this
+      // "the" boundary; it is not, because it sits inside the superseded branch while the
+      // current-version materialization below is a second mutation on a different path. Reads and
+      // branch selection interleave here, so a single hoisted check would either sit before a
+      // later read or miss a branch. The invariant is stated per mutation instead: NO MUTATION
+      // STARTS AFTER THE DEADLINE. Everything above is read-only and takes the pass
+      // signal, so it is cancellable and abandonable; everything below MUTATES and is therefore
+      // never abandoned (the publisher awaits it under the claim lock). Checking here means a
+      // deadline that arrived during the reads refuses to ENTER the mutation rather than starting
+      // an unbounded write phase late. One boundary, one check — rather than a signal threaded
+      // hopefully through N layers, which is how the last four rounds each missed the next one.
+      throwIfRecoveryDeadlineReached(signal);
       await this._writeQueuedKnowledgeAssetVmPublishReceipt(
         request,
         recovered.txHash,
@@ -5046,6 +5076,10 @@ export class PublishMethods extends DKGAgentBase {
       return;
     }
 
+    // r29 (🔴 3822354184) — the OTHER mutation, on the current-version path, which the
+    // superseded-branch guard never covered. Same invariant, checked immediately before it: an
+    // expired pass must not begin lifecycle materialization while holding the claim lock.
+    throwIfRecoveryDeadlineReached(signal);
     const materialization = await this.getOrCreateFinalizationHandler().handleChainReconciledKC({
       contextGraphId: request.contextGraphId,
       onChainCgId,
@@ -5141,6 +5175,20 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
     const publisher = opts?.publisherOverride ?? this.publisher;
+    // GH#2270 PR-3 r4 — the cross-cutting execution hooks, gathered ONCE and threaded UNCHANGED
+    // through whichever branch (create publish / update) executes the queued transaction. The
+    // update branch used to name its forwarded fields one by one and simply omitted
+    // `onBeforeBroadcast` — so every named-KA update sent its transaction with no durable
+    // write-ahead. One object, spread into both branches, makes "the branch dropped a hook" a
+    // structural impossibility rather than a review item; computed per-branch fields stay
+    // explicit where they are.
+    const executionHooks: {
+      readonly onPhase?: PhaseCallback;
+      readonly onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
+    } = {
+      onPhase: opts?.onPhase ?? publishOptions.onPhase,
+      onBeforeBroadcast: publishOptions.onBeforeBroadcast,
+    };
     if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
@@ -5357,7 +5405,11 @@ export class PublishMethods extends DKGAgentBase {
         snapshotPrivateQuads,
         {
           operationCtx: ctx,
-          onPhase: opts?.onPhase ?? publishOptions.onPhase,
+          // GH#2270 PR-3 r3/r4 — this branch used to name its hooks field by field and dropped
+          // `onBeforeBroadcast` entirely: the pre-send write-ahead never fired for a named-KA
+          // update and its transaction went out with no durable record. The ONE hooks object is
+          // now spread through both branches, so neither can drop a hook the other carries.
+          ...executionHooks,
           precomputedUpdateAttestation: updateAttestation,
           publisherOverride: publisher,
           subGraphName: request.subGraphName,
@@ -5482,7 +5534,11 @@ export class PublishMethods extends DKGAgentBase {
         ...(snapshotPrivateRoot ? { privateMerkleRoot: snapshotPrivateRoot } : {}),
         privateTripleCount: seal.privateTripleCount,
         operationCtx: ctx,
-        onPhase: opts?.onPhase ?? publishOptions.onPhase,
+        // GH#2270 PR-3 r4 — the same ONE hooks object the update branch spreads. This branch used
+        // to get `onBeforeBroadcast` for free through `publisherPublishOptions` and only re-derive
+        // `onPhase`; spreading the shared object makes the two branches' hook wiring identical by
+        // construction.
+        ...executionHooks,
         skipContextGraphEnsure: true,
         v10ACKProvider: publishOptions.v10ACKProvider ?? this.createV10ACKProvider(request.contextGraphId),
         publishEpochs: request.publishEpochs ?? publishOptions.publishEpochs,

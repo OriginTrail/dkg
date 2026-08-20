@@ -31,11 +31,13 @@ import {
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type AsyncLiftChainProofLookup,
+  type AsyncLiftUpdateChainProofLookup,
+  type AsyncLiftChainProofResolution,
   type AsyncLiftPublisherRecoveryResult,
   type VmPublisherControl,
-  type LiftJobBroadcast,
+  type LiftJob,
   type LiftJobHex,
-  type LiftJobIncluded,
   type PublishOptions,
   type V10ACKProviderParams,
   type SnapshotPageIndexStore,
@@ -56,6 +58,19 @@ import {
   type RuntimeEvmChainConfig,
 } from './runtime-chain-config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
+// GH#2270 PR-3 r3 — chain-proof POLICY lives in its own module; this file stays the
+// composition root that hands it the adapters and wires the result into the publisher.
+import {
+  asLiftJobBigInt,
+  asLiftJobHex,
+  chainAdaptersForWallets,
+  createChainProofResolver,
+  hasChainPublishLookup,
+  hasChainRecoveryCapabilityFor,
+  mapOnChainPublishResultToLiftRecovery,
+  verifyCanonicalUpdateFacts,
+  type PublisherChainAdapters,
+} from './publisher-chain-proof.js';
 
 export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';
 
@@ -519,19 +534,30 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   const publishers = new Map<string, DKGPublisher>(
     wallets.map((wallet) => [wallet.address, wallet.publisher]),
   );
-  const hasChainRecovery = [...publishers.values()].some((p) => {
-    const chain = (p as unknown as { chain?: { resolvePublishByTxHash?: unknown } }).chain;
-    return typeof chain?.resolvePublishByTxHash === 'function';
-  });
+  // GH#2270 PR-3 r2 — the recovery factories take adapters, not publishers. Built here, from the
+  // wallets, where `chain` is a public field rather than something to assert through.
+  const chainAdapters = chainAdaptersForWallets(wallets);
+  const hasChainRecovery = [...chainAdapters.values()].some(hasChainPublishLookup);
 
   const scopedKnowledgeAssetVmPublishHandler = scopeKnowledgeAssetVmPublishHandler(
     publishers,
     args.knowledgeAssetVmPublishHandler,
   );
+  // PR #2300 r2 (🟡 3809616683) — no shared verifier instance: the `recovered` verdict CARRIES
+  // its canonical update evidence to the finalizer, so a recognized update is verified once per
+  // recovery by construction, with no cache and no temporal coupling between the factories.
   const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
-    chainRecoveryResolver: hasChainRecovery ? createChainRecoveryResolver(publishers) : undefined,
+    chainProofResolver: hasChainRecovery ? createChainProofResolver(chainAdapters) : undefined,
+    // r20 (🔴 3815617109) — `hasChainRecovery` is `.some(...)`, so on a node mixing a capable
+    // adapter with a legacy one the resolvers are installed for the whole node. The honesty
+    // contract is per JOB, so admission must ask about the wallet that actually signs it rather
+    // than inherit the node-wide answer.
+    chainProofCapableForWallet: (walletId: string, operationKind: 'create' | 'update' | undefined) => {
+      const chain = chainAdapters.get(walletId);
+      return chain !== undefined && hasChainRecoveryCapabilityFor(chain, operationKind);
+    },
     knowledgeAssetVmPublishRecoveryResolver: hasChainRecovery
-      ? createKnowledgeAssetVmPublishRecoveryResolver(publishers)
+      ? createKnowledgeAssetVmPublishRecoveryResolver(chainAdapters)
       : undefined,
     maxRetries: args.maxRetries,
     // GH#2270 — spread rather than four copied fields, so a knob added to
@@ -756,26 +782,21 @@ function createV10ACKProviderForPublisher(
   };
 }
 
-export function createChainRecoveryResolver(
-  publishers: Map<string, DKGPublisher>,
-): (job: LiftJobBroadcast | LiftJobIncluded) => Promise<AsyncLiftPublisherRecoveryResult | null> {
-  return async (job) => {
-    const recovered = await resolveOnChainPublish(job, publishers);
-    return recovered
-      ? mapOnChainPublishResultToLiftRecovery(
-          recovered.result,
-          recovered.chain.chainId,
-          recovered.knowledgeAssetsContract,
-        )
-      : null;
-  };
-}
 
 export function createKnowledgeAssetVmPublishRecoveryResolver(
-  publishers: Map<string, DKGPublisher>,
+  adapters: PublisherChainAdapters,
 ): AsyncKnowledgeAssetVmPublishRecoveryResolver {
-  return async (job) => {
-    const recovered = await resolveCanonicalOnChainPublish(job, publishers);
+  return async (job, lookup, verdictRecovery, options) => {
+    // GH#2270 PR-3 r4 — an UPDATE transaction has no publish receipt to resolve canonically; its
+    // proof is the update-verification machinery, against the exact root the queued seal
+    // intended. PR #2300 r2 — when the dispatcher's verdict already CARRIES the canonical
+    // evidence, it is consumed directly (one verification per recovery, no shared state); the
+    // LIVE interrupted lane arrives with no verdict and verifies once here, behind the same
+    // finality gate.
+    if (lookup.operationKind === 'update') {
+      return resolveCanonicalUpdateRecoveryEvidence(job, lookup, adapters, verdictRecovery, options);
+    }
+    const recovered = await resolveCanonicalOnChainPublish(lookup, adapters, options);
     if (!recovered) return null;
     const evidence = mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
       recovered.receipt,
@@ -809,26 +830,126 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
   };
 }
 
+/**
+ * GH#2270 PR-3 r4 — recovery evidence for a queued named-KA UPDATE. PR #2300 r1 (🟡 3809054830):
+ * the ESTABLISHMENT lives in the shared {@link CanonicalUpdateVerifier} — the same verification
+ * the dispatcher's verdict came from, so a recovery that reached this finalizer never re-proves
+ * the transaction, and the two consumers cannot drift on the binding rules. This is only the
+ * mapping of those verified facts to the named lane's evidence shape: singleton batch range
+ * pinned to the reserved id, the graph-local queued UAL for materialization, and the publish
+ * proof carrying the chain-verified root plus the request's sealed author. Every gap answers
+ * `null`, and the publisher keeps the job held — including facts verified without a canonical
+ * block hash or tx index, which cannot make durable evidence.
+ */
+async function resolveCanonicalUpdateRecoveryEvidence(
+  job: LiftJob,
+  lookup: AsyncLiftUpdateChainProofLookup,
+  adapters: PublisherChainAdapters,
+  verdictRecovery: AsyncLiftPublisherRecoveryResult | undefined,
+  options?: { readonly signal?: AbortSignal },
+): Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null> {
+  const request = job.request?.jobType === 'knowledge-asset-vm-publish'
+    ? job.request.knowledgeAssetVmPublish
+    : undefined;
+  if (
+    request?.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+    || request.kaUal === undefined
+    || lookup.publishIdentityKaId === undefined
+  ) {
+    return null;
+  }
+  // PR #2300 r2 — the verdict's canonical evidence is the SAME verification this recovery was
+  // dispatched on; consume it rather than re-proving the transaction. The kaId comes from the
+  // lookup the verification was bound to. Only a verdict-less arrival (the LIVE interrupted
+  // lane) verifies here — once, behind the same finality gate.
+  let kaId: bigint;
+  try {
+    kaId = BigInt(lookup.publishIdentityKaId);
+  } catch {
+    return null;
+  }
+  const facts = verdictRecovery?.canonicalUpdate
+    ? {
+        kaId,
+        onChainRoot: verdictRecovery.canonicalUpdate.onChainRoot,
+        blockNumber: verdictRecovery.inclusion.blockNumber,
+        ...(verdictRecovery.canonicalUpdate.merkleRootCount !== undefined
+          ? { merkleRootCount: verdictRecovery.canonicalUpdate.merkleRootCount }
+          : {}),
+        blockHash: verdictRecovery.canonicalUpdate.blockHash,
+        txIndex: verdictRecovery.canonicalUpdate.txIndex,
+      }
+    : await verifyCanonicalUpdateFacts(lookup, adapters, options);
+  if (!facts) return null;
+  if (facts.txIndex === undefined) return null;
+  const blockHash = facts.blockHash ? asLiftJobHex(facts.blockHash) : null;
+  if (!blockHash) return null;
+  const authorAddress = asLiftJobHex(request.seal.authorAddress);
+  const publisherAddress = asLiftJobHex(lookup.walletId);
+  if (!authorAddress || !publisherAddress) return null;
+
+  return {
+    inclusion: {
+      txHash: lookup.txHash,
+      blockNumber: facts.blockNumber,
+      blockHash,
+    },
+    finalization: {
+      mode: 'published',
+      txHash: lookup.txHash,
+      ual: request.kaUal,
+      batchId: facts.kaId.toString() as `${bigint}`,
+      startKAId: facts.kaId.toString() as `${bigint}`,
+      endKAId: facts.kaId.toString() as `${bigint}`,
+      publisherAddress,
+    },
+    publishProof: {
+      merkleRoot: facts.onChainRoot,
+      authorAddress,
+      txIndex: facts.txIndex,
+      ...(facts.merkleRootCount !== undefined ? { merkleRootCount: facts.merkleRootCount } : {}),
+      operationKind: 'update',
+    },
+  };
+}
+
 async function resolveCanonicalOnChainPublish(
-  job: LiftJobBroadcast | LiftJobIncluded,
-  publishers: Map<string, DKGPublisher>,
+  lookup: AsyncLiftChainProofLookup,
+  adapters: PublisherChainAdapters,
+  options?: { readonly signal?: AbortSignal },
 ): Promise<{
   receipt: CanonicalFinalizationReceipt;
   chain: ChainAdapter;
   knowledgeAssetsContract: string;
 } | null> {
-  const publisher = publishers.get(job.broadcast.walletId);
-  if (!publisher) return null;
-  const chain = (publisher as unknown as { chain?: ChainAdapter }).chain;
+  const chain = adapters.get(lookup.walletId);
   if (!chain?.resolveCanonicalFinalizationReceipt) return null;
 
   let resolution;
   try {
-    resolution = await chain.resolveCanonicalFinalizationReceipt(job.broadcast.txHash);
+    resolution = await chain.resolveCanonicalFinalizationReceipt(lookup.txHash, options);
   } catch {
     return null;
   }
   if (resolution.status !== 'confirmed') return null;
+
+  // r14 (3814018304) — the same finality rule every other mined verdict in this chain follows. This
+  // is the CREATE branch's own resolver path: it reads a canonical receipt directly rather than
+  // going through the gated verdict, so without this it could begin finalizing from a receipt a
+  // reorg can still rewrite while every finality row on the update branch stayed green.
+  if (!chain.isReceiptBlockFinalAndCanonical) return null;
+  try {
+    // r25 (🔴 3820711175) — the finality gate takes the pass deadline like every other read on
+    // this branch; it was the one left detached after the receipt lookup was threaded.
+    const final = await chain.isReceiptBlockFinalAndCanonical({
+      txHash: lookup.txHash,
+      blockNumber: resolution.receipt.blockNumber,
+      blockHash: resolution.receipt.blockHash,
+    }, options);
+    if (!final) return null;
+  } catch {
+    return null;
+  }
 
   let knowledgeAssetsContract = resolution.receipt.knowledgeAssetsContract;
   if (!knowledgeAssetsContract && chain.getDKGKnowledgeAssetsAddress) {
@@ -843,41 +964,6 @@ async function resolveCanonicalOnChainPublish(
     : null;
 }
 
-function asLiftJobHex(value: string): LiftJobHex | null {
-  return ethers.isHexString(value) ? value as LiftJobHex : null;
-}
-
-function asLiftJobBigInt(value: bigint | undefined): `${bigint}` | undefined {
-  return value?.toString() as `${bigint}` | undefined;
-}
-
-export function mapOnChainPublishResultToLiftRecovery(
-  result: OnChainPublishResult,
-  chainId: string,
-  knowledgeAssetsContract: string,
-): AsyncLiftPublisherRecoveryResult | null {
-  const txHash = asLiftJobHex(result.txHash);
-  const publisherAddress = asLiftJobHex(result.publisherAddress);
-  if (!txHash || !publisherAddress) return null;
-
-  const recoveredKaId = result.kaId ?? result.startKAId ?? result.batchId;
-  return {
-    inclusion: {
-      txHash,
-      blockNumber: result.blockNumber,
-      blockTimestamp: result.blockTimestamp,
-    },
-    finalization: {
-      mode: 'published',
-      txHash,
-      ual: buildKnowledgeAssetUal(chainId, knowledgeAssetsContract, recoveredKaId),
-      batchId: result.batchId.toString() as `${bigint}`,
-      startKAId: asLiftJobBigInt(result.startKAId),
-      endKAId: asLiftJobBigInt(result.endKAId),
-      publisherAddress,
-    },
-  };
-}
 
 function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
   receipt: CanonicalFinalizationReceipt,
@@ -921,43 +1007,10 @@ function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
       endKAId: receipt.endKAId.toString() as `${bigint}`,
       publisherAddress,
     },
-    publishProof: { merkleRoot, authorAddress, txIndex: receipt.txIndex },
+    publishProof: { merkleRoot, authorAddress, txIndex: receipt.txIndex, operationKind: 'create' },
   };
 }
 
-async function resolveOnChainPublish(
-  job: LiftJobBroadcast | LiftJobIncluded,
-  publishers: Map<string, DKGPublisher>,
-): Promise<{
-  result: OnChainPublishResult;
-  chain: ChainAdapter;
-  knowledgeAssetsContract: string;
-} | null> {
-  const publisher = publishers.get(job.broadcast.walletId);
-  if (!publisher) return null;
-  const chain = (publisher as unknown as { chain?: ChainAdapter }).chain;
-  if (!chain?.resolvePublishByTxHash) return null;
-
-  let result: OnChainPublishResult | null;
-  try {
-    result = await chain.resolvePublishByTxHash(job.broadcast.txHash);
-  } catch {
-    // Transient RPC/provider errors — treat as inconclusive (null) so the
-    // recovery timeout mechanism handles it rather than crashing the daemon.
-    return null;
-  }
-  if (!result) return null;
-
-  let knowledgeAssetsContract = result.knowledgeAssetsContract;
-  if (!knowledgeAssetsContract && chain.getDKGKnowledgeAssetsAddress) {
-    try {
-      knowledgeAssetsContract = await chain.getDKGKnowledgeAssetsAddress();
-    } catch {
-      return null;
-    }
-  }
-  return knowledgeAssetsContract ? { result, chain, knowledgeAssetsContract } : null;
-}
 
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {
   if (config.store) {

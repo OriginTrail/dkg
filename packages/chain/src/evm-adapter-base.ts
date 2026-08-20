@@ -21,6 +21,8 @@ import type {
   KnowledgeAssetUpdateContext,
   V10PublishParams,
   OnChainPublishResult,
+  PreBroadcastSignal,
+  SignedTransactionEnvelope,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { KeyedSerializer } from './keyed-mutex.js';
@@ -1574,11 +1576,14 @@ export class EVMChainAdapterBase {
   protected async signPopulatedTransaction(
     signer: Wallet,
     populated: ethers.TransactionRequest,
-  ): Promise<{ signedTx: string; txHash: string }> {
+  ): Promise<SignedTransactionEnvelope> {
     const filled = await signer.populateTransaction(populated);
     const signedTx = await signer.signTransaction(filled);
-    const txHash = ethers.Transaction.from(signedTx).hash ?? '0x';
-    return { signedTx, txHash };
+    // GH#2270 PR-3 r3 — ONE decode of the signed bytes, here, for both facts the send window
+    // needs. The nonce used to be re-parsed at the dispatch boundary from the same string.
+    const parsed = ethers.Transaction.from(signedTx);
+    const nonce = Number.isSafeInteger(parsed.nonce) && parsed.nonce >= 0 ? parsed.nonce : undefined;
+    return { signedTx, txHash: parsed.hash ?? '0x', ...(nonce === undefined ? {} : { nonce }) };
   }
 
   /**
@@ -1598,7 +1603,7 @@ export class EVMChainAdapterBase {
     tokenAmount: bigint,
     reapproveLabel: string,
     approvalSender: ContractWriteSender = this.sendContractTransaction.bind(this),
-  ): Promise<{ signedTx: string; txHash: string }> {
+  ): Promise<SignedTransactionEnvelope> {
     // Per-endpoint populate+sign failover lives in the shared
     // `populateAndSignAcrossProviders` (so a 429ing primary can't fail-fast the
     // publish); the #888 stale-allowance recovery stays a strict ONE-SHOT. OUTER
@@ -1695,14 +1700,23 @@ export class EVMChainAdapterBase {
   protected async dispatchSerializedV10Write(
     signer: Wallet,
     label: 'publish' | 'update',
-    onBroadcast: ((info: { txHash: string }) => Promise<void> | void) | undefined,
-    buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<{ signedTx: string; txHash: string }>,
+    onBroadcast: ((signal: PreBroadcastSignal) => Promise<void> | void) | undefined,
+    buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<SignedTransactionEnvelope>,
     onNullReceipt: (preBroadcastTxHash: string) => never,
   ): Promise<ethers.TransactionReceipt> {
     return this.withSerializedSignerWrite(signer, async (ctx) => {
-      const { signedTx, txHash: preBroadcastTxHash } = await buildSignedTx(ctx);
+      const { signedTx, txHash: preBroadcastTxHash, nonce } = await buildSignedTx(ctx);
+      // GH#2270 PR-3 — the WAL checkpoint also carries the signed NONCE. A null transaction
+      // lookup is point-in-time, backend-local evidence: a broadcast whose response timed out can
+      // still be accepted and mined later, so "the node does not have it" is not absence. The
+      // nonce is what makes absence PROVABLE — once the wallet's account nonce at a FINALIZED
+      // block is past this slot, and the transaction is still not found, it can never mine.
+      //
+      // It arrives already parsed, from the one decode `signPopulatedTransaction` does at signing.
+      // A signer that could not provide one leaves it undefined and the recovery side stays
+      // fail-closed; nothing is re-derived here.
       try {
-        await onBroadcast?.({ txHash: preBroadcastTxHash });
+        await onBroadcast?.({ txHash: preBroadcastTxHash, nonce });
       } catch (hookErr) {
         throw new Error(
           `chain:writeahead hook failed before ${label} broadcast: ` +
@@ -1743,7 +1757,7 @@ export class EVMChainAdapterBase {
     signer: Wallet,
     label: string,
     opts?: { gasLimitBufferBps?: number },
-  ): Promise<{ signedTx: string; txHash: string }> {
+  ): Promise<SignedTransactionEnvelope> {
     return this.rpcFailover.populateAndSign(contract, method, args, signer, label, opts);
   }
 

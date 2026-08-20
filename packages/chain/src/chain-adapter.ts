@@ -257,6 +257,35 @@ export type CanonicalFinalizationReceiptResolution =
   | { status: 'rejected' }
   | { status: 'not-found' };
 
+/**
+ * GH#2270 — what the chain says about a publish transaction, without fusing
+ * "we have no proof" into "it did not happen".
+ *
+ * `resolvePublishByTxHash` answers `OnChainPublishResult | null`, and that one
+ * `null` stands for five different chain facts: a mined-but-reverted tx, a
+ * mined tx carrying no publish this adapter can parse, a broadcast tx still
+ * waiting to be mined, a tx the node has never heard of, and an adapter whose
+ * publish contracts are not wired up. Recovery must never resend on the
+ * strength of that `null`. Only `not-found` — the node was asked for the
+ * TRANSACTION, not merely its receipt, and does not have it — is evidence of
+ * absence.
+ */
+export type PublishTransactionResolution =
+  /** Mined, successful, and carries a publish this adapter parsed. */
+  | { status: 'confirmed'; publish: OnChainPublishResult }
+  /** Mined with a failure receipt: proven ineffective, and permanently so. */
+  | { status: 'reverted' }
+  /**
+   * Mined and successful, but carrying no publish event this adapter
+   * recognizes. NOT proof that no publish happened — an adapter with unwired
+   * publish contracts lands here too.
+   */
+  | { status: 'unrecognized' }
+  /** The node holds the transaction and has not mined it yet. Never absence. */
+  | { status: 'pending' }
+  /** The node has neither the receipt nor the transaction: the only proven absence. */
+  | { status: 'not-found' };
+
 export interface CanonicalFinalizationReceiptReadOptions extends ChainReadOptions {
   /** Persisted block identity supplied during replay canonicality checks. */
   expectedBlockHash?: string;
@@ -299,6 +328,27 @@ export interface TxResult {
   publisherAddress?: string;
   /** Set by createContextGraph when V9 registry is used (on-chain contextGraphId as hex). */
   contextGraphId?: string;
+}
+
+/**
+ * GH#2270 PR-3 r4 — one finalized block's answer to the release-by-absence pair. See
+ * {@link ChainAdapter.readFinalizedChainProofSnapshot} for why the facts travel together.
+ */
+export interface FinalizedChainProofSnapshot {
+  /** The finalized block BOTH reads below were evaluated at. */
+  blockNumber: number;
+  /** Its hash — the identity that makes the pin auditable. */
+  blockHash: string;
+  /** `getTransactionCount(address, blockNumber)`: the NEXT nonce as of the pinned block. */
+  accountNonce: number;
+  /**
+   * Minted state of the requested `kaId` AT the pinned block: `true` for a real owner, `false`
+   * only for a provable nonexistent-token answer, `null` for every ambiguity (an unclassifiable
+   * revert, an undeployed storage contract). PR #2300 r1 — non-optional, because the snapshot
+   * REQUIRES a `kaId` now: the release decision it feeds is only ever taken over a pinned
+   * identity, so a nonce-only snapshot had no caller and existed only as optional soup.
+   */
+  kaMinted: boolean | null;
 }
 
 export interface KAUpdateVerification {
@@ -737,7 +787,7 @@ export interface V10PublishParams {
    * callers in TypeScript, so an `async () => ...` hook passed in
    * here would otherwise race the broadcast.
    */
-  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
+  onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
 }
 
 export interface V10UpdateKAParams {
@@ -788,7 +838,7 @@ export interface V10UpdateKAParams {
    * {@link V10PublishParams.onBroadcast} for full semantics
    * (fail-closed contract, exactly-once, Promise return, etc.).
    */
-  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
+  onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
 }
 
 /**
@@ -959,6 +1009,44 @@ export interface OperationalWalletRegistrationResult {
 }
 
 /** Optional cancellation boundary for caller-owned, read-only chain work. */
+/**
+ * GH#2270 PR-3 — what the adapter knows about a transaction it has SIGNED and is about to send.
+ *
+ * Delivered to `onBeforeBroadcast`, awaited strictly before `eth_sendRawTransaction`, and
+ * fail-closed: a throw aborts the broadcast with the signed transaction still local, so a caller
+ * that could not make this durable never has a transaction on the wire.
+ *
+ * The shape lives in the chain package because the chain package is what produces it. It used to
+ * be smuggled to listeners as two parsed phase STRINGS, which made a durability guarantee depend
+ * on a naming convention, on emission order, and on nobody else claiming the same prefix.
+ */
+/**
+ * GH#2270 PR-3 r3 — a signed, not-yet-sent transaction, as the signing path produces it.
+ *
+ * The nonce is parsed ONCE, where the transaction is signed and the bytes are already being
+ * decoded for the hash. It used to be re-parsed later, at the dispatch boundary, which meant two
+ * decodes of the same bytes and two places that had to agree on what "the nonce" meant.
+ *
+ * `nonce` stays optional because it is only as available as the signer made it: an unparseable
+ * transaction yields none, and the recovery side reads that absence as "no proof of absence
+ * available" rather than guessing.
+ */
+export interface SignedTransactionEnvelope {
+  readonly signedTx: string;
+  readonly txHash: string;
+  readonly nonce?: number;
+}
+
+export interface PreBroadcastSignal {
+  /** The signed transaction's hash, known before it is sent. */
+  readonly txHash: string;
+  /**
+   * The account nonce the signed transaction reserved. Absent only when it could not be read —
+   * recovery treats that as "no proof of absence available" rather than guessing.
+   */
+  readonly nonce?: number;
+}
+
 export interface ChainReadOptions {
   signal?: AbortSignal;
 }
@@ -1052,6 +1140,73 @@ export interface ChainAdapter {
     txHash: string,
     options?: ChainReadOptions,
   ): Promise<OnChainPublishResult | null>;
+
+  /**
+   * GH#2270 — the same lookup as {@link resolvePublishByTxHash}, answering with
+   * the chain fact rather than with `null`. Recovery uses this one: it is the
+   * only surface on which "the node does not have this transaction" can be told
+   * apart from "the node has it and has not mined it yet", and a resend is safe
+   * on the first but a double-publish on the second.
+   *
+   * It is a SECOND entry point rather than a widened `resolvePublishByTxHash`
+   * because that method has a consumer outside recovery — durable-sync
+   * graph-scoped materialization, which wants the publish or nothing and has no
+   * use for the other four states. Widening it would push a five-way switch into
+   * a subsystem that does not have the question, for no gain. The two are not
+   * duplicates: `resolvePublishByTxHash` stays receipt-only (one RPC round trip,
+   * which is all it needs), and the extra `eth_getTransaction` that makes
+   * `not-found` mean something is paid only here. `resolveCanonicalFinalizationReceipt`
+   * already draws the same line for the named-KA lane.
+   */
+  resolvePublishTransaction?(
+    txHash: string,
+    options?: ChainReadOptions,
+  ): Promise<PublishTransactionResolution>;
+
+  /**
+   * PR #2300 r2 — is this receipt's block both FINAL and still CANONICAL? Promoted from an
+   * adapter-internal gate to a capability because update recognition (CLI-side) must establish
+   * the same finality before treating a verified update as fact: `resolvePublishTransaction`
+   * consumes it for its mined verdicts, and `verifyKAUpdate`-based recognition consumes it for
+   * the same reason — a merely-mined update receipt can be reorged onto a chain where the same
+   * signed transaction lands differently.
+   *
+   * Depth alone is not the test: the hash at the receipt's height must still be the receipt's.
+   * `txHash` is advisory — the EVM adapter answers from block identity alone; the mock keys its
+   * finality seam on it. A throw propagates (a gate that cannot answer resolves nothing).
+   */
+  isReceiptBlockFinalAndCanonical?(
+    receipt: { txHash?: string; blockNumber: number; blockHash: string },
+    options?: ChainReadOptions,
+  ): Promise<boolean>;
+
+  /**
+   * GH#2270 PR-3 r4 — the two release-by-absence facts, observed together at ONE finalized block
+   * on ONE provider, or `null` when this deployment cannot produce that pinned pair.
+   *
+   * Read separately (a finalized account nonce, then a minted-state check), the two proofs can be
+   * served by different endpoints at different heights: a nonce that reads as consumed on a fresh
+   * endpoint plus a minted-state read served by a lagging one that has not seen the replacement's
+   * mint yet composes into "consumed and unminted" — a release verdict no single chain state ever
+   * contained. Pinning both reads to one finalized block identity on one provider makes the pair
+   * a fact about A block rather than a splice of two. PR #2300 r1 — the snapshot is the ONE
+   * surface for these facts: the granular `getFinalizedAccountNonce` / `isKnowledgeAssetMinted`
+   * capabilities it superseded are deleted (they never shipped), and `kaId` is REQUIRED because
+   * the decision this feeds is only ever taken over a pinned identity.
+   *
+   * `finalized` is load-bearing, not an optimisation: the nonce half proves a recorded
+   * transaction can NEVER mine (its slot is behind the finalized frontier), and read at `latest`
+   * that conclusion can be reorged away. The minted half asks by IDENTITY, which is what closes
+   * the same-calldata-replacement hole nonce consumption cannot see. `kaMinted` is `false` only
+   * for the one revert shape that means "this token does not exist AT the pinned block", `null`
+   * for every ambiguity. A `null` RESULT means no pinned pair could be produced on any endpoint,
+   * and the caller must treat the absence question as unanswerable rather than fall back to
+   * unpinned reads.
+   */
+  readFinalizedChainProofSnapshot?(
+    params: { address: string; kaId: bigint },
+    options?: ChainReadOptions,
+  ): Promise<FinalizedChainProofSnapshot | null>;
 
   /**
    * Recovery-only receipt capability with mandatory canonical ordering.
@@ -1655,6 +1810,35 @@ export interface ChainAdapter {
   getMerkleRootCount?(kaId: bigint, options?: ChainReadOptions): Promise<bigint>;
 
   /**
+   * GH#2270 PR #2300 r8 — the asset's CURRENT version state as ONE coherent view: the latest
+   * merkle root and the number of roots written, read from a single provider at a single pinned
+   * block.
+   *
+   * Recovery decides whether a recovered transaction is still current by comparing its own
+   * position and root against these. Read separately they can come from endpoints at different
+   * heights, and a lagging COUNT beside a fresh ROOT is exactly the combination that makes an old
+   * transaction in an A -> B -> A history look current — so the pair has to be observed together
+   * or not at all. `null` means no endpoint could produce the view, and the caller must not
+   * conclude anything from that.
+   *
+   * PR #2300 r11 — it also carries the version's ATTRIBUTION, and it is taken from the MOST
+   * ADVANCED endpoint rather than the first that answers. Both follow from the same requirement:
+   * a caller deciding "is this recovered transaction still current" must not mix a root from one
+   * view with an author, a publisher or a block height from another, and a healthy-but-lagging
+   * endpoint answering first would make an old transaction look current.
+   */
+  readKnowledgeAssetVersionSnapshot?(
+    kaId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<{
+    latestRoot: string;
+    rootCount: bigint;
+    latestAuthor: string;
+    latestPublisher: string;
+    blockNumber: number;
+  } | null>;
+
+  /**
    * Constant-cost scalar update context for a KA. Consumers that need version
    * plus sizing data should prefer this over separate root-count and leaf-count
    * reads so one RPC supplies the complete recovery descriptor. Sizing hints
@@ -1732,7 +1916,7 @@ export interface ChainAdapter {
    * can omit the surface; callers MUST treat `address(0)` as
    * "no attestation on file" rather than as a valid author claim.
    */
-  getLatestMerkleRootAuthor?(kaId: bigint): Promise<string>;
+  getLatestMerkleRootAuthor?(kaId: bigint, options?: ChainReadOptions): Promise<string>;
 
   /**
    * Context graph id that hosts `kaId`, sourced from

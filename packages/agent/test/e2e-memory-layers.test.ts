@@ -728,6 +728,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const recoveryInput = {
       walletId: 'wallet-1',
       request: recoveryRequest,
+      // GH#2270 PR-3 r3 — the typed transaction facts the finalizer reads; `job.broadcast`
+      // stays only as the optional merkle-root cross-check carrier.
+      lookup: { txHash, walletId: 'wallet-1' },
       job: {
         jobId: 'recovery-job',
         jobSlug: 'recovery-job',
@@ -877,9 +880,105 @@ describe('rootless graph-scoped KA lifecycle', () => {
       code: 'KA_OPERATION_PUBLIC_SNAPSHOT_NOT_FOUND',
     });
 
+    // r29 (🔴 3822354184 / 🔴 3822354192) — the deadline at the REAL mutation boundary, on the
+    // CURRENT-version path. The previous row stopped inside the read-only normalizer, which cannot
+    // mutate anything, so it could not see that the r28 guard sat inside the superseded branch
+    // while `handleChainReconciledKC` on this path ran unguarded. An expired pass must not begin
+    // lifecycle materialization while it still holds the claim lock.
+    //
+    // The abort is armed BEFORE the call, so the deadline is already reached by the time the reads
+    // finish and the mutation would start. The spy is the observable: the finalization handler is
+    // the mutating collaborator, and it must never be entered.
+    // r29 (🔴 3822354184 / 🔴 3822354192) — the deadline at the REAL mutation boundary. The
+    // previous row stopped inside the read-only normalizer, which cannot mutate anything, so it
+    // could not see that the r28 guard sat inside the superseded branch while the current-version
+    // materialization ran unguarded.
+    //
+    // The observable is the ERROR IDENTITY, not a spy on the finalization handler: that handler is
+    // shared with the SWM host reconcile lane, which touches this same asset, so a call count
+    // there answers a question about someone else's work (it counted 1 even when the guard was
+    // correct). Error identity is specific by construction.
+    //
+    // The argument the row rests on: the abort is fired from inside a LATE read — the context
+    // graph id lookup, which runs after the normalizer has finished all of its own deadline
+    // checks. So the deadline cannot be reached by any guard before that point. If the call then
+    // rejects with the recovery deadline error, the only guard that can have raised it is one
+    // AFTER the reads, i.e. a mutation boundary. That is exactly what must exist.
+    {
+      const expired = new AbortController();
+      const realCgId = agent.getContextGraphOnChainId.bind(agent);
+      agent.getContextGraphOnChainId = (async (...args: unknown[]) => {
+        const value = await realCgId(...(args as Parameters<typeof realCgId>));
+        expired.abort();
+        return value;
+      }) as typeof agent.getContextGraphOnChainId;
+
+      try {
+        await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+          ...recoveryInput,
+          signal: expired.signal,
+        } as any)).rejects.toMatchObject({ name: 'RecoveryDeadlineReachedError' });
+      } finally {
+        agent.getContextGraphOnChainId = realCgId;
+      }
+    }
+
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     expect(recoveryCleanup).not.toHaveBeenCalled();
+
+    // PR #2300 r1 (🟡 3809054841) — the record shape item 5 exists for: a persisted FAILED job
+    // held on the recovery carrier alone (`recovery.txHashChecked`, NO `broadcast`). The REAL
+    // finalizer must complete lifecycle materialization from `lookup.txHash`; a regression that
+    // reads `job.broadcast.txHash` anywhere on this path throws on this input and fails the row.
+    // PR #2300 r5 (3812275752) — reset the lifecycle to its PRE-recovery state first. Without
+    // this the assertions below describe what the earlier invocation already produced, so a
+    // carrier-only call that silently did nothing would still leave the row green.
+    for (const predicate of [
+      `${DKG}publishedUal`,
+      `${DKG}vmCurrentAssertion`,
+      `${DKG}assertionGraph`,
+      `${DKG}memoryLayer`,
+      `${DKG}state`,
+    ]) {
+      await store.deleteByPattern({ subject: lifecycleUri, predicate, graph: metaGraph });
+    }
+    await store.deleteByPattern({ subject: assertionUri, predicate: `${DKG}memoryLayer`, graph: metaGraph });
+    for (const predicate of Object.values(ASSERTION_PUBLISH_RECEIPT_PREDICATES)) {
+      await store.deleteByPattern({ subject: assertionUri, predicate, graph: metaGraph });
+    }
+    await store.insert([
+      { subject: lifecycleUri, predicate: `${DKG}state`, object: '"promoted"', graph: metaGraph },
+      { subject: lifecycleUri, predicate: `${DKG}memoryLayer`, object: `"${MemoryLayer.SharedWorkingMemory}"`, graph: metaGraph },
+      { subject: assertionUri, predicate: `${DKG}memoryLayer`, object: `"${MemoryLayer.SharedWorkingMemory}"`, graph: metaGraph },
+    ]);
+    // The premise: the lifecycle really is un-published again, so anything asserted after the
+    // carrier-only call is that call's own work.
+    expect((await agent.assertion.history(CG_ID, name))?.status).not.toBe('vm-confirmed');
+
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      job: {
+        jobId: 'carrier-only-recovery-job',
+        jobSlug: 'carrier-only-recovery-job',
+        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: recoveryRequest },
+        status: 'failed',
+        failure: {
+          failedFromState: 'claimed',
+          code: 'workspace_unavailable',
+          retryable: true,
+          resolution: 'reset_to_accepted',
+          message: 'held on the recovery carrier alone',
+          errorPayloadRef: 'urn:dkg:test:error:carrier-only',
+          occurredAt: 3,
+        },
+        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: txHash },
+        timestamps: { acceptedAt: 1, failedAt: 3, updatedAt: 3 },
+        retries: { retryCount: 0, maxRetries: 10 },
+        controlPlane: {},
+      },
+    } as any);
+    expect((await agent.assertion.history(CG_ID, name))?.status).toBe('vm-confirmed');
 
     const history = await agent.assertion.history(CG_ID, name);
     expect(history?.state).toBe('published');
@@ -1544,6 +1643,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
       walletId: 'wallet-1',
       request: intent,
+      lookup: { txHash: processed.broadcast.txHash, walletId: 'wallet-1' },
       job: {
         jobId: 'subgraph-recovery-job',
         jobSlug: 'subgraph-recovery-job',
@@ -2554,4 +2654,119 @@ describe('Query views', () => {
     expect(mergedSubjects.some((s: string) => s.includes('canonical'))).toBe(true);
     expect(mergedSubjects.some((s: string) => s.includes('shared'))).toBe(true);
   }, 15_000);
+
+  /**
+   * GH#2270 PR-3 r3 — the pre-send write-ahead must survive the REAL queued-agent handler, on
+   * BOTH of its branches.
+   *
+   * Everything else in this chain proves the signal once it reaches `publisher.publish` /
+   * `publisher.update`. Between the queue and those calls sits
+   * `publishQueuedKnowledgeAssetVmPublish`, which rebuilds its option bag field by field — and a
+   * field-by-field rebuild silently drops anything nobody thought to name. It HAD dropped it on
+   * the update branch, so every named-KA update sent its transaction with nothing on disk
+   * recording it. A stubbed handler cannot see that; this drives the real one, over a real chain,
+   * and reads the persisted job.
+   */
+  it('records the signed nonce through the real queued handler, on create AND update [GH#2270]', async () => {
+    const agent = await createAgent('WriteAheadBoundaryBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Write-Ahead Boundary' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-writeahead-both-branches';
+    const root = `${ENTITY_BASE}:queued-writeahead`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"v1"' },
+    ]);
+    await agent.assertion.promote(CG_ID, name);
+
+    const runQueued = async () => {
+      const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+      const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+        knowledgeAssetVmPublishHandler: {
+          preflight: async ({ request }) =>
+            agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+          execute: async ({ request, publishOptions }) =>
+            agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+        },
+      });
+      await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
+      return asyncPublisher.processNext('wallet-1');
+    };
+
+    // CREATE branch — no prior vmCurrentAssertion.
+    const intentForUpdate = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const created = await runQueued();
+    expect(created?.status).toBe('finalized');
+    expect(created?.broadcast?.txHash).toMatch(/^0x[0-9a-f]+$/i);
+    // The write-ahead fired with a REAL signed nonce, carried from the adapter through the agent.
+    expect(typeof created?.broadcast?.nonce).toBe('number');
+    expect(created!.broadcast!.nonce!).toBeGreaterThanOrEqual(0);
+    expect((await agent.assertion.history(CG_ID, name))?.vmCurrentAssertion).toBeDefined();
+
+    // UPDATE branch — the hop that actually dropped it. GH#2270 r4: `agent.update` stays REAL and
+    // the double sits on the underlying PUBLISHER's update entry, so this row pins the whole
+    // agent-side chain of custody — queued handler → the real `agent.update` preconditions → the
+    // publisher — receiving the IDENTICAL callback. Driving the real send would need a fresh full
+    // share/reopen lifecycle, so with the publisher doubled there is no send here to prevent;
+    // rejection-stops-the-send for the update path is proven at the publisher's own boundary in
+    // `pre-broadcast-signal-await.test.ts`, and this row pins callback identity only.
+    const realPublisher = (agent as any).publisher;
+    const publisherUpdateSpy = vi.spyOn(realPublisher, 'updateKnowledgeAssetFromSharedMemory')
+      .mockResolvedValue({ status: 'failed', kaManifest: [] } as never);
+    const recorder = () => {};
+    try {
+      await agent.publishQueuedKnowledgeAssetVmPublish(
+        {
+          ...intentForUpdate,
+          vmCurrentAssertion: intentForUpdate.sealMerkleRoot.slice(2),
+          // The real update path enforces that the queued version ADVANCES past the published
+          // lifecycle pointer; the create half above published version 1.
+          assertionVersion: '2',
+        },
+        {
+          quads: [{ subject: root, predicate: 'http://schema.org/name', object: '"v1"', graph: '' }],
+          publisherPeerId: 'queued-update-branch',
+          onBeforeBroadcast: recorder,
+        } as never,
+      ).catch(() => undefined);
+      expect(publisherUpdateSpy).toHaveBeenCalled();
+      const forwarded = (publisherUpdateSpy.mock.calls[0] as unknown[])[1] as { onBeforeBroadcast?: unknown };
+      expect(forwarded.onBeforeBroadcast).toBe(recorder);
+    } finally {
+      publisherUpdateSpy.mockRestore();
+    }
+  }, 180_000);
+
+  it('a rejecting write-ahead stops the queued publish from sending [GH#2270]', async () => {
+    // Fail-closed across the same real boundary: if the durable record cannot be written, no
+    // transaction may go out.
+    const agent = await createAgent('WriteAheadBoundaryBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Write-Ahead Boundary' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-writeahead-fail-closed';
+    const root = `${ENTITY_BASE}:queued-writeahead-fail`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"v1"' },
+    ]);
+    await agent.assertion.promote(CG_ID, name);
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+
+    let signalled = 0;
+    const result = await agent.publishQueuedKnowledgeAssetVmPublish(intent, {
+      quads: [{ subject: root, predicate: 'http://schema.org/name', object: '"v1"', graph: '' }],
+      publisherPeerId: 'queued-writeahead-fail',
+      onBeforeBroadcast: () => {
+        signalled += 1;
+        throw new Error('could not persist the write-ahead');
+      },
+    } as never).catch((err: unknown) => err);
+
+    // The handler reached the durable boundary and then refused to publish.
+    expect(signalled).toBe(1);
+    expect(result).toBeInstanceOf(Error);
+    expect((await agent.assertion.history(CG_ID, name))?.vmCurrentAssertion).toBeUndefined();
+  }, 180_000);
 });

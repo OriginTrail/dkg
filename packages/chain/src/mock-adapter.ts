@@ -6,7 +6,9 @@ import type {
   BatchMintResult,
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
+  ChainReadOptions,
   CreateKCParams,
+  FinalizedChainProofSnapshot,
   UpdateKCParams,
   TxResult,
   ChainEvent,
@@ -30,6 +32,7 @@ import type {
   ShardingTableNode,
   PcaContracts,
   PcaRpcMethod,
+  PublishTransactionResolution,
   VerifyACKIdentityResult,
   KnowledgeAssetUpdateContext,
 } from './chain-adapter.js';
@@ -55,7 +58,24 @@ interface MockBatch {
   publisherAddress: string;
 }
 
+/**
+ * GH#2270 — the states a transaction can be in that the mock's publish event
+ * log cannot express on its own.
+ *
+ * - `pending`  the node accepted it; no receipt yet.
+ * - `reverted` mined with a failure receipt.
+ * - `mined`    mined and successful, but carrying no publish event.
+ */
+type MockTransactionState = 'pending' | 'reverted' | 'mined';
+
 interface MockKnowledgeCollection {
+  /**
+   * r21 (🔴 3816664744) — the block this collection's CURRENT version was written at. The
+   * coherent snapshot used to report a constant 1 while returning the up-to-date root and count,
+   * so a recovered materialization carried an ordering block from a different point in mock-chain
+   * history than the state it described. Stamped on every write, like a real chain.
+   */
+  versionBlockNumber: number;
   merkleRoot: Uint8Array;
   kaCount: number;
   updateContext: KnowledgeAssetUpdateContext;
@@ -169,6 +189,24 @@ export class MockChainAdapter implements ChainAdapter {
   private collections = new Map<bigint, MockKnowledgeCollection>();
   private contextGraphRegistry = new Map<string, Record<string, string>>();
   private events: ChainEvent[] = [];
+  /**
+   * GH#2270 — transactions this mock knows about that its event log does NOT
+   * represent as a publish. Without it the mock can only say "confirmed
+   * publish" or "never heard of it", so every test of the recovery path would
+   * read a mid-flight transaction as proven absent — the exact fabrication the
+   * tri-state exists to prevent. Populated only through
+   * {@link __setTransactionState}.
+   */
+  private transactionStates = new Map<string, MockTransactionState>();
+  /**
+   * GH#2270 PR-3 r1 — per-wallet finalized account nonce, declared by tests. Empty by default:
+   * the mock has no finality, so it reports `null` and recovery stays fail-closed.
+   */
+  private finalizedAccountNonces = new Map<string, number>();
+  private unfinalizedTxHashes = new Set<string>();
+  /** GH#2270 PR-3 r2 — ids a test declared minted, and ids the mock must refuse to answer for. */
+  private mintedKaIds = new Set<string>();
+  private unknownMintedIds = new Set<string>();
   /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
   private reservedRangesByPublisher = new Map<string, Array<{ startId: bigint; endId: bigint }>>();
   /** Publisher addresses this mock is explicitly allowed to attribute V10 publishes to. */
@@ -381,6 +419,111 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
+  async resolvePublishTransaction(
+    txHash: string,
+    _options: ChainReadOptions = {},
+  ): Promise<PublishTransactionResolution> {
+    // PR #2300 r1 — parity with the EVM adapter's finality gate: a MINED verdict (confirmed,
+    // reverted, unrecognized) is only emitted for a receipt whose block is final and canonical;
+    // until then the honest answer is `pending`. The mock mines-and-finalizes instantly by
+    // default, so nothing changes for a test that does not declare otherwise; the seam below
+    // declares the not-yet-final window.
+    const unfinalized = this.unfinalizedTxHashes.has(txHash);
+    const publish = await this.resolvePublishByTxHash(txHash);
+    if (publish) return unfinalized ? { status: 'pending' } : { status: 'confirmed', publish };
+
+    switch (this.transactionStates.get(txHash)) {
+      case 'pending': return { status: 'pending' };
+      case 'reverted': return unfinalized ? { status: 'pending' } : { status: 'reverted' };
+      case 'mined': return unfinalized ? { status: 'pending' } : { status: 'unrecognized' };
+      // Nothing in the event log, nothing declared: the mock genuinely does not
+      // have this transaction, which is what `not-found` asserts.
+      default: return { status: 'not-found' };
+    }
+  }
+
+  /**
+   * Test seam (double-underscore convention, off the ChainAdapter interface) —
+   * declare a transaction the mock knows about but did not mine as a publish.
+   * A hash left undeclared and absent from the event log reads as `not-found`,
+   * the mock's only proven absence.
+   */
+  __setTransactionState(txHash: string, state: MockTransactionState): void {
+    this.transactionStates.set(txHash, state);
+  }
+
+  /** Test seam — undo {@link __setTransactionState} for one hash. */
+  __clearTransactionState(txHash: string): void {
+    this.transactionStates.delete(txHash);
+  }
+
+  /**
+   * PR #2300 r1 test seam — declare that this transaction's receipt sits in a block that is not
+   * yet final (or was reorged out of its height). Every mined verdict for it reads `pending`
+   * until the seam is cleared, mirroring the EVM adapter's finality gate.
+   */
+  __setTransactionUnfinalized(txHash: string, unfinalized = true): void {
+    if (unfinalized) this.unfinalizedTxHashes.add(txHash);
+    else this.unfinalizedTxHashes.delete(txHash);
+  }
+
+  /**
+   * PR #2300 r2 — see {@link ChainAdapter.isReceiptBlockFinalAndCanonical}. The mock's finality
+   * is its per-transaction seam, so the advisory `txHash` is the key here: a receipt whose
+   * transaction is declared unfinalized is not final; everything else is finalized-instantly,
+   * which is the mock's block model.
+   */
+  async isReceiptBlockFinalAndCanonical(
+    receipt: { txHash?: string; blockNumber: number; blockHash: string },
+    _options: ChainReadOptions = {},
+  ): Promise<boolean> {
+    return !(receipt.txHash !== undefined && this.unfinalizedTxHashes.has(receipt.txHash));
+  }
+
+  /**
+   * GH#2270 PR-3 r4 — see {@link ChainAdapter.readFinalizedChainProofSnapshot}. The mock's one
+   * finality seam is the declared finalized nonce (`__setFinalizedAccountNonce` declares the
+   * chain FACT, and survives PR #2300 r1's deletion of the granular read methods it once also
+   * fed), so the snapshot exists exactly when a test has declared one for this address. The
+   * minted half reads the same minted seams (`collections` / `__setKnowledgeAssetMinted` /
+   * `__setKnowledgeAssetMintedUnknown`) in the SAME call, which is the parity the capability
+   * exists for.
+   */
+  async readFinalizedChainProofSnapshot(
+    params: { address: string; kaId: bigint },
+    _options: ChainReadOptions = {},
+  ): Promise<FinalizedChainProofSnapshot | null> {
+    const accountNonce = this.finalizedAccountNonces.get(params.address.toLowerCase());
+    if (accountNonce === undefined) return null;
+    const blockNumber = this.nextBlock;
+    const kaMinted = this.unknownMintedIds.has(params.kaId.toString())
+      ? null
+      : this.collections.has(params.kaId) || this.mintedKaIds.has(params.kaId.toString());
+    return { blockNumber, blockHash: mockBlockHash(blockNumber), accountNonce, kaMinted };
+  }
+
+  /**
+   * Test seam — declare that the mock CANNOT answer for this id, the fail-closed shape a real
+   * deployment produces when the storage contract is absent or the read is ambiguous.
+   */
+  __setKnowledgeAssetMintedUnknown(kaId: bigint): void {
+    this.unknownMintedIds.add(kaId.toString());
+  }
+
+  /** Test seam — declare an id as already minted without driving a full publish. */
+  __setKnowledgeAssetMinted(kaId: bigint): void {
+    this.mintedKaIds.add(kaId.toString());
+  }
+
+  /**
+   * Test seam — declare the wallet's account nonce at the finalized block. Pass `undefined` to go
+   * back to "this deployment cannot answer", which is the mock's default.
+   */
+  __setFinalizedAccountNonce(address: string, nonce: number | undefined): void {
+    if (nonce === undefined) this.finalizedAccountNonces.delete(address.toLowerCase());
+    else this.finalizedAccountNonces.set(address.toLowerCase(), nonce);
+  }
+
   async resolveCanonicalFinalizationReceipt(
     txHash: string,
     options: CanonicalFinalizationReceiptReadOptions = {},
@@ -393,7 +536,16 @@ export class MockChainAdapter implements ChainAdapter {
       || !Number.isSafeInteger(txIndex)
       || Number(txIndex) < 0
     ) {
-      return { status: 'not-found' };
+      // GH#2270 — the same seam `resolvePublishTransaction` reads, mapped onto
+      // this surface's vocabulary. `rejected` covers both a failure receipt and
+      // a mined tx carrying no parseable publish, exactly as the EVM adapter
+      // fuses them here.
+      switch (this.transactionStates.get(txHash)) {
+        case 'pending': return { status: 'pending' };
+        case 'reverted':
+        case 'mined': return { status: 'rejected' };
+        default: return { status: 'not-found' };
+      }
     }
     const blockHash = mockBlockHash(publish.blockNumber);
     if (
@@ -483,6 +635,9 @@ export class MockChainAdapter implements ChainAdapter {
     const collection = this.collections.get(params.kaId);
     if (collection) {
       collection.merkleRoot = params.newMerkleRoot;
+      // r21 (🔴 3816664744) — an update MOVES the version, so it re-stamps the ordering block.
+      // Without this the snapshot would report a fresh root against the creation block.
+      collection.versionBlockNumber = this.nextBlock;
       applyV10UpdateContext(collection.updateContext, params);
     }
     const hintedPublisherAddress = params.publisherAddress
@@ -522,6 +677,10 @@ export class MockChainAdapter implements ChainAdapter {
       verified: true,
       onChainMerkleRoot: fromHex(match.data.newMerkleRoot as string),
       blockNumber: match.blockNumber,
+      // GH#2270 PR-3 r4 — parity with the EVM adapter, which returns the receipt's blockHash.
+      // Update-job recovery evidence requires the canonical block hash, so a mock without one
+      // silently disqualified every update-recovery path from being drivable in tests.
+      blockHash: mockBlockHash(match.blockNumber),
       txIndex: typeof match.data.txIndex === 'number' ? match.data.txIndex : 0,
       merkleRootCount: match.data.merkleRootCount
         ? BigInt(String(match.data.merkleRootCount))
@@ -534,6 +693,7 @@ export class MockChainAdapter implements ChainAdapter {
   async createKnowledgeAsset(params: CreateKCParams): Promise<TxResult> {
     const kaId = this.nextBatchId++;
     this.collections.set(kaId, {
+      versionBlockNumber: this.nextBlock,
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsCount,
       updateContext: createLegacyUpdateContext(params.knowledgeAssetsCount, this.rsEpoch),
@@ -562,6 +722,11 @@ export class MockChainAdapter implements ChainAdapter {
     }
 
     existing.merkleRoot = params.newMerkleRoot;
+    // r21 (🔴 3816664744) — the legacy V8 update moves the version too, so it re-stamps the
+    // ordering block alongside the V10 path. Leaving it out would make the snapshot's block
+    // depend on WHICH update entry point a fixture happened to use.
+    const legacyCollection = this.collections.get(params.kaId);
+    if (legacyCollection) legacyCollection.versionBlockNumber = this.nextBlock;
     this.pushEvent('KCUpdated', {
       kaId: params.kaId.toString(),
       newMerkleRoot: toHex(params.newMerkleRoot),
@@ -1649,6 +1814,7 @@ export class MockChainAdapter implements ChainAdapter {
     // fixtures that never set reservedKaId are unaffected).
     const kaId = params.reservedKaId ?? this.nextBatchId++;
     this.collections.set(kaId, {
+      versionBlockNumber: this.nextBlock,
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
       updateContext: createV10UpdateContext(params, this.rsEpoch),
@@ -1860,6 +2026,7 @@ export class MockChainAdapter implements ChainAdapter {
       cgId: input.contextGraphId,
     });
     this.collections.set(input.kaId, {
+      versionBlockNumber: this.nextBlock,
       merkleRoot: fromHex(input.merkleRootHex),
       kaCount: input.chunks.length,
       updateContext: createFixtureUpdateContext({
@@ -2089,6 +2256,29 @@ export class MockChainAdapter implements ChainAdapter {
 
   async getMerkleRootCount(kaId: bigint): Promise<bigint> {
     return (await this.getKnowledgeAssetUpdateContext(kaId)).merkleRootsCount;
+  }
+
+  /** GH#2270 PR #2300 — the mock has ONE state, so its view is coherent and current by construction. */
+  async readKnowledgeAssetVersionSnapshot(
+    kaId: bigint,
+  ): Promise<{
+    latestRoot: string;
+    rootCount: bigint;
+    latestAuthor: string;
+    latestPublisher: string;
+    blockNumber: number;
+  } | null> {
+    try {
+      return {
+        latestRoot: ethers.hexlify(await this.getLatestMerkleRoot(kaId)),
+        rootCount: await this.getMerkleRootCount(kaId),
+        latestAuthor: await this.getLatestMerkleRootAuthor(kaId),
+        latestPublisher: await this.getLatestMerkleRootPublisher(kaId),
+        blockNumber: this.collections.get(kaId)?.versionBlockNumber ?? this.nextBlock,
+      };
+    } catch {
+      return null;
+    }
   }
 
   async getKnowledgeAssetUpdateContext(kaId: bigint): Promise<KnowledgeAssetUpdateContext> {
