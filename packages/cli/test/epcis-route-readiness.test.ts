@@ -215,6 +215,44 @@ describe('EPCIS async capture publisher readiness', () => {
     });
   });
 
+  it('stamps the AUTHENTICATED submitter as the admission owner, and the client cannot forge it', async () => {
+    // 3825614158 — an EPCIS capture reaches the same async publisher queue as the daemon's
+    // knowledge-assets route, and this PR made admission ownership the sole authorization for the
+    // by-id force-clear. Without this stamp the agent's own publish path treats an authenticated
+    // capture as an internal producer and assigns it to the node's default agent: the submitting
+    // agent loses the only manual exit for a held job, and the node owner gains a destructive
+    // capability over a job it never enqueued.
+    const SUBMITTER = '0x00000000000000000000000000000000000000a7';
+    const FORGED = '0x00000000000000000000000000000000000000ff';
+    const published: Array<{ opts: any }> = [];
+    const ctx = createContext({
+      req: createRequest({
+        epcisDocument: VALID_OBJECT_EVENT_DOC,
+        // The client tries to name a different owner in its own publish options.
+        publishOptions: { admittedByAgentAddress: FORGED },
+      }),
+      requestAgentAddress: SUBMITTER,
+      agent: {
+        publishAsync: async (_cg: string, _content: unknown, opts: unknown) => {
+          published.push({ opts });
+          return { captureID: 'capture-owner-1' };
+        },
+      } as unknown as RequestContext['agent'],
+      publisherState: readyPublisherState(),
+    });
+
+    await handleEpcisRoutes(ctx);
+
+    expect(ctx.res.statusCode).toBe(202);
+    // The authenticated identity is what lands. The client's value never arrives at all:
+    // `handleCaptureAsync` builds publisher opts from a strict allow-list, so the row below is
+    // an end-to-end check that a request body cannot choose the owner — NOT proof that the
+    // spread ordering defends it. Reversing that ordering leaves this row green (measured), so
+    // the ordering is defence in depth only, and the allow-list is the guard.
+    expect(published[0]?.opts?.admittedByAgentAddress).toBe(SUBMITTER);
+    expect(published[0]?.opts?.admittedByAgentAddress).not.toBe(FORGED);
+  });
+
   it('accepts capture and publishes bare documents as private content without route public wrapping', async () => {
     const published: Array<{ contextGraphId: string; content: unknown; opts: unknown }> = [];
     const ctx = createContext({
@@ -243,7 +281,9 @@ describe('EPCIS async capture publisher readiness', () => {
       {
         contextGraphId: 'epcis-test',
         content: { private: VALID_OBJECT_EVENT_DOC },
-        opts: { accessPolicy: 'allowList', allowedPeers: ['peer-a'] },
+        // 3825614158 — the authenticated submitter is stamped as the admission owner on every
+        // capture, beside the client's publish options.
+        opts: { accessPolicy: 'allowList', allowedPeers: ['peer-a'], admittedByAgentAddress: '0x0' },
       },
     ]);
   });
@@ -272,7 +312,7 @@ describe('EPCIS async capture publisher readiness', () => {
       {
         contextGraphId: 'per-request-cg',
         content: { private: VALID_OBJECT_EVENT_DOC },
-        opts: { subGraphName: 'research' },
+        opts: { subGraphName: 'research', admittedByAgentAddress: '0x0' },
       },
     ]);
   });

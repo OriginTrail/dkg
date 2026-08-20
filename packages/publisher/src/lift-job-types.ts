@@ -335,6 +335,9 @@ export const LIFT_JOB_IMMUTABLE_FIELDS = [
   'jobId',
   'jobSlug',
   'request',
+  // GH#2270 follow-up (3825614166) — who admitted the job is fixed at creation and never
+  // rewritten. A reset that rebuilds the job carries it forward; nothing may reassign it.
+  'admission',
   'timestamps.acceptedAt',
   'retries.maxRetries',
 ] as const;
