@@ -535,6 +535,12 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(String(res.body.error)).toContain('job-7');
     // The pre-PR-3 wording promised nobody was coming.
     expect(String(res.body.error)).not.toContain('No automatic lane resolves this');
+    // GH#2270 follow-up (🔴 3824098486, 🔴 3824353564, 🔴 3824484756) — the command handed
+    // back must be one that WORKS. A held job's clear needs the explicit override, and
+    // retryability does not decide that: a recoverable job can still be `retry_recovery`. This is
+    // asserted on the EMITTED body rather than the source, so an override left in dead source
+    // cannot pass for a usable instruction.
+    expect(String(res.body.error)).toContain('{"jobId":"job-7","allowPendingTransaction":true}');
   });
 
   it('vm/publish-async: LIFT_JOB_PENDING_CHAIN_PROOF forwards retryable: FALSE for an operator-only record [PR#2300 r1]', async () => {
@@ -581,6 +587,10 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(String(res.body.error)).toContain('/api/publisher/clear-job');
     expect(String(res.body.error)).toContain('job-8');
     expect(String(res.body.error)).not.toContain('Chain recovery re-checks this job');
+    // The other polarity of the same guarantee: BOTH retryable values must be handed a command
+    // that can actually clear the job, which is what makes this pair discriminating rather than
+    // a single-branch check that a reversal could satisfy.
+    expect(String(res.body.error)).toContain('{"jobId":"job-8","allowPendingTransaction":true}');
   });
 
   // GH#1778 — the disambiguation error surfaces as a 409 with the candidate

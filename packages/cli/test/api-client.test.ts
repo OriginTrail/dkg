@@ -1307,6 +1307,22 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(JSON.parse(calls[0].opts.body as string)).toEqual({ jobId: 'lift job 7' });
   });
 
+  // GH#2270 follow-up (🟡 3824484894) — the escape-hatch option is the CHANGED public behaviour,
+  // and only the unchanged default was covered. Removing or inverting the conditional spread would
+  // have sent the plain body while every existing row stayed green — and the plain body is exactly
+  // what cannot clear a held job.
+  it('publisherClearJob serializes the pending-transaction override only when asked', async () => {
+    const calls = track({ outcome: 'cleared', jobId: 'lift job 7' });
+    await client.publisherClearJob('lift job 7', { allowPendingTransaction: true });
+    expect(JSON.parse(calls[0].opts.body as string))
+      .toEqual({ jobId: 'lift job 7', allowPendingTransaction: true });
+
+    // The discriminating half: an explicit false must not opt in, so a caller cannot request the
+    // destructive override by passing the option around with a falsy value.
+    await client.publisherClearJob('lift job 7', { allowPendingTransaction: false });
+    expect(JSON.parse(calls[1].opts.body as string)).toEqual({ jobId: 'lift job 7' });
+  });
+
   it('knowledgeAssetShareAsync rejects unsupported sync-only options before HTTP serialization', async () => {
     const calls = track({ jobId: 'should-not-reach', state: 'queued' });
     await expect(client.knowledgeAssetShareAsync('cg', 'f', {

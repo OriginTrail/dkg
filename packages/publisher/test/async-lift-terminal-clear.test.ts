@@ -139,6 +139,39 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect(await p.getStatus(jobId)).toBeNull();
   });
 
+  it('a NODE-TOKEN job can be force-cleared by that node token [followup]', async () => {
+    // 🔴 3824484639 — a node-level API token is the ordinary client, and it resolves to no
+    // `callerAgentAddress` at all: that field is an author RESOLUTION HINT and is deliberately
+    // absent for node tokens. Authorizing on it therefore denied the force-clear to the most
+    // common caller, reproducing the exact dead end this PR set out to remove — the daemon handed
+    // back a command that could never work.
+    //
+    // `admittedByAgentAddress` records the authenticated enqueuer instead, for every admission,
+    // and carries no author-selection meaning.
+    const NODE = '0xNNnNNn00000000000000000000000000000000Nn';
+    const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
+    const p = createPublisher();
+    const jobId = await driveToTerminalFailed(p, {
+      // No callerAgentAddress: the node-token shape.
+      admittedByAgentAddress: NODE,
+    });
+    const job = await p.getStatus(jobId);
+    if (!job || !('failure' in job)) throw new Error('expected a failed job');
+    const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
+
+    // An unrelated token is still refused...
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: OTHER },
+    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+
+    // ...and the token that admitted it can clear it, which is what the daemon advertises.
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: NODE },
+    })).toEqual({ outcome: 'cleared' });
+  });
+
   it('but BULK clear still leaves a retry_recovery failed job alone', async () => {
     // The discriminating half: the fix must move only the targeted lane. If both lanes had been
     // relaxed, routine cleanup could delete a job whose transaction may still land.

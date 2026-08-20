@@ -277,8 +277,13 @@ export function isClearableTerminalLiftJob(job: LiftJob): boolean {
  */
 export function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | undefined): boolean {
   if (!agentAddress) return false;
-  const caller = (job.request as { knowledgeAssetVmPublish?: { callerAgentAddress?: string } })
-    ?.knowledgeAssetVmPublish?.callerAgentAddress;
+  const publish = (job.request as {
+    knowledgeAssetVmPublish?: { admittedByAgentAddress?: string; callerAgentAddress?: string };
+  })?.knowledgeAssetVmPublish;
+  // `admittedByAgentAddress` is the authenticated enqueuer and is always recorded now. The caller
+  // hint is accepted as a fallback for jobs admitted before that field existed — it is present
+  // only for agent-token admissions, which is exactly the population that can still be attributed.
+  const caller = publish?.admittedByAgentAddress ?? publish?.callerAgentAddress;
   return typeof caller === 'string'
     && caller.length > 0
     && caller.toLowerCase() === agentAddress.toLowerCase();

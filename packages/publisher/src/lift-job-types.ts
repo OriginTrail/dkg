@@ -53,6 +53,15 @@ export interface KnowledgeAssetVmPublishRequest {
    * node default inside `stampAddressCurator`, exactly as the sync lane does.
    */
   readonly callerAgentAddress?: string;
+  /**
+   * GH#2270 follow-up (🔴 3824484639) — the AUTHENTICATED identity that admitted this job, for
+   * authorization only. Distinct from `callerAgentAddress` on purpose: that field is an author
+   * RESOLUTION HINT (GH#1778) and is deliberately absent for a node-level token, so authorizing
+   * against it left every node-token job unable to use the by-id force-clear the daemon advertises
+   * to it. This one is always recorded, resolves a node token to the default owner agent, and
+   * carries no author-selection meaning — changing that would change what gets published.
+   */
+  readonly admittedByAgentAddress?: string;
   readonly subGraphName?: string;
   readonly shareOperationId: string;
   readonly roots: readonly string[];

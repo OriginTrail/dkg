@@ -1591,7 +1591,15 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             : {}),
         });
         await agent.preflightKnowledgeAssetVmPublishSnapshot(intent);
-        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent);
+        // 🔴 3824484639 — record WHO admitted this job, for authorization only. `requestAgentAddress`
+        // is always resolvable (a node-level token maps to the default owner agent), unlike the
+        // author-resolution hint, which is deliberately absent for node tokens — authorizing on
+        // that left every node-token job unable to use the force-clear the daemon advertises to it.
+        // Kept separate from `callerAgentAddress` so author selection is untouched.
+        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish({
+          ...intent,
+          ...(requestAgentAddress ? { admittedByAgentAddress: requestAgentAddress } : {}),
+        });
         return jsonResponse(res, 202, {
           jobId,
           status: "accepted",
