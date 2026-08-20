@@ -115,6 +115,36 @@ describe('admission-to-runtime recovery capability bridge', () => {
     expect(calls).toEqual([[WALLET, 'update']]);
   });
 
+  it('the PRODUCTION runtime capability answers per adapter and per operation [followup]', async () => {
+    // 🔴 3824531105 — the rows above hand the probe a fake `canSettleHeldJob`, so a real runtime
+    // returning `() => false` would restore the production bug with every test green. This one
+    // builds the capability the runtime actually exposes, from a real adapter map.
+    const { createRuntimeRecoveryCapability } = await import('../src/publisher-runner.js');
+    const CAPABLE = '0x1111111111111111111111111111111111111111';
+    const LOOKUP_ONLY = '0x2222222222222222222222222222222222222222';
+    const asAdapter = (c: Record<string, unknown>) => c as never;
+
+    const capability = createRuntimeRecoveryCapability(new Map([
+      // A create needs the lookup, the finalized snapshot, the canonical receipt AND finality.
+      [CAPABLE, asAdapter({
+        resolvePublishTransaction: () => null,
+        readFinalizedChainProofSnapshot: () => null,
+        resolveCanonicalFinalizationReceipt: () => null,
+        isReceiptBlockFinalAndCanonical: () => null,
+      })],
+      // The tri-state lookup alone settles neither kind.
+      [LOOKUP_ONLY, asAdapter({ resolvePublishTransaction: () => null })],
+    ]) as never);
+
+    expect(capability(CAPABLE, 'create')).toBe(true);
+    expect(capability(LOOKUP_ONLY, 'create')).toBe(false);
+    // Per OPERATION too: that same adapter cannot settle an update (no verification/finality/
+    // contract-address path), so a blanket `true` would be caught here.
+    expect(capability(CAPABLE, 'update')).toBe(false);
+    // And an unknown wallet is not this runtime's to settle.
+    expect(capability('0x9999999999999999999999999999999999999999', 'create')).toBe(false);
+  });
+
   it('reports what the runtime says, not merely that one exists', async () => {
     const { createAdmissionRecoveryCapabilityProbe } = await import('../src/publisher-runner.js');
     const state = { runtime: { canSettleHeldJob: () => false } };

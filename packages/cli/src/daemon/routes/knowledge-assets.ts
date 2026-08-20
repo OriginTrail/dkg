@@ -1650,7 +1650,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
               : 'This job\'s record gives chain recovery no automatic exit (no provable absence '
                 + 'and no formable recognition), so retrying will not release it. Check the '
                 + 'transaction yourself, then clear the job with '
-            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true}.`,
+            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true} — which the agent that ENQUEUED that job must run, since the override is scoped to its admission lane.`,
             retryable: err.retryable,
             existingJobId: err.existingJobId,
           });

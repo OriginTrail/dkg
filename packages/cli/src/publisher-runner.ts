@@ -431,6 +431,24 @@ export function createPublisherInspectorFromStore(
  * to it thereafter — forwarding both the wallet and the operation kind, since the runtime's answer
  * is per wallet AND per operation.
  */
+/**
+ * GH#2270 follow-up (🔴 3824531105) — the RUNTIME half of the capability bridge, as a named
+ * factory so the production answer is reachable by a test rather than only by booting a daemon.
+ *
+ * This is the one function both sides use: the runtime's own publisher takes it as
+ * `chainProofCapableForWallet`, and the runtime handle exposes it as `canSettleHeldJob` for the
+ * daemon's admission instance to ask. Sharing it by identity is what keeps those two answers from
+ * drifting; exporting it is what lets a test prove the answer is right rather than merely present.
+ */
+export function createRuntimeRecoveryCapability(
+  chainAdapters: PublisherChainAdapters,
+): (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean {
+  return (walletId, operationKind) => {
+    const chain = chainAdapters.get(walletId);
+    return chain !== undefined && hasChainRecoveryCapabilityFor(chain, operationKind);
+  };
+}
+
 export function createAdmissionRecoveryCapabilityProbe(
   readState: () => { runtime?: { canSettleHeldJob: (w: string, k: 'create' | 'update' | undefined) => boolean } | null },
 ): (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean {
@@ -579,13 +597,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   // the runtime handle the daemon's admission instance asks. These two answers are required to be
   // identical; computing them twice is precisely the drift this bridge exists to prevent, so they
   // share function identity rather than a copied body.
-  const canSettleHeldJob = (
-    walletId: string,
-    operationKind: 'create' | 'update' | undefined,
-  ): boolean => {
-    const chain = chainAdapters.get(walletId);
-    return chain !== undefined && hasChainRecoveryCapabilityFor(chain, operationKind);
-  };
+  const canSettleHeldJob = createRuntimeRecoveryCapability(chainAdapters);
 
   const scopedKnowledgeAssetVmPublishHandler = scopeKnowledgeAssetVmPublishHandler(
     publishers,
