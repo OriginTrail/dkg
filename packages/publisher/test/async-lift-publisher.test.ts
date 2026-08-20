@@ -1939,6 +1939,12 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         },
       },
     };
+    // GH#2270 PR-3 r18 — the chain-proof sweep defers a job that established nothing, so the next
+    // pass is a real pass rather than an immediate re-ask. The base deferral is 30s and the
+    // runner's recovery cadence is 60s, so in a deployment a deferred job is due on the very next
+    // pass and nothing is delayed; only a test calling recover() twice at the SAME clock instant
+    // sees the deferral. Advancing by one cadence is what production does.
+    now += 60_000;
     await publisher.recover();
     job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('finalized');
@@ -1992,6 +1998,12 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         },
       },
     };
+    // GH#2270 PR-3 r18 — the chain-proof sweep defers a job that established nothing, so the next
+    // pass is a real pass rather than an immediate re-ask. The base deferral is 30s and the
+    // runner's recovery cadence is 60s, so in a deployment a deferred job is due on the very next
+    // pass and nothing is delayed; only a test calling recover() twice at the SAME clock instant
+    // sees the deferral. Advancing by one cadence is what production does.
+    now += 60_000;
     await publisher.recover();
     job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('finalized');
