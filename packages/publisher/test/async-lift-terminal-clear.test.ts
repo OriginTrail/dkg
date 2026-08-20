@@ -92,11 +92,16 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect((await p.getStatus(broadcast))?.status).toBe('broadcast');
   });
 
-  it('rejects a retry_recovery-protected failed job as nonterminal (a pending tx may still land)', async () => {
-    // retry_recovery is a raw-lift-only recovery resolution (KA-VM canRetryFailedRecovery
-    // is false), so inject a synthetic retry_recovery-failed job to exercise the guard the
-    // clearer shares with bulk clear(). Start from a real terminal-failed job and rewrite
-    // its persisted resolution.
+  it('CLEARS a retry_recovery failed job by id — the targeted override is the operator exit', async () => {
+    // GH#2270 follow-up (🔴 3822987650) — this row previously asserted the opposite, because the
+    // by-id clear shared the BULK predicate, which treats a retry_recovery failure as
+    // nonterminal-for-cleanup (a pending tx may still land — right for bulk).
+    //
+    // The chain-proof work made that wrong for the targeted lane: a held UPDATE has no
+    // absence-release path by design, so the by-id clear is its STATED exit, and sharing the bulk
+    // rule meant neither lane could remove it — a permanent dead end, and the release notes named
+    // a command that could not work. The operator names the exact job here and owns the
+    // consequence; bulk keeps the stricter rule, pinned by the row below.
     const p = createPublisher();
     const jobId = await driveToTerminalFailed(p);
     const job = await p.getStatus(jobId);
@@ -104,8 +109,24 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
     await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
     await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
-    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
-    expect((await p.getStatus(jobId))?.status).toBe('failed'); // unchanged
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
+    expect(await p.getStatus(jobId)).toBeNull();
+  });
+
+  it('but BULK clear still leaves a retry_recovery failed job alone', async () => {
+    // The discriminating half: the fix must move only the targeted lane. If both lanes had been
+    // relaxed, routine cleanup could delete a job whose transaction may still land.
+    const p = createPublisher();
+    const jobId = await driveToTerminalFailed(p);
+    const job = await p.getStatus(jobId);
+    if (!job || !('failure' in job)) throw new Error('expected a failed job');
+    const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
+
+    await p.clear('failed');
+
+    expect((await p.getStatus(jobId))?.status).toBe('failed');
   });
 
   it('is idempotent: absent / already-cleared → already_absent', async () => {

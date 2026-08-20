@@ -2089,6 +2089,13 @@ export async function runDaemonInner(
     retryTuning: isPublisherRuntimeEnabled(config.publisher)
       ? resolvePublisherRetryTuning(config.publisher)
       : { autoRetryEnabled: false },
+    // GH#2270 follow-up (🔴 3822987482) — admission asks the LIVE runtime whether an automatic
+    // exit exists for this job's wallet and operation, instead of inferring "no" from its own
+    // deliberately resolver-less wiring. `publisherState` is late-bound (the runtime starts after
+    // this instance is built), which is why this is a closure and not a value — the same pattern
+    // the RPC-usage drain above already uses.
+    chainProofCapableForWallet: (walletId, operationKind) =>
+      publisherState.runtime?.canSettleHeldJob(walletId, operationKind) ?? false,
   });
   // #1828 — one-time idempotent backfill of the durable-admission intent index
   // for VM-publish jobs admitted before it existed. Additive-only (RDF set

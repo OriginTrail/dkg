@@ -442,6 +442,37 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
         .rejects.toMatchObject({ code: 'LIFT_JOB_PENDING_CHAIN_PROOF', retryable: true });
     });
 
+    it('an ADMISSION instance with no resolver still promises the runtime exit [followup]', async () => {
+      // 🔴 3822987482 — the daemon's admission instance is a separate publisher that
+      // deliberately holds no chain-proof resolver: it runs no scheduler. The predicate gated on
+      // `this.chainProofResolver`, so in production EVERY pending-chain-proof rejection claimed
+      // there was no automatic exit — on nodes where recovery was configured and running. The
+      // whole per-wallet/per-operation honesty contract was inert in the daemon.
+      //
+      // "Is there a lane" and "do I hold the resolver" are different questions. A capability
+      // oracle speaks for the live runtime, so its presence is the evidence.
+      const publisher = createPublisher({
+        // NO chainProofResolver — exactly the admission instance's wiring.
+        chainProofCapableForWallet: () => true,
+      });
+      const request = kaVmPublishRequest();
+      await heldCreateWithNonce(publisher, request);
+
+      await expect(publisher.enqueueKnowledgeAssetVmPublish(request))
+        .rejects.toMatchObject({ code: 'LIFT_JOB_PENDING_CHAIN_PROOF', retryable: true });
+    });
+
+    it('an instance with NEITHER resolver nor oracle still reports no exit [followup]', async () => {
+      // The discriminating half: the fix must not turn the promise into an unconditional yes.
+      // A publisher with no recovery wiring at all genuinely has no lane and must say so.
+      const publisher = createPublisher({});
+      const request = kaVmPublishRequest();
+      await heldCreateWithNonce(publisher, request);
+
+      await expect(publisher.enqueueKnowledgeAssetVmPublish(request))
+        .rejects.toMatchObject({ code: 'LIFT_JOB_PENDING_CHAIN_PROOF', retryable: false });
+    });
+
     it('is NOT promised when only OTHER wallets can be answered', async () => {
       const publisher = createPublisher({
         chainProofResolver: async () => ({ status: 'inconclusive' }),

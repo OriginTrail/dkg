@@ -58,6 +58,7 @@ import {
   isAutomaticallyRetryableLiftJob,
   isBulkClearableTerminalLiftJob,
   isClearableTerminalLiftJob,
+  isTargetedClearableLiftJob,
   decideChainProofDisposition,
   hasAutomaticRecoveryExit,
   isHeldForChainProof,
@@ -1154,9 +1155,17 @@ export class TripleStoreAsyncLiftPublisher
     } finally {
       this.finalizationsInFlight.delete(job.jobId);
     }
-    // A repair that honoured the deadline did not finish, so it must not be recorded as if it
-    // had: the durable transition below is reserved for a completed repair.
-    if (options?.signal?.aborted) return 'unresolved';
+    // GH#2270 follow-up (🔴 3823596367) — this used to return `unresolved` when the signal had
+    // aborted while the repair ran. That was wrong, and it inverted the intent: the mutating
+    // handler is deliberately AWAITED to termination and the production handler does not cancel
+    // once it is past the read boundary, so a repair that starts at second 14 of a 15s budget and
+    // succeeds at second 16 had genuinely completed — and was then discarded. The queue record
+    // stayed held while the lifecycle was already repaired, and every later pass repeated the
+    // materialization and discarded it again.
+    //
+    // The deadline's job is to stop a mutation STARTING late and to cancel read-only work. It has
+    // no business erasing the result of a mutation it allowed to finish. A successful return is
+    // therefore completion, whatever the clock says by then.
 
     // --- persistence: past the deadline's reach, and deliberately so ---
     await this.releaseWalletLockForJob(job);
@@ -1442,7 +1451,16 @@ export class TripleStoreAsyncLiftPublisher
    * proves; a create's absence release needs only the reset this class already owns.
    */
   private automaticExitIsConfiguredFor(job: PersistedFailedJob): boolean {
-    if (!hasAutomaticRecoveryExit(job) || !this.chainProofResolver) return false;
+    if (!hasAutomaticRecoveryExit(job)) return false;
+    // GH#2270 follow-up (🔴 3822987482) — "is there a recovery lane" is not the same question as
+    // "do I hold the resolver". The daemon's ADMISSION instance is a separate, deliberately
+    // resolver-less publisher that runs no scheduler, and it is the one that raises this
+    // rejection — so gating on `this.chainProofResolver` made every production response claim
+    // there was no automatic exit, on nodes where recovery was configured and running.
+    //
+    // A capability oracle speaks FOR that runtime, so its presence is the evidence here. An
+    // instance with neither the resolver nor an oracle genuinely has no lane and still says so.
+    if (!this.chainProofResolver && !this.chainProofCapableForWallet) return false;
     // r20 (🔴 3815617109) — per WALLET, not per node. A resolver's presence is node-wide, but
     // the ability to answer belongs to the adapter that signs for this job: on a node mixing a
     // capable adapter with a legacy one, a node-wide answer promised an automatic exit to jobs
@@ -1456,8 +1474,18 @@ export class TripleStoreAsyncLiftPublisher
     // is necessary but not sufficient: a create's absence release needs the finalized snapshot and
     // an update's recognition needs verification plus the finality gate, so an adapter with the
     // lookup alone can hold a job forever behind a `retryable: true` nothing can honour.
-    if (this.chainProofCapableForWallet
-      && !this.chainProofCapableForWallet(walletId, liftJobOperationKindMarker(job))) return false;
+    const oracle = this.chainProofCapableForWallet;
+    if (!this.chainProofResolver) {
+      // An ADMISSION instance: it holds no resolvers of its own, so the oracle is not a narrowing
+      // of local wiring — it IS the answer, and it speaks for the runtime that would do the work.
+      // Consulting `knowledgeAssetVmPublishRecoveryResolver` here would ask this instance about a
+      // collaborator only the runtime has, which is the same mistake one level down.
+      return oracle!(walletId, liftJobOperationKindMarker(job));
+    }
+    // A RUNTIME instance: the oracle narrows per wallet and operation, and the local wiring still
+    // has to be complete — r12 (3813505773) requires the named recovery resolver for a named job
+    // whatever its kind, and that rule is unchanged here.
+    if (oracle && !oracle(walletId, liftJobOperationKindMarker(job))) return false;
     if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return true;
     // r12 (3813505773) — a named job needs the recovery resolver whatever its kind. The create
     // case looked exempt because absence-release is create-only and needs nothing but the reset —
@@ -1821,7 +1849,7 @@ export class TripleStoreAsyncLiftPublisher
       }
       if (job === null) return { outcome: 'rejected', reason: 'malformed' };
       if (!LIFT_JOB_STATES.includes(job.status)) return { outcome: 'rejected', reason: 'unknown' };
-      if (!isClearableTerminalLiftJob(job)) return { outcome: 'rejected', reason: 'nonterminal' };
+      if (!isTargetedClearableLiftJob(job)) return { outcome: 'rejected', reason: 'nonterminal' };
       await this.releaseWalletLockForJob(job);
       await this.deleteJob(jobId);
       return { outcome: 'cleared' };

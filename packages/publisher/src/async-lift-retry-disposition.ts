@@ -274,6 +274,25 @@ export function isClearableTerminalLiftJob(job: LiftJob): boolean {
  * reverted and unfunded attempts keeps working. Nothing is lost by clearing either: the #1829
  * journal is append-only and a clear never touches it, so the txHash outlives the job record.
  */
+/**
+ * GH#2270 follow-up (🔴 3822987650) — what the TARGETED by-id clear may remove.
+ *
+ * #1837's single predicate treats a `retry_recovery`-failed job as nonterminal-for-cleanup,
+ * because periodic recovery may still finalize it from chain. That is exactly right for BULK
+ * cleanup and wrong for the by-id override, and the chain-proof work made the difference matter: a
+ * held UPDATE has no absence-release path by design, so when its transaction is proven absent the
+ * dispatcher deliberately keeps it held and the by-id clear is the STATED exit. Sharing the bulk
+ * predicate meant that exit returned `nonterminal` — the job could be removed by neither lane, and
+ * the guidance in the release notes named a command that could not work.
+ *
+ * The operator names the exact job here and owns the consequence, which is the whole point of the
+ * targeted lane. Terminal state is therefore the only requirement; the bulk lane keeps the
+ * stricter rule and is unchanged.
+ */
+export function isTargetedClearableLiftJob(job: LiftJob): boolean {
+  return isTerminalLiftJobState(job.status);
+}
+
 export function isBulkClearableTerminalLiftJob(job: LiftJob): boolean {
   return isClearableTerminalLiftJob(job) && !(isFailedJob(job) && isHeldForChainProof(job));
 }

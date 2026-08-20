@@ -1373,6 +1373,45 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(asked[0]).not.toBe(asked[1]);
     });
 
+    it('a repair that COMPLETES after the deadline is kept, not discarded [followup]', async () => {
+      // 🔴 3823596367 — the pass returned `unresolved` whenever the signal had aborted while the
+      // repair ran. But the mutating handler is deliberately awaited to termination and does not
+      // cancel once past the read boundary, so a repair starting at second 14 of a 15s budget and
+      // succeeding at second 16 had genuinely completed — and was thrown away. The queue record
+      // stayed held while the lifecycle was already repaired, and every later pass repeated the
+      // materialization and discarded it again.
+      //
+      // The deadline stops a mutation STARTING late and cancels reads. It must not erase the
+      // result of a mutation it allowed to finish.
+      let entered = 0;
+      const publisher = createPublisher({
+        chainProofDispatchTimeBudgetMs: 20,
+        chainProofResolver: async () => ({ status: 'recovered', recovery: { txHash: TX_HASH } } as never),
+        knowledgeAssetVmPublishRecoveryResolver: async () => ({
+          inclusion: { blockNumber: 1, txHash: TX_HASH },
+          finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+        } as never),
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => ({ ok: true } as never),
+          execute: async () => ({ } as never),
+          // Starts inside the budget, finishes outside it — the case the bug discarded.
+          finalizeRecovered: async () => {
+            entered += 1;
+            await new Promise((resolve) => { setTimeout(resolve, 60); });
+          },
+        } as never,
+      });
+      const held = await failAfterRecordedTxHash(publisher);
+
+      expect(await publisher.recover()).toBe(1);
+      expect((await publisher.getStatus(held.jobId))?.status).toBe('finalized');
+      // And it was repaired ONCE — the point of keeping the result is that no later pass repeats it.
+      expect(entered).toBe(1);
+
+      await publisher.recover();
+      expect(entered).toBe(1);
+    });
+
     it('a stalled FINALIZER cannot hold the pass open past the budget [r23]', async () => {
       // 🔴 3817474007 — the budget bounded the proof and stopped there. Finalization does its
       // own chain reads, so a resolver that answers `recovered` instantly followed by a named
@@ -1460,7 +1499,12 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       // Exactly one entry: no overlapping second invocation, and nothing wrote after the return.
       expect(entered).toBe(1);
       expect(mutationsAfterReturn).toEqual([]);
-      expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
+      // GH#2270 follow-up (🔴 3823596367) — this row used to assert the job stayed `failed`,
+      // which encoded the very bug that finding named: the repair was ALLOWED to finish and its
+      // result was then discarded. This row's subject is that a mutating repair is never abandoned
+      // (the pass waits, one entry, no post-return write) — and a repair that the pass waited for
+      // and that succeeded must be KEPT. The two properties belong together.
+      expect((await publisher.getStatus(held.jobId))?.status).toBe('finalized');
     });
 
     it('two OVERLAPPING passes cannot enter the same repair [r27]', async () => {
