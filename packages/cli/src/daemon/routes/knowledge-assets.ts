@@ -1591,7 +1591,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             : {}),
         });
         await agent.preflightKnowledgeAssetVmPublishSnapshot(intent);
-        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent);
+        // 🔴 3824484639 — record WHO admitted this job, for authorization only. `requestAgentAddress`
+        // is always resolvable (a node-level token maps to the default owner agent), unlike the
+        // author-resolution hint, which is deliberately absent for node tokens — authorizing on
+        // that left every node-token job unable to use the force-clear the daemon advertises to it.
+        // Kept separate from `callerAgentAddress` so author selection is untouched.
+        // Admission travels BESIDE the request (🟡 3824743779), never inside it: the operation
+        // payload that execution and recovery act on carries no authorization principal.
+        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent, {
+          admittedByAgentAddress: requestAgentAddress,
+        });
         return jsonResponse(res, 202, {
           jobId,
           status: "accepted",
@@ -1642,7 +1651,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
               : 'This job\'s record gives chain recovery no automatic exit (no provable absence '
                 + 'and no formable recognition), so retrying will not release it. Check the '
                 + 'transaction yourself, then clear the job with '
-            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}"}.`,
+            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true} — which the agent that ENQUEUED that job must run, since the override is scoped to its admission lane.`,
             retryable: err.retryable,
             existingJobId: err.existingJobId,
           });

@@ -535,6 +535,12 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(String(res.body.error)).toContain('job-7');
     // The pre-PR-3 wording promised nobody was coming.
     expect(String(res.body.error)).not.toContain('No automatic lane resolves this');
+    // GH#2270 follow-up (🔴 3824098486, 🔴 3824353564, 🔴 3824484756) — the command handed
+    // back must be one that WORKS. A held job's clear needs the explicit override, and
+    // retryability does not decide that: a recoverable job can still be `retry_recovery`. This is
+    // asserted on the EMITTED body rather than the source, so an override left in dead source
+    // cannot pass for a usable instruction.
+    expect(String(res.body.error)).toContain('{"jobId":"job-7","allowPendingTransaction":true}');
   });
 
   it('vm/publish-async: LIFT_JOB_PENDING_CHAIN_PROOF forwards retryable: FALSE for an operator-only record [PR#2300 r1]', async () => {
@@ -581,6 +587,10 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(String(res.body.error)).toContain('/api/publisher/clear-job');
     expect(String(res.body.error)).toContain('job-8');
     expect(String(res.body.error)).not.toContain('Chain recovery re-checks this job');
+    // The other polarity of the same guarantee: BOTH retryable values must be handed a command
+    // that can actually clear the job, which is what makes this pair discriminating rather than
+    // a single-branch check that a reversal could satisfy.
+    expect(String(res.body.error)).toContain('{"jobId":"job-8","allowPendingTransaction":true}');
   });
 
   // GH#1778 — the disambiguation error surfaces as a 409 with the candidate
@@ -1005,6 +1015,60 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(seenResolveOptions).toHaveLength(1);
     expect(seenResolveOptions[0]).toMatchObject({ callerAgentAddress: tokenAgentAddress });
     expect(enqueuedIntents[0]).toMatchObject({ agentAddress: tokenAgentAddress });
+  });
+
+  it('vm/publish-async stamps the AUTHENTICATED enqueuer as admission metadata, beside the intent', async () => {
+    // 🟡 3824743785 — this stamp is the authorization basis for the destructive by-id force-clear,
+    // and until now only publisher-level tests exercised it, constructing the field themselves. If
+    // this route line were dropped, those stayed green while every NODE-TOKEN job lost the clear
+    // the daemon advertises to it — the exact dead end GH#2270's follow-up set out to remove.
+    //
+    // The node-token shape is the one under test: `resolveAgentByToken` yields nothing (the author
+    // hint is deliberately absent for a node token), yet the request still has an authenticated
+    // identity.
+    const NODE_OWNER = '0x00000000000000000000000000000000000000n0'.toLowerCase();
+    const enqueueCalls: Array<{ intent: any; admission: any }> = [];
+
+    await startWith({}, {
+      resolveAgentByToken: () => undefined,
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'share-node-token',
+        roots: ['urn:test:node-token-root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'db'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, { requestAgentAddress: NODE_OWNER }, {
+      enqueueKnowledgeAssetVmPublish: async (intent: unknown, admission: unknown) => {
+        enqueueCalls.push({ intent, admission });
+        return 'job-node-token';
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+
+    expect(res.status).toBe(202);
+    expect(enqueueCalls).toHaveLength(1);
+    // The stamp reaches the queue, for a caller that has NO author hint at all.
+    expect(enqueueCalls[0]?.admission).toEqual({ admittedByAgentAddress: NODE_OWNER });
+    // Discriminating half (🟡 3824743779): it travels BESIDE the request, never inside it. If the
+    // principal leaked back into the payload, execution and recovery would carry an authorization
+    // identity they have no use for, and the generic clear boundary would go back to casting.
+    expect(enqueueCalls[0]?.intent).not.toHaveProperty('admittedByAgentAddress');
+    // And it did not become an author-selection input: a node token still resolves no author hint,
+    // so what gets published is unchanged.
+    expect(enqueueCalls[0]?.intent).not.toHaveProperty('callerAgentAddress');
   });
 
   // GH#1786 — the resident-author selector. The load-bearing property is that it can

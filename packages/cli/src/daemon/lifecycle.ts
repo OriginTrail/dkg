@@ -159,7 +159,7 @@ import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
-import { createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
+import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
@@ -2089,6 +2089,12 @@ export async function runDaemonInner(
     retryTuning: isPublisherRuntimeEnabled(config.publisher)
       ? resolvePublisherRetryTuning(config.publisher)
       : { autoRetryEnabled: false },
+    // GH#2270 follow-up (🔴 3822987482) — admission asks the LIVE runtime whether an automatic
+    // exit exists for this job's wallet and operation, instead of inferring "no" from its own
+    // deliberately resolver-less wiring. `publisherState` is late-bound (the runtime starts after
+    // this instance is built), which is why this is a closure and not a value — the same pattern
+    // the RPC-usage drain above already uses.
+    chainProofCapableForWallet: createAdmissionRecoveryCapabilityProbe(() => publisherState),
   });
   // #1828 — one-time idempotent backfill of the durable-admission intent index
   // for VM-publish jobs admitted before it existed. Additive-only (RDF set

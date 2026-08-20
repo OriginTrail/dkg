@@ -80,8 +80,28 @@ export type IntentLookupResult =
   | { readonly kind: 'superseded'; readonly jobs: LiftJob[]; readonly exactIntentMatch?: boolean }
   | { readonly kind: 'conflict'; readonly jobs: LiftJob[] };
 
+/**
+ * Queue-layer facts about an admission, supplied alongside the operation request.
+ *
+ * Separate from the request on purpose (GH#2270 follow-up 🟡 3824743779): the authenticated
+ * enqueuer authorizes later control-plane actions on the job and is not an input to the operation,
+ * so execution and recovery never see it in the payload they act on.
+ */
+export interface AsyncLiftAdmissionContext {
+  /**
+   * The authenticated identity admitting the job. REQUIRED whenever a context is supplied
+   * (3825162430): an authenticated admission has exactly one principal, so `{}` must not compile
+   * into a job that is silently unowned. A caller with no principal omits the whole argument,
+   * which is a different and visible statement.
+   */
+  readonly admittedByAgentAddress: string;
+}
+
 export interface AsyncLiftPublisher {
-  enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string>;
+  enqueueKnowledgeAssetVmPublish(
+    request: KnowledgeAssetVmPublishRequest,
+    admission?: AsyncLiftAdmissionContext,
+  ): Promise<string>;
   claimNext(walletId: string): Promise<LiftJob | null>;
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<LiftJob | null>;
@@ -206,7 +226,27 @@ export interface VmPublishAdmissionJournalReader {
  * in the control-plane graph only).
  */
 export interface VmPublishTerminalJobClearer {
-  clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome>;
+  /**
+   * GH#2270 follow-up (🔴 3823952704) — `allowPendingTransaction` opts in to clearing a job whose
+   * transaction may still land. It is OFF by default: the caller must have established the right
+   * to take that risk for this specific job, because the route this is reached through is open to
+   * every registered agent token.
+   */
+  clearTerminalJob(
+    jobId: string,
+    options?: {
+      /**
+       * GH#2270 follow-up — opt in to clearing a job whose transaction may still land.
+       *
+       * ONE value rather than a flag beside an identity: the request and the authority to make it
+       * are the same fact, and splitting them let `{ allowPendingTransaction: true }` and
+       * `{ requireOwnerAgentAddress: x }` each compile while silently behaving like an ordinary
+       * clear. Present means "this caller asks"; the publisher grants it only for a job that
+       * caller enqueued.
+       */
+      readonly pendingTransactionOverride?: { readonly requestedBy: string };
+    },
+  ): Promise<TerminalJobClearOutcome>;
 }
 
 /**
@@ -343,7 +383,7 @@ export interface AsyncKnowledgeAssetVmPublishRecoveryInput {
    */
   readonly lookup: AsyncLiftChainProofLookup;
   readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
-  readonly publisher?: DKGPublisher;
+  readonly publisher?: DKGPublisher;
   /**
    * GH#2270 PR #2300 r25 — the pass deadline, so a handler that reaches the chain can cancel its
    * reads rather than leak them once per timed-out pass. The publisher additionally bounds this

@@ -95,6 +95,22 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
   }
 
   /**
+   * Re-admit a held job and read the verdict admission hands back. A held record answers with
+   * `LiftJobPendingChainProofError`, whose `retryable` is the per-job answer to "does an automatic
+   * lane exist that can move THIS record" — the value the HTTP boundary forwards to the client.
+   */
+  async function admissionVerdictFor(control: Control, name: string): Promise<{ retryable: boolean }> {
+    try {
+      await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest(name));
+    } catch (error) {
+      const held = error as { retryable?: boolean };
+      if (typeof held.retryable !== 'boolean') throw error;
+      return { retryable: held.retryable };
+    }
+    throw new Error('expected admission to hold the job for chain proof');
+  }
+
+  /**
    * Terminal AND tx-bearing: a confirmation mismatch is a job whose transaction is unaccounted
    * for, so GH#2270 holds it for chain proof rather than letting its subject fall vacant.
    */
@@ -225,6 +241,58 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     // beside it tells them to go and fix. The job itself is untouched: this is a read.
     expect(res.body.retryState).toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
     expect(res.body.job.status).toBe('failed');
+  });
+
+  it('carries the LIVE runtime capability through the production factory into the admission verdict', async () => {
+    // 🟡 3824743596 — the probe helper, the daemon option and the publisher policy each had their
+    // own test, but nothing traversed the bridge between them. The forwarding edge is invisible to
+    // all three: if `createPublisherControlFromStore` stopped passing `chainProofCapableForWallet`
+    // through, every one of them stays green while a live, capable node tells clients their held
+    // job has no automatic exit — sending them to an operator action they do not need.
+    //
+    // Late binding is part of the contract and part of this test: the capability is read through a
+    // closure over state that does not exist yet when the control is built, exactly as the daemon
+    // wires it (the runtime starts after admission).
+    let liveRuntimeCapable: boolean | undefined;
+    const probedWallets: string[] = [];
+    const store = new OxigraphStore();
+    stores.push(store);
+    const control = createPublisherControlFromStore(store, {
+      chainProofCapableForWallet: (walletId) => {
+        probedWallets.push(walletId);
+        // Undefined would mean the control consulted the runtime before it existed.
+        if (liveRuntimeCapable === undefined) throw new Error('probed before the runtime was bound');
+        return liveRuntimeCapable;
+      },
+    });
+
+    // The record must be one the dispatcher COULD finalize, or it has no automatic exit whatever
+    // the runtime can do — and this test would pass its false-polarity row for the wrong reason.
+    // The durable operation marker is the part `failAfterRecordedTxHash` leaves out, so it is set
+    // explicitly here.
+    const jobId = await claimedAndValidated(control, 'rpc');
+    await control.update(jobId, 'broadcast', {
+      broadcast: { txHash: TX_HASH, walletId: 'wallet-rpc', operationKind: 'create', nonce: 7 },
+    });
+    await control.recordPublishFailure(jobId, {
+      error: new Error('RPC endpoint temporarily unavailable'),
+      failedFromState: 'broadcast',
+      errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+    });
+    const heldJob = await control.getStatus(jobId);
+    if (!heldJob || !('failure' in heldJob)) throw new Error('expected a held failed job');
+
+    // The runtime comes up capable AFTER the control was constructed.
+    liveRuntimeCapable = true;
+    expect(await admissionVerdictFor(control, 'rpc')).toEqual({ retryable: true });
+    // The probe was asked about the wallet that actually signed, not a placeholder.
+    expect(probedWallets).toContain('wallet-rpc');
+
+    // Both polarities through the SAME wiring: a runtime that cannot settle this job must not be
+    // reported as having an automatic exit. Asserting only `true` would pass on a forwarding edge
+    // replaced by a constant.
+    liveRuntimeCapable = false;
+    expect(await admissionVerdictFor(control, 'rpc')).toEqual({ retryable: false });
   });
 
   it('leaves a chain-proof hold alone when the publisher runtime is unavailable', async () => {

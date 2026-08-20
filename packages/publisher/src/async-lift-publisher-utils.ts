@@ -280,6 +280,9 @@ export function buildLiftJobAcceptedReset(
     jobId: job.jobId,
     jobSlug: job.jobSlug,
     request: job.request,
+    // Admission is immutable job identity: a recovery reset must not launder away WHO admitted the
+    // job, or the enqueuer would lose the by-id clear on exactly the recovered jobs that need it.
+    ...(job.admission ? { admission: job.admission } : {}),
     status: 'accepted',
     timestamps: {
       acceptedAt: job.timestamps.acceptedAt,

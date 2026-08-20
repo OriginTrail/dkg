@@ -37,6 +37,7 @@ import type {
   AsyncLiftPublisherConfig,
   AsyncLiftChainProofLookup,
   AsyncLiftChainProofResolution,
+  AsyncLiftAdmissionContext,
   AsyncLiftPublisherRecoveryResolver,
   AsyncLiftPublisherRecoveryResult,
   AsyncLiftRetryOutcome,
@@ -58,8 +59,11 @@ import {
   isAutomaticallyRetryableLiftJob,
   isBulkClearableTerminalLiftJob,
   isClearableTerminalLiftJob,
+  isTargetedClearableLiftJob,
   decideChainProofDisposition,
   hasAutomaticRecoveryExit,
+  resolveHeldJobSettlementCapability,
+  type HeldJobSettlementCapability,
   isHeldForChainProof,
   selectLifecycleBindingJobs,
   type LiftJobRetryProjection,
@@ -457,6 +461,8 @@ export class TripleStoreAsyncLiftPublisher
    */
   private readonly finalizationsInFlight = new Set<string>();
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
+  /** 3825614002 — this instance's ROLE, resolved once from its wiring. */
+  private readonly heldJobSettlement: HeldJobSettlementCapability;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
@@ -536,10 +542,20 @@ export class TripleStoreAsyncLiftPublisher
     this.knowledgeAssetVmPublishHandler = resolveKnowledgeAssetVmPublishHandler(config);
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
     this.publicSnapshotStore = config.publicSnapshotStore;
+    this.heldJobSettlement = resolveHeldJobSettlementCapability({
+      hasChainProofResolver: config.chainProofResolver !== undefined,
+      ...(config.chainProofCapableForWallet
+        ? { capableForWallet: config.chainProofCapableForWallet }
+        : {}),
+      hasNamedRecoveryResolver: config.knowledgeAssetVmPublishRecoveryResolver !== undefined,
+    });
     this.graphManager = new GraphManager(store);
   }
 
-  async enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string> {
+  async enqueueKnowledgeAssetVmPublish(
+    request: KnowledgeAssetVmPublishRequest,
+    admission?: AsyncLiftAdmissionContext,
+  ): Promise<string> {
     return this.withClaimLock(async () => {
       await this.ensureGraph();
       if (!request.shareOperationId.trim()) {
@@ -567,6 +583,7 @@ export class TripleStoreAsyncLiftPublisher
         jobId,
         jobSlug: createJobSlug(jobRequest),
         request: jobRequest,
+        ...(admission ? { admission: { byAgentAddress: admission.admittedByAgentAddress } } : {}),
         status: 'accepted',
         timestamps: { acceptedAt: now, updatedAt: now },
         retries: { retryCount: 0, maxRetries: this.maxRetries },
@@ -1154,9 +1171,17 @@ export class TripleStoreAsyncLiftPublisher
     } finally {
       this.finalizationsInFlight.delete(job.jobId);
     }
-    // A repair that honoured the deadline did not finish, so it must not be recorded as if it
-    // had: the durable transition below is reserved for a completed repair.
-    if (options?.signal?.aborted) return 'unresolved';
+    // GH#2270 follow-up (🔴 3823596367) — this used to return `unresolved` when the signal had
+    // aborted while the repair ran. That was wrong, and it inverted the intent: the mutating
+    // handler is deliberately AWAITED to termination and the production handler does not cancel
+    // once it is past the read boundary, so a repair that starts at second 14 of a 15s budget and
+    // succeeds at second 16 had genuinely completed — and was then discarded. The queue record
+    // stayed held while the lifecycle was already repaired, and every later pass repeated the
+    // materialization and discarded it again.
+    //
+    // The deadline's job is to stop a mutation STARTING late and to cancel read-only work. It has
+    // no business erasing the result of a mutation it allowed to finish. A successful return is
+    // therefore completion, whatever the clock says by then.
 
     // --- persistence: past the deadline's reach, and deliberately so ---
     await this.releaseWalletLockForJob(job);
@@ -1442,29 +1467,20 @@ export class TripleStoreAsyncLiftPublisher
    * proves; a create's absence release needs only the reset this class already owns.
    */
   private automaticExitIsConfiguredFor(job: PersistedFailedJob): boolean {
-    if (!hasAutomaticRecoveryExit(job) || !this.chainProofResolver) return false;
-    // r20 (🔴 3815617109) — per WALLET, not per node. A resolver's presence is node-wide, but
-    // the ability to answer belongs to the adapter that signs for this job: on a node mixing a
-    // capable adapter with a legacy one, a node-wide answer promised an automatic exit to jobs
-    // whose own wallet could only ever return `inconclusive`. A job with no wallet at all cannot
-    // be asked about either, which is the same answer for the same reason.
-    // r23 (🔴 3817434406) — the SIGNER's adapter, from the same carrier as the hash. Reading
-    // the claim here asked whether a wallet that never signed this transaction could settle it.
+    if (!hasAutomaticRecoveryExit(job)) return false;
+    // r20 (🔴 3815617109) — per WALLET, not per node. A resolver's presence is node-wide, but the
+    // ability to answer belongs to the adapter that signs for this job: on a node mixing a capable
+    // adapter with a legacy one, a node-wide answer promised an automatic exit to jobs whose own
+    // wallet could only ever return `inconclusive`. A job with no wallet at all cannot be asked
+    // about either, which is the same answer for the same reason.
+    // r23 (🔴 3817434406) — the SIGNER's adapter, from the same carrier as the hash. Reading the
+    // claim here asked whether a wallet that never signed this transaction could settle it.
     const walletId = liftJobCheckedSigner(job);
     if (!walletId) return false;
-    // r22 (🔴 3817363935) — and per OPERATION KIND, not just per wallet. The tri-state lookup
-    // is necessary but not sufficient: a create's absence release needs the finalized snapshot and
-    // an update's recognition needs verification plus the finality gate, so an adapter with the
-    // lookup alone can hold a job forever behind a `retryable: true` nothing can honour.
-    if (this.chainProofCapableForWallet
-      && !this.chainProofCapableForWallet(walletId, liftJobOperationKindMarker(job))) return false;
-    if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return true;
-    // r12 (3813505773) — a named job needs the recovery resolver whatever its kind. The create
-    // case looked exempt because absence-release is create-only and needs nothing but the reset —
-    // but that is only ONE of its outcomes. If the transaction MINED, settling it means building
-    // canonical evidence and repairing the lifecycle, which is exactly what this resolver does;
-    // without it a mined create is held forever while the response promised convergence.
-    return this.knowledgeAssetVmPublishRecoveryResolver !== undefined;
+    // 3825614002 — and per OPERATION KIND. Which policy answers was decided once, by role, when
+    // this instance was built; this asks it directly rather than re-deriving the role from which
+    // collaborators happen to be installed.
+    return this.heldJobSettlement(job, walletId, liftJobOperationKindMarker(job));
   }
 
   private async dispatchFailedJobsOnChainProof(): Promise<number> {
@@ -1796,7 +1812,10 @@ export class TripleStoreAsyncLiftPublisher
    * subject-scoped to the control-plane graph, so it never touches another job or the
    * #1829 journal. Never throws / never mutates on a reject.
    */
-  async clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome> {
+  async clearTerminalJob(
+    jobId: string,
+    options: { readonly pendingTransactionOverride?: { readonly requestedBy: string } } = {},
+  ): Promise<TerminalJobClearOutcome> {
     // Reject an empty OR SPARQL-unsafe jobId as malformed BEFORE building the jobSubject
     // IRI — otherwise an attacker-controlled jobId (from the clear-job HTTP body) with a
     // space/'>'/'{' could break the query out of `<…>` and surface as a 500/injection
@@ -1821,7 +1840,20 @@ export class TripleStoreAsyncLiftPublisher
       }
       if (job === null) return { outcome: 'rejected', reason: 'malformed' };
       if (!LIFT_JOB_STATES.includes(job.status)) return { outcome: 'rejected', reason: 'unknown' };
-      if (!isClearableTerminalLiftJob(job)) return { outcome: 'rejected', reason: 'nonterminal' };
+      // GH#2270 follow-up (🔴 3824098476, 🟡 3824098494) — ownership is resolved HERE, not at
+      // the route. Doing it at the route meant an unsafe jobId reached a `getStatus` query before
+      // this method's `isSafeJobId` guard ran, and the ownership read happened outside the claim
+      // lock the clear itself takes — a TOCTOU on the record the decision is about.
+      //
+      // Inside, the job has already been validated and read under that lock, so the check is on
+      // the same record that is about to be deleted. A caller that cannot be matched to the job's
+      // admission lane simply does not get the override; the ordinary terminal clear is untouched.
+      // 3825162663 — ONE decision: the policy takes the override as the caller made it and
+      // settles authority and state eligibility together, so a call site cannot read the
+      // canonical predicate while forgetting the ownership half.
+      if (!isTargetedClearableLiftJob(job, options)) {
+        return { outcome: 'rejected', reason: 'nonterminal' };
+      }
       await this.releaseWalletLockForJob(job);
       await this.deleteJob(jobId);
       return { outcome: 'cleared' };

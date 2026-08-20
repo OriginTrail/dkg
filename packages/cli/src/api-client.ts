@@ -1366,8 +1366,19 @@ export class ApiClient {
   // status-scoped publisherClear). cleared / already_absent resolve normally (200);
   // rejected (nonterminal/unknown → 409, malformed → 400) throws via the post() helper
   // carrying { outcome:'rejected', reason } in the response body.
-  async publisherClearJob(jobId: string): Promise<{ outcome: 'cleared' | 'already_absent'; jobId: string }> {
-    return this.post('/api/publisher/clear-job', { jobId });
+  //
+  // GH#2270 follow-up (🔴 3824098486) — `allowPendingTransaction` opts in to clearing a job whose
+  // transaction may still land, which is the ONLY way to remove a held record that recovery has no
+  // automatic exit for. It defaults to false, so an ordinary clear is unchanged, and the daemon
+  // grants it only to a caller that owns the job.
+  async publisherClearJob(
+    jobId: string,
+    options: { allowPendingTransaction?: boolean } = {},
+  ): Promise<{ outcome: 'cleared' | 'already_absent'; jobId: string }> {
+    return this.post('/api/publisher/clear-job', {
+      jobId,
+      ...(options.allowPendingTransaction === true ? { allowPendingTransaction: true } : {}),
+    });
   }
 
   // ------------------------- EPCIS -------------------------------------

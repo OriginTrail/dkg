@@ -24,6 +24,7 @@ import {
   liftJobOperationKindMarker,
   isFailedJob,
   pinnedPublishIdentityKaId,
+  isKnowledgeAssetVmPublishJobRequest,
   queuedLiftOperationKind,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
@@ -264,15 +265,155 @@ export function isClearableTerminalLiftJob(job: LiftJob): boolean {
 }
 
 /**
- * GH#2270 — what BULK `clear(status)` may delete: terminal-clearable, MINUS a job
- * {@link isHeldForChainProof}. Deleting a held job is what turns admission's
- * `LiftJobPendingChainProofError` back into a fresh job for the same KA, so bulk cleanup is safe by
- * default; the by-jobId clear (`clearTerminalJob`) stays the operator's deliberate, targeted
- * override — there the operator names the exact job and owns the consequence.
+ * Can THIS node settle a held job itself — the CAPABILITY half of "does an automatic exit exist"?
+ *
+ * {@link hasAutomaticRecoveryExit} answers from the record alone (is there a question the chain
+ * could settle). This answers whether the components that would ask and act are wired up, per
+ * WALLET and per OPERATION, because both narrow what can actually be settled.
+ *
+ * 3825614002 — a publisher instance has a ROLE, and the role is now named and chosen ONCE, at
+ * construction. It used to be inferred inside the decision method from which collaborators
+ * happened to be installed, so the same oracle meant different things depending on whether a
+ * resolver sat beside it and a reader had to reconstruct constructor combinations to know which.
+ */
+export type HeldJobSettlementCapability = (
+  job: PersistedFailedJob,
+  walletId: string,
+  operationKind: 'create' | 'update' | undefined,
+) => boolean;
+
+/** Neither a local lane nor an oracle: this instance genuinely has no automatic exit to offer. */
+export const NO_HELD_JOB_SETTLEMENT: HeldJobSettlementCapability = () => false;
+
+/**
+ * The ADMISSION role: this instance holds no resolvers of its own and runs no scheduler, but it is
+ * the one that answers clients. It therefore asks the lane that would actually do the work, and
+ * that oracle IS the answer — not a narrowing of local wiring it does not have. Consulting a
+ * named-recovery resolver here would ask this instance about a collaborator only the runtime has.
+ */
+export function delegatedHeldJobSettlement(
+  capableForWallet: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean,
+): HeldJobSettlementCapability {
+  return (_job, walletId, operationKind) => capableForWallet(walletId, operationKind);
+}
+
+/**
+ * The RUNTIME role: this instance owns the lane. An oracle, when present, narrows the answer per
+ * wallet and operation; the local wiring still has to be complete on top of that.
+ *
+ * r12 (3813505773) — a named job needs the named recovery resolver whatever its kind. The create
+ * case looks exempt because the absence release is create-only and needs nothing but the reset, but
+ * that is only ONE of its outcomes: if the transaction MINED, settling it means building canonical
+ * evidence and repairing the lifecycle, which is exactly what that resolver does. Without it a
+ * mined create is held forever while the response promised convergence.
+ */
+export function localHeldJobSettlement(options: {
+  readonly capableForWallet?: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean;
+  readonly hasNamedRecoveryResolver: boolean;
+}): HeldJobSettlementCapability {
+  return (job, walletId, operationKind) => {
+    if (options.capableForWallet && !options.capableForWallet(walletId, operationKind)) return false;
+    if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return true;
+    return options.hasNamedRecoveryResolver;
+  };
+}
+
+/**
+ * Pick the role from how this instance was wired. Deliberately the ONE place that reads collaborator
+ * presence for this purpose: after construction the decision asks the returned policy directly.
+ */
+export function resolveHeldJobSettlementCapability(wiring: {
+  readonly hasChainProofResolver: boolean;
+  readonly capableForWallet?: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean;
+  readonly hasNamedRecoveryResolver: boolean;
+}): HeldJobSettlementCapability {
+  if (!wiring.hasChainProofResolver) {
+    return wiring.capableForWallet
+      ? delegatedHeldJobSettlement(wiring.capableForWallet)
+      : NO_HELD_JOB_SETTLEMENT;
+  }
+  return localHeldJobSettlement({
+    ...(wiring.capableForWallet ? { capableForWallet: wiring.capableForWallet } : {}),
+    hasNamedRecoveryResolver: wiring.hasNamedRecoveryResolver,
+  });
+}
+
+/**
+ * Does this caller own the job's admission lane?
+ *
+ * The pending-transaction override below is destructive and `/api/publisher/clear-job` is open to
+ * every registered agent token, so the right to accept that risk is per JOB, not per node.
+ *
+ * The owner is the AUTHENTICATED ENQUEUER, not the resolved author: curated publishing lets those
+ * differ (GH#1778), so a curator may submit for another author and it is the curator who admitted
+ * the job. A record with no admission has nobody to match and is denied — falling back to the
+ * author would grant the override to an identity that did not enqueue anything, and the risk being
+ * accepted is a double publish.
+ *
+ * This boundary is generic over job kind on purpose (3824743779): it reads one typed job-level
+ * field and never inspects an operation payload, so a new job variant needs no case here.
+ *
+ * Attribution comes ONLY from an explicit stamp made at admission (3825162149). There is
+ * deliberately no fallback that reads the publish payload's `callerAgentAddress`: on the
+ * agent's own publish path that field is the AUTHOR, so such a fallback silently handed the
+ * destructive override to a curated-publish signer who enqueued nothing. A record with no
+ * stamp is denied instead, which is the conservative answer and the one this doc has always
+ * claimed.
+ */
+function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | undefined): boolean {
+  if (!agentAddress) return false;
+  const admittedBy = job.admission?.byAgentAddress;
+  return typeof admittedBy === 'string'
+    && admittedBy.length > 0
+    && admittedBy.toLowerCase() === agentAddress.toLowerCase();
+}
+
+/**
+ * What the TARGETED by-id clear may remove.
+ *
+ * #1837's base predicate treats a `retry_recovery`-failed job as nonterminal-for-cleanup, because
+ * periodic recovery may still finalize it from chain. That is right for bulk cleanup and it leaves
+ * a held UPDATE with no exit at all: an update has no absence-release path by design, so the by-id
+ * clear is its stated exit. This lane therefore accepts ONE named exception on top of the base.
+ *
+ * The exception is named rather than expressed as the base predicate's complement: written that
+ * way it would silently absorb every future reason a terminal job becomes protected. Additions to
+ * the base policy stay denied here until someone allows them on purpose.
+ *
+ * The caller must also be entitled to it — see {@link ownsLiftJobAdmissionLane}.
+ */
+export function isTargetedClearableLiftJob(
+  job: LiftJob,
+  options: {
+    /**
+     * The override as the CALLER made it: who requested it, not whether someone decided they
+     * may have it (3825162663). Taking a boolean here reduced authenticated authority to a flag at
+     * the call site and left the ownership check as a separate step a future targeted-clear
+     * could forget while still reading the apparently canonical predicate.
+     */
+    readonly pendingTransactionOverride?: { readonly requestedBy?: string };
+  } = {},
+): boolean {
+  if (isClearableTerminalLiftJob(job)) return true;
+  const override = options.pendingTransactionOverride;
+  if (!override) return false;
+  // Authority and state eligibility are decided together, so neither can be granted alone.
+  if (!ownsLiftJobAdmissionLane(job, override.requestedBy)) return false;
+  return isTerminalLiftJobState(job.status)
+    && isFailedJob(job)
+    && job.failure.resolution === 'retry_recovery';
+}
+
+/**
+ * What BULK `clear(status)` may delete: terminal-clearable, MINUS a job {@link isHeldForChainProof}.
+ *
+ * Deleting a held job turns admission's `LiftJobPendingChainProofError` back into a fresh job for
+ * the same KA, so bulk cleanup is safe by default and the targeted lane above is where an operator
+ * accepts that risk deliberately, for one named job.
  *
  * A job whose failure PROVES its transaction had no effect is not held, so routine cleanup of
- * reverted and unfunded attempts keeps working. Nothing is lost by clearing either: the #1829
- * journal is append-only and a clear never touches it, so the txHash outlives the job record.
+ * reverted and unfunded attempts keeps working. Nothing is lost either way: the #1829 journal is
+ * append-only and a clear never touches it, so the txHash outlives the job record.
  */
 export function isBulkClearableTerminalLiftJob(job: LiftJob): boolean {
   return isClearableTerminalLiftJob(job) && !(isFailedJob(job) && isHeldForChainProof(job));

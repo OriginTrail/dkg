@@ -10,6 +10,10 @@ import {
   describeRetryProjection,
   hasAutomaticRecoveryExit,
   hasBroadcastEvidence,
+  delegatedHeldJobSettlement,
+  localHeldJobSettlement,
+  resolveHeldJobSettlementCapability,
+  isTargetedClearableLiftJob,
 } from '../src/async-lift-retry-disposition.js';
 import {
   DEFAULT_CONTROL_GRAPH_URI,
@@ -207,6 +211,96 @@ describe('GH#2270 failed-job retry disposition', () => {
       recoveredFromStatus: 'broadcast',
       txHashChecked: undefined,
     });
+  });
+
+  it('names the two settlement ROLES explicitly, without inferring either from wiring [3825614002]', () => {
+    // 3825614002 — the role used to be re-derived inside the decision method from which
+    // collaborators happened to be installed, so the same oracle meant different things depending
+    // on whether a resolver sat beside it. Both policies are exercised directly here, with no
+    // publisher instance at all: nothing about these answers may depend on wiring discovery.
+    const namedJob = {
+      request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: kaVmPublishRequest() },
+    } as unknown as PersistedFailedJob;
+    const rawJob = { request: { jobType: 'lift', lift: {} } } as unknown as PersistedFailedJob;
+
+    // DELEGATED (admission): the oracle IS the answer, per wallet and per operation. No local
+    // collaborator is consulted — this role has none.
+    const delegated = delegatedHeldJobSettlement((w, k) => w === 'wallet-a' && k === 'create');
+    expect(delegated(namedJob, 'wallet-a', 'create')).toBe(true);
+    expect(delegated(namedJob, 'wallet-a', 'update')).toBe(false);
+    expect(delegated(namedJob, 'wallet-b', 'create')).toBe(false);
+    // Even with NO named recovery resolver anywhere in sight, which the local role would require.
+    expect(delegated(namedJob, 'wallet-a', 'create')).toBe(true);
+
+    // LOCAL (runtime): the oracle only NARROWS; local wiring must also be complete. A named job
+    // needs the named recovery resolver whatever its kind (r12); a raw lift does not.
+    expect(localHeldJobSettlement({ hasNamedRecoveryResolver: true })(namedJob, 'wallet-a', 'create')).toBe(true);
+    expect(localHeldJobSettlement({ hasNamedRecoveryResolver: false })(namedJob, 'wallet-a', 'create')).toBe(false);
+    expect(localHeldJobSettlement({ hasNamedRecoveryResolver: false })(rawJob, 'wallet-a', 'create')).toBe(true);
+    expect(localHeldJobSettlement({
+      capableForWallet: () => false,
+      hasNamedRecoveryResolver: true,
+    })(namedJob, 'wallet-a', 'create')).toBe(false);
+
+    // The discriminating pair: SAME oracle, SAME job, and the two roles legitimately DISAGREE.
+    // That disagreement is precisely why the role must be named rather than re-derived where the
+    // decision is made.
+    const oracle = () => true;
+    expect(delegatedHeldJobSettlement(oracle)(namedJob, 'wallet-a', 'create')).toBe(true);
+    expect(localHeldJobSettlement({ capableForWallet: oracle, hasNamedRecoveryResolver: false })(
+      namedJob, 'wallet-a', 'create',
+    )).toBe(false);
+
+    // Role selection reads wiring in exactly ONE place, and an instance wired with neither a
+    // resolver nor an oracle offers nothing.
+    expect(resolveHeldJobSettlementCapability({
+      hasChainProofResolver: false,
+      hasNamedRecoveryResolver: false,
+    })(namedJob, 'wallet-a', 'create')).toBe(false);
+    expect(resolveHeldJobSettlementCapability({
+      hasChainProofResolver: false,
+      capableForWallet: oracle,
+      hasNamedRecoveryResolver: false,
+    })(namedJob, 'wallet-a', 'create')).toBe(true);
+    expect(resolveHeldJobSettlementCapability({
+      hasChainProofResolver: true,
+      capableForWallet: oracle,
+      hasNamedRecoveryResolver: false,
+    })(namedJob, 'wallet-a', 'create')).toBe(false);
+  });
+
+  it('carries job-level ADMISSION across a reset, so recovery cannot launder the enqueuer', async () => {
+    // 🟡 3824743779 — admission moved from the publish payload to job metadata. The reset REBUILDS
+    // the job field by field rather than merging, so a job-level field that is not named here is
+    // dropped silently. Dropping this one would revoke the by-id force-clear from the very jobs
+    // that need it: a job is reset precisely when recovery could not settle it, which is the state
+    // whose stated exit is the enqueuer's clear.
+    const ADMITTED_BY = '0xAAaAAa00000000000000000000000000000000Aa';
+    const publisher = createPublisher();
+    const failed = await failAfterRecordedTxHash(publisher);
+    const admitted = { ...failed, admission: { byAgentAddress: ADMITTED_BY } } as PersistedFailedJob;
+
+    const reset = resetFailedLiftJobToAccepted(admitted, 9_000);
+
+    expect(reset.admission).toEqual({ byAgentAddress: ADMITTED_BY });
+    // The property that matters is the entitlement, not the field. Read it through the one
+    // composed policy (3825162663) on a job in the state the override exists for: the enqueuer
+    // still owns the lane after the reset, and an unrelated token still does not.
+    const heldAfterReset = {
+      ...admitted,
+      admission: { byAgentAddress: ADMITTED_BY },
+      failure: { ...admitted.failure, resolution: 'retry_recovery' },
+    } as PersistedFailedJob;
+    expect(isTargetedClearableLiftJob(heldAfterReset, {
+      pendingTransactionOverride: { requestedBy: ADMITTED_BY },
+    })).toBe(true);
+    expect(isTargetedClearableLiftJob(heldAfterReset, {
+      pendingTransactionOverride: { requestedBy: '0xBBbBBb00000000000000000000000000000000Bb' },
+    })).toBe(false);
+    // ...and with no override at all, ownership alone never grants the clear.
+    expect(isTargetedClearableLiftJob(heldAfterReset)).toBe(false);
+    // A job admitted with no principal must not acquire one by being reset.
+    expect(resetFailedLiftJobToAccepted(failed, 9_000).admission).toBeUndefined();
   });
 
   it('keeps a hash that only the recovery record carries, across a SECOND reset', async () => {

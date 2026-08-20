@@ -33,22 +33,34 @@ describe('#1837 lift publisher clearTerminalJob', () => {
   const bx = KA_VM_BROADCAST_TX;
   const inc = KA_VM_INCLUSION;
 
-  async function driveToValidated(p: TripleStoreAsyncLiftPublisher, o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {}): Promise<string> {
-    const jobId = await p.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest(o));
+  async function driveToValidated(
+    p: TripleStoreAsyncLiftPublisher,
+    o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {},
+    admission?: { admittedByAgentAddress?: string },
+  ): Promise<string> {
+    const jobId = await p.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest(o), admission);
     await p.claimNext('wallet-1');
     await p.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
     return jobId;
   }
-  async function driveToFinalized(p: TripleStoreAsyncLiftPublisher, o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {}): Promise<string> {
-    const jobId = await driveToValidated(p, o);
+  async function driveToFinalized(
+    p: TripleStoreAsyncLiftPublisher,
+    o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {},
+    admission?: { admittedByAgentAddress?: string },
+  ): Promise<string> {
+    const jobId = await driveToValidated(p, o, admission);
     await p.update(jobId, 'broadcast', { broadcast: bx });
     await p.update(jobId, 'included', { broadcast: bx, inclusion: inc });
     await p.update(jobId, 'finalized', { broadcast: bx, inclusion: inc, finalization: { mode: 'local' } });
     return jobId;
   }
   // Terminal, non-retryable (tx_reverted → fail_job): clearable, retry() won't touch it.
-  async function driveToTerminalFailed(p: TripleStoreAsyncLiftPublisher, o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {}): Promise<string> {
-    const jobId = await driveToValidated(p, o);
+  async function driveToTerminalFailed(
+    p: TripleStoreAsyncLiftPublisher,
+    o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {},
+    admission?: { admittedByAgentAddress?: string },
+  ): Promise<string> {
+    const jobId = await driveToValidated(p, o, admission);
     await p.update(jobId, 'broadcast', { broadcast: bx });
     await p.recordPublishFailure(jobId, { error: new Error('tx reverted on chain'), failedFromState: 'broadcast', errorPayloadRef: 'urn:err:1' });
     return jobId;
@@ -92,11 +104,92 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect((await p.getStatus(broadcast))?.status).toBe('broadcast');
   });
 
-  it('rejects a retry_recovery-protected failed job as nonterminal (a pending tx may still land)', async () => {
-    // retry_recovery is a raw-lift-only recovery resolution (KA-VM canRetryFailedRecovery
-    // is false), so inject a synthetic retry_recovery-failed job to exercise the guard the
-    // clearer shares with bulk clear(). Start from a real terminal-failed job and rewrite
-    // its persisted resolution.
+  it('CLEARS a retry_recovery failed job by id — the targeted override is the operator exit', async () => {
+    // GH#2270 follow-up (🔴 3822987650) — this row previously asserted the opposite, because the
+    // by-id clear shared the BULK predicate, which treats a retry_recovery failure as
+    // nonterminal-for-cleanup (a pending tx may still land — right for bulk).
+    //
+    // The chain-proof work made that wrong for the targeted lane: a held UPDATE has no
+    // absence-release path by design, so the by-id clear is its STATED exit, and sharing the bulk
+    // rule meant neither lane could remove it — a permanent dead end, and the release notes named
+    // a command that could not work. The operator names the exact job here and owns the
+    // consequence; bulk keeps the stricter rule, pinned by the row below.
+    // 🔴 3824353569 — the ENQUEUING CALLER owns the override, not the resolved author. Curated
+    // publishing lets those differ (GH#1778), so the fixture makes them differ: the curator who
+    // admitted the job may clear it; an authenticated token for the AUTHOR may not.
+    const CALLER = '0xCCcCCc00000000000000000000000000000000Cc';
+    const AUTHOR = '0xAAaAAa00000000000000000000000000000000Aa';
+    const p = createPublisher();
+    // The curator's `callerAgentAddress` stays in the request (it is the GH#1778 author-resolution
+    // hint), but the ENTITLEMENT comes only from the explicit admission stamp (3825162149) — the
+    // payload hint grants nothing on its own, which is what stops an agent's own publish path
+    // from handing the override to a third-party author.
+    const jobId = await driveToTerminalFailed(p, {
+      agentAddress: AUTHOR,
+      callerAgentAddress: CALLER,
+    }, { admittedByAgentAddress: CALLER });
+    const job = await p.getStatus(jobId);
+    if (!job || !('failure' in job)) throw new Error('expected a failed job');
+    const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
+    // 🔴 3823952704 — and it is an EXPLICIT override, off by default. This route is open to
+    // every registered agent token, so a default-on widening would have let one agent delete
+    // another lifecycle's only chain-recovery record.
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect((await p.getStatus(jobId))?.status).toBe('failed');
+
+    // 🔴 3824098476 / 🟡 3824098494 — ownership is decided HERE, under the same lock and
+    // after the same safe-id validation as the delete, on the same record. A caller that does not
+    // own the job gets no override however explicitly it asks.
+    // The AUTHOR is not the enqueuer, so the author's token gets nothing — this is the exact
+    // confusion the previous version had backwards.
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: AUTHOR },
+    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect((await p.getStatus(jobId))?.status).toBe('failed');
+
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: CALLER },
+    })).toEqual({ outcome: 'cleared' });
+    expect(await p.getStatus(jobId)).toBeNull();
+  });
+
+  it('a NODE-TOKEN job can be force-cleared by that node token [followup]', async () => {
+    // 🔴 3824484639 — a node-level API token is the ordinary client, and it resolves to no
+    // `callerAgentAddress` at all: that field is an author RESOLUTION HINT and is deliberately
+    // absent for node tokens. Authorizing on it therefore denied the force-clear to the most
+    // common caller, reproducing the exact dead end this PR set out to remove — the daemon handed
+    // back a command that could never work.
+    //
+    // Job-level admission metadata records the authenticated enqueuer instead, for every
+    // admission, and carries no author-selection meaning.
+    const NODE = '0xNNnNNn00000000000000000000000000000000Nn';
+    const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
+    const p = createPublisher();
+    // No callerAgentAddress in the REQUEST: the node-token shape. The principal travels
+    // beside it, as admission metadata.
+    const jobId = await driveToTerminalFailed(p, {}, { admittedByAgentAddress: NODE });
+    const job = await p.getStatus(jobId);
+    if (!job || !('failure' in job)) throw new Error('expected a failed job');
+    const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
+
+    // An unrelated token is still refused...
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: OTHER },
+    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+
+    // ...and the token that admitted it can clear it, which is what the daemon advertises.
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: NODE },
+    })).toEqual({ outcome: 'cleared' });
+  });
+
+  it('but BULK clear still leaves a retry_recovery failed job alone', async () => {
+    // The discriminating half: the fix must move only the targeted lane. If both lanes had been
+    // relaxed, routine cleanup could delete a job whose transaction may still land.
     const p = createPublisher();
     const jobId = await driveToTerminalFailed(p);
     const job = await p.getStatus(jobId);
@@ -104,8 +197,10 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
     await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
     await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
-    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
-    expect((await p.getStatus(jobId))?.status).toBe('failed'); // unchanged
+
+    await p.clear('failed');
+
+    expect((await p.getStatus(jobId))?.status).toBe('failed');
   });
 
   it('is idempotent: absent / already-cleared → already_absent', async () => {

@@ -335,6 +335,9 @@ export const LIFT_JOB_IMMUTABLE_FIELDS = [
   'jobId',
   'jobSlug',
   'request',
+  // GH#2270 follow-up (3825614166) — who admitted the job is fixed at creation and never
+  // rewritten. A reset that rebuilds the job carries it forward; nothing may reassign it.
+  'admission',
   'timestamps.acceptedAt',
   'retries.maxRetries',
 ] as const;
@@ -363,10 +366,28 @@ export const LIFT_JOB_MUTABLE_PERSISTED_FIELDS = [
   'controlPlane',
 ] as const;
 
+/**
+ * Who admitted this job — queue metadata, not part of any operation's payload.
+ *
+ * GH#2270 follow-up (🟡 3824743779). This is the AUTHENTICATED identity that enqueued the job and
+ * it exists for authorization only, so it lives at the job level where a generic boundary can read
+ * it without knowing which operation the job carries. It is deliberately NOT
+ * `KnowledgeAssetVmPublishRequest.callerAgentAddress`: that field is an author RESOLUTION HINT
+ * (GH#1778) which is absent for a node-level token and carries author-selection meaning, so
+ * authorizing against it both denied every node-token job its advertised force-clear and risked
+ * changing what gets published.
+ *
+ * Immutable: stamped once at admission and never mutated, like `request` and `jobId`.
+ */
+export interface LiftJobAdmissionMetadata {
+  readonly byAgentAddress: string;
+}
+
 export interface LiftJobBase {
   readonly jobId: string;
   readonly jobSlug: string;
   readonly request: LiftJobRequest;
+  readonly admission?: LiftJobAdmissionMetadata;
   readonly status: LiftJobState;
   readonly timestamps: LiftJobTimestamps;
   readonly retries: LiftJobRetryMetadata;

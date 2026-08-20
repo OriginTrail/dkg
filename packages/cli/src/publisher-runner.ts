@@ -92,6 +92,15 @@ export interface PublisherRuntime {
   readonly stop: () => Promise<void>;
   /** RpcUsageDrainable: merged window across every per-wallet chain adapter. */
   readonly drainRpcUsage: () => RpcUsageWindow;
+  /**
+   * GH#2270 follow-up (🔴 3822987482) — can THIS runtime settle a held job signed by this
+   * wallet, for this operation kind? The daemon's ADMISSION instance is a separate, deliberately
+   * resolver-less publisher (it runs no scheduler), so asking it whether an automatic exit exists
+   * always answered "no" — every pending-chain-proof rejection claimed there was no automatic
+   * recovery even on a node where recovery was configured and running. Admission now asks the
+   * live runtime through this probe instead of inferring from its own wiring.
+   */
+  readonly canSettleHeldJob: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean;
 }
 
 export interface PublisherRuntimeWallet {
@@ -411,6 +420,41 @@ export function createPublisherInspectorFromStore(
   };
 }
 
+/**
+ * GH#2270 follow-up (🔴 3822987482, 🟡 3823952750) — the admission-to-runtime capability
+ * bridge, as a named function so the seam itself is testable.
+ *
+ * The daemon builds its admission publisher BEFORE the runtime exists, and admission is what
+ * answers "does this held job have an automatic exit". Reading that from the admission instance's
+ * own wiring always said no, because that instance deliberately holds no resolver. This closes
+ * over the late-bound state instead, so it answers `false` until the runtime is up and delegates
+ * to it thereafter — forwarding both the wallet and the operation kind, since the runtime's answer
+ * is per wallet AND per operation.
+ */
+/**
+ * GH#2270 follow-up (🔴 3824531105) — the RUNTIME half of the capability bridge, as a named
+ * factory so the production answer is reachable by a test rather than only by booting a daemon.
+ *
+ * This is the one function both sides use: the runtime's own publisher takes it as
+ * `chainProofCapableForWallet`, and the runtime handle exposes it as `canSettleHeldJob` for the
+ * daemon's admission instance to ask. Sharing it by identity is what keeps those two answers from
+ * drifting; exporting it is what lets a test prove the answer is right rather than merely present.
+ */
+export function createRuntimeRecoveryCapability(
+  chainAdapters: PublisherChainAdapters,
+): (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean {
+  return (walletId, operationKind) => {
+    const chain = chainAdapters.get(walletId);
+    return chain !== undefined && hasChainRecoveryCapabilityFor(chain, operationKind);
+  };
+}
+
+export function createAdmissionRecoveryCapabilityProbe(
+  readState: () => { runtime?: { canSettleHeldJob: (w: string, k: 'create' | 'update' | undefined) => boolean } | null },
+): (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean {
+  return (walletId, operationKind) => readState().runtime?.canSettleHeldJob(walletId, operationKind) ?? false;
+}
+
 export function createPublisherControlFromStore(
   store: TripleStore,
   options: {
@@ -423,12 +467,23 @@ export function createPublisherControlFromStore(
      * as auto-retry-eligible on a node where the operator switched the lane off (#1836).
      */
     retryTuning?: PublisherRetryTuning;
+    /**
+     * GH#2270 follow-up (🔴 3822987482) — the capability oracle for the LIVE runtime. This
+     * instance deliberately holds no resolver, but it is the one that answers admission, so it
+     * must ask the lane that would actually do the work rather than infer from its own wiring.
+     * Late-bound on purpose: the runtime starts after this instance is built.
+     */
+    chainProofCapableForWallet?: (
+      walletId: string,
+      operationKind: 'create' | 'update' | undefined,
+    ) => boolean;
   } = {},
 ): VmPublisherControl {
   // The daemon admission instance also serves the #1828 recovery lookup (route)
   // and the boot index backfill — segregated capabilities the base
   // AsyncLiftPublisher runtime contract intentionally does NOT carry.
   return new TripleStoreAsyncLiftPublisher(store, {
+    chainProofCapableForWallet: options.chainProofCapableForWallet,
     publicSnapshotStore: options.publicSnapshotStore,
     maxRetries: options.maxRetries,
     ...options.retryTuning,
@@ -538,6 +593,11 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   // wallets, where `chain` is a public field rather than something to assert through.
   const chainAdapters = chainAdaptersForWallets(wallets);
   const hasChainRecovery = [...chainAdapters.values()].some(hasChainPublishLookup);
+  // GH#2270 follow-up (🟡 3823952723) — ONE closure, used by both the runtime's own publisher and
+  // the runtime handle the daemon's admission instance asks. These two answers are required to be
+  // identical; computing them twice is precisely the drift this bridge exists to prevent, so they
+  // share function identity rather than a copied body.
+  const canSettleHeldJob = createRuntimeRecoveryCapability(chainAdapters);
 
   const scopedKnowledgeAssetVmPublishHandler = scopeKnowledgeAssetVmPublishHandler(
     publishers,
@@ -552,10 +612,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     // adapter with a legacy one the resolvers are installed for the whole node. The honesty
     // contract is per JOB, so admission must ask about the wallet that actually signs it rather
     // than inherit the node-wide answer.
-    chainProofCapableForWallet: (walletId: string, operationKind: 'create' | 'update' | undefined) => {
-      const chain = chainAdapters.get(walletId);
-      return chain !== undefined && hasChainRecoveryCapabilityFor(chain, operationKind);
-    },
+    chainProofCapableForWallet: canSettleHeldJob,
     knowledgeAssetVmPublishRecoveryResolver: hasChainRecovery
       ? createKnowledgeAssetVmPublishRecoveryResolver(chainAdapters)
       : undefined,
@@ -622,6 +679,9 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     walletIds: validWalletIds,
     wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
     drainRpcUsage: () => mergeRpcUsageWindows(...wallets.map((w) => w.chain.drainRpcUsage?.())),
+    // The SAME question the runtime's own publisher answers, from the same adapter map, so the
+    // daemon's admission instance and the lane that would do the work cannot disagree.
+    canSettleHeldJob,
     stop: async () => {
       await runner.stop();
       if (args.closeStoreOnStop) {

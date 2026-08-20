@@ -652,6 +652,21 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     if (typeof jobId !== "string" || jobId.trim().length === 0) {
       return jsonResponse(res, 400, { outcome: "rejected", reason: "malformed", error: "Missing jobId" });
     }
-    return respondTerminalClearOutcome(res, await publisherControl.clearTerminalJob(jobId), jobId);
+    // GH#2270 follow-up (🔴 3823952704, 🔴 3824098476) — clearing a job whose transaction may
+    // still land is a DESTRUCTIVE override, and this route is open to every registered agent token
+    // with no ownership check of its own. The route therefore states WHO is asking and WHAT they
+    // asked for; it does not look the job up itself.
+    //
+    // That matters: an earlier version read the job here, which put an unvalidated jobId into a
+    // query before `clearTerminalJob`'s safe-id guard ran, and decided ownership outside the claim
+    // lock the clear then takes. Validation, the ownership decision and the delete now happen on
+    // one record behind one boundary.
+    return respondTerminalClearOutcome(
+      res,
+      await publisherControl.clearTerminalJob(jobId, parsed.allowPendingTransaction === true
+        ? { pendingTransactionOverride: { requestedBy: requestAgentAddress } }
+        : {}),
+      jobId,
+    );
   }
 }
