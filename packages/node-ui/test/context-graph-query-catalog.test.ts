@@ -6,6 +6,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+const localStorageValues = new Map<string, string>();
+Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true,
+  value: {
+    clear: () => localStorageValues.clear(),
+    getItem: (key: string) => localStorageValues.get(key) ?? null,
+    key: (index: number) => [...localStorageValues.keys()][index] ?? null,
+    get length() { return localStorageValues.size; },
+    removeItem: (key: string) => localStorageValues.delete(key),
+    setItem: (key: string, value: string) => localStorageValues.set(key, value),
+  },
+});
 
 const apiMocks = vi.hoisted(() => ({
   executeQuery: vi.fn(),

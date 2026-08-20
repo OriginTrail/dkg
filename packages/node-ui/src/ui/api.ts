@@ -1442,7 +1442,7 @@ export async function listAssertions(
     // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
     // already drops these daemon-side; this guards the parser too.
     if (subGraph === 'meta') continue;
-    const key = `${subGraph ?? ''} ${name}`;
+    const key = `${subGraph ?? ''}\0${name}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const cnt = countByGraph.get(g);

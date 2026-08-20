@@ -613,7 +613,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const graph = `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
     const query = `PREFIX prof: <http://dkg.io/ontology/profile/>
 PREFIX schema: <http://schema.org/>
-SELECT ?q ?subGraph ?catalog ?name ?description ?sparql ?resultColumn ?rank ?catalogName ?catalogDescription ?catalogRank
+SELECT ?q ?subGraph ?catalog ?name ?description ?sparql ?resultColumn ?executionView ?view ?rank ?catalogName ?catalogDescription ?catalogRank
 WHERE {
   GRAPH <${graph}> {
     ?q a prof:SavedQuery ;
@@ -623,6 +623,8 @@ WHERE {
     OPTIONAL { ?q prof:displayName ?name }
     OPTIONAL { ?q schema:description ?description }
     OPTIONAL { ?q prof:resultColumn ?resultColumn }
+    OPTIONAL { ?q prof:executionView ?executionView }
+    OPTIONAL { ?q prof:view ?view }
     OPTIONAL { ?q prof:rank ?rank }
     OPTIONAL { ?catalog prof:displayName ?catalogName }
     OPTIONAL { ?catalog schema:description ?catalogDescription }

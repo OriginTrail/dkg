@@ -105,6 +105,21 @@ describe('buildQueryCatalogState', () => {
       catalogName: 'Queries',
     });
   });
+
+  it('preserves an explicit execution view returned by the profile catalog endpoint', () => {
+    const state = buildQueryCatalogState([], [{
+      q: '<urn:dkg:profile:demo:query:verified-trace>',
+      subGraph: '__context_graph',
+      name: 'Verified trace',
+      sparql: 'SELECT ?record WHERE { ?record ?p ?o }',
+      executionView: 'verifiable-memory',
+    }]);
+
+    expect(state.queryCatalogs[0].queries[0]).toMatchObject({
+      slug: 'verified-trace',
+      view: 'verifiable-memory',
+    });
+  });
 });
 
 describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () => {
