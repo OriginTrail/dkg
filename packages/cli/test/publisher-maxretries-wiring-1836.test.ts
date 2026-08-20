@@ -225,10 +225,27 @@ describe('runDaemonInner publisher admission-config wiring (#1836, #2270)', () =
     expect(mocks.createPublisherControlFromStore).toHaveBeenCalledTimes(1);
     const [store, options] = mocks.createPublisherControlFromStore.mock.calls[0] as [
       unknown,
-      { maxRetries?: number; retryTuning?: Record<string, unknown> },
+      {
+        maxRetries?: number;
+        retryTuning?: Record<string, unknown>;
+        chainProofCapableForWallet?: (w: string, k: 'create' | 'update' | undefined) => boolean;
+      },
     ];
     return { store, options, agentStore: fakeAgent.store };
   }
+
+  // GH#2270 follow-up (🔴 3822987482, 🟡 3824167750) — the admission instance is deliberately
+  // resolver-less, so it cannot answer "does this held job have an automatic exit" from its own
+  // wiring; it must ask the live runtime. That bridge is the exact seam that produced the bug, and
+  // testing the extracted helper alone left it uncovered: deleting the daemon's wiring line kept
+  // every other row green while production went back to reporting `retryable: false`.
+  it('installs the runtime capability probe on the admission control (#2270)', async () => {
+    const { options } = await captureAdmissionControlCall({ enabled: true, maxRetries: 3 });
+    expect(typeof options.chainProofCapableForWallet).toBe('function');
+    // Before a runtime exists the answer is false rather than a crash — the daemon builds this
+    // instance first and starts the runtime afterwards.
+    expect(options.chainProofCapableForWallet?.('0xabc', 'create')).toBe(false);
+  });
 
   it('forwards config.publisher.maxRetries into createPublisherControlFromStore (daemon HTTP admission)', async () => {
     const { store, options, agentStore } = await captureAdmissionControlCall({ enabled: true, maxRetries: 0 });
