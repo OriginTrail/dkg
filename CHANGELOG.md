@@ -31,6 +31,7 @@ A selected-public convergence release. An Edge node can opt a bounded set of pub
 - **Selected manifests activate the RFC-64 lane directly** (#2272): a valid accepted non-empty bootstrap manifest with `enabled` omitted is active by default, while an absent block and explicit `enabled: false` stay dormant. This removes a redundant configuration switch without expanding an Edge node beyond its operator-selected Context Graphs.
 - **Cold selected CG bindings resolve directly from chain state** (#2205): a fresh receiver can map the configured public graph to its numeric on-chain identity without relying on pre-existing ontology/store metadata, and ambiguous or stale bindings fail closed.
 - **Publisher workspace-head writes remain on the StorageACK lane** (#2178), preventing unrelated normal-lane store work from delaying acknowledgement-critical state.
+- **Process-level store concurrency respects host CPU capacity** (#2277): `DKG_STORE_MAX_CONCURRENT` is capped at the runtime's available parallelism on hosts with at least two logical CPUs; single-vCPU hosts retain the two-slot minimum needed for the default ACK reservation. Explicitly lower environment values and constructor overrides remain unchanged.
 - **Prime Agent legacy chat memory migrates to numbered, graph-scoped working memory** (#2151, #2153) without mistaking orphan lifecycle rows for legacy drafts.
 
 ### Fixed

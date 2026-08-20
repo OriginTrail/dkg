@@ -553,7 +553,11 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     await expect(s.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeDefined();
     expect(active).toBe(0);
 
-    await expect(s.query('SELECT ?s WHERE { ?s ?p ?o }')).resolves.toMatchObject({
+    // The 5 ms budget above exists only to trigger cancellation. Reusing it
+    // for the recovery probe makes this assertion depend on host scheduling
+    // latency rather than on whether the previous attempt released its slot.
+    const recoveryStore = new BlazegraphStore(baseUrl, { timeout: 200 });
+    await expect(recoveryStore.query('SELECT ?s WHERE { ?s ?p ?o }')).resolves.toMatchObject({
       type: 'bindings',
     });
     expect(maxActive).toBe(1);
