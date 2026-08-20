@@ -10,6 +10,9 @@ import {
   describeRetryProjection,
   hasAutomaticRecoveryExit,
   hasBroadcastEvidence,
+  delegatedHeldJobSettlement,
+  localHeldJobSettlement,
+  resolveHeldJobSettlementCapability,
   isTargetedClearableLiftJob,
 } from '../src/async-lift-retry-disposition.js';
 import {
@@ -208,6 +211,62 @@ describe('GH#2270 failed-job retry disposition', () => {
       recoveredFromStatus: 'broadcast',
       txHashChecked: undefined,
     });
+  });
+
+  it('names the two settlement ROLES explicitly, without inferring either from wiring [3825614002]', () => {
+    // 3825614002 — the role used to be re-derived inside the decision method from which
+    // collaborators happened to be installed, so the same oracle meant different things depending
+    // on whether a resolver sat beside it. Both policies are exercised directly here, with no
+    // publisher instance at all: nothing about these answers may depend on wiring discovery.
+    const namedJob = {
+      request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: kaVmPublishRequest() },
+    } as unknown as PersistedFailedJob;
+    const rawJob = { request: { jobType: 'lift', lift: {} } } as unknown as PersistedFailedJob;
+
+    // DELEGATED (admission): the oracle IS the answer, per wallet and per operation. No local
+    // collaborator is consulted — this role has none.
+    const delegated = delegatedHeldJobSettlement((w, k) => w === 'wallet-a' && k === 'create');
+    expect(delegated(namedJob, 'wallet-a', 'create')).toBe(true);
+    expect(delegated(namedJob, 'wallet-a', 'update')).toBe(false);
+    expect(delegated(namedJob, 'wallet-b', 'create')).toBe(false);
+    // Even with NO named recovery resolver anywhere in sight, which the local role would require.
+    expect(delegated(namedJob, 'wallet-a', 'create')).toBe(true);
+
+    // LOCAL (runtime): the oracle only NARROWS; local wiring must also be complete. A named job
+    // needs the named recovery resolver whatever its kind (r12); a raw lift does not.
+    expect(localHeldJobSettlement({ hasNamedRecoveryResolver: true })(namedJob, 'wallet-a', 'create')).toBe(true);
+    expect(localHeldJobSettlement({ hasNamedRecoveryResolver: false })(namedJob, 'wallet-a', 'create')).toBe(false);
+    expect(localHeldJobSettlement({ hasNamedRecoveryResolver: false })(rawJob, 'wallet-a', 'create')).toBe(true);
+    expect(localHeldJobSettlement({
+      capableForWallet: () => false,
+      hasNamedRecoveryResolver: true,
+    })(namedJob, 'wallet-a', 'create')).toBe(false);
+
+    // The discriminating pair: SAME oracle, SAME job, and the two roles legitimately DISAGREE.
+    // That disagreement is precisely why the role must be named rather than re-derived where the
+    // decision is made.
+    const oracle = () => true;
+    expect(delegatedHeldJobSettlement(oracle)(namedJob, 'wallet-a', 'create')).toBe(true);
+    expect(localHeldJobSettlement({ capableForWallet: oracle, hasNamedRecoveryResolver: false })(
+      namedJob, 'wallet-a', 'create',
+    )).toBe(false);
+
+    // Role selection reads wiring in exactly ONE place, and an instance wired with neither a
+    // resolver nor an oracle offers nothing.
+    expect(resolveHeldJobSettlementCapability({
+      hasChainProofResolver: false,
+      hasNamedRecoveryResolver: false,
+    })(namedJob, 'wallet-a', 'create')).toBe(false);
+    expect(resolveHeldJobSettlementCapability({
+      hasChainProofResolver: false,
+      capableForWallet: oracle,
+      hasNamedRecoveryResolver: false,
+    })(namedJob, 'wallet-a', 'create')).toBe(true);
+    expect(resolveHeldJobSettlementCapability({
+      hasChainProofResolver: true,
+      capableForWallet: oracle,
+      hasNamedRecoveryResolver: false,
+    })(namedJob, 'wallet-a', 'create')).toBe(false);
   });
 
   it('carries job-level ADMISSION across a reset, so recovery cannot launder the enqueuer', async () => {

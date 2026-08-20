@@ -24,6 +24,7 @@ import {
   liftJobOperationKindMarker,
   isFailedJob,
   pinnedPublishIdentityKaId,
+  isKnowledgeAssetVmPublishJobRequest,
   queuedLiftOperationKind,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
@@ -261,6 +262,80 @@ export function selectLifecycleBindingJobs(
 export function isClearableTerminalLiftJob(job: LiftJob): boolean {
   return isTerminalLiftJobState(job.status)
     && !(isFailedJob(job) && job.failure.resolution === 'retry_recovery');
+}
+
+/**
+ * Can THIS node settle a held job itself — the CAPABILITY half of "does an automatic exit exist"?
+ *
+ * {@link hasAutomaticRecoveryExit} answers from the record alone (is there a question the chain
+ * could settle). This answers whether the components that would ask and act are wired up, per
+ * WALLET and per OPERATION, because both narrow what can actually be settled.
+ *
+ * 3825614002 — a publisher instance has a ROLE, and the role is now named and chosen ONCE, at
+ * construction. It used to be inferred inside the decision method from which collaborators
+ * happened to be installed, so the same oracle meant different things depending on whether a
+ * resolver sat beside it and a reader had to reconstruct constructor combinations to know which.
+ */
+export type HeldJobSettlementCapability = (
+  job: PersistedFailedJob,
+  walletId: string,
+  operationKind: 'create' | 'update' | undefined,
+) => boolean;
+
+/** Neither a local lane nor an oracle: this instance genuinely has no automatic exit to offer. */
+export const NO_HELD_JOB_SETTLEMENT: HeldJobSettlementCapability = () => false;
+
+/**
+ * The ADMISSION role: this instance holds no resolvers of its own and runs no scheduler, but it is
+ * the one that answers clients. It therefore asks the lane that would actually do the work, and
+ * that oracle IS the answer — not a narrowing of local wiring it does not have. Consulting a
+ * named-recovery resolver here would ask this instance about a collaborator only the runtime has.
+ */
+export function delegatedHeldJobSettlement(
+  capableForWallet: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean,
+): HeldJobSettlementCapability {
+  return (_job, walletId, operationKind) => capableForWallet(walletId, operationKind);
+}
+
+/**
+ * The RUNTIME role: this instance owns the lane. An oracle, when present, narrows the answer per
+ * wallet and operation; the local wiring still has to be complete on top of that.
+ *
+ * r12 (3813505773) — a named job needs the named recovery resolver whatever its kind. The create
+ * case looks exempt because the absence release is create-only and needs nothing but the reset, but
+ * that is only ONE of its outcomes: if the transaction MINED, settling it means building canonical
+ * evidence and repairing the lifecycle, which is exactly what that resolver does. Without it a
+ * mined create is held forever while the response promised convergence.
+ */
+export function localHeldJobSettlement(options: {
+  readonly capableForWallet?: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean;
+  readonly hasNamedRecoveryResolver: boolean;
+}): HeldJobSettlementCapability {
+  return (job, walletId, operationKind) => {
+    if (options.capableForWallet && !options.capableForWallet(walletId, operationKind)) return false;
+    if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return true;
+    return options.hasNamedRecoveryResolver;
+  };
+}
+
+/**
+ * Pick the role from how this instance was wired. Deliberately the ONE place that reads collaborator
+ * presence for this purpose: after construction the decision asks the returned policy directly.
+ */
+export function resolveHeldJobSettlementCapability(wiring: {
+  readonly hasChainProofResolver: boolean;
+  readonly capableForWallet?: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean;
+  readonly hasNamedRecoveryResolver: boolean;
+}): HeldJobSettlementCapability {
+  if (!wiring.hasChainProofResolver) {
+    return wiring.capableForWallet
+      ? delegatedHeldJobSettlement(wiring.capableForWallet)
+      : NO_HELD_JOB_SETTLEMENT;
+  }
+  return localHeldJobSettlement({
+    ...(wiring.capableForWallet ? { capableForWallet: wiring.capableForWallet } : {}),
+    hasNamedRecoveryResolver: wiring.hasNamedRecoveryResolver,
+  });
 }
 
 /**

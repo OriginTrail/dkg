@@ -62,6 +62,8 @@ import {
   isTargetedClearableLiftJob,
   decideChainProofDisposition,
   hasAutomaticRecoveryExit,
+  resolveHeldJobSettlementCapability,
+  type HeldJobSettlementCapability,
   isHeldForChainProof,
   selectLifecycleBindingJobs,
   type LiftJobRetryProjection,
@@ -459,6 +461,8 @@ export class TripleStoreAsyncLiftPublisher
    */
   private readonly finalizationsInFlight = new Set<string>();
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
+  /** 3825614002 — this instance's ROLE, resolved once from its wiring. */
+  private readonly heldJobSettlement: HeldJobSettlementCapability;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
@@ -538,6 +542,13 @@ export class TripleStoreAsyncLiftPublisher
     this.knowledgeAssetVmPublishHandler = resolveKnowledgeAssetVmPublishHandler(config);
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
     this.publicSnapshotStore = config.publicSnapshotStore;
+    this.heldJobSettlement = resolveHeldJobSettlementCapability({
+      hasChainProofResolver: config.chainProofResolver !== undefined,
+      ...(config.chainProofCapableForWallet
+        ? { capableForWallet: config.chainProofCapableForWallet }
+        : {}),
+      hasNamedRecoveryResolver: config.knowledgeAssetVmPublishRecoveryResolver !== undefined,
+    });
     this.graphManager = new GraphManager(store);
   }
 
@@ -1457,47 +1468,19 @@ export class TripleStoreAsyncLiftPublisher
    */
   private automaticExitIsConfiguredFor(job: PersistedFailedJob): boolean {
     if (!hasAutomaticRecoveryExit(job)) return false;
-    // GH#2270 follow-up (🔴 3822987482) — "is there a recovery lane" is not the same question as
-    // "do I hold the resolver". The daemon's ADMISSION instance is a separate, deliberately
-    // resolver-less publisher that runs no scheduler, and it is the one that raises this
-    // rejection — so gating on `this.chainProofResolver` made every production response claim
-    // there was no automatic exit, on nodes where recovery was configured and running.
-    //
-    // A capability oracle speaks FOR that runtime, so its presence is the evidence here. An
-    // instance with neither the resolver nor an oracle genuinely has no lane and still says so.
-    if (!this.chainProofResolver && !this.chainProofCapableForWallet) return false;
-    // r20 (🔴 3815617109) — per WALLET, not per node. A resolver's presence is node-wide, but
-    // the ability to answer belongs to the adapter that signs for this job: on a node mixing a
-    // capable adapter with a legacy one, a node-wide answer promised an automatic exit to jobs
-    // whose own wallet could only ever return `inconclusive`. A job with no wallet at all cannot
-    // be asked about either, which is the same answer for the same reason.
-    // r23 (🔴 3817434406) — the SIGNER's adapter, from the same carrier as the hash. Reading
-    // the claim here asked whether a wallet that never signed this transaction could settle it.
+    // r20 (🔴 3815617109) — per WALLET, not per node. A resolver's presence is node-wide, but the
+    // ability to answer belongs to the adapter that signs for this job: on a node mixing a capable
+    // adapter with a legacy one, a node-wide answer promised an automatic exit to jobs whose own
+    // wallet could only ever return `inconclusive`. A job with no wallet at all cannot be asked
+    // about either, which is the same answer for the same reason.
+    // r23 (🔴 3817434406) — the SIGNER's adapter, from the same carrier as the hash. Reading the
+    // claim here asked whether a wallet that never signed this transaction could settle it.
     const walletId = liftJobCheckedSigner(job);
     if (!walletId) return false;
-    // r22 (🔴 3817363935) — and per OPERATION KIND, not just per wallet. The tri-state lookup
-    // is necessary but not sufficient: a create's absence release needs the finalized snapshot and
-    // an update's recognition needs verification plus the finality gate, so an adapter with the
-    // lookup alone can hold a job forever behind a `retryable: true` nothing can honour.
-    const oracle = this.chainProofCapableForWallet;
-    if (!this.chainProofResolver) {
-      // An ADMISSION instance: it holds no resolvers of its own, so the oracle is not a narrowing
-      // of local wiring — it IS the answer, and it speaks for the runtime that would do the work.
-      // Consulting `knowledgeAssetVmPublishRecoveryResolver` here would ask this instance about a
-      // collaborator only the runtime has, which is the same mistake one level down.
-      return oracle!(walletId, liftJobOperationKindMarker(job));
-    }
-    // A RUNTIME instance: the oracle narrows per wallet and operation, and the local wiring still
-    // has to be complete — r12 (3813505773) requires the named recovery resolver for a named job
-    // whatever its kind, and that rule is unchanged here.
-    if (oracle && !oracle(walletId, liftJobOperationKindMarker(job))) return false;
-    if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return true;
-    // r12 (3813505773) — a named job needs the recovery resolver whatever its kind. The create
-    // case looked exempt because absence-release is create-only and needs nothing but the reset —
-    // but that is only ONE of its outcomes. If the transaction MINED, settling it means building
-    // canonical evidence and repairing the lifecycle, which is exactly what this resolver does;
-    // without it a mined create is held forever while the response promised convergence.
-    return this.knowledgeAssetVmPublishRecoveryResolver !== undefined;
+    // 3825614002 — and per OPERATION KIND. Which policy answers was decided once, by role, when
+    // this instance was built; this asks it directly rather than re-deriving the role from which
+    // collaborators happen to be installed.
+    return this.heldJobSettlement(job, walletId, liftJobOperationKindMarker(job));
   }
 
   private async dispatchFailedJobsOnChainProof(): Promise<number> {
