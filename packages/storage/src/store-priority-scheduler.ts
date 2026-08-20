@@ -104,6 +104,7 @@ interface LegacyStorePrioritySchedulerArguments {
 // operations by default, while still allowing operators to tune explicitly.
 const DEFAULT_MAX_CONCURRENT = 4;
 const DEFAULT_ACK_RESERVED_SLOTS = 1;
+const MIN_ACK_SAFE_MAX_CONCURRENT = DEFAULT_ACK_RESERVED_SLOTS + 1;
 const DEFAULT_HEALTH_RESERVED_SLOTS = 1;
 const DEFAULT_NORMAL_RESERVED_SLOTS = 1;
 const DEFAULT_BACKGROUND_RESERVED_SLOTS = 1;
@@ -135,7 +136,14 @@ function resolveMaxConcurrentFromEnv(): number {
   // even while the JS scheduler reports empty queues. Keep explicit constructor
   // options available to tests/embedded callers, but make the process-level
   // environment setting a hardware-aware ceiling.
-  return Math.min(configured, Math.max(1, availableParallelism()));
+  // A one-slot automatic ceiling would normalize the default ACK reservation
+  // to zero. Keep one ordinary slot plus the default reserved ACK slot even on
+  // a single-vCPU runtime. An explicitly lower process setting is still
+  // honored because it remains the first operand of Math.min().
+  return Math.min(
+    configured,
+    Math.max(MIN_ACK_SAFE_MAX_CONCURRENT, availableParallelism()),
+  );
 }
 
 function resolveQueueLimitsFromEnv(): StorePriorityQueueLimits {

@@ -1,23 +1,79 @@
 import { describe, expect, it, vi } from 'vitest';
+import { availableParallelism } from 'node:os';
 import {
   StorePriorityScheduler,
   StoreSchedulerBusyError,
 } from '../src/store-priority-scheduler.js';
-import { availableParallelism } from 'node:os';
 import type { StoreWorkPriority } from '../src/triple-store.js';
 
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return {
+    ...actual,
+    availableParallelism: vi.fn(() => 4),
+  };
+});
+
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+const mockedAvailableParallelism = vi.mocked(availableParallelism);
 
 describe('StorePriorityScheduler', () => {
-  it('caps process-level concurrency at the host logical CPU count', () => {
+  it('caps only oversized process settings while preserving lower values and constructor overrides', () => {
     const previous = process.env.DKG_STORE_MAX_CONCURRENT;
-    process.env.DKG_STORE_MAX_CONCURRENT = '1000000';
+    mockedAvailableParallelism.mockReturnValue(4);
     try {
-      const scheduler = new StorePriorityScheduler();
-      expect(scheduler.snapshot.maxConcurrent).toBe(availableParallelism());
+      process.env.DKG_STORE_MAX_CONCURRENT = '2';
+      expect(new StorePriorityScheduler().snapshot.maxConcurrent).toBe(2);
+
+      process.env.DKG_STORE_MAX_CONCURRENT = '1000000';
+      expect(new StorePriorityScheduler().snapshot.maxConcurrent).toBe(4);
+
+      expect(new StorePriorityScheduler({ maxConcurrent: 5 }).snapshot.maxConcurrent).toBe(5);
     } finally {
+      mockedAvailableParallelism.mockReturnValue(4);
       if (previous === undefined) delete process.env.DKG_STORE_MAX_CONCURRENT;
       else process.env.DKG_STORE_MAX_CONCURRENT = previous;
+    }
+  });
+
+  it('preserves default ACK admission when the runtime reports one logical CPU', async () => {
+    const previousMaxConcurrent = process.env.DKG_STORE_MAX_CONCURRENT;
+    const previousAckReservedSlots = process.env.DKG_STORE_ACK_RESERVED_SLOTS;
+    let releaseNormal: (() => void) | undefined;
+    let normal: Promise<string> | undefined;
+    mockedAvailableParallelism.mockReturnValue(1);
+    delete process.env.DKG_STORE_MAX_CONCURRENT;
+    delete process.env.DKG_STORE_ACK_RESERVED_SLOTS;
+    try {
+      const scheduler = new StorePriorityScheduler({
+        healthReservedSlots: 0,
+        queueWaitTimeoutMs: 20,
+      });
+      expect(scheduler.snapshot).toMatchObject({
+        maxConcurrent: 2,
+        ackReservedSlots: 1,
+      });
+
+      normal = scheduler.run('normal', 'query.long-running', async () => {
+        await new Promise<void>((resolve) => {
+          releaseNormal = resolve;
+        });
+        return 'normal';
+      });
+      expect(scheduler.snapshot.normalInflight).toBe(1);
+
+      await expect(
+        scheduler.run('ack', 'storage-ack.persist', async () => 'ack'),
+      ).resolves.toBe('ack');
+      expect(scheduler.snapshot.ackQueued).toBe(0);
+    } finally {
+      releaseNormal?.();
+      await normal;
+      mockedAvailableParallelism.mockReturnValue(4);
+      if (previousMaxConcurrent === undefined) delete process.env.DKG_STORE_MAX_CONCURRENT;
+      else process.env.DKG_STORE_MAX_CONCURRENT = previousMaxConcurrent;
+      if (previousAckReservedSlots === undefined) delete process.env.DKG_STORE_ACK_RESERVED_SLOTS;
+      else process.env.DKG_STORE_ACK_RESERVED_SLOTS = previousAckReservedSlots;
     }
   });
 
