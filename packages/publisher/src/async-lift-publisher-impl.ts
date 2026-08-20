@@ -37,6 +37,7 @@ import type {
   AsyncLiftPublisherConfig,
   AsyncLiftChainProofLookup,
   AsyncLiftChainProofResolution,
+  AsyncLiftAdmissionContext,
   AsyncLiftPublisherRecoveryResolver,
   AsyncLiftPublisherRecoveryResult,
   AsyncLiftRetryOutcome,
@@ -112,6 +113,7 @@ import {
   liftJobCheckedNonce,
   liftJobCheckedSigner,
   liftJobOperationKindMarker,
+  backfillLegacyAdmission,
   normalizePersistedLiftJobRequest,
   buildLiftJobAcceptedReset,
   pinnedPublishIdentityKaId,
@@ -541,7 +543,10 @@ export class TripleStoreAsyncLiftPublisher
     this.graphManager = new GraphManager(store);
   }
 
-  async enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string> {
+  async enqueueKnowledgeAssetVmPublish(
+    request: KnowledgeAssetVmPublishRequest,
+    admission?: AsyncLiftAdmissionContext,
+  ): Promise<string> {
     return this.withClaimLock(async () => {
       await this.ensureGraph();
       if (!request.shareOperationId.trim()) {
@@ -569,6 +574,9 @@ export class TripleStoreAsyncLiftPublisher
         jobId,
         jobSlug: createJobSlug(jobRequest),
         request: jobRequest,
+        ...(admission?.admittedByAgentAddress
+          ? { admission: { byAgentAddress: admission.admittedByAgentAddress } }
+          : {}),
         status: 'accepted',
         timestamps: { acceptedAt: now, updatedAt: now },
         retries: { retryCount: 0, maxRetries: this.maxRetries },
@@ -2431,9 +2439,11 @@ export class TripleStoreAsyncLiftPublisher
     const payload = parseLiteral(binding);
     if (typeof payload !== 'string') return null;
     const parsed = JSON.parse(payload) as LiftJob & { request: unknown };
+    const request = normalizePersistedLiftJobRequest(parsed.request);
     return {
       ...parsed,
-      request: normalizePersistedLiftJobRequest(parsed.request),
+      request,
+      ...backfillLegacyAdmission(parsed.admission, request),
     } as LiftJob;
   }
 

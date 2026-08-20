@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { type LiftJob } from '../src/index.js';
+import { type LiftJob, type LiftJobRequest } from '../src/index.js';
 import {
+  backfillLegacyAdmission,
   queuedLiftOperationKind,
   resetFailedLiftJobToAccepted,
   type PersistedFailedJob,
@@ -10,6 +11,7 @@ import {
   describeRetryProjection,
   hasAutomaticRecoveryExit,
   hasBroadcastEvidence,
+  ownsLiftJobAdmissionLane,
 } from '../src/async-lift-retry-disposition.js';
 import {
   DEFAULT_CONTROL_GRAPH_URI,
@@ -207,6 +209,52 @@ describe('GH#2270 failed-job retry disposition', () => {
       recoveredFromStatus: 'broadcast',
       txHashChecked: undefined,
     });
+  });
+
+  it('carries job-level ADMISSION across a reset, so recovery cannot launder the enqueuer', async () => {
+    // 🟡 3824743779 — admission moved from the publish payload to job metadata. The reset REBUILDS
+    // the job field by field rather than merging, so a job-level field that is not named here is
+    // dropped silently. Dropping this one would revoke the by-id force-clear from the very jobs
+    // that need it: a job is reset precisely when recovery could not settle it, which is the state
+    // whose stated exit is the enqueuer's clear.
+    const ADMITTED_BY = '0xAAaAAa00000000000000000000000000000000Aa';
+    const publisher = createPublisher();
+    const failed = await failAfterRecordedTxHash(publisher);
+    const admitted = { ...failed, admission: { byAgentAddress: ADMITTED_BY } } as PersistedFailedJob;
+
+    const reset = resetFailedLiftJobToAccepted(admitted, 9_000);
+
+    expect(reset.admission).toEqual({ byAgentAddress: ADMITTED_BY });
+    // The property that matters is the entitlement, not the field: the enqueuer still owns the
+    // lane after the reset, and an unrelated token still does not.
+    expect(ownsLiftJobAdmissionLane(reset, ADMITTED_BY)).toBe(true);
+    expect(ownsLiftJobAdmissionLane(reset, '0xBBbBBb00000000000000000000000000000000Bb')).toBe(false);
+    // A job admitted with no principal must not acquire one by being reset.
+    expect(resetFailedLiftJobToAccepted(failed, 9_000).admission).toBeUndefined();
+  });
+
+  it('attributes a LEGACY job whose principal is still in the publish payload', async () => {
+    // 🟡 3824743779 — the clear boundary reads only `job.admission`, so a record persisted before
+    // the move would be unattributable and lose an entitlement it had. Deserialization is where
+    // that compatibility belongs: it is the one layer that already knows the payload's shape.
+    const CALLER = '0xCCcCCc00000000000000000000000000000000Cc';
+    const legacy = {
+      jobType: 'knowledge-asset-vm-publish',
+      knowledgeAssetVmPublish: { ...kaVmPublishRequest(), callerAgentAddress: CALLER },
+    } as LiftJobRequest;
+
+    expect(backfillLegacyAdmission(undefined, legacy)).toEqual({ admission: { byAgentAddress: CALLER } });
+    // Discriminating rows: an existing stamp WINS (the backfill must never overwrite the
+    // authenticated principal with the weaker author-resolution hint)...
+    expect(backfillLegacyAdmission({ byAgentAddress: '0xDDdDDd00000000000000000000000000000000Dd' }, legacy))
+      .toEqual({});
+    // ...and a legacy NODE-token job has no caller to attribute, so it stays denied rather than
+    // being granted to whoever the author happened to be.
+    const nodeTokenLegacy = {
+      jobType: 'knowledge-asset-vm-publish',
+      knowledgeAssetVmPublish: kaVmPublishRequest(),
+    } as LiftJobRequest;
+    expect(backfillLegacyAdmission(undefined, nodeTokenLegacy)).toEqual({});
   });
 
   it('keeps a hash that only the recovery record carries, across a SECOND reset', async () => {

@@ -1596,8 +1596,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // author-resolution hint, which is deliberately absent for node tokens — authorizing on
         // that left every node-token job unable to use the force-clear the daemon advertises to it.
         // Kept separate from `callerAgentAddress` so author selection is untouched.
-        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish({
-          ...intent,
+        // Admission travels BESIDE the request (🟡 3824743779), never inside it: the operation
+        // payload that execution and recovery act on carries no authorization principal.
+        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent, {
           ...(requestAgentAddress ? { admittedByAgentAddress: requestAgentAddress } : {}),
         });
         return jsonResponse(res, 202, {

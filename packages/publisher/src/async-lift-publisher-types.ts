@@ -80,8 +80,23 @@ export type IntentLookupResult =
   | { readonly kind: 'superseded'; readonly jobs: LiftJob[]; readonly exactIntentMatch?: boolean }
   | { readonly kind: 'conflict'; readonly jobs: LiftJob[] };
 
+/**
+ * Queue-layer facts about an admission, supplied alongside the operation request.
+ *
+ * Separate from the request on purpose (GH#2270 follow-up 🟡 3824743779): the authenticated
+ * enqueuer authorizes later control-plane actions on the job and is not an input to the operation,
+ * so execution and recovery never see it in the payload they act on.
+ */
+export interface AsyncLiftAdmissionContext {
+  /** Authenticated identity admitting the job. Absent only for unauthenticated internal callers. */
+  readonly admittedByAgentAddress?: string;
+}
+
 export interface AsyncLiftPublisher {
-  enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string>;
+  enqueueKnowledgeAssetVmPublish(
+    request: KnowledgeAssetVmPublishRequest,
+    admission?: AsyncLiftAdmissionContext,
+  ): Promise<string>;
   claimNext(walletId: string): Promise<LiftJob | null>;
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<LiftJob | null>;
@@ -363,7 +378,7 @@ export interface AsyncKnowledgeAssetVmPublishRecoveryInput {
    */
   readonly lookup: AsyncLiftChainProofLookup;
   readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
-  readonly publisher?: DKGPublisher;
+  readonly publisher?: DKGPublisher;
   /**
    * GH#2270 PR #2300 r25 — the pass deadline, so a handler that reaches the chain can cancel its
    * reads rather than leak them once per timed-out pass. The publisher additionally bounds this

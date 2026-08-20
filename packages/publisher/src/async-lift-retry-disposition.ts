@@ -269,24 +269,22 @@ export function isClearableTerminalLiftJob(job: LiftJob): boolean {
  * The pending-transaction override below is destructive and `/api/publisher/clear-job` is open to
  * every registered agent token, so the right to accept that risk is per JOB, not per node.
  *
- * The owner is the ENQUEUING CALLER, not the resolved author: curated publishing lets those differ
- * (GH#1778), so a curator may submit for another author and it is the curator who admitted the
- * job. A record with no `callerAgentAddress` predates that field and has no caller to match, so it
- * is denied — falling back to the author would grant the override to an identity that did not
- * enqueue anything, and the risk being accepted is a double publish.
+ * The owner is the AUTHENTICATED ENQUEUER, not the resolved author: curated publishing lets those
+ * differ (GH#1778), so a curator may submit for another author and it is the curator who admitted
+ * the job. A record with no admission has nobody to match and is denied — falling back to the
+ * author would grant the override to an identity that did not enqueue anything, and the risk being
+ * accepted is a double publish.
+ *
+ * This boundary is generic over job kind on purpose (🟡 3824743779): it reads one typed job-level
+ * field and never inspects an operation payload, so a new job variant needs no case here. Legacy
+ * records are attributed by the queue's own deserialization — see `backfillLegacyAdmission`.
  */
 export function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | undefined): boolean {
   if (!agentAddress) return false;
-  const publish = (job.request as {
-    knowledgeAssetVmPublish?: { admittedByAgentAddress?: string; callerAgentAddress?: string };
-  })?.knowledgeAssetVmPublish;
-  // `admittedByAgentAddress` is the authenticated enqueuer and is always recorded now. The caller
-  // hint is accepted as a fallback for jobs admitted before that field existed — it is present
-  // only for agent-token admissions, which is exactly the population that can still be attributed.
-  const caller = publish?.admittedByAgentAddress ?? publish?.callerAgentAddress;
-  return typeof caller === 'string'
-    && caller.length > 0
-    && caller.toLowerCase() === agentAddress.toLowerCase();
+  const admittedBy = job.admission?.byAgentAddress;
+  return typeof admittedBy === 'string'
+    && admittedBy.length > 0
+    && admittedBy.toLowerCase() === agentAddress.toLowerCase();
 }
 
 /**

@@ -33,22 +33,34 @@ describe('#1837 lift publisher clearTerminalJob', () => {
   const bx = KA_VM_BROADCAST_TX;
   const inc = KA_VM_INCLUSION;
 
-  async function driveToValidated(p: TripleStoreAsyncLiftPublisher, o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {}): Promise<string> {
-    const jobId = await p.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest(o));
+  async function driveToValidated(
+    p: TripleStoreAsyncLiftPublisher,
+    o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {},
+    admission?: { admittedByAgentAddress?: string },
+  ): Promise<string> {
+    const jobId = await p.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest(o), admission);
     await p.claimNext('wallet-1');
     await p.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
     return jobId;
   }
-  async function driveToFinalized(p: TripleStoreAsyncLiftPublisher, o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {}): Promise<string> {
-    const jobId = await driveToValidated(p, o);
+  async function driveToFinalized(
+    p: TripleStoreAsyncLiftPublisher,
+    o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {},
+    admission?: { admittedByAgentAddress?: string },
+  ): Promise<string> {
+    const jobId = await driveToValidated(p, o, admission);
     await p.update(jobId, 'broadcast', { broadcast: bx });
     await p.update(jobId, 'included', { broadcast: bx, inclusion: inc });
     await p.update(jobId, 'finalized', { broadcast: bx, inclusion: inc, finalization: { mode: 'local' } });
     return jobId;
   }
   // Terminal, non-retryable (tx_reverted → fail_job): clearable, retry() won't touch it.
-  async function driveToTerminalFailed(p: TripleStoreAsyncLiftPublisher, o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {}): Promise<string> {
-    const jobId = await driveToValidated(p, o);
+  async function driveToTerminalFailed(
+    p: TripleStoreAsyncLiftPublisher,
+    o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {},
+    admission?: { admittedByAgentAddress?: string },
+  ): Promise<string> {
+    const jobId = await driveToValidated(p, o, admission);
     await p.update(jobId, 'broadcast', { broadcast: bx });
     await p.recordPublishFailure(jobId, { error: new Error('tx reverted on chain'), failedFromState: 'broadcast', errorPayloadRef: 'urn:err:1' });
     return jobId;
@@ -146,15 +158,14 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // common caller, reproducing the exact dead end this PR set out to remove — the daemon handed
     // back a command that could never work.
     //
-    // `admittedByAgentAddress` records the authenticated enqueuer instead, for every admission,
-    // and carries no author-selection meaning.
+    // Job-level admission metadata records the authenticated enqueuer instead, for every
+    // admission, and carries no author-selection meaning.
     const NODE = '0xNNnNNn00000000000000000000000000000000Nn';
     const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
     const p = createPublisher();
-    const jobId = await driveToTerminalFailed(p, {
-      // No callerAgentAddress: the node-token shape.
-      admittedByAgentAddress: NODE,
-    });
+    // No callerAgentAddress in the REQUEST: the node-token shape. The principal travels
+    // beside it, as admission metadata.
+    const jobId = await driveToTerminalFailed(p, {}, { admittedByAgentAddress: NODE });
     const job = await p.getStatus(jobId);
     if (!job || !('failure' in job)) throw new Error('expected a failed job');
     const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };

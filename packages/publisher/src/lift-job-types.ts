@@ -53,15 +53,6 @@ export interface KnowledgeAssetVmPublishRequest {
    * node default inside `stampAddressCurator`, exactly as the sync lane does.
    */
   readonly callerAgentAddress?: string;
-  /**
-   * GH#2270 follow-up (🔴 3824484639) — the AUTHENTICATED identity that admitted this job, for
-   * authorization only. Distinct from `callerAgentAddress` on purpose: that field is an author
-   * RESOLUTION HINT (GH#1778) and is deliberately absent for a node-level token, so authorizing
-   * against it left every node-token job unable to use the by-id force-clear the daemon advertises
-   * to it. This one is always recorded, resolves a node token to the default owner agent, and
-   * carries no author-selection meaning — changing that would change what gets published.
-   */
-  readonly admittedByAgentAddress?: string;
   readonly subGraphName?: string;
   readonly shareOperationId: string;
   readonly roots: readonly string[];
@@ -372,10 +363,28 @@ export const LIFT_JOB_MUTABLE_PERSISTED_FIELDS = [
   'controlPlane',
 ] as const;
 
+/**
+ * Who admitted this job — queue metadata, not part of any operation's payload.
+ *
+ * GH#2270 follow-up (🟡 3824743779). This is the AUTHENTICATED identity that enqueued the job and
+ * it exists for authorization only, so it lives at the job level where a generic boundary can read
+ * it without knowing which operation the job carries. It is deliberately NOT
+ * `KnowledgeAssetVmPublishRequest.callerAgentAddress`: that field is an author RESOLUTION HINT
+ * (GH#1778) which is absent for a node-level token and carries author-selection meaning, so
+ * authorizing against it both denied every node-token job its advertised force-clear and risked
+ * changing what gets published.
+ *
+ * Immutable: stamped once at admission and never mutated, like `request` and `jobId`.
+ */
+export interface LiftJobAdmissionMetadata {
+  readonly byAgentAddress: string;
+}
+
 export interface LiftJobBase {
   readonly jobId: string;
   readonly jobSlug: string;
   readonly request: LiftJobRequest;
+  readonly admission?: LiftJobAdmissionMetadata;
   readonly status: LiftJobState;
   readonly timestamps: LiftJobTimestamps;
   readonly retries: LiftJobRetryMetadata;

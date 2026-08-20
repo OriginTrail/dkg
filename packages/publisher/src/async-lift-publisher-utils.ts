@@ -8,6 +8,7 @@ import type {
   KnowledgeAssetVmPublishRequest,
   LiftJob,
   LiftJobAccepted,
+  LiftJobAdmissionMetadata,
   LiftJobHex,
   LiftJobResettableState,
   LiftJobRequest,
@@ -280,6 +281,9 @@ export function buildLiftJobAcceptedReset(
     jobId: job.jobId,
     jobSlug: job.jobSlug,
     request: job.request,
+    // Admission is immutable job identity: a recovery reset must not launder away WHO admitted the
+    // job, or the enqueuer would lose the by-id clear on exactly the recovered jobs that need it.
+    ...(job.admission ? { admission: job.admission } : {}),
     status: 'accepted',
     timestamps: {
       acceptedAt: job.timestamps.acceptedAt,
@@ -379,6 +383,29 @@ export function createKnowledgeAssetVmPublishJobRequest(
     jobType: 'knowledge-asset-vm-publish',
     knowledgeAssetVmPublish: request,
   };
+}
+
+/**
+ * Attribute a job persisted BEFORE admission became job-level metadata.
+ *
+ * GH#2270 follow-up (🟡 3824743779). The queue layer owns admission, so the one place that knows a
+ * legacy payload's shape is deserialization — not the generic clear boundary, which reads only
+ * `job.admission`. For a pre-upgrade record the best available attribution is the publish request's
+ * `callerAgentAddress`: it is present exactly for agent-token admissions, which is exactly the
+ * population that was ever attributable. A node-token legacy job has no caller and stays
+ * unattributed, so it is denied — the same position that shipped before this move.
+ *
+ * Returns a spreadable patch so a job that already carries `admission` is left untouched.
+ */
+export function backfillLegacyAdmission(
+  admission: LiftJobAdmissionMetadata | undefined,
+  request: LiftJobRequest,
+): { admission: LiftJobAdmissionMetadata } | Record<string, never> {
+  if (admission) return {};
+  if (!isKnowledgeAssetVmPublishJobRequest(request)) return {};
+  const caller = request.knowledgeAssetVmPublish.callerAgentAddress;
+  if (typeof caller !== 'string' || caller.length === 0) return {};
+  return { admission: { byAgentAddress: caller } };
 }
 
 export function isKnowledgeAssetVmPublishJobRequest(
@@ -491,7 +518,6 @@ function parseKnowledgeAssetVmPublishRequest(value: unknown, path: string): Know
     // the async worker stamps the CG curator with the operator who requested the
     // publish (consistent with the sync lane), not the resolved KA author.
     ...optionalStringField(record, 'callerAgentAddress', path),
-    ...optionalStringField(record, 'admittedByAgentAddress', path),
     ...optionalStringField(record, 'subGraphName', path),
     shareOperationId: expectString(record, 'shareOperationId', path),
     roots: expectStringArray(record, 'roots', path),
