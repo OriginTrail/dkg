@@ -5050,8 +5050,12 @@ export class PublishMethods extends DKGAgentBase {
           { code: 'KA_VM_RECOVERY_INCONSISTENT' },
         );
       }
-      // r28 (🔴 3821720957) — THE read/write boundary for recovery repair, and the only place
-      // the deadline is consulted on this side. Everything above is read-only and takes the pass
+      // r29 (🔴 3822354184) — a deadline check immediately before THIS mutation. r28 called this
+      // "the" boundary; it is not, because it sits inside the superseded branch while the
+      // current-version materialization below is a second mutation on a different path. Reads and
+      // branch selection interleave here, so a single hoisted check would either sit before a
+      // later read or miss a branch. The invariant is stated per mutation instead: NO MUTATION
+      // STARTS AFTER THE DEADLINE. Everything above is read-only and takes the pass
       // signal, so it is cancellable and abandonable; everything below MUTATES and is therefore
       // never abandoned (the publisher awaits it under the claim lock). Checking here means a
       // deadline that arrived during the reads refuses to ENTER the mutation rather than starting
@@ -5072,6 +5076,10 @@ export class PublishMethods extends DKGAgentBase {
       return;
     }
 
+    // r29 (🔴 3822354184) — the OTHER mutation, on the current-version path, which the
+    // superseded-branch guard never covered. Same invariant, checked immediately before it: an
+    // expired pass must not begin lifecycle materialization while holding the claim lock.
+    throwIfRecoveryDeadlineReached(signal);
     const materialization = await this.getOrCreateFinalizationHandler().handleChainReconciledKC({
       contextGraphId: request.contextGraphId,
       onChainCgId,

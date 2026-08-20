@@ -880,6 +880,49 @@ describe('rootless graph-scoped KA lifecycle', () => {
       code: 'KA_OPERATION_PUBLIC_SNAPSHOT_NOT_FOUND',
     });
 
+    // r29 (🔴 3822354184 / 🔴 3822354192) — the deadline at the REAL mutation boundary, on the
+    // CURRENT-version path. The previous row stopped inside the read-only normalizer, which cannot
+    // mutate anything, so it could not see that the r28 guard sat inside the superseded branch
+    // while `handleChainReconciledKC` on this path ran unguarded. An expired pass must not begin
+    // lifecycle materialization while it still holds the claim lock.
+    //
+    // The abort is armed BEFORE the call, so the deadline is already reached by the time the reads
+    // finish and the mutation would start. The spy is the observable: the finalization handler is
+    // the mutating collaborator, and it must never be entered.
+    // r29 (🔴 3822354184 / 🔴 3822354192) — the deadline at the REAL mutation boundary. The
+    // previous row stopped inside the read-only normalizer, which cannot mutate anything, so it
+    // could not see that the r28 guard sat inside the superseded branch while the current-version
+    // materialization ran unguarded.
+    //
+    // The observable is the ERROR IDENTITY, not a spy on the finalization handler: that handler is
+    // shared with the SWM host reconcile lane, which touches this same asset, so a call count
+    // there answers a question about someone else's work (it counted 1 even when the guard was
+    // correct). Error identity is specific by construction.
+    //
+    // The argument the row rests on: the abort is fired from inside a LATE read — the context
+    // graph id lookup, which runs after the normalizer has finished all of its own deadline
+    // checks. So the deadline cannot be reached by any guard before that point. If the call then
+    // rejects with the recovery deadline error, the only guard that can have raised it is one
+    // AFTER the reads, i.e. a mutation boundary. That is exactly what must exist.
+    {
+      const expired = new AbortController();
+      const realCgId = agent.getContextGraphOnChainId.bind(agent);
+      agent.getContextGraphOnChainId = (async (...args: unknown[]) => {
+        const value = await realCgId(...(args as Parameters<typeof realCgId>));
+        expired.abort();
+        return value;
+      }) as typeof agent.getContextGraphOnChainId;
+
+      try {
+        await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+          ...recoveryInput,
+          signal: expired.signal,
+        } as any)).rejects.toMatchObject({ name: 'RecoveryDeadlineReachedError' });
+      } finally {
+        agent.getContextGraphOnChainId = realCgId;
+      }
+    }
+
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     expect(recoveryCleanup).not.toHaveBeenCalled();
