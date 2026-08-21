@@ -98,7 +98,7 @@ describe('AsyncLiftRunner', () => {
     expect(processNextCalls).toContainEqual(['wallet-1']);
   });
 
-  it('processes one job per wallet concurrently and continues immediately after work', async () => {
+  it('processes wallets concurrently and lets each continue immediately after work', async () => {
     const processNextCalls: unknown[][] = [];
     const firstCycleWallets = new Set<string>();
     let releaseFirstCycle!: () => void;
@@ -126,7 +126,7 @@ describe('AsyncLiftRunner', () => {
       walletIds: ['wallet-1', 'wallet-2'],
       sleep: async (...args: unknown[]) => {
         sleepCalls.push(args);
-        void runner.stop();
+        await new Promise((resolve) => setTimeout(resolve, 0));
       },
     } as any);
 
@@ -139,36 +139,38 @@ describe('AsyncLiftRunner', () => {
     expect(firstCycleWallets).toEqual(new Set(['wallet-1', 'wallet-2']));
     expect(processNextCalls.filter((call) => call[0] === 'wallet-1').length).toBeGreaterThanOrEqual(2);
     expect(processNextCalls.filter((call) => call[0] === 'wallet-2').length).toBeGreaterThanOrEqual(2);
-    expect(sleepCalls.length).toBe(1);
+    expect(sleepCalls.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('waits for every wallet attempt to settle before reporting a cycle error', async () => {
-    let walletTwoSettled = false;
-    const errors: unknown[] = [];
-    let runner!: AsyncLiftRunner;
+  it('does not let a stuck wallet block another wallet from processing more jobs', async () => {
+    let releaseStuckWallet!: () => void;
+    const stuckWallet = new Promise<void>((resolve) => { releaseStuckWallet = resolve; });
+    let walletTwoCalls = 0;
     const publisher = createPublisher({
       processNext: async (walletId: string) => {
-        if (walletId === 'wallet-1') throw new Error('wallet one failed');
-        await new Promise((resolve) => setTimeout(resolve, 25));
-        walletTwoSettled = true;
-        return null;
+        if (walletId === 'wallet-1') {
+          await stuckWallet;
+          return null;
+        }
+        walletTwoCalls += 1;
+        return walletTwoCalls <= 3
+          ? { jobId: `wallet-two-job-${walletTwoCalls}` } as LiftJob
+          : null;
       },
     } as any);
 
-    runner = new AsyncLiftRunner({
+    const runner = new AsyncLiftRunner({
       publisher,
       walletIds: ['wallet-1', 'wallet-2'],
-      onError: (error) => { errors.push(error); },
-      errorBackoffMs: 1,
-      sleep: async () => { void runner.stop(); },
+      pollIntervalMs: 1,
     });
 
     await runner.start();
-    await waitFor(() => expect(errors.length).toBeGreaterThan(0));
+    await waitFor(() => expect(walletTwoCalls).toBeGreaterThanOrEqual(3));
+    releaseStuckWallet();
     await runner.stop();
 
-    expect(walletTwoSettled).toBe(true);
-    expect(errors[0]).toMatchObject({ message: 'wallet one failed' });
+    expect(walletTwoCalls).toBeGreaterThanOrEqual(3);
   });
 
   it('backs off and continues after loop-level errors', async () => {
