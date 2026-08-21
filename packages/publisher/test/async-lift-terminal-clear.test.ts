@@ -242,6 +242,42 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect((await p.getStatus(jobId))?.admission).toEqual({ byAgentAddress: OWNER });
   });
 
+  it('refuses an explicit `undefined` for an immutable field, which would ERASE it', async () => {
+    // The merge spreads the patch, so an explicit `undefined` overwrites rather than being skipped.
+    // Treating it as "nothing supplied" let a transition delete the owner outright — worse than
+    // reassigning it, because the job is then held with nobody able to clear it at all.
+    const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
+    const p = createPublisher();
+    const jobId = await driveToValidated(p, {}, { admittedByAgentAddress: OWNER });
+    const before = await p.getStatus(jobId);
+
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      admission: undefined,
+    } as never)).rejects.toThrow(/admission is immutable/);
+
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      timestamps: { acceptedAt: undefined },
+    } as never)).rejects.toThrow(/timestamps.acceptedAt is immutable/);
+
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      retries: { maxRetries: undefined },
+    } as never)).rejects.toThrow(/retries.maxRetries is immutable/);
+
+    // Nothing was persisted by any of the three refusals.
+    const after = await p.getStatus(jobId);
+    expect(after?.admission).toEqual({ byAgentAddress: OWNER });
+    expect(after?.status).toBe(before?.status);
+    expect(after?.timestamps.acceptedAt).toBe(before?.timestamps.acceptedAt);
+    expect(after?.retries.maxRetries).toBe(before?.retries.maxRetries);
+
+    // An ordinary timestamps patch that never mentions `acceptedAt` is still allowed.
+    await p.update(jobId, 'broadcast', { broadcast: bx, timestamps: { updatedAt: 12_345 } } as never);
+    expect((await p.getStatus(jobId))?.timestamps.acceptedAt).toBe(before?.timestamps.acceptedAt);
+  });
+
   it('but BULK clear still leaves a retry_recovery failed job alone', async () => {
     // The discriminating half: the fix must move only the targeted lane. If both lanes had been
     // relaxed, routine cleanup could delete a job whose transaction may still land.

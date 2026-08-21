@@ -404,8 +404,17 @@ export function assertNoImmutableLiftJobFieldChange(current: LiftJob, patch: Par
     if (!(head in patch)) continue;
     const patchHead = (patch as unknown as Record<string, unknown>)[head as string];
     const currentHead = (current as unknown as Record<string, unknown>)[head as string];
-    const incoming = nested ? (patchHead as Record<string, unknown> | undefined)?.[nested] : patchHead;
-    if (incoming === undefined) continue;
+    // PRESENCE, not definedness. The merge below does not skip an explicit `undefined` — it
+    // spreads it — so treating undefined as 'nothing supplied' let a patch ERASE the very
+    // field this guard protects. `{ admission: undefined }` would have removed the owner and
+    // stranded a held job with nobody able to clear it.
+    if (nested) {
+      // A nested patch that never mentions the key changes nothing; one that mentions it,
+      // even as undefined, is a write.
+      if (patchHead === undefined) continue;
+      if (!(nested in (patchHead as Record<string, unknown>))) continue;
+    }
+    const incoming = nested ? (patchHead as Record<string, unknown>)[nested] : patchHead;
     const existing = nested ? (currentHead as Record<string, unknown> | undefined)?.[nested] : currentHead;
     if (JSON.stringify(incoming) === JSON.stringify(existing)) continue;
     throw new Error(
