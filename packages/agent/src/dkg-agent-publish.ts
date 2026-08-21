@@ -1966,6 +1966,7 @@ export class PublishMethods extends DKGAgentBase {
        * nothing on disk recording it.
        */
       onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
+      onBroadcastAccepted?: PublishOptions['onBroadcastAccepted'];
     },
   ): Promise<PublishResult> {
     return withRootlessUpdateLock(contextGraphId, kaId, async () => {
@@ -2266,6 +2267,7 @@ export class PublishMethods extends DKGAgentBase {
       operationCtx: ctx,
       onPhase,
       onBeforeBroadcast: opts?.onBeforeBroadcast,
+      onBroadcastAccepted: opts?.onBroadcastAccepted,
       subGraphName: opts?.subGraphName,
       precomputedUpdateAttestation: opts.precomputedUpdateAttestation,
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -5236,9 +5238,11 @@ export class PublishMethods extends DKGAgentBase {
     const executionHooks: {
       readonly onPhase?: PhaseCallback;
       readonly onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
+      readonly onBroadcastAccepted?: PublishOptions['onBroadcastAccepted'];
     } = {
       onPhase: opts?.onPhase ?? publishOptions.onPhase,
       onBeforeBroadcast: publishOptions.onBeforeBroadcast,
+      onBroadcastAccepted: publishOptions.onBroadcastAccepted,
     };
     if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();

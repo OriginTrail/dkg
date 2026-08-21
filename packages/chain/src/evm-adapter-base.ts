@@ -1663,10 +1663,20 @@ export class EVMChainAdapterBase {
     // fired once upstream. The receipt wait is NOT re-broadcast (it owns its own
     // poll + deadline), so lock-hold (held across the retries for the V10 path)
     // stays bounded.
+    await this.broadcastSignedTransactionWithRetries(signedTx, txHash, label);
+    return this.waitForReceiptWithFailover(txHash, label);
+  }
+
+  /** Broadcast one immutable signed transaction with bounded endpoint-set retries. */
+  private async broadcastSignedTransactionWithRetries(
+    signedTx: string,
+    txHash: string,
+    label: string,
+  ): Promise<void> {
     for (let pass = 0; ; pass += 1) {
       try {
         await this.broadcastSignedTransactionWithFailover(signedTx, txHash, label);
-        break;
+        return;
       } catch (err) {
         if (isRetryableRpcError(err) && pass < RPC_ENDPOINT_SET_RETRIES) {
           await sleep(RPC_ENDPOINT_SET_RETRY_BACKOFF_MS);
@@ -1675,7 +1685,6 @@ export class EVMChainAdapterBase {
         throw err;
       }
     }
-    return this.waitForReceiptWithFailover(txHash, label);
   }
 
   /**
@@ -1703,8 +1712,9 @@ export class EVMChainAdapterBase {
     onBroadcast: ((signal: PreBroadcastSignal) => Promise<void> | void) | undefined,
     buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<SignedTransactionEnvelope>,
     onNullReceipt: (preBroadcastTxHash: string) => never,
+    onBroadcastAccepted?: (signal: PreBroadcastSignal) => void,
   ): Promise<ethers.TransactionReceipt> {
-    return this.withSerializedSignerWrite(signer, async (ctx) => {
+    const prepared = await this.withSerializedSignerWrite(signer, async (ctx) => {
       const { signedTx, txHash: preBroadcastTxHash, nonce } = await buildSignedTx(ctx);
       // GH#2270 PR-3 — the WAL checkpoint also carries the signed NONCE. A null transaction
       // lookup is point-in-time, backend-local evidence: a broadcast whose response timed out can
@@ -1723,14 +1733,36 @@ export class EVMChainAdapterBase {
           `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
         );
       }
-      const receipt = await this.sendSignedTransactionAndWait(
+      // The nonce-critical lane ends when an endpoint accepts these exact
+      // signed bytes. Receipt polling is deliberately outside the serializer:
+      // the pending nonce has advanced, so the next same-wallet transaction
+      // can be populated safely without this receipt holding the lane for the
+      // full timeout window.
+      await this.broadcastSignedTransactionWithRetries(
         signedTx,
         preBroadcastTxHash,
         `V10 ${label}`,
       );
-      if (!receipt) onNullReceipt(preBroadcastTxHash);
-      return receipt;
+      try {
+        onBroadcastAccepted?.({ txHash: preBroadcastTxHash, nonce });
+      } catch (hookErr) {
+        // Post-acceptance notification is observational. The transaction is
+        // already on the wire, so a callback failure must never turn it into a
+        // send failure or invite a second transaction.
+        console.warn(
+          `[chain] post-acceptance callback failed for V10 ${label} ` +
+          `tx=${preBroadcastTxHash}: ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+        );
+      }
+      return { preBroadcastTxHash };
     });
+
+    const receipt = await this.waitForReceiptWithFailover(
+      prepared.preBroadcastTxHash,
+      `V10 ${label}`,
+    );
+    if (!receipt) onNullReceipt(prepared.preBroadcastTxHash);
+    return receipt;
   }
 
   protected async sendPopulatedTransaction(
@@ -3719,6 +3751,7 @@ export class EVMChainAdapterBase {
       () => {
         throw new Error('Transaction receipt is null');
       },
+      params.onBroadcastAccepted,
     ).catch(async (err: unknown) => {
       // Turn an insufficient-funds failure (native gas OR a zero-TRAC
       // transferFrom revert) on the selected wallet into an actionable

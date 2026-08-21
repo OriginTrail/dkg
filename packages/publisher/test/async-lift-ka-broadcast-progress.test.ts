@@ -76,6 +76,47 @@ describe('KA async VM publish broadcast progress', () => {
     expect(afterRecover?.broadcast?.txHash).toBe(txHash);
   });
 
+  it('releases the wallet after accepted broadcast and treats later receipt timeout as unknown', async () => {
+    const txHash = KA_VM_EXECUTOR_TX_HASH;
+    let finishReceiptWait!: () => void;
+    const receiptWait = new Promise<void>((resolve) => {
+      finishReceiptWait = resolve;
+    });
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({ txHash, nonce: 17 });
+          input.publishOptions.onBroadcastAccepted?.({ txHash, nonce: 17 });
+          await receiptWait;
+          throw new Error('receipt polling timed out after accepted broadcast');
+        },
+      },
+    });
+    await stageShareSnapshot();
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('broadcast');
+    expect(processed?.broadcast?.txHash).toBe(txHash);
+    expect(processed?.broadcast?.nonce).toBe(17);
+
+    const lock = await store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> ?p ?o .
+      }
+    }`);
+    expect(lock.type).toBe('bindings');
+    if (lock.type === 'bindings') expect(lock.bindings).toHaveLength(0);
+
+    finishReceiptWait();
+    await Promise.resolve();
+    await Promise.resolve();
+    const afterTimeout = await publisher.getStatus(jobId);
+    expect(afterTimeout?.status).toBe('broadcast');
+    expect(afterTimeout?.failure).toBeUndefined();
+  });
+
   it('does not reset tx-bearing KA broadcast jobs to accepted on recovery timeout', async () => {
     const txHash = `0x${'ef'.repeat(32)}` as `0x${string}`;
     const publisher = createPublisher({ recoveryLookupTimeoutMs: 10 });
