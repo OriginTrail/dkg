@@ -112,6 +112,28 @@ describe('handler — POST /register happy path', () => {
     expect(captured.statusCode).toBe(202);
     expect(publishAsync.mock.calls[0][0]).toBe('urn:cg:from-config');
   });
+  it('stamps the AUTHENTICATED submitter and a client cannot name its own owner', async () => {
+    // Ownership decides who may run the destructive by-id clear. `publishOptions` here is an
+    // unfiltered client record, unlike the EPCIS lane's allow-list, so the stamp must beat a
+    // caller-supplied value — the spread ORDER is the guard, and this row is what fails if
+    // it is ever reversed.
+    const SUBMITTER = '0x00000000000000000000000000000000000000b7';
+    const ATTACKER = '0x00000000000000000000000000000000000000ff';
+    const { req, res } = mockReqRes('POST', '/api/kafka/streams/register', validBody);
+    const { ctx, publishAsync } = mockCtx({ requestAgentAddress: SUBMITTER });
+    const handler = createHandler({
+      basePath: '/api/kafka/streams',
+      contextGraphId: 'urn:cg:demo',
+      publishOptions: { accessPolicy: 'public', admittedByAgentAddress: ATTACKER },
+    });
+    await handler({ ...ctx, req, res, path: '/api/kafka/streams/register' });
+    const opts = publishAsync.mock.calls[0][2] as Record<string, unknown>;
+    expect(opts.admittedByAgentAddress).toBe(SUBMITTER);
+    expect(opts.admittedByAgentAddress).not.toBe(ATTACKER);
+    // Ordinary options still forward untouched.
+    expect(opts.accessPolicy).toBe('public');
+  });
+
   it('forwards factoryOptions.publishOptions to agent.publishAsync', async () => {
     const { req, res } = mockReqRes('POST', '/api/kafka/streams/register', validBody);
     const { ctx, publishAsync } = mockCtx();
@@ -121,7 +143,14 @@ describe('handler — POST /register happy path', () => {
       publishOptions: { accessPolicy: 'public', subGraphName: 'streams' },
     });
     await handler({ ...ctx, req, res, path: '/api/kafka/streams/register' });
-    expect(publishAsync.mock.calls[0][2]).toEqual({ accessPolicy: 'public', subGraphName: 'streams' });
+    // The authenticated submitter is stamped alongside the forwarded options: a Kafka stream
+    // request is externally authenticated, so its job must be owned by the agent that sent it
+    // rather than by the node default.
+    expect(publishAsync.mock.calls[0][2]).toEqual({
+      accessPolicy: 'public',
+      subGraphName: 'streams',
+      admittedByAgentAddress: '0x0000000000000000000000000000000000000000',
+    });
   });
 });
 describe('handler — POST /register error paths', () => {

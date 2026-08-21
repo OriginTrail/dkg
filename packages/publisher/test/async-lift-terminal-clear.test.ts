@@ -117,8 +117,12 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // 🔴 3824353569 — the ENQUEUING CALLER owns the override, not the resolved author. Curated
     // publishing lets those differ (GH#1778), so the fixture makes them differ: the curator who
     // admitted the job may clear it; an authenticated token for the AUTHOR may not.
-    const CALLER = '0xCCcCCc00000000000000000000000000000000Cc';
-    const AUTHOR = '0xAAaAAa00000000000000000000000000000000Aa';
+    // 🔴 3825861808 — THREE distinct identities. The previous fixture gave the payload caller
+    // and the admission owner the same address, so a regression that authorized from
+    // `callerAgentAddress` would have stayed green on a destructive cross-agent clear.
+    const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';   // the admission stamp
+    const PAYLOAD_CALLER = '0xDDdDDd00000000000000000000000000000000Dd'; // GH#1778 hint only
+    const AUTHOR = '0xAAaAAa00000000000000000000000000000000Aa';   // resolved author
     const p = createPublisher();
     // The curator's `callerAgentAddress` stays in the request (it is the GH#1778 author-resolution
     // hint), but the ENTITLEMENT comes only from the explicit admission stamp (3825162149) — the
@@ -126,8 +130,8 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // from handing the override to a third-party author.
     const jobId = await driveToTerminalFailed(p, {
       agentAddress: AUTHOR,
-      callerAgentAddress: CALLER,
-    }, { admittedByAgentAddress: CALLER });
+      callerAgentAddress: PAYLOAD_CALLER,
+    }, { admittedByAgentAddress: OWNER });
     const job = await p.getStatus(jobId);
     if (!job || !('failure' in job)) throw new Error('expected a failed job');
     const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
@@ -149,8 +153,16 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(jobId))?.status).toBe('failed');
 
+    // The row that was missing: the PAYLOAD caller is not the owner either. Admission is the
+    // sole entitlement, so the GH#1778 hint sitting in the request grants nothing — this is
+    // what fails if ownership ever falls back to reading the payload.
     expect(await p.clearTerminalJob(jobId, {
-      pendingTransactionOverride: { requestedBy: CALLER },
+      pendingTransactionOverride: { requestedBy: PAYLOAD_CALLER },
+    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect((await p.getStatus(jobId))?.status).toBe('failed');
+
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: OWNER },
     })).toEqual({ outcome: 'cleared' });
     expect(await p.getStatus(jobId)).toBeNull();
   });
@@ -185,6 +197,125 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect(await p.clearTerminalJob(jobId, {
       pendingTransactionOverride: { requestedBy: NODE },
     })).toEqual({ outcome: 'cleared' });
+  });
+
+  it('an UNOWNED job grants the override to nobody, including its payload caller [3825861808]', async () => {
+    // Fail-closed half. A record with no admission stamp (one admitted before ownership existed,
+    // or by a path that never stamped) has nobody to match. If ownership ever fell back to the
+    // payload's `callerAgentAddress`, this is the row that catches it: that identity is present,
+    // and it must still be refused.
+    const PAYLOAD_CALLER = '0xDDdDDd00000000000000000000000000000000Dd';
+    const p = createPublisher();
+    const jobId = await driveToTerminalFailed(p, { callerAgentAddress: PAYLOAD_CALLER });
+    const job = await p.getStatus(jobId);
+    if (!job || !('failure' in job)) throw new Error('expected a failed job');
+    expect(job.admission).toBeUndefined();
+    const mutated = { ...job, failure: { ...job.failure, resolution: 'retry_recovery' } };
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(mutated as typeof job, DEFAULT_CONTROL_GRAPH_URI));
+
+    expect(await p.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { requestedBy: PAYLOAD_CALLER },
+    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect((await p.getStatus(jobId))?.status).toBe('failed');
+  });
+
+  it('refuses to REASSIGN the admission owner through a transition [3825861806]', async () => {
+    // 🔴 3825861806 — `LIFT_JOB_IMMUTABLE_FIELDS` declared admission immutable; nothing enforced it,
+    // and the transition merge spread the caller's patch straight over the record. Moving the owner
+    // moves the right to run the destructive clear, so this is an authorization boundary, not a
+    // data-integrity nicety.
+    const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
+    const ATTACKER = '0xEEeEEe00000000000000000000000000000000Ee';
+    const p = createPublisher();
+    const jobId = await driveToValidated(p, {}, { admittedByAgentAddress: OWNER });
+
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      admission: { byAgentAddress: ATTACKER },
+    } as never)).rejects.toThrow(/admission is immutable/);
+
+    // The owner is unchanged on the persisted record, so the entitlement did not move.
+    expect((await p.getStatus(jobId))?.admission).toEqual({ byAgentAddress: OWNER });
+    // Re-stating the SAME owner is not a change and must still be allowed.
+    await p.update(jobId, 'broadcast', { broadcast: bx, admission: { byAgentAddress: OWNER } } as never);
+    expect((await p.getStatus(jobId))?.admission).toEqual({ byAgentAddress: OWNER });
+  });
+
+  it('refuses an explicit `undefined` for an immutable field, which would ERASE it', async () => {
+    // The merge spreads the patch, so an explicit `undefined` overwrites rather than being skipped.
+    // Treating it as "nothing supplied" let a transition delete the owner outright — worse than
+    // reassigning it, because the job is then held with nobody able to clear it at all.
+    const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
+    const p = createPublisher();
+    const jobId = await driveToValidated(p, {}, { admittedByAgentAddress: OWNER });
+    const before = await p.getStatus(jobId);
+
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      admission: undefined,
+    } as never)).rejects.toThrow(/admission is immutable/);
+
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      timestamps: { acceptedAt: undefined },
+    } as never)).rejects.toThrow(/timestamps.acceptedAt is immutable/);
+
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      retries: { maxRetries: undefined },
+    } as never)).rejects.toThrow(/retries.maxRetries is immutable/);
+
+    // Nothing was persisted by any of the three refusals.
+    const after = await p.getStatus(jobId);
+    expect(after?.admission).toEqual({ byAgentAddress: OWNER });
+    expect(after?.status).toBe(before?.status);
+    expect(after?.timestamps.acceptedAt).toBe(before?.timestamps.acceptedAt);
+    expect(after?.retries.maxRetries).toBe(before?.retries.maxRetries);
+
+    // 3828732842 — a PARTIAL nested patch. `retries` is replaced wholesale by the merge (unlike
+    // `timestamps`, which is deep-merged), so omitting `maxRetries` erased the budget while a
+    // presence-based guard saw "key not mentioned, nothing changed".
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      retries: { retryCount: 3 },
+    } as never)).rejects.toThrow(/retries.maxRetries is immutable/);
+
+    // 3828701108 — erasing the PARENT object takes the immutable child with it.
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      retries: undefined,
+    } as never)).rejects.toThrow(/retries.maxRetries is immutable/);
+    // ...but NOT for `timestamps`, and the asymmetry is real rather than an oversight: the merge
+    // coalesces `data.timestamps ?? {}`, so an undefined parent there preserves the children. The
+    // guard reads the merge's output, so it agrees with whatever the merge actually does instead
+    // of asserting a rule the merge does not follow.
+    await p.update(jobId, 'broadcast', { broadcast: bx, timestamps: undefined } as never);
+    expect((await p.getStatus(jobId))?.timestamps.acceptedAt).toBe(before?.timestamps.acceptedAt);
+
+    // Nested VALUE changes, not just erasures — and the sibling in the same object must still
+    // be writable, which is what separates "reject this key" from "reject this object".
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      retries: { retryCount: 0, maxRetries: 999 },
+    } as never)).rejects.toThrow(/retries.maxRetries is immutable/);
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      timestamps: { acceptedAt: 1 },
+    } as never)).rejects.toThrow(/timestamps.acceptedAt is immutable/);
+    // The mutable sibling goes through, with the immutable one untouched.
+    await p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      retries: { retryCount: 3, maxRetries: before!.retries.maxRetries },
+    } as never);
+    expect((await p.getStatus(jobId))?.retries).toMatchObject({
+      retryCount: 3,
+      maxRetries: before?.retries.maxRetries,
+    });
+
+    // An ordinary timestamps patch that never mentions `acceptedAt` is still allowed.
+    await p.update(jobId, 'broadcast', { broadcast: bx, timestamps: { updatedAt: 12_345 } } as never);
+    expect((await p.getStatus(jobId))?.timestamps.acceptedAt).toBe(before?.timestamps.acceptedAt);
   });
 
   it('but BULK clear still leaves a retry_recovery failed job alone', async () => {

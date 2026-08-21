@@ -213,6 +213,29 @@ describe('GH#2270 failed-job retry disposition', () => {
     });
   });
 
+  it('matches owners with the CANONICAL identity policy, not a bespoke lowercase [3826008043]', () => {
+    // EVM addresses are case-folded; legacy non-EVM identities (peer IDs) are byte-for-byte. A
+    // bespoke `toLowerCase()` folded both, which on a destructive authorization boundary widened
+    // who counts as the owner.
+    const held = (owner: string) => ({
+      status: 'failed',
+      failure: { resolution: 'retry_recovery' },
+      admission: { byAgentAddress: owner },
+      request: { jobType: 'lift', lift: {} },
+    } as unknown as LiftJob);
+    const override = (requestedBy: string) => ({ pendingTransactionOverride: { requestedBy } });
+
+    // EVM: case-insensitive, both directions.
+    const EVM = '0xAbCdEf0000000000000000000000000000001234';
+    expect(isTargetedClearableLiftJob(held(EVM), override(EVM.toLowerCase()))).toBe(true);
+    expect(isTargetedClearableLiftJob(held(EVM.toLowerCase()), override(EVM))).toBe(true);
+
+    // Legacy peer id: case-SENSITIVE. This is the row a bespoke lowercase gets wrong.
+    const PEER = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
+    expect(isTargetedClearableLiftJob(held(PEER), override(PEER))).toBe(true);
+    expect(isTargetedClearableLiftJob(held(PEER), override(PEER.toLowerCase()))).toBe(false);
+  });
+
   it('names the two settlement ROLES explicitly, without inferring either from wiring [3825614002]', () => {
     // 3825614002 — the role used to be re-derived inside the decision method from which
     // collaborators happened to be installed, so the same oracle meant different things depending

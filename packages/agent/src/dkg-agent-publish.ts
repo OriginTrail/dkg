@@ -1600,7 +1600,13 @@ export class PublishMethods extends DKGAgentBase {
     // who enqueued nothing. A host that authenticated a caller passes it in; otherwise this is an
     // internal producer and the node's own default agent owns the job — the same identity a
     // node-level token resolves to in the daemon, so the operator keeps the exit.
-    const admittedByAgentAddress = opts?.admittedByAgentAddress ?? this.getDefaultAgentAddress();
+    // A blank identity is ABSENT, not a principal. `??` only guards nullish, so an
+    // empty or whitespace-only string slipped past the default and then failed the truthiness
+    // check below, producing exactly the unowned job this fallback exists to prevent.
+    const suppliedAdmission = opts?.admittedByAgentAddress?.trim();
+    const admittedByAgentAddress = (suppliedAdmission && suppliedAdmission.length > 0)
+      ? suppliedAdmission
+      : this.getDefaultAgentAddress();
     const captureID = await asyncPublisher.enqueueKnowledgeAssetVmPublish(
       intent,
       admittedByAgentAddress ? { admittedByAgentAddress } : undefined,

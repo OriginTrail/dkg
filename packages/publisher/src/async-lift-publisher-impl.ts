@@ -114,6 +114,7 @@ import {
   liftJobCheckedNonce,
   liftJobCheckedSigner,
   liftJobOperationKindMarker,
+  assertNoImmutableLiftJobFieldChange,
   normalizePersistedLiftJobRequest,
   buildLiftJobAcceptedReset,
   pinnedPublishIdentityKaId,
@@ -2550,7 +2551,7 @@ export class TripleStoreAsyncLiftPublisher
       },
     } as LiftJob;
 
-    return {
+    const next = {
       ...merged,
       timestamps: {
         ...merged.timestamps,
@@ -2563,6 +2564,13 @@ export class TripleStoreAsyncLiftPublisher
         updatedAt: now,
       },
     } as LiftJob;
+    // The immutable set is ENFORCED here, not merely declared, and it is checked against the
+    // MERGE'S OWN OUTPUT rather than the caller's patch. Reasoning about the patch is what
+    // made earlier versions of this guard wrong twice: an explicit `undefined` is spread, not
+    // skipped, and an omitted nested key only survives where the merge deep-merges that
+    // object -- true for `timestamps`, false for `retries`. Reading the result cannot drift.
+    assertNoImmutableLiftJobFieldChange(current, next);
+    return next;
   }
 
   /**
