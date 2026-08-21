@@ -1,23 +1,34 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  computeAgentProfileAuthorityTransitionDigestV1,
   computeAgentProfileHeadObjectDigestV1,
+  evaluateAgentProfileHeadAdvanceV1,
   evaluateAgentProfileSameSequenceTombstoneAdvanceV1,
+  type AgentProfileAuthorityTransitionV1,
   type AgentProfileHeadObjectV1,
   type AgentProfileSameSequenceAppliedRowV1,
   type AgentProfileTombstoneHeadObjectV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import {
+  CORE_ACCEPTED_LINEAGE_V1,
+  CORE_CLOCK_MS_V1,
+  CORE_HISTORICAL_ROOTS_V1,
+} from './helpers/authority-verdict-diff-core-evidence-v1.js';
+import {
   CORE_CHAIN_V1,
   CORE_CURRENT_DIGEST_V1,
   CORE_CURRENT_HEAD_V1,
+  CORE_MINT_GRAPH_V1,
 } from './helpers/authority-verdict-diff-core-heads-v1.js';
 import {
   mintStorageSummaryForHeadV1,
   prepareStorageDriverV1,
   requireStorageSummaryForHeadV1,
 } from './helpers/authority-verdict-diff-storage-driver-v1.js';
+import { rotatedActiveHeadV1 } from './helpers/system-record-active-replacement-fixture.js';
+import { mintAgentProfileTombstoneClosureV1 } from './helpers/system-record-terminal-replacement-fixture.js';
 import { buildTombstoneHeadFromPredecessorV1 } from './helpers/tombstone-head-fixture-v1.js';
 
 /**
@@ -41,9 +52,18 @@ import { buildTombstoneHeadFromPredecessorV1 } from './helpers/tombstone-head-fi
  * THE ARRANGEMENT IS FORCED, NOT CHOSEN, and a reader asking "why this
  * predecessor?" deserves the answer, because the obvious alternative silently
  * measures the ordinary apply instead. The disjunct requires the candidate's
- * sequence to equal the applied lineage length; only two sequence-2 active heads
- * exist; and the other one IS the applied row, which lands in the short-circuit
- * by construction. There is no second arrangement to cross-check against.
+ * sequence to equal the applied lineage length; of the sequence-2 active heads
+ * THIS FIXTURE SHIPS, the only other one IS the applied row, which lands in the
+ * short-circuit by construction.
+ *
+ * THAT USED TO READ "only two sequence-2 active heads exist... there is no
+ * second arrangement to cross-check against", AND IT WAS FALSE IN BOTH CLAUSES.
+ * A disagreeing sequence-2 active head is constructible from one field, it is
+ * built a few blocks below, and the identity rows drive it. The true and
+ * narrower statement is the one worth having: every sequence-2 head this fixture
+ * ships agrees on issuer, root and accepted-transition digest, so no cell in the
+ * band varies record identity -- which is exactly how the identity precondition
+ * could go missing here without a single one of them noticing.
  *
  * SO REPRESENTATIVENESS COMES FROM THE BRANCH'S NARROWNESS, NOT THE FIXTURE'S
  * REALISM. The comparison consults exactly two things -- sequence equality and
@@ -93,11 +113,23 @@ function flipLeadV1(value: string): string {
  * the correspondence is checked rather than assumed -- which matters because
  * this object is what makes the pair-pin's first element mean anything.
  */
+/**
+ * The applied row every cell below decides against.
+ *
+ * The identity operands are taken FROM THE APPLIED HEAD rather than written as
+ * literals, because that is what a receiver supplies and what makes the cells
+ * same-record by construction: the whole locked band is one authority branch, so
+ * every row here satisfies the identity conjuncts and none of them is what these
+ * cells measure. A cell that wanted an identity MISMATCH has to say so, and the
+ * rows that do are grouped separately below.
+ */
 const APPLIED_ROW_V1: AgentProfileSameSequenceAppliedRowV1 = Object.freeze({
   status: 'active',
   authoritySequence: CORE_CURRENT_HEAD_V1.authoritySequence,
   version: CORE_CURRENT_HEAD_V1.version,
   headDigest: CORE_CURRENT_DIGEST_V1,
+  currentRoot: CORE_CURRENT_HEAD_V1.rootSubject,
+  acceptedTransitionDigest: CORE_CURRENT_HEAD_V1.acceptedTransitionDigest,
 });
 
 describe('the same-sequence tombstone disjunct (ADR 0002 :112-114, :126)', () => {
@@ -598,6 +630,457 @@ describe('the same-sequence tombstone disjunct (ADR 0002 :112-114, :126)', () =>
       projectionSchemaDigest: 'closure-mint',
       'version-not-strictly-greater': 'closure-mint',
       'version-equal-to-predecessor': 'closure-mint',
+    });
+  });
+});
+
+/**
+ * RECORD IDENTITY: THE PRECONDITION THE EXTRACTION LOST.
+ *
+ * Every row above is one authority branch, which is why none of them measures
+ * this. The rule answers "does this tombstone dominate its sequence"; inside the
+ * full evaluator that question is only ever reached after the adapter has
+ * established that the candidate and the applied row ARE the same record --
+ * `same-sequence authority changed` on issuer and root, then
+ * `transition-equivocation` on the accepted transition digest. The extracted
+ * entry inherited the rule and not the conditional, and its four-field operand
+ * could not express either question.
+ *
+ * THE CONSEQUENCE WAS NOT THEORETICAL. Driven through the real receiver path --
+ * closure mint, driver, derivation -- a verified tombstone whose predecessor
+ * accepted a DIFFERENT transition into this sequence returned `ready`: the
+ * applied projection deleted on another rotation's revocation. The same-branch
+ * control returned `ready` too, so storage could not tell them apart.
+ *
+ * THE COMPETING ROTATION IS ONE FIELD AWAY, AND THAT IS THE THREAT MODEL RATHER
+ * THAN A FIXTURE TRICK. `issuedAt` is inside the transition's canonical digest
+ * field list, so moving it alone yields a second, differently-digested rotation
+ * into the same sequence with every binding intact -- same network, same peer,
+ * same prior and next issuer. The transition validator constrains the issuer
+ * only against the transition's OWN prior, and the closure's equivocation key
+ * carries no issuer at all. So a peer signs two rotations out of one sequence
+ * with its own keys and equivocates; nothing is forged and no third party is
+ * involved.
+ *
+ * THAT ALSO EXPLAINS THE WALL FOUR SEATS HIT. The fixture's ready-made
+ * equivocating transitions rotate the ROOT, which drags the issuer with it
+ * through the codec weld (`rootSubject` must equal `did:dkg:agent:${evmIssuer}`)
+ * and therefore obliges a rebuilt author seal -- refused, in domain wording, as
+ * `graph-scoped seal author must equal evmIssuer`. That refusal is a fixture
+ * choice, not a system property: an equivocation needs no new issuer at all.
+ */
+describe('record identity is established before the same-sequence rule runs', () => {
+  /**
+   * A second rotation into sequence 2, differing from the real one ONLY in
+   * `issuedAt` -- inside the canonical digest, outside every binding.
+   */
+  const competingTransition = Object.freeze({
+    ...structuredClone(CORE_CHAIN_V1.transitions[1] as AgentProfileAuthorityTransitionV1),
+    issuedAt: '2026-08-05T12:03:00Z',
+  }) as unknown as AgentProfileAuthorityTransitionV1;
+  const competingDigest = computeAgentProfileAuthorityTransitionDigestV1(competingTransition);
+
+  /**
+   * The alternate sequence-2 ACTIVE head: the fixture's own base head, having
+   * accepted the competing rotation instead. Issuer and root never move, so
+   * every seal weld holds untouched and no re-sealing is needed.
+   */
+  const alternateBranchHead = Object.freeze({
+    ...structuredClone(CORE_CHAIN_V1.base),
+    acceptedTransitionDigest: competingDigest,
+  }) as unknown as AgentProfileHeadObjectV1;
+
+  /**
+   * A head that moves the ROOT while accepting the applied row's own transition.
+   *
+   * IT EXISTS BECAUSE THE REALISTIC CELL CANNOT SEPARATE THE TWO CONJUNCTS. Any
+   * head that differs in root also differs in the transition that rotated to
+   * that root, so deleting either conjunct alone leaves the other catching it,
+   * and both solo-removal mutants would SURVIVE against a row that violates
+   * both -- reading as "something else covers this" when it means "this row
+   * cannot see it". The discriminating rows are therefore built one field apart
+   * each: this one moves only the root, `alternateBranchHead` only the
+   * transition digest. Neither models traffic; they separate operators.
+   *
+   * It goes through the fixture's own rotation because moving a root obliges
+   * five derived rewrites -- root subject, owned-subject table digest,
+   * projection quads, content digest and four seal fields -- each refused one
+   * layer deeper in domain wording if skipped.
+   */
+  const otherRootSameTransition = rotatedActiveHeadV1(
+    CORE_CHAIN_V1.base,
+    `0x${'99'.repeat(20)}`,
+    CORE_CURRENT_HEAD_V1.authoritySequence,
+    '0',
+    { acceptedTransitionDigest: CORE_CURRENT_HEAD_V1.acceptedTransitionDigest },
+  );
+
+  /**
+   * The REASON is rendered for quarantine as well as reject, and that is not
+   * cosmetic: `quarantine | head-fork` leaking onto a foreign-branch cell is the
+   * precise failure the ordering below exists to prevent, and a renderer that
+   * printed a bare `quarantine` would hide it behind a word that looks fine.
+   */
+  const answer = (predecessor: AgentProfileHeadObjectV1, version = '1'): string => {
+    const decision = evaluateAgentProfileSameSequenceTombstoneAdvanceV1(
+      buildTombstoneHeadFromPredecessorV1(predecessor, version),
+      Object.freeze({ tombstonePredecessor: predecessor }) as never,
+      APPLIED_ROW_V1,
+    );
+    const reason = (decision as { reason?: string }).reason;
+    return reason === undefined ? decision.decision : `${decision.decision}|${reason}`;
+  };
+
+  /**
+   * BOTH FAMILIES, EACH SEPARATED, AND THE CONTROL THAT MAKES THEM MEASUREMENTS.
+   *
+   * The control is not decoration: it is what shows the refusals are caused by
+   * identity rather than by anything else the construction changed. Same
+   * builder, same applied row, one field apart.
+   */
+  it('refuses a candidate from another branch and one that accepted another transition', () => {
+    expect({
+      control: answer(CORE_CHAIN_V1.base as unknown as AgentProfileHeadObjectV1),
+      rootOnly: answer(otherRootSameTransition as unknown as AgentProfileHeadObjectV1),
+      transitionOnly: answer(alternateBranchHead),
+    }).toStrictEqual({
+      control: 'accept',
+      rootOnly: 'reject|same-sequence tombstone belongs to another authority branch',
+      transitionOnly:
+        'reject|same-sequence tombstone accepted a different authority transition',
+    });
+  });
+
+  /**
+   * THE VERSION AXIS COLLAPSES ON A FOREIGN BRANCH, AND IT HAS TO.
+   *
+   * The routing this PR added made TWO version relations advance -- lower and
+   * higher -- so the identity hole rode both of them, not just the one the first
+   * construction happened to use. Testing identity at the lower relation alone
+   * would leave the second data-destroying advance unproven while looking
+   * covered.
+   *
+   * Identity is decided BEFORE any version is read, so all three relations must
+   * give one answer per family. That collapse is the property: if a version ever
+   * reappears in these answers, identity has moved below the version branch.
+   *
+   * AND BEFORE THE FORK BRANCH, WHICH IS A SECOND ORDERING OBLIGATION. The
+   * equal-version cell is the one the open ADR fork question is about -- but that
+   * question presupposes two heads OF ONE RECORD at one sequence and version. A
+   * foreign-branch candidate is not that cell and never was in its scope, so
+   * holding it as `quarantine | head-fork` would answer a question it does not
+   * pose. The discriminator is exact: a surviving `head-fork` on either
+   * equal-version row below means identity is still being decided after the fork
+   * branch rather than before it.
+   */
+  /**
+   * THE APPLIED-STATUS AXIS, which storage cannot reach and this entry can.
+   *
+   * Storage's disposition precondition defers every applied-tombstone row before
+   * core is consulted, so no storage cell exercises this. The entry has no such
+   * precondition -- it decides against a tombstoned applied row under ADR
+   * :126-128 -- which means the guard keeping that combination unreachable lives
+   * in the SEAM, protecting today's caller rather than the published export.
+   *
+   * Identity runs before the rule, so applied-tombstone rows are identity-checked
+   * on exactly the same path as applied-active ones. THE CONTROL HALF IS THE
+   * LOAD-BEARING ONE: refusals alone do not discriminate, because an entry that
+   * simply stopped deciding against tombstoned rows would produce identical
+   * refusals. The controls are what prove :126-128 still runs underneath.
+   */
+  it('checks identity against a tombstoned applied row without disabling the rule', () => {
+    const tombstoneRow = Object.freeze({ ...APPLIED_ROW_V1, status: 'tombstone' });
+    const against = (predecessor: AgentProfileHeadObjectV1, version: string): string => {
+      const decision = evaluateAgentProfileSameSequenceTombstoneAdvanceV1(
+        buildTombstoneHeadFromPredecessorV1(predecessor, version),
+        Object.freeze({ tombstonePredecessor: predecessor }) as never,
+        tombstoneRow as never,
+      );
+      const reason = (decision as { reason?: string }).reason;
+      return reason === undefined ? decision.decision : `${decision.decision}|${reason}`;
+    };
+    const control = CORE_CHAIN_V1.base as unknown as AgentProfileHeadObjectV1;
+    // ADR :126-128 resolves an EQUAL-version pair by digest, so the control's
+    // equal cell is pinned to the RULE rather than to an outcome: the branch this
+    // fixture happens to take is computed here and asserted alongside the
+    // verdict, so a fixture change that flips the comparison fails this row
+    // instead of silently swapping the answer under it.
+    const equalTakesTheLowerDigest =
+      computeAgentProfileHeadObjectDigestV1(
+        buildTombstoneHeadFromPredecessorV1(control, CORE_CURRENT_HEAD_V1.version),
+      ) < CORE_CURRENT_DIGEST_V1;
+    expect({
+      foreignRootLower: against(
+        otherRootSameTransition as unknown as AgentProfileHeadObjectV1, '1',
+      ),
+      foreignRootHigher: against(
+        otherRootSameTransition as unknown as AgentProfileHeadObjectV1, '3',
+      ),
+      foreignTransitionLower: against(alternateBranchHead, '1'),
+      foreignTransitionHigher: against(alternateBranchHead, '3'),
+      controlLower: against(control, '1'),
+      controlHigher: against(control, '3'),
+      controlEqualFollowsTheDigestRule:
+        against(control, CORE_CURRENT_HEAD_V1.version)
+        === (equalTakesTheLowerDigest ? 'accept' : 'stale'),
+    }).toStrictEqual({
+      foreignRootLower: 'reject|same-sequence tombstone belongs to another authority branch',
+      foreignRootHigher: 'reject|same-sequence tombstone belongs to another authority branch',
+      foreignTransitionLower:
+        'reject|same-sequence tombstone accepted a different authority transition',
+      foreignTransitionHigher:
+        'reject|same-sequence tombstone accepted a different authority transition',
+      // ADR :127-128, the lowest tombstone winning: a LOWER tombstone is accepted
+      // over the applied one, a HIGHER one is stale.
+      controlLower: 'accept',
+      controlHigher: 'stale',
+      controlEqualFollowsTheDigestRule: true,
+    });
+  });
+
+  it('answers foreign-branch cells identically at every version relation', () => {
+    const relations = ['1', CORE_CURRENT_HEAD_V1.version, '3'] as const;
+    const across = (predecessor: AgentProfileHeadObjectV1) =>
+      Object.fromEntries(relations.map((version) => [version, answer(predecessor, version)]));
+
+    expect({
+      rootOnly: across(otherRootSameTransition as unknown as AgentProfileHeadObjectV1),
+      transitionOnly: across(alternateBranchHead),
+      control: across(CORE_CHAIN_V1.base as unknown as AgentProfileHeadObjectV1),
+    }).toStrictEqual({
+      rootOnly: {
+        1: 'reject|same-sequence tombstone belongs to another authority branch',
+        2: 'reject|same-sequence tombstone belongs to another authority branch',
+        3: 'reject|same-sequence tombstone belongs to another authority branch',
+      },
+      transitionOnly: {
+        1: 'reject|same-sequence tombstone accepted a different authority transition',
+        2: 'reject|same-sequence tombstone accepted a different authority transition',
+        3: 'reject|same-sequence tombstone accepted a different authority transition',
+      },
+      // The same-branch control keeps the band's own answers, so the collapse
+      // above is a property of foreign identity rather than of this entry
+      // having stopped reading versions at all.
+      control: { 1: 'accept', 2: 'quarantine|head-fork', 3: 'accept' },
+    });
+  });
+
+  /**
+   * A head that trips BOTH conjuncts, pinned for its ORDER rather than its
+   * refusal -- and this is the only realistically mintable competitor, so it is
+   * also the cell a reader is most likely to meet.
+   *
+   * WHY THE ORDER IS WORTH A ROW. Which reason this returns is decided purely by
+   * which conjunct the shared classifier asks first. At the storage layer that
+   * is invisible, because both core reasons map to one deferral. At the entry it
+   * is a published export's answer on the realistic cell. And it is the one
+   * observable that makes "one implementation, both callers" CHECKABLE: the full
+   * evaluator asks issuer/root before transition-equivocation, so a classifier
+   * genuinely shared with it must answer with the ROOT reason here. If this row
+   * ever reports the transition reason, the extraction has drifted from the
+   * evaluator it was extracted from -- which is exactly the divergence sharing
+   * exists to prevent, and it would otherwise be invisible from either layer.
+   */
+  const bothConjunctsDiffer = rotatedActiveHeadV1(
+    CORE_CHAIN_V1.base,
+    `0x${'99'.repeat(20)}`,
+    CORE_CURRENT_HEAD_V1.authoritySequence,
+    '0',
+    { acceptedTransitionDigest: competingDigest },
+  );
+
+  it('answers the both-conjuncts cell in the full evaluator\'s own conjunct order', () => {
+    expect(answer(bothConjunctsDiffer as unknown as AgentProfileHeadObjectV1))
+      .toBe('reject|same-sequence tombstone belongs to another authority branch');
+  });
+
+  /**
+   * THE ENTRY AND THE FULL EVALUATOR DIVERGE HERE, DELIBERATELY AND ONCE.
+   *
+   * The evaluator holds the record's disposition and the conflicting transition
+   * OBJECTS, so it can name an equivocation. This entry holds two digests. "The
+   * candidate's accepted transition is not this record's" is what its operands
+   * ground; "this record's authority equivocated" is a conclusion equally
+   * consistent with a fork the receiver already resolved or a chain it has never
+   * seen. So the entry REFUSES and does not classify, and its reason names the
+   * observation rather than the conclusion. Declared here so the divergence is a
+   * documented decision rather than a surprise in someone's comparison table.
+   */
+  it('declares the one cell where the entry and the full evaluator differ', () => {
+    const candidate = buildTombstoneHeadFromPredecessorV1(alternateBranchHead, '1');
+    const full = evaluateAgentProfileHeadAdvanceV1(
+      Object.freeze({
+        current: CORE_CURRENT_HEAD_V1,
+        disposition: 'discoverable',
+        transitionLineage: CORE_ACCEPTED_LINEAGE_V1,
+        historicalRoots: CORE_HISTORICAL_ROOTS_V1,
+      }) as never,
+      candidate as never,
+      Object.freeze({
+        tombstonePredecessor: alternateBranchHead,
+        nowMs: CORE_CLOCK_MS_V1.valid,
+      }) as never,
+    );
+    expect({
+      entry: answer(alternateBranchHead),
+      fullEvaluator: `${full.decision}|${(full as { reason?: string }).reason ?? ''}`,
+    }).toStrictEqual({
+      entry: 'reject|same-sequence tombstone accepted a different authority transition',
+      fullEvaluator: 'quarantine|transition-equivocation',
+    });
+  });
+
+  /**
+   * THE ROW THE DEFECT WAS ACTUALLY ABOUT: the real receiver path, end to end.
+   *
+   * `ready` means the projection is deleted. Before the identity conjuncts the
+   * foreign cell returned `ready`, and the same-branch control still does -- so
+   * this row fails in BOTH directions: if identity stops being established it
+   * goes back to deleting, and if the conjuncts overreach it takes the
+   * legitimate revocation down with it.
+   *
+   * EVERY CELL GATES ON `unresolved === []`. An artifact the closure asked for
+   * and this graph did not hold produces a refusal phrased exactly like a domain
+   * refusal, and reading one as the other is how three earlier attempts reported
+   * a system limit that was a short artifact list.
+   *
+   * THE THIRD CELL IS A PATH DISCRIMINATOR, not a third behaviour. The
+   * equal-version pre-filter exists ONLY inside the routing this PR added, so a
+   * candidate that reaches identity refusal at the applied version proves the
+   * cell traverses the new path rather than being answered by an upstream
+   * short-circuit -- causation without a mutation.
+   */
+  it('does not advance a foreign-branch tombstone through the real storage entry', async () => {
+    const driver = await prepareStorageDriverV1();
+    const drive = async (predecessor: AgentProfileHeadObjectV1, version: string) => {
+      const candidate = buildTombstoneHeadFromPredecessorV1(predecessor, version);
+      const unresolved: string[] = [];
+      const minted = await mintAgentProfileTombstoneClosureV1({
+        tombstone: candidate,
+        predecessor,
+        ownedSubjectTable: [(predecessor as unknown as { rootSubject: string }).rootSubject],
+        ancestors: [...CORE_MINT_GRAPH_V1.ancestry, predecessor],
+        transitions: [...CORE_MINT_GRAPH_V1.transitions, competingTransition],
+        onUnresolvedArtifact: (reference: string) => unresolved.push(reference),
+      } as never);
+      const outcome = driver.drive({
+        candidate: candidate as never,
+        summary: (minted as { authoritySummary: unknown }).authoritySummary as never,
+        operation: 'tombstone',
+        snapshotForm: { kind: 'present', appliedStatus: 'active' },
+      } as never);
+      return { unresolved, outcome };
+    };
+
+    const foreign = await drive(alternateBranchHead, '1');
+    const control = await drive(
+      CORE_CHAIN_V1.base as unknown as AgentProfileHeadObjectV1,
+      '1',
+    );
+    const atAppliedVersion = await drive(alternateBranchHead, CORE_CURRENT_HEAD_V1.version);
+    // THE SECOND DATA-DESTROYING ADVANCE. The routing made lower AND higher
+    // advance, so the identity hole rode both; a fix witnessed only at the lower
+    // relation leaves the other one unproven while looking covered.
+    const foreignHigher = await drive(alternateBranchHead, '3');
+    const controlHigher = await drive(
+      CORE_CHAIN_V1.base as unknown as AgentProfileHeadObjectV1,
+      '3',
+    );
+
+    const appliedState = (driver.buildSnapshot({
+      kind: 'present',
+      appliedStatus: 'active',
+    } as never) as unknown as {
+      snapshot: { appliedState: Record<string, unknown> };
+    }).snapshot.appliedState;
+    const appliedLineage = appliedState.transitionLineage as readonly {
+      transitionDigest: string;
+    }[];
+    const appliedRoot = appliedState.currentRoot as string;
+
+    expect({
+      foreignUnresolved: foreign.unresolved,
+      foreign: foreign.outcome,
+      controlUnresolved: control.unresolved,
+      control: control.outcome,
+      pathDiscriminator: atAppliedVersion.outcome,
+      foreignHigher: foreignHigher.outcome,
+      controlHigher: controlHigher.outcome,
+      // THE APPLIED ROW IS READ FROM THE DRIVER, NOT INFERRED FROM SETUP.
+      //
+      // Comparing the two constants this file itself built would assert what the
+      // fixture was ASKED for, never what the driver APPLIED -- and it would pass
+      // unchanged if the snapshot were built from the candidate's own branch,
+      // which is the single arrangement that would make this whole row
+      // meaningless. So the applied lineage is located inside the driver's own
+      // snapshot: the record's real transition must be PRESENT and the competing
+      // one ABSENT. Both directions, because presence alone cannot tell a
+      // same-branch row from one carrying both.
+      appliedCarriesTheRealTransition:
+        appliedLineage.some((entry) =>
+          entry.transitionDigest === CORE_CURRENT_HEAD_V1.acceptedTransitionDigest),
+      appliedDoesNotCarryTheCompetingTransition:
+        !appliedLineage.some((entry) => entry.transitionDigest === competingDigest),
+      appliedRootIsTheRecordsOwn: appliedRoot === CORE_CURRENT_HEAD_V1.rootSubject,
+      sequencesMatch:
+        (alternateBranchHead as unknown as { authoritySequence: string }).authoritySequence
+        === CORE_CURRENT_HEAD_V1.authoritySequence,
+    }).toStrictEqual({
+      foreignUnresolved: [],
+      foreign: {
+        kind: 'derivation',
+        verdict: 'deferred',
+        reason: 'same-sequence-authority-branch-mismatch',
+      },
+      controlUnresolved: [],
+      control: { kind: 'derivation', verdict: 'ready' },
+      pathDiscriminator: {
+        kind: 'derivation',
+        verdict: 'deferred',
+        reason: 'same-sequence-authority-branch-mismatch',
+      },
+      foreignHigher: {
+        kind: 'derivation',
+        verdict: 'deferred',
+        reason: 'same-sequence-authority-branch-mismatch',
+      },
+      controlHigher: { kind: 'derivation', verdict: 'ready' },
+      appliedCarriesTheRealTransition: true,
+      appliedDoesNotCarryTheCompetingTransition: true,
+      appliedRootIsTheRecordsOwn: true,
+      sequencesMatch: true,
+    });
+  });
+
+  /**
+   * THE WELD THE SINGLE ROOT COMPARISON RESTS ON.
+   *
+   * The full evaluator tests issuer OR root; the entry compares only the root,
+   * which is faithful ONLY because the head codec refuses any head whose
+   * `rootSubject` is not `did:dkg:agent:${evmIssuer}`. That is another module's
+   * invariant, so it is pinned rather than trusted: if it is relaxed, the root
+   * comparison silently stops covering the issuer, and this row is what says so.
+   */
+  it('pins the codec weld that lets one root comparison cover the issuer', () => {
+    const base = CORE_CHAIN_V1.base as unknown as Record<string, unknown>;
+    const otherIssuer = `0x${'99'.repeat(20)}`;
+    const refusalFor = (patch: Record<string, unknown>): string => {
+      try {
+        buildTombstoneHeadFromPredecessorV1(
+          Object.freeze({ ...base, ...patch }) as never,
+          '1',
+        );
+        return 'BUILT';
+      } catch (error) {
+        return (error as Error).message;
+      }
+    };
+    expect({
+      issuerAlone: refusalFor({ evmIssuer: otherIssuer }),
+      rootAlone: refusalFor({ rootSubject: `did:dkg:agent:${otherIssuer}` }),
+    }).toStrictEqual({
+      issuerAlone: '[system-record-binding] agent root does not match its EVM issuer',
+      rootAlone: '[system-record-binding] agent root does not match its EVM issuer',
     });
   });
 });

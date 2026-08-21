@@ -39,7 +39,7 @@ export interface VerdictDiffCounterfactualV1 {
 
 export const VERDICT_DIFF_COUNTERFACTUALS_V1: readonly VerdictDiffCounterfactualV1[] = [
   {
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1383',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1492',
     before: "} else if (current.status !== 'active') {",
     after: "} else if (current.status !== 'active' && current.status !== 'tombstone') {",
     appliedProof: 'occurrence count of the original predicate 1 -> 0',
@@ -433,33 +433,33 @@ export const CORE_HARNESS_LIMITATIONS_V1: readonly HarnessLimitationV1[] = [
 export const CORE_SUMMARY_ASYMMETRY_CITATIONS_V1: readonly SourceCitationV1[] = [
   {
     id: 'core-single-semantic-read',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:428',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:478',
     contains: 'const summary = evidenceState.verifiedAuthoritySummary;',
     why: "Core's ONLY semantic read of the field, and it sits inside the absent-state branch.",
   },
   {
     id: 'core-evidence-allowlist-copy',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:1185',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:1342',
     contains: "'verifiedAuthoritySummary',",
     why: 'The allowlist that carries the field into the evidence snapshot, which is why a '
       + 'name-grep over the branch functions could not have settled this on its own.',
   },
   {
     id: 'storage-binds-candidate-head-digest',
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:931',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:966',
     contains: 'summary.candidateHeadDigest !== headDigest',
     why: 'Storage refuses a summary that does not name the head it is presented with.',
   },
   {
     id: 'storage-binds-lineage-length',
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:932',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:967',
     contains: 'BigInt(summary.transitionLineage.length) '
       + '!== parseCanonicalDecimalU64(facts.head.authoritySequence)',
     why: 'The lineage-length invariant: the discriminating conjunct, and unique in the file.',
   },
   {
     id: 'storage-binds-root-history-length',
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:933',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:968',
     contains: 'summary.historicalRoots.length !== summary.transitionLineage.length',
     why: 'The retained-root count must match the lineage it is retained against.',
   },

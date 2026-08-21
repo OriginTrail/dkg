@@ -215,6 +215,21 @@ export const STORAGE_OUTCOME_CODOMAIN_V1: readonly string[] = [
   // it, instead of being absorbed silently.
   'deferred|late-tombstone-evidence-incomplete',
   'deferred|undecided-authority-classification',
+  // AND THE FOUR THE SAME-SEQUENCE SEAM ADDED. Two of them were missing from
+  // this list for a full review round while the aggregate pins stayed green --
+  // the note above happening again, because a label the list has never been
+  // shown cannot be missing from it, so a mapping regression swapping one of
+  // these for a neighbouring reason would pass unnoticed.
+  //
+  // Their reach is pinned in JOIN_UNREACHED_OUTCOMES_V1 with the KIND of zero
+  // stated, not merely the zero. This sweep's axes never vary authority branch,
+  // so it cannot mint a candidate on a competing one -- a limit of the
+  // instrument rather than a property of the system, and the same-sequence seam
+  // suite carries the positive observation the sweep cannot.
+  'deferred|same-sequence-tombstone-conflict',
+  'deferred|tombstone-predecessor-unbound',
+  'deferred|same-sequence-authority-branch-mismatch',
+  'deferred|same-sequence-entry-precondition-unmet',
   'capacity-exhausted|state-revision-overflow',
   'capacity-exhausted|capacity-revision-overflow',
   'capacity-exhausted|record-count-cap',
@@ -269,7 +284,7 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     image: [...STORAGE_ADMITTING_V1],
     semantics: JOIN_SEMANTICS_V1.PRESERVING,
     citations: [
-      'packages/storage/src/system-record-next-state-v1-internal.ts:221-222',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:256-222',
       'packages/storage/src/system-record-next-state-v1-internal.ts:259',
       'packages/storage/src/system-record-next-state-v1-internal.ts:314',
     ],
@@ -295,10 +310,10 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     image: ['stale', 'already-applied', 'ready', 'deferred|verified-state-mismatch'],
     semantics: JOIN_SEMANTICS_V1.CHANGING,
     citations: [
-      'packages/core/src/system-record-authority-v1-internal.ts:245',
-      'packages/core/src/system-record-authority-v1-internal.ts:199',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1274',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1276-1285',
+      'packages/core/src/system-record-authority-v1-internal.ts:293',
+      'packages/core/src/system-record-authority-v1-internal.ts:231',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1383',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1385-1285',
       'packages/storage/src/system-record-next-state-v1-internal.ts:270',
     ],
     note: 'MAPPING core stale TO {stale} ALONE WOULD FABRICATE A DIVERGENCE, and '
@@ -321,9 +336,9 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     image: ['deferred|authority-fork'],
     semantics: JOIN_SEMANTICS_V1.CHANGING,
     citations: [
-      'packages/core/src/system-record-authority-v1-internal.ts:249',
-      'packages/core/src/system-record-authority-v1-internal.ts:508',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1286',
+      'packages/core/src/system-record-authority-v1-internal.ts:297',
+      'packages/core/src/system-record-authority-v1-internal.ts:558',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1395',
     ],
     note: 'No storage outcome is spelled `quarantine`: storage\'s quarantine is an '
       + 'axis-H INPUT operation, not an outcome. The image is still groundable and '

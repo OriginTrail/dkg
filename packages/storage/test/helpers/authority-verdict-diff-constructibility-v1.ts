@@ -105,7 +105,7 @@ export const SAME_PREDICATE_CITATIONS_V1: readonly SourceCitationV1[] = [
   },
   {
     id: 'evaluator-binding-call',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:452',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:502',
     contains: 'isTombstoneBoundToPredecessorV1(candidateState, predecessor)',
     why: 'The evaluating site: the same predicate, same operands, later window. '
       + 'THE TEXT IS NO LONGER UNIQUE -- the same call now stands at three sites '

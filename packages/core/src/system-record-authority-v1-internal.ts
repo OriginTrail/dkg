@@ -187,6 +187,38 @@ export interface AgentProfileSameSequenceAppliedRowV1 {
   readonly authoritySequence: string;
   readonly version: string;
   readonly headDigest: Digest32V1;
+  /**
+   * THE APPLIED ROW'S AUTHORITY BRANCH. Without it this rule decides a
+   * projection-DELETING question without establishing that the candidate and the
+   * applied row are the same record, which is the defect this field was added to
+   * close: a verified tombstone bound to its own predecessor on a DIFFERENT
+   * same-sequence branch was accepted and advanced, deleting the applied
+   * projection. The full evaluator refuses that state before it ever reaches this
+   * rule; the extracted entry had no operand able to ask the question.
+   *
+   * A receiver persists this as `currentRoot`, and it is the same value the
+   * applied head carries as `rootSubject` -- measured, not assumed.
+   *
+   * ONE COMPARISON COVERS THE ISSUER TOO, and the reason is a codec weld rather
+   * than an economy: `assertAgentRootV1` refuses any head whose `rootSubject` is
+   * not `did:dkg:agent:${evmIssuer}`, so two codec-valid heads agree on the root
+   * exactly when they agree on the issuer. The full evaluator's disjunction over
+   * both fields is belt-and-braces over that weld. The weld is pinned by a test
+   * rather than trusted: perturbing either field alone is refused, which is what
+   * makes the single comparison faithful instead of eight-of-nine.
+   */
+  readonly currentRoot: string;
+  /**
+   * The transition the applied row accepted INTO this sequence -- the applied
+   * head's `acceptedTransitionDigest`, which a receiver holds as the last entry
+   * of its persisted transition lineage (measured equal, both directions).
+   *
+   * Optional because a record at authority sequence zero has accepted no
+   * transition and its lineage is empty; the candidate at that sequence carries
+   * none either, so the comparison is `undefined === undefined` and passes
+   * rather than being skipped.
+   */
+  readonly acceptedTransitionDigest?: Digest32V1;
 }
 
 function snapshotSameSequenceTombstoneEvidenceV1(
@@ -205,10 +237,26 @@ function snapshotSameSequenceAppliedRowV1(
   const probe = snapshotSystemRecordDataRecord(value, 'same-sequence applied row');
   const row = snapshotExactDataRecord(
     probe,
-    ['status', 'authoritySequence', 'version', 'headDigest'],
+    [
+      'status',
+      'authoritySequence',
+      'version',
+      'headDigest',
+      'currentRoot',
+      // A sequence-zero row has accepted no transition, so the key is absent
+      // rather than undefined -- the exact-record check counts keys, and listing
+      // it unconditionally would refuse the genesis row outright.
+      ...(hasOwnDataProperty(probe, 'acceptedTransitionDigest')
+        ? (['acceptedTransitionDigest'] as const)
+        : ([] as const)),
+    ],
     'same-sequence applied row',
   );
   digest(row.headDigest, 'same-sequence applied row headDigest');
+  assertAgentRootV1(row.currentRoot);
+  if (row.acceptedTransitionDigest !== undefined) {
+    digest(row.acceptedTransitionDigest, 'same-sequence applied row acceptedTransitionDigest');
+  }
   u64(row.authoritySequence, 'same-sequence applied row authoritySequence');
   u64(row.version, 'same-sequence applied row version');
   if (!['active', 'quarantined', 'tombstone', 'dirty'].includes(row.status as string)) {
@@ -350,14 +398,16 @@ export function evaluateAgentProfileHeadAdvanceV1(
       historicalRoots,
     );
   }
-  if (
-    candidateState.evmIssuer !== current.evmIssuer ||
-    candidateState.rootSubject !== current.rootSubject
-  ) {
+  const identity = classifyAgentProfileSameSequenceIdentityV1(
+    candidateState,
+    current.rootSubject,
+    current.acceptedTransitionDigest,
+  );
+  if (identity === 'authority-changed') {
     return { decision: 'reject', reason: 'same-sequence authority changed' };
   }
   const currentDigest = computeAgentProfileHeadObjectDigestV1(current);
-  if (candidateState.acceptedTransitionDigest !== current.acceptedTransitionDigest) {
+  if (identity === 'transition-differs') {
     return { decision: 'quarantine', reason: 'transition-equivocation' };
   }
   const currentVersion = parseCanonicalDecimalU64(current.version);
@@ -713,6 +763,12 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
  * `{ decision: 'stale' }` from an entry whose name promises a tombstone verdict.
  * The type narrows to a tombstone head and the runtime check refuses anything
  * else, because a caller can always cast.
+ *
+ * THIS IS A RECEIVER-SEAM ENTRY, NOT THE GENERAL AUTHORITY API. Like its
+ * same-sequence sibling it answers one ADR clause for a caller that holds
+ * persisted evidence rather than the accepted head object. A caller holding that
+ * head should use {@link evaluateAgentProfileHeadAdvanceV1}, which owns sequence
+ * dispatch and the preconditions this entry cannot check for itself.
  */
 export function evaluateAgentProfileLateTombstoneAdvanceV1(
   candidate: AgentProfileTombstoneHeadObjectV1,
@@ -745,6 +801,96 @@ export function evaluateAgentProfileLateTombstoneAdvanceV1(
 }
 
 /**
+ * IS THIS CANDIDATE THE SAME RECORD, ON THE SAME AUTHORITY BRANCH, AS THE STATE
+ * IT IS BEING COMPARED WITH? One implementation, both callers -- the full
+ * evaluator, which holds the applied head object, and the same-sequence entry,
+ * which holds only the persisted row.
+ *
+ * IT RETURNS A CLASSIFICATION RATHER THAN A DECISION, and that is what lets it
+ * be shared. The two callers owe their callers different answers: the evaluator
+ * has the record's disposition and the conflicting transitions in hand and can
+ * say `transition-equivocation`; the entry has two digests and can honestly say
+ * only that they differ. Returning a verdict here would force one of them to
+ * publish a claim its operands do not support. Returning the FACT lets each map
+ * it to what it can defend, while the comparison itself exists exactly once.
+ *
+ * THAT SINGULARITY IS THE POINT, NOT A TIDINESS. The defect this closes was an
+ * extracted rule that lost the identity preconditions its original call site
+ * established; answering it with a SECOND copy of those preconditions would
+ * reproduce the same failure one layer over, because two copies prove that they
+ * agree, never that either is right -- and a copy that tracks the root but not
+ * the transition digest fails open on exactly the cell that deletes a
+ * projection.
+ *
+ * WHY THE ROOT COMPARISON CARRIES THE ISSUER. The evaluator historically tested
+ * `evmIssuer || rootSubject`; the head codec refuses any head whose
+ * `rootSubject` is not `did:dkg:agent:${evmIssuer}`, so across codec-valid heads
+ * those are the same test. The weld is pinned by its own row rather than relied
+ * upon: if it were ever relaxed, this single comparison would stop covering the
+ * issuer, and it would do so silently.
+ */
+type AgentProfileSameSequenceIdentityV1 =
+  | 'same-record'
+  | 'authority-changed'
+  | 'transition-differs';
+
+function classifyAgentProfileSameSequenceIdentityV1(
+  candidateState: AgentProfileHeadObjectV1,
+  appliedRoot: string,
+  appliedAcceptedTransitionDigest: Digest32V1 | undefined,
+): AgentProfileSameSequenceIdentityV1 {
+  if (candidateState.rootSubject !== appliedRoot) return 'authority-changed';
+  if (candidateState.acceptedTransitionDigest !== appliedAcceptedTransitionDigest) {
+    return 'transition-differs';
+  }
+  return 'same-record';
+}
+
+/**
+ * The shared identity classification above, mapped to the answers THIS entry can
+ * defend from the operands it holds.
+ *
+ * Both arms refuse, and neither claims to have classified an equivocation. That
+ * naming belongs to the full evaluator, which reaches it holding the record's
+ * disposition and the conflicting transitions; from a digest comparison alone
+ * "these differ" is the whole of what is known. Refusing withholds the advance
+ * just as completely as a quarantine would, and it does not publish a verdict
+ * its inputs cannot ground.
+ */
+function refuseSameSequenceIdentityMismatchV1(
+  candidateState: AgentProfileHeadObjectV1,
+  row: AgentProfileSameSequenceAppliedRowV1,
+): Extract<SystemRecordAuthorityDecisionV1, { readonly decision: 'reject' }> | undefined {
+  const identity = classifyAgentProfileSameSequenceIdentityV1(
+    candidateState,
+    row.currentRoot,
+    row.acceptedTransitionDigest,
+  );
+  if (identity === 'authority-changed') {
+    return {
+      decision: 'reject',
+      reason: 'same-sequence tombstone belongs to another authority branch',
+    };
+  }
+  if (identity === 'transition-differs') {
+    return {
+      decision: 'reject',
+      reason: 'same-sequence tombstone accepted a different authority transition',
+    };
+  }
+  return undefined;
+}
+
+/**
+ * THIS IS A RECEIVER-SEAM ENTRY, NOT THE GENERAL AUTHORITY API. It answers one
+ * ADR clause for a caller that holds a persisted applied ROW and no head object.
+ * A caller holding the accepted head should use
+ * {@link evaluateAgentProfileHeadAdvanceV1}, which is the canonical evaluator and
+ * establishes record identity, sequence dispatch and the clock gates itself;
+ * this entry assumes only what its operands can express and refuses the rest.
+ * Choosing between the two is not a judgement call: it follows from whether you
+ * have the head.
+ *
  * The ADR 0002 :112-114 / :126-128 decision on a tombstone learned AT the
  * applied authority sequence, for a caller holding a persisted applied row.
  *
@@ -810,6 +956,17 @@ export function evaluateAgentProfileSameSequenceTombstoneAdvanceV1(
       reason: 'same-sequence tombstone entry requires an active or tombstone applied row',
     };
   }
+  // RECORD IDENTITY IS ESTABLISHED BEFORE THE RULE IS CONSULTED, exactly as the
+  // full evaluator establishes it before dispatching to the same rule. These two
+  // conjuncts are that evaluator's, moved onto the operands a receiver holds:
+  // the rule below decides whether a tombstone DOMINATES its sequence, and that
+  // question presupposes that the tombstone and the applied row are the same
+  // record on the same authority branch. Without them a verified tombstone bound
+  // to its own predecessor on a competing branch is accepted, mapped to advance,
+  // and DELETES the applied projection -- measured through the real receiver
+  // path, not argued.
+  const identityRefusal = refuseSameSequenceIdentityMismatchV1(candidateState, row);
+  if (identityRefusal !== undefined) return identityRefusal;
   return evaluateSameSequenceTombstoneRuleV1(
     candidateState,
     supplied.tombstonePredecessor === undefined

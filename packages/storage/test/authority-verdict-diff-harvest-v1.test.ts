@@ -152,8 +152,21 @@ describe('core authority decision reason harvest', () => {
     // 32 until the late-tombstone entry added its own precondition rejects, then
     // 35 until the same-sequence entry added three of its own: a non-tombstone
     // candidate, a candidate at the wrong sequence, and an applied row whose
-    // status the rule does not decide against.
-    expect([...reject.values()].flat().length).toBe(38);
+    // status the rule does not decide against. Then 38 -> 40 when that entry
+    // learned to establish RECORD IDENTITY before its rule runs: two refusals of
+    // its own, for a candidate on another authority branch and one that accepted
+    // a different transition into this sequence.
+    //
+    // THE QUARANTINE COUNT DELIBERATELY DID NOT MOVE, and that is the load-
+    // bearing half. The identity comparison the entry needed already existed in
+    // the full evaluator, so it was EXTRACTED and shared rather than copied: one
+    // implementation, two callers, each mapping the classification to what its
+    // own operands can defend. Had it been copied, the evaluator's literals would
+    // each have gained a second producing site and the ambiguity register below
+    // would have gone from six to seven -- measuring duplication rather than
+    // observational ambiguity, which is a mistake this register has recorded
+    // once already.
+    expect([...reject.values()].flat().length).toBe(40);
     expect([...quarantine.values()].flat().length).toBe(10);
   });
 });

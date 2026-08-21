@@ -113,13 +113,48 @@ export type SystemRecordActiveDerivationDeferredReasonV1 =
    *
    * This package gates on the predecessor's PRESENCE; core additionally requires
    * it to be the candidate's exact verified active predecessor, and the
-   * difference is real -- five conjuncts core checks that the tombstone-facts
-   * assert does not. Minted rather than reused: `verified-state-mismatch`
-   * already answers for four other refusals, and this branch's own register of
-   * observationally ambiguous literals exists because one reason string mapping
-   * to many sites is a defect this slice measured, not a saving.
+   * difference is real -- six conjuncts core checks that the tombstone-facts
+   * assert does not (`networkId`, `peerPublicKey`, `acceptedTransitionDigest`,
+   * `evmIssuer`, `projectionSchemaDigest`, and the version relation). Minted
+   * rather than reused: `verified-state-mismatch` already answers for four other
+   * refusals, and this branch's own register of observationally ambiguous
+   * literals exists because one reason string mapping to many sites is a defect
+   * this slice measured, not a saving.
    */
-  | 'tombstone-predecessor-unbound';
+  | 'tombstone-predecessor-unbound'
+  /**
+   * The candidate tombstone is not on this row's authority branch.
+   *
+   * Its predecessor binds perfectly -- to a head on a DIFFERENT same-sequence
+   * branch. Core establishes record identity before its rule is consulted, and
+   * this is that refusal: the candidate's root subject, or the transition it
+   * accepted into this sequence, is not the applied row's.
+   *
+   * IT IS DISTINCT FROM `tombstone-predecessor-unbound` BECAUSE THE OLD LABEL
+   * WAS ACTIVELY WRONG HERE, not merely coarse. Reporting a bound predecessor as
+   * unbound sends a reader to check a conjunction that holds, for a state whose
+   * actual cause is a competing authority branch -- and this arm is the one the
+   * seam measured REACHABLE through the real receiver path, so it is the label
+   * most likely to be read in anger.
+   */
+  | 'same-sequence-authority-branch-mismatch'
+  /**
+   * Core refused the same-sequence CALL rather than deciding the tombstone.
+   *
+   * Its entry rejects a non-tombstone candidate, a candidate at another
+   * sequence, and an applied row it does not answer for. Every one is excluded
+   * upstream here -- the facts assert pins the candidate's state, this arm's own
+   * guard matches the sequences, and the classification gate filters the status
+   * -- so nothing reaches this label today.
+   *
+   * IT EXISTS SO THAT NOTHING IS ABSORBED. `reject.reason` is an unconstrained
+   * string on the published decision type, so a refusal this seam has never been
+   * shown would otherwise be relabelled as whichever mapped reason came first,
+   * and would read as a diagnosed state rather than an unrecognised one. The
+   * arm is unreachable and explicit, which is the difference between a
+   * precondition being enforced and being believed.
+   */
+  | 'same-sequence-entry-precondition-unmet';
 
 export type SystemRecordActiveDerivationCapacityReasonV1 =
   | 'state-revision-overflow'
@@ -966,6 +1001,46 @@ function assertTrustedReplacement(
  * system-record-verified-replacement-v1.test.ts:541. Re-checking it here would
  * be a guard nothing can make fail.
  */
+/**
+ * Core's same-sequence reject reasons, mapped by REASON.
+ *
+ * The literals are core's, matched exactly. A reason this seam has not been
+ * shown does NOT fall into a neighbouring label: it lands on
+ * `same-sequence-entry-precondition-unmet`, which says "core refused and this
+ * seam does not recognise the refusal" rather than asserting a diagnosis it
+ * cannot support. That is fail-closed in the only sense available here -- the
+ * candidate is withheld either way, and the difference is whether the operator
+ * reading the record is told something true.
+ *
+ * WHY THIS IS NOT A COMPILE-TIME EXHAUSTIVENESS CHECK. It cannot be: the
+ * published decision type declares `reason: string`, deliberately, because
+ * narrowing a published return type breaks external consumers' defensive arms
+ * with no runtime value moving -- a mistake this seam already made and reverted.
+ * The compile-time obligation lives instead in the type-contract lane, which
+ * pins the correspondence between these labels and the reason union they map
+ * into.
+ */
+function mapSameSequenceRejectV1(reason: string): Exclude<TombstoneAdvance, { outcome: 'advance' }> {
+  // TWO CORE CAUSES, ONE STORAGE OUTCOME, AND THE COLLAPSE IS DELIBERATE rather
+  // than an absorption. Both say the same thing at this layer -- the candidate
+  // is not on the applied row's authority branch -- and the only question this
+  // layer answers is whether to advance, which has one answer for both. The
+  // finer cause is not lost: it stays in core's reason, which is what a reader
+  // debugging one of these deferrals should follow. A second storage label would
+  // multiply a name by a distinction storage never acts on, and this branch's
+  // register of ambiguous literals already records what that costs.
+  if (
+    reason === 'same-sequence tombstone belongs to another authority branch'
+    || reason === 'same-sequence tombstone accepted a different authority transition'
+  ) {
+    return { outcome: 'deferred', reason: 'same-sequence-authority-branch-mismatch' };
+  }
+  if (reason === 'tombstone lacks its exact verified active predecessor') {
+    return { outcome: 'deferred', reason: 'tombstone-predecessor-unbound' };
+  }
+  return { outcome: 'deferred', reason: 'same-sequence-entry-precondition-unmet' };
+}
+
 function assertTrustedTombstoneReplacement(
   facts: SystemRecordVerifiedTombstoneReplacementFactsV1,
   snapshot: SystemRecordAppliedSnapshotV1,
@@ -1207,6 +1282,20 @@ function classifySameSequenceTombstoneAdvance(
       authoritySequence: String(current.transitionLineage.length),
       version: snapshot.headVersion,
       headDigest: current.headDigest,
+      // THE ROW'S AUTHORITY BRANCH, so core can establish that the candidate and
+      // this row are the same record before it decides a question that DELETES
+      // the projection. Both operands are persisted here and both were measured
+      // equal to the applied head's own fields rather than assumed: `currentRoot`
+      // is that head's `rootSubject`, and the lineage's last entry carries its
+      // `acceptedTransitionDigest`. Neither is derived, reconstructed, or
+      // defaulted -- a missing one would make the comparison pass by absence.
+      currentRoot: current.currentRoot,
+      ...(current.transitionLineage.length === 0
+        ? {}
+        : {
+          acceptedTransitionDigest:
+            current.transitionLineage[current.transitionLineage.length - 1]?.transitionDigest,
+        }),
     }),
   );
   // EVERY MEMBER OF THE FULL AUTHORITY UNION IS WRITTEN OUT, INCLUDING THE ONE
@@ -1224,19 +1313,39 @@ function classifySameSequenceTombstoneAdvance(
       // and bound to its exact predecessor; only the arithmetic was refusing it.
       return Object.freeze({ outcome: 'advance' });
     case 'reject':
-      // Every reject reachable from this call site is the predecessor one. The
-      // entry's other refusals are all excluded upstream: the facts assert pins
-      // `head.state` to 'tombstone', the applied sequence handed to core is the
-      // same string this arm's own guard matched, and the classification gate
-      // above leaves only rows whose status is one the entry decides against.
-      // The seam suite drives the unbound cells so the label is measured rather
-      // than argued.
-      return Object.freeze({ outcome: 'deferred', reason: 'tombstone-predecessor-unbound' });
+      // THE REASON IS READ, NOT JUST THE DISCRIMINANT, and that distinction is
+      // this arm's entire content. `reject.reason` is an unconstrained `string`
+      // on the published decision type, so a switch over `decision` alone is
+      // exhaustive in the compiler's eyes and silently wrong in ours: every
+      // refusal core can ever add lands in one arm and is relabelled as whatever
+      // that arm names. This one used to name the predecessor -- which stopped
+      // being true the moment core learned to refuse on record identity, and the
+      // first such cell measured through the real receiver path reported a
+      // perfectly bound predecessor as unbound.
+      return Object.freeze(mapSameSequenceRejectV1(decision.reason));
     case 'quarantine':
-      // THE DECLINE, on the literal verdict. See this function's docblock: the
-      // cell keeps today's answer pending the filed ADR question, and it keeps
-      // it by not adopting a verdict rather than by never asking for one.
-      return Object.freeze({ outcome: 'deferred', reason: 'authority-history-mismatch' });
+      // THE DECLINE, KEYED ON THE LITERAL AND NOT ON THE DISCRIMINANT. That
+      // distinction is the whole of the decline's safety argument: this seam
+      // holds ONE cell at today's answer pending a filed ADR question about a
+      // fork-shaped equal-version conflict, and `head-fork` is that cell. The
+      // reason union is closed at two members, so keying on `quarantine` alone
+      // would silently adopt this hold for `transition-equivocation` too -- a
+      // durable authority state reported as awaiting an ADR answer that has
+      // nothing to do with it. This arm shipped keyed on the discriminant, which
+      // was harmless only while the entry could not produce the other member.
+      if (decision.reason === 'head-fork') {
+        return Object.freeze({ outcome: 'deferred', reason: 'authority-history-mismatch' });
+      }
+      // The other member is unreachable through this entry BY CONSTRUCTION: it
+      // refuses a differing accepted transition as a reject before the rule is
+      // consulted, precisely because a digest comparison cannot ground the
+      // claim that a record equivocated. Written explicitly rather than folded,
+      // so that if the entry ever does return it, it is not absorbed into a hold
+      // it was never about.
+      return Object.freeze({
+        outcome: 'deferred',
+        reason: 'same-sequence-entry-precondition-unmet',
+      });
     case 'stale':
       // ADR :127-128, the lowest tombstone winning over a higher one. Only
       // reachable against a tombstoned applied row, which the precondition

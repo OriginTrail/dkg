@@ -223,6 +223,33 @@ function rotatedActiveHead(
   } as AgentProfileActiveHeadObjectV1;
 }
 
+/**
+ * The rotation above, exposed for callers who need a head on an authority
+ * branch this fixture's own chain does not walk -- an equivocating rotation, a
+ * competitor at a sequence the chain already occupies.
+ *
+ * IT IS EXPOSED RATHER THAN LEFT PRIVATE BECAUSE THE ALTERNATIVE IS A COPY, and
+ * a copy of this function is the one shape guaranteed to be wrong. Rotating an
+ * issuer obliges FIVE derived rewrites that are invisible until one is missed:
+ * the root subject, the owned-subject table digest, the projection quads and
+ * their content digest, and four fields of the graph-scoped author seal
+ * (`authorAddress`, `kaUal`, `reservedKaId`, `assertionMerkleRoot`). Each
+ * omission is refused one layer deeper than the last, in DOMAIN wording -- a
+ * caller who sets only the issuer is told the seal author is wrong, fixes that,
+ * and is then told the UAL author is wrong. Three separate attempts on this
+ * branch read those refusals as "the system forbids an alternate authority"
+ * when every one of them meant "you rebuilt this head by hand".
+ */
+export function rotatedActiveHeadV1(
+  source: AgentProfileActiveHeadObjectV1,
+  issuer: string,
+  authoritySequence: string,
+  version: string,
+  history: Readonly<{ previousHeadDigest?: Digest32V1; acceptedTransitionDigest?: Digest32V1 }>,
+): AgentProfileActiveHeadObjectV1 {
+  return rotatedActiveHead(source, issuer, authoritySequence, version, history);
+}
+
 export interface RotatedAuthorityChainV1 {
   /** The head at the top of the chain -- `heads[steps]`. */
   readonly base: AgentProfileActiveHeadObjectV1;

@@ -803,3 +803,100 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
     )).toStrictEqual({ decision: 'stale' });
   });
 });
+
+/**
+ * THE EXPIRED-PRIOR MODE, THROUGH THIS ENTRY.
+ *
+ * Every retained transition the sweep builds is co-signed, so no cell varies
+ * `mode` at all and the whole 1,728-cell population exercises one of the two.
+ * A reviewer noticed and supplied the construction; it reaches the branch
+ * verbatim.
+ *
+ * THE ROW ASSERTS TODAY'S BEHAVIOUR AND DOES NOT ENDORSE IT. Read the two rows
+ * together: the SAME expired-prior transition yields a permanent refusal when it
+ * names the tombstone, and the tombstone's precedence when it names another
+ * head. An expired-prior transition naming the tombstone can never validate a
+ * descendant, so it is arguable that the safe disposition is to honour the
+ * revocation rather than refuse forever -- refusing forever means retrying
+ * indefinitely on evidence that cannot improve. ADR 0002's resurrection passages
+ * can be read either way and the question is filed with the document's owner.
+ *
+ * So this is a TRIPWIRE, not an endorsement: if the specification answers that
+ * unusable expired-prior evidence should yield to the tombstone, this row goes
+ * red on the change and names the reason, instead of a semantic decision landing
+ * silently behind a green suite.
+ *
+ * SCOPED TO WHAT IT PROVES. The helper's next conjunct -- the cross-object
+ * `priorValidUntil` equality -- is NOT reachable through this entry: a late
+ * tombstone's named prior head is the tombstone itself, so the
+ * prior-must-be-active check fires first. Measured rather than reasoned:
+ * perturbing `priorValidUntil` leaves the verdict byte-identical, which is why
+ * the third row is here.
+ */
+describe('the late-tombstone entry propagates an inadmissible expired-prior refusal', () => {
+  const candidate = buildLateTombstoneCandidateV1();
+  const candidateDigest = computeAgentProfileHeadObjectDigestV1(candidate);
+  const retained = coreSequenceTransitionV1(String(BigInt(LATE_SEQUENCE) + 1n));
+  const predecessor = coreSequenceActiveHeadV1(LATE_SEQUENCE);
+
+  /** The applied lineage that RETAINS the transition under test. */
+  const lineageForV1 = (
+    transition: AgentProfileAuthorityTransitionV1,
+  ): readonly AgentProfileAppliedTransitionV1[] => Object.freeze([
+    Object.freeze({
+      priorAuthoritySequence: '0',
+      nextAuthoritySequence: '1',
+      transitionDigest: computeAgentProfileAuthorityTransitionDigestV1(
+        coreSequenceTransitionV1('1'),
+      ),
+    }),
+    Object.freeze({
+      priorAuthoritySequence: transition.priorAuthoritySequence,
+      nextAuthoritySequence: transition.nextAuthoritySequence,
+      transitionDigest: computeAgentProfileAuthorityTransitionDigestV1(transition),
+    }),
+  ]);
+
+  const expiredPrior = (overrides: Record<string, unknown>) => Object.freeze({
+    ...structuredClone(retained),
+    mode: 'expired-prior',
+    priorValidUntil: (predecessor as unknown as Record<string, string>).validUntil,
+    ...overrides,
+  }) as unknown as AgentProfileAuthorityTransitionV1;
+
+  const drive = (transition: AgentProfileAuthorityTransitionV1) => {
+    const decision = evaluateAgentProfileLateTombstoneAdvanceV1(
+      candidate as never,
+      {
+        retainedTransition: { transition, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
+        tombstonePredecessor: predecessor,
+      } as never,
+      lineageForV1(transition),
+    );
+    return decision.decision === 'reject' ? `reject|${decision.reason}` : decision.decision;
+  };
+
+  it('refuses when the expired-prior transition names the tombstone, and says why', () => {
+    expect({
+      // The control: identical operands, co-signed. Without it the refusal below
+      // could be caused by anything else the construction changed.
+      coSignedBinding: drive(Object.freeze({
+        ...structuredClone(retained),
+        priorHeadDigest: candidateDigest,
+      }) as unknown as AgentProfileAuthorityTransitionV1),
+      expiredPriorBinding: drive(expiredPrior({ priorHeadDigest: candidateDigest })),
+      // The conjunct below the one under test is pre-empted, not merely unused.
+      expiredPriorBindingWrongValidity: drive(expiredPrior({
+        priorHeadDigest: candidateDigest,
+        priorValidUntil: '2099-01-01T00:00:00Z',
+      })),
+      expiredPriorNamingAnotherHead: drive(expiredPrior({})),
+    }).toStrictEqual({
+      coSignedBinding: 'stale',
+      expiredPriorBinding: 'reject|expired-prior transition cannot resurrect a tombstone',
+      expiredPriorBindingWrongValidity:
+        'reject|expired-prior transition cannot resurrect a tombstone',
+      expiredPriorNamingAnotherHead: 'accept',
+    });
+  });
+});

@@ -276,6 +276,12 @@ export const JOIN_LEVEL1_PER_ENTRY_V1: Readonly<Record<string, JoinLevel1EntryCo
       'deferred|undecided-authority-classification': 768,
       'deferred|verified-state-mismatch': 0,
       'deferred|root-state-changed': 0,
+      // The same-sequence seam's four, zero under `reject` for the reason the
+      // unreached register states per label rather than as one blanket cause.
+      'deferred|same-sequence-tombstone-conflict': 0,
+      'deferred|tombstone-predecessor-unbound': 0,
+      'deferred|same-sequence-authority-branch-mismatch': 0,
+      'deferred|same-sequence-entry-precondition-unmet': 0,
       'capacity-exhausted|state-revision-overflow': 0,
       'capacity-exhausted|capacity-revision-overflow': 0,
       'capacity-exhausted|record-count-cap': 0,
@@ -353,7 +359,7 @@ export const JOIN_DIVERGENCES_V1: Readonly<Record<string, number>> = {
  *
  * Storage returned a FLAT `stale` for any candidate below the current sequence,
  * checking neither the predecessor nor the transition --
- * `packages/storage/src/system-record-next-state-v1-internal.ts:1000-1003`
+ * `packages/storage/src/system-record-next-state-v1-internal.ts:1075-1003`
  * before the routing, where the condition read `authoritySequence <
  * transitionLineage.length` and the lineage's CONTENTS were never consulted. So
  * CORE ACCEPTS A LATE TOMBSTONE THAT STORAGE REFUSED OUTRIGHT, and only the
@@ -506,6 +512,17 @@ export const JOIN_STORAGE_LABEL_REACH_V1: Readonly<Record<string, number>> = {
   'deferred|undecided-authority-classification': 1152,
   'deferred|verified-state-mismatch': 0,
   'deferred|root-state-changed': 0,
+  // THE SAME-SEQUENCE SEAM'S FOUR, ALL ZERO HERE, AND THE ZEROES ARE NOT ALIKE.
+  // Each is classified in JOIN_UNREACHED_OUTCOMES_V1 by the discriminator this
+  // harness applies everywhere else: whether the SYSTEM forbids the cell or this
+  // FIXTURE never builds it. Three of the four are the second kind, so they
+  // bound the coverage claim rather than supporting it -- and the region behind
+  // an instrument-limit zero is exactly where this branch already found a live
+  // revocation bypass sitting unexamined.
+  'deferred|same-sequence-tombstone-conflict': 0,
+  'deferred|tombstone-predecessor-unbound': 0,
+  'deferred|same-sequence-authority-branch-mismatch': 0,
+  'deferred|same-sequence-entry-precondition-unmet': 0,
   'capacity-exhausted|state-revision-overflow': 0,
   'capacity-exhausted|capacity-revision-overflow': 0,
   'capacity-exhausted|record-count-cap': 0,
@@ -574,6 +591,50 @@ export const JOIN_UNREACHED_OUTCOMES_V1: readonly JoinUnreachedOutcomeV1[] = [
     why: 'harness-never-builds',
     reason: 'The other arm of the same root-snapshot classification as root-collision, and '
       + 'unreached for the same reason.',
+  },
+  {
+    side: 'storage',
+    outcome: 'deferred|same-sequence-authority-branch-mismatch',
+    why: 'harness-never-builds',
+    reason: 'THIS SWEEP HAS NO AUTHORITY-BRANCH AXIS. Every candidate it mints comes off '
+      + 'the fixture\'s own chain, so candidate and applied row are always the same record '
+      + 'on the same branch and the identity conjuncts are satisfied in every cell. Not '
+      + 'forbidden, and emphatically not unreachable: the same-sequence seam suite builds a '
+      + 'competing sequence-2 head one field away and drives this outcome through the real '
+      + 'receiver path. This zero measures the instrument, and the region behind it is where '
+      + 'the branch-identity defect lived while every aggregate pin here stayed green.',
+  },
+  {
+    side: 'storage',
+    outcome: 'deferred|tombstone-predecessor-unbound',
+    why: 'system-forbids',
+    reason: 'An unbound tombstone cannot carry the verified authority summary this package '
+      + 'requires: the verification closure runs THE SAME binding predicate over the heads '
+      + 'it parses before it will mint one. Enumerated conjunct by conjunct in the '
+      + 'same-sequence seam suite -- all ten refused upstream, four by the head codec and '
+      + 'seven by the closure, with a bound control minting in the same run. The forbidding '
+      + 'gate lives in ANOTHER MODULE, so this classification is contingent on that closure '
+      + 'and the enumeration doubles as its tripwire.',
+  },
+  {
+    side: 'storage',
+    outcome: 'deferred|same-sequence-tombstone-conflict',
+    why: 'harness-never-builds',
+    reason: 'Requires an applied row whose authority classification V1 has not decided -- a '
+      + 'tombstoned row reaching the same-sequence arm. The sweep\'s applied-status axis '
+      + 'feeds the snapshot rather than the disposition reader, so it never presents that '
+      + 'combination. The seam suite drives it directly.',
+  },
+  {
+    side: 'storage',
+    outcome: 'deferred|same-sequence-entry-precondition-unmet',
+    why: 'system-forbids',
+    reason: 'The fail-closed arm for a core refusal this seam does not recognise. Core\'s own '
+      + 'preconditions -- non-tombstone candidate, wrong sequence, an applied status the '
+      + 'rule does not answer for -- are each excluded upstream before the call is made, and '
+      + 'the one quarantine reason the entry cannot return is refused as a reject before the '
+      + 'rule runs. Unreachable BY DESIGN and written anyway, so a reject core adds later is '
+      + 'reported as unrecognised instead of borrowing whichever mapped reason stands first.',
   },
   {
     side: 'core',

@@ -360,14 +360,25 @@ const sameSequenceEvidenceKeysAreExact: SAME_SEQUENCE_EVIDENCE_KEYS_ARE_EXACT = 
  * THE APPLIED-ROW OPERAND IS A ROW, NOT A HEAD OBJECT, AND THAT IS THE WHOLE
  * REASON THE ENTRY IS CALLABLE.
  *
- * A receiver persists a status, a digest, a version and a sequence. The moment
- * this shape asks for a head object, the only way to call the entry is to
- * manufacture one -- inventing the issuer, clock and schema fields its digest is
- * taken over. Pinning the keys exactly is what stops that from being added
- * later as a convenience.
+ * A receiver persists a status, a digest, a version, a sequence, its current
+ * root and its accepted transition lineage. The moment this shape asks for a
+ * head object, the only way to call the entry is to manufacture one -- inventing
+ * the issuer, clock and schema fields its digest is taken over. Pinning the keys
+ * exactly is what stops that from being added later as a convenience.
+ *
+ * THE TWO IDENTITY KEYS ARE PINNED FOR THE OPPOSITE REASON, and that is why they
+ * are named here rather than the pin being widened to admit them. `currentRoot`
+ * and `acceptedTransitionDigest` were ADDED because without them this entry
+ * decided a projection-DELETING question without establishing that the candidate
+ * and the applied row were the same record -- reachable through the real
+ * receiver path, not a hardening. Both are values a receiver already holds, so
+ * neither reopens the manufacture-a-head trap the rest of this pin guards.
+ * Dropping either one silently restores the defect, so they are named in a lane
+ * that actually compiles.
  */
 const SAME_SEQUENCE_APPLIED_ROW_KEYS_V1 = [
   'status', 'authoritySequence', 'version', 'headDigest',
+  'currentRoot', 'acceptedTransitionDigest',
 ] as const;
 type SAME_SEQUENCE_APPLIED_ROW_KEYS_ARE_EXACT =
   keyof AgentProfileSameSequenceAppliedRowV1 extends
