@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import { jsonResponse, readBody } from '@origintrail-official/dkg/daemon/plugin-api';
 import type { RequestContext } from '@origintrail-official/dkg/daemon/plugin-api';
 import { coreSchema, CORE_FIELDS, type CoreFields } from './schema.js';
@@ -35,14 +35,6 @@ export type KafkaPluginCtx = Pick<
 > & {
   config: RequestContext['config'] & { kafka?: { contextGraphId?: string } };
 };
-
-export interface KafkaJobStatus {
-  status: string;
-  request?: unknown;
-  timestamps: { acceptedAt: number; finalizedAt?: number };
-  finalization?: { ual?: string };
-  failure?: { message?: string };
-}
 
 interface KafkaJobScope {
   contextGraphId?: string;
@@ -89,7 +81,7 @@ export function createHandler(opts: CreateHandlerOptions) {
     : coreSchema;
 
   return async function handle(ctx: KafkaPluginCtx): Promise<void> {
-    const path = ctx.path ?? new URL(ctx.req.url ?? '/', `http://${ctx.req.headers.host ?? 'localhost'}`).pathname;
+    const path = ctx.path;
 
     if (ctx.req.method === 'POST' && path === registerPath) {
       return handlePostRegister(ctx, opts, mergedSchema, loggedCollisionKeys);
@@ -417,13 +409,8 @@ async function handleGetSingle(
 }
 
 function parseSearchParams(ctx: KafkaPluginCtx): URLSearchParams {
-  if (ctx.url) return ctx.url.searchParams;
-  const rawUrl = ctx.req.url ?? '/';
-  try {
-    return new URL(rawUrl, `http://${ctx.req.headers.host ?? 'localhost'}`).searchParams;
-  } catch {
-    return new URLSearchParams();
-  }
+  // The canonical context always carries a parsed `url`; the daemon builds it before dispatch.
+  return ctx.url.searchParams;
 }
 
 function discoveryQueryOptions(
