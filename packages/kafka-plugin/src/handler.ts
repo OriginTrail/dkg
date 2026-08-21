@@ -49,7 +49,13 @@ interface KafkaJobScope {
 export interface CreateHandlerOptions {
   basePath: string;
   contextGraphId?: string;
-  publishOptions?: Record<string, unknown>;
+  /**
+   * The agent's own publish options, derived from the capability rather than restated as a
+   * loose record. A `Record<string, unknown>` is assignable to them (its index signature
+   * satisfies the optional properties), so it compiled fine — and silently accepted nonsense
+   * like `accessPolicy: 42` from plugin configuration.
+   */
+  publishOptions?: Parameters<PluginAgentCapability['publishAsync']>[3];
   extension?: KafkaPluginExtension<Record<string, unknown>>;
 }
 
