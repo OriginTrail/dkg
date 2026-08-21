@@ -42,17 +42,15 @@ interface KafkaJobScope {
 }
 
 /**
- * The publish options a plugin consumer may set: the PUBLISHED contract, unchanged.
+ * COMPATIBILITY SURFACE: whatever a consumer passes, forwarded to the agent as-is.
  *
- * Deliberately not narrowed here. Three attempts in this PR to type it more tightly each
- * turned out to be a source-breaking change to a published plugin API in a patch line:
- * a strict allow-list rejected `{ localOnly: true }`, and rejecting
- * `admittedByAgentAddress` broke callers that pass it today. The security property does not
- * depend on any of it -- the handler overwrites that field with the authenticated requester
- * after spreading these options, and a runtime test proves an attacker-supplied value loses.
+ * Nothing here is checked. Values are not validated, unknown keys are accepted, and
+ * `admittedByAgentAddress` is accepted and then IGNORED -- the handler overwrites it with the
+ * authenticated requester after spreading these options, which is where that guarantee lives.
  *
- * Typing this surface (known-value checking, an allow-list, deprecating the ignored field)
- * is worth doing and belongs with a major, where the break is expected. Tracked on #2305.
+ * Deriving and narrowing this from the agent's own options is tracked on #2305 for a major,
+ * because every narrowing rejects configurations that compile against the published contract
+ * today.
  */
 export type KafkaPublishOptions = Record<string, unknown>;
 

@@ -18,9 +18,7 @@ export interface KafkaPluginOptions<TParsed = Record<string, unknown>> {
   basePath?: string;
   contextGraphId?: string;
   /**
-   * Derived from the same canonical capability the handler uses. This is the contract a
-   * CONSUMER actually types against, so narrowing only the internal handler option left
-   * `createKafkaPlugin({ publishOptions: { accessPolicy: 42 } })` compiling.
+   * Forwarded to the agent as-is. Not validated here: see {@link KafkaPublishOptions}.
    */
   publishOptions?: KafkaPublishOptions;
   extension?: KafkaPluginExtension<TParsed>;
