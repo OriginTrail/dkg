@@ -843,11 +843,15 @@ function bytesEqual(left: Uint8Array | undefined, right: Uint8Array | undefined)
  * Returns the OWNER rather than narrowing the argument, so the caller keeps a resolved value and
  * never has to consult the caller-owned object again. Splitting validation from resolution is what
  * opened a window for the object to be mutated across an await.
+ *
+ * The result is non-optional. An owner that could be `undefined` would let `{ kind: 'node' }` pass
+ * this boundary and still enqueue an UNOWNED job on a node with no default agent — the one state
+ * this whole parameter exists to make unrepresentable.
  */
 function resolvePublishAsyncAdmissionOwner(
   admission: PublishAsyncAdmission,
-  nodeOwner: () => string | undefined,
-): string | undefined {
+  nodeOwner: () => string,
+): string {
   const kind = (admission as { kind?: unknown } | null | undefined)?.kind;
   if (kind === 'node') return nodeOwner();
   if (kind === 'agent') {
@@ -1374,7 +1378,10 @@ export class PublishMethods extends DKGAgentBase {
     //    it had passed validation, redirecting the force-clear or blanking it entirely.
     const admittedByAgentAddress = resolvePublishAsyncAdmissionOwner(
       admission,
-      () => this.getDefaultAgentAddress(),
+      // The canonical node identity, not a second policy: `resolveAgentAddress` is what the
+      // daemon resolves a node-level token to, so the owner recorded here is the one that token
+      // can later present. It always yields a string (default agent, else this node's peer id).
+      () => this.resolveAgentAddress(undefined),
     );
     const contextGraphId = normalizePublishContextGraphId(contextGraphIdOrUal);
     const ctx = opts?.operationCtx ?? createOperationContext('publish');
@@ -1657,7 +1664,7 @@ export class PublishMethods extends DKGAgentBase {
     // node-level token resolves to in the daemon, so the operator keeps the exit.
     const captureID = await asyncPublisher.enqueueKnowledgeAssetVmPublish(
       intent,
-      admittedByAgentAddress ? { admittedByAgentAddress } : undefined,
+      { admittedByAgentAddress },
     );
     return { captureID };
   }

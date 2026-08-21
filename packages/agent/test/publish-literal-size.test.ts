@@ -13,7 +13,7 @@ describe('agent publish literal size validation', () => {
   it('rejects publishAsync private quads before workspace staging', async () => {
     const agentStub = {
       contextGraphExists: vi.fn(async () => true),
-      getDefaultAgentAddress: () => '0xNODE',
+      resolveAgentAddress: () => '0xNODE',
     };
 
     await expect(
@@ -41,7 +41,7 @@ describe('agent publish literal size validation', () => {
     // Rejection happens BEFORE any workspace work: `contextGraphExists` is the first thing the
     // publish path touches, so it not being called is the evidence nothing was staged.
     const contextGraphExists = vi.fn(async () => true);
-    const agentStub = { contextGraphExists, getDefaultAgentAddress: () => '0xNODE' };
+    const agentStub = { contextGraphExists, resolveAgentAddress: () => '0xNODE' };
     const content = { publicQuads: [], privateQuads: [] };
 
     for (const bad of [

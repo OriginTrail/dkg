@@ -368,8 +368,13 @@ describe('publishJsonLd', () => {
 
     // An INTERNAL producer supplies no principal: the node's own default agent owns the job, the
     // same identity a node-level token resolves to in the daemon, so the operator keeps the exit.
-    const nodeOwner = agent.getDefaultAgentAddress();
-    expect(nodeOwner).toBeTruthy();
+    // 3829782408 — the CANONICAL node identity, which is what the daemon resolves a node-level
+    // token to, so the recorded owner is the one that token can present. It always yields a
+    // string (default agent, else this node's peer id), which is what makes an unowned job
+    // unrepresentable rather than merely unlikely.
+    const nodeOwner = agent.resolveAgentAddress(undefined);
+    expect(typeof nodeOwner).toBe('string');
+    expect(nodeOwner.length).toBeGreaterThan(0);
     const internal = await agent.publishAsync(
       { kind: 'node' },
       'did:dkg:context-graph:async-admission',
