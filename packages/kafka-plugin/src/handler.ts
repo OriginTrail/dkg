@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse, readBody } from '@origintrail-official/dkg/daemon/plugin-api';
+import type { PublishAsyncAdmission } from '@origintrail-official/dkg/daemon/plugin-api';
 import { coreSchema, CORE_FIELDS, type CoreFields } from './schema.js';
 import { buildKa, mergeAugmentFragment } from './ka-builder.js';
 import type { KafkaPluginExtension } from './extension.js';
@@ -19,7 +20,7 @@ export interface KafkaPluginCtx {
   res: ServerResponse;
   agent: {
     publishAsync(
-      admission: { kind: 'agent'; agentAddress: string } | { kind: 'node' },
+      admission: PublishAsyncAdmission,
       contextGraphId: string,
       content: Record<string, unknown>,
       opts?: Record<string, unknown>,

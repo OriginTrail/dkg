@@ -18,6 +18,7 @@ describe('agent publish literal size validation', () => {
     await expect(
       PublishMethods.prototype.publishAsync.call(
         agentStub as never,
+        { kind: 'node' },
         'computer-history',
         {
           publicQuads: [],
@@ -30,6 +31,39 @@ describe('agent publish literal size validation', () => {
       maxBytes: 60_000,
       predicate: 'http://schema.org/text',
     });
+  });
+
+  it('rejects a malformed admission before any staging, and never falls back to the node', async () => {
+    // 3829496422 — the union is erased at runtime, so a JavaScript plugin can present an unknown
+    // kind. Reading "not 'agent'" as node admission would silently rebuild the ownership defect
+    // this parameter exists to prevent, and a blank identity must not become the node owner.
+    // Rejection happens BEFORE any workspace work: `contextGraphExists` is the first thing the
+    // publish path touches, so it not being called is the evidence nothing was staged.
+    const contextGraphExists = vi.fn(async () => true);
+    const agentStub = { contextGraphExists, getDefaultAgentAddress: () => '0xNODE' };
+    const content = { publicQuads: [], privateQuads: [] };
+
+    for (const bad of [
+      { kind: 'agnt', agentAddress: '0xSUBMITTER' },  // typo: must NOT become node-owned
+      { kind: 'agent' },                              // no address
+      { kind: 'agent', agentAddress: '' },            // blank
+      { kind: 'agent', agentAddress: '   ' },         // whitespace only
+      { kind: 'agent', agentAddress: null },          // wrong type, and used to throw late
+      {},                                             // no kind at all
+      undefined,
+    ]) {
+      await expect(
+        PublishMethods.prototype.publishAsync.call(
+          agentStub as never,
+          bad as never,
+          'computer-history',
+          content as never,
+        ),
+      ).rejects.toThrow(/admission/i);
+    }
+
+    // Nothing was staged for any of them.
+    expect(contextGraphExists).not.toHaveBeenCalled();
   });
 
   it('rejects direct publish quads before chain or publisher work', async () => {

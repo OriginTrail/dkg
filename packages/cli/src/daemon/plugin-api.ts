@@ -15,6 +15,16 @@ import type {
 import type { RequestContext as DaemonRequestContext } from './routes/context.js';
 
 /**
+ * The admission contract a plugin must satisfy when it enqueues an async publish.
+ *
+ * Re-exported here rather than restated by each plugin: a hand-copied union cannot be checked
+ * against the real agent, so it goes stale silently the moment a variant is added or an address
+ * shape is refined — which is exactly how the Kafka lane ended up assigning its submitters' jobs
+ * to the node.
+ */
+export type { PublishAsyncAdmission } from '@origintrail-official/dkg-agent';
+
+/**
  * Plugin-only view of the canonical daemon context. The deprecated aliases are
  * materialized by the plugin dispatcher, so built-in routes cannot accidentally
  * treat them as independent lifecycle state.

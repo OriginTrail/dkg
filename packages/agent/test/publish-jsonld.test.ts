@@ -390,18 +390,17 @@ describe('publishJsonLd', () => {
     const authenticatedJob = await asyncPublisher.getStatus(authenticated.captureID);
     expect(authenticatedJob?.admission?.byAgentAddress).toBe(EPCIS_CALLER);
 
-    // 3826008054 — malformed-but-type-valid identities. An empty or whitespace-only string is
-    // ABSENT, not a principal: it must fall back to the node owner rather than slip past the
-    // default and enqueue a job nobody can ever force-clear.
+    // 3829496422 — a blank agent identity now REJECTS rather than falling back to the node.
+    // Silently substituting the node owner for a caller that claimed to have an authenticated
+    // identity hands the destructive force-clear to an agent that did not submit the job; a host
+    // with no principal is expected to say `{ kind: 'node' }` instead.
     for (const blank of ['', '   ']) {
-      const res = await agent.publishAsync(
+      await expect(agent.publishAsync(
         { kind: 'agent', agentAddress: blank },
         'did:dkg:context-graph:async-admission',
         content(`AsyncAdmissionBlank${blank.length}`),
         { localOnly: true },
-      );
-      const blankJob = await asyncPublisher.getStatus(res.captureID);
-      expect(blankJob?.admission?.byAgentAddress).toBe(nodeOwner);
+      )).rejects.toThrow(/non-blank agentAddress/);
     }
 
     // The discriminating half: the owner is NOT the author. Under curated publishing the signer

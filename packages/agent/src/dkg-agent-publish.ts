@@ -831,6 +831,37 @@ function bytesEqual(left: Uint8Array | undefined, right: Uint8Array | undefined)
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 
+/**
+ * Resolve the owner from a DECLARED admission, rejecting anything else.
+ *
+ * Exhaustive on purpose. `PublishAsyncAdmission` is erased at runtime, so a JavaScript plugin or a
+ * value widened through `any` can present an unknown kind; reading "not 'agent'" as node admission
+ * would silently reproduce the ownership defect the parameter exists to prevent. Only an explicit
+ * `node` selects the node owner, and a malformed agent identity fails here — before any staging —
+ * rather than after irreversible publish preparation.
+ */
+function assertValidPublishAsyncAdmission(
+  admission: PublishAsyncAdmission,
+): asserts admission is PublishAsyncAdmission {
+  const kind = (admission as { kind?: unknown } | null | undefined)?.kind;
+  if (kind === 'node') return;
+  if (kind === 'agent') {
+    const agentAddress = (admission as { agentAddress?: unknown }).agentAddress;
+    if (typeof agentAddress !== 'string' || agentAddress.trim().length === 0) {
+      throw new Error(
+        'publishAsync: admission { kind: "agent" } requires a non-blank agentAddress. A blank '
+        + 'identity is not a principal, and defaulting it to the node would hand the destructive '
+        + 'force-clear to an agent that did not submit this job.',
+      );
+    }
+    return;
+  }
+  throw new Error(
+    `publishAsync: unknown admission kind ${JSON.stringify(kind)}. State { kind: 'agent', `
+    + "agentAddress } for an authenticated caller or { kind: 'node' } for an internal producer.",
+  );
+}
+
 export class PublishMethods extends DKGAgentBase {
   async publishWorkspaceGossip(this: DKGAgent,
     contextGraphId: string,
@@ -1329,6 +1360,13 @@ export class PublishMethods extends DKGAgentBase {
     content: PublishAsyncContent,
     opts?: PublishAsyncOpts,
   ): Promise<{ captureID: string }> {
+    // Validated FIRST, before any staging, and fail-closed. The union is a compile-time
+    // guarantee only: a JavaScript plugin, a dynamically loaded handler, or anything widened
+    // through `any` can hand us an unknown kind. Treating "not 'agent'" as node admission would
+    // rebuild the exact defect this parameter exists to prevent — `{ kind: 'agnt' }` silently
+    // becoming a node-owned job — and a malformed agent address must not surface only after
+    // irreversible publish preparation has already happened.
+    assertValidPublishAsyncAdmission(admission);
     const contextGraphId = normalizePublishContextGraphId(contextGraphIdOrUal);
     const ctx = opts?.operationCtx ?? createOperationContext('publish');
 
@@ -1608,11 +1646,10 @@ export class PublishMethods extends DKGAgentBase {
     // who enqueued nothing. A host that authenticated a caller passes it in; otherwise this is an
     // internal producer and the node's own default agent owns the job — the same identity a
     // node-level token resolves to in the daemon, so the operator keeps the exit.
-    // The principal comes from the ADMISSION the caller declared, never from the options bag.
-    // A blank agent address is absent rather than a principal, and falls back to the node the
-    // same way an explicit node admission does — an unowned job has no manual exit at all.
-    const declared = admission.kind === 'agent' ? admission.agentAddress.trim() : '';
-    const admittedByAgentAddress = declared.length > 0 ? declared : this.getDefaultAgentAddress();
+    // Shape was validated at entry, so this ternary cannot silently absorb an unknown kind.
+    const admittedByAgentAddress = admission.kind === 'agent'
+      ? admission.agentAddress.trim()
+      : this.getDefaultAgentAddress();
     const captureID = await asyncPublisher.enqueueKnowledgeAssetVmPublish(
       intent,
       admittedByAgentAddress ? { admittedByAgentAddress } : undefined,
