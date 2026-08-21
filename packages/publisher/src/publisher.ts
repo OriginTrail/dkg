@@ -269,6 +269,13 @@ export interface PublishOptions {
    */
   onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
   /**
+   * Best-effort notification that an RPC endpoint accepted the exact signed
+   * transaction recorded by {@link onBeforeBroadcast}. This is deliberately
+   * post-send and non-fail-closed: queue workers may use it to detach receipt
+   * reconciliation, but callback failure can never undo or reject the send.
+   */
+  onBroadcastAccepted?: (record: PreBroadcastRecord) => void;
+  /**
    * Skip the publisher-level context-graph graph creation/ensure step.
    * Only callers that already validated the target context graph should set
    * this; it avoids re-entering store-backed graph discovery on direct publish.

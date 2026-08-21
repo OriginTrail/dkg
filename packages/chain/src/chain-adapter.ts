@@ -788,6 +788,16 @@ export interface V10PublishParams {
    * here would otherwise race the broadcast.
    */
   onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  /**
+   * Invoked after an RPC endpoint has accepted the exact signed publish
+   * transaction. Unlike {@link onBroadcast}, this is post-send notification:
+   * it is best-effort and MUST NOT be used as a fail-closed WAL boundary.
+   *
+   * Async queue runners use it to release the wallet worker while receipt
+   * reconciliation continues independently. A callback failure cannot undo an
+   * accepted transaction and therefore must not fail the chain write.
+   */
+  onBroadcastAccepted?: (signal: PreBroadcastSignal) => void;
 }
 
 export interface V10UpdateKAParams {
@@ -839,6 +849,8 @@ export interface V10UpdateKAParams {
    * (fail-closed contract, exactly-once, Promise return, etc.).
    */
   onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  /** Post-send counterpart to {@link onBroadcast}; see V10PublishParams. */
+  onBroadcastAccepted?: (signal: PreBroadcastSignal) => void;
 }
 
 /**

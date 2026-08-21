@@ -936,6 +936,11 @@ export class TripleStoreAsyncLiftPublisher
       if (preflight?.action === 'noop') {
         return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshot, snapshotMetadata);
       }
+      let signalBroadcastAccepted!: (record: PreBroadcastRecord) => void;
+      const broadcastAccepted = new Promise<PreBroadcastRecord>((resolve) => {
+        signalBroadcastAccepted = resolve;
+      });
+      const inheritedBroadcastAccepted = prepared.publishOptions.onBroadcastAccepted;
       const executionInput = {
         walletId,
         request,
@@ -946,9 +951,38 @@ export class TripleStoreAsyncLiftPublisher
         publishOptions: {
           ...prepared.publishOptions,
           onBeforeBroadcast: broadcastRecorder.onBeforeBroadcast,
+          // Post-send, non-fail-closed signal. Once an endpoint accepts the
+          // exact signed transaction recorded above, this queue worker no
+          // longer needs to occupy the wallet while receipt polling runs.
+          onBroadcastAccepted: (record: PreBroadcastRecord) => {
+            try {
+              inheritedBroadcastAccepted?.(record);
+            } finally {
+              signalBroadcastAccepted(record);
+            }
+          },
         },
       };
-      publishResult = await this.knowledgeAssetVmPublishHandler.execute(executionInput);
+      const execution = this.knowledgeAssetVmPublishHandler.execute(executionInput);
+      const outcome = await Promise.race([
+        execution.then((result) => ({ kind: 'settled' as const, result })),
+        broadcastAccepted.then(() => ({ kind: 'accepted' as const })),
+      ]);
+      if (outcome.kind === 'accepted') {
+        // Receipt success, revert, timeout, or temporary lookup failure is now
+        // owned solely by chain-proof recovery. The execution continues so the
+        // normal publisher can finish any local post-receipt work, but its
+        // return value is intentionally not allowed to rewrite queue truth in
+        // parallel with recovery.
+        void execution.then(
+          () => undefined,
+          () => undefined,
+        );
+        const current = await this.getRequiredJob(claimed.jobId);
+        await this.releaseWalletLockForJob(current);
+        return current;
+      }
+      publishResult = outcome.result;
     } catch (error) {
       // #1864 — switch on the typed pre-send boundary outcome (no `executorReturned` flag,
       // no `getStatus` re-read). The tx send happens strictly AFTER the write-ahead durably
@@ -957,8 +991,11 @@ export class TripleStoreAsyncLiftPublisher
       // the wire.
       if (broadcastRecorder.outcome === 'recorded-durable' && !isDefinitivePreAcceptanceSendFailure(error)) {
         // Ambiguous post-write-ahead failure — leave the job in 'broadcast' so recovery's
-        // interrupted-broadcast path reconciles it on chain, never resend.
-        return await this.getRequiredJob(claimed.jobId);
+        // interrupted-broadcast path reconciles it on chain, never resend. Receipt timeout is
+        // UNKNOWN, not failed, and must not retain the wallet worker while proof is pending.
+        const current = await this.getRequiredJob(claimed.jobId);
+        await this.releaseWalletLockForJob(current);
+        return current;
       }
       // #1867 — either the tx never left ('not-reached' / 'rolled-back-pre-send'), or a
       // DEFINITIVE pre-acceptance reject (e.g. insufficient funds at eth_sendRawTransaction)

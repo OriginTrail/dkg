@@ -2103,6 +2103,7 @@ export class DKGPublisher implements Publisher {
       clearSharedMemoryAfter?: boolean;
       onPhase?: PhaseCallback;
       onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
+      onBroadcastAccepted?: (record: PreBroadcastRecord) => void;
       /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
       publishContextGraphId?: string;
       /** On-chain CG ID for the V10 chain tx (ACK digest + publishDirect). Does NOT trigger remap. */
@@ -2304,6 +2305,7 @@ export class DKGPublisher implements Publisher {
       operationCtx: ctx,
       onPhase: options?.onPhase,
       onBeforeBroadcast: options?.onBeforeBroadcast,
+      onBroadcastAccepted: options?.onBroadcastAccepted,
       publisherPeerId: options?.publisherPeerId,
       v10ACKProvider: options?.v10ACKProvider,
       trustedNonManifestCatalogTriples: options?.trustedNonManifestCatalogTriples,
@@ -2650,6 +2652,7 @@ export class DKGPublisher implements Publisher {
       entityProofs = false,
       onPhase,
       onBeforeBroadcast,
+      onBroadcastAccepted,
     } = options;
     // Round 9 Bug 25 + Round 12 Bug 34: reject user-authored reserved-
     // namespace subjects. The bypass is keyed on a module-private
@@ -3980,6 +3983,8 @@ export class DKGPublisher implements Publisher {
               vs: ack.signatureVS,
             })),
             onBroadcast: emitWriteAheadStart,
+            onBroadcastAccepted: (signal) =>
+              onBroadcastAccepted?.({ ...signal, operationKind: 'create' }),
           });
         } finally {
           if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
@@ -4542,6 +4547,7 @@ export class DKGPublisher implements Publisher {
 
   async update(kaId: bigint, options: PublishOptions): Promise<PublishResult> {
     const onBeforeBroadcast = options.onBeforeBroadcast;
+    const onBroadcastAccepted = options.onBroadcastAccepted;
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const graphUpdate = resolveGraphScopedPublishDescriptor(options);
     if (graphUpdate) {
@@ -5381,6 +5387,8 @@ export class DKGPublisher implements Publisher {
               vs: ack.signatureVS,
             })),
             onBroadcast: emitWriteAheadStart,
+            onBroadcastAccepted: (signal) =>
+              onBroadcastAccepted?.({ ...signal, operationKind: 'update' }),
           });
         } catch (v10Err) {
           const errorName = extractV10UpdateRejectionName(v10Err);
