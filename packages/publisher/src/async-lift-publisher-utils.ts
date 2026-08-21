@@ -3,6 +3,7 @@ import {
   LIFT_AUTHORITY_TYPES,
   LIFT_TRANSITION_TYPES,
 } from './lift-job.js';
+import { LIFT_JOB_IMMUTABLE_FIELDS } from './lift-job.js';
 import type {
   KnowledgeAssetVmPublishJobRequest,
   KnowledgeAssetVmPublishRequest,
@@ -382,6 +383,35 @@ export function createKnowledgeAssetVmPublishJobRequest(
     jobType: 'knowledge-asset-vm-publish',
     knowledgeAssetVmPublish: request,
   };
+}
+
+/**
+ * Enforce {@link LIFT_JOB_IMMUTABLE_FIELDS} at the WRITE boundary.
+ *
+ * That list said these fields never change; nothing checked it, and
+ * the transition merge spread a caller's patch straight over the record. Harmless-looking while the
+ * set was identity and budget, it became an AUTHORIZATION hole when `admission` joined: whoever can
+ * pass an `admission` through a transition can move the right to run the destructive
+ * pending-transaction clear onto themselves.
+ *
+ * A patch that omits a field, or repeats its current value, is not a change. Nested entries
+ * ('timestamps.acceptedAt') are compared at that key only, so an ordinary timestamps patch that
+ * does not touch `acceptedAt` still passes.
+ */
+export function assertNoImmutableLiftJobFieldChange(current: LiftJob, patch: Partial<LiftJob>): void {
+  for (const field of LIFT_JOB_IMMUTABLE_FIELDS) {
+    const [head, nested] = field.split('.') as [keyof LiftJob, string | undefined];
+    if (!(head in patch)) continue;
+    const patchHead = (patch as unknown as Record<string, unknown>)[head as string];
+    const currentHead = (current as unknown as Record<string, unknown>)[head as string];
+    const incoming = nested ? (patchHead as Record<string, unknown> | undefined)?.[nested] : patchHead;
+    if (incoming === undefined) continue;
+    const existing = nested ? (currentHead as Record<string, unknown> | undefined)?.[nested] : currentHead;
+    if (JSON.stringify(incoming) === JSON.stringify(existing)) continue;
+    throw new Error(
+      `LiftJob ${current.jobId}: ${field} is immutable and cannot be changed by a transition`,
+    );
+  }
 }
 
 export function isKnowledgeAssetVmPublishJobRequest(

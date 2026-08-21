@@ -114,6 +114,7 @@ import {
   liftJobCheckedNonce,
   liftJobCheckedSigner,
   liftJobOperationKindMarker,
+  assertNoImmutableLiftJobFieldChange,
   normalizePersistedLiftJobRequest,
   buildLiftJobAcceptedReset,
   pinnedPublishIdentityKaId,
@@ -2538,6 +2539,12 @@ export class TripleStoreAsyncLiftPublisher
   private mergeJob(current: LiftJob, status: LiftJobState, data: Partial<LiftJob>): LiftJob {
     const now = this.now();
     if (current.status !== status) assertLiftJobTransition(current.status, status);
+    // The immutable set is ENFORCED here, not merely declared.
+    // `LIFT_JOB_IMMUTABLE_FIELDS` documented that these never change, but this merge spread the
+    // caller's patch straight over the record, so a transition could silently replace any of
+    // them. That became an authorization hole the moment `admission` joined the set: moving the
+    // owner moves the right to run the destructive pending-transaction clear.
+    assertNoImmutableLiftJobFieldChange(current, data);
 
     const merged = {
       ...current,

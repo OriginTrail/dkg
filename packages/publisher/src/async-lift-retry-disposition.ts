@@ -28,6 +28,7 @@ import {
   queuedLiftOperationKind,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
+import { knowledgeAssetAgentAddressesEqual } from '@origintrail-official/dkg-core';
 import { getLiftJobFailurePolicy, isTerminalLiftJobState } from './lift-job.js';
 import type { LiftJob, LiftJobFailureCode } from './lift-job.js';
 // Type-only, and erased at emit — the reverse edge (types importing `LiftJobRetryProjection`
@@ -363,9 +364,12 @@ export function resolveHeldJobSettlementCapability(wiring: {
 function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | undefined): boolean {
   if (!agentAddress) return false;
   const admittedBy = job.admission?.byAgentAddress;
-  return typeof admittedBy === 'string'
-    && admittedBy.length > 0
-    && admittedBy.toLowerCase() === agentAddress.toLowerCase();
+  if (typeof admittedBy !== 'string' || admittedBy.length === 0) return false;
+  // The REPOSITORY's identity equality, not a second definition. A bespoke
+  // `toLowerCase()` folded case for legacy non-EVM identities (peer IDs) too, which the
+  // canonical helper deliberately compares byte-for-byte: on a destructive authorization
+  // boundary that silently widened who counts as the owner.
+  return knowledgeAssetAgentAddressesEqual(admittedBy, agentAddress);
 }
 
 /**

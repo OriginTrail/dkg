@@ -536,19 +536,15 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
           {
             ...opts,
             /**
-             * GH#2270 follow-up (3825614158) — an EPCIS capture is EXTERNALLY AUTHENTICATED, so
-             * the job it enqueues belongs to the agent that submitted it. Without this the
-             * agent's own publish path treats the capture as an internal producer and assigns
-             * it to the node's default agent: the submitting agent then loses the by-id force
-             * clear that is the only manual exit for a held job, and the node owner gains a
-             * destructive capability over a job it never enqueued.
+             * An EPCIS capture is externally authenticated, so the job it enqueues belongs to
+             * the agent that submitted it. Without this the publish path treats the capture as
+             * an internal producer and assigns it to the node's default agent, which both
+             * denies the submitter the by-id force clear — the only manual exit for a held job
+             * — and hands that destructive capability to an agent that never submitted it.
              *
-             * Unforgeable because `handleCaptureAsync` builds `opts` from a strict ALLOW-LIST
-             * (accessPolicy, allowedPeers, subGraphName — see packages/epcis/src/handlers.ts),
-             * so a request body cannot carry this field here at all. Spreading first is
-             * defence in depth against that allow-list ever being widened, NOT the guard
-             * itself — reversing the order today changes nothing, and a test cannot prove
-             * otherwise. It is authorization only and never reaches author selection.
+             * `handleCaptureAsync` builds these opts from a strict allow-list, so a request
+             * body cannot carry this field; spreading first is defence in depth if that
+             * allow-list ever widens. Authorization only — never an author-selection input.
              */
             admittedByAgentAddress: requestAgentAddress,
           },

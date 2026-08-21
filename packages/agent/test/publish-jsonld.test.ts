@@ -387,6 +387,19 @@ describe('publishJsonLd', () => {
     const authenticatedJob = await asyncPublisher.getStatus(authenticated.captureID);
     expect(authenticatedJob?.admission?.byAgentAddress).toBe(EPCIS_CALLER);
 
+    // 3826008054 — malformed-but-type-valid identities. An empty or whitespace-only string is
+    // ABSENT, not a principal: it must fall back to the node owner rather than slip past the
+    // default and enqueue a job nobody can ever force-clear.
+    for (const blank of ['', '   ']) {
+      const res = await agent.publishAsync(
+        'did:dkg:context-graph:async-admission',
+        content(`AsyncAdmissionBlank${blank.length}`),
+        { localOnly: true, admittedByAgentAddress: blank },
+      );
+      const blankJob = await asyncPublisher.getStatus(res.captureID);
+      expect(blankJob?.admission?.byAgentAddress).toBe(nodeOwner);
+    }
+
     // The discriminating half: the owner is NOT the author. Under curated publishing the signer
     // may be a third party who enqueued nothing, and handing them a destructive clear would give
     // the double-publish decision to someone who never asked for the publish.
