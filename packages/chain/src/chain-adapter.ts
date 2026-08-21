@@ -793,11 +793,11 @@ export interface V10PublishParams {
    * transaction. Unlike {@link onBroadcast}, this is post-send notification:
    * it is best-effort and MUST NOT be used as a fail-closed WAL boundary.
    *
-   * Async queue runners use it to release the wallet worker while receipt
-   * reconciliation continues independently. A callback failure cannot undo an
-   * accepted transaction and therefore must not fail the chain write.
+   * Async queue runners use it to durably checkpoint RPC acceptance before
+   * receipt reconciliation continues independently. A callback failure cannot
+   * undo an accepted transaction and therefore must not fail the chain write.
    */
-  onBroadcastAccepted?: (signal: PreBroadcastSignal) => void;
+  onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void;
 }
 
 export interface V10UpdateKAParams {
@@ -850,7 +850,7 @@ export interface V10UpdateKAParams {
    */
   onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
   /** Post-send counterpart to {@link onBroadcast}; see V10PublishParams. */
-  onBroadcastAccepted?: (signal: PreBroadcastSignal) => void;
+  onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void;
 }
 
 /**

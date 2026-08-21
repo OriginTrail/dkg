@@ -163,6 +163,8 @@ export interface LiftJobTimestamps {
   readonly claimedAt?: number;
   readonly validatedAt?: number;
   readonly broadcastAt?: number;
+  /** RPC endpoint acceptance, durably recorded after the pre-send WAL checkpoint. */
+  readonly rpcAcceptedAt?: number;
   readonly includedAt?: number;
   readonly finalizedAt?: number;
   readonly failedAt?: number;
@@ -559,6 +561,7 @@ export type JournalKind =
   | 'claimed'
   | 'validated'
   | 'broadcast'
+  | 'rpc-accepted'
   | 'included'
   | 'finalized'
   | 'noop-finalized'

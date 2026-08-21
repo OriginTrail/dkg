@@ -1712,7 +1712,7 @@ export class EVMChainAdapterBase {
     onBroadcast: ((signal: PreBroadcastSignal) => Promise<void> | void) | undefined,
     buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<SignedTransactionEnvelope>,
     onNullReceipt: (preBroadcastTxHash: string) => never,
-    onBroadcastAccepted?: (signal: PreBroadcastSignal) => void,
+    onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void,
   ): Promise<ethers.TransactionReceipt> {
     const prepared = await this.withSerializedSignerWrite(signer, async (ctx) => {
       const { signedTx, txHash: preBroadcastTxHash, nonce } = await buildSignedTx(ctx);
@@ -1744,7 +1744,7 @@ export class EVMChainAdapterBase {
         `V10 ${label}`,
       );
       try {
-        onBroadcastAccepted?.({ txHash: preBroadcastTxHash, nonce });
+        await onBroadcastAccepted?.({ txHash: preBroadcastTxHash, nonce });
       } catch (hookErr) {
         // Post-acceptance notification is observational. The transaction is
         // already on the wire, so a callback failure must never turn it into a

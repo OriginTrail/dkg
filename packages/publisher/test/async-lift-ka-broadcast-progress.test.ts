@@ -76,7 +76,7 @@ describe('KA async VM publish broadcast progress', () => {
     expect(afterRecover?.broadcast?.txHash).toBe(txHash);
   });
 
-  it('releases the wallet after accepted broadcast and treats later receipt timeout as unknown', async () => {
+  it('durably records RPC acceptance and keeps the wallet reserved while receipt fate is unknown', async () => {
     const txHash = KA_VM_EXECUTOR_TX_HASH;
     let finishReceiptWait!: () => void;
     const receiptWait = new Promise<void>((resolve) => {
@@ -100,14 +100,15 @@ describe('KA async VM publish broadcast progress', () => {
     expect(processed?.status).toBe('broadcast');
     expect(processed?.broadcast?.txHash).toBe(txHash);
     expect(processed?.broadcast?.nonce).toBe(17);
+    expect(processed?.timestamps.rpcAcceptedAt).toBeDefined();
 
-    const lock = await store.query(`SELECT ?p ?o WHERE {
+    const lock = await store.query(`SELECT ?job WHERE {
       GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
-        <${walletLockSubject('wallet-1')}> ?p ?o .
+        <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?job .
       }
     }`);
     expect(lock.type).toBe('bindings');
-    if (lock.type === 'bindings') expect(lock.bindings).toHaveLength(0);
+    if (lock.type === 'bindings') expect(lock.bindings).toEqual([{ job: jobSubject(jobId) }]);
 
     finishReceiptWait();
     await Promise.resolve();
@@ -117,7 +118,7 @@ describe('KA async VM publish broadcast progress', () => {
     expect(afterTimeout?.failure).toBeUndefined();
   });
 
-  it('keeps tx-bearing KA broadcast jobs unknown and unlocks the wallet on recovery timeout', async () => {
+  it('keeps a tx-bearing wallet proof-bound after its ordinary lease and recovery timeout expire', async () => {
     const txHash = `0x${'ef'.repeat(32)}` as `0x${string}`;
     const publisher = createPublisher({ recoveryLookupTimeoutMs: 10 });
 
@@ -129,7 +130,7 @@ describe('KA async VM publish broadcast progress', () => {
     await publisher.update(jobId, 'broadcast', {
       broadcast: { txHash, walletId: 'wallet-1' },
     });
-    now += 20;
+    now += 6 * 60 * 1_000;
 
     const recovered = await publisher.recover();
     const job = await publisher.getStatus(jobId);
@@ -145,7 +146,54 @@ describe('KA async VM publish broadcast progress', () => {
     expect(job?.failure).toBeUndefined();
     expect(lock.type).toBe('bindings');
     if (lock.type !== 'bindings') return;
-    expect(lock.bindings).toHaveLength(0);
+    expect(lock.bindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        p: CONTROL_LOCKED_JOB,
+        o: jobSubject(jobId),
+      }),
+    ]));
+
+    await publisher.enqueueKnowledgeAssetVmPublish({
+      ...kaVmPublishRequest(),
+      name: 'urn:test:ka:second',
+      intentKey: 'second-intent',
+    });
+    expect(await publisher.claimNext('wallet-1')).toBeNull();
+  });
+
+  it('uses generic chain proof to release a proven-absent create without reusing an ambiguous nonce', async () => {
+    const txHash = `0x${'cd'.repeat(32)}` as `0x${string}`;
+    const publisher = createPublisher({
+      chainProofResolver: async () => ({ status: 'not-found' }),
+      knowledgeAssetVmPublishRecoveryResolver: async () => {
+        throw new Error('canonical finalization must not run for proven absence');
+      },
+    });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: {
+        txHash,
+        walletId: 'wallet-1',
+        nonce: 19,
+        operationKind: 'create',
+      },
+    });
+
+    expect(await publisher.reconcileTransactions()).toBe(1);
+    const reset = await publisher.getStatus(jobId);
+    expect(reset?.status).toBe('accepted');
+    expect(reset?.recovery).toMatchObject({
+      recoveredFromStatus: 'broadcast',
+      txHashChecked: txHash,
+      txHashAccounted: true,
+      operationKind: 'create',
+      walletIdChecked: 'wallet-1',
+      nonceChecked: 19,
+    });
+    expect(await publisher.claimNext('wallet-1')).toMatchObject({ jobId });
   });
 
   it('finalizes confirmed KA broadcast and included jobs only after lifecycle-aware recovery succeeds', async () => {
