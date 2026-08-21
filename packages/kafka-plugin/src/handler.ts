@@ -42,30 +42,19 @@ interface KafkaJobScope {
 }
 
 /**
- * The publish options a PLUGIN CONSUMER may set.
+ * The publish options a plugin consumer may set: the PUBLISHED contract, unchanged.
  *
- * Three properties at once, and the third is why this is not a plain allow-list:
+ * Deliberately not narrowed here. Three attempts in this PR to type it more tightly each
+ * turned out to be a source-breaking change to a published plugin API in a patch line:
+ * a strict allow-list rejected `{ localOnly: true }`, and rejecting
+ * `admittedByAgentAddress` broke callers that pass it today. The security property does not
+ * depend on any of it -- the handler overwrites that field with the authenticated requester
+ * after spreading these options, and a runtime test proves an attacker-supplied value loses.
  *
- *  - KNOWN options are type-checked against the agent's own definitions, so a value like
- *    `accessPolicy: 42` from plugin configuration cannot reach the agent unchecked.
- *  - `admittedByAgentAddress` is rejected outright. It is the authenticated submitter, set
- *    from the request identity, so advertising it would describe a control the plugin
- *    overrides and ignores.
- *  - OTHER options still compile. The public contract was `Record<string, unknown>` and the
- *    runtime forwards whatever it is given, so a strict allow-list would stop existing
- *    configurations like `{ localOnly: true }` from compiling -- a breaking change to a
- *    published plugin API, in a patch line, in a PR whose premise is being non-breaking.
- *
- * The stricter allow-list -- where adding an agent option requires an explicit Kafka API
- * decision -- is the better end state and belongs with a major. Tracked on #2305.
+ * Typing this surface (known-value checking, an allow-list, deprecating the ignored field)
+ * is worth doing and belongs with a major, where the break is expected. Tracked on #2305.
  */
-export type KafkaPublishOptions =
-  Pick<
-    NonNullable<Parameters<RequestContext['agent']['publishAsync']>[2]>,
-    'accessPolicy' | 'allowedPeers' | 'subGraphName' | 'publishEpochs'
-  >
-  & { admittedByAgentAddress?: never }
-  & Record<string, unknown>;
+export type KafkaPublishOptions = Record<string, unknown>;
 
 export interface CreateHandlerOptions {
   basePath: string;
