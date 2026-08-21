@@ -117,7 +117,7 @@ describe('KA async VM publish broadcast progress', () => {
     expect(afterTimeout?.failure).toBeUndefined();
   });
 
-  it('does not reset tx-bearing KA broadcast jobs to accepted on recovery timeout', async () => {
+  it('keeps tx-bearing KA broadcast jobs unknown and unlocks the wallet on recovery timeout', async () => {
     const txHash = `0x${'ef'.repeat(32)}` as `0x${string}`;
     const publisher = createPublisher({ recoveryLookupTimeoutMs: 10 });
 
@@ -139,11 +139,10 @@ describe('KA async VM publish broadcast progress', () => {
       }
     }`);
 
-    expect(recovered).toBe(1);
-    expect(job?.status).toBe('failed');
-    expect(job?.failure?.code).toBe('recovery_state_inconsistent');
-    expect(job?.failure?.failedFromState).toBe('broadcast');
-    expect(job?.failure?.message).toContain(txHash);
+    expect(recovered).toBe(0);
+    expect(job?.status).toBe('broadcast');
+    expect(job?.broadcast?.txHash).toBe(txHash);
+    expect(job?.failure).toBeUndefined();
     expect(lock.type).toBe('bindings');
     if (lock.type !== 'bindings') return;
     expect(lock.bindings).toHaveLength(0);

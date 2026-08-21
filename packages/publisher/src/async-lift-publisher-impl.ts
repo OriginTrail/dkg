@@ -1112,10 +1112,12 @@ export class TripleStoreAsyncLiftPublisher
       return true;
     }
 
-    if (!this.hasInconclusiveRecoveryTimedOut(recoverable)) return false;
+    // No proof is not a failure. A receipt/canonical-finalization timeout leaves the transaction's
+    // fate UNKNOWN, so preserve the tx-bearing live state and retry reconciliation on a later
+    // recovery pass. The wallet is released independently: proof polling must never serialize the
+    // next nonce or strand an otherwise healthy publisher wallet.
     await this.releaseWalletLockForJob(job);
-    await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable), 'failed');
-    return true;
+    return false;
   }
 
   /**

@@ -2038,7 +2038,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.recovery).toBeUndefined();
     expect(lock.type).toBe('bindings');
     if (lock.type !== 'bindings') return;
-    expect(lock.bindings.length).toBeGreaterThan(0);
+    expect(lock.bindings).toHaveLength(0);
   });
 
   // GH#2270 — this row used to end with bulk clear DELETING the failure. The job is terminal, but
@@ -2046,7 +2046,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   // that record hands the KA's lifecycle subject back to admission, which then mints a second job
   // for a transaction nobody has accounted for. Bulk clear now leaves it; an operator removes it
   // by exact id once the transaction's fate is known.
-  it('fails included knowledge asset VM publish jobs and holds them for chain proof', async () => {
+  it('keeps included knowledge asset VM publish jobs unknown without holding the wallet', async () => {
     const publisher = createPublisher({
       config: {
         recoveryLookupTimeoutMs: 50,
@@ -2069,15 +2069,18 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const recovered = await publisher.recover();
     const job = await publisher.getStatus(jobId);
 
-    expect(recovered).toBe(1);
-    expect(job?.status).toBe('failed');
-    expect(job?.failure?.code).toBe('recovery_state_inconsistent');
-    expect(job?.failure?.resolution).toBe('fail_job');
+    expect(recovered).toBe(0);
+    expect(job?.status).toBe('included');
+    expect(job?.failure).toBeUndefined();
 
-    expect(await publisher.clear('failed')).toBe(0);
-    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
-    expect(await publisher.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
-    expect(await publisher.getStatus(jobId)).toBeNull();
+    const lock = await store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> ?p ?o .
+      }
+    }`);
+    expect(lock.type).toBe('bindings');
+    if (lock.type !== 'bindings') return;
+    expect(lock.bindings).toHaveLength(0);
   });
 
   it('supports pause, resume, cancel, retry, and clear', async () => {
