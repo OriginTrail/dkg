@@ -1,5 +1,5 @@
 import type { RequestContext, RoutePlugin } from '@origintrail-official/dkg/daemon/plugin-api';
-import { createHandler, type KafkaPluginCtx } from './handler.js';
+import { createHandler } from './handler.js';
 import { coreSchema } from './schema.js';
 import { validateExtensionAgainstCore, type KafkaPluginExtension } from './extension.js';
 
