@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse, readBody } from '@origintrail-official/dkg/daemon/plugin-api';
+import type { PluginAgentCapability } from '@origintrail-official/dkg/daemon/plugin-api';
 import { coreSchema, CORE_FIELDS, type CoreFields } from './schema.js';
 import { buildKa, mergeAugmentFragment } from './ka-builder.js';
 import type { KafkaPluginExtension } from './extension.js';
@@ -17,17 +18,8 @@ import {
 export interface KafkaPluginCtx {
   req: IncomingMessage;
   res: ServerResponse;
-  agent: {
-    publishAsync(
-      contextGraphId: string,
-      content: Record<string, unknown>,
-      opts?: Record<string, unknown>,
-    ): Promise<{ captureID: string }>;
-    query(
-      sparql: string,
-      opts?: { contextGraphId?: string; [k: string]: unknown },
-    ): Promise<{ bindings: Array<Record<string, unknown>> }>;
-  };
+  // Derived from the daemon context, so a signature change cannot leave this stale.
+  agent: PluginAgentCapability;
   publisherControl: {
     getStatus(captureID: string): Promise<KafkaJobStatus | null>;
   };
@@ -57,7 +49,13 @@ interface KafkaJobScope {
 export interface CreateHandlerOptions {
   basePath: string;
   contextGraphId?: string;
-  publishOptions?: Record<string, unknown>;
+  /**
+   * The agent's own publish options, derived from the capability rather than restated as a
+   * loose record. `Record<string, unknown>` is assignable to them (its index signature
+   * satisfies the optional properties), so a nonsense value such as `accessPolicy: 42` from
+   * plugin configuration compiled clean and reached the agent unchecked.
+   */
+  publishOptions?: Parameters<PluginAgentCapability['publishAsync']>[2];
   extension?: KafkaPluginExtension<Record<string, unknown>>;
 }
 
