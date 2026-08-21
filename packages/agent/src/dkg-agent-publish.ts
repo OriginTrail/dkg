@@ -852,22 +852,51 @@ function resolvePublishAsyncAdmissionOwner(
   admission: PublishAsyncAdmission,
   nodeOwner: () => string,
 ): string {
-  const kind = (admission as { kind?: unknown } | null | undefined)?.kind;
-  if (kind === 'node') return nodeOwner();
-  if (kind === 'agent') {
-    const agentAddress = (admission as { agentAddress?: unknown }).agentAddress;
-    if (typeof agentAddress !== 'string' || agentAddress.trim().length === 0) {
+  // ONE runtime check, at the boundary where an untyped value can arrive, and then a switch on the
+  // TYPED discriminant. Keeping a cast-based interpretation alongside the union meant a new variant
+  // would compile here unchanged and be rejected at runtime — exhaustiveness in the comment only.
+  assertPublishAsyncAdmissionShape(admission);
+  switch (admission.kind) {
+    case 'node':
+      return nodeOwner();
+    case 'agent':
+      // Shape-checked above, so this is the declared identity rather than a re-interpretation.
+      return admission.agentAddress.trim();
+    default: {
+      // Adding a variant to `PublishAsyncAdmission` fails HERE, at compile time, instead of
+      // silently reaching the runtime rejection below.
+      const unreachable: never = admission;
+      throw new Error(
+        `publishAsync: unhandled admission ${JSON.stringify(unreachable)}.`,
+      );
+    }
+  }
+}
+
+/**
+ * The single runtime gate. `PublishAsyncAdmission` is erased at runtime, so a JavaScript plugin or
+ * a value widened through `any` can present anything; this is where that is rejected, before any
+ * staging. Everything after it reasons about the TYPED union.
+ */
+function assertPublishAsyncAdmissionShape(
+  admission: PublishAsyncAdmission,
+): asserts admission is PublishAsyncAdmission {
+  const candidate = admission as { kind?: unknown; agentAddress?: unknown } | null | undefined;
+  if (candidate?.kind === 'node') return;
+  if (candidate?.kind === 'agent') {
+    if (typeof candidate.agentAddress !== 'string' || candidate.agentAddress.trim().length === 0) {
       throw new Error(
         'publishAsync: admission { kind: "agent" } requires a non-blank agentAddress. A blank '
         + 'identity is not a principal, and defaulting it to the node would hand the destructive '
         + 'force-clear to an agent that did not submit this job.',
       );
     }
-    return agentAddress.trim();
+    return;
   }
   throw new Error(
-    `publishAsync: unknown admission kind ${JSON.stringify(kind)}. State { kind: 'agent', `
-    + "agentAddress } for an authenticated caller or { kind: 'node' } for an internal producer.",
+    `publishAsync: unknown admission kind ${JSON.stringify(candidate?.kind)}. State `
+    + "{ kind: 'agent', agentAddress } for an authenticated caller or { kind: 'node' } for an "
+    + 'internal producer.',
   );
 }
 

@@ -384,6 +384,31 @@ describe('publishJsonLd', () => {
     const internalJob = await asyncPublisher.getStatus(internal.captureID);
     expect(internalJob?.admission?.byAgentAddress).toBe(nodeOwner);
 
+    // 3829948739 — the row above cannot fail for the branch this change actually ADDED. On this
+    // fixture a default agent always exists, so `resolveAgentAddress(undefined)` and the old
+    // `getDefaultAgentAddress()` return the same value: reverting to the optional owner would
+    // leave it green. Removing the default agent is what separates them, and a node-admitted job
+    // must STILL be owned — by this node's peer id — rather than enqueued unowned.
+    // The field, not the accessor: `resolveAgentAddress` reads `defaultAgentAddress` directly,
+    // so spying on `getDefaultAgentAddress` would not reach the branch under test.
+    const withDefault = (agent as unknown as { defaultAgentAddress?: string });
+    const savedDefault = withDefault.defaultAgentAddress;
+    withDefault.defaultAgentAddress = undefined;
+    try {
+      expect(agent.resolveAgentAddress(undefined)).toBe(agent.peerId);
+      const peerFallback = await agent.publishAsync(
+        { kind: 'node' },
+        'did:dkg:context-graph:async-admission',
+        content('AsyncAdmissionPeerFallback'),
+        { localOnly: true },
+      );
+      const peerJob = await asyncPublisher.getStatus(peerFallback.captureID);
+      expect(peerJob?.admission?.byAgentAddress).toBe(agent.peerId);
+      expect(peerJob?.admission?.byAgentAddress).toBeTruthy();
+    } finally {
+      withDefault.defaultAgentAddress = savedDefault;
+    }
+
     // A host that AUTHENTICATED a caller supplies it, and that principal wins.
     const EPCIS_CALLER = '0x00000000000000000000000000000000000000e1';
     const authenticated = await agent.publishAsync(
