@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import { jsonResponse, readBody } from '@origintrail-official/dkg/daemon/plugin-api';
+import type { RequestContext } from '@origintrail-official/dkg/daemon/plugin-api';
 import { coreSchema, CORE_FIELDS, type CoreFields } from './schema.js';
 import { buildKa, mergeAugmentFragment } from './ka-builder.js';
 import type { KafkaPluginExtension } from './extension.js';
@@ -14,40 +15,26 @@ import {
   bindingsToKa,
 } from './discovery.js';
 
-export interface KafkaPluginCtx {
-  req: IncomingMessage;
-  res: ServerResponse;
-  agent: {
-    publishAsync(
-      contextGraphId: string,
-      content: Record<string, unknown>,
-      opts?: Record<string, unknown>,
-    ): Promise<{ captureID: string }>;
-    query(
-      sparql: string,
-      opts?: { contextGraphId?: string; [k: string]: unknown },
-    ): Promise<{ bindings: Array<Record<string, unknown>> }>;
-  };
-  publisherControl: {
-    getStatus(captureID: string): Promise<KafkaJobStatus | null>;
-  };
-  publisherRuntime: { walletIds: string[] } | null;
-  config: {
-    kafka?: { contextGraphId?: string };
-    [k: string]: unknown;
-  };
-  requestAgentAddress: string;
-  url?: URL;
-  path?: string;
-}
-
-export interface KafkaJobStatus {
-  status: string;
-  request?: unknown;
-  timestamps: { acceptedAt: number; finalizedAt?: number };
-  finalization?: { ual?: string };
-  failure?: { message?: string };
-}
+/**
+ * The canonical daemon request context, refined only where this plugin genuinely differs.
+ *
+ * Not a parallel shape. A hand-written context stays correct only while someone remembers to
+ * sync it, and the boundary cast that fed it hid every mismatch — which is how this plugin's
+ * copy of `publishAsync` went stale and its jobs became node-owned (GH#2270, fixed in #2304).
+ * Deriving it means a daemon-side change breaks the build here instead of at runtime, and the
+ * dispatcher can hand its context over with no cast at all.
+ *
+ * The single refinement is `config`: plugins carry their own namespaced configuration, which
+ * the canonical `DkgConfig` has no member for. Intersecting adds it without widening the
+ * daemon's own type.
+ */
+export type KafkaPluginCtx = Pick<
+  RequestContext,
+  'req' | 'res' | 'agent' | 'publisherControl' | 'publisherState' | 'requestAgentAddress'
+  | 'url' | 'path'
+> & {
+  config: RequestContext['config'] & { kafka?: { contextGraphId?: string } };
+};
 
 interface KafkaJobScope {
   contextGraphId?: string;
@@ -57,6 +44,11 @@ interface KafkaJobScope {
 export interface CreateHandlerOptions {
   basePath: string;
   contextGraphId?: string;
+  /**
+   * Forwarded to the agent as-is: not validated, unknown keys accepted. This is the published
+   * contract. `admittedByAgentAddress` may be present and is IGNORED -- the handler overwrites
+   * it with the authenticated requester. Deriving and narrowing needs a major (#2305).
+   */
   publishOptions?: Record<string, unknown>;
   extension?: KafkaPluginExtension<Record<string, unknown>>;
 }
@@ -74,7 +66,7 @@ export function createHandler(opts: CreateHandlerOptions) {
     : coreSchema;
 
   return async function handle(ctx: KafkaPluginCtx): Promise<void> {
-    const path = ctx.path ?? new URL(ctx.req.url ?? '/', `http://${ctx.req.headers.host ?? 'localhost'}`).pathname;
+    const path = ctx.path;
 
     if (ctx.req.method === 'POST' && path === registerPath) {
       return handlePostRegister(ctx, opts, mergedSchema, loggedCollisionKeys);
@@ -108,7 +100,10 @@ async function handlePostRegister(
       message: 'kafka-plugin has no configured contextGraphId',
     });
   }
-  if (!ctx.publisherRuntime || ctx.publisherRuntime.walletIds.length === 0) {
+  // `publisherState.runtime`, not the dispatcher's deprecated `publisherRuntime` alias: the
+  // canonical context should not be built out of a compatibility projection.
+  const runtime = ctx.publisherState.runtime;
+  if (!runtime || runtime.walletIds.length === 0) {
     return jsonResponse(ctx.res, 503, {
       error: 'PublisherUnavailable',
       message: 'kafka-plugin requires the publisher runtime to be running with at least one configured publisher wallet',
@@ -273,7 +268,8 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
     });
   }
 
-  const searchParams = parseSearchParams(ctx);
+  // The daemon parses `url` before dispatch, so the query is always available here.
+  const searchParams = ctx.url.searchParams;
   let pagination;
   try {
     pagination = parsePagination(searchParams);
@@ -399,16 +395,6 @@ async function handleGetSingle(
     });
   }
   return jsonResponse(ctx.res, 200, ka);
-}
-
-function parseSearchParams(ctx: KafkaPluginCtx): URLSearchParams {
-  if (ctx.url) return ctx.url.searchParams;
-  const rawUrl = ctx.req.url ?? '/';
-  try {
-    return new URL(rawUrl, `http://${ctx.req.headers.host ?? 'localhost'}`).searchParams;
-  } catch {
-    return new URLSearchParams();
-  }
 }
 
 function discoveryQueryOptions(
