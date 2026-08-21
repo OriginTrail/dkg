@@ -5131,10 +5131,12 @@ describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () 
 
     const received: any[] = [];
     let sentAfterSignal = false;
-    a.sendSignedTransactionAndWait = async () => {
+    a.broadcastSignedTransactionWithRetries = async () => {
       sentAfterSignal = received.length === 1;
-      return { hash: txHash, blockNumber: 1, status: 1, logs: [] };
     };
+    a.waitForReceiptWithFailover = async () => ({
+      hash: txHash, blockNumber: 1, status: 1, logs: [],
+    });
 
     await a.dispatchSerializedV10Write(
       wallet,
@@ -5170,7 +5172,8 @@ describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () 
     const txHash = ethers.Transaction.from(signedTx).hash!;
 
     let sent = false;
-    a.sendSignedTransactionAndWait = async () => { sent = true; return { hash: txHash }; };
+    a.broadcastSignedTransactionWithRetries = async () => { sent = true; };
+    a.waitForReceiptWithFailover = async () => ({ hash: txHash });
 
     await expect(a.dispatchSerializedV10Write(
       wallet,

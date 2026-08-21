@@ -13,7 +13,12 @@ import {
   knowledgeAssetVmPublishLifecycleKey,
   serializeJob,
 } from '../src/async-lift-control-plane.js';
-import { KA_VM_BROADCAST_TX, KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
+import {
+  KA_VM_BROADCAST_TX,
+  KA_VM_INCLUSION,
+  KA_VM_VALIDATION,
+  kaVmPublishRequest,
+} from './_helpers/ka-vm-publish.js';
 
 // #1828 — durable-admission recovery: exact intent lookup keyed on the lifecycle
 // facts a client retains, with a materialized index and deterministic
@@ -48,13 +53,20 @@ describe('#1828 async lift intent lookup', () => {
    * lifecycle subject even though the failure is terminal — pinned by its own row below.
    */
   async function driveToFailed(request: ReturnType<typeof kaVmPublishRequest>): Promise<string> {
-    const publisher = createPublisher({ recoveryLookupTimeoutMs: 10 });
+    const publisher = createPublisher();
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
     await publisher.update(jobId, 'broadcast', { broadcast: KA_VM_BROADCAST_TX });
-    now += 20;
-    await publisher.recover();
+    await publisher.update(jobId, 'included', {
+      broadcast: KA_VM_BROADCAST_TX,
+      inclusion: KA_VM_INCLUSION,
+    });
+    await publisher.recordPublishFailure(jobId, {
+      error: new Error('on-chain confirmation mismatch'),
+      failedFromState: 'included',
+      errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+    });
     const job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('failed');
     return jobId;
@@ -311,8 +323,8 @@ describe('#1828 async lift intent lookup', () => {
   });
 
   it('classifies a terminal failure with an unaccounted transaction as active (GH#2270)', async () => {
-    // A recovery that could not reconcile its own broadcast is terminal, but its transaction may
-    // be on chain. Reporting it as SUPERSEDED told a recovering client the subject was free —
+    // A confirmation mismatch is terminal, but its transaction may be on chain. Reporting it as
+    // SUPERSEDED told a recovering client the subject was free —
     // and admission agreed, minting a second job for the same KA. It now stays the live job,
     // which is what makes the re-submit answer `LIFT_JOB_PENDING_CHAIN_PROOF`.
     const jobId = await driveToFailed(kaVmPublishRequest());
@@ -322,7 +334,7 @@ describe('#1828 async lift intent lookup', () => {
     expect(result.kind).toBe('active');
     if (result.kind !== 'active') return;
     expect([result.job.jobId, result.job.failure?.code, result.job.failure?.retryable])
-      .toEqual([jobId, 'recovery_state_inconsistent', false]);
+      .toEqual([jobId, 'confirmation_mismatch', false]);
   });
 
   it('reports an ordinary failed job with a NEWER sibling as superseded, not as a second active job (GH#2270)', async () => {
