@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse, readBody } from '@origintrail-official/dkg/daemon/plugin-api';
-import type { PluginAgentCapability } from '@origintrail-official/dkg/daemon/plugin-api';
+import type { RequestContext } from '@origintrail-official/dkg/daemon/plugin-api';
 import { coreSchema, CORE_FIELDS, type CoreFields } from './schema.js';
 import { buildKa, mergeAugmentFragment } from './ka-builder.js';
 import type { KafkaPluginExtension } from './extension.js';
@@ -18,8 +18,12 @@ import {
 export interface KafkaPluginCtx {
   req: IncomingMessage;
   res: ServerResponse;
-  // Derived from the daemon context, so a signature change cannot leave this stale.
-  agent: PluginAgentCapability;
+  // The CANONICAL agent from the daemon context, not a copy and not a narrowed re-derivation.
+  // A hand-written copy only stays correct while someone remembers to sync it — that is how
+  // this plugin's `publishAsync` copy went stale and its jobs became node-owned (GH#2270).
+  // Narrowing it with `OmitThisParameter` was worse than useless: it made unbound extraction
+  // type-check while the runtime still needs the receiver.
+  agent: RequestContext['agent'];
   publisherControl: {
     getStatus(captureID: string): Promise<KafkaJobStatus | null>;
   };
@@ -55,7 +59,7 @@ export interface CreateHandlerOptions {
    * satisfies the optional properties), so a nonsense value such as `accessPolicy: 42` from
    * plugin configuration compiled clean and reached the agent unchecked.
    */
-  publishOptions?: Parameters<PluginAgentCapability['publishAsync']>[2];
+  publishOptions?: Parameters<RequestContext['agent']['publishAsync']>[2];
   extension?: KafkaPluginExtension<Record<string, unknown>>;
 }
 
