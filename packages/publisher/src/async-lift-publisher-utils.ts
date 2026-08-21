@@ -388,35 +388,27 @@ export function createKnowledgeAssetVmPublishJobRequest(
 /**
  * Enforce {@link LIFT_JOB_IMMUTABLE_FIELDS} at the WRITE boundary.
  *
- * That list said these fields never change; nothing checked it, and
- * the transition merge spread a caller's patch straight over the record. Harmless-looking while the
- * set was identity and budget, it became an AUTHORIZATION hole when `admission` joined: whoever can
- * pass an `admission` through a transition can move the right to run the destructive
- * pending-transaction clear onto themselves.
+ * That list said these fields never change; nothing checked it, and the transition merge spread a
+ * caller's patch straight over the record. Harmless-looking while the set was identity and budget,
+ * it became an AUTHORIZATION hole when `admission` joined: whoever can pass an `admission` through
+ * a transition can move the right to run the destructive pending-transaction clear onto themselves.
  *
- * A patch that omits a field, or repeats its current value, is not a change. Nested entries
- * ('timestamps.acceptedAt') are compared at that key only, so an ordinary timestamps patch that
- * does not touch `acceptedAt` still passes.
+ * Compares the EFFECTIVE post-merge value against the current one, never the shape of the patch.
+ * Reasoning about the patch is what made the first two versions of this guard wrong: an explicit
+ * `undefined` is spread rather than skipped, and an omitted nested key only survives where the
+ * merge deep-merges that object -- true for `timestamps`, false for `retries`, which is replaced
+ * wholesale. Reading the merge's own output cannot drift from the merge.
  */
-export function assertNoImmutableLiftJobFieldChange(current: LiftJob, patch: Partial<LiftJob>): void {
+export function assertNoImmutableLiftJobFieldChange(current: LiftJob, next: LiftJob): void {
   for (const field of LIFT_JOB_IMMUTABLE_FIELDS) {
     const [head, nested] = field.split('.') as [keyof LiftJob, string | undefined];
-    if (!(head in patch)) continue;
-    const patchHead = (patch as unknown as Record<string, unknown>)[head as string];
-    const currentHead = (current as unknown as Record<string, unknown>)[head as string];
-    // PRESENCE, not definedness. The merge below does not skip an explicit `undefined` — it
-    // spreads it — so treating undefined as 'nothing supplied' let a patch ERASE the very
-    // field this guard protects. `{ admission: undefined }` would have removed the owner and
-    // stranded a held job with nobody able to clear it.
-    if (nested) {
-      // A nested patch that never mentions the key changes nothing; one that mentions it,
-      // even as undefined, is a write.
-      if (patchHead === undefined) continue;
-      if (!(nested in (patchHead as Record<string, unknown>))) continue;
-    }
-    const incoming = nested ? (patchHead as Record<string, unknown>)[nested] : patchHead;
-    const existing = nested ? (currentHead as Record<string, unknown> | undefined)?.[nested] : currentHead;
-    if (JSON.stringify(incoming) === JSON.stringify(existing)) continue;
+    const read = (job: LiftJob): unknown => {
+      const value = (job as unknown as Record<string, unknown>)[head as string];
+      return nested ? (value as Record<string, unknown> | undefined)?.[nested] : value;
+    };
+    const before = read(current);
+    const after = read(next);
+    if (JSON.stringify(before) === JSON.stringify(after)) continue;
     throw new Error(
       `LiftJob ${current.jobId}: ${field} is immutable and cannot be changed by a transition`,
     );

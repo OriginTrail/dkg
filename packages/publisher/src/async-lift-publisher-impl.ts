@@ -2539,12 +2539,6 @@ export class TripleStoreAsyncLiftPublisher
   private mergeJob(current: LiftJob, status: LiftJobState, data: Partial<LiftJob>): LiftJob {
     const now = this.now();
     if (current.status !== status) assertLiftJobTransition(current.status, status);
-    // The immutable set is ENFORCED here, not merely declared.
-    // `LIFT_JOB_IMMUTABLE_FIELDS` documented that these never change, but this merge spread the
-    // caller's patch straight over the record, so a transition could silently replace any of
-    // them. That became an authorization hole the moment `admission` joined the set: moving the
-    // owner moves the right to run the destructive pending-transaction clear.
-    assertNoImmutableLiftJobFieldChange(current, data);
 
     const merged = {
       ...current,
@@ -2557,7 +2551,7 @@ export class TripleStoreAsyncLiftPublisher
       },
     } as LiftJob;
 
-    return {
+    const next = {
       ...merged,
       timestamps: {
         ...merged.timestamps,
@@ -2570,6 +2564,13 @@ export class TripleStoreAsyncLiftPublisher
         updatedAt: now,
       },
     } as LiftJob;
+    // The immutable set is ENFORCED here, not merely declared, and it is checked against the
+    // MERGE'S OWN OUTPUT rather than the caller's patch. Reasoning about the patch is what
+    // made earlier versions of this guard wrong twice: an explicit `undefined` is spread, not
+    // skipped, and an omitted nested key only survives where the merge deep-merges that
+    // object -- true for `timestamps`, false for `retries`. Reading the result cannot drift.
+    assertNoImmutableLiftJobFieldChange(current, next);
+    return next;
   }
 
   /**

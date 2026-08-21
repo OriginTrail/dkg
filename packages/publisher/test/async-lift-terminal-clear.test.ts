@@ -273,6 +273,26 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect(after?.timestamps.acceptedAt).toBe(before?.timestamps.acceptedAt);
     expect(after?.retries.maxRetries).toBe(before?.retries.maxRetries);
 
+    // 3828732842 — a PARTIAL nested patch. `retries` is replaced wholesale by the merge (unlike
+    // `timestamps`, which is deep-merged), so omitting `maxRetries` erased the budget while a
+    // presence-based guard saw "key not mentioned, nothing changed".
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      retries: { retryCount: 3 },
+    } as never)).rejects.toThrow(/retries.maxRetries is immutable/);
+
+    // 3828701108 — erasing the PARENT object takes the immutable child with it.
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      retries: undefined,
+    } as never)).rejects.toThrow(/retries.maxRetries is immutable/);
+    // ...but NOT for `timestamps`, and the asymmetry is real rather than an oversight: the merge
+    // coalesces `data.timestamps ?? {}`, so an undefined parent there preserves the children. The
+    // guard reads the merge's output, so it agrees with whatever the merge actually does instead
+    // of asserting a rule the merge does not follow.
+    await p.update(jobId, 'broadcast', { broadcast: bx, timestamps: undefined } as never);
+    expect((await p.getStatus(jobId))?.timestamps.acceptedAt).toBe(before?.timestamps.acceptedAt);
+
     // Nested VALUE changes, not just erasures — and the sibling in the same object must still
     // be writable, which is what separates "reject this key" from "reject this object".
     await expect(p.update(jobId, 'broadcast', {
