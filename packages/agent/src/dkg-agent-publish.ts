@@ -852,52 +852,47 @@ function resolvePublishAsyncAdmissionOwner(
   admission: PublishAsyncAdmission,
   nodeOwner: () => string,
 ): string {
-  // ONE runtime check, at the boundary where an untyped value can arrive, and then a switch on the
-  // TYPED discriminant. Keeping a cast-based interpretation alongside the union meant a new variant
-  // would compile here unchanged and be rejected at runtime — exhaustiveness in the comment only.
-  assertPublishAsyncAdmissionShape(admission);
-  switch (admission.kind) {
-    case 'node':
-      return nodeOwner();
-    case 'agent':
-      // Shape-checked above, so this is the declared identity rather than a re-interpretation.
-      return admission.agentAddress.trim();
-    default: {
-      // Adding a variant to `PublishAsyncAdmission` fails HERE, at compile time, instead of
-      // silently reaching the runtime rejection below.
-      const unreachable: never = admission;
-      throw new Error(
-        `publishAsync: unhandled admission ${JSON.stringify(unreachable)}.`,
-      );
-    }
-  }
-}
+  // Each field is read from the caller's object EXACTLY ONCE, into a local, before anything is
+  // decided. `admission` is caller-owned and may be a Proxy or expose getters, so a second read can
+  // return a different value than the one that was validated — a guard that accepted `node` while
+  // the switch then saw `agent` produced an empty owner. Nothing below touches `admission` again.
+  const source = admission as { kind?: unknown; agentAddress?: unknown } | null | undefined;
+  const kind = source?.kind;
+  const agentAddress = source?.agentAddress;
 
-/**
- * The single runtime gate. `PublishAsyncAdmission` is erased at runtime, so a JavaScript plugin or
- * a value widened through `any` can present anything; this is where that is rejected, before any
- * staging. Everything after it reasons about the TYPED union.
- */
-function assertPublishAsyncAdmissionShape(
-  admission: PublishAsyncAdmission,
-): asserts admission is PublishAsyncAdmission {
-  const candidate = admission as { kind?: unknown; agentAddress?: unknown } | null | undefined;
-  if (candidate?.kind === 'node') return;
-  if (candidate?.kind === 'agent') {
-    if (typeof candidate.agentAddress !== 'string' || candidate.agentAddress.trim().length === 0) {
+  // Normalized into a value WE own, so the exhaustive switch below reasons about the union rather
+  // than about the caller's object. This is the one place an untyped value becomes a typed one.
+  let normalized: PublishAsyncAdmission;
+  if (kind === 'node') {
+    normalized = { kind: 'node' };
+  } else if (kind === 'agent') {
+    if (typeof agentAddress !== 'string' || agentAddress.trim().length === 0) {
       throw new Error(
         'publishAsync: admission { kind: "agent" } requires a non-blank agentAddress. A blank '
         + 'identity is not a principal, and defaulting it to the node would hand the destructive '
         + 'force-clear to an agent that did not submit this job.',
       );
     }
-    return;
+    normalized = { kind: 'agent', agentAddress: agentAddress.trim() };
+  } else {
+    throw new Error(
+      `publishAsync: unknown admission kind ${JSON.stringify(kind)}. State `
+      + "{ kind: 'agent', agentAddress } for an authenticated caller or { kind: 'node' } for an "
+      + 'internal producer.',
+    );
   }
-  throw new Error(
-    `publishAsync: unknown admission kind ${JSON.stringify(candidate?.kind)}. State `
-    + "{ kind: 'agent', agentAddress } for an authenticated caller or { kind: 'node' } for an "
-    + 'internal producer.',
-  );
+
+  switch (normalized.kind) {
+    case 'node':
+      return nodeOwner();
+    case 'agent':
+      return normalized.agentAddress;
+    default: {
+      // Adding a variant to `PublishAsyncAdmission` fails HERE, at compile time.
+      const unreachable: never = normalized;
+      throw new Error(`publishAsync: unhandled admission ${JSON.stringify(unreachable)}.`);
+    }
+  }
 }
 
 export class PublishMethods extends DKGAgentBase {

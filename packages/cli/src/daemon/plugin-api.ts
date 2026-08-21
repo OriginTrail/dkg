@@ -15,14 +15,22 @@ import type {
 import type { RequestContext as DaemonRequestContext } from './routes/context.js';
 
 /**
- * The admission contract a plugin must satisfy when it enqueues an async publish.
+ * The agent capability a route plugin may use, derived from the canonical daemon context.
  *
- * Re-exported here rather than restated by each plugin: a hand-copied union cannot be checked
- * against the real agent, so it goes stale silently the moment a variant is added or an address
- * shape is refined — which is exactly how the Kafka lane ended up assigning its submitters' jobs
- * to the node.
+ * Derived rather than restated: a hand-written copy keeps only whatever someone remembered to
+ * sync. Argument order, content and option types and the result all drift independently, and
+ * the plugin dispatcher's cast suppresses the mismatch — so a stale plugin fails at runtime
+ * instead of at compile time. That is how the Kafka lane came to assign its submitters' jobs to
+ * the node while still type-checking.
  */
-export type { PublishAsyncAdmission } from '@origintrail-official/dkg-agent';
+//
+// `OmitThisParameter` is required, not cosmetic: these methods are declared with an explicit
+// `this: DKGAgent`, so a plain `Pick` produces a capability nobody but a full agent can call.
+// Dropping only the receiver keeps the parameter and result types — which is the drift that
+// actually matters — while letting a plugin hold the narrow surface.
+export type PluginAgentCapability = {
+  [K in 'publishAsync' | 'query']: OmitThisParameter<DaemonRequestContext['agent'][K]>;
+};
 
 /**
  * Plugin-only view of the canonical daemon context. The deprecated aliases are

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse, readBody } from '@origintrail-official/dkg/daemon/plugin-api';
-import type { PublishAsyncAdmission } from '@origintrail-official/dkg/daemon/plugin-api';
+import type { PluginAgentCapability } from '@origintrail-official/dkg/daemon/plugin-api';
 import { coreSchema, CORE_FIELDS, type CoreFields } from './schema.js';
 import { buildKa, mergeAugmentFragment } from './ka-builder.js';
 import type { KafkaPluginExtension } from './extension.js';
@@ -18,18 +18,8 @@ import {
 export interface KafkaPluginCtx {
   req: IncomingMessage;
   res: ServerResponse;
-  agent: {
-    publishAsync(
-      admission: PublishAsyncAdmission,
-      contextGraphId: string,
-      content: Record<string, unknown>,
-      opts?: Record<string, unknown>,
-    ): Promise<{ captureID: string }>;
-    query(
-      sparql: string,
-      opts?: { contextGraphId?: string; [k: string]: unknown },
-    ): Promise<{ bindings: Array<Record<string, unknown>> }>;
-  };
+  // Derived from the daemon context, so a signature change cannot leave this stale.
+  agent: PluginAgentCapability;
   publisherControl: {
     getStatus(captureID: string): Promise<KafkaJobStatus | null>;
   };
