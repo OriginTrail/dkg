@@ -26,6 +26,7 @@ function createPublisher(overrides: Partial<AsyncLiftPublisher> = {}): AsyncLift
     recordPublishResult: async () => {},
     recordPublishFailure: async () => {},
     recover: async () => 0,
+    reconcileTransactions: async () => 0,
     getStats: () => ({}),
     pause: () => {},
     resume: () => {},
@@ -171,6 +172,35 @@ describe('AsyncLiftRunner', () => {
     await runner.stop();
 
     expect(walletTwoCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  it('reconciles transactions while a wallet attempt remains stuck', async () => {
+    let releaseStuckWallet!: () => void;
+    const stuckWallet = new Promise<void>((resolve) => { releaseStuckWallet = resolve; });
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      processNext: async (walletId: string) => {
+        if (walletId === 'wallet-1') await stuckWallet;
+        return null;
+      },
+      reconcileTransactions: async () => {
+        reconciliationCalls += 1;
+        return 0;
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1', 'wallet-2'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 5,
+    });
+
+    await runner.start();
+    await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(1));
+    releaseStuckWallet();
+    await runner.stop();
+
+    expect(reconciliationCalls).toBeGreaterThanOrEqual(1);
   });
 
   it('backs off and continues after loop-level errors', async () => {

@@ -1,5 +1,9 @@
 import type { AsyncLiftPublisher } from './async-lift-publisher.js';
 
+type TransactionReconciliationPublisher = AsyncLiftPublisher & {
+  reconcileTransactions?: () => Promise<number>;
+};
+
 export interface AsyncLiftRunnerConfig {
   readonly publisher: AsyncLiftPublisher;
   readonly walletIds: readonly string[];
@@ -22,8 +26,8 @@ export class AsyncLiftRunner {
   private running?: Promise<void>;
   private lastRecoveryAt = 0;
   private lastRecoveryAttemptAt = 0;
-  private activeWalletAttempts = 0;
   private recoveryInFlight?: Promise<void>;
+  private recoveryTimer?: ReturnType<typeof setTimeout>;
 
   constructor(private readonly config: AsyncLiftRunnerConfig) {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
@@ -57,6 +61,7 @@ export class AsyncLiftRunner {
     }
 
     this.started = true;
+    this.scheduleTransactionReconciliation();
     this.running = Promise.all(
       this.config.walletIds.map((walletId) => this.walletLoop(walletId)),
     ).then(() => undefined);
@@ -64,22 +69,18 @@ export class AsyncLiftRunner {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = undefined;
+    }
     await this.running;
+    await this.recoveryInFlight;
   }
 
   private async walletLoop(walletId: string): Promise<void> {
     while (!this.stopped) {
       try {
-        await this.maybeRunRecoveryWhenIdle();
-        if (this.stopped) break;
-
-        this.activeWalletAttempts += 1;
-        let processed;
-        try {
-          processed = await this.config.publisher.processNext(walletId);
-        } finally {
-          this.activeWalletAttempts -= 1;
-        }
+        const processed = await this.config.publisher.processNext(walletId);
         if (!processed && !this.stopped) {
           await this.sleep(this.pollIntervalMs);
         }
@@ -96,30 +97,48 @@ export class AsyncLiftRunner {
     }
   }
 
-  private async maybeRunRecoveryWhenIdle(): Promise<void> {
-    if (this.activeWalletAttempts > 0) return;
-    if (this.recoveryInFlight) {
-      await this.recoveryInFlight;
-      return;
-    }
-
+  private scheduleTransactionReconciliation(): void {
+    if (this.stopped || this.recoveryTimer || this.recoveryInFlight) return;
+    if (!this.transactionReconciler()) return;
     const now = Date.now();
-    if (now - this.lastRecoveryAt < this.recoveryIntervalMs) return;
-    // Throttle attempts at errorBackoffMs to avoid hammering during outages,
-    // but allow the full interval between *successful* recoveries.
-    if (now - this.lastRecoveryAttemptAt < this.errorBackoffMs) return;
-    this.lastRecoveryAttemptAt = now;
-    const recovery = this.config.publisher.recover().then(() => {
-      this.lastRecoveryAt = now;
-    });
+    const nextAt = Math.max(
+      this.lastRecoveryAt + this.recoveryIntervalMs,
+      this.lastRecoveryAttemptAt + this.errorBackoffMs,
+    );
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      this.startTransactionReconciliation();
+    }, Math.max(1, nextAt - now));
+  }
+
+  private startTransactionReconciliation(): void {
+    if (this.stopped || this.recoveryInFlight) return;
+    const reconcileTransactions = this.transactionReconciler();
+    if (!reconcileTransactions) return;
+    this.lastRecoveryAttemptAt = Date.now();
+    const recovery = reconcileTransactions()
+      .then(() => {
+        this.lastRecoveryAt = Date.now();
+      })
+      .catch(async (error) => {
+        try {
+          await this.onError?.(error);
+        } catch {
+          // Error reporting must not stop transaction reconciliation.
+        }
+      })
+      .finally(() => {
+        if (this.recoveryInFlight === recovery) {
+          this.recoveryInFlight = undefined;
+        }
+        this.scheduleTransactionReconciliation();
+      });
     this.recoveryInFlight = recovery;
-    try {
-      await recovery;
-    } finally {
-      if (this.recoveryInFlight === recovery) {
-        this.recoveryInFlight = undefined;
-      }
-    }
+  }
+
+  private transactionReconciler(): (() => Promise<number>) | undefined {
+    const publisher = this.config.publisher as TransactionReconciliationPublisher;
+    return publisher.reconcileTransactions?.bind(publisher);
   }
 }
 
