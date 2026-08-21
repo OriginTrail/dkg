@@ -951,12 +951,14 @@ export class TripleStoreAsyncLiftPublisher
         publishOptions: {
           ...prepared.publishOptions,
           onBeforeBroadcast: broadcastRecorder.onBeforeBroadcast,
-          // Post-send, non-fail-closed signal. Once an endpoint accepts the
-          // exact signed transaction recorded above, this queue worker no
-          // longer needs to occupy the wallet while receipt polling runs.
-          onBroadcastAccepted: (record: PreBroadcastRecord) => {
+          // The endpoint has accepted the exact signed transaction recorded
+          // above. Persist that fact before receipt polling is detached. The
+          // wallet lock deliberately remains owned by this tx-bearing job:
+          // only chain proof may release it for another nonce.
+          onBroadcastAccepted: async (record: PreBroadcastRecord) => {
+            await this.recordRpcAccepted(claimed.jobId, record);
             try {
-              inheritedBroadcastAccepted?.(record);
+              await inheritedBroadcastAccepted?.(record);
             } finally {
               signalBroadcastAccepted(record);
             }
@@ -978,9 +980,7 @@ export class TripleStoreAsyncLiftPublisher
           () => undefined,
           () => undefined,
         );
-        const current = await this.getRequiredJob(claimed.jobId);
-        await this.releaseWalletLockForJob(current);
-        return current;
+        return await this.getRequiredJob(claimed.jobId);
       }
       publishResult = outcome.result;
     } catch (error) {
@@ -992,10 +992,9 @@ export class TripleStoreAsyncLiftPublisher
       if (broadcastRecorder.outcome === 'recorded-durable' && !isDefinitivePreAcceptanceSendFailure(error)) {
         // Ambiguous post-write-ahead failure — leave the job in 'broadcast' so recovery's
         // interrupted-broadcast path reconciles it on chain, never resend. Receipt timeout is
-        // UNKNOWN, not failed, and must not retain the wallet worker while proof is pending.
-        const current = await this.getRequiredJob(claimed.jobId);
-        await this.releaseWalletLockForJob(current);
-        return current;
+        // UNKNOWN, not failed. The tx-bearing job retains the wallet until
+        // chain proof finalizes, proves a revert, or proves create absence.
+        return await this.getRequiredJob(claimed.jobId);
       }
       // #1867 — either the tx never left ('not-reached' / 'rolled-back-pre-send'), or a
       // DEFINITIVE pre-acceptance reject (e.g. insufficient funds at eth_sendRawTransaction)
@@ -1025,6 +1024,54 @@ export class TripleStoreAsyncLiftPublisher
     return await this.recordExecutionFailure(jobId, failedFromState, error);
   }
 
+  /**
+   * Durable post-send checkpoint. The pre-send `broadcast` record proves what
+   * was signed; this timestamp proves an endpoint accepted those exact bytes.
+   * It is diagnostic rather than resend authority: a missing checkpoint after
+   * a crash remains ambiguous and therefore keeps the wallet reserved.
+   */
+  private async recordRpcAccepted(jobId: string, record: PreBroadcastRecord): Promise<void> {
+    const current = await this.getRequiredJob(jobId);
+    if (current.status !== 'broadcast') {
+      // Independent reconciliation may have already advanced the exact job.
+      if (
+        (current.status === 'included' || current.status === 'finalized')
+        && current.broadcast?.txHash === record.txHash
+      ) return;
+      throw new Error(`Cannot record RPC acceptance for LiftJob ${jobId} in state ${current.status}`);
+    }
+    await this.assertActiveClaimLock(current);
+    if (current.broadcast.txHash !== record.txHash) {
+      throw new Error(
+        `RPC-accepted tx ${record.txHash} does not match persisted broadcast tx `
+        + `${current.broadcast.txHash} for job ${jobId}`,
+      );
+    }
+    if (
+      current.broadcast.nonce !== undefined
+      && record.nonce !== undefined
+      && current.broadcast.nonce !== record.nonce
+    ) {
+      throw new Error(
+        `RPC-accepted nonce ${record.nonce} does not match persisted broadcast nonce `
+        + `${current.broadcast.nonce} for job ${jobId}`,
+      );
+    }
+    if (current.timestamps.rpcAcceptedAt !== undefined) return;
+    const acceptedAt = this.now();
+    const next = {
+      ...current,
+      timestamps: {
+        ...current.timestamps,
+        rpcAcceptedAt: acceptedAt,
+        updatedAt: acceptedAt,
+      },
+    } as LiftJobBroadcast;
+    this.assertJobMatchesStatus(next);
+    await this.writeJob(next, 'rpc-accepted');
+    await this.syncWalletLockForJob(next);
+  }
+
   private async recoverRawLiftInterrupted(job: LiftJob): Promise<boolean> {
     if (job.status !== 'broadcast' && job.status !== 'included') {
       return false;
@@ -1044,9 +1091,8 @@ export class TripleStoreAsyncLiftPublisher
         await this.writeJob(this.resetJobToAccepted(job, 'broadcast', undefined), 'recover-reset');
         return true;
       }
-      // Evidence-bearing (or 'included'): release the wallet so the node is not wedged.
-      await this.releaseWalletLockForJob(job);
-      // r25 (🔴 3820711322) — and then let the SAME timeout gate the resolver-bearing path uses
+      // Evidence-bearing (or 'included'): keep the signing wallet reserved.
+      // r25 (🔴 3820711322) — let the SAME timeout gate the resolver-bearing path uses
       // move it to a held failed state. Leaving it at 'broadcast' made the comment above false: a
       // non-terminal record is unclaimable, never times out, and `clearTerminalJob` rejects it as
       // nonterminal — so the operator exit this branch promised did not exist, and the job was
@@ -1057,7 +1103,9 @@ export class TripleStoreAsyncLiftPublisher
       // the failed-job lane.
       const timedOut = job as LiftJobBroadcast | LiftJobIncluded;
       if (!this.hasInconclusiveRecoveryTimedOut(timedOut)) return false;
-      await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(timedOut), 'failed');
+      const failed = this.failKnowledgeAssetInconclusiveRecovery(timedOut);
+      await this.writeJob(failed, 'failed');
+      await this.syncWalletLockForJob(failed);
       return true;
     }
 
@@ -1084,8 +1132,9 @@ export class TripleStoreAsyncLiftPublisher
       return true;
     }
     if (this.hasInconclusiveRecoveryTimedOut(recoverable)) {
-      await this.releaseWalletLockForJob(job);
-      await this.writeJob(this.failInconclusiveRecovery(recoverable), 'failed');
+      const failed = this.failInconclusiveRecovery(recoverable);
+      await this.writeJob(failed, 'failed');
+      await this.syncWalletLockForJob(failed);
       return true;
     }
     return false;
@@ -1095,9 +1144,53 @@ export class TripleStoreAsyncLiftPublisher
     if (job.status !== 'broadcast' && job.status !== 'included') return false;
 
     const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
+    const origin = liveChainRecoveryOrigin(recoverable);
+    if (this.chainProofResolver) {
+      const resolution = await this.chainProofResolver(origin.lookup);
+      if (resolution.status === 'recovered') {
+        const outcome = await this.finalizeProvenKnowledgeAssetVmPublish(
+          recoverable,
+          origin,
+          resolution.recovery,
+        );
+        return outcome === 'finalized';
+      }
+      if (resolution.status === 'reverted') {
+        const failure = createLiftJobFailureMetadata({
+          failedFromState: recoverable.status,
+          code: 'tx_reverted',
+          message:
+            `Named knowledge asset VM publish job ${recoverable.jobId} transaction `
+            + `${recoverable.broadcast.txHash} was proven reverted and published nothing.`,
+          errorPayloadRef: `urn:dkg:publisher:error:${recoverable.jobId}:chain-proof-reverted`,
+        });
+        await this.releaseWalletLockForJob(recoverable);
+        await this.writeJob(this.mergeJob(recoverable, 'failed', { failure: failure as any }), 'failed');
+        return true;
+      }
+      if (resolution.status === 'not-found' && queuedLiftOperationKind(recoverable) === 'create') {
+        await this.releaseWalletLockForJob(recoverable);
+        await this.writeJob(buildLiftJobAcceptedReset(recoverable, {
+          now: this.now(),
+          recoveredFrom: recoverable.status,
+          txHashChecked: recoverable.broadcast.txHash,
+          txHashAccounted: true,
+          stampRetriedAt: false,
+          operationKind: 'create',
+          walletIdChecked: recoverable.broadcast.walletId,
+          ...(recoverable.broadcast.nonce !== undefined
+            ? { nonceChecked: recoverable.broadcast.nonce }
+            : {}),
+        }), 'recover-reset');
+        return true;
+      }
+      // Pending, unrecognized, inconclusive, and update absence establish no
+      // safe resend. Keep both the tx-bearing record and its wallet reservation.
+      return false;
+    }
     const outcome = await this.finalizeProvenKnowledgeAssetVmPublish(
       recoverable,
-      liveChainRecoveryOrigin(recoverable),
+      origin,
     );
     if (outcome === 'finalized') return true;
     // Chain success is authoritative, but local lifecycle repair may be temporarily blocked (for
@@ -1107,16 +1200,14 @@ export class TripleStoreAsyncLiftPublisher
     if (outcome === 'unsupported') {
       // A chain resolver without the named-lifecycle finalizer cannot safely claim local recovery.
       // Preserve the explicit terminal diagnosis rather than silently marking the job finalized.
-      await this.releaseWalletLockForJob(job);
-      await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable), 'failed');
+      const failed = this.failKnowledgeAssetInconclusiveRecovery(recoverable);
+      await this.writeJob(failed, 'failed');
+      await this.syncWalletLockForJob(failed);
       return true;
     }
 
     // No proof is not a failure. A receipt/canonical-finalization timeout leaves the transaction's
-    // fate UNKNOWN, so preserve the tx-bearing live state and retry reconciliation on a later
-    // recovery pass. The wallet is released independently: proof polling must never serialize the
-    // next nonce or strand an otherwise healthy publisher wallet.
-    await this.releaseWalletLockForJob(job);
+    // fate UNKNOWN, so preserve both the tx-bearing live state and its wallet reservation.
     return false;
   }
 
@@ -1715,9 +1806,6 @@ export class TripleStoreAsyncLiftPublisher
           txHash: lookup.txHash,
           lookup,
         };
-        // Release the lock BEFORE the handler runs so the wallet is free either way; a handler
-        // that cannot finalize yet leaves the job held, and it holds no wallet while it waits.
-        await this.releaseWalletLockForJob(job);
         // r23 (🔴 3817474007) — the budget bounded the PROOF and stopped there. Finalization
         // does its own chain reads and store writes, so a stalled provider inside it hung
         // `recover()` — and the startup awaiting it — indefinitely, which is exactly the ceiling
@@ -1733,6 +1821,7 @@ export class TripleStoreAsyncLiftPublisher
         if (deadline.signal.aborted) return 0;
         const finalized = await this.jobHandlerFor(job.request)
           .finalizeProvenPublish(job, origin, resolution.recovery, { signal: deadline.signal });
+        if (finalized) await this.releaseWalletLockForJob(job);
         return finalized ? 1 : 0;
       }
       case 'refail_reverted': {
@@ -2199,14 +2288,16 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async hasActiveWalletLock(walletId: string): Promise<boolean> {
-    const now = this.now();
-    const result = await this.store.query(
-      `SELECT ?expiresAt WHERE { GRAPH <${this.walletLockGraphUri}> { <${walletLockSubject(walletId)}> <${CONTROL_LOCK_STATUS}> ${literal('active')} ; <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt . } }`,
-      { source: 'publisher.asyncLift.walletLock.active' },
-    );
-    const rows = expectBindings(result);
-    if (rows.length === 0) return false;
-    return parseIntegerLiteral(rows[0]?.['expiresAt'] ?? '"0"') > now;
+    const lock = await this.readWalletLock(walletId);
+    if (!lock || lock.status !== 'active') return false;
+    const job = await this.getStatus(lock.jobId);
+    if (job && this.isProofBoundWalletOwner(lock, job, walletId)) {
+      // A transaction-bearing lock is proof-bound, not lease-bound. Expiry is
+      // only a crash-recovery escape for work that provably never reached the
+      // pre-send WAL boundary.
+      return true;
+    }
+    return (lock.expiresAt ?? 0) > this.now();
   }
 
   private async sweepStaleWalletLocks(): Promise<string[]> {
@@ -2224,11 +2315,17 @@ export class TripleStoreAsyncLiftPublisher
       const jobId = this.jobIdFromRef(jobRef);
       const job = jobId ? await this.getStatus(jobId) : null;
 
+      const lock = {
+        jobId: jobId ?? '',
+        claimToken: row['claimToken'] ? String(parseLiteral(row['claimToken'])) : undefined,
+      };
+      const proofBoundOwner = !!job && this.isProofBoundWalletOwner(lock, job, walletId);
+
       const stale =
-        expiresAt <= now ||
+        (!proofBoundOwner && expiresAt <= now) ||
         !job ||
         job.status === 'accepted' ||
-        job.status === 'failed' ||
+        (!proofBoundOwner && job.status === 'failed') ||
         job.status === 'finalized' ||
         job.claim?.walletId !== walletId;
 
@@ -2254,7 +2351,13 @@ export class TripleStoreAsyncLiftPublisher
 
     const currentLock = await this.readWalletLock(walletId);
 
-    if (job.status === 'claimed' || job.status === 'validated' || job.status === 'broadcast' || job.status === 'included') {
+    if (
+      job.status === 'claimed'
+      || job.status === 'validated'
+      || job.status === 'broadcast'
+      || job.status === 'included'
+      || (isFailedJob(job) && isHeldForChainProof(job))
+    ) {
       if (!currentLock) throw this.createStaleClaimError(job, `missing active wallet lock for ${walletId}`);
       if (!this.isUsableActiveLock(currentLock, job)) throw this.createStaleClaimError(job, `wallet lock mismatch for ${walletId}`);
       const acquiredAt = job.timestamps.claimedAt ?? this.now();
@@ -2558,8 +2661,29 @@ export class TripleStoreAsyncLiftPublisher
     job: LiftJob,
   ): boolean {
     if (lock.status !== 'active') return false;
+    if (!this.lockMatchesJob(lock, job)) return false;
+    if (job.status === 'broadcast' || job.status === 'included') return true;
+    if (
+      isFailedJob(job)
+      && isHeldForChainProof(job)
+      && liftJobCheckedSigner(job) === job.claim?.walletId
+    ) return true;
     if (lock.expiresAt !== undefined && lock.expiresAt <= this.now()) return false;
-    return this.lockMatchesJob(lock, job);
+    return true;
+  }
+
+  private isProofBoundWalletOwner(
+    lock: { jobId: string; claimToken?: string },
+    job: LiftJob,
+    walletId: string,
+  ): boolean {
+    if (!this.lockMatchesJob(lock, job)) return false;
+    if (job.status === 'broadcast' || job.status === 'included') {
+      return job.broadcast.walletId === walletId;
+    }
+    return isFailedJob(job)
+      && isHeldForChainProof(job)
+      && liftJobCheckedSigner(job) === walletId;
   }
 
   private createStaleClaimError(job: LiftJob, reason: string): Error {

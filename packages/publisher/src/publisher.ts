@@ -269,12 +269,13 @@ export interface PublishOptions {
    */
   onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
   /**
-   * Best-effort notification that an RPC endpoint accepted the exact signed
-   * transaction recorded by {@link onBeforeBroadcast}. This is deliberately
-   * post-send and non-fail-closed: queue workers may use it to detach receipt
-   * reconciliation, but callback failure can never undo or reject the send.
+   * Notification that an RPC endpoint accepted the exact signed transaction
+   * recorded by {@link onBeforeBroadcast}. The adapter awaits this callback so
+   * durable queue owners can checkpoint acceptance before detaching receipt
+   * reconciliation. It remains post-send and non-fail-closed: callback failure
+   * can never undo or reject an already accepted transaction.
    */
-  onBroadcastAccepted?: (record: PreBroadcastRecord) => void;
+  onBroadcastAccepted?: (record: PreBroadcastRecord) => Promise<void> | void;
   /**
    * Skip the publisher-level context-graph graph creation/ensure step.
    * Only callers that already validated the target context graph should set

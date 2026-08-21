@@ -2103,7 +2103,7 @@ export class DKGPublisher implements Publisher {
       clearSharedMemoryAfter?: boolean;
       onPhase?: PhaseCallback;
       onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
-      onBroadcastAccepted?: (record: PreBroadcastRecord) => void;
+      onBroadcastAccepted?: (record: PreBroadcastRecord) => Promise<void> | void;
       /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
       publishContextGraphId?: string;
       /** On-chain CG ID for the V10 chain tx (ACK digest + publishDirect). Does NOT trigger remap. */

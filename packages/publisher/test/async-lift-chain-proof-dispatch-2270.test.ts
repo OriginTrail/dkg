@@ -515,17 +515,16 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(after?.status).toBe('broadcast');
       expect(after?.broadcast?.txHash).toBe(TX_HASH);
 
-      // r17 (🟡 3814892900) — holding the job is only ONE of the two observables this branch
-      // owes. The wallet must not be held hostage to a job that will never move on this node, so
-      // the second is that 'wallet-raw' is usable IMMEDIATELY rather than after its claim lease
-      // expires. Asserted through the queue, because that is the property an operator depends on;
-      // which internal path drops the lock is not.
+      // A transaction-bearing wallet is proof-bound. Reusing it merely because this node cannot
+      // currently resolve the transaction permits a later intent to sign the same nonce after an
+      // RPC forgets its pending pool. Keep the exact wallet reserved until proof or an explicit
+      // operator intervention accounts for the transaction.
       const lock = await h.store.query(`SELECT ?p ?o WHERE {
         GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
           <${walletLockSubject('wallet-raw')}> ?p ?o .
         }
       }`);
-      expect((lock as { bindings: unknown[] }).bindings).toHaveLength(0);
+      expect((lock as { bindings: unknown[] }).bindings).not.toHaveLength(0);
       const nextJobId = await seedLegacyRawLiftTestJob(h.store, {
         swmId: 'swm-2',
         namespace: 'default',
@@ -541,7 +540,8 @@ describe('GH#2270 proof-first chain dispatcher', () => {
         transitionType: 'CREATE',
         authority: { type: 'owner', proofRef: 'proof:owner:2' },
       });
-      expect(await publisher.claimNext('wallet-raw')).toMatchObject({ jobId: nextJobId });
+      expect(nextJobId).toBeTruthy();
+      expect(await publisher.claimNext('wallet-raw')).toBeNull();
     });
 
     it('after the recovery timeout it reaches a state the OPERATOR can clear [r25]', async () => {

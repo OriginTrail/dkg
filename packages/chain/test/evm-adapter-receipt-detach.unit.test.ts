@@ -54,7 +54,16 @@ describe('V10 receipt reconciliation detaches from the nonce serializer', () => 
 
     const writes = Promise.all([
       (adapter as any).dispatchSerializedV10Write(
-        signer, 'publish', undefined, build('a'), () => { throw new Error('null'); },
+        signer,
+        'publish',
+        undefined,
+        build('a'),
+        () => { throw new Error('null'); },
+        async () => {
+          events.push('checkpoint:a:start');
+          await delay(5);
+          events.push('checkpoint:a:durable');
+        },
       ),
       (adapter as any).dispatchSerializedV10Write(
         signer, 'publish', undefined, build('b'), () => { throw new Error('null'); },
@@ -67,6 +76,7 @@ describe('V10 receipt reconciliation detaches from the nonce serializer', () => 
     expect(events).toContain('build:b:1');
     expect(events).toContain('accepted:b-1:0xb1');
     expect(events).not.toContain('receipt:0xa0');
+    expect(events.indexOf('build:b:1')).toBeGreaterThan(events.indexOf('checkpoint:a:durable'));
 
     const results = await writes;
     expect(results.map((item) => item.hash)).toEqual(['0xa0', '0xb1']);
