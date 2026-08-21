@@ -1,5 +1,5 @@
 import type { RequestContext, RoutePlugin } from '@origintrail-official/dkg/daemon/plugin-api';
-import { createHandler, type CreateHandlerOptions, type KafkaPluginCtx } from './handler.js';
+import { createHandler, type KafkaPublishOptions, type KafkaPluginCtx } from './handler.js';
 import { coreSchema } from './schema.js';
 import { validateExtensionAgainstCore, type KafkaPluginExtension } from './extension.js';
 
@@ -22,7 +22,7 @@ export interface KafkaPluginOptions<TParsed = Record<string, unknown>> {
    * CONSUMER actually types against, so narrowing only the internal handler option left
    * `createKafkaPlugin({ publishOptions: { accessPolicy: 42 } })` compiling.
    */
-  publishOptions?: CreateHandlerOptions['publishOptions'];
+  publishOptions?: KafkaPublishOptions;
   extension?: KafkaPluginExtension<TParsed>;
 }
 

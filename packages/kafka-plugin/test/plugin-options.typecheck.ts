@@ -14,3 +14,8 @@ void createKafkaPlugin({ publishOptions: { accessPolicy: 42 } });
 // @ts-expect-error An option the agent does not define is rejected too, so a typo in plugin
 // configuration fails at build time rather than being silently forwarded.
 void createKafkaPlugin({ publishOptions: { accessPolicyy: 'public' } });
+
+// @ts-expect-error The submitter is set from the authenticated request identity, so it is not
+// plugin configuration. Advertising it would let a caller set it, type-check, and have the
+// handler silently replace the value.
+void createKafkaPlugin({ publishOptions: { admittedByAgentAddress: '0xattacker' } });

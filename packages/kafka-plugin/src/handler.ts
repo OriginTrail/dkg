@@ -28,7 +28,11 @@ import {
  * the canonical `DkgConfig` has no member for. Intersecting adds it without widening the
  * daemon's own type.
  */
-export type KafkaPluginCtx = Omit<RequestContext, 'config'> & {
+export type KafkaPluginCtx = Pick<
+  RequestContext,
+  'req' | 'res' | 'agent' | 'publisherControl' | 'publisherRuntime' | 'requestAgentAddress'
+  | 'url' | 'path'
+> & {
   config: RequestContext['config'] & { kafka?: { contextGraphId?: string } };
 };
 
@@ -45,6 +49,20 @@ interface KafkaJobScope {
   subGraphName?: string;
 }
 
+/**
+ * The publish options a PLUGIN CONSUMER may set.
+ *
+ * Derived from the agent's own options so value types cannot drift, minus the controls this
+ * route owns. `admittedByAgentAddress` is the authenticated submitter and is set from the
+ * request identity: advertising it as configuration would let a caller write
+ * `{ admittedByAgentAddress: '0xattacker' }`, type-check, and have it silently replaced —
+ * a public type describing something the plugin does not honour.
+ */
+export type KafkaPublishOptions = Omit<
+  NonNullable<Parameters<RequestContext['agent']['publishAsync']>[2]>,
+  'admittedByAgentAddress'
+>;
+
 export interface CreateHandlerOptions {
   basePath: string;
   contextGraphId?: string;
@@ -54,7 +72,7 @@ export interface CreateHandlerOptions {
    * satisfies the optional properties), so a nonsense value such as `accessPolicy: 42` from
    * plugin configuration compiled clean and reached the agent unchecked.
    */
-  publishOptions?: Parameters<RequestContext['agent']['publishAsync']>[2];
+  publishOptions?: KafkaPublishOptions;
   extension?: KafkaPluginExtension<Record<string, unknown>>;
 }
 
