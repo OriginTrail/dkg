@@ -15,27 +15,22 @@ import {
   bindingsToKa,
 } from './discovery.js';
 
-export interface KafkaPluginCtx {
-  req: IncomingMessage;
-  res: ServerResponse;
-  // The CANONICAL agent from the daemon context, not a copy and not a narrowed re-derivation.
-  // A hand-written copy only stays correct while someone remembers to sync it — that is how
-  // this plugin's `publishAsync` copy went stale and its jobs became node-owned (GH#2270).
-  // Narrowing it with `OmitThisParameter` was worse than useless: it made unbound extraction
-  // type-check while the runtime still needs the receiver.
-  agent: RequestContext['agent'];
-  publisherControl: {
-    getStatus(captureID: string): Promise<KafkaJobStatus | null>;
-  };
-  publisherRuntime: { walletIds: string[] } | null;
-  config: {
-    kafka?: { contextGraphId?: string };
-    [k: string]: unknown;
-  };
-  requestAgentAddress: string;
-  url?: URL;
-  path?: string;
-}
+/**
+ * The canonical daemon request context, refined only where this plugin genuinely differs.
+ *
+ * Not a parallel shape. A hand-written context stays correct only while someone remembers to
+ * sync it, and the boundary cast that fed it hid every mismatch — which is how this plugin's
+ * copy of `publishAsync` went stale and its jobs became node-owned (GH#2270, fixed in #2304).
+ * Deriving it means a daemon-side change breaks the build here instead of at runtime, and the
+ * dispatcher can hand its context over with no cast at all.
+ *
+ * The single refinement is `config`: plugins carry their own namespaced configuration, which
+ * the canonical `DkgConfig` has no member for. Intersecting adds it without widening the
+ * daemon's own type.
+ */
+export type KafkaPluginCtx = Omit<RequestContext, 'config'> & {
+  config: RequestContext['config'] & { kafka?: { contextGraphId?: string } };
+};
 
 export interface KafkaJobStatus {
   status: string;

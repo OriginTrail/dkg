@@ -43,7 +43,7 @@ export function createKafkaPlugin<TParsed = Record<string, unknown>>(
   return {
     name: 'kafka-plugin',
     handle(ctx: RequestContext) {
-      return handle(ctx as unknown as KafkaPluginCtx);
+      return handle(ctx);
     },
   };
 }
