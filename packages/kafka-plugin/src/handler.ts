@@ -44,19 +44,28 @@ interface KafkaJobScope {
 /**
  * The publish options a PLUGIN CONSUMER may set.
  *
- * An ALLOW-LIST, not the agent's surface minus a deny-list. Value types are still derived, so
- * they cannot drift — but which options this plugin OFFERS is a decision made here. A
- * deny-list silently republished every future agent option as Kafka configuration, including
- * internal controls like `operationCtx`, and made adding an agent flag a change to this
- * plugin's public API by accident.
+ * Three properties at once, and the third is why this is not a plain allow-list:
  *
- * `admittedByAgentAddress` is absent by construction: it is the authenticated submitter, set
- * from the request identity, so advertising it would describe a control the plugin ignores.
+ *  - KNOWN options are type-checked against the agent's own definitions, so a value like
+ *    `accessPolicy: 42` from plugin configuration cannot reach the agent unchecked.
+ *  - `admittedByAgentAddress` is rejected outright. It is the authenticated submitter, set
+ *    from the request identity, so advertising it would describe a control the plugin
+ *    overrides and ignores.
+ *  - OTHER options still compile. The public contract was `Record<string, unknown>` and the
+ *    runtime forwards whatever it is given, so a strict allow-list would stop existing
+ *    configurations like `{ localOnly: true }` from compiling -- a breaking change to a
+ *    published plugin API, in a patch line, in a PR whose premise is being non-breaking.
+ *
+ * The stricter allow-list -- where adding an agent option requires an explicit Kafka API
+ * decision -- is the better end state and belongs with a major. Tracked on #2305.
  */
-export type KafkaPublishOptions = Pick<
-  NonNullable<Parameters<RequestContext['agent']['publishAsync']>[2]>,
-  'accessPolicy' | 'allowedPeers' | 'subGraphName' | 'publishEpochs'
->;
+export type KafkaPublishOptions =
+  Pick<
+    NonNullable<Parameters<RequestContext['agent']['publishAsync']>[2]>,
+    'accessPolicy' | 'allowedPeers' | 'subGraphName' | 'publishEpochs'
+  >
+  & { admittedByAgentAddress?: never }
+  & Record<string, unknown>;
 
 export interface CreateHandlerOptions {
   basePath: string;
