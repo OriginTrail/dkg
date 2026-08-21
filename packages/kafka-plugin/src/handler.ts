@@ -30,7 +30,7 @@ import {
  */
 export type KafkaPluginCtx = Pick<
   RequestContext,
-  'req' | 'res' | 'agent' | 'publisherControl' | 'publisherRuntime' | 'requestAgentAddress'
+  'req' | 'res' | 'agent' | 'publisherControl' | 'publisherState' | 'requestAgentAddress'
   | 'url' | 'path'
 > & {
   config: RequestContext['config'] & { kafka?: { contextGraphId?: string } };
@@ -118,7 +118,10 @@ async function handlePostRegister(
       message: 'kafka-plugin has no configured contextGraphId',
     });
   }
-  if (!ctx.publisherRuntime || ctx.publisherRuntime.walletIds.length === 0) {
+  // `publisherState.runtime`, not the dispatcher's deprecated `publisherRuntime` alias: the
+  // canonical context should not be built out of a compatibility projection.
+  const runtime = ctx.publisherState.runtime;
+  if (!runtime || runtime.walletIds.length === 0) {
     return jsonResponse(ctx.res, 503, {
       error: 'PublisherUnavailable',
       message: 'kafka-plugin requires the publisher runtime to be running with at least one configured publisher wallet',

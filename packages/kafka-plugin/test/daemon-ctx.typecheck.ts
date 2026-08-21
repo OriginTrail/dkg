@@ -18,8 +18,14 @@ void daemonCtx(base, req, res);
 // drifted into shapes production never produces, which kept dead fallback branches alive.
 void daemonCtx(base, req, res, { path: '/anything' });
 
-// @ts-expect-error Same for `url` — and a nonsense value must not slip through either.
-void daemonCtx(base, req, res, { url: 'invalid' });
+// @ts-expect-error Same for `url`. The value is a REAL URL on purpose: with a nonsense string the
+// error could come from the value's type rather than from the field being forbidden, so the row
+// would have passed for the wrong reason.
+void daemonCtx(base, req, res, { url: new URL('http://x/api/kafka/streams') });
+
+// @ts-expect-error `res` is positional too, and was previously untested — a regression re-admitting
+// it would have gone unnoticed.
+void daemonCtx(base, req, res, { res });
 
 // @ts-expect-error `req` is a positional argument, not an override that can contradict it.
 void daemonCtx(base, req, res, { req });

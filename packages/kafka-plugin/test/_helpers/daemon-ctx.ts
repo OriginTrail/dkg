@@ -19,5 +19,5 @@ export function daemonCtx(
   overrides: DaemonCtxOverrides = {},
 ): KafkaPluginCtx {
   const url = new URL(req.url ?? '/', 'http://x');
-  return { ...base, ...overrides, req, res, url, path: url.pathname } as KafkaPluginCtx;
+  return { ...base, ...overrides, req, res, url, path: url.pathname };
 }

@@ -69,7 +69,7 @@ function mockCtx(overrides: Partial<Record<string, unknown>> = {}) {
     ctx: {
       agent: { publishAsync, query },
       publisherControl: { getStatus },
-      publisherRuntime: { walletIds: ['0xwallet'] },
+      publisherState: { runtime: { walletIds: ['0xwallet'] }, availability: { available: true } },
       config: {},
       requestAgentAddress: '0x0000000000000000000000000000000000000000',
       ...overrides,
@@ -163,9 +163,9 @@ describe('handler — POST /register error paths', () => {
     expect(captured.statusCode).toBe(503);
     expect(captured.body).toMatchObject({ error: 'PluginMisconfigured' });
   });
-  it('returns 503 PublisherUnavailable when publisherRuntime is null', async () => {
+  it('returns 503 PublisherUnavailable when the publisher runtime is absent', async () => {
     const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', validBody);
-    const { ctx } = mockCtx({ publisherRuntime: null });
+    const { ctx } = mockCtx({ publisherState: { runtime: null, availability: { available: false } } });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
     await handler(daemonCtx(ctx, req, res));
     expect(captured.statusCode).toBe(503);
@@ -173,7 +173,7 @@ describe('handler — POST /register error paths', () => {
   });
   it('returns 503 PublisherUnavailable when walletIds is empty', async () => {
     const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', validBody);
-    const { ctx } = mockCtx({ publisherRuntime: { walletIds: [] } });
+    const { ctx } = mockCtx({ publisherState: { runtime: { walletIds: [] }, availability: { available: true } } });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
     await handler(daemonCtx(ctx, req, res));
     expect(captured.statusCode).toBe(503);
@@ -677,7 +677,7 @@ describe('handler — discovery query failures', () => {
     const { ctx, query } = mockCtx();
     query.mockRejectedValue(new Error('query backend down'));
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler(daemonCtx(ctx, req, res, { path }));
+    await handler(daemonCtx(ctx, req, res));
     expect(captured.statusCode).toBe(503);
     expect(captured.body).toMatchObject({ error: 'QueryFailed', message: 'query backend down' });
   });
