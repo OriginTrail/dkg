@@ -1456,26 +1456,36 @@ export class TripleStoreAsyncLiftPublisher
     await this.ensureGraph();
     await this.sweepStaleWalletLocks();
     const interrupted = (await this.list()).filter(
-      (job) => job.status === 'claimed' || job.status === 'validated' || job.status === 'broadcast' || job.status === 'included',
+      (job) => job.status === 'claimed' || job.status === 'validated',
     );
 
     let recovered = 0;
 
     for (const job of interrupted) {
-      if (job.status === 'claimed' || job.status === 'validated') {
-        await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.resetJobToAccepted(job, job.status, getLiftJobTransactionEvidence(job)), 'recover-reset');
-        recovered += 1;
-        continue;
-      }
+      await this.releaseWalletLockForJob(job);
+      await this.writeJob(this.resetJobToAccepted(job, job.status, getLiftJobTransactionEvidence(job)), 'recover-reset');
+      recovered += 1;
+    }
 
+    recovered += await this.reconcileTransactions();
+    return recovered;
+  }
+
+  async reconcileTransactions(): Promise<number> {
+    await this.ensureGraph();
+    const txBearing = (await this.list()).filter(
+      (job) => job.status === 'broadcast' || job.status === 'included',
+    );
+
+    let reconciled = 0;
+    for (const job of txBearing) {
       if (await this.jobHandlerFor(job.request).recoverInterrupted(job)) {
-        recovered += 1;
+        reconciled += 1;
       }
     }
 
-    recovered += await this.dispatchFailedJobsOnChainProof();
-    return recovered;
+    reconciled += await this.dispatchFailedJobsOnChainProof();
+    return reconciled;
   }
 
   /**
