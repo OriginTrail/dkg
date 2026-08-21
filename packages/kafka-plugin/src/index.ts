@@ -1,5 +1,5 @@
 import type { RequestContext, RoutePlugin } from '@origintrail-official/dkg/daemon/plugin-api';
-import { createHandler, type KafkaPublishOptions, type KafkaPluginCtx } from './handler.js';
+import { createHandler, type KafkaPluginCtx } from './handler.js';
 import { coreSchema } from './schema.js';
 import { validateExtensionAgainstCore, type KafkaPluginExtension } from './extension.js';
 
@@ -17,10 +17,7 @@ export type { KafkaPluginExtension } from './extension.js';
 export interface KafkaPluginOptions<TParsed = Record<string, unknown>> {
   basePath?: string;
   contextGraphId?: string;
-  /**
-   * Forwarded to the agent as-is. Not validated here: see {@link KafkaPublishOptions}.
-   */
-  publishOptions?: KafkaPublishOptions;
+  publishOptions?: Record<string, unknown>;
   extension?: KafkaPluginExtension<TParsed>;
 }
 

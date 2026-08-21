@@ -1,23 +1,19 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { KafkaPluginCtx } from '../../src/handler.js';
-
-/** Overrides a test may set: anything EXCEPT the fields the daemon derives. */
-export type DaemonCtxOverrides = Omit<Partial<KafkaPluginCtx>, 'req' | 'res' | 'url' | 'path'>;
 
 /**
- * Build the context the DAEMON would hand a plugin.
+ * Attach a request to a base context, deriving `url` and `path` from it the way the daemon does.
  *
- * `url` and `path` are derived from the request exactly as `handleRequest` derives them, and are
- * applied AFTER the overrides so a caller cannot substitute a shape production never produces.
- * Fixtures drifting away from the real context is what kept dead fallback branches alive in this
- * handler, so the invariant is enforced by the type rather than described in a comment.
+ * Deliberately NOT "a daemon context": it does not derive `requestAgentAddress` from a token, and
+ * its `url` host is a placeholder rather than the real Host header. Claiming production fidelity
+ * would be false confidence. What it does provide is the one thing worth centralizing — fixtures
+ * that omit `url`/`path` drift into shapes the daemon never produces, which is what kept dead
+ * fallback branches in this handler alive until they were removed.
  */
-export function daemonCtx(
-  base: Omit<KafkaPluginCtx, 'req' | 'res' | 'url' | 'path'>,
+export function attachRequest<T extends object>(
+  base: T,
   req: IncomingMessage,
   res: ServerResponse,
-  overrides: DaemonCtxOverrides = {},
-): KafkaPluginCtx {
+): T & { req: IncomingMessage; res: ServerResponse; url: URL; path: string } {
   const url = new URL(req.url ?? '/', 'http://x');
-  return { ...base, ...overrides, req, res, url, path: url.pathname };
+  return { ...base, req, res, url, path: url.pathname };
 }

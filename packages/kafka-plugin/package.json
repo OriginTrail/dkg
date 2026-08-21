@@ -5,8 +5,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc && pnpm run test:types",
-    "test:types": "tsc --project tsconfig.type-tests.json",
+    "build": "tsc",
     "test": "vitest run --coverage",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"

@@ -41,29 +41,15 @@ interface KafkaJobScope {
   subGraphName?: string;
 }
 
-/**
- * COMPATIBILITY SURFACE: whatever a consumer passes, forwarded to the agent as-is.
- *
- * Nothing here is checked. Values are not validated, unknown keys are accepted, and
- * `admittedByAgentAddress` is accepted and then IGNORED -- the handler overwrites it with the
- * authenticated requester after spreading these options, which is where that guarantee lives.
- *
- * Deriving and narrowing this from the agent's own options is tracked on #2305 for a major,
- * because every narrowing rejects configurations that compile against the published contract
- * today.
- */
-export type KafkaPublishOptions = Record<string, unknown>;
-
 export interface CreateHandlerOptions {
   basePath: string;
   contextGraphId?: string;
   /**
-   * The agent's own publish options, derived from the capability rather than restated as a
-   * loose record. `Record<string, unknown>` is assignable to them (its index signature
-   * satisfies the optional properties), so a nonsense value such as `accessPolicy: 42` from
-   * plugin configuration compiled clean and reached the agent unchecked.
+   * Forwarded to the agent as-is: not validated, unknown keys accepted. This is the published
+   * contract. `admittedByAgentAddress` may be present and is IGNORED -- the handler overwrites
+   * it with the authenticated requester. Deriving and narrowing needs a major (#2305).
    */
-  publishOptions?: KafkaPublishOptions;
+  publishOptions?: Record<string, unknown>;
   extension?: KafkaPluginExtension<Record<string, unknown>>;
 }
 
