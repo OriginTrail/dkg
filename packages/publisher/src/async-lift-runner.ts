@@ -22,6 +22,8 @@ export class AsyncLiftRunner {
   private running?: Promise<void>;
   private lastRecoveryAt = 0;
   private lastRecoveryAttemptAt = 0;
+  private activeWalletAttempts = 0;
+  private recoveryInFlight?: Promise<void>;
 
   constructor(private readonly config: AsyncLiftRunnerConfig) {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
@@ -55,7 +57,9 @@ export class AsyncLiftRunner {
     }
 
     this.started = true;
-    this.running = this.loop();
+    this.running = Promise.all(
+      this.config.walletIds.map((walletId) => this.walletLoop(walletId)),
+    ).then(() => undefined);
   }
 
   async stop(): Promise<void> {
@@ -63,11 +67,19 @@ export class AsyncLiftRunner {
     await this.running;
   }
 
-  private async loop(): Promise<void> {
+  private async walletLoop(walletId: string): Promise<void> {
     while (!this.stopped) {
       try {
-        await this.maybeRunRecovery();
-        const processed = await this.runCycle();
+        await this.maybeRunRecoveryWhenIdle();
+        if (this.stopped) break;
+
+        this.activeWalletAttempts += 1;
+        let processed;
+        try {
+          processed = await this.config.publisher.processNext(walletId);
+        } finally {
+          this.activeWalletAttempts -= 1;
+        }
         if (!processed && !this.stopped) {
           await this.sleep(this.pollIntervalMs);
         }
@@ -84,36 +96,30 @@ export class AsyncLiftRunner {
     }
   }
 
-  private async maybeRunRecovery(): Promise<void> {
+  private async maybeRunRecoveryWhenIdle(): Promise<void> {
+    if (this.activeWalletAttempts > 0) return;
+    if (this.recoveryInFlight) {
+      await this.recoveryInFlight;
+      return;
+    }
+
     const now = Date.now();
     if (now - this.lastRecoveryAt < this.recoveryIntervalMs) return;
     // Throttle attempts at errorBackoffMs to avoid hammering during outages,
     // but allow the full interval between *successful* recoveries.
     if (now - this.lastRecoveryAttemptAt < this.errorBackoffMs) return;
     this.lastRecoveryAttemptAt = now;
-    await this.config.publisher.recover();
-    this.lastRecoveryAt = now;
-  }
-
-  private async runCycle(): Promise<boolean> {
-    if (this.stopped) return false;
-
-    // Each configured wallet owns an independent nonce stream and is already
-    // protected by the publisher's wallet-scoped claim. Run one job per
-    // wallet concurrently so adding publisher wallets actually increases
-    // throughput. Wait for every wallet attempt to settle before propagating
-    // an error; otherwise a fast rejection could start the next cycle while a
-    // slower wallet from this cycle is still publishing.
-    const outcomes = await Promise.allSettled(
-      this.config.walletIds.map((walletId) => this.config.publisher.processNext(walletId)),
-    );
-    const failure = outcomes.find(
-      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
-    );
-    if (failure) {
-      throw failure.reason;
+    const recovery = this.config.publisher.recover().then(() => {
+      this.lastRecoveryAt = now;
+    });
+    this.recoveryInFlight = recovery;
+    try {
+      await recovery;
+    } finally {
+      if (this.recoveryInFlight === recovery) {
+        this.recoveryInFlight = undefined;
+      }
     }
-    return outcomes.some((outcome) => outcome.status === 'fulfilled' && Boolean(outcome.value));
   }
 }
 
