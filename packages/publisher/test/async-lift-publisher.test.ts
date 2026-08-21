@@ -2012,7 +2012,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.timestamps?.failedAt).toBeUndefined();
   });
 
-  it('keeps broadcast knowledge asset VM publish jobs pending instead of blind retrying', async () => {
+  it('keeps broadcast knowledge asset VM publish jobs and their wallet reservation pending', async () => {
     const publisher = createPublisher();
 
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -2026,9 +2026,9 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     const recovered = await publisher.recover();
     const job = await publisher.getStatus(jobId);
-    const lock = await store.query(`SELECT ?p ?o WHERE {
+    const lock = await store.query(`SELECT ?job WHERE {
       GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
-        <${walletLockSubject('wallet-1')}> ?p ?o .
+        <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?job .
       }
     }`);
 
@@ -2038,7 +2038,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.recovery).toBeUndefined();
     expect(lock.type).toBe('bindings');
     if (lock.type !== 'bindings') return;
-    expect(lock.bindings).toHaveLength(0);
+    expect(lock.bindings).toEqual([{ job: jobSubject(jobId) }]);
   });
 
   // GH#2270 — this row used to end with bulk clear DELETING the failure. The job is terminal, but
@@ -2046,7 +2046,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   // that record hands the KA's lifecycle subject back to admission, which then mints a second job
   // for a transaction nobody has accounted for. Bulk clear now leaves it; an operator removes it
   // by exact id once the transaction's fate is known.
-  it('keeps included knowledge asset VM publish jobs unknown without holding the wallet', async () => {
+  it('keeps included knowledge asset VM publish jobs unknown while retaining the wallet reservation', async () => {
     const publisher = createPublisher({
       config: {
         recoveryLookupTimeoutMs: 50,
@@ -2073,14 +2073,14 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.status).toBe('included');
     expect(job?.failure).toBeUndefined();
 
-    const lock = await store.query(`SELECT ?p ?o WHERE {
+    const lock = await store.query(`SELECT ?lockedJob WHERE {
       GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
-        <${walletLockSubject('wallet-1')}> ?p ?o .
+        <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?lockedJob .
       }
     }`);
     expect(lock.type).toBe('bindings');
     if (lock.type !== 'bindings') return;
-    expect(lock.bindings).toHaveLength(0);
+    expect(lock.bindings).toEqual([{ lockedJob: jobSubject(jobId) }]);
   });
 
   it('supports pause, resume, cancel, retry, and clear', async () => {
