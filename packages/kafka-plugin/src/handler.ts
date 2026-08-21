@@ -268,7 +268,8 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
     });
   }
 
-  const searchParams = parseSearchParams(ctx);
+  // The daemon parses `url` before dispatch, so the query is always available here.
+  const searchParams = ctx.url.searchParams;
   let pagination;
   try {
     pagination = parsePagination(searchParams);
@@ -394,11 +395,6 @@ async function handleGetSingle(
     });
   }
   return jsonResponse(ctx.res, 200, ka);
-}
-
-function parseSearchParams(ctx: KafkaPluginCtx): URLSearchParams {
-  // The canonical context always carries a parsed `url`; the daemon builds it before dispatch.
-  return ctx.url.searchParams;
 }
 
 function discoveryQueryOptions(
