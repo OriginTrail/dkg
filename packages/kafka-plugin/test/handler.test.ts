@@ -57,6 +57,17 @@ function mockReqRes(method: string, urlPath: string, body?: unknown): {
   } as unknown as ServerResponse;
   return { req: reqStream, res, captured };
 }
+/**
+ * Build the context the DAEMON would hand a plugin: `url` and `path` derived from the
+ * request exactly as `handleRequest` derives them. Centralized so a new canonical field is
+ * one edit here rather than one per call site, and so fixtures cannot drift into shapes
+ * production never produces -- which is what kept dead fallback branches alive.
+ */
+function daemonCtx(base: Record<string, unknown>, req: any, res: any, overrides: Record<string, unknown> = {}) {
+  const url = new URL(req.url ?? '/', 'http://x');
+  return { ...base, req, res, url, path: url.pathname, ...overrides } as any;
+}
+
 function mockCtx(overrides: Partial<Record<string, unknown>> = {}) {
   const publishAsync = vi.fn().mockResolvedValue({ captureID: 'cap-123' });
   const getStatus = vi.fn();
@@ -108,7 +119,7 @@ describe('handler — POST /register happy path', () => {
     const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', validBody);
     const { ctx, publishAsync } = mockCtx({ config: { kafka: { contextGraphId: 'urn:cg:from-config' } } });
     const handler = createHandler({ basePath: '/api/kafka/streams' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(202);
     expect(publishAsync.mock.calls[0][0]).toBe('urn:cg:from-config');
   });
@@ -126,7 +137,7 @@ describe('handler — POST /register happy path', () => {
       contextGraphId: 'urn:cg:demo',
       publishOptions: { accessPolicy: 'public', admittedByAgentAddress: ATTACKER },
     });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     const opts = publishAsync.mock.calls[0][2] as Record<string, unknown>;
     expect(opts.admittedByAgentAddress).toBe(SUBMITTER);
     expect(opts.admittedByAgentAddress).not.toBe(ATTACKER);
@@ -142,7 +153,7 @@ describe('handler — POST /register happy path', () => {
       contextGraphId: 'urn:cg:demo',
       publishOptions: { accessPolicy: 'public', subGraphName: 'streams' },
     });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     // The authenticated submitter is stamped alongside the forwarded options: a Kafka stream
     // request is externally authenticated, so its job must be owned by the agent that sent it
     // rather than by the node default.
@@ -158,7 +169,7 @@ describe('handler — POST /register error paths', () => {
     const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', validBody);
     const { ctx } = mockCtx();
     const handler = createHandler({ basePath: '/api/kafka/streams' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(503);
     expect(captured.body).toMatchObject({ error: 'PluginMisconfigured' });
   });
@@ -166,7 +177,7 @@ describe('handler — POST /register error paths', () => {
     const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', validBody);
     const { ctx } = mockCtx({ publisherRuntime: null });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(503);
     expect(captured.body).toMatchObject({ error: 'PublisherUnavailable' });
   });
@@ -174,7 +185,7 @@ describe('handler — POST /register error paths', () => {
     const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', validBody);
     const { ctx } = mockCtx({ publisherRuntime: { walletIds: [] } });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(503);
     expect(captured.body).toMatchObject({ error: 'PublisherUnavailable' });
   });
@@ -182,7 +193,7 @@ describe('handler — POST /register error paths', () => {
     const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', { name: 'only-name' });
     const { ctx } = mockCtx();
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(400);
     expect(captured.body).toMatchObject({ error: 'InvalidContent' });
     expect(Array.isArray((captured.body as Record<string, unknown>).details)).toBe(true);
@@ -192,7 +203,7 @@ describe('handler — POST /register error paths', () => {
     const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', body);
     const { ctx } = mockCtx();
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(400);
     expect(captured.body).toMatchObject({ error: 'InvalidContent' });
   });
@@ -220,7 +231,7 @@ describe('handler — POST /register error paths', () => {
     const err = Object.assign(new Error('cg missing'), { code: 'ContextGraphNotFound' });
     publishAsync.mockRejectedValueOnce(err);
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(404);
     expect(captured.body).toMatchObject({ error: 'ContextGraphNotFound' });
   });
@@ -229,7 +240,7 @@ describe('handler — POST /register error paths', () => {
     const { ctx, publishAsync } = mockCtx();
     publishAsync.mockRejectedValueOnce(new Error('boom'));
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(503);
     expect(captured.body).toMatchObject({ error: 'EnqueueFailed', message: 'boom' });
   });
@@ -239,7 +250,7 @@ describe('handler — POST /register error paths', () => {
     const err = Object.assign(new Error('bad content'), { code: 'InvalidContent' });
     publishAsync.mockRejectedValueOnce(err);
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(400);
     expect(captured.body).toMatchObject({ error: 'InvalidContent', message: 'bad content' });
   });
@@ -249,7 +260,7 @@ describe('handler — POST /register error paths', () => {
     const err = Object.assign(new Error('bad content'), { name: 'InvalidContentError' });
     publishAsync.mockRejectedValueOnce(err);
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(400);
     expect(captured.body).toMatchObject({ error: 'InvalidContent', message: 'bad content' });
   });
@@ -268,7 +279,7 @@ describe('handler — GET /register/:captureID', () => {
       finalization: { ual: 'did:dkg:1/0xabc' },
     });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register/cap-1' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register/cap-1' }));
     expect(captured.statusCode).toBe(200);
     expect(captured.body).toEqual({
       captureID: 'cap-1',
@@ -289,7 +300,7 @@ describe('handler — GET /register/:captureID', () => {
       timestamps: { acceptedAt: 1700000000000 },
     });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register/cap-2' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register/cap-2' }));
     expect(captured.statusCode).toBe(200);
     expect(captured.body).toMatchObject({
       state: 'accepted',
@@ -317,7 +328,7 @@ describe('handler — GET /register/:captureID', () => {
       contextGraphId: 'urn:cg:demo',
       publishOptions: { subGraphName: 'streams' },
     });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register/cap-ka' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register/cap-ka' }));
     expect(captured.statusCode).toBe(200);
     expect(captured.body).toMatchObject({
       captureID: 'cap-ka',
@@ -335,7 +346,7 @@ describe('handler — GET /register/:captureID', () => {
       failure: { message: 'tx reverted' },
     });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register/cap-3' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register/cap-3' }));
     expect(captured.statusCode).toBe(200);
     expect((captured.body as Record<string, unknown>).error).toBe('tx reverted');
   });
@@ -344,7 +355,7 @@ describe('handler — GET /register/:captureID', () => {
     const { ctx, getStatus } = mockCtx();
     getStatus.mockResolvedValueOnce(null);
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register/missing' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register/missing' }));
     expect(captured.statusCode).toBe(404);
     expect(captured.body).toMatchObject({ error: 'CaptureNotFound' });
   });
@@ -353,7 +364,7 @@ describe('handler — GET /register/:captureID', () => {
     const { ctx, getStatus } = mockCtx();
     getStatus.mockRejectedValueOnce(new Error('status store down'));
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register/cap-err' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register/cap-err' }));
     expect(captured.statusCode).toBe(503);
     expect(captured.body).toMatchObject({ error: 'StatusLookupFailed', message: 'status store down' });
   });
@@ -370,7 +381,7 @@ describe('handler — GET /register/:captureID', () => {
       finalization: { ual: 'did:dkg:1/0xabc' },
     });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo', publishOptions });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register/cap-other' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register/cap-other' }));
     expect(captured.statusCode).toBe(404);
     expect(captured.body).toMatchObject({ error: 'CaptureNotFound' });
   });
@@ -378,7 +389,7 @@ describe('handler — GET /register/:captureID', () => {
     const { req, res, captured } = mockReqRes('GET', '/api/kafka/streams/register/');
     const { ctx } = mockCtx();
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register/' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register/' }));
     expect(captured.statusCode).toBe(404);
     expect(captured.body).toMatchObject({ error: 'CaptureNotFound' });
   });
@@ -391,7 +402,7 @@ describe('handler — GET /register/:captureID', () => {
       timestamps: { acceptedAt: 1700000000000 },
     });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register/cap%2Fone' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register/cap%2Fone' }));
     expect(getStatus).toHaveBeenCalledWith('cap/one');
     expect(captured.statusCode).toBe(200);
   });
@@ -401,7 +412,7 @@ describe('handler — unmatched routes', () => {
     const { req, res, captured } = mockReqRes('POST', '/api/something/else', {});
     const { ctx } = mockCtx();
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/something/else' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/something/else' }));
     expect(captured.writableEnded).toBe(false);
     expect(captured.headersSent).toBe(false);
   });
@@ -436,7 +447,7 @@ describe('handler — GET / (list)', () => {
     query.mockResolvedValueOnce({ bindings: samplePageBindings });
     query.mockResolvedValueOnce({ bindings: sampleListBindings });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams' }));
     expect(captured.statusCode).toBe(200);
     const body = captured.body as { items: Array<Record<string, unknown>>; limit: number; offset: number; total: number };
     expect(body.limit).toBe(30);
@@ -461,14 +472,7 @@ describe('handler — GET / (list)', () => {
     query.mockResolvedValueOnce({ bindings: [{ count: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>' }] });
     query.mockResolvedValueOnce({ bindings: [] });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({
-      ...ctx,
-      req,
-      res,
-      url: new URL(req.url ?? '/', 'http://x'),
-      path: '/api/kafka/streams',
-      requestAgentAddress: '0x0000000000000000000000000000000000000001',
-    });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams', requestAgentAddress: '0x0000000000000000000000000000000000000001', }));
     expect(query).toHaveBeenCalledTimes(2);
     expect(query.mock.calls[0][1]).toMatchObject({
       contextGraphId: 'urn:cg:demo',
@@ -497,7 +501,7 @@ describe('handler — GET / (list)', () => {
       contextGraphId: 'urn:cg:demo',
       publishOptions: { subGraphName: 'streams' },
     });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams' }));
     expect(query).toHaveBeenCalledTimes(2);
     for (const call of query.mock.calls) {
       expect(call[0]).toContain('GRAPH <did:dkg:context-graph:urn:cg:demo/_meta>');
@@ -515,7 +519,7 @@ describe('handler — GET / (list)', () => {
       contextGraphId: 'urn:cg:demo',
       publishOptions: { subGraphName: 'bad/streams' },
     });
-    await expect(handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams' })).resolves.toBeUndefined();
+    await expect(handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams' }))).resolves.toBeUndefined();
     expect(captured.statusCode).toBe(500);
     expect(captured.body).toMatchObject({
       error: 'PluginMisconfigured',
@@ -529,7 +533,7 @@ describe('handler — GET / (list)', () => {
     query.mockResolvedValueOnce({ bindings: [{ count: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>' }] });
     query.mockResolvedValueOnce({ bindings: [] });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams' }));
     expect(captured.statusCode).toBe(200);
     expect((captured.body as { limit: number }).limit).toBe(1000);
     expect(query.mock.calls[1][0]).toContain('LIMIT 1000 OFFSET 0');
@@ -540,7 +544,7 @@ describe('handler — GET / (list)', () => {
     query.mockResolvedValueOnce({ bindings: [{ count: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>' }] });
     query.mockResolvedValueOnce({ bindings: [] });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams' }));
     expect(captured.statusCode).toBe(200);
     expect((captured.body as { limit: number }).limit).toBe(1000);
     expect(query.mock.calls[1][0]).toContain('LIMIT 1000 OFFSET 0');
@@ -551,7 +555,7 @@ describe('handler — GET / (list)', () => {
     query.mockResolvedValueOnce({ bindings: [{ count: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>' }] });
     query.mockResolvedValueOnce({ bindings: [] });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams' }));
     expect(captured.statusCode).toBe(200);
     expect(captured.body).toEqual({ items: [], limit: 30, offset: 0, total: 0 });
   });
@@ -559,7 +563,7 @@ describe('handler — GET / (list)', () => {
     const { req, res, captured } = mockReqRes('GET', '/api/kafka/streams?limit=-3');
     const { ctx } = mockCtx();
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams' }));
     expect(captured.statusCode).toBe(400);
     expect(captured.body).toMatchObject({ error: 'InvalidContent' });
   });
@@ -567,7 +571,7 @@ describe('handler — GET / (list)', () => {
     const { req, res, captured } = mockReqRes('GET', '/api/kafka/streams');
     const { ctx } = mockCtx();
     const handler = createHandler({ basePath: '/api/kafka/streams' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams' }));
     expect(captured.statusCode).toBe(503);
     expect(captured.body).toMatchObject({ error: 'PluginMisconfigured' });
   });
@@ -585,14 +589,7 @@ describe('handler — GET /:ual (single)', () => {
       ],
     });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({
-      ...ctx,
-      req,
-      res,
-      url: new URL(req.url ?? '/', 'http://x'),
-      path: '/api/kafka/streams/did:dkg:1/0xabc',
-      requestAgentAddress: '0x0000000000000000000000000000000000000001',
-    });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/did:dkg:1/0xabc', requestAgentAddress: '0x0000000000000000000000000000000000000001', }));
     expect(captured.statusCode).toBe(200);
     const body = captured.body as Record<string, unknown>;
     expect(body['@type']).toBe('dkg-streams:KafkaStream');
@@ -624,14 +621,7 @@ describe('handler — GET /:ual (single)', () => {
       contextGraphId: 'urn:cg:demo',
       publishOptions: { subGraphName: 'streams' },
     });
-    await handler({
-      ...ctx,
-      req,
-      res,
-      url: new URL(req.url ?? '/', 'http://x'),
-      path: '/api/kafka/streams/did:dkg:1/0xabc',
-      requestAgentAddress: '0x0000000000000000000000000000000000000001',
-    });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/did:dkg:1/0xabc', requestAgentAddress: '0x0000000000000000000000000000000000000001', }));
     expect(captured.statusCode).toBe(200);
     expect(query.mock.calls[0][0]).toContain('GRAPH <did:dkg:context-graph:urn:cg:demo/_meta>');
     expect(query.mock.calls[0][0]).toContain(
@@ -644,7 +634,7 @@ describe('handler — GET /:ual (single)', () => {
     const { ctx, query } = mockCtx();
     query.mockResolvedValueOnce({ bindings: [] });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/did:dkg:1/0xmissing' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/did:dkg:1/0xmissing' }));
     expect(captured.statusCode).toBe(404);
     expect(captured.body).toMatchObject({ error: 'StreamNotFound' });
   });
@@ -657,7 +647,7 @@ describe('handler — GET /:ual (single)', () => {
       timestamps: { acceptedAt: 1700000000000 },
     });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register/cap-1' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register/cap-1' }));
     expect(captured.statusCode).toBe(200);
     expect(getStatus).toHaveBeenCalledTimes(1);
     expect(query).not.toHaveBeenCalled();
@@ -666,7 +656,7 @@ describe('handler — GET /:ual (single)', () => {
     const { req, res, captured } = mockReqRes('GET', '/api/kafka/streams/register');
     const { ctx, query, getStatus } = mockCtx();
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(query).not.toHaveBeenCalled();
     expect(getStatus).not.toHaveBeenCalled();
     expect(captured.statusCode).not.toBe(200);
@@ -675,7 +665,7 @@ describe('handler — GET /:ual (single)', () => {
     const { req, res, captured } = mockReqRes('GET', '/api/kafka/streams/did:dkg:1/0xabc');
     const { ctx } = mockCtx();
     const handler = createHandler({ basePath: '/api/kafka/streams' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/did:dkg:1/0xabc' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/did:dkg:1/0xabc' }));
     expect(captured.statusCode).toBe(503);
     expect(captured.body).toMatchObject({ error: 'PluginMisconfigured' });
   });
@@ -689,7 +679,7 @@ describe('handler — GET /:ual (single)', () => {
       ],
     });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: `/api/kafka/streams/${encoded}` });
+    await handler(daemonCtx(ctx, req, res, { path: `/api/kafka/streams/${encoded}` }));
     expect(captured.statusCode).toBe(200);
     expect(query.mock.calls[0][0]).toContain('<did:dkg:1/0xabc>');
   });
@@ -703,7 +693,7 @@ describe('handler — discovery query failures', () => {
     const { ctx, query } = mockCtx();
     query.mockRejectedValue(new Error('query backend down'));
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path });
+    await handler(daemonCtx(ctx, req, res, { path }));
     expect(captured.statusCode).toBe(503);
     expect(captured.body).toMatchObject({ error: 'QueryFailed', message: 'query backend down' });
   });
@@ -714,7 +704,7 @@ describe('handler — register-to-discovery regression', () => {
     const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', validBody);
     const { ctx, publishAsync } = mockCtx();
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: cgId });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(202);
     const [, content] = publishAsync.mock.calls[0];
     expect(content).toHaveProperty('private');
@@ -753,7 +743,7 @@ describe('handler — POST /register with extension', () => {
       contextGraphId: 'urn:cg:demo',
       extension,
     });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(202);
     expect(publishAsync).toHaveBeenCalledTimes(1);
     const [, content] = publishAsync.mock.calls[0];
@@ -776,7 +766,7 @@ describe('handler — POST /register with extension', () => {
       contextGraphId: 'urn:cg:demo',
       extension,
     });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(400);
     expect(captured.body).toMatchObject({ error: 'InvalidContent' });
     expect(publishAsync).not.toHaveBeenCalled();
@@ -790,7 +780,7 @@ describe('handler — POST /register with extension', () => {
       contextGraphId: 'urn:cg:demo',
       extension,
     });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(400);
     expect(captured.body).toMatchObject({ error: 'InvalidContent' });
   });
@@ -808,7 +798,7 @@ describe('handler — POST /register with extension', () => {
       contextGraphId: 'urn:cg:demo',
       extension: ext,
     });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(augmentSpy).toHaveBeenCalledTimes(1);
     const arg = augmentSpy.mock.calls[0][0];
     expect(arg).toEqual({ externalRef: 'ref-alpha', sourceRef: 'source-1' });
@@ -824,7 +814,7 @@ describe('handler — POST /register with extension', () => {
     const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', body);
     const { ctx, publishAsync } = mockCtx();
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo', extension: ext });
-    await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+    await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     expect(captured.statusCode).toBe(400);
     expect(captured.body).toMatchObject({ error: 'InvalidContent', message: 'extension says no' });
     expect(publishAsync).not.toHaveBeenCalled();
@@ -852,7 +842,7 @@ describe('handler — extension runtime collision (one warn per unique key acros
       const { req, res } = mockReqRes('POST', '/api/kafka/streams/register', body);
       const { ctx, publishAsync } = mockCtx();
       ctxs.push({ publishAsync });
-      await handler({ ...ctx, req, res, url: new URL(req.url ?? '/', 'http://x'), path: '/api/kafka/streams/register' });
+      await handler(daemonCtx(ctx, req, res, { path: '/api/kafka/streams/register' }));
     }
     for (const { publishAsync } of ctxs) {
       const ka = publishAsync.mock.calls[0][1].private as Record<string, unknown>;

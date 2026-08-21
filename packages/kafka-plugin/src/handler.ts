@@ -44,15 +44,18 @@ interface KafkaJobScope {
 /**
  * The publish options a PLUGIN CONSUMER may set.
  *
- * Derived from the agent's own options so value types cannot drift, minus the controls this
- * route owns. `admittedByAgentAddress` is the authenticated submitter and is set from the
- * request identity: advertising it as configuration would let a caller write
- * `{ admittedByAgentAddress: '0xattacker' }`, type-check, and have it silently replaced —
- * a public type describing something the plugin does not honour.
+ * An ALLOW-LIST, not the agent's surface minus a deny-list. Value types are still derived, so
+ * they cannot drift — but which options this plugin OFFERS is a decision made here. A
+ * deny-list silently republished every future agent option as Kafka configuration, including
+ * internal controls like `operationCtx`, and made adding an agent flag a change to this
+ * plugin's public API by accident.
+ *
+ * `admittedByAgentAddress` is absent by construction: it is the authenticated submitter, set
+ * from the request identity, so advertising it would describe a control the plugin ignores.
  */
-export type KafkaPublishOptions = Omit<
+export type KafkaPublishOptions = Pick<
   NonNullable<Parameters<RequestContext['agent']['publishAsync']>[2]>,
-  'admittedByAgentAddress'
+  'accessPolicy' | 'allowedPeers' | 'subGraphName' | 'publishEpochs'
 >;
 
 export interface CreateHandlerOptions {

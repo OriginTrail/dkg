@@ -19,3 +19,12 @@ void createKafkaPlugin({ publishOptions: { accessPolicyy: 'public' } });
 // plugin configuration. Advertising it would let a caller set it, type-check, and have the
 // handler silently replace the value.
 void createKafkaPlugin({ publishOptions: { admittedByAgentAddress: '0xattacker' } });
+
+// @ts-expect-error An internal agent control is not Kafka configuration. Under a deny-list this
+// compiled, and every future agent option would have become plugin API by accident.
+void createKafkaPlugin({ publishOptions: { operationCtx: undefined } });
+
+// The options this plugin does offer still type-check together.
+void createKafkaPlugin({
+  publishOptions: { accessPolicy: 'allowList', allowedPeers: ['peer-a'], subGraphName: 'streams' },
+});
