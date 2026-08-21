@@ -839,12 +839,17 @@ function bytesEqual(left: Uint8Array | undefined, right: Uint8Array | undefined)
  * would silently reproduce the ownership defect the parameter exists to prevent. Only an explicit
  * `node` selects the node owner, and a malformed agent identity fails here — before any staging —
  * rather than after irreversible publish preparation.
+ *
+ * Returns the OWNER rather than narrowing the argument, so the caller keeps a resolved value and
+ * never has to consult the caller-owned object again. Splitting validation from resolution is what
+ * opened a window for the object to be mutated across an await.
  */
-function assertValidPublishAsyncAdmission(
+function resolvePublishAsyncAdmissionOwner(
   admission: PublishAsyncAdmission,
-): asserts admission is PublishAsyncAdmission {
+  nodeOwner: () => string | undefined,
+): string | undefined {
   const kind = (admission as { kind?: unknown } | null | undefined)?.kind;
-  if (kind === 'node') return;
+  if (kind === 'node') return nodeOwner();
   if (kind === 'agent') {
     const agentAddress = (admission as { agentAddress?: unknown }).agentAddress;
     if (typeof agentAddress !== 'string' || agentAddress.trim().length === 0) {
@@ -854,7 +859,7 @@ function assertValidPublishAsyncAdmission(
         + 'force-clear to an agent that did not submit this job.',
       );
     }
-    return;
+    return agentAddress.trim();
   }
   throw new Error(
     `publishAsync: unknown admission kind ${JSON.stringify(kind)}. State { kind: 'agent', `
@@ -1360,13 +1365,17 @@ export class PublishMethods extends DKGAgentBase {
     content: PublishAsyncContent,
     opts?: PublishAsyncOpts,
   ): Promise<{ captureID: string }> {
-    // Validated FIRST, before any staging, and fail-closed. The union is a compile-time
-    // guarantee only: a JavaScript plugin, a dynamically loaded handler, or anything widened
-    // through `any` can hand us an unknown kind. Treating "not 'agent'" as node admission would
-    // rebuild the exact defect this parameter exists to prevent — `{ kind: 'agnt' }` silently
-    // becoming a node-owned job — and a malformed agent address must not surface only after
-    // irreversible publish preparation has already happened.
-    assertValidPublishAsyncAdmission(admission);
+    // Resolved ONCE, here, before any await. Two properties depend on that:
+    //  - fail-closed on shape. The union is erased at runtime, so a JavaScript plugin can
+    //    present an unknown kind; reading "not 'agent'" as node admission would rebuild the
+    //    ownership defect this parameter exists to prevent.
+    //  - no re-read of a CALLER-OWNED object. `admission` belongs to the caller and publishing
+    //    suspends on many awaits; re-reading it at enqueue let a caller mutate the owner after
+    //    it had passed validation, redirecting the force-clear or blanking it entirely.
+    const admittedByAgentAddress = resolvePublishAsyncAdmissionOwner(
+      admission,
+      () => this.getDefaultAgentAddress(),
+    );
     const contextGraphId = normalizePublishContextGraphId(contextGraphIdOrUal);
     const ctx = opts?.operationCtx ?? createOperationContext('publish');
 
@@ -1646,10 +1655,6 @@ export class PublishMethods extends DKGAgentBase {
     // who enqueued nothing. A host that authenticated a caller passes it in; otherwise this is an
     // internal producer and the node's own default agent owns the job — the same identity a
     // node-level token resolves to in the daemon, so the operator keeps the exit.
-    // Shape was validated at entry, so this ternary cannot silently absorb an unknown kind.
-    const admittedByAgentAddress = admission.kind === 'agent'
-      ? admission.agentAddress.trim()
-      : this.getDefaultAgentAddress();
     const captureID = await asyncPublisher.enqueueKnowledgeAssetVmPublish(
       intent,
       admittedByAgentAddress ? { admittedByAgentAddress } : undefined,

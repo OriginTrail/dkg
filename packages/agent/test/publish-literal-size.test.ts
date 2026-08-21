@@ -13,6 +13,7 @@ describe('agent publish literal size validation', () => {
   it('rejects publishAsync private quads before workspace staging', async () => {
     const agentStub = {
       contextGraphExists: vi.fn(async () => true),
+      getDefaultAgentAddress: () => '0xNODE',
     };
 
     await expect(

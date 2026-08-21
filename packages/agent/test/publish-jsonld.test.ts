@@ -403,6 +403,35 @@ describe('publishJsonLd', () => {
       )).rejects.toThrow(/non-blank agentAddress/);
     }
 
+    // 3829656449 — the admission object belongs to the CALLER, and publishing suspends on many
+    // awaits. Re-reading it at enqueue let a caller pass validation as one identity and have a
+    // different one persisted. The owner is captured before the first await, so mutating the
+    // object mid-flight changes nothing.
+    const mutable = { kind: 'agent' as const, agentAddress: EPCIS_CALLER };
+    const pending = agent.publishAsync(
+      mutable,
+      'did:dkg:context-graph:async-admission',
+      content('AsyncAdmissionMutated'),
+      { localOnly: true },
+    );
+    mutable.agentAddress = '   ';          // would have blanked the owner
+    const mutatedJob = await asyncPublisher.getStatus((await pending).captureID);
+    expect(mutatedJob?.admission?.byAgentAddress).toBe(EPCIS_CALLER);
+
+    // 3829656707 — the forged-owner path, against the REAL publish method rather than a mock. A
+    // legacy `admittedByAgentAddress` in the options bag must lose to the declared admission; the
+    // Kafka unit test could not prove this, because the decision lives here.
+    const ATTACKER = '0x00000000000000000000000000000000000000ff';
+    const forged = await agent.publishAsync(
+      { kind: 'agent', agentAddress: EPCIS_CALLER },
+      'did:dkg:context-graph:async-admission',
+      content('AsyncAdmissionForged'),
+      { localOnly: true, admittedByAgentAddress: ATTACKER } as never,
+    );
+    const forgedJob = await asyncPublisher.getStatus(forged.captureID);
+    expect(forgedJob?.admission?.byAgentAddress).toBe(EPCIS_CALLER);
+    expect(JSON.stringify(forgedJob)).not.toContain(ATTACKER);
+
     // The discriminating half: the owner is NOT the author. Under curated publishing the signer
     // may be a third party who enqueued nothing, and handing them a destructive clear would give
     // the double-publish decision to someone who never asked for the publish.

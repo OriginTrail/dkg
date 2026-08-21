@@ -112,11 +112,12 @@ describe('handler — POST /register happy path', () => {
     expect(captured.statusCode).toBe(202);
     expect(publishAsync.mock.calls[0][1]).toBe('urn:cg:from-config');
   });
-  it('stamps the AUTHENTICATED submitter and a client cannot name its own owner', async () => {
-    // Ownership decides who may run the destructive by-id clear. `publishOptions` here is an
-    // unfiltered client record, unlike the EPCIS lane's allow-list, so the stamp must beat a
-    // caller-supplied value — the spread ORDER is the guard, and this row is what fails if
-    // it is ever reversed.
+  it('DECLARES the authenticated submitter as the admission it passes to the agent', async () => {
+    // Scope, stated because the previous version of this row overclaimed (3829656707): this
+    // proves only what the PLUGIN declares. The ownership DECISION now lives in the agent, which
+    // is mocked here — so a regression that read the options bag instead of the declaration
+    // would leave this row green. That property is proven end to end against the real publish
+    // method and the persisted job in agent/test/publish-jsonld.test.ts.
     const SUBMITTER = '0x00000000000000000000000000000000000000b7';
     const ATTACKER = '0x00000000000000000000000000000000000000ff';
     const { req, res } = mockReqRes('POST', '/api/kafka/streams/register', validBody);
@@ -129,7 +130,8 @@ describe('handler — POST /register happy path', () => {
     await handler({ ...ctx, req, res, path: '/api/kafka/streams/register' });
     expect(publishAsync.mock.calls[0][0]).toEqual({ kind: 'agent', agentAddress: SUBMITTER });
     const opts = publishAsync.mock.calls[0][3] as Record<string, unknown>;
-    // The client's attempt stays in the options bag, where it now means nothing.
+    // The client's value is still forwarded in the options bag; it simply is not the
+    // admission any more, and nothing here can prove the agent ignores it.
     expect(opts.admittedByAgentAddress).toBe(ATTACKER);
     // Ordinary options still forward untouched.
     expect(opts.accessPolicy).toBe('public');
