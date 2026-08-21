@@ -224,6 +224,7 @@ export {
   type ContextGraphDiscoveryOptions,
   type PublishOpts,
   type PublishAsyncContent,
+  type PublishAsyncAdmission,
   type PublishAsyncOpts,
   type PublishAsyncQuadEnvelope,
   type ContextGraphMemberPrincipalType,

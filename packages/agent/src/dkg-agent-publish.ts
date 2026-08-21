@@ -400,6 +400,7 @@ import {
   type CclPublishedResultEntry,
   type CclPublishedEvaluationRecord,
   type PublishOpts,
+  type PublishAsyncAdmission,
   type PublishAsyncOpts,
   type PublishAsyncQuadEnvelope,
   type PublishAsyncContent,
@@ -1316,7 +1317,14 @@ export class PublishMethods extends DKGAgentBase {
     return { failureCountForCg: next, evictedToOverflow };
   }
 
+  /**
+   * @param admission WHO is admitting this job. Required and explicit: ownership decides who
+   * may later run the destructive by-id force clear, and every ownership defect in GH#2270 was
+   * a caller that OMITTED this rather than one that got it wrong. An authenticated host names
+   * its caller; an internal producer states `{ kind: 'node' }` on purpose.
+   */
   async publishAsync(this: DKGAgent,
+    admission: PublishAsyncAdmission,
     contextGraphIdOrUal: string,
     content: PublishAsyncContent,
     opts?: PublishAsyncOpts,
@@ -1600,13 +1608,11 @@ export class PublishMethods extends DKGAgentBase {
     // who enqueued nothing. A host that authenticated a caller passes it in; otherwise this is an
     // internal producer and the node's own default agent owns the job — the same identity a
     // node-level token resolves to in the daemon, so the operator keeps the exit.
-    // A blank identity is ABSENT, not a principal. `??` only guards nullish, so an
-    // empty or whitespace-only string slipped past the default and then failed the truthiness
-    // check below, producing exactly the unowned job this fallback exists to prevent.
-    const suppliedAdmission = opts?.admittedByAgentAddress?.trim();
-    const admittedByAgentAddress = (suppliedAdmission && suppliedAdmission.length > 0)
-      ? suppliedAdmission
-      : this.getDefaultAgentAddress();
+    // The principal comes from the ADMISSION the caller declared, never from the options bag.
+    // A blank agent address is absent rather than a principal, and falls back to the node the
+    // same way an explicit node admission does — an unowned job has no manual exit at all.
+    const declared = admission.kind === 'agent' ? admission.agentAddress.trim() : '';
+    const admittedByAgentAddress = declared.length > 0 ? declared : this.getDefaultAgentAddress();
     const captureID = await asyncPublisher.enqueueKnowledgeAssetVmPublish(
       intent,
       admittedByAgentAddress ? { admittedByAgentAddress } : undefined,

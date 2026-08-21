@@ -19,6 +19,7 @@ export interface KafkaPluginCtx {
   res: ServerResponse;
   agent: {
     publishAsync(
+      admission: { kind: 'agent'; agentAddress: string } | { kind: 'node' },
       contextGraphId: string,
       content: Record<string, unknown>,
       opts?: Record<string, unknown>,
@@ -178,19 +179,15 @@ async function handlePostRegister(
   } as unknown as Record<string, unknown>;
   let publishResult: { captureID: string };
   try {
-    // A Kafka stream request is EXTERNALLY AUTHENTICATED, so
-    // the job it enqueues belongs to the agent that submitted it. Without this the agent's
-    // publish path treats it as an internal producer and assigns it to the node's default
-    // agent: the submitter loses the by-id force clear that is the only manual exit for a held
-    // job, and the node owner gains a destructive capability over a job it never submitted.
-    //
-    // Stamped AFTER the spread, and here that ordering IS the guard: unlike the EPCIS lane,
-    // `publishOptions` is an unfiltered client-supplied record, so a request body could
-    // otherwise name its own owner.
-    publishResult = await ctx.agent.publishAsync(cgId, publishContent, {
-      ...opts.publishOptions,
-      admittedByAgentAddress: ctx.requestAgentAddress,
-    });
+    // A Kafka stream request is externally authenticated, so the job belongs to the agent that
+    // submitted it. The identity is DECLARED rather than merged into the options bag, so no
+    // spread ordering decides authorization and a client-supplied option cannot name an owner.
+    publishResult = await ctx.agent.publishAsync(
+      { kind: 'agent', agentAddress: ctx.requestAgentAddress },
+      cgId,
+      publishContent,
+      opts.publishOptions,
+    );
   } catch (err) {
     const code = (err as { code?: string; name?: string })?.code ?? (err as { name?: string })?.name;
     if (code === 'ContextGraphNotFound') {

@@ -88,7 +88,7 @@ describe('handler — POST /register happy path', () => {
     await handler({ ...ctx, req, res, url: new URL('http://x/api/kafka/streams/register'), path: '/api/kafka/streams/register' });
     expect(captured.statusCode).toBe(202);
     expect(publishAsync).toHaveBeenCalledTimes(1);
-    const [cgId, content] = publishAsync.mock.calls[0];
+    const [, cgId, content] = publishAsync.mock.calls[0];
     expect(cgId).toBe('urn:cg:demo');
     expect(content).toHaveProperty('private');
     expect(content).toHaveProperty('public');
@@ -110,7 +110,7 @@ describe('handler — POST /register happy path', () => {
     const handler = createHandler({ basePath: '/api/kafka/streams' });
     await handler({ ...ctx, req, res, path: '/api/kafka/streams/register' });
     expect(captured.statusCode).toBe(202);
-    expect(publishAsync.mock.calls[0][0]).toBe('urn:cg:from-config');
+    expect(publishAsync.mock.calls[0][1]).toBe('urn:cg:from-config');
   });
   it('stamps the AUTHENTICATED submitter and a client cannot name its own owner', async () => {
     // Ownership decides who may run the destructive by-id clear. `publishOptions` here is an
@@ -127,9 +127,10 @@ describe('handler — POST /register happy path', () => {
       publishOptions: { accessPolicy: 'public', admittedByAgentAddress: ATTACKER },
     });
     await handler({ ...ctx, req, res, path: '/api/kafka/streams/register' });
-    const opts = publishAsync.mock.calls[0][2] as Record<string, unknown>;
-    expect(opts.admittedByAgentAddress).toBe(SUBMITTER);
-    expect(opts.admittedByAgentAddress).not.toBe(ATTACKER);
+    expect(publishAsync.mock.calls[0][0]).toEqual({ kind: 'agent', agentAddress: SUBMITTER });
+    const opts = publishAsync.mock.calls[0][3] as Record<string, unknown>;
+    // The client's attempt stays in the options bag, where it now means nothing.
+    expect(opts.admittedByAgentAddress).toBe(ATTACKER);
     // Ordinary options still forward untouched.
     expect(opts.accessPolicy).toBe('public');
   });
@@ -146,11 +147,10 @@ describe('handler — POST /register happy path', () => {
     // The authenticated submitter is stamped alongside the forwarded options: a Kafka stream
     // request is externally authenticated, so its job must be owned by the agent that sent it
     // rather than by the node default.
-    expect(publishAsync.mock.calls[0][2]).toEqual({
-      accessPolicy: 'public',
-      subGraphName: 'streams',
-      admittedByAgentAddress: '0x0000000000000000000000000000000000000000',
-    });
+    expect(publishAsync.mock.calls[0][3]).toEqual({ accessPolicy: 'public', subGraphName: 'streams' });
+    // The submitter is declared, not merged into the options.
+    expect(publishAsync.mock.calls[0][0]).toEqual(
+      { kind: 'agent', agentAddress: '0x0000000000000000000000000000000000000000' });
   });
 });
 describe('handler — POST /register error paths', () => {
@@ -707,7 +707,7 @@ describe('handler — register-to-discovery regression', () => {
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: cgId });
     await handler({ ...ctx, req, res, path: '/api/kafka/streams/register' });
     expect(captured.statusCode).toBe(202);
-    const [, content] = publishAsync.mock.calls[0];
+    const [, , content] = publishAsync.mock.calls[0];
     expect(content).toHaveProperty('private');
     expect(content).toHaveProperty('public');
     expect((content.private as Record<string, unknown>)['@type']).toBe('dkg-streams:KafkaStream');
@@ -747,7 +747,7 @@ describe('handler — POST /register with extension', () => {
     await handler({ ...ctx, req, res, path: '/api/kafka/streams/register' });
     expect(captured.statusCode).toBe(202);
     expect(publishAsync).toHaveBeenCalledTimes(1);
-    const [, content] = publishAsync.mock.calls[0];
+    const [, , content] = publishAsync.mock.calls[0];
     expect(content).toHaveProperty('private');
     expect(content).toHaveProperty('public');
     const ka = content.private as Record<string, unknown>;
@@ -846,7 +846,7 @@ describe('handler — extension runtime collision (one warn per unique key acros
       await handler({ ...ctx, req, res, path: '/api/kafka/streams/register' });
     }
     for (const { publishAsync } of ctxs) {
-      const ka = publishAsync.mock.calls[0][1].private as Record<string, unknown>;
+      const ka = publishAsync.mock.calls[0][2].private as Record<string, unknown>;
       expect(ka['schema:name']).toBe('demo');
       expect(ka['dkg-streams:kafkaTopicName']).toBe('demo-topic');
       expect(ka['vendor:ok']).toBe('ok');

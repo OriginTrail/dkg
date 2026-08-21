@@ -224,7 +224,7 @@ describe('EPCIS async capture publisher readiness', () => {
     // capability over a job it never enqueued.
     const SUBMITTER = '0x00000000000000000000000000000000000000a7';
     const FORGED = '0x00000000000000000000000000000000000000ff';
-    const published: Array<{ opts: any }> = [];
+    const published: Array<{ admission: any; opts: any }> = [];
     const ctx = createContext({
       req: createRequest({
         epcisDocument: VALID_OBJECT_EVENT_DOC,
@@ -233,8 +233,8 @@ describe('EPCIS async capture publisher readiness', () => {
       }),
       requestAgentAddress: SUBMITTER,
       agent: {
-        publishAsync: async (_cg: string, _content: unknown, opts: unknown) => {
-          published.push({ opts });
+        publishAsync: async (admission: unknown, _cg: string, _content: unknown, opts: unknown) => {
+          published.push({ admission, opts });
           return { captureID: 'capture-owner-1' };
         },
       } as unknown as RequestContext['agent'],
@@ -244,13 +244,12 @@ describe('EPCIS async capture publisher readiness', () => {
     await handleEpcisRoutes(ctx);
 
     expect(ctx.res.statusCode).toBe(202);
-    // The authenticated identity is what lands. The client's value never arrives at all:
-    // `handleCaptureAsync` builds publisher opts from a strict allow-list, so the row below is
-    // an end-to-end check that a request body cannot choose the owner — NOT proof that the
-    // spread ordering defends it. Reversing that ordering leaves this row green (measured), so
-    // the ordering is defence in depth only, and the allow-list is the guard.
-    expect(published[0]?.opts?.admittedByAgentAddress).toBe(SUBMITTER);
-    expect(published[0]?.opts?.admittedByAgentAddress).not.toBe(FORGED);
+    // The authenticated identity is DECLARED as the admission argument, so no merge order and
+    // no allow-list is load-bearing for it: a request body has nowhere to put an owner.
+    expect(published[0]?.admission).toEqual({ kind: 'agent', agentAddress: SUBMITTER });
+    // And the client's attempt never reaches the publish options either.
+    expect(published[0]?.opts?.admittedByAgentAddress).toBeUndefined();
+    expect(JSON.stringify(published[0])).not.toContain(FORGED);
   });
 
   it('accepts capture and publishes bare documents as private content without route public wrapping', async () => {
@@ -261,7 +260,7 @@ describe('EPCIS async capture publisher readiness', () => {
         publishOptions: { accessPolicy: 'allowList', allowedPeers: ['peer-a'] },
       }),
       agent: {
-        publishAsync: async (contextGraphId: string, content: unknown, opts: unknown) => {
+        publishAsync: async (_admission: unknown, contextGraphId: string, content: unknown, opts: unknown) => {
           published.push({ contextGraphId, content, opts });
           return { captureID: 'capture-route-1' };
         },
@@ -283,7 +282,7 @@ describe('EPCIS async capture publisher readiness', () => {
         content: { private: VALID_OBJECT_EVENT_DOC },
         // 3825614158 — the authenticated submitter is stamped as the admission owner on every
         // capture, beside the client's publish options.
-        opts: { accessPolicy: 'allowList', allowedPeers: ['peer-a'], admittedByAgentAddress: '0x0' },
+        opts: { accessPolicy: 'allowList', allowedPeers: ['peer-a'] },
       },
     ]);
   });
@@ -297,7 +296,7 @@ describe('EPCIS async capture publisher readiness', () => {
         epcisDocument: VALID_OBJECT_EVENT_DOC,
       }),
       agent: {
-        publishAsync: async (contextGraphId: string, content: unknown, opts: unknown) => {
+        publishAsync: async (_admission: unknown, contextGraphId: string, content: unknown, opts: unknown) => {
           published.push({ contextGraphId, content, opts });
           return { captureID: 'capture-route-2' };
         },
@@ -312,7 +311,7 @@ describe('EPCIS async capture publisher readiness', () => {
       {
         contextGraphId: 'per-request-cg',
         content: { private: VALID_OBJECT_EVENT_DOC },
-        opts: { subGraphName: 'research', admittedByAgentAddress: '0x0' },
+        opts: { subGraphName: 'research' },
       },
     ]);
   });

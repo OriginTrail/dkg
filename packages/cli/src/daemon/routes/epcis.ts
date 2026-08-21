@@ -530,24 +530,14 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
 
     const epcisPublisher: EpcisAsyncPublisher = {
       async publishAsync(contextGraphId, content, opts) {
+        // An EPCIS capture is externally authenticated, so the job belongs to the agent that
+        // submitted it. Declared as admission rather than smuggled through the options bag:
+        // the caller cannot forget it and a request body cannot supply it.
         return agent.publishAsync(
+          { kind: 'agent', agentAddress: requestAgentAddress },
           contextGraphId,
           content as Record<string, unknown>,
-          {
-            ...opts,
-            /**
-             * An EPCIS capture is externally authenticated, so the job it enqueues belongs to
-             * the agent that submitted it. Without this the publish path treats the capture as
-             * an internal producer and assigns it to the node's default agent, which both
-             * denies the submitter the by-id force clear — the only manual exit for a held job
-             * — and hands that destructive capability to an agent that never submitted it.
-             *
-             * `handleCaptureAsync` builds these opts from a strict allow-list, so a request
-             * body cannot carry this field; spreading first is defence in depth if that
-             * allow-list ever widens. Authorization only — never an author-selection input.
-             */
-            admittedByAgentAddress: requestAgentAddress,
-          },
+          opts,
         );
       },
     };

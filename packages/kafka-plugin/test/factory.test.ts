@@ -48,7 +48,9 @@ describe('createKafkaPlugin factory wiring', () => {
     } as never);
     expect(captured.statusCode).toBe(202);
     expect(publishAsync).toHaveBeenCalledTimes(1);
-    expect(publishAsync.mock.calls[0][0]).toBe('urn:cg:demo');
+    // Admission is argument 0 now; the context graph moved to 1.
+    expect(publishAsync.mock.calls[0][1]).toBe('urn:cg:demo');
+    expect(publishAsync.mock.calls[0][0]).toMatchObject({ kind: 'agent' });
   });
   it('forwards publishOptions through the factory to publishAsync', async () => {
     const plugin = createKafkaPlugin({
@@ -67,7 +69,7 @@ describe('createKafkaPlugin factory wiring', () => {
       config: {},
       path: '/api/kafka/streams/register',
     } as never);
-    expect(publishAsync.mock.calls[0][2]).toEqual({ accessPolicy: 'public' });
+    expect(publishAsync.mock.calls[0][3]).toEqual({ accessPolicy: 'public' });
   });
   it('respects custom basePath override', async () => {
     const plugin = createKafkaPlugin({ basePath: '/custom/kafka', contextGraphId: 'urn:cg:demo' });

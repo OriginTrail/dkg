@@ -314,6 +314,7 @@ describe('publishJsonLd', () => {
 
     const { captureID } = await Promise.race([
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-maxretries',
         {
           private: {
@@ -370,6 +371,7 @@ describe('publishJsonLd', () => {
     const nodeOwner = agent.getDefaultAgentAddress();
     expect(nodeOwner).toBeTruthy();
     const internal = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-admission',
       content('AsyncAdmissionInternal'),
       { localOnly: true },
@@ -380,9 +382,10 @@ describe('publishJsonLd', () => {
     // A host that AUTHENTICATED a caller supplies it, and that principal wins.
     const EPCIS_CALLER = '0x00000000000000000000000000000000000000e1';
     const authenticated = await agent.publishAsync(
+      { kind: 'agent', agentAddress: EPCIS_CALLER },
       'did:dkg:context-graph:async-admission',
       content('AsyncAdmissionAuthenticated'),
-      { localOnly: true, admittedByAgentAddress: EPCIS_CALLER },
+      { localOnly: true },
     );
     const authenticatedJob = await asyncPublisher.getStatus(authenticated.captureID);
     expect(authenticatedJob?.admission?.byAgentAddress).toBe(EPCIS_CALLER);
@@ -392,9 +395,10 @@ describe('publishJsonLd', () => {
     // default and enqueue a job nobody can ever force-clear.
     for (const blank of ['', '   ']) {
       const res = await agent.publishAsync(
+        { kind: 'agent', agentAddress: blank },
         'did:dkg:context-graph:async-admission',
         content(`AsyncAdmissionBlank${blank.length}`),
-        { localOnly: true, admittedByAgentAddress: blank },
+        { localOnly: true },
       );
       const blankJob = await asyncPublisher.getStatus(res.captureID);
       expect(blankJob?.admission?.byAgentAddress).toBe(nodeOwner);
@@ -418,6 +422,7 @@ describe('publishJsonLd', () => {
     const root = 'http://example.org/AsyncSecret';
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-priv-only',
       {
         private: {
@@ -493,6 +498,7 @@ describe('publishJsonLd', () => {
     const root = 'http://example.org/AsyncBareSecret';
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-bare-private',
       {
         '@context': 'http://schema.org/',
@@ -554,6 +560,7 @@ describe('publishJsonLd', () => {
     expect(tenant.agentAddress.toLowerCase()).not.toBe(publisherAddress.toLowerCase());
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-seal-e2e',
       {
         public: {
@@ -612,6 +619,7 @@ describe('publishJsonLd', () => {
     );
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-seal-distinct',
       {
         public: {
@@ -681,6 +689,7 @@ describe('publishJsonLd', () => {
     const stranger = ethers.Wallet.createRandom().address;
     await expect(
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-seal-reject',
         {
           public: {
@@ -700,6 +709,7 @@ describe('publishJsonLd', () => {
     const selfSovereign = await agent.registerAgent('SelfSovereign', { publicKey: publicKeyCompressed });
     await expect(
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-seal-reject',
         {
           public: {
@@ -724,6 +734,7 @@ describe('publishJsonLd', () => {
     const root = 'http://example.org/AsyncSealParityEntity';
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-seal-parity',
       {
         public: {
@@ -762,6 +773,7 @@ describe('publishJsonLd', () => {
 
     await expect(
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-seal-non-v10',
         {
           public: {
@@ -791,6 +803,7 @@ describe('publishJsonLd', () => {
 
     await expect(
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-seal-throw',
         {
           public: {
@@ -821,6 +834,7 @@ describe('publishJsonLd', () => {
 
     await expect(
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-seal-explicit-throw',
         {
           public: {
@@ -848,6 +862,7 @@ describe('publishJsonLd', () => {
     const root = 'http://example.org/AsyncSealEntity';
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-seal',
       {
         public: {
@@ -876,6 +891,7 @@ describe('publishJsonLd', () => {
     const root = 'http://example.org/AsyncSealPrivEntity';
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-seal-priv',
       {
         '@context': 'http://schema.org/',
@@ -901,6 +917,7 @@ describe('publishJsonLd', () => {
     const root = 'http://example.org/AsyncSealDiskSnapshotEntity';
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-seal-disk-snapshot',
       {
         '@context': 'http://schema.org/',
@@ -955,6 +972,7 @@ describe('publishJsonLd', () => {
 
     await expect(
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-seal-presigned',
         {
           public: {
@@ -1003,6 +1021,7 @@ describe('publishJsonLd', () => {
     });
     await source.agent.registerContextGraph('async-valid-presigned-source');
     const sourceCapture = await source.agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-valid-presigned-source',
       content,
       {
@@ -1034,6 +1053,7 @@ describe('publishJsonLd', () => {
     });
     await target.agent.registerContextGraph('async-valid-presigned-target');
     const targetCapture = await target.agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-valid-presigned-target',
       content,
       {
@@ -1069,6 +1089,7 @@ describe('publishJsonLd', () => {
 
     await expect(
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-seal-mutex',
         {
           public: {
@@ -1111,6 +1132,7 @@ describe('publishJsonLd', () => {
 
     let typedDataReceived: { domain: unknown; types: unknown; message: { authorAddress: string; merkleRoot: string; reservedKaId: bigint } } | null = null;
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-seal-callback',
       {
         public: {
@@ -1192,6 +1214,7 @@ describe('publishJsonLd', () => {
 
     await expect(
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-seal-cb-noaddr',
         {
           public: {
@@ -1229,6 +1252,7 @@ describe('publishJsonLd', () => {
     expect(selfSov.agentAddress.toLowerCase()).not.toBe(publisherAddress.toLowerCase());
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-cb-e2e',
       {
         public: {
@@ -1296,6 +1320,7 @@ describe('publishJsonLd', () => {
     };
     await expect(
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-priorver',
         content,
         {
@@ -1306,6 +1331,7 @@ describe('publishJsonLd', () => {
     ).rejects.toThrow(/no longer accepts transitionType/);
     await expect(
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-priorver',
         content,
         {
@@ -1316,6 +1342,7 @@ describe('publishJsonLd', () => {
     ).rejects.toThrow(/no longer accepts transitionType/);
     await expect(
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-priorver',
         content,
         {
@@ -1350,11 +1377,13 @@ describe('publishJsonLd', () => {
     );
 
     await expect(agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-invalid-access-envelope',
       content,
       { localOnly: true, accessPolicy: 'allowList' },
     )).rejects.toThrow(/allowList policy requires allowedPeers/);
     await expect(agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-invalid-access-envelope',
       content,
       { localOnly: true, accessPolicy: 'public', allowedPeers: ['peer-a'] },
@@ -1374,6 +1403,7 @@ describe('publishJsonLd', () => {
 
     await expect(
       agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-entity-proofs',
         {
           public: {
@@ -1401,6 +1431,7 @@ describe('publishJsonLd', () => {
     await agent.registerContextGraph('async-node-id-override');
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-node-id-override',
       {
         public: {
@@ -1428,6 +1459,7 @@ describe('publishJsonLd', () => {
     await agent.registerContextGraph('async-node-id-zero');
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-node-id-zero',
       {
         public: {
@@ -1460,6 +1492,7 @@ describe('publishJsonLd', () => {
     try {
       await expect(
         agent.publishAsync(
+          { kind: 'node' },
           'did:dkg:context-graph:async-no-signer',
           {
             public: {
@@ -1512,6 +1545,7 @@ describe('publishJsonLd', () => {
 
     try {
       await agent.publishAsync(
+        { kind: 'node' },
         'did:dkg:context-graph:async-sync-parity',
         {
           public: {
@@ -1538,6 +1572,7 @@ describe('publishJsonLd', () => {
     // Intentionally skip registerContextGraph so the CG has no on-chain id.
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'did:dkg:context-graph:async-no-onchain',
       {
         public: {
@@ -1583,6 +1618,7 @@ describe('publishJsonLd', () => {
     // The submitted graph is a new KA even if an older root-addressed asset
     // happens to contain an identical triple.
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'async-subtract-observe',
       {
         publicQuads: [{ subject: root, predicate: 'http://example.org/p', object: '"hello"', graph: '' }],
@@ -1607,6 +1643,7 @@ describe('publishJsonLd', () => {
     const root = 'http://example.org/AsyncSubGraphSecret';
 
     const { captureID } = await agent.publishAsync(
+      { kind: 'node' },
       'async-subgraph',
       {
         public: {

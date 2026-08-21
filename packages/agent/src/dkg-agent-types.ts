@@ -375,21 +375,26 @@ export interface PublishAsyncOpts extends PublishOpts {
   };
   /** Caller signs typed-data built by the daemon. Requires `authorAgentAddress`. */
   authorSignTypedData?: (typedData: AuthorAttestationTypedData) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
-  /**
-   * GH#2270 follow-up (3825162149) — the AUTHENTICATED identity admitting this job, for
-   * authorization only. A host that authenticated a caller (an EPCIS capture route, a plugin with
-   * a token) passes it here so that caller keeps the by-id force-clear its job may later need.
-   *
-   * Deliberately NOT the author: `authorAgentAddress` and `preSignedAuthorAttestation.authorAddress`
-   * name who SIGNED the assertion, which under curated publishing may be a third party who
-   * enqueued nothing. Granting a destructive clear to them would hand the double-publish decision
-   * to someone who never asked for the publish.
-   *
-   * Omitted → the job is admitted by the node itself (an internal producer such as the Kafka
-   * stream), and the node's default agent owns it; see `publishAsync`.
-   */
-  admittedByAgentAddress?: string;
 }
+
+/**
+ * WHO is admitting this job, stated by the caller rather than inferred from an absent field.
+ *
+ * Ownership decides who may later run the destructive by-id force clear, which is the only manual
+ * exit for a job automatic recovery cannot settle. It used to travel as an optional key inside
+ * `PublishAsyncOpts`, where omitting it silently meant "internal producer, use the node default" —
+ * and every ownership defect in GH#2270 was an omission, not a wrong value: the EPCIS capture route
+ * and then the Kafka stream plugin, both externally authenticated, both assigning their callers'
+ * jobs to the node.
+ *
+ * A required discriminated parameter makes that omission a COMPILE ERROR. A host that authenticated
+ * someone names them; an internal producer says so on purpose.
+ */
+export type PublishAsyncAdmission =
+  /** An externally authenticated caller. `agentAddress` is the request identity, never the author. */
+  | { readonly kind: 'agent'; readonly agentAddress: string }
+  /** No authenticated caller: the node itself admits the job and its default agent owns it. */
+  | { readonly kind: 'node' };
 
 export interface PublishAsyncQuadEnvelope {
   publicQuads?: Quad[];
