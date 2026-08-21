@@ -273,6 +273,26 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect(after?.timestamps.acceptedAt).toBe(before?.timestamps.acceptedAt);
     expect(after?.retries.maxRetries).toBe(before?.retries.maxRetries);
 
+    // Nested VALUE changes, not just erasures — and the sibling in the same object must still
+    // be writable, which is what separates "reject this key" from "reject this object".
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      retries: { retryCount: 0, maxRetries: 999 },
+    } as never)).rejects.toThrow(/retries.maxRetries is immutable/);
+    await expect(p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      timestamps: { acceptedAt: 1 },
+    } as never)).rejects.toThrow(/timestamps.acceptedAt is immutable/);
+    // The mutable sibling goes through, with the immutable one untouched.
+    await p.update(jobId, 'broadcast', {
+      broadcast: bx,
+      retries: { retryCount: 3, maxRetries: before!.retries.maxRetries },
+    } as never);
+    expect((await p.getStatus(jobId))?.retries).toMatchObject({
+      retryCount: 3,
+      maxRetries: before?.retries.maxRetries,
+    });
+
     // An ordinary timestamps patch that never mentions `acceptedAt` is still allowed.
     await p.update(jobId, 'broadcast', { broadcast: bx, timestamps: { updatedAt: 12_345 } } as never);
     expect((await p.getStatus(jobId))?.timestamps.acceptedAt).toBe(before?.timestamps.acceptedAt);
