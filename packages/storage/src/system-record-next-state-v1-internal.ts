@@ -1289,6 +1289,11 @@ function classifySameSequenceTombstoneAdvance(
       // is that head's `rootSubject`, and the lineage's last entry carries its
       // `acceptedTransitionDigest`. Neither is derived, reconstructed, or
       // defaulted -- a missing one would make the comparison pass by absence.
+      // The stable record key, supplied from the persisted applied state rather
+      // than derived: core refuses `stable record key changed` before it looks at
+      // the branch, and it can only do that if the receiver hands it the key.
+      networkId: current.networkId,
+      peerId: current.peerId,
       currentRoot: current.currentRoot,
       ...(current.transitionLineage.length === 0
         ? {}

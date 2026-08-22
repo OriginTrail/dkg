@@ -378,7 +378,7 @@ const sameSequenceEvidenceKeysAreExact: SAME_SEQUENCE_EVIDENCE_KEYS_ARE_EXACT = 
  */
 const SAME_SEQUENCE_APPLIED_ROW_KEYS_V1 = [
   'status', 'authoritySequence', 'version', 'headDigest',
-  'currentRoot', 'acceptedTransitionDigest',
+  'networkId', 'peerId', 'currentRoot', 'acceptedTransitionDigest',
 ] as const;
 type SAME_SEQUENCE_APPLIED_ROW_KEYS_ARE_EXACT =
   keyof AgentProfileSameSequenceAppliedRowV1 extends

@@ -366,6 +366,46 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
   });
 
   /**
+   * THE SAME OMISSION, ON THE SIBLING ENTRY, WHERE THE MASKING IS WORSE.
+   *
+   * FOUND BY REVIEW. This entry's `reject | late tombstone lacks its exact
+   * verified active predecessor` appears nowhere in any test -- only in the
+   * source. An empty-evidence case cannot reach it either, because the absent
+   * retained transition rejects first and the predecessor check is never
+   * consulted: the refusal that fires masks the refusal that does not.
+   *
+   * So the omission is built on the UNBOUND row deliberately, because that row
+   * ACCEPTS when the predecessor is supplied. The control and the omission
+   * differ in one key, and the direction is the unsafe one: without the check a
+   * missing predecessor would take the ADR's "otherwise the tombstone takes
+   * precedence" branch and advance.
+   */
+  it('refuses the unbound row when no predecessor is supplied at all', () => {
+    const omitted = evaluateAgentProfileLateTombstoneAdvanceV1(
+      candidate,
+      {
+        retainedTransition: { transition: retained, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
+      } as never,
+      lineageFor(retained),
+    );
+    const supplied = evaluateAgentProfileLateTombstoneAdvanceV1(
+      candidate,
+      {
+        retainedTransition: { transition: retained, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
+        tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
+      } satisfies AgentProfileLateTombstoneEvidenceV1,
+      lineageFor(retained),
+    );
+    expect({ omitted, supplied }).toStrictEqual({
+      omitted: {
+        decision: 'reject',
+        reason: 'late tombstone lacks its exact verified active predecessor',
+      },
+      supplied: { decision: 'accept' },
+    });
+  });
+
+  /**
    * EVIDENCE FROM ANOTHER AUTHORITY IS NOT "THE TOMBSTONE TAKES PRECEDENCE".
    *
    * FOUND BY REVIEW. The seam asked one structural question -- "does this

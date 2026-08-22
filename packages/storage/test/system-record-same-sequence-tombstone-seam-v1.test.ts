@@ -128,6 +128,8 @@ const APPLIED_ROW_V1: AgentProfileSameSequenceAppliedRowV1 = Object.freeze({
   authoritySequence: CORE_CURRENT_HEAD_V1.authoritySequence,
   version: CORE_CURRENT_HEAD_V1.version,
   headDigest: CORE_CURRENT_DIGEST_V1,
+  networkId: CORE_CURRENT_HEAD_V1.networkId,
+  peerId: CORE_CURRENT_HEAD_V1.peerId,
   currentRoot: CORE_CURRENT_HEAD_V1.rootSubject,
   acceptedTransitionDigest: CORE_CURRENT_HEAD_V1.acceptedTransitionDigest,
 });
@@ -1149,6 +1151,8 @@ describe('the applied-row key list is conditional on PRESENCE', () => {
       authoritySequence: CORE_CURRENT_HEAD_V1.authoritySequence,
       version: CORE_CURRENT_HEAD_V1.version,
       headDigest: CORE_CURRENT_DIGEST_V1,
+      networkId: CORE_CURRENT_HEAD_V1.networkId,
+      peerId: CORE_CURRENT_HEAD_V1.peerId,
       currentRoot: CORE_CURRENT_HEAD_V1.rootSubject,
     };
     const keyPresentButUndefined = { ...keyAbsent, acceptedTransitionDigest: undefined };
@@ -1161,6 +1165,98 @@ describe('the applied-row key list is conditional on PRESENCE', () => {
     }).toStrictEqual({
       keyAbsent: REACHED_THE_RULE,
       keyPresentButUndefined: REACHED_THE_RULE,
+    });
+  });
+});
+
+/**
+ * THE STABLE RECORD KEY IS A DIFFERENT QUESTION FROM THE AUTHORITY BRANCH, and
+ * the extracted entry originally asked only the second one.
+ *
+ * The full evaluator refuses `stable record key changed` on `networkId`/`peerId`
+ * BEFORE it classifies the branch. The extraction carried the branch conjuncts
+ * -- root and accepted transition -- and left the record key behind, which is
+ * the same precondition loss that made this entry necessary, one layer over.
+ * `currentRoot` cannot stand in for it: the codec welds the root to
+ * `did:dkg:agent:${evmIssuer}`, so it establishes the ISSUER, and one issuer may
+ * key more than one record. At authority sequence zero there is no accepted
+ * transition to separate two records either, so both branch conjuncts pass
+ * between records and a tombstone for one could be accepted against another's
+ * applied row -- mapped to advance, deleting the wrong projection.
+ *
+ * EACH ROW IS ONE FIELD APART FROM THE CONTROL, which is what makes the pair
+ * discriminating rather than merely red: the control accepts, and perturbing
+ * either half of the key alone must refuse. A single row covering both fields
+ * would survive deleting either comparison, because the other would still catch
+ * it -- the redundancy that looks like coverage and is not.
+ */
+describe('the stable record key is established before the authority branch', () => {
+  const predecessor = CORE_CHAIN_V1.base as unknown as AgentProfileHeadObjectV1;
+
+  const answer = (applied: AgentProfileSameSequenceAppliedRowV1): string => {
+    const decision = evaluateAgentProfileSameSequenceTombstoneAdvanceV1(
+      tombstoneOfV1(predecessor, '1') as never,
+      Object.freeze({ tombstonePredecessor: predecessor }) as never,
+      applied,
+    );
+    return 'reason' in decision ? `${decision.decision}|${decision.reason}` : decision.decision;
+  };
+
+  it('refuses a row whose network or peer differs, one field at a time', () => {
+    expect({
+      control: answer(APPLIED_ROW_V1),
+      networkIdAlone: answer(Object.freeze({ ...APPLIED_ROW_V1, networkId: 'other-network' })),
+      peerIdAlone: answer(Object.freeze({ ...APPLIED_ROW_V1, peerId: 'other-peer' })),
+    }).toStrictEqual({
+      // The control ACCEPTS, which is what makes the two refusals mean something:
+      // without the key comparison these rows accept too -- root and accepted
+      // transition still match -- and `accept` is mapped to advance.
+      control: 'accept',
+      networkIdAlone: 'reject|stable record key changed',
+      peerIdAlone: 'reject|stable record key changed',
+    });
+  });
+});
+
+/**
+ * OMITTING THE PREDECESSOR IS A DIFFERENT PATH FROM SUPPLYING THE WRONG ONE,
+ * and only the second was covered.
+ *
+ * The entry's docblock states that `evidence.tombstonePredecessor` is required
+ * in substance and that without it the decision is `reject | tombstone lacks its
+ * exact verified active predecessor`. Every call in this file supplies one; the
+ * rows that reach that literal do so with an UNBOUND predecessor -- the wrong
+ * head, not a missing one. So the entry's `undefined` branch, which is where a
+ * caller that simply has no predecessor arrives, was never executed.
+ *
+ * FOUND BY REVIEW. The row matters because the failure direction is the unsafe
+ * one: if the rule ever treated a missing predecessor as "no binding to check",
+ * the answer would be `accept`, which the seam maps to advance -- and the
+ * projection is deleted on evidence nobody supplied.
+ */
+describe('a missing predecessor is refused, not waved through', () => {
+  const predecessor = CORE_CHAIN_V1.base as unknown as AgentProfileHeadObjectV1;
+
+  it('answers the documented refusal when the evidence carries no predecessor', () => {
+    const decision = evaluateAgentProfileSameSequenceTombstoneAdvanceV1(
+      tombstoneOfV1(predecessor, '1') as never,
+      Object.freeze({}) as never,
+      APPLIED_ROW_V1,
+    );
+    const supplied = evaluateAgentProfileSameSequenceTombstoneAdvanceV1(
+      tombstoneOfV1(predecessor, '1') as never,
+      Object.freeze({ tombstonePredecessor: predecessor }) as never,
+      APPLIED_ROW_V1,
+    );
+    expect({
+      omitted: 'reason' in decision ? `${decision.decision}|${decision.reason}` : decision.decision,
+      // The control is what makes the refusal mean something: the SAME candidate
+      // and row accept once the predecessor is supplied, so the refusal is the
+      // omission being caught rather than the cell being unreachable.
+      supplied: 'reason' in supplied ? `${supplied.decision}|${supplied.reason}` : supplied.decision,
+    }).toStrictEqual({
+      omitted: 'reject|tombstone lacks its exact verified active predecessor',
+      supplied: 'accept',
     });
   });
 });

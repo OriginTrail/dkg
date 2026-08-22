@@ -188,6 +188,25 @@ export interface AgentProfileSameSequenceAppliedRowV1 {
   readonly version: string;
   readonly headDigest: Digest32V1;
   /**
+   * THE STABLE RECORD KEY, and it is a DIFFERENT question from the branch below.
+   *
+   * `currentRoot` establishes the authority BRANCH; it cannot establish the
+   * RECORD, because the codec welds the root to `did:dkg:agent:${evmIssuer}` and
+   * one issuer may key more than one record. The full evaluator asks both, and
+   * asks this one FIRST -- `reject | stable record key changed` -- before it
+   * classifies the branch at all. The extracted entry carried the branch
+   * conjuncts and left this one behind, which is the same precondition loss that
+   * made the entry necessary, one layer over: at authority sequence zero there is
+   * no accepted transition to separate two records either, so a tombstone for one
+   * record could be accepted against another record's applied row and advance,
+   * deleting the wrong projection.
+   *
+   * A receiver persists both; they are the applied state's own `networkId` and
+   * `peerId`, taken from it rather than derived.
+   */
+  readonly networkId: string;
+  readonly peerId: string;
+  /**
    * THE APPLIED ROW'S AUTHORITY BRANCH. Without it this rule decides a
    * projection-DELETING question without establishing that the candidate and the
    * applied row are the same record, which is the defect this field was added to
@@ -242,6 +261,8 @@ function snapshotSameSequenceAppliedRowV1(
       'authoritySequence',
       'version',
       'headDigest',
+      'networkId',
+      'peerId',
       'currentRoot',
       // A sequence-zero row has accepted no transition, so the key is absent
       // rather than undefined -- the exact-record check counts keys, and listing
@@ -253,6 +274,12 @@ function snapshotSameSequenceAppliedRowV1(
     'same-sequence applied row',
   );
   digest(row.headDigest, 'same-sequence applied row headDigest');
+  if (typeof row.networkId !== 'string' || row.networkId.length === 0) {
+    fail('system-record-schema', 'same-sequence applied row networkId is invalid');
+  }
+  if (typeof row.peerId !== 'string' || row.peerId.length === 0) {
+    fail('system-record-schema', 'same-sequence applied row peerId is invalid');
+  }
   assertAgentRootV1(row.currentRoot);
   if (row.acceptedTransitionDigest !== undefined) {
     digest(row.acceptedTransitionDigest, 'same-sequence applied row acceptedTransitionDigest');
@@ -957,7 +984,7 @@ export function evaluateAgentProfileSameSequenceTombstoneAdvanceV1(
     };
   }
   // RECORD IDENTITY IS ESTABLISHED BEFORE THE RULE IS CONSULTED, exactly as the
-  // full evaluator establishes it before dispatching to the same rule. These two
+  // full evaluator establishes it before dispatching to the same rule. These
   // conjuncts are that evaluator's, moved onto the operands a receiver holds:
   // the rule below decides whether a tombstone DOMINATES its sequence, and that
   // question presupposes that the tombstone and the applied row are the same
@@ -965,6 +992,16 @@ export function evaluateAgentProfileSameSequenceTombstoneAdvanceV1(
   // to its own predecessor on a competing branch is accepted, mapped to advance,
   // and DELETES the applied projection -- measured through the real receiver
   // path, not argued.
+  // THE STABLE RECORD KEY IS ASKED FIRST, which is the full evaluator's own
+  // order: it refuses `stable record key changed` before it classifies the
+  // branch, because "is this the same record" precedes "is this the same branch
+  // of that record". The literal is the evaluator's verbatim so the two agree.
+  if (
+    candidateState.networkId !== row.networkId
+    || candidateState.peerId !== row.peerId
+  ) {
+    return { decision: 'reject', reason: 'stable record key changed' };
+  }
   const identityRefusal = refuseSameSequenceIdentityMismatchV1(candidateState, row);
   if (identityRefusal !== undefined) return identityRefusal;
   return evaluateSameSequenceTombstoneRuleV1(

@@ -166,7 +166,24 @@ describe('core authority decision reason harvest', () => {
     // would have gone from six to seven -- measuring duplication rather than
     // observational ambiguity, which is a mistake this register has recorded
     // once already.
-    expect([...reject.values()].flat().length).toBe(40);
+    //
+    // Then 40 -> 41 when a REVIEW ROUND found that the entry had carried two of
+    // the evaluator's three identity preconditions and left the third behind:
+    // the STABLE RECORD KEY. `currentRoot` establishes the issuer, not the
+    // record -- the codec welds the root to the issuer, and one issuer may key
+    // more than one record -- and at authority sequence zero there is no
+    // accepted transition to separate two records either, so both branch
+    // conjuncts passed BETWEEN records. Measured: the entry returned `accept` on
+    // a row differing only in the record key.
+    //
+    // THE REGISTER BELOW STILL DID NOT MOVE, for the same reason as before. The
+    // refusal reuses the evaluator's own literal rather than minting a sibling,
+    // so `stable record key changed` went from two producing sites to three --
+    // a literal that was ALREADY observationally ambiguous does not become more
+    // so by count, and the two callers answering one condition with one literal
+    // is the property worth having. A new literal would have kept the sites
+    // distinct and let the entry and the evaluator drift on the same question.
+    expect([...reject.values()].flat().length).toBe(41);
     expect([...quarantine.values()].flat().length).toBe(10);
   });
 });

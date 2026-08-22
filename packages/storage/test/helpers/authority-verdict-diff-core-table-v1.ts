@@ -39,7 +39,7 @@ export interface VerdictDiffCounterfactualV1 {
 
 export const VERDICT_DIFF_COUNTERFACTUALS_V1: readonly VerdictDiffCounterfactualV1[] = [
   {
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1492',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1497',
     before: "} else if (current.status !== 'active') {",
     after: "} else if (current.status !== 'active' && current.status !== 'tombstone') {",
     appliedProof: 'occurrence count of the original predicate 1 -> 0',
@@ -433,13 +433,13 @@ export const CORE_HARNESS_LIMITATIONS_V1: readonly HarnessLimitationV1[] = [
 export const CORE_SUMMARY_ASYMMETRY_CITATIONS_V1: readonly SourceCitationV1[] = [
   {
     id: 'core-single-semantic-read',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:478',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:505',
     contains: 'const summary = evidenceState.verifiedAuthoritySummary;',
     why: "Core's ONLY semantic read of the field, and it sits inside the absent-state branch.",
   },
   {
     id: 'core-evidence-allowlist-copy',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:1342',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:1379',
     contains: "'verifiedAuthoritySummary',",
     why: 'The allowlist that carries the field into the evidence snapshot, which is why a '
       + 'name-grep over the branch functions could not have settled this on its own.',
