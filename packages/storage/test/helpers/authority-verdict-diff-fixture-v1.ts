@@ -23,8 +23,8 @@ export const CORE_BARE_DECISIONS_V1 = ['accept', 'stale'] as const;
  * caller acts on.
  */
 export const CORE_QUARANTINE_REASONS_V1 = {
-  'head-fork': { sites: [189, 200, 416] },
-  'transition-equivocation': { sites: [140, 172, 384, 483, 508, 564, 567] },
+  'head-fork': { sites: [464, 475, 1141] },
+  'transition-equivocation': { sites: [404, 438, 1086, 1208, 1233, 1289, 1292] },
 } as const;
 
 /**
@@ -34,39 +34,62 @@ export const CORE_QUARANTINE_REASONS_V1 = {
  * produce it.
  *
  * Harvested from packages/core/src/system-record-authority-v1-internal.ts:
- * 27 distinct literals across 32 sites.
+ * 35 distinct literals across 41 sites. THE TWO COUNTS IN THIS SENTENCE ARE
+ * PROSE AND NOTHING ASSERTS THEM -- they were stale by two literals before
+ * anyone noticed, so treat the map below as the pin and this line as a summary
+ * that has to be re-derived whenever the map is.
  *
  * AN UNMAPPED OBSERVED LITERAL IS A FAILURE, not a skip: it means a reject was
  * added or reworded, and the map says which case to look at.
+ *
+ * SITES MOVE IN BLOCKS, AND THAT IS THIS PIN WORKING RATHER THAN A MAINTENANCE
+ * TAX. Any insertion above a reject shifts every site below it together, so the
+ * diff names which sites moved and by how much; a file-contains pin would stay
+ * green through all of it. Every shift so far has left the reject CODOMAIN
+ * unchanged while moving sites, which is the fact worth having and the one a
+ * contains-pin cannot state. An enumeration of past shifts used to sit here and
+ * went stale within a round; the property is what belongs in prose.
+ *
+ * RE-DERIVE, NEVER ADD A CONSTANT. Both maps here and the quarantine map above
+ * are produced by the same scan the harvest test runs; recomputing from source
+ * catches a literal that appeared or vanished, and adding an offset does not.
  */
 export const CORE_REJECT_REASON_SITES_V1: Readonly<Record<string, readonly number[]>> = {
-  'absent state cannot retain authority history or quarantine': [220, 535],
-  'accepted authority state has incomplete transition lineage': [124, 546],
-  'accepted head does not bind its retained transition lineage': [133],
-  'active closure contains tombstone-only authority evidence': [268],
-  'authority history is incomplete': [152],
-  'authority transition reuses a root retained by this record': [365, 581],
-  'cold noninitial head requires its verified authority closure': [237],
-  'cold tombstone closure lacks its exact deletion predecessor': [259],
-  'current frontier fork requires its exact direct resolving successor': [462],
-  'exact accepted authority transition is missing': [344],
-  'fork resolution issuedAt exceeds the future clock-skew bound': [468],
-  'head issuedAt exceeds the future clock-skew bound': [101],
-  'historical or unsolicited fork resolution is audit-only': [439],
-  'late tombstone lacks its exact verified active predecessor': [292],
-  'late tombstone requires the exact retained resurrection transition': [309],
-  'next-sequence head does not bind transition issuer/root': [374],
-  'next-sequence tombstone requires its exact same-sequence active predecessor': [350],
-  'same-sequence authority changed': [168],
-  'stable record key changed': [137, 553],
-  'tombstone is terminal within its authority sequence': [193],
-  'tombstone lacks its exact verified active predecessor': [411],
-  'transition has no accepted predecessor': [540],
-  'transition verification time is invalid': [522],
-  'transitions do not target the same authority tuple': [502],
-  'unresolved head fork cannot advance authority sequence': [329, 572],
-  'verification clock is invalid': [97],
-  'verified authority closure has incomplete lineage': [247],
+  'absent state cannot retain authority history or quarantine': [495, 1260],
+  'accepted authority state has incomplete transition lineage': [388, 1271],
+  'accepted head does not bind its retained transition lineage': [397],
+  'active closure contains tombstone-only authority evidence': [543],
+  'authority history is incomplete': [416],
+  'authority transition reuses a root retained by this record': [1067, 1306],
+  'cold noninitial head requires its verified authority closure': [512],
+  'cold tombstone closure lacks its exact deletion predecessor': [534],
+  'current frontier fork requires its exact direct resolving successor': [1187],
+  'exact accepted authority transition is missing': [1046],
+  'fork resolution issuedAt exceeds the future clock-skew bound': [1193],
+  'head issuedAt exceeds the future clock-skew bound': [352],
+  'historical or unsolicited fork resolution is audit-only': [1164],
+  'late tombstone entry requires a candidate below the accepted authority sequence': [818],
+  'late tombstone entry requires a tombstone candidate': [809],
+  'late tombstone lacks its exact verified active predecessor': [590],
+  'late tombstone requires the exact retained resurrection transition': [608],
+  'late tombstone retained transition belongs to another authority': [676],
+  'next-sequence head does not bind transition issuer/root': [1076],
+  'next-sequence tombstone requires its exact same-sequence active predecessor': [1052],
+  'same-sequence authority changed': [434],
+  'same-sequence tombstone accepted a different authority transition': [905],
+  'same-sequence tombstone belongs to another authority branch': [899],
+  'same-sequence tombstone entry requires a candidate at the applied sequence': [976],
+  'same-sequence tombstone entry requires a tombstone candidate': [968],
+  'same-sequence tombstone entry requires an active or tombstone applied row': [983],
+  'stable record key changed': [401, 1003, 1278],
+  'tombstone is terminal within its authority sequence': [468],
+  'tombstone lacks its exact verified active predecessor': [1136],
+  'transition has no accepted predecessor': [1265],
+  'transition verification time is invalid': [1247],
+  'transitions do not target the same authority tuple': [1227],
+  'unresolved head fork cannot advance authority sequence': [1031, 1297],
+  'verification clock is invalid': [347],
+  'verified authority closure has incomplete lineage': [522],
 };
 
 /**
@@ -74,7 +97,7 @@ export const CORE_REJECT_REASON_SITES_V1: Readonly<Record<string, readonly numbe
  * above is not the whole of it.
  *
  * `evaluateAgentProfileHeadAdvanceV1` delegates to `evaluateAuthorityTransitionV1`
- * at :353 and returns its decision VERBATIM at :358. Those rejects are minted in
+ * and returns its decision VERBATIM. Those rejects are minted in
  * a DIFFERENT FILE and carry no marker of their origin, so a caller observing
  * `{ decision: 'reject', reason }` cannot tell which file produced it.
  *
@@ -88,12 +111,12 @@ export const CORE_REJECT_REASON_SITES_V1: Readonly<Record<string, readonly numbe
  * Harvested from packages/core/src/system-record-authority-verification-v1-internal.ts.
  */
 export const CORE_DELEGATED_REJECT_REASON_SITES_V1: Readonly<Record<string, readonly number[]>> = {
-  'verification clock is invalid': [30],
-  'transition issuedAt exceeds the future clock-skew bound': [34],
-  'transition does not bind the accepted predecessor': [48],
-  'expired-prior transition cannot resurrect a tombstone': [55],
-  'expired-prior transition does not bind prior validity': [61],
-  'prior authority has not passed the expiry skew': [70],
+  'transition does not bind the accepted predecessor': [111],
+  'verification clock is invalid': [147],
+  'transition issuedAt exceeds the future clock-skew bound': [151],
+  'expired-prior transition cannot resurrect a tombstone': [176],
+  'expired-prior transition does not bind prior validity': [182],
+  'prior authority has not passed the expiry skew': [191],
 };
 
 /** Every reject literal a caller can observe from the exported entry. */
@@ -121,8 +144,8 @@ export const CORE_ALL_REJECT_LITERALS_V1: readonly string[] = Object.freeze([
  * FIVE. Delegated rejects escape verbatim through the same decision object, so
  * a literal produced ONCE IN EACH FILE is one-to-many to a caller while being
  * one-to-one in either map on its own. Exactly one literal has that shape --
- * 'verification clock is invalid', at authority :97 and authority-verification
- * :30 -- and it was missed, so the finding said five when a caller sees six.
+ * 'verification clock is invalid', produced once in each of the two files above
+ * -- and it was missed, so the finding said five when a caller sees six.
  *
  * THE CLASS, NOT THE INSTANCE: CORE_ALL_REJECT_LITERALS_V1 twenty lines above
  * ALREADY unions both maps. The delegation sweep was applied to that consumer

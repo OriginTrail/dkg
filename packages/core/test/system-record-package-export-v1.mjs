@@ -251,6 +251,8 @@ const expectedRuntimeExports = Object.freeze([
   'encodeSystemRecordRequestFrameV1',
   'encodeSystemRecordResponseFrameV1',
   'evaluateAgentProfileHeadAdvanceV1',
+  'evaluateAgentProfileLateTombstoneAdvanceV1',
+  'evaluateAgentProfileSameSequenceTombstoneAdvanceV1',
   'evaluateAuthorityTransitionAgainstAcceptedStateV1',
   'evaluateAuthorityTransitionConflictV1',
   'evaluateAuthorityTransitionV1',

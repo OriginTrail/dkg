@@ -93,9 +93,9 @@ export const JOIN_NOT_COMPARABLE_CAUSE_V1 = {
   /**
    * Storage cannot be driven at all. `verifiedAuthoritySummary` is a REQUIRED
    * field on all three facts variants and is bind-checked at
-   * system-record-next-state-v1-internal.ts:883 -- the lineage-length invariant,
-   * which is unique in that file, unlike the brand assert at :850 whose text
-   * recurs at :906 in the tombstone path and so cannot name which path it means.
+   * system-record-next-state-v1-internal.ts:902 -- the lineage-length invariant,
+   * which is unique in that file, unlike the brand assert at :869 whose text
+   * recurs at :925 in the tombstone path and so cannot name which path it means.
    * A summary is a factory-only capability, so where the closure builder refuses
    * to mint one there is no storage verdict to compare against.
    *
@@ -103,7 +103,7 @@ export const JOIN_NOT_COMPARABLE_CAUSE_V1 = {
    * correction will assume it is. Two harness limitations on the core side do
    * not imply a third here: storage genuinely requires a bound summary and
    * genuinely cannot be driven without one, which is a property of the code at
-   * :863 rather than of this fixture's chain depth. The cause stands as declared.
+   * :882 rather than of this fixture's chain depth. The cause stands as declared.
    */
   NO_MINTABLE_SUMMARY: 'storage-requires-a-verified-authority-summary-this-head-cannot-mint',
   /**
@@ -120,19 +120,19 @@ export const JOIN_NOT_COMPARABLE_CAUSE_V1 = {
  * the precondition a restatement of the observation and unfalsifiable.
  *
  * TWO CLASSIFIERS, because the exported entry dispatches on the operation at
- * :171-181 and the tombstone path never enters `classifyAuthorityAdvance`:
+ * :190-200 and the tombstone path never enters `classifyAuthorityAdvance`:
  *
  *   operation 'tombstone' -> `deriveSystemRecordTombstoneReplacementV1`, whose
- *   gate at :956-960 refuses a QUARANTINED row and nothing else. A dirty or
+ *   gate at :995-999 refuses a QUARANTINED row and nothing else. A dirty or
  *   already-tombstoned row passes it.
  *
  *   operation 'active'/'quarantine' -> `classifyAuthorityAdvance`, which returns
- *   `deferred('non-active-state')` before the candidate is first read at :1116:
- *     :1113-1114  any status that is neither 'active' nor 'quarantined'
- *     :1110-1111  a quarantined row under any operation that is not 'quarantine'
- *     :1097-1108  a quarantined row under 'active' unless a verified direct
+ *   `deferred('non-active-state')` before the candidate is first read at :1221:
+ *     :1218-1219  any status that is neither 'active' nor 'quarantined'
+ *     :1215-1216  a quarantined row under any operation that is not 'quarantine'
+ *     :1202-1213  a quarantined row under 'active' unless a verified direct
  *                 fork-resolving successor adjudicates that exact quarantine
- *   An absent row short-circuits the other way at :1092 and DOES produce a
+ *   An absent row short-circuits the other way at :1197 and DOES produce a
  *   verdict, so it meets the precondition.
  *
  * Core has no field to put an applied status in: `AgentProfileAcceptedAuthority-
@@ -146,7 +146,7 @@ export function storageReadsTheCandidateV1(cell: VerdictDiffCellV1): boolean {
   if (cell.storageOperation === 'tombstone') return cell.appliedStatus !== 'quarantined';
   if (cell.snapshot === 'absent') return true;
   if (cell.appliedStatus === 'active') return true;
-  // The :1097 arm can in principle admit a quarantined row under an 'active'
+  // The :1202 arm can in principle admit a quarantined row under an 'active'
   // operation, but only for a candidate whose fork resolution adjudicates THAT
   // quarantine. No cell in this space does, which is recorded as a measured
   // sub-fact rather than assumed: the pinned distribution has zero adjudicated
@@ -206,6 +206,30 @@ export const STORAGE_OUTCOME_CODOMAIN_V1: readonly string[] = [
   'deferred|authority-history-mismatch',
   'deferred|verified-state-mismatch',
   'deferred|root-state-changed',
+  // THE TWO REASONS THE LATE-TOMBSTONE SEAM ADDED, and this pin earned its keep
+  // here. Routing that seam through core moved 1,152 cells onto labels the list
+  // had never been shown, and because `reject`'s image is computed FROM this
+  // list those cells adjudicated DIVERGENCE until the list caught up -- exactly
+  // what the enumerated-not-collected discipline above says should happen. A
+  // reason added to the source union moves this list and takes the images with
+  // it, instead of being absorbed silently.
+  'deferred|late-tombstone-evidence-incomplete',
+  'deferred|undecided-authority-classification',
+  // AND THE FOUR THE SAME-SEQUENCE SEAM ADDED. Two of them were missing from
+  // this list for a full review round while the aggregate pins stayed green --
+  // the note above happening again, because a label the list has never been
+  // shown cannot be missing from it, so a mapping regression swapping one of
+  // these for a neighbouring reason would pass unnoticed.
+  //
+  // Their reach is pinned in JOIN_UNREACHED_OUTCOMES_V1 with the KIND of zero
+  // stated, not merely the zero. This sweep's axes never vary authority branch,
+  // so it cannot mint a candidate on a competing one -- a limit of the
+  // instrument rather than a property of the system, and the same-sequence seam
+  // suite carries the positive observation the sweep cannot.
+  'deferred|same-sequence-tombstone-conflict',
+  'deferred|tombstone-predecessor-unbound',
+  'deferred|same-sequence-authority-branch-mismatch',
+  'deferred|same-sequence-entry-precondition-unmet',
   'capacity-exhausted|state-revision-overflow',
   'capacity-exhausted|capacity-revision-overflow',
   'capacity-exhausted|record-count-cap',
@@ -260,15 +284,15 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     image: [...STORAGE_ADMITTING_V1],
     semantics: JOIN_SEMANTICS_V1.PRESERVING,
     citations: [
-      'packages/storage/src/system-record-next-state-v1-internal.ts:202-203',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:240',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:295',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:256-222',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:259',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:314',
     ],
     note: 'Storage has no outcome spelled `accept`. Its internal classifier value '
-      + '`advance` never escapes the entry: :203 returns every NON-advance verdict '
+      + '`advance` never escapes the entry: :222 returns every NON-advance verdict '
       + 'verbatim, while `advance` falls through into the derivation and surfaces '
       + 'with the materialization discriminator folded in -- `already-applied` from '
-      + 'the reuse branch at :240-:295, `ready` otherwise. Both admit the candidate '
+      + 'the reuse branch at :259-:314, `ready` otherwise. Both admit the candidate '
       + 'as the new authority, which is what core `accept` says, so the image is the '
       + 'admitting pair. MEASURED: only `ready` is reached; the `already-applied` '
       + 'member is pinned at zero rather than dropped, because an image narrowed to '
@@ -280,26 +304,26 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     // fitted to an observation cannot be violated by that observation -- it is
     // drawing the target around the arrow, and the guard it arms would encode
     // nothing about what was expected. These are the four exits reachable from
-    // the inputs core calls stale: :1119/:1134 stale, the reuse branch's
-    // :294-295 already-applied and its :251 mismatch exit, and the
+    // the inputs core calls stale: :1224/:1239 stale, the reuse branch's
+    // :313-314 already-applied and its :270 mismatch exit, and the
     // rematerialize fall-through to `ready`.
     image: ['stale', 'already-applied', 'ready', 'deferred|verified-state-mismatch'],
     semantics: JOIN_SEMANTICS_V1.CHANGING,
     citations: [
-      'packages/core/src/system-record-authority-v1-internal.ts:196',
-      'packages/core/src/system-record-authority-v1-internal.ts:199',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1154',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1156-1165',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:251',
+      'packages/core/src/system-record-authority-v1-internal.ts:293',
+      'packages/core/src/system-record-authority-v1-internal.ts:231',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1383',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1385-1285',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:270',
     ],
     note: 'MAPPING core stale TO {stale} ALONE WOULD FABRICATE A DIVERGENCE, and '
       + 'that is the worst output this harness can produce. Core has TWO stale '
       + 'sub-causes and only one of them is storage `stale`. At :196 a LOWER-VERSION '
-      + 'candidate is stale, and storage says `stale` at :1134 for the same input. At '
+      + 'candidate is stale, and storage says `stale` at :1239 for the same input. At '
       + ':199 the IDENTICAL head -- same version, same digest -- is also stale, and '
-      + 'storage calls that input `advance` at :1136-1145, surfacing as '
+      + 'storage calls that input `advance` at :1241-1250, surfacing as '
       + '`already-applied`. Same outcome, different word. THE IMAGE WAS THEN WIDENED '
-      + 'BY MEASUREMENT to include `ready`: :1139-1144 selects `rematerialize` rather '
+      + 'BY MEASUREMENT to include `ready`: :1244-1249 selects `rematerialize` rather '
       + 'than `reuse` when the snapshot needs rematerialising or a quarantine '
       + 'operation moved the status or the conflict-evidence digest, and a '
       + 'rematerialize does NOT enter the reuse branch -- it returns a CAS plan the '
@@ -312,17 +336,17 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     image: ['deferred|authority-fork'],
     semantics: JOIN_SEMANTICS_V1.CHANGING,
     citations: [
-      'packages/core/src/system-record-authority-v1-internal.ts:200',
-      'packages/core/src/system-record-authority-v1-internal.ts:433',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1166',
+      'packages/core/src/system-record-authority-v1-internal.ts:297',
+      'packages/core/src/system-record-authority-v1-internal.ts:558',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1395',
     ],
     note: 'No storage outcome is spelled `quarantine`: storage\'s quarantine is an '
       + 'axis-H INPUT operation, not an outcome. The image is still groundable and '
       + 'still narrow -- core reaches :200 on a same-sequence same-version candidate '
-      + 'whose digest differs, which is exactly the condition storage tests at :1146 '
+      + 'whose digest differs, which is exactly the condition storage tests at :1251 '
       + 'before returning deferred(authority-fork). WHAT DIFFERS IS DURABILITY, and '
       + 'it is the concrete answer to what storage loses by not being routed through '
-      + 'core: core\'s quarantine is STATE. At :433 `evaluateSameSequenceActiveAdvance'
+      + 'core: core\'s quarantine is STATE. At :508 `evaluateSameSequenceActiveAdvance'
       + 'V1` branches on `acceptedState.disposition === \'head-fork-quarantined\'` and '
       + 'routes the NEXT candidate down the fork-resolution-successor path. Storage\'s '
       + 'defer leaves no trace at all: the next candidate is evaluated identically to '
@@ -342,7 +366,7 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     semantics: JOIN_SEMANTICS_V1.CHANGING,
     citations: [
       'packages/core/src/system-record-authority-v1-internal.ts:139-141',
-      'packages/core/src/system-record-authority-v1-internal.ts:171-172',
+      'packages/core/src/system-record-authority-v1-internal.ts:220-221',
       'packages/storage/test/authority-verdict-diff-projection-v1.test.ts:129',
     ],
     note: 'NO IMAGE CAN BE GROUNDED, and the reason is structural rather than a gap '
@@ -382,8 +406,8 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     image: STORAGE_WITHHOLDING_V1,
     semantics: JOIN_SEMANTICS_V1.CHANGING,
     citations: [
-      'packages/core/src/system-record-authority-v1-internal.ts:98-103',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:145-160',
+      'packages/core/src/system-record-authority-v1-internal.ts:147-152',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:164-179',
       'packages/storage/test/authority-verdict-diff-projection-equivalence-v1.test.ts',
     ],
     note: 'A core `reject` refuses the candidate outright, so nothing that ADMITS it '

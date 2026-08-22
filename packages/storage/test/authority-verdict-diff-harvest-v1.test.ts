@@ -97,6 +97,20 @@ describe('core authority decision reason harvest', () => {
     }
     const ambiguous = [...sites].filter(([, s]) => s.length > 1).map(([l]) => l);
     expect(ambiguous.sort()).toEqual([...CORE_AMBIGUOUS_REJECT_LITERALS_V1].sort());
+    // SIX, BACK FROM SEVEN. The late-tombstone entry briefly mirrored the clock
+    // gates inline, which gave both literals a second producing site and pushed
+    // one into this register as pure bookkeeping. Extracting the shared preflight
+    // returned it: one producer per literal in this file, and the register
+    // measures observational ambiguity again rather than duplication.
+    // ORIGINAL NOTE (kept, it explains the mechanism): That entry has
+    // to refuse an unusable clock and a too-far-future head ITSELF -- delegating
+    // them would let a clock failure read as tombstone precedence -- so both
+    // literals now have a second producing site. `head issuedAt exceeds the
+    // future clock-skew bound` crossed from one site to two and joined the
+    // register; `verification clock is invalid` was already ambiguous across the
+    // two files and went from two sites to three. The register growing is the
+    // honest record of a branch a caller can no longer distinguish, and it is
+    // the price of the guard rather than an oversight.
     expect(ambiguous).toHaveLength(6);
   });
 
@@ -135,7 +149,41 @@ describe('core authority decision reason harvest', () => {
   // rows above would all pass against an empty map if the regex or the path
   // broke -- the zero-is-indistinguishable-from-a-broken-probe failure.
   it('harvests a non-trivial number of sites, so an empty map cannot pass', () => {
-    expect([...reject.values()].flat().length).toBe(32);
+    // 32 until the late-tombstone entry added its own precondition rejects, then
+    // 35 until the same-sequence entry added three of its own: a non-tombstone
+    // candidate, a candidate at the wrong sequence, and an applied row whose
+    // status the rule does not decide against. Then 38 -> 40 when that entry
+    // learned to establish RECORD IDENTITY before its rule runs: two refusals of
+    // its own, for a candidate on another authority branch and one that accepted
+    // a different transition into this sequence.
+    //
+    // THE QUARANTINE COUNT DELIBERATELY DID NOT MOVE, and that is the load-
+    // bearing half. The identity comparison the entry needed already existed in
+    // the full evaluator, so it was EXTRACTED and shared rather than copied: one
+    // implementation, two callers, each mapping the classification to what its
+    // own operands can defend. Had it been copied, the evaluator's literals would
+    // each have gained a second producing site and the ambiguity register below
+    // would have gone from six to seven -- measuring duplication rather than
+    // observational ambiguity, which is a mistake this register has recorded
+    // once already.
+    //
+    // Then 40 -> 41 when a REVIEW ROUND found that the entry had carried two of
+    // the evaluator's three identity preconditions and left the third behind:
+    // the STABLE RECORD KEY. `currentRoot` establishes the issuer, not the
+    // record -- the codec welds the root to the issuer, and one issuer may key
+    // more than one record -- and at authority sequence zero there is no
+    // accepted transition to separate two records either, so both branch
+    // conjuncts passed BETWEEN records. Measured: the entry returned `accept` on
+    // a row differing only in the record key.
+    //
+    // THE REGISTER BELOW STILL DID NOT MOVE, for the same reason as before. The
+    // refusal reuses the evaluator's own literal rather than minting a sibling,
+    // so `stable record key changed` went from two producing sites to three --
+    // a literal that was ALREADY observationally ambiguous does not become more
+    // so by count, and the two callers answering one condition with one literal
+    // is the property worth having. A new literal would have kept the sites
+    // distinct and let the entry and the evaluator drift on the same question.
+    expect([...reject.values()].flat().length).toBe(41);
     expect([...quarantine.values()].flat().length).toBe(10);
   });
 });
@@ -170,7 +218,18 @@ function harvestEvidenceOptionals(): { declared: string[]; snapshotted: string[]
     .map((line) => /^\s*readonly\s+(\w+)\?:/.exec(line)?.[1])
     .filter((name): name is string => name !== undefined);
 
-  const optionals = /const optionals = \[([^\]]*)\]/.exec(source)?.[1] ?? '';
+  // ANCHORED TO THE FUNCTION IT MEANS, not to the first `const optionals` in the
+  // file. It used to be the latter, and that was a latent defect this PR fired:
+  // a SECOND snapshot helper with its own optionals list was added ABOVE this
+  // one, so the pin silently began harvesting the other function's members and
+  // compared them against this interface's declarations. The row stayed a row
+  // and measured the wrong pair. A regex keyed on a shape that is unique only
+  // until someone writes a second instance is a check that cannot fail on
+  // schedule.
+  const snapshotFn = source.indexOf('function snapshotHeadAdvanceEvidenceV1');
+  if (snapshotFn < 0) throw new Error('snapshotHeadAdvanceEvidenceV1 not found in core source');
+  const optionals = /const optionals = \[([^\]]*)\]/
+    .exec(source.slice(snapshotFn))?.[1] ?? '';
   const snapshotted = [...optionals.matchAll(/'([^']+)'/g)].map((match) => match[1]);
   return { declared, snapshotted };
 }

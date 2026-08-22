@@ -39,7 +39,7 @@ export interface VerdictDiffCounterfactualV1 {
 
 export const VERDICT_DIFF_COUNTERFACTUALS_V1: readonly VerdictDiffCounterfactualV1[] = [
   {
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1133',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1497',
     before: "} else if (current.status !== 'active') {",
     after: "} else if (current.status !== 'active' && current.status !== 'tombstone') {",
     appliedProof: 'occurrence count of the original predicate 1 -> 0',
@@ -149,7 +149,7 @@ export const CORE_VERDICT_TABLE_DIGEST_V1 =
  *
  * 145,728 DECIDED IS NOT 145,728 INDEPENDENT OBSERVATIONS. Of the 61,920 cells
  * the S1 removal returns to the table, 20,640 short-circuit at the future
- * clock-skew bound (core :98 testing it, :101 returning) before any other axis
+ * clock-skew bound, which core tests first, before any other axis
  * does anything, so each of those contributes roughly one bit rather than a full
  * axis product. THE RE-PIN CHANGES WHAT IS DECIDED, NOT WHAT IS COVERED -- and
  * this is the number in the artifact most likely to be read as the opposite.
@@ -192,7 +192,7 @@ export const CORE_PROJECTIONS_V1 = 25920;
  *
  * A NAME-GREP WOULD NOT HAVE BEEN ENOUGH, which is why the instrument is
  * empirical rather than textual. Core copies the field into its evidence snapshot
- * through an allowlist at system-record-authority-v1-internal.ts:654, so it
+ * through the `core-evidence-allowlist-copy` citation below, so it
  * travels inside an object; a branch reading it off the whole snapshot, or by
  * dynamic access, would never appear in a grep for the symbol. Running the
  * branches closes that gap for the branches actually run.
@@ -433,33 +433,33 @@ export const CORE_HARNESS_LIMITATIONS_V1: readonly HarnessLimitationV1[] = [
 export const CORE_SUMMARY_ASYMMETRY_CITATIONS_V1: readonly SourceCitationV1[] = [
   {
     id: 'core-single-semantic-read',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:230',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:505',
     contains: 'const summary = evidenceState.verifiedAuthoritySummary;',
     why: "Core's ONLY semantic read of the field, and it sits inside the absent-state branch.",
   },
   {
     id: 'core-evidence-allowlist-copy',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:654',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:1379',
     contains: "'verifiedAuthoritySummary',",
     why: 'The allowlist that carries the field into the evidence snapshot, which is why a '
       + 'name-grep over the branch functions could not have settled this on its own.',
   },
   {
     id: 'storage-binds-candidate-head-digest',
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:882',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:966',
     contains: 'summary.candidateHeadDigest !== headDigest',
     why: 'Storage refuses a summary that does not name the head it is presented with.',
   },
   {
     id: 'storage-binds-lineage-length',
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:883',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:967',
     contains: 'BigInt(summary.transitionLineage.length) '
       + '!== parseCanonicalDecimalU64(facts.head.authoritySequence)',
     why: 'The lineage-length invariant: the discriminating conjunct, and unique in the file.',
   },
   {
     id: 'storage-binds-root-history-length',
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:884',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:968',
     contains: 'summary.historicalRoots.length !== summary.transitionLineage.length',
     why: 'The retained-root count must match the lineage it is retained against.',
   },
@@ -635,7 +635,7 @@ export const CORE_SWEEP_FINDINGS_V1: readonly string[] = [
   + 'previously said the axis "AWAITS A DENOTATION DETERMINATION" and that building a '
   + "candidate first would pin a fixture's guess as a finding. Measured at both sites, "
   + 'neither implementation has the distinction the question presupposed: core '
-  + 'system-record-authority-v1-internal.ts:151-153 rejects any candidate more than '
+  + 'system-record-authority-v1-internal.ts:200-202 rejects any candidate more than '
   + 'one sequence ahead with \'authority history is incomplete\', and storage\'s '
   + 'classifyAuthorityAdvance defers it as \'authority-history-mismatch\', both from '
   + 'the SEQUENCE NUMBER ALONE and both short-circuiting before reading the summary, '
@@ -723,7 +723,7 @@ export const CORE_SWEEP_FINDINGS_V1: readonly string[] = [
   // something anyone routes around.
   'THE ASYMMETRY: CORE NEVER READS `verifiedAuthoritySummary` ON ANY PRESENT-STATE '
   + 'PATH, WHILE STORAGE BIND-CHECKS IT HARD. Core has exactly ONE semantic read of '
-  + 'the field, at system-record-authority-v1-internal.ts:230, inside the ABSENT-state '
+  + 'the field, at system-record-authority-v1-internal.ts:320, inside the ABSENT-state '
   + 'branch; the five present-state branch functions (:274 lower-sequence, :318 '
   + 'next-sequence, :389 same-sequence tombstone, :427 same-sequence active, :445 '
   + 'fork-resolution successor) never read it, which is why omitting it moves no '

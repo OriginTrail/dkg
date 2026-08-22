@@ -376,6 +376,75 @@ describe('system-record V1 object codecs', () => {
     })).toBe(false);
   });
 
+  /**
+   * THE TWO EXPIRED-PRIOR CHECKS WERE BRANCHES NOTHING COULD FAIL ON.
+   *
+   * FOUND BY REVIEW. The test below asserts `toMatchObject({ decision: 'reject' })`
+   * on the early-clock call, which passes whichever refusal fired -- so the
+   * `priorValidUntil` binding comparison and the expiry-skew condition were both
+   * masked by each other and by the decision-only assertion. Their literals
+   * appear in the harvest pin, but a harvest pin asserts that a literal EXISTS at
+   * a line, not that its condition is correct: neutralising the comparison while
+   * leaving the literal in place kept every suite green. Measured, not assumed --
+   * the mutant survived core's system-record suite, the objects suite and four
+   * storage lanes.
+   *
+   * These rows discriminate by REASON, and each is one field or one clock apart
+   * from a row that answers differently, so neither check can be removed without
+   * moving exactly one of them.
+   */
+  it('discriminates the two expired-prior refusals by reason, not only by decision', async () => {
+    const fixture = await authorityFixture();
+    const current = activeHead(fixture);
+    const bound = authorityTransition(fixture, current, 'expired-prior');
+    const acceptingNow = Date.parse(bound.issuedAt) + 5 * 60_000;
+    const misbound = {
+      ...bound,
+      priorValidUntil: '2030-01-01T00:00:00Z',
+    } as AgentProfileAuthorityTransitionV1;
+    const justAfterExpiry = {
+      ...bound,
+      issuedAt: '2026-08-06T12:01:00Z',
+    } as AgentProfileAuthorityTransitionV1;
+
+    expect({
+      misboundAtAnAcceptingClock:
+        evaluateAuthorityTransitionV1(misbound, current, acceptingNow),
+      // THE SKEW BRANCH NEEDS ITS OWN TRANSITION, and that is why it was never
+      // reached. The shared fixture issues a day after the prior head expires,
+      // so every clock before `validUntil + skew` is also outside the issuedAt
+      // future-skew window and is refused there first -- the two windows are
+      // DISJOINT for this fixture. Issuing one minute after expiry makes them
+      // overlap, and only then does this branch become observable.
+      issuedAtExpiryBeforeTheSkew: evaluateAuthorityTransitionV1(
+        justAfterExpiry,
+        current,
+        Date.parse('2026-08-06T12:04:00Z'),
+      ),
+      issuedAtExpiryAfterTheSkew: evaluateAuthorityTransitionV1(
+        justAfterExpiry,
+        current,
+        Date.parse('2026-08-06T12:06:00Z'),
+      ),
+      boundAfterTheSkew:
+        evaluateAuthorityTransitionV1(bound, current, acceptingNow),
+    }).toStrictEqual({
+      misboundAtAnAcceptingClock: {
+        decision: 'reject',
+        reason: 'expired-prior transition does not bind prior validity',
+      },
+      issuedAtExpiryBeforeTheSkew: {
+        decision: 'reject',
+        reason: 'prior authority has not passed the expiry skew',
+      },
+      // Two minutes later the same transition and head ACCEPT, which is what
+      // makes both refusals above the checks firing rather than a cell that
+      // cannot succeed at all.
+      issuedAtExpiryAfterTheSkew: { decision: 'accept' },
+      boundAfterTheSkew: { decision: 'accept' },
+    });
+  });
+
   it('enforces transition expiry and direct successor fork decisions', async () => {
     const fixture = await authorityFixture();
     const current = activeHead(fixture);

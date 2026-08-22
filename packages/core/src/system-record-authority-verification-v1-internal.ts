@@ -20,58 +20,178 @@ import {
 import type { CanonicalRfc3339SecondsV1 } from './system-record-agent-profile-primitives-v1-internal.js';
 import type { SystemRecordAuthorityDecisionV1 } from './system-record-authority-types-v1-internal.js';
 
-export function evaluateAuthorityTransitionV1(
+/**
+ * How a retained transition relates to a head, in the three ways that differ.
+ *
+ * `names-this-head` -- it rotates out of exactly this head.
+ * `names-another-head` -- SAME record and sequence and issuer, different head.
+ * `unrelated` -- a different record, sequence or issuer entirely.
+ *
+ * THE SECOND AND THIRD ARE NOT THE SAME ANSWER, and collapsing them is a
+ * measured defect rather than a style point. ADR 0002 :131-132's "otherwise the
+ * tombstone takes precedence" presupposes evidence FROM THIS RECORD'S rotation:
+ * a transition that names a different head at this sequence really does prove no
+ * valid descendant of the tombstone exists. Evidence from another authority
+ * proves nothing about this record at all, and treating it as precedence lets an
+ * unrelated object decide a tombstone's fate. Measured before the split: a
+ * retained transition carrying a foreign `priorEvmIssuer` returned `accept`.
+ */
+export type AuthorityTransitionBindingV1 =
+  | 'names-this-head'
+  | 'names-another-head'
+  | 'unrelated';
+
+export function classifyAuthorityTransitionBindingV1(
   transition: AgentProfileAuthorityTransitionV1,
   priorHead: AgentProfileHeadObjectV1,
-  nowMs: number,
-): SystemRecordAuthorityDecisionV1 {
+): AuthorityTransitionBindingV1 {
   const validatedTransition = validateAuthorityTransition(transition);
   const validatedPrior = validateAgentProfileHeadObjectV1(priorHead);
-  if (!isSafeNow(nowMs)) return { decision: 'reject', reason: 'verification clock is invalid' };
-  if (isIssuedTooFarInFuture(validatedTransition.issuedAt, nowMs)) {
-    return {
-      decision: 'reject',
-      reason: 'transition issuedAt exceeds the future clock-skew bound',
-    };
-  }
-  const priorDigest = computeAgentProfileHeadObjectDigestV1(validatedPrior);
+  // The record-and-rotation identity: who this transition belongs to and which
+  // sequence it leaves. Every field here is about the AUTHORITY, not the head.
   if (
     validatedTransition.networkId !== validatedPrior.networkId ||
     validatedTransition.peerId !== validatedPrior.peerId ||
     validatedTransition.peerPublicKey !== validatedPrior.peerPublicKey ||
     validatedTransition.priorAuthoritySequence !== validatedPrior.authoritySequence ||
-    validatedTransition.priorHeadDigest !== priorDigest ||
     validatedTransition.priorEvmIssuer !== validatedPrior.evmIssuer
   ) {
+    return 'unrelated';
+  }
+  // Same authority, same sequence: now the head-level question.
+  return validatedTransition.priorHeadDigest
+    === computeAgentProfileHeadObjectDigestV1(validatedPrior)
+    ? 'names-this-head'
+    : 'names-another-head';
+}
+
+/**
+ * THE PUBLISHED SIGNATURE KEEPS THE FULL UNION, and that is deliberate.
+ *
+ * This function is exported from the package barrel, so its declared return type
+ * is a contract with consumers outside this repository. Narrowing it to the real
+ * codomain -- which is what an earlier revision of this change did -- breaks
+ * their source: a defensive `case 'quarantine':` stops compiling against a
+ * narrower union even though no runtime value changed. That is a breaking change
+ * and it does not belong in a fix.
+ *
+ * `evaluateAuthorityTransitionInternalV1` carries the precise type for callers
+ * inside this package, so the seam can stay narrow without the published surface
+ * moving. When the narrowing is wanted on the public entry it should be its own
+ * change, in a release that says so.
+ */
+export function evaluateAuthorityTransitionV1(
+  transition: AgentProfileAuthorityTransitionV1,
+  priorHead: AgentProfileHeadObjectV1,
+  nowMs: number,
+): SystemRecordAuthorityDecisionV1 {
+  return evaluateAuthorityTransitionInternalV1(transition, priorHead, nowMs);
+}
+
+/**
+ * ACCEPT OR REJECT, never stale and never quarantine.
+ *
+ * Measured over its own body: one accept and six rejects. A caller narrowing its
+ * own result would otherwise have to write arms for states that cannot arrive,
+ * or launder them. This is the shape the late-tombstone rule consumes; it is NOT
+ * exported from the package barrel.
+ */
+export function evaluateAuthorityTransitionInternalV1(
+  transition: AgentProfileAuthorityTransitionV1,
+  priorHead: AgentProfileHeadObjectV1,
+  nowMs: number,
+): Extract<SystemRecordAuthorityDecisionV1, { readonly decision: 'accept' | 'reject' }> {
+  const validatedTransition = validateAuthorityTransition(transition);
+  const validatedPrior = validateAgentProfileHeadObjectV1(priorHead);
+  const unverifiable = rejectUnverifiableAuthorityTransitionV1(validatedTransition, nowMs);
+  if (unverifiable !== undefined) return unverifiable;
+  if (classifyAuthorityTransitionBindingV1(validatedTransition, validatedPrior) !== 'names-this-head') {
     return {
       decision: 'reject',
       reason: 'transition does not bind the accepted predecessor',
     };
   }
-  if (validatedTransition.mode === 'expired-prior') {
-    if (validatedPrior.state !== 'active') {
-      return {
-        decision: 'reject',
-        reason: 'expired-prior transition cannot resurrect a tombstone',
-      };
-    }
-    if (validatedTransition.priorValidUntil !== validatedPrior.validUntil) {
-      return {
-        decision: 'reject',
-        reason: 'expired-prior transition does not bind prior validity',
-      };
-    }
-    if (
-      !Number.isSafeInteger(nowMs) ||
-      nowMs < Date.parse(validatedPrior.validUntil) + SYSTEM_RECORD_MAX_CLOCK_SKEW_MS
-    ) {
-      return {
-        decision: 'reject',
-        reason: 'prior authority has not passed the expiry skew',
-      };
-    }
-  }
+  const inadmissible = rejectInadmissibleExpiredPriorTransitionV1(
+    validatedTransition,
+    validatedPrior,
+    nowMs,
+  );
+  if (inadmissible !== undefined) return inadmissible;
   return { decision: 'accept' };
+}
+
+/**
+ * THE REFUSALS THAT ARE ABOUT THE TRANSITION ITSELF, NOT ABOUT WHAT IT BINDS.
+ *
+ * These answer "can this object be verified at all, right now" -- a question
+ * whose answer does not depend on which head the transition names. They are
+ * extracted so a caller can ask it BEFORE classifying the binding, which is what
+ * stops a structural reading of an unverifiable object from becoming an
+ * affirmative: "not verifiable now" must never be allowed to mean "no valid
+ * descendant exists".
+ *
+ * WHY THIS IS A CLASS AND NOT A HOIST. Fixing one condition inside one caller
+ * closes today's instance and leaves the next binding-independent refusal free
+ * to repeat it -- and this seam has now produced that same shape four times, one
+ * arm over each time. Every future refusal of that kind belongs HERE, and the
+ * callers that must not read a refusal structurally get it without noticing.
+ *
+ * The order inside this function and its position inside
+ * {@link evaluateAuthorityTransitionInternalV1} are unchanged from when both
+ * lived inline, so the verifier's own decisions are identical.
+ */
+export function rejectUnverifiableAuthorityTransitionV1(
+  transition: AgentProfileAuthorityTransitionV1,
+  nowMs: number,
+): Extract<SystemRecordAuthorityDecisionV1, { readonly decision: 'reject' }> | undefined {
+  if (!isSafeNow(nowMs)) return { decision: 'reject', reason: 'verification clock is invalid' };
+  if (isIssuedTooFarInFuture(transition.issuedAt, nowMs)) {
+    return {
+      decision: 'reject',
+      reason: 'transition issuedAt exceeds the future clock-skew bound',
+    };
+  }
+  return undefined;
+}
+
+/**
+ * THE EXPIRED-PRIOR REFUSALS, WHICH ARE QUESTIONS ABOUT THIS BINDING.
+ *
+ * Deliberately NOT part of the verifiability gate above: every one compares the
+ * transition against the prior head it names, so asking them of a transition
+ * that names a DIFFERENT head would be answering about the wrong pair. They
+ * belong after the binding is established -- and splitting them out is what lets
+ * a caller classify the binding exactly once instead of recomputing it to
+ * reconstruct a reason the verifier had already discarded.
+ */
+export function rejectInadmissibleExpiredPriorTransitionV1(
+  transition: AgentProfileAuthorityTransitionV1,
+  priorHead: AgentProfileHeadObjectV1,
+  nowMs: number,
+): Extract<SystemRecordAuthorityDecisionV1, { readonly decision: 'reject' }> | undefined {
+  if (transition.mode !== 'expired-prior') return undefined;
+  if (priorHead.state !== 'active') {
+    return {
+      decision: 'reject',
+      reason: 'expired-prior transition cannot resurrect a tombstone',
+    };
+  }
+  if (transition.priorValidUntil !== priorHead.validUntil) {
+    return {
+      decision: 'reject',
+      reason: 'expired-prior transition does not bind prior validity',
+    };
+  }
+  if (
+    !Number.isSafeInteger(nowMs) ||
+    nowMs < Date.parse(priorHead.validUntil) + SYSTEM_RECORD_MAX_CLOCK_SKEW_MS
+  ) {
+    return {
+      decision: 'reject',
+      reason: 'prior authority has not passed the expiry skew',
+    };
+  }
+  return undefined;
 }
 
 /** Bind a successor head to the exact accepted transition for the same stable record. */

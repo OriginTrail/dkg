@@ -132,6 +132,19 @@ describe('verdict-diff evaluator input projections', { timeout: VERDICT_DIFF_SUI
   // input and persists nothing; the claim that storage has no source for it is
   // what Phase 2 exists to fix, so it is pinned rather than remembered -- and
   // pinned at the scope actually searched, which is this directory only.
+  //
+  // KEPT VERBATIM THROUGH THE LATE-TOMBSTONE ROUTING, WHICH IS THE POINT. That
+  // slice added the first storage-side consumer and its first draft REPLACED
+  // this walk with the three targeted claims below. That was wrong, and the
+  // reason generalises: this raw substring zero is a TRIPWIRE and those are
+  // GUARDS. A guard catches exactly what it names; the tripwire catches what
+  // nobody thought to name -- a prose comment, a future literal, a copied
+  // constant. It caught a neighbouring PR's ordinary-English comment within the
+  // hour of being live. Guards COMPOSE with a tripwire and never replace one,
+  // and this zero is cited as a premise in shipped artifacts, so replacing it
+  // would have silently falsified those citations. The routing keeps the zero by
+  // using the CamelCase symbol only and naming its reason member
+  // `undecided-authority-classification`.
   it('finds no disposition producer anywhere in packages/storage/src', () => {
     const root = new URL('../src/', import.meta.url);
     const walk = (dir: URL): string[] => readdirSync(dir, { withFileTypes: true })
@@ -140,5 +153,74 @@ describe('verdict-diff evaluator input projections', { timeout: VERDICT_DIFF_SUI
         : entry.name.endsWith('.ts') ? [readFileSync(new URL(entry.name, dir), 'utf8')] : []));
     const hits = walk(root).filter((source) => source.includes('disposition'));
     expect(hits).toHaveLength(0);
+  });
+
+  // ADDITIONS, NOT A REPLACEMENT. The walk above says the word is absent; these
+  // say what the one legitimate consumer is allowed to do. Both are needed: the
+  // absence claim cannot distinguish a correct consumer from a hand-rolled copy
+  // of core's mapping, because a copy that avoided the word entirely would
+  // satisfy it.
+  it('consumes core\'s authority-classification reader and re-derives none of its own', () => {
+    const root = new URL('../src/', import.meta.url);
+    const walk = (dir: URL): { file: string; source: string }[] => readdirSync(
+      dir,
+      { withFileTypes: true },
+    ).flatMap((entry) => (entry.isDirectory()
+      ? walk(new URL(`${entry.name}/`, dir))
+      : entry.name.endsWith('.ts')
+        ? [{ file: entry.name, source: readFileSync(new URL(entry.name, dir), 'utf8') }]
+        : []));
+    const files = walk(root);
+    // Non-vacuity first: a walk that found nothing would satisfy every claim
+    // below, which is the shape this suite exists to refuse.
+    expect(files.length).toBeGreaterThan(40);
+
+    // THE CONSUMER IS KEYED ON THE CamelCase SYMBOL, which is the only form the
+    // walk above permits -- and that is not a workaround, it is what makes both
+    // checks live at once. Counting OCCURRENCES rather than files, because two
+    // calls in one file are two facts and a file count would report them as one.
+    const importing = files.filter(
+      (f) => f.source.includes('deriveAgentProfileAuthorityDispositionV1'),
+    );
+    expect(importing.map((f) => f.file)).toStrictEqual(
+      ['system-record-next-state-v1-internal.ts'],
+    );
+    // TWO CALLS, ONE PER ROUTED TOMBSTONE ARM, AND THE SECOND IS THE DESIGN
+    // RATHER THAN A DRIFT. The late-tombstone arm and the same-sequence arm each
+    // consult the reader as their own precondition, because each decides what an
+    // unclassified applied row means for ITS rule and one arm must not answer for
+    // the other. A third call is either a third routed arm -- which owes its own
+    // precondition rows -- or a consumer that slipped in, and both are this
+    // seam's problem.
+    const calls = importing.flatMap(
+      (f) => f.source.match(/deriveAgentProfileAuthorityDispositionV1\(/g) ?? [],
+    );
+    expect(calls).toHaveLength(2);
+
+    // EVERY REFERENCE IS ACCOUNTED FOR, NOT JUST EVERY CALL, and this line exists
+    // because the call count alone SURVIVED its own mutant: `const alias =
+    // deriveAgentProfileAuthorityDispositionV1;` is a reference and not a call,
+    // so it passed a check whose whole job is bounding this consumer -- and an
+    // alias can be invoked anywhere afterwards. Four occurrences: the import, one
+    // docblock mention, and the two calls above. A fifth is either a further
+    // consumer or an alias, and both are this seam's problem.
+    const references = importing.flatMap(
+      (f) => f.source.match(/deriveAgentProfileAuthorityDispositionV1/g) ?? [],
+    );
+    expect(references).toHaveLength(4);
+
+    // AND THE DOMAIN ITSELF IS NOT RESTATED HERE. A storage-side copy of core's
+    // three classification values is the exact re-implementation this seam
+    // forbids, and it would be invisible to a call-site count -- a copy written
+    // without the noun would pass the walk above and this one both, which is why
+    // the values are named individually.
+    for (const literal of [
+      "'discoverable'",
+      "'head-fork-quarantined'",
+      "'transition-equivocation-quarantined'",
+    ]) {
+      expect(files.filter((f) => f.source.includes(literal)).map((f) => f.file))
+        .toStrictEqual([]);
+    }
   });
 });

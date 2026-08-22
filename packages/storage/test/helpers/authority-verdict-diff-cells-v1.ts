@@ -143,7 +143,7 @@ export function enumerateVerdictDiffCellsV1(): readonly VerdictDiffCellV1[] {
         // referent when the snapshot is absent -- the same dependency axis B
         // already has, measured rather than assumed: both evaluators branch on
         // an absent current before any sequence logic runs (core
-        // system-record-authority-v1-internal.ts:111/:531/:678; storage
+        // system-record-authority-v1-internal.ts:160/:688/:835; storage
         // next-state-v1-internal.ts:1112 returns rematerialize immediately).
         const sequences = snapshot === 'present'
           ? [...A.D_sequenceRelation] as (VerdictDiffCellV1['sequenceRelation'])[]
@@ -171,8 +171,8 @@ export function enumerateVerdictDiffCellsV1(): readonly VerdictDiffCellV1[] {
               // What is gated HERE is only reachability: like axis D the axis has
               // no referent when the snapshot is absent. Ruled 2026-08-11 after measurement: the
               // transition-equivocation decision the spec names this axis for is
-              // core system-record-authority-v1-internal.ts:171, whose referent is
-              // `current`, and :111 diverts to the absent branch before it ever
+              // core system-record-authority-v1-internal.ts:221, whose referent is
+              // `current`, and :160 diverts to the absent branch before it ever
               // runs; storage returns at next-state-v1-internal.ts:1112 for an
               // absent snapshot without reading the field at all. Left ungated the
               // fixture could not build 'equal' and 'differ' as DISTINCT inputs

@@ -106,6 +106,8 @@ export {
 export {
   assertAgentProfileForkResolutionEvidenceV1,
   evaluateAgentProfileHeadAdvanceV1,
+  evaluateAgentProfileLateTombstoneAdvanceV1,
+  evaluateAgentProfileSameSequenceTombstoneAdvanceV1,
   evaluateAuthorityTransitionAgainstAcceptedStateV1,
   evaluateAuthorityTransitionConflictV1,
   evaluateAuthorityTransitionV1,
@@ -113,6 +115,11 @@ export {
   isDirectResolvingSuccessorV1,
   type AgentProfileAcceptedAuthorityStateV1,
   type AgentProfileHeadAdvanceEvidenceV1,
+  type AgentProfileLateTombstoneDecisionV1,
+  type AgentProfileLateTombstoneEvidenceV1,
+  type AgentProfileLateTombstoneRetainedTransitionV1,
+  type AgentProfileSameSequenceAppliedRowV1,
+  type AgentProfileSameSequenceTombstoneEvidenceV1,
   type SystemRecordAuthorityDecisionV1,
 } from './system-record-authority-v1-internal.js';
 

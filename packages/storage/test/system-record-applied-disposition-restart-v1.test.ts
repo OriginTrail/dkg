@@ -133,7 +133,7 @@ describe('authority disposition survives a restart on persisted quads alone', ()
    *
    * FAIL-BEFORE, and the reason this test is the one that catches it: delete
    * the transition-digest merge at
-   * `system-record-next-state-v1-internal.ts:476-484` and the quarantined row
+   * `system-record-next-state-v1-internal.ts:495-503` and the quarantined row
    * persists with empty slots, so the re-derivation below returns
    * `head-fork-quarantined` and this goes red. No storage-layer assertion would
    * notice, because the consumer of the value lives in core and takes it as an

@@ -19,9 +19,14 @@ import type {
   AgentProfileIdentityFactsInputV1,
   AgentProfileIdentityFactsV1,
   AgentProfileIndexedSubjectKindV1,
+  AgentProfileLateTombstoneDecisionV1,
+  AgentProfileLateTombstoneEvidenceV1,
+  AgentProfileLateTombstoneRetainedTransitionV1,
   AgentProfileLinkedSubjectKindV1,
   AgentProfileOwnedSubjectKindV1,
   AgentProfileProjectionQuadV1,
+  AgentProfileSameSequenceAppliedRowV1,
+  AgentProfileSameSequenceTombstoneEvidenceV1,
   AgentProfileTombstoneHeadObjectV1,
   AgentProfileTransitionConflictEntryV1,
   AgentProfileVerifiedAuthoritySummaryV1,
@@ -93,6 +98,12 @@ import type {
   SystemRecordVerificationClosureV1,
   ValidatedSystemRecordInventoryTreeV1,
   VerifySystemRecordEnvelopeOptionsV1,
+} from '@origintrail-official/dkg-core/system-record-v1';
+// Value import: the pin below reads this function's declared RETURN TYPE, which
+// a type-only import cannot reach.
+import {
+  evaluateAgentProfileSameSequenceTombstoneAdvanceV1,
+  evaluateAuthorityTransitionV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 import {
   createSystemRecordInventoryRowTraversalV1,
@@ -266,7 +277,143 @@ type ACCEPTED_DISPOSITIONS_ARE_EXACTLY_THE_UNION =
     : never;
 const acceptedDispositionsAreExactlyTheUnion: ACCEPTED_DISPOSITIONS_ARE_EXACTLY_THE_UNION = true;
 
+/**
+ * THE LATE-TOMBSTONE EVIDENCE CONTRACT, PINNED WHERE IT COMPILES.
+ *
+ * The published boundary makes one safety promise a caller can act on: the
+ * retained transition and the clock that verifies it are ONE field, so nobody
+ * can hand the rule a binding transition with an unusable clock. That promise
+ * lived only in prose and in runtime cases -- and those cases cast their
+ * fixtures, so they would keep passing if the type widened. No test DIRECTORY in
+ * this repository is in any tsc program; THIS file is, which is the only reason
+ * these assertions are worth writing rather than decorative.
+ *
+ * Each is a conditional type resolving to `never` when the property breaks, so
+ * the assignment underneath is the compile error.
+ */
+type LATE_TOMBSTONE_EVIDENCE_HAS_NO_TOP_LEVEL_CLOCK =
+  'nowMs' extends keyof AgentProfileLateTombstoneEvidenceV1 ? never : true;
+const lateTombstoneEvidenceHasNoTopLevelClock:
+LATE_TOMBSTONE_EVIDENCE_HAS_NO_TOP_LEVEL_CLOCK = true;
+
+type LATE_TOMBSTONE_EVIDENCE_HAS_NO_BARE_TRANSITION =
+  'acceptedTransition' extends keyof AgentProfileLateTombstoneEvidenceV1 ? never : true;
+const lateTombstoneEvidenceHasNoBareTransition:
+LATE_TOMBSTONE_EVIDENCE_HAS_NO_BARE_TRANSITION = true;
+
+const LATE_TOMBSTONE_EVIDENCE_KEYS_V1 = ['tombstonePredecessor', 'retainedTransition'] as const;
+type LATE_TOMBSTONE_EVIDENCE_KEYS_ARE_EXACT =
+  keyof AgentProfileLateTombstoneEvidenceV1 extends
+    (typeof LATE_TOMBSTONE_EVIDENCE_KEYS_V1)[number]
+    ? (typeof LATE_TOMBSTONE_EVIDENCE_KEYS_V1)[number] extends
+      keyof AgentProfileLateTombstoneEvidenceV1 ? true : never
+    : never;
+const lateTombstoneEvidenceKeysAreExact: LATE_TOMBSTONE_EVIDENCE_KEYS_ARE_EXACT = true;
+
+/**
+ * BOTH HALVES REQUIRED. If either becomes optional the pairing stops being a
+ * pairing and a caller can once again supply a transition with no clock -- the
+ * exact shape that turned a `stale` into an `accept`.
+ */
+type RETAINED_TRANSITION_REQUIRES_BOTH_HALVES =
+  undefined extends AgentProfileLateTombstoneRetainedTransitionV1['transition'] ? never
+    : undefined extends AgentProfileLateTombstoneRetainedTransitionV1['nowMs'] ? never
+      : true;
+const retainedTransitionRequiresBothHalves: RETAINED_TRANSITION_REQUIRES_BOTH_HALVES = true;
+
+/**
+ * THE PUBLISHED TRANSITION EVALUATOR STILL PROMISES THE WHOLE UNION.
+ *
+ * Narrowing an exported return type is a source-level breaking change even when
+ * no runtime value moves: a consumer's defensive `case 'quarantine':` stops
+ * compiling against the narrower type. A revision of this change did exactly
+ * that, which is why the pin exists. The wider direction is the one nothing else
+ * would catch, because every in-repo caller keeps compiling happily against a
+ * narrowed return.
+ */
+type PUBLIC_TRANSITION_EVALUATOR_RETURNS_THE_FULL_UNION =
+  SystemRecordAuthorityDecisionV1 extends ReturnType<typeof evaluateAuthorityTransitionV1>
+    ? true : never;
+const publicTransitionEvaluatorReturnsTheFullUnion:
+PUBLIC_TRANSITION_EVALUATOR_RETURNS_THE_FULL_UNION = true;
+
+/**
+ * THE SAME-SEQUENCE RULE READS NO CLOCK AND NO TRANSITION, AND ITS EVIDENCE
+ * SHAPE HAS TO SAY SO.
+ *
+ * Unlike the late-tombstone rule this one never consults a verifier, so a
+ * caller has nothing to verify a transition WITH. If either key ever appears
+ * here, a caller would start supplying operands the decision cannot read -- and
+ * the late-tombstone arc is on record for what happens when a rule is handed a
+ * clock it has no use for.
+ */
+const SAME_SEQUENCE_EVIDENCE_KEYS_V1 = ['tombstonePredecessor'] as const;
+type SAME_SEQUENCE_EVIDENCE_KEYS_ARE_EXACT =
+  keyof AgentProfileSameSequenceTombstoneEvidenceV1 extends
+    (typeof SAME_SEQUENCE_EVIDENCE_KEYS_V1)[number]
+    ? (typeof SAME_SEQUENCE_EVIDENCE_KEYS_V1)[number] extends
+      keyof AgentProfileSameSequenceTombstoneEvidenceV1 ? true : never
+    : never;
+const sameSequenceEvidenceKeysAreExact: SAME_SEQUENCE_EVIDENCE_KEYS_ARE_EXACT = true;
+
+/**
+ * THE APPLIED-ROW OPERAND IS A ROW, NOT A HEAD OBJECT, AND THAT IS THE WHOLE
+ * REASON THE ENTRY IS CALLABLE.
+ *
+ * A receiver persists a status, a digest, a version, a sequence, its current
+ * root and its accepted transition lineage. The moment this shape asks for a
+ * head object, the only way to call the entry is to manufacture one -- inventing
+ * the issuer, clock and schema fields its digest is taken over. Pinning the keys
+ * exactly is what stops that from being added later as a convenience.
+ *
+ * THE TWO IDENTITY KEYS ARE PINNED FOR THE OPPOSITE REASON, and that is why they
+ * are named here rather than the pin being widened to admit them. `currentRoot`
+ * and `acceptedTransitionDigest` were ADDED because without them this entry
+ * decided a projection-DELETING question without establishing that the candidate
+ * and the applied row were the same record -- reachable through the real
+ * receiver path, not a hardening. Both are values a receiver already holds, so
+ * neither reopens the manufacture-a-head trap the rest of this pin guards.
+ * Dropping either one silently restores the defect, so they are named in a lane
+ * that actually compiles.
+ */
+const SAME_SEQUENCE_APPLIED_ROW_KEYS_V1 = [
+  'status', 'authoritySequence', 'version', 'headDigest',
+  'networkId', 'peerId', 'currentRoot', 'acceptedTransitionDigest',
+] as const;
+type SAME_SEQUENCE_APPLIED_ROW_KEYS_ARE_EXACT =
+  keyof AgentProfileSameSequenceAppliedRowV1 extends
+    (typeof SAME_SEQUENCE_APPLIED_ROW_KEYS_V1)[number]
+    ? (typeof SAME_SEQUENCE_APPLIED_ROW_KEYS_V1)[number] extends
+      keyof AgentProfileSameSequenceAppliedRowV1 ? true : never
+    : never;
+const sameSequenceAppliedRowKeysAreExact: SAME_SEQUENCE_APPLIED_ROW_KEYS_ARE_EXACT = true;
+
+/**
+ * THE SAME-SEQUENCE ENTRY PROMISES THE WHOLE UNION, AND HERE THAT IS A MEASURED
+ * FACT RATHER THAN A COMPATIBILITY CONCESSION.
+ *
+ * The rule produces all four decisions: `accept` on a dominating tombstone,
+ * `quarantine | head-fork` on the equal-version fork, `stale` under ADR
+ * :127-128, and `reject` on its refusals. Narrowing this return would therefore
+ * be false about the body, not merely unkind to consumers -- the opposite
+ * direction from the transition evaluator's pin above, which is why both are
+ * written out.
+ */
+type SAME_SEQUENCE_ENTRY_RETURNS_THE_FULL_UNION =
+  SystemRecordAuthorityDecisionV1 extends
+    ReturnType<typeof evaluateAgentProfileSameSequenceTombstoneAdvanceV1>
+    ? true : never;
+const sameSequenceEntryReturnsTheFullUnion: SAME_SEQUENCE_ENTRY_RETURNS_THE_FULL_UNION = true;
+
+void publicTransitionEvaluatorReturnsTheFullUnion;
+void sameSequenceEvidenceKeysAreExact;
+void sameSequenceAppliedRowKeysAreExact;
+void sameSequenceEntryReturnsTheFullUnion;
 void appliedStatusesAreExactlyTheUnion;
 void acceptedDispositionsAreExactlyTheUnion;
+void lateTombstoneEvidenceHasNoTopLevelClock;
+void lateTombstoneEvidenceHasNoBareTransition;
+void lateTombstoneEvidenceKeysAreExact;
+void retainedTransitionRequiresBothHalves;
 
 export {};
