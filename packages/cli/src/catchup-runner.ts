@@ -1136,14 +1136,20 @@ class WorkerCatchupRunner implements CatchupRunner {
           && typeof agent.resolveRfc64CompleteSwmProviderPeerIdsV1 === 'function'
             ? agent.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId)
             : [];
-        if (preferredPeerId) {
-          await agent.ensurePeerConnected(preferredPeerId);
-        }
-        await Promise.allSettled(
-          authoritativeSharedMemoryPeerIds.map(
+        // Connection attempts only expand the candidate set. A stale curator
+        // address (for example, a relayed peer returning NO_RESERVATION) must
+        // not abort a public multi-peer repair before already-connected peers
+        // can contribute their RFC-64 snapshot union. Private graphs remain
+        // fail-closed in selectCatchupPeers; with no eligible curator they
+        // simply produce an unreachable bounded job.
+        await Promise.allSettled([
+          ...(preferredPeerId === undefined
+            ? []
+            : [agent.ensurePeerConnected(preferredPeerId)]),
+          ...authoritativeSharedMemoryPeerIds.map(
             (peerId) => agent.ensurePeerConnected(peerId),
           ),
-        );
+        ]);
         await agent.primeCatchupConnections();
 
         const selectedPeerIds = agent.selectCatchupPeers(

@@ -327,6 +327,36 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.result.connectedPeers).toBe(3);
   });
 
+  it('keeps connected fallback peers when the preferred curator connection fails', async () => {
+    const { agent } = bridgeAgent({
+      resolveSyncPeerWithProvenance: async () => ({
+        peerId: 'peer-stale-curator',
+        provenance: 'metadata',
+      }),
+      ensurePeerConnected: async () => {
+        throw new Error('failed to connect via relay with status NO_RESERVATION');
+      },
+      node: {
+        libp2p: {
+          getConnections: () => [{
+            remotePeer: { toString: () => 'peer-connected-core' },
+          }],
+        },
+      },
+      selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+    });
+
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-public-repair']);
+
+    expect(posted.error).toBeUndefined();
+    expect(posted.result).toMatchObject({
+      preferredPeerId: 'peer-stale-curator',
+      authoritativePeerId: 'peer-stale-curator',
+      peerIds: ['peer-connected-core'],
+      connectedPeers: 1,
+    });
+  });
+
   it('ranks an RFC-64 complete-SWM provider ahead of fallback peers', async () => {
     const ensured: string[] = [];
     const { agent } = bridgeAgent({
