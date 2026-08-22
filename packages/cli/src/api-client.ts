@@ -1508,6 +1508,8 @@ export class ApiClient {
   async subscribeToContextGraph(contextGraphId: string, options?: {
     includeSharedMemory?: boolean;
     syncMode?: ContextGraphSyncMode;
+    /** Reconcile even when persisted readiness already says this graph is complete. */
+    forceCatchup?: boolean;
   }): Promise<{
     subscribed: string;
     syncMode: ContextGraphSyncMode;
@@ -1576,6 +1578,7 @@ export class ApiClient {
       contextGraphId,
       includeWorkspace: options?.includeSharedMemory,
       syncMode: options?.syncMode ?? 'always-on',
+      forceCatchup: options?.forceCatchup,
     });
   }
 
