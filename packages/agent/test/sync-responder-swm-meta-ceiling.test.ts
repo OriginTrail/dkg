@@ -137,6 +137,7 @@ function forbidSwmMetaSortOrOffsetQueries(store: OxigraphStore) {
 
 describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', () => {
   it('keeps plan-only ceilings pinned below the snapshot materialization caps', () => {
+    expect(FRESH_SWM_META_PLAN_MAX_SUBJECTS).toBe(64_000);
     expect(FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS).toBe(64_000);
     expect(FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE).toBe(32 * 1024 * 1024);
     expect(FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS)

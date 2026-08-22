@@ -2802,11 +2802,11 @@ function freshSwmMetaPlanResponseByteLimit(): number {
  * an unbounded subject set no matter how large the fresh window is: a fresh set
  * beyond the cap is a typed bounded refusal, never an unbounded control-plane
  * plan. Sizing: every admitted subject serves at least one row, so this cap
- * alone admits sessions far past the point where they run plan-paged, while
- * the retained plan stays a few megabytes at worst (also capped by the fixed
- * plan byte estimate below, which bounds pathological IRI lengths).
+ * alone admits sessions far past the point where they run plan-paged. The
+ * 64,000-subject ceiling covers the 33k-41k subjects observed on mainnet while
+ * the independent 32 MiB plan estimate still bounds pathological IRI lengths.
  */
-export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 32_000;
+export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 64_000;
 
 /**
  * Discover the TTL-admitted subjects of one SWM meta graph with two
