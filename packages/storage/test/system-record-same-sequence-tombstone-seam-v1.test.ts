@@ -818,6 +818,16 @@ describe('record identity is established before the same-sequence rule runs', ()
       ),
       foreignTransitionLower: against(alternateBranchHead, '1'),
       foreignTransitionHigher: against(alternateBranchHead, '3'),
+      // THE EQUAL RELATION IS WHERE THIS ROW EARNS ITS KEEP. It is the cell the
+      // open ADR fork question is about, so it is the one place a foreign
+      // candidate could plausibly be held under a question it does not pose --
+      // and it is where the fork-shadowing concern lived. Covering only lower
+      // and higher would leave exactly that cell unwitnessed on this axis.
+      foreignRootEqual: against(
+        otherRootSameTransition as unknown as AgentProfileHeadObjectV1,
+        CORE_CURRENT_HEAD_V1.version,
+      ),
+      foreignTransitionEqual: against(alternateBranchHead, CORE_CURRENT_HEAD_V1.version),
       controlLower: against(control, '1'),
       controlHigher: against(control, '3'),
       controlEqualFollowsTheDigestRule:
@@ -829,6 +839,12 @@ describe('record identity is established before the same-sequence rule runs', ()
       foreignTransitionLower:
         'reject|same-sequence tombstone accepted a different authority transition',
       foreignTransitionHigher:
+        'reject|same-sequence tombstone accepted a different authority transition',
+      // The version axis collapses here exactly as it does against an ACTIVE
+      // applied row: identity is decided before any version is read, so the
+      // equal cell is refused rather than held under the fork question.
+      foreignRootEqual: 'reject|same-sequence tombstone belongs to another authority branch',
+      foreignTransitionEqual:
         'reject|same-sequence tombstone accepted a different authority transition',
       // ADR :127-128, the lowest tombstone winning: a LOWER tombstone is accepted
       // over the applied one, a HIGHER one is stale.
