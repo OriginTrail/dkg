@@ -5007,14 +5007,19 @@ export class PublishMethods extends DKGAgentBase {
           publicSnapshotStore: this.publicSnapshotStore,
         });
       } catch (error) {
-        if (
-          !(error instanceof KnowledgeAssetOperationPublicSnapshotNotFoundError)
-          || request.clearSharedMemoryAfter !== true
-        ) {
+        if (!(error instanceof KnowledgeAssetOperationPublicSnapshotNotFoundError)) {
           throw error;
         }
-        // Explicit post-publish cleanup may remove the redundant snapshot. The
-        // signed seal plus immutable queued counts still verifies exact VM.
+        // Every confirmed graph-scoped publish removes the exact published SWM
+        // graph and its operation metadata. `clearSharedMemoryAfter` controls
+        // only whether OTHER unpublished SWM content is also removed, so it is
+        // not evidence that this operation snapshot should still exist.
+        //
+        // Recovery reaches this branch only after `normalizeRecoveredNamedKaPublish`
+        // has proven the transaction, Merkle root, author, reserved KA id and
+        // finalized chain receipt against the immutable queued seal. A genuinely
+        // corrupt or mismatched snapshot still throws above; only an absent row
+        // uses the already-proven seal envelope.
         this.log.info(
           ctx,
           `Named KA recovery for "${request.name}" has no durable public snapshot; `
