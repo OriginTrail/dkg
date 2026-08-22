@@ -1100,3 +1100,67 @@ describe('record identity is established before the same-sequence rule runs', ()
     });
   });
 });
+
+/**
+ * THE CONDITIONAL KEY LIST IS THE ONE THING HERE NOTHING COULD FAIL ON.
+ *
+ * `snapshotSameSequenceAppliedRowV1` lists `acceptedTransitionDigest` only when
+ * the key is present, and its comment gives the reason: a sequence-zero row has
+ * accepted no transition, so listing the key unconditionally would refuse the
+ * genesis row outright. Every applied row committed in this file carries the
+ * key, and the compiled type-contract lane pins the FULL list -- so making the
+ * runtime list unconditional would refuse legitimate genesis rows while every
+ * assertion in this file and every type pin stayed green. A documented
+ * conditional that no test can fail on is the same shape this PR fixes
+ * elsewhere: a rule whose precondition nothing exercises.
+ *
+ * WHAT THIS PINS, and only this: a row WITHOUT the key satisfies the operand
+ * contract and REACHES THE RULE. It does not claim the genesis authority
+ * semantics are right -- the predecessor here carries a transition digest the
+ * applied row does not, so the rule correctly answers a transition-family
+ * refusal. Reaching that answer instead of throwing is the whole property.
+ *
+ * The two rows are ONE FIELD APART -- the sequence is deliberately held at the
+ * fixture's value so key presence is the only thing that varies -- and today
+ * they answer IDENTICALLY, because the exact-record check counts KEYS and then
+ * tolerates an undefined value in the key it counted. That equality is the
+ * discriminator: make the key list unconditional and the rows SEPARATE, because
+ * the absent-key row starts throwing while the undefined-value row does not.
+ */
+describe('the applied-row key list is conditional on PRESENCE', () => {
+  const predecessor = CORE_CHAIN_V1.base as unknown as AgentProfileHeadObjectV1;
+
+  const answerFor = (applied: unknown): string => {
+    try {
+      const decision = evaluateAgentProfileSameSequenceTombstoneAdvanceV1(
+        tombstoneOfV1(predecessor) as never,
+        Object.freeze({ tombstonePredecessor: predecessor }) as never,
+        applied as AgentProfileSameSequenceAppliedRowV1,
+      );
+      return 'reason' in decision ? `${decision.decision}|${decision.reason}` : decision.decision;
+    } catch (error) {
+      return `threw|${(error as Error).message}`;
+    }
+  };
+
+  it('reaches the rule with the key absent, and answers the same when it is undefined', () => {
+    const keyAbsent = {
+      status: 'active',
+      authoritySequence: CORE_CURRENT_HEAD_V1.authoritySequence,
+      version: CORE_CURRENT_HEAD_V1.version,
+      headDigest: CORE_CURRENT_DIGEST_V1,
+      currentRoot: CORE_CURRENT_HEAD_V1.rootSubject,
+    };
+    const keyPresentButUndefined = { ...keyAbsent, acceptedTransitionDigest: undefined };
+    const REACHED_THE_RULE =
+      'reject|same-sequence tombstone accepted a different authority transition';
+
+    expect({
+      keyAbsent: answerFor(keyAbsent),
+      keyPresentButUndefined: answerFor(keyPresentButUndefined),
+    }).toStrictEqual({
+      keyAbsent: REACHED_THE_RULE,
+      keyPresentButUndefined: REACHED_THE_RULE,
+    });
+  });
+});
