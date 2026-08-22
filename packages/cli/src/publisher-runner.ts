@@ -608,6 +608,10 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   // recovery by construction, with no cache and no temporal coupling between the factories.
   const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
     chainProofResolver: hasChainRecovery ? createChainProofResolver(chainAdapters) : undefined,
+    // Receipt waiting is detached only when this runtime has the independent chain-proof lane
+    // that can move the resulting tx-bearing `broadcast` record. Direct library consumers retain
+    // the historical blocking `processNext()` contract by default.
+    detachReceiptReconciliation: hasChainRecovery,
     // r20 (🔴 3815617109) — `hasChainRecovery` is `.some(...)`, so on a node mixing a capable
     // adapter with a legacy one the resolvers are installed for the whole node. The honesty
     // contract is per JOB, so admission must ask about the wallet that actually signs it rather

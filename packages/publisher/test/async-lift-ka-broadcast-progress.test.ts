@@ -83,6 +83,9 @@ describe('KA async VM publish broadcast progress', () => {
       finishReceiptWait = resolve;
     });
     const publisher = createPublisher({
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => ({ status: 'pending' }),
+      knowledgeAssetVmPublishRecoveryResolver: async () => null,
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           await input.publishOptions.onBeforeBroadcast?.({ txHash, nonce: 17 });
@@ -116,6 +119,61 @@ describe('KA async VM publish broadcast progress', () => {
     const afterTimeout = await publisher.getStatus(jobId);
     expect(afterTimeout?.status).toBe('broadcast');
     expect(afterTimeout?.failure).toBeUndefined();
+  });
+
+  it('does not detach a receipt for a wallet whose adapter cannot settle the job', async () => {
+    let releaseExecution!: () => void;
+    const executionWait = new Promise<void>((resolve) => {
+      releaseExecution = resolve;
+    });
+    let signalAccepted!: () => void;
+    const accepted = new Promise<void>((resolve) => {
+      signalAccepted = resolve;
+    });
+    const publisher = createPublisher({
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => ({ status: 'pending' }),
+      knowledgeAssetVmPublishRecoveryResolver: async () => null,
+      chainProofCapableForWallet: () => false,
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          signalAccepted();
+          await executionWait;
+          return {
+            kaId: 11n,
+            ual: 'did:dkg:mock:31337/0xdef/11',
+            merkleRoot: new Uint8Array([0xde, 0xf0]),
+            kaManifest: [],
+            status: 'confirmed',
+            onChainResult: {
+              batchId: 11n,
+              startKAId: 11n,
+              endKAId: 11n,
+              txHash: KA_VM_EXECUTOR_TX_HASH,
+              blockNumber: 77,
+              blockTimestamp: 1_700_000_077,
+              publisherAddress: '0x2222222222222222222222222222222222222222',
+            },
+          };
+        },
+      },
+    });
+    await stageShareSnapshot();
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+    let processSettled = false;
+    const processing = publisher.processNext('legacy-wallet').then((job) => {
+      processSettled = true;
+      return job;
+    });
+    await accepted;
+    await Promise.resolve();
+    expect(processSettled).toBe(false);
+
+    releaseExecution();
+    expect((await processing)?.status).toBe('finalized');
   });
 
   it('keeps a tx-bearing wallet proof-bound after its ordinary lease and recovery timeout expire', async () => {

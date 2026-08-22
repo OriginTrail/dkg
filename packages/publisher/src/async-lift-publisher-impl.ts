@@ -462,6 +462,7 @@ export class TripleStoreAsyncLiftPublisher
    */
   private readonly finalizationsInFlight = new Set<string>();
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
+  private readonly detachReceiptReconciliation: boolean;
   /** 3825614002 — this instance's ROLE, resolved once from its wiring. */
   private readonly heldJobSettlement: HeldJobSettlementCapability;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
@@ -539,6 +540,7 @@ export class TripleStoreAsyncLiftPublisher
     this.chainProofDispatchBatchSize = config.chainProofDispatchBatchSize ?? 25;
     this.chainProofDispatchTimeBudgetMs = config.chainProofDispatchTimeBudgetMs ?? 15_000;
     this.knowledgeAssetVmPublishRecoveryResolver = config.knowledgeAssetVmPublishRecoveryResolver;
+    this.detachReceiptReconciliation = config.detachReceiptReconciliation ?? false;
     this.publishExecutor = config.publishExecutor;
     this.knowledgeAssetVmPublishHandler = resolveKnowledgeAssetVmPublishHandler(config);
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
@@ -970,7 +972,14 @@ export class TripleStoreAsyncLiftPublisher
         execution.then((result) => ({ kind: 'settled' as const, result })),
         broadcastAccepted.then(() => ({ kind: 'accepted' as const })),
       ]);
-      if (outcome.kind === 'accepted') {
+      const canDetachReceiptReconciliation = this.detachReceiptReconciliation
+        && this.chainProofResolver !== undefined
+        && this.knowledgeAssetVmPublishRecoveryResolver !== undefined
+        && (this.chainProofCapableForWallet?.(
+          walletId,
+          queuedLiftOperationKind(claimed),
+        ) ?? true);
+      if (outcome.kind === 'accepted' && canDetachReceiptReconciliation) {
         // Receipt success, revert, timeout, or temporary lookup failure is now
         // owned solely by chain-proof recovery. The execution continues so the
         // normal publisher can finish any local post-receipt work, but its
@@ -982,7 +991,7 @@ export class TripleStoreAsyncLiftPublisher
         );
         return await this.getRequiredJob(claimed.jobId);
       }
-      publishResult = outcome.result;
+      publishResult = outcome.kind === 'settled' ? outcome.result : await execution;
     } catch (error) {
       // #1864 — switch on the typed pre-send boundary outcome (no `executorReturned` flag,
       // no `getStatus` re-read). The tx send happens strictly AFTER the write-ahead durably
