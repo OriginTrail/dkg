@@ -3366,6 +3366,7 @@ async function buildFreshSwmDataGraphPlan(
       .sort(compareCodePoint);
     for (const chunk of chunkValues(roots, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
       const chunkSet = new Set(chunk);
+      // sparql-scan-allow: R2 -- ?root is VALUES-bound to at most 100 fresh metadata roots and every result graph is admitted against the finite current graph snapshot
       const rootResult = await store.query(`
         SELECT DISTINCT ?g ?root WHERE {
           VALUES ?root { ${graphValues(chunk)} }
