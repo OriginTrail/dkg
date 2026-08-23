@@ -59,6 +59,12 @@ export interface PromoteMemoryGraphChangedEvent {
   counts?: { triples?: number };
 }
 
+/**
+ * Logging is strictly best-effort: sinks may be synchronous or asynchronous,
+ * but worker progress never waits for them and sink failures are discarded.
+ */
+export type PromoteWorkerLogger = (message: string) => void | Promise<void>;
+
 export interface PromoteWorkerConfig {
   /** The host DKG agent — provides the queue + the sync `promote` call. */
   agent: DKGAgent;
@@ -81,7 +87,7 @@ export interface PromoteWorkerConfig {
   /** Deterministic time source for tests. */
   now?: () => number;
   /** Defaults to `console.warn`. The daemon passes its own logger. */
-  log?: (msg: string) => void;
+  log?: PromoteWorkerLogger;
   /** Defaults to a no-op. The daemon passes its `memoryGraphChanged` emitter. */
   emitMemoryGraphChanged?: (event: PromoteMemoryGraphChangedEvent) => void;
   /**
@@ -131,6 +137,107 @@ export type ClassifiedPromoteError = {
   message?: string;
 };
 
+const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
+const PROMOTE_DIAGNOSTIC_STAGES = new Set([
+  'ensureSubGraphRegistered',
+  'assertGraphScopedLifecycleWritable',
+  'knowledgeAssetPrivateQuads',
+  'assertionScopedQuads',
+  'assertTrustedCatalogTriplesAllowed',
+  'encodeWorkspaceGossipPayload',
+]);
+// Only producer-owned, source-defined identities are safe to retain verbatim.
+// Arbitrary upstream name/code strings can be credentials even when they are
+// syntactically simple, so everything outside these closed sets becomes unknown.
+const SAFE_ERROR_NAMES = new Set([
+  'Error',
+  'DKGError',
+  'DKGUserError',
+  'DKGInternalError',
+  'PayloadTooLargeError',
+  'SwmGossipPayloadTooLargeError',
+  'CuratorUnconfirmedError',
+  'CuratorRejectedError',
+  'AssertionNotPersistedError',
+]);
+const SAFE_ERROR_CODES = new Set([
+  'PAYLOAD_TOO_LARGE',
+  'SWM_GOSSIP_PAYLOAD_TOO_LARGE',
+  'CURATOR_UNCONFIRMED',
+  'CURATOR_REJECTED',
+  'ASSERTION_NOT_PERSISTED',
+]);
+
+function untagPromoteMessage(message: string): string {
+  return message.replace(PROMOTE_STEP_TAG, '');
+}
+
+function diagnosticPromoteStage(message: string): string {
+  const candidate = PROMOTE_STEP_TAG.exec(message)?.[1];
+  return candidate !== undefined && PROMOTE_DIAGNOSTIC_STAGES.has(candidate)
+    ? candidate
+    : 'unknown';
+}
+
+function safeErrorIdentity(
+  err: unknown,
+  field: 'name' | 'code',
+  allowed: ReadonlySet<string>,
+): string | undefined {
+  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return undefined;
+  try {
+    const value = Reflect.get(err, field);
+    return typeof value === 'string' && allowed.has(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function bestEffortLog(log: PromoteWorkerLogger, message: string): void {
+  try {
+    void Promise.resolve(log(message)).catch(() => {});
+  } catch {
+    // Logging must never delay or alter queue state transitions.
+  }
+}
+
+/**
+ * Emit privacy-bounded evidence before queue.fail() makes a terminal row
+ * externally clearable. Diagnostics are best-effort and can never change the
+ * promote state transition, even when the injected logger fails synchronously
+ * or asynchronously.
+ */
+function logPromoteAttemptFailure(input: {
+  job: PromoteJob;
+  err: unknown;
+  message: string;
+  classified: ClassifiedPromoteError;
+  promoteStarted: boolean;
+  log: PromoteWorkerLogger;
+}): void {
+  try {
+    bestEffortLog(
+      input.log,
+      `[async-promote-worker] ${JSON.stringify({
+        event: 'async_promote_attempt_failed',
+        schemaVersion: 1,
+        jobId: input.job.jobId,
+        attempt: input.job.attempt.count,
+        maxAttempts: input.job.attempt.maxRetries,
+        promoteStartedMarkerPersisted: input.promoteStarted,
+        swmCommitObserved: false,
+        stage: diagnosticPromoteStage(input.message),
+        classification: input.classified.classification,
+        retryable: input.classified.retryable,
+        errorName: safeErrorIdentity(input.err, 'name', SAFE_ERROR_NAMES) ?? 'unknown',
+        errorCode: safeErrorIdentity(input.err, 'code', SAFE_ERROR_CODES) ?? 'unknown',
+      })}`,
+    );
+  } catch {
+    // Diagnostics must never prevent fail-closed queue bookkeeping.
+  }
+}
+
 /**
  * Map a promote error message to a `PromoteAttemptError` classification.
  * Seeded from the three rc.10 Graphify import patterns documented in
@@ -149,7 +256,7 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   // classifier trigger token (e.g. the step "encodeWorkspaceGossipPayload" would otherwise make
   // every error from it match the "gossip" cap-check). We classify on the ORIGINAL error text;
   // the tag stays on the operator-facing message. The tag is single (idempotent, innermost wins).
-  const untagged = (raw ?? '').replace(/^\[promote:[^\]]*\]\s*/, '');
+  const untagged = untagPromoteMessage(raw ?? '');
   const message = untagged.toLowerCase();
   const code =
     err && typeof err === 'object' && 'code' in err
@@ -215,7 +322,7 @@ export async function runPromoteJob(
     ) => Promise<{ promotedCount: number }>;
     now: () => number;
     heartbeatIntervalMs: number;
-    log: (msg: string) => void;
+    log: PromoteWorkerLogger;
     emitMemoryGraphChanged?: (event: PromoteMemoryGraphChangedEvent) => void;
   },
 ): Promise<{
@@ -242,7 +349,10 @@ export async function runPromoteJob(
           // Expected when the job has already succeeded/failed and the lease was cleared.
           return;
         }
-        log(`Heartbeat error for ${job.jobId}: ${err instanceof Error ? err.message : String(err)}`);
+        bestEffortLog(
+          log,
+          `Heartbeat error for ${job.jobId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       });
     }, heartbeatIntervalMs);
     if (heartbeatTimer.unref) heartbeatTimer.unref();
@@ -261,6 +371,14 @@ export async function runPromoteJob(
     } catch (err: unknown) {
       const classified = classifyPromoteError(err);
       const message = err instanceof Error ? err.message : String(err);
+      logPromoteAttemptFailure({
+        job,
+        err,
+        message,
+        classified,
+        promoteStarted: promoteStartedMarked,
+        log,
+      });
       const attemptError: PromoteAttemptError = {
         message,
         retryable: classified.retryable,
@@ -271,7 +389,7 @@ export async function runPromoteJob(
         await queue.fail(job.jobId, claimToken, attemptError);
       } catch (failErr: unknown) {
         if (failErr instanceof PromoteJobLeaseError) {
-          log(`Lease lost while recording failure for ${job.jobId}: ${message}`);
+          bestEffortLog(log, `Lease lost while recording failure for ${job.jobId}: ${message}`);
         } else {
           throw failErr;
         }
@@ -311,7 +429,8 @@ export async function runPromoteJob(
         bookkeepingErr instanceof Error
           ? bookkeepingErr.message
           : String(bookkeepingErr);
-      log(
+      bestEffortLog(
+        log,
         `PARTIAL-PROMOTE-AMBIGUITY: jobId=${job.jobId} ` +
           `assertion.promote() returned successfully (promotedCount=${result.promotedCount}) ` +
           `but post-promote bookkeeping failed: ${message}. ` +
@@ -340,7 +459,10 @@ export async function runPromoteJob(
           counts: { triples: result.promotedCount },
         });
       } catch (emitErr: unknown) {
-        log(`memoryGraphChanged emit failed for ${job.jobId}: ${emitErr instanceof Error ? emitErr.message : String(emitErr)}`);
+        bestEffortLog(
+          log,
+          `memoryGraphChanged emit failed for ${job.jobId}: ${emitErr instanceof Error ? emitErr.message : String(emitErr)}`,
+        );
       }
     }
 
@@ -371,7 +493,8 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
   }
   const shutdownTimeoutMs = config.shutdownTimeoutMs ?? 30_000;
   const now = config.now ?? (() => Date.now());
-  const log = config.log ?? ((msg: string) => console.warn(`[promote-worker] ${msg}`));
+  const log: PromoteWorkerLogger =
+    config.log ?? ((msg: string) => console.warn(`[promote-worker] ${msg}`));
   const workerIdPrefix = config.workerIdPrefix ?? `daemon-${process.pid}`;
   const slots: WorkerSlot[] = Array.from({ length: concurrency }, (_, i) => ({
     workerId: `${workerIdPrefix}-slot-${i}`,
@@ -397,7 +520,10 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
   async function tickSlot(slot: WorkerSlot): Promise<boolean> {
     if (shuttingDown || slot.inFlight) return false;
     const claimed = await config.agent.promoteQueue.claimNext(slot.workerId).catch((err: unknown) => {
-      log(`claimNext error on ${slot.workerId}: ${err instanceof Error ? err.message : String(err)}`);
+      bestEffortLog(
+        log,
+        `claimNext error on ${slot.workerId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return null;
     });
     if (!claimed) return false;
@@ -445,7 +571,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
-        log(`Worker ${slot.workerId} crashed processing ${claimed.jobId}: ${message}`);
+        bestEffortLog(log, `Worker ${slot.workerId} crashed processing ${claimed.jobId}: ${message}`);
         if (claimed.lease) {
           try {
             await config.agent.promoteQueue.fail(claimed.jobId, claimed.lease.claimToken, {
@@ -457,9 +583,13 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           } catch (failErr: unknown) {
             const failMessage = failErr instanceof Error ? failErr.message : String(failErr);
             if (failErr instanceof PromoteJobLeaseError) {
-              log(`Lease lost while parking crashed job ${claimed.jobId}: ${failMessage}`);
+              bestEffortLog(
+                log,
+                `Lease lost while parking crashed job ${claimed.jobId}: ${failMessage}`,
+              );
             } else {
-              log(
+              bestEffortLog(
+                log,
                 `Failed to park crashed job ${claimed.jobId}; next startup recovery must reconcile it: ` +
                   `${failMessage}`,
               );
@@ -518,7 +648,10 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       try {
         const summary = await config.agent.promoteQueue.recoverOnStartup();
         if (summary.reclaimed > 0 || summary.abandoned > 0) {
-          log(`recoverOnStartup: reclaimed=${summary.reclaimed} abandoned=${summary.abandoned}`);
+          bestEffortLog(
+            log,
+            `recoverOnStartup: reclaimed=${summary.reclaimed} abandoned=${summary.abandoned}`,
+          );
         }
       } catch (err: unknown) {
         started = false;
@@ -560,7 +693,8 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       if (result === 'timeout') {
         const active = activeShutdownSlotCount() || activeAtStop;
         counters.interruptedAtShutdown += active;
-        log(
+        bestEffortLog(
+          log,
           `Shutdown timeout (${shutdownTimeoutMs}ms) reached; ${active} in-flight promote(s) abandoned to next-boot recovery`,
         );
       }
