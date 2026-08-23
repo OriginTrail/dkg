@@ -167,6 +167,7 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePrivateMetaAskQuery } from './context-graph-private-meta-proof.js';
 import { buildAuthoritativePublicMetaAskQuery } from './context-graph-public-meta-proof.js';
 import { repairCreatorPublicMetaProjections } from './context-graph-public-meta-repair.js';
+import { buildReconciledKnowledgeAssetUal } from './ka-identity.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -3997,6 +3998,92 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
   }
 
+  /**
+   * Foreground Random Sampling repair for one challenged public KA.
+   *
+   * The background VM reconciler eventually walks every registration ordinal,
+   * but a proof period already gives us the exact `(cgId, kaId)` that matters.
+   * Fetch only that descriptor/payload from a bounded rotating provider window,
+   * preserving the exact-sync responder verification and graph-scoped
+   * materialization gates. The prover re-runs its local content-bound extractor
+   * after this returns; this method never declares peer bytes proof-ready.
+   */
+  async repairRandomSamplingKnowledgeAsset(this: DKGAgent, input: {
+    kaId: bigint;
+    cgId: bigint;
+  }): Promise<void> {
+    const ctx = createOperationContext('sync');
+    const localCgId = this.resolveLocalCgIdByOnChainId(input.cgId);
+    if (!localCgId) {
+      throw new Error(`Random Sampling repair cannot resolve local CG ${input.cgId}`);
+    }
+
+    const storageAddress = this.chain.getDKGKnowledgeAssetsAddress
+      ? await this.chain.getDKGKnowledgeAssetsAddress()
+      : await this.chain.getKnowledgeAssetsLifecycleAddress();
+    const ual = buildReconciledKnowledgeAssetUal(
+      this.chain.chainId,
+      storageAddress,
+      input.kaId,
+    );
+
+    const observedPeerIds = this.vmReconcileObservedCandidatePeerIds(localCgId);
+    if (observedPeerIds.length === 0) {
+      throw new Error(`Random Sampling repair found no providers for ${localCgId}`);
+    }
+    const peerWindow = this.selectCatchupPeerWindow(
+      observedPeerIds.map((peerId) => ({ toString: () => peerId })),
+      {
+        maxPeers: DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
+        peerRotationKey: `rs-proof:${localCgId}`,
+      },
+    );
+    const timeoutSignal = AbortSignal.timeout(90_000);
+    const signal = this.node.stopSignal
+      ? AbortSignal.any([this.node.stopSignal, timeoutSignal])
+      : timeoutSignal;
+    const attempted: string[] = [];
+
+    for (const peer of peerWindow) {
+      if (signal.aborted) break;
+      const peerId = peer.toString();
+      attempted.push(peerId.slice(-8));
+      try {
+        if (!(await this.ensurePeerAdmittedForRecovery(
+          peerId,
+          ctx,
+          'Random Sampling exact repair peer',
+        ))) continue;
+        await this.ensurePeerConnected(peerId);
+        if (!(await this.waitForSyncProtocol({ toString: () => peerId }))) continue;
+
+        const result = await this.syncExactKnowledgeAssetsFromPeerDetailed(
+          peerId,
+          localCgId,
+          [ual],
+          { signal, isCurrent: () => this.started && !signal.aborted },
+        );
+        this.log.info(
+          ctx,
+          `RS exact repair for ${ual} from ${peerId.slice(-8)}: `
+            + `disposition=${result.disposition} inserted=${result.result.insertedTriples}`,
+        );
+        if (result.disposition === 'found') return;
+      } catch (error) {
+        this.log.info(
+          ctx,
+          `RS exact repair for ${ual} from ${peerId.slice(-8)} failed: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    throw new Error(
+      `Random Sampling exact repair did not recover ${ual} from `
+        + `${attempted.length > 0 ? attempted.join(',') : 'the bounded provider window'}`,
+    );
+  }
+
   async tryStartRandomSamplingProver(this: DKGAgent,
     ctx: OperationContext,
     logDisabled: boolean,
@@ -4113,6 +4200,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
         tickIntervalMs: this.config.randomSamplingTickIntervalMs,
         log: this.randomSamplingLogger(ctx),
+        repairMissingKnowledgeAsset: (input) =>
+          this.repairRandomSamplingKnowledgeAsset(input),
       });
       if (this.randomSamplingHandle && this.randomSamplingHandle !== handle) {
         try { await this.randomSamplingHandle.stop(); } catch { /* swallow bind replacement cleanup */ }

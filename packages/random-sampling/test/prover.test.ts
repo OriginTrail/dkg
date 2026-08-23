@@ -990,6 +990,66 @@ describe('RandomSamplingProver — short-circuits', () => {
     await prover.close();
   });
 
+  it('repairs a missing challenged KA once and submits in the same tick', async () => {
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kaId: 999n,
+      ual: 'did:dkg:hardhat:31337/0x0000000000000000000000000000000000000001/999',
+      rootEntities: ['urn:e:repair'],
+      publicTriples: [
+        { subject: 'urn:e:repair', predicate: 'urn:p:k', object: '"recovered"' },
+      ],
+    };
+    const leaves = fixture.publicTriples.map((triple) =>
+      hashTripleV10(triple.subject, triple.predicate, triple.object));
+    const { root, leafCount } = structuredKARootV10(leaves, []);
+    const submitProof = vi.fn(async () => ({
+      hash: '0xrepaired', blockNumber: 1001, success: true,
+    }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    const repairMissingKnowledgeAsset = vi.fn(async () => {
+      await seedKC(store, fixture);
+    });
+    const wal = new InMemoryProverWal();
+    const prover = new RandomSamplingProver({
+      chain,
+      store,
+      identityId: IDENTITY_ID,
+      wal,
+      repairMissingKnowledgeAsset,
+    });
+
+    const outcome = await prover.tick();
+
+    expect(repairMissingKnowledgeAsset).toHaveBeenCalledOnce();
+    expect(repairMissingKnowledgeAsset).toHaveBeenCalledWith({
+      kaId: fixture.kaId,
+      cgId: fixture.cgId,
+    });
+    expect(outcome).toMatchObject({
+      kind: 'submitted',
+      txHash: '0xrepaired',
+      kaId: fixture.kaId,
+      cgId: fixture.cgId,
+    });
+    expect((await wal.readAll()).map((entry) => entry.status)).toEqual([
+      'challenge', 'extracted', 'built', 'submitted',
+    ]);
+    await prover.close();
+  });
+
   it('returns submit-stale when submitProof throws ChallengeNoLongerActiveError', async () => {
     const fixture: KCFixture = {
       cgId: 11n, kaId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',

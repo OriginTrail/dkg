@@ -65,6 +65,11 @@ export interface RandomSamplingBindOptions {
    * by the hook are caught and logged so the prover stays running.
    */
   onTick?: (outcome: TickOutcome) => void;
+  /** Foreground exact-KA repair used by the prover's one-shot extraction retry. */
+  repairMissingKnowledgeAsset?: (input: {
+    kaId: bigint;
+    cgId: bigint;
+  }) => Promise<void>;
 }
 
 /**
@@ -169,6 +174,7 @@ export async function bindRandomSampling(
     builder,
     wal,
     log: opts.log,
+    repairMissingKnowledgeAsset: opts.repairMissingKnowledgeAsset,
   });
 
   const loop = startProverLoop({

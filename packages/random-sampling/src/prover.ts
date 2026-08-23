@@ -83,6 +83,16 @@ export interface RandomSamplingProverDeps {
   wal?: ProverWal;
   /** Hook for observability / structured logs. Default = no-op. */
   log?: ProverLogger;
+  /**
+   * Optional foreground repair invoked when the sampled public KA is absent
+   * from the local scoped store. The agent uses this seam to fetch that exact
+   * KA from a connected, authenticated provider; the prover then retries the
+   * local extraction once before recording a missed proof.
+   */
+  repairMissingKnowledgeAsset?: (input: {
+    kaId: bigint;
+    cgId: bigint;
+  }) => Promise<void>;
 }
 
 export interface ProverLogger {
@@ -113,6 +123,7 @@ export class RandomSamplingProver {
   private readonly builder: ProofBuilder;
   private readonly wal: ProverWal;
   private readonly log: ProverLogger;
+  private readonly repairMissingKnowledgeAsset?: RandomSamplingProverDeps['repairMissingKnowledgeAsset'];
   private inflight: Promise<TickOutcome> | null = null;
 
   /**
@@ -143,6 +154,7 @@ export class RandomSamplingProver {
     this.builder = deps.builder ?? new InProcessProofBuilder();
     this.wal = deps.wal ?? new InMemoryProverWal();
     this.log = deps.log ?? noopLog;
+    this.repairMissingKnowledgeAsset = deps.repairMissingKnowledgeAsset;
   }
 
   /** Single-flight tick. Concurrent callers await the same result. */
@@ -448,7 +460,46 @@ export class RandomSamplingProver {
     } else {
       proofKind = 'public';
       try {
-        const extracted = await extractV10KCFromStore(this.store, cgId, kaId);
+        let extracted;
+        try {
+          extracted = await extractV10KCFromStore(this.store, cgId, kaId);
+        } catch (initialError) {
+          if (
+            !(initialError instanceof KCNotFoundError)
+            && !(initialError instanceof KCDataMissingError)
+          ) throw initialError;
+          if (!this.repairMissingKnowledgeAsset) throw initialError;
+
+          this.log.info('rs.tick.kc-repair-started', {
+            kaId: kaId.toString(),
+            cgId: cgId.toString(),
+            periodStart: periodKey.periodStartBlock.toString(),
+            err: initialError.name,
+          });
+          try {
+            await this.repairMissingKnowledgeAsset({ kaId, cgId });
+          } catch (repairError) {
+            this.log.warn('rs.tick.kc-repair-failed', {
+              kaId: kaId.toString(),
+              cgId: cgId.toString(),
+              periodStart: periodKey.periodStartBlock.toString(),
+              err: repairError instanceof Error
+                ? repairError.message.slice(0, 200)
+                : String(repairError).slice(0, 200),
+            });
+            throw initialError;
+          }
+
+          // The repair hook is deliberately transport-only. Re-run the same
+          // content-bound extractor so unverified or incomplete peer data can
+          // never proceed to proof construction.
+          extracted = await extractV10KCFromStore(this.store, cgId, kaId);
+          this.log.info('rs.tick.kc-repaired', {
+            kaId: kaId.toString(),
+            cgId: cgId.toString(),
+            periodStart: periodKey.periodStartBlock.toString(),
+          });
+        }
         // public structured path: contents = N-Triple bytes; private sub-roots -> sibling.
         contents = extracted.triples.map((t) => tripleContentV10(t.subject, t.predicate, t.object));
         privateRoots = extracted.privateRoots;

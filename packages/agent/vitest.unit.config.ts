@@ -44,6 +44,7 @@ export default defineConfig({
       "test/swm/host-mode-store.test.ts",
       "test/swm/host-mode-key-canonicalization.test.ts",
       "test/rs-heal-stranded-kc-decorated.test.ts",
+      "test/random-sampling-proof-repair.test.ts",
       "test/vm-reconcile-source-labels.test.ts",
       "test/profile-fix-verify.test.ts",
       "test/pca-v10-facade.test.ts",
