@@ -364,6 +364,15 @@ export class FinalizationRecovery<
       // the autonomous retry budget.
       if (!this.isLiveEntry(entry)) return { status: 'handled' };
 
+      // The worker and reconciliation paths already honor this durable gate.
+      // Live duplicate gossip must do the same: the per-entry lock serializes
+      // equivalent deliveries, but without this check every queued duplicate
+      // still repeats the store-heavy workspace-head/materialization probe.
+      // A newly inserted row has no deadline and runs immediately; once a
+      // deferred attempt records backoff, one due delivery or the autonomous
+      // worker may retry it.
+      if (!store.isAttemptDue(entry)) return { status: 'handled' };
+
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
           const outcome = await this.materialize(input, { kind: 'recovery', entry });

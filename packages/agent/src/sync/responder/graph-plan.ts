@@ -950,7 +950,6 @@ export async function readSwmDataPage(params: {
       params.store,
       dataGraphs,
       graphSet,
-      candidateGraphsFor,
       params.cutoffIso!,
       signal,
     );
@@ -2802,11 +2801,11 @@ function freshSwmMetaPlanResponseByteLimit(): number {
  * an unbounded subject set no matter how large the fresh window is: a fresh set
  * beyond the cap is a typed bounded refusal, never an unbounded control-plane
  * plan. Sizing: every admitted subject serves at least one row, so this cap
- * alone admits sessions far past the point where they run plan-paged, while
- * the retained plan stays a few megabytes at worst (also capped by the fixed
- * plan byte estimate below, which bounds pathological IRI lengths).
+ * alone admits sessions far past the point where they run plan-paged. The
+ * 64,000-subject ceiling covers the 33k-41k subjects observed on mainnet while
+ * the independent 32 MiB plan estimate still bounds pathological IRI lengths.
  */
-export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 32_000;
+export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 64_000;
 
 /**
  * Discover the TTL-admitted subjects of one SWM meta graph with two
@@ -3312,11 +3311,6 @@ async function readFreshSwmDataRows(
   return rows.sort(compareRows);
 }
 
-interface FreshSwmCandidateGraph {
-  graph: string;
-  metaGraph: string;
-}
-
 const FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK = 100;
 
 function chunkValues<T>(values: readonly T[], size: number): T[][] {
@@ -3341,68 +3335,68 @@ function parseSparqlInteger(value: string | undefined): number {
  * graph; on a 1 GiB workspace that exceeded the 30s HTTP query timeout on every
  * page. This planner inverts the work with backend-neutral SPARQL 1.1:
  *
- *  1. Join each concrete graph to its fresh metadata roots by the root subject
- *     (an indexed lookup and a DKG workspace invariant: `rootEntity` names an
- *     entity present in the shared payload).
+ *  1. Discover fresh metadata roots ONCE per SWM bucket, then locate those few
+ *     roots through an indexed subject lookup across the bucket graph family.
  *  2. Count the exact root closures per concrete graph without returning their
  *     large literal values.
  *  3. Cache only graph/root/count scalars for the responder session.
  *
- * Paging then touches one or two concrete graphs at a time with `VALUES ?root`,
- * preserving the exact root/skolem filter used by {@link readFreshSwmDataRows}
- * while avoiding a database-specific optimizer hint or graph-family scan.
+ * The discovery/lookup split is important on long-lived context graphs. The
+ * previous planner emitted one UNION branch per historical data graph, and
+ * every branch repeated the same fresh-metadata join. A bucket with no fresh
+ * legacy roots could therefore spend its complete deadline proving the same
+ * empty result tens of thousands of times. Work here is proportional to the
+ * fresh root set instead of the historical graph count. Paging then touches
+ * one or two concrete graphs at a time with `VALUES ?root`, preserving the
+ * exact root/skolem filter used by {@link readFreshSwmDataRows}.
  */
 async function buildFreshSwmDataGraphPlan(
   store: TripleStore,
   dataGraphs: readonly string[],
   graphSet: ReadonlySet<string>,
-  candidateGraphsFor: (graph: string) => string[],
   cutoffIso: string,
   signal?: AbortSignal,
 ): Promise<FreshSwmDataGraphPlan> {
-  const cutoffFilter =
-    `FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`;
-  const candidates: FreshSwmCandidateGraph[] = [];
-  for (const graph of dataGraphs) {
-    const metaGraph = `${graph}_meta`;
-    if (!graphSet.has(metaGraph)) continue;
-    for (const candidate of candidateGraphsFor(graph)) {
-      candidates.push({ graph: candidate, metaGraph });
-    }
-  }
-  const uniqueCandidates = [...new Map(
-    candidates.map((candidate) => [candidate.graph, candidate]),
-  ).values()].sort((a, b) => compareCodePoint(a.graph, b.graph));
-  if (uniqueCandidates.length === 0) return { entries: [], totalRows: 0 };
-
   const rootsByGraph = new Map<string, Set<string>>();
-  for (const chunk of chunkValues(uniqueCandidates, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
-    const unions = chunk.map(({ graph, metaGraph }) => `
-      {
-        SELECT (<${assertSafeIri(graph)}> AS ?g) ?root WHERE {
-          GRAPH <${assertSafeIri(metaGraph)}> {
-            ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
-                <${DKG_PUBLISHED_AT}> ?ts ;
-                <${DKG_ROOT_ENTITY}> ?root .
-            ${cutoffFilter}
-          }
-          GRAPH <${assertSafeIri(graph)}> { ?root ?rootPredicate ?rootObject }
+  for (const bucketGraph of dedupeStrings(dataGraphs).sort(compareCodePoint)) {
+    throwIfAborted(signal);
+    const metaGraph = `${bucketGraph}_meta`;
+    if (!graphSet.has(metaGraph)) continue;
+    const roots = [...await readFreshSwmRoots(store, metaGraph, cutoffIso, signal)]
+      .sort(compareCodePoint);
+    for (const chunk of chunkValues(roots, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
+      const chunkSet = new Set(chunk);
+      // sparql-scan-allow: R2 -- ?root is VALUES-bound to at most 100 fresh metadata roots and every result graph is admitted against the finite current graph snapshot
+      const rootResult = await store.query(`
+        SELECT DISTINCT ?g ?root WHERE {
+          VALUES ?root { ${graphValues(chunk)} }
+          GRAPH ?g { ?root ?rootPredicate ?rootObject }
+          FILTER(
+            ?g = <${assertSafeIri(bucketGraph)}>
+            || STRSTARTS(STR(?g), CONCAT(STR(<${assertSafeIri(bucketGraph)}>), "/"))
+          )
         }
-      }`);
-    const rootResult = await store.query(`
-      SELECT DISTINCT ?g ?root WHERE {
-        ${unions.join('\n        UNION')}
+      `, syncResponderStoreOptions(signal, 'sync.responder.planFreshSwmGraphRoots'));
+      if (rootResult.type !== 'bindings') continue;
+      for (const row of rootResult.bindings) {
+        const graph = row['g'];
+        const root = row['root'];
+        // The broad prefix filter keeps the store lookup optimizer-friendly;
+        // enforce the exact read-both graph shape and current graph snapshot in
+        // process before admitting a result. This excludes staging, malformed
+        // descendants and unrelated/nested graph families.
+        if (
+          !graph
+          || !root
+          || !graphSet.has(graph)
+          || !chunkSet.has(root)
+          || (graph !== bucketGraph
+            && !isSharedMemoryBucketDescendantDataGraph(graph, bucketGraph))
+        ) continue;
+        const graphRoots = rootsByGraph.get(graph) ?? new Set<string>();
+        graphRoots.add(root);
+        rootsByGraph.set(graph, graphRoots);
       }
-      ORDER BY ?g ?root
-    `, syncResponderStoreOptions(signal, 'sync.responder.planFreshSwmGraphRoots'));
-    if (rootResult.type !== 'bindings') continue;
-    for (const row of rootResult.bindings) {
-      const graph = row['g'];
-      const root = row['root'];
-      if (!graph || !root) continue;
-      const roots = rootsByGraph.get(graph) ?? new Set<string>();
-      roots.add(root);
-      rootsByGraph.set(graph, roots);
     }
   }
 

@@ -502,6 +502,7 @@ describe('ApiClient', () => {
       await client.subscribeToContextGraph('cg-selected', {
         includeSharedMemory: true,
         syncMode: 'on-demand',
+        forceCatchup: true,
       });
 
       expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/subscribe`);
@@ -509,6 +510,7 @@ describe('ApiClient', () => {
         contextGraphId: 'cg-selected',
         includeWorkspace: true,
         syncMode: 'on-demand',
+        forceCatchup: true,
       });
     });
 

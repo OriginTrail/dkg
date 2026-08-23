@@ -168,6 +168,34 @@ are not classified as public merely by appearing there: the public-CG catch-up
 boundary applies selected scheduling, while the private-CG boundary ignores it
 and retains curator recovery.
 
+### Repair an existing public graph
+
+Readiness recorded by an older release does not prove that every historical SWM
+snapshot was visited. An operator can request one bounded reconciliation without
+resetting the graph's current ready state:
+
+```bash
+dkg subscribe <context-graph-id> --repair
+```
+
+The equivalent API request is:
+
+```json
+{
+  "contextGraphId": "<context-graph-id>",
+  "includeSharedMemory": true,
+  "forceCatchup": true
+}
+```
+
+For a public graph this enters the RFC-64 selected scheduler and resumes large
+snapshot walks across bounded continuation jobs. The switch is off by default
+and applies to this request only. Concurrent requests for the same graph dedupe
+onto its active job. Run repairs in small waves and gate the next wave on catch-up
+status, store backpressure, CPU, and disk headroom. Ordinary peers contribute to
+multi-peer union convergence; only an operator-pinned `completeSwmProviders`
+peer can prove the selected SWM scope terminal.
+
 For a signed-catalog target gate, activation alone is not sufficient. Every
 intended target must report `outcome: "applied"`, a non-null
 `appliedHeadDigest`, and the expected `inventoryRowCount`. A `not-found` or
