@@ -33,6 +33,7 @@ import {
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
 import {
+  resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
   type ApprovalPolicy,
 } from '@origintrail-official/dkg-chain';
@@ -212,6 +213,10 @@ export interface NetworkConfig {
     tokenAddress?: string;
     chainId: string;
     receiptTimeoutMs?: number;
+    /** Mined-receipt confirmation depth; receipt block itself counts as 1. */
+    finalityConfirmations?: number;
+    /** Optional operator cap for transaction fee-per-gas fields (wei). */
+    maxFeePerGasWei?: bigint | string | number;
     /**
      * ContextGraphNameRegistry discovery scan `eth_getLogs` block-window.
      * Defaults to the EVM adapter's 2,000-block common provider cap.
@@ -344,15 +349,24 @@ export interface ChainConfig {
   minPublisherTracWei?: bigint | string | number;
   /** Overall submitted-transaction receipt deadline (default 10 minutes). */
   receiptTimeoutMs?: number;
+  /**
+   * Canonical block confirmations required for a mined publish receipt.
+   * The receipt block itself counts as confirmation 1. Defaults to 1.
+   */
+  finalityConfirmations?: number;
+  /** Optional operator cap for transaction fee-per-gas fields (wei). */
+  maxFeePerGasWei?: bigint | string | number;
 }
 
 export type ResolvedChainConfig = Partial<
-  Omit<ChainConfig, 'approvalPolicy' | 'minPublisherNativeWei' | 'minPublisherTracWei'>
+  Omit<ChainConfig, 'approvalPolicy' | 'minPublisherNativeWei' | 'minPublisherTracWei' | 'maxFeePerGasWei'>
 > & {
   approvalPolicy?: ApprovalPolicyConfig;
   /** Normalized funding floors — always bigint past resolution. */
   minPublisherNativeWei?: bigint;
   minPublisherTracWei?: bigint;
+  /** Normalized positive fee-per-gas cap. */
+  maxFeePerGasWei?: bigint;
 };
 
 export interface LargeLiteralStorageConfig {
@@ -654,6 +668,16 @@ export interface DkgConfig {
   syncSharedMemoryOnConnect?: boolean;
   /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
   syncReconcilerEnabled?: boolean;
+  /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
+  syncReconcilerIntervalMs?: number;
+  /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
+  syncStalenessThresholdMs?: number;
+  /** Initial per-peer automatic sync retry delay. Default: 5 minutes. */
+  syncBackoffBaseMs?: number;
+  /** Maximum per-peer automatic sync retry delay. Default: 60 minutes. */
+  syncBackoffMaxMs?: number;
+  /** Fractional retry jitter from 0 through 1. Default: 0.25. */
+  syncBackoffJitter?: number;
   /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
   syncOnConnectEnabled?: boolean;
   /**
@@ -812,6 +836,8 @@ export interface DkgConfig {
     enabled?: boolean;
     pollIntervalMs?: number;
     errorBackoffMs?: number;
+    /** How often to check submitted transactions for chain confirmation. Default 60000ms. */
+    recoveryIntervalMs?: number;
     /**
      * Retry budget per job — ONE counter shared by the publisher's automatic
      * retries and manual reaccepts, snapshot at admission. Default 10.
@@ -885,6 +911,8 @@ export interface DkgConfig {
   storageAck?: {
     handlerDeadlineMs?: number;
     sendTimeoutMs?: number;
+    /** Maximum publisher-side StorageACK collection rounds in flight. Default 1. */
+    maxConcurrentCollections?: number;
   };
   /**
    * V10 Random Sampling prover (core-only). When the node is `core`
@@ -1605,6 +1633,24 @@ export function resolveChainConfig(
     : net?.receiptTimeoutMs;
   if (operatorHasReceiptTimeout || receiptTimeoutMs !== undefined) {
     merged.receiptTimeoutMs = resolveReceiptTimeoutMs(receiptTimeoutMs);
+  }
+  // Presence matters: explicit null/zero must fail rather than silently
+  // falling through to the network or adapter default.
+  const operatorHasFinalityConfirmations = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'finalityConfirmations');
+  const finalityConfirmations: unknown = operatorHasFinalityConfirmations
+    ? cfg.finalityConfirmations
+    : net?.finalityConfirmations;
+  if (operatorHasFinalityConfirmations || finalityConfirmations !== undefined) {
+    merged.finalityConfirmations = resolveFinalityConfirmations(finalityConfirmations);
+  }
+  const maxFeePerGasWei = parseWeiFloor(
+    cfg?.maxFeePerGasWei ?? net?.maxFeePerGasWei,
+    'chain.maxFeePerGasWei',
+  );
+  if (maxFeePerGasWei !== undefined) {
+    if (maxFeePerGasWei === 0n) throw new Error('chain.maxFeePerGasWei must be greater than zero');
+    merged.maxFeePerGasWei = maxFeePerGasWei;
   }
   // Funding floors: local config wins, else the network overlay's per-chain
   // default (both default 0n downstream in the adapter when unset). Persisted

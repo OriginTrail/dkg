@@ -27,7 +27,13 @@ import {
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
-import { resolveReceiptTimeoutMs, RPC_READ_STALL_TIMEOUT_MS, RPC_RECEIPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import {
+  DEFAULT_FINALITY_CONFIRMATIONS,
+  resolveFinalityConfirmations,
+  resolveReceiptTimeoutMs,
+  RPC_READ_STALL_TIMEOUT_MS,
+  RPC_RECEIPT_TIMEOUT_MS,
+} from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
@@ -46,6 +52,51 @@ it('defaults an omitted receipt deadline to ten minutes', () => {
 it('rejects an explicitly invalid receipt deadline at the adapter boundary', () => {
   expect(() => new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 999 })))
     .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
+});
+
+it('defaults mined-receipt finality to one confirmation', () => {
+  expect(resolveFinalityConfirmations(undefined)).toBe(1);
+  expect(DEFAULT_FINALITY_CONFIRMATIONS).toBe(1);
+  expect((new EVMChainAdapter(minimalConfig()) as any).finalityConfirmations).toBe(1);
+});
+
+it('accepts an explicit confirmation depth and rejects invalid values', () => {
+  expect(resolveFinalityConfirmations(7)).toBe(7);
+  expect((new EVMChainAdapter(minimalConfig({ finalityConfirmations: 7 })) as any)
+    .finalityConfirmations).toBe(7);
+  for (const value of [null, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    expect(() => resolveFinalityConfirmations(value)).toThrow(
+      /finalityConfirmations must be an integer >= 1/,
+    );
+  }
+});
+
+it('caps populated transaction fee fields when the operator sets maxFeePerGasWei', async () => {
+  const cap = 100_000_000n;
+  const adapter: any = new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: cap }));
+  const wallet = new ethers.Wallet(DEPLOYER_PK).connect({
+    getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
+    estimateGas: async () => 21_000n,
+    getTransactionCount: async () => 3,
+    getFeeData: async () => ({ maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1_000_000_000n }),
+    resolveName: async (name: string) => name,
+    _isProvider: true,
+  } as never);
+  const { signedTx } = await adapter.signPopulatedTransaction(wallet, {
+    to: '0x0000000000000000000000000000000000000002',
+    value: 0n,
+    nonce: 3,
+    gasLimit: 21_000n,
+    chainId: 31337,
+    type: 2,
+    maxFeePerGas: 1_000_000_000n,
+    maxPriorityFeePerGas: 1_000_000_000n,
+  });
+  const decoded = ethers.Transaction.from(signedTx);
+  expect(decoded.maxFeePerGas).toBe(cap);
+  expect(decoded.maxPriorityFeePerGas).toBe(cap);
+  expect(() => new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: 0n })))
+    .toThrow(/maxFeePerGasWei must be greater than zero/);
 });
 
 describe('EVMChainAdapter historical KA update verification', () => {
@@ -5035,6 +5086,36 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     expect(populate.calls).toHaveLength(2); // p0(429) → p1(ok)
     expect(signSpy.calls).toHaveLength(1);  // signed once, on the healthy provider
     expect(ensureSpy.calls).toEqual([]);    // no TooLowAllowance → no forced approve
+  });
+
+  it('waits and retries the full provider set when V10 preparation is temporarily rate limited', async () => {
+    vi.useFakeTimers();
+    try {
+      const { a, ensureSpy, signer } = makeRecoveryAdapter();
+      const r429 = () => {
+        const error = new Error('all configured RPC endpoints returned 429');
+        (error as any).status = 429;
+        return error;
+      };
+      let call = 0;
+      const populateAndSign = recorder(async () => {
+        call += 1;
+        if (call <= 2) throw r429();
+        return { signedTx: '0xsigned', txHash: '0xhash' };
+      });
+      (a as any).populateAndSignAcrossProviders = populateAndSign;
+
+      const pending = (a as any).populateAndSignV10WithAllowanceRecovery(
+        signer, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label',
+      );
+      await vi.runAllTimersAsync();
+
+      await expect(pending).resolves.toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
+      expect(populateAndSign.calls).toHaveLength(3);
+      expect(ensureSpy.calls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('enriches the SECOND raw TooLowAllowance before throwing the one-shot failure', async () => {

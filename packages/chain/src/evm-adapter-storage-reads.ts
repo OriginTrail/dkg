@@ -135,15 +135,14 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         if (BigInt(network.chainId) !== expectedChainId) return null;
       }
       if (options.signal?.aborted) return null;
-      // r13 (3813796492) — pinned to the FINALIZED block, not the head. This view drives a DURABLE
-      // decision: marking a recovered transaction superseded finalizes it receipt-only and hands
-      // the lifecycle to another version. Read at the head, an unfinalized update that later
-      // reorgs out would strip a transaction that is in fact current of its materialization, with
-      // nothing left to re-trigger it. Every other mined verdict in this chain already waits for
-      // finality; this is the same rule for the one read that had escaped it.
-      const finalized = await provider.getBlock('finalized');
-      const blockNumber = finalized?.number;
-      if (typeof blockNumber !== 'number') return null;
+      // Use the same operator-selected confirmation depth as the receipt proof. The receipt block
+      // itself is confirmation 1, so finalityConfirmations=1 pins this coherent version view to
+      // the current head. Larger values pin head-depth+1. Using the RPC-specific `finalized` tag
+      // here made one-block receipt finality ineffective because named-KA recovery still waited
+      // many minutes for the endpoint's consensus finality marker to advance.
+      const latestBlockNumber = await provider.getBlockNumber();
+      if (!Number.isSafeInteger(latestBlockNumber) || latestBlockNumber < 0) return null;
+      const blockNumber = Math.max(0, latestBlockNumber - this.finalityConfirmations + 1);
       const bound = this.rebindContract(kas as Contract, provider);
       const at = { blockTag: blockNumber };
       const [latestRoot, context, latestAuthor, latestPublisher] = await Promise.all([

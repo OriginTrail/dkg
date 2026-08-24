@@ -237,6 +237,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       chainBase: args.chainBase,
       pollIntervalMs: args.config.publisher.pollIntervalMs,
       errorBackoffMs: args.config.publisher.errorBackoffMs,
+      recoveryIntervalMs: args.config.publisher.recoveryIntervalMs,
       maxRetries: args.config.publisher.maxRetries,
       // GH#2270 — this is the ONE runtime whose retry scheduler and claim-time
       // sweep actually run, so the kill-switch and backoff knobs are dead
@@ -347,6 +348,7 @@ interface PublisherRuntimeBaseArgs {
   chainBase?: RuntimeEvmChainConfig;
   pollIntervalMs?: number;
   errorBackoffMs?: number;
+  recoveryIntervalMs?: number;
   maxRetries?: number;
   /** GH#2270 — validated `config.publisher` retry knobs; unset knobs keep the library defaults. */
   retryTuning?: PublisherRetryTuning;
@@ -365,6 +367,7 @@ export async function createPublisherRuntime(args: {
   config: DkgConfig;
   pollIntervalMs?: number;
   errorBackoffMs?: number;
+  recoveryIntervalMs?: number;
   maxRetries?: number;
 }): Promise<PublisherRuntime> {
   const publisherWallets = await loadPublisherWallets(args.dataDir);
@@ -390,6 +393,7 @@ export async function createPublisherRuntime(args: {
     chainBase,
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
+    recoveryIntervalMs: args.recoveryIntervalMs ?? args.config.publisher?.recoveryIntervalMs,
     maxRetries: args.maxRetries ?? args.config.publisher?.maxRetries,
     retryTuning: resolvePublisherRetryTuning(args.config.publisher),
     publicSnapshotStore,
@@ -501,6 +505,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   chainBase?: RuntimeEvmChainConfig;
   pollIntervalMs?: number;
   errorBackoffMs?: number;
+  recoveryIntervalMs?: number;
   maxRetries?: number;
   retryTuning?: PublisherRetryTuning;
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>;
@@ -517,6 +522,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     chainBase: args.chainBase,
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
+    recoveryIntervalMs: args.recoveryIntervalMs,
     maxRetries: args.maxRetries,
     retryTuning: args.retryTuning,
     ackTransportFactory: args.ackTransportFactory,
@@ -674,6 +680,10 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     walletIds: validWalletIds,
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
+    recoveryIntervalMs: args.recoveryIntervalMs,
+    // Operator-only maintenance seam. Recovery still reconciles signed transactions, but wallet
+    // loops cannot claim released jobs while a closed run is being removed from the queue.
+    startPaused: process.env.DKG_PUBLISHER_START_PAUSED === '1',
     hasIncludedRecoveryResolver: hasChainRecovery,
   });
 

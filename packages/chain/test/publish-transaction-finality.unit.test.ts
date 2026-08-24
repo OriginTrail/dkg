@@ -24,6 +24,7 @@ const BLOCK_HASH = `0x${'cd'.repeat(32)}`;
 function adapter(overrides: Record<string, unknown> = {}) {
   return Object.assign(Object.create(PublishMethods.prototype), {
     init: vi.fn(async () => undefined),
+    finalityConfirmations: 1,
     contracts: { knowledgeAssetStorage: {} },
     getTransactionReceiptWithFailover: vi.fn(async () => null),
     getTransactionWithFailover: vi.fn(async () => null),
@@ -94,14 +95,15 @@ describe('resolvePublishTransaction gates every mined verdict on finality [PR#23
 
 describe('isReceiptBlockFinalAndCanonical [PR#2300 r1]', () => {
   function chainOver(script: {
-    finalized: { number: number; hash: string } | null;
+    latestBlockNumber: number;
     atHeight: { number: number; hash: string } | null;
-  }) {
+  }, finalityConfirmations = 1) {
     const provider = {
-      getBlock: vi.fn(async (tag: string | number) =>
-        tag === 'finalized' ? script.finalized : script.atHeight),
+      getBlockNumber: vi.fn(async () => script.latestBlockNumber),
+      getBlock: vi.fn(async () => script.atHeight),
     };
     return adapter({
+      finalityConfirmations,
       readProvider: async (_label: string, fn: (p: unknown) => Promise<unknown>) => fn(provider),
     }) as PublishMethods & {
       isReceiptBlockFinalAndCanonical(r: { blockNumber: number; blockHash: string }): Promise<boolean>;
@@ -114,18 +116,20 @@ describe('isReceiptBlockFinalAndCanonical [PR#2300 r1]', () => {
    * production code ASKED for that policy rather than relying on this stub's generosity.
    */
   function chainOverProviders(scripts: Array<{
-    finalized: { number: number; hash: string } | null;
+    latestBlockNumber: number;
     atHeight: { number: number; hash: string } | null;
-  }>) {
+  }>, finalityConfirmations = 1) {
     const seen: number[] = [];
     const readOpts: Array<{ isEmptyResult?: (v: unknown) => boolean }> = [];
     const providers = scripts.map((script, index) => ({
-      getBlock: async (tag: string | number) => {
+      getBlockNumber: async () => {
         seen.push(index);
-        return tag === 'finalized' ? script.finalized : script.atHeight;
+        return script.latestBlockNumber;
       },
+      getBlock: async () => script.atHeight,
     }));
     const chain = adapter({
+      finalityConfirmations,
       readProvider: async (
         _label: string,
         fn: (p: unknown) => Promise<unknown>,
@@ -148,90 +152,68 @@ describe('isReceiptBlockFinalAndCanonical [PR#2300 r1]', () => {
 
   const RECEIPT = { blockNumber: 123, blockHash: BLOCK_HASH };
 
-  it('an endpoint with no finalized view fails the gate OVER to a capable one [PR#2300 r5]', async () => {
-    // 3812435954 — the `null` added in r5 exists to trigger failover, and nothing proved it did:
-    // a regression returning `false` would stop at the incapable primary and pin every held job at
-    // `pending` forever. Provider 0 cannot serve `finalized`; provider 1 can, and proves the
-    // receipt final and canonical.
+  it('a lagging latest frontier fails over instead of deciding', async () => {
+    const { chain, seen } = chainOverProviders([
+      { latestBlockNumber: 123, atHeight: { number: 123, hash: BLOCK_HASH } },
+      { latestBlockNumber: 124, atHeight: { number: 123, hash: BLOCK_HASH } },
+    ], 2);
+
+    await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
+    expect(seen).toContain(1);
+  });
+
+  it('answers false when no endpoint has reached the configured depth', async () => {
+    const { chain } = chainOverProviders([
+      { latestBlockNumber: 123, atHeight: { number: 123, hash: BLOCK_HASH } },
+      { latestBlockNumber: 124, atHeight: { number: 123, hash: BLOCK_HASH } },
+    ], 3);
+
+    await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(false);
+  });
+
+  it('an endpoint missing the receipt block fails over rather than answering false', async () => {
     const { chain, seen, readOpts } = chainOverProviders([
-      { finalized: null, atHeight: null },
-      { finalized: { number: 200, hash: `0x${'ee'.repeat(32)}` }, atHeight: { number: 123, hash: BLOCK_HASH } },
+      { latestBlockNumber: 123, atHeight: null },
+      { latestBlockNumber: 123, atHeight: { number: 123, hash: BLOCK_HASH } },
     ]);
 
     await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
-    // The answer came from the SECOND endpoint, and the read asked for empty-result failover.
     expect(seen).toContain(1);
     expect(readOpts[0]?.isEmptyResult?.(null)).toBe(true);
   });
 
-  it('a LAGGING finalized frontier fails over instead of deciding [r10]', async () => {
-    // 3812960956 — finality is monotone, so an endpoint whose frontier has not reached the receipt
-    // has nothing to say yet; treating that as a negative verdict made the most lagging endpoint
-    // authoritative and held jobs at `pending` while a configured peer already had the proof.
-    const { chain, seen } = chainOverProviders([
-      { finalized: { number: 100, hash: `0x${'ee'.repeat(32)}` }, atHeight: { number: 123, hash: BLOCK_HASH } },
-      { finalized: { number: 200, hash: `0x${'ee'.repeat(32)}` }, atHeight: { number: 123, hash: BLOCK_HASH } },
-    ]);
-
-    await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
-    expect(seen).toContain(1);
-  });
-
-  it('still answers false when NO endpoint has reached the receipt [r10]', async () => {
-    // The polarity that keeps the row above honest: an all-lagging walk is the real "not final
-    // anywhere", and it must not become a silent null at the call site.
-    const { chain } = chainOverProviders([
-      { finalized: { number: 100, hash: `0x${'ee'.repeat(32)}` }, atHeight: { number: 123, hash: BLOCK_HASH } },
-      { finalized: { number: 110, hash: `0x${'ee'.repeat(32)}` }, atHeight: { number: 123, hash: BLOCK_HASH } },
-    ]);
-
-    await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(false);
-  });
-
-  it('an endpoint missing the RECEIPT block also fails over, rather than answering false [r8]', async () => {
-    // 3812585310 — the frontier read already treated a missing view as empty; the block-at-height
-    // read did not, so a pruned or incomplete primary that serves `finalized` but not the older
-    // receipt block answered `false` and stranded the job. `false` is now reserved for a block
-    // that IS served and whose hash differs.
-    const { chain, seen } = chainOverProviders([
-      { finalized: { number: 200, hash: `0x${'ee'.repeat(32)}` }, atHeight: null },
-      { finalized: { number: 200, hash: `0x${'ee'.repeat(32)}` }, atHeight: { number: 123, hash: BLOCK_HASH } },
-    ]);
-
-    await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
-    expect(seen).toContain(1);
-  });
-
-  it('true only when the height is behind the finalized frontier AND the hash still matches', async () => {
+  it('confirmation 1 accepts the receipt block itself when its hash is canonical', async () => {
     const chain = chainOver({
-      finalized: { number: 200, hash: `0x${'ee'.repeat(32)}` },
+      latestBlockNumber: 123,
       atHeight: { number: 123, hash: BLOCK_HASH },
     });
     await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
   });
 
-  it('false while the receipt height is past the finalized frontier', async () => {
+  it('higher confirmation depths require the requested number of canonical blocks', async () => {
     const chain = chainOver({
-      finalized: { number: 100, hash: `0x${'ee'.repeat(32)}` },
+      latestBlockNumber: 124,
       atHeight: { number: 123, hash: BLOCK_HASH },
-    });
+    }, 3);
     await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(false);
+
+    const reached = chainOver({
+      latestBlockNumber: 125,
+      atHeight: { number: 123, hash: BLOCK_HASH },
+    }, 3);
+    await expect(reached.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
   });
 
-  it('false when a DIFFERENT block occupies the receipt height — depth alone is not the test', async () => {
-    // The canonicality half: the height is finalized, but the hash there is not the receipt's —
-    // the receipt describes an orphaned copy of history.
+  it('false when a different block occupies the receipt height — depth alone is not enough', async () => {
     const chain = chainOver({
-      finalized: { number: 200, hash: `0x${'ee'.repeat(32)}` },
+      latestBlockNumber: 200,
       atHeight: { number: 123, hash: `0x${'99'.repeat(32)}` },
     });
     await expect(chain.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(false);
   });
 
-  it('false when the endpoint cannot serve the finalized frontier or the height', async () => {
-    await expect(chainOver({ finalized: null, atHeight: { number: 123, hash: BLOCK_HASH } })
-      .isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(false);
-    await expect(chainOver({ finalized: { number: 200, hash: `0x${'ee'.repeat(32)}` }, atHeight: null })
+  it('false when no endpoint can serve the receipt height', async () => {
+    await expect(chainOver({ latestBlockNumber: 200, atHeight: null })
       .isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(false);
   });
 });

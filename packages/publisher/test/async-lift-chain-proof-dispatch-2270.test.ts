@@ -342,7 +342,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     });
   });
 
-  it('leaves a held job alone when the named lane cannot finalize it locally yet', async () => {
+  it('keeps the job held but releases its wallet when local finalization is not ready', async () => {
     // A `recovered` verdict is not enough on its own: the named lane still has to repair the local
     // lifecycle. While that repair is blocked the job must stay exactly as it was — tx-bearing and
     // held — rather than being reset, which would resend a transaction the chain just confirmed.
@@ -366,6 +366,15 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     const stillHeld = expectFailed(await publisher.getStatus(failed.jobId));
     expect(stillHeld.status).toBe('failed');
     expect(isHeldForChainProof(stillHeld)).toBe(true);
+    const walletId = `wallet-tx-${failed.jobId}`;
+    const lock = await h.store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject(walletId)}> ?p ?o .
+      }
+    }`);
+    expect(lock.type).toBe('bindings');
+    if (lock.type !== 'bindings') return;
+    expect(lock.bindings).toHaveLength(0);
     expect(sends).toBe(0);
   });
 

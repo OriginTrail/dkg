@@ -23,13 +23,14 @@ const BLOCK_HASH = `0x${'ab'.repeat(32)}`;
 // Hardhat's well-known throwaway dev keys, as in evm-adapter.unit.test.ts — never a real secret.
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
-function minimalConfig() {
+function minimalConfig(finalityConfirmations = 1) {
   return {
     rpcUrl: 'http://127.0.0.1:59998',
     privateKey: DEPLOYER_PK,
     hubAddress: '0x0000000000000000000000000000000000000001',
     chainId: 'evm:31337',
     staticNetwork: false,
+    finalityConfirmations,
   } as never;
 }
 
@@ -46,15 +47,24 @@ type ProviderScript = {
  * observe which provider served the snapshot and which blockTag each read carried, which is what
  * every row here is about.
  */
-function adapterOver(scripts: ProviderScript[], opts: { storageDeployed?: boolean } = {}) {
+function adapterOver(
+  scripts: ProviderScript[],
+  opts: { storageDeployed?: boolean; finalityConfirmations?: number } = {},
+) {
+  const finalityConfirmations = opts.finalityConfirmations ?? 1;
   const calls: Array<{ provider: number; read: string; blockTag: unknown }> = [];
   const providers = scripts.map((script, index) => ({
     async getNetwork() {
       return { chainId: script.wrongChain ? 999n : 31337n };
     },
-    async getBlock(tag: string) {
-      if (tag !== 'finalized') throw new Error(`expected the finalized tag, got ${tag}`);
+    async getBlockNumber() {
       if (script.finalized instanceof Error) throw script.finalized;
+      return (script.finalized?.number ?? 90) + finalityConfirmations - 1;
+    },
+    async getBlock(tag: number) {
+      if (script.finalized && tag !== script.finalized.number) {
+        throw new Error(`expected confirmation-depth block ${script.finalized.number}, got ${tag}`);
+      }
       return script.finalized;
     },
     async getTransactionCount(address: string, blockTag: unknown) {
@@ -65,7 +75,7 @@ function adapterOver(scripts: ProviderScript[], opts: { storageDeployed?: boolea
     __script: script,
   }));
 
-  const a: any = new EVMChainAdapter(minimalConfig());
+  const a: any = new EVMChainAdapter(minimalConfig(finalityConfirmations));
   a.initialized = true;
   a.init = async () => {};
   a.contracts = {
@@ -122,6 +132,21 @@ function nonexistentTokenRevert(): Error {
 }
 
 describe('EVMChainAdapter.readFinalizedChainProofSnapshot [GH#2270 r4]', () => {
+  it('pins the pair at the configured confirmation depth', async () => {
+    const { adapter, calls } = adapterOver([{
+      finalized: { number: 90, hash: BLOCK_HASH },
+      nonceAt: async () => 7,
+      ownerAt: async () => { throw nonexistentTokenRevert(); },
+    }], { finalityConfirmations: 3 });
+
+    const snapshot = await adapter.readFinalizedChainProofSnapshot({ address: ADDRESS, kaId: KA_ID });
+
+    expect(snapshot?.blockNumber).toBe(90);
+    expect(calls).toEqual([
+      { provider: 0, read: 'nonce', blockTag: 90 },
+      { provider: 0, read: 'ownerOf', blockTag: 90 },
+    ]);
+  });
   it('returns the pinned pair: both reads carry the finalized block NUMBER, not a floating tag', async () => {
     const { adapter, calls } = adapterOver([{
       finalized: { number: 90, hash: BLOCK_HASH },

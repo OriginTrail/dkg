@@ -44,7 +44,7 @@ import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cu
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
@@ -641,6 +641,9 @@ export class EVMChainAdapterBase {
   /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
   protected readonly rpcUsage: RpcUsageTracker;
   protected readonly receiptTimeoutMs: number;
+  protected readonly finalityConfirmations: number;
+
+  protected readonly maxFeePerGasWei?: bigint;
 
   protected readonly configuredStaticChainId?: bigint;
 
@@ -1083,6 +1086,11 @@ export class EVMChainAdapterBase {
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
     this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
+    this.finalityConfirmations = resolveFinalityConfirmations(config.finalityConfirmations);
+    if (config.maxFeePerGasWei !== undefined && config.maxFeePerGasWei <= 0n) {
+      throw new Error('chain.maxFeePerGasWei must be greater than zero');
+    }
+    this.maxFeePerGasWei = config.maxFeePerGasWei;
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
         .map((url) => typeof url === 'string' ? url.trim() : '')
@@ -1578,6 +1586,23 @@ export class EVMChainAdapterBase {
     populated: ethers.TransactionRequest,
   ): Promise<SignedTransactionEnvelope> {
     const filled = await signer.populateTransaction(populated);
+    if (this.maxFeePerGasWei !== undefined) {
+      const cap = this.maxFeePerGasWei;
+      if (filled.gasPrice !== null && filled.gasPrice !== undefined && BigInt(filled.gasPrice) > cap) {
+        filled.gasPrice = cap;
+      }
+      if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined && BigInt(filled.maxFeePerGas) > cap) {
+        filled.maxFeePerGas = cap;
+      }
+      if (filled.maxPriorityFeePerGas !== null && filled.maxPriorityFeePerGas !== undefined) {
+        const effectiveCap = filled.maxFeePerGas === null || filled.maxFeePerGas === undefined
+          ? cap
+          : BigInt(filled.maxFeePerGas) < cap ? BigInt(filled.maxFeePerGas) : cap;
+        if (BigInt(filled.maxPriorityFeePerGas) > effectiveCap) {
+          filled.maxPriorityFeePerGas = effectiveCap;
+        }
+      }
+    }
     const signedTx = await signer.signTransaction(filled);
     // GH#2270 PR-3 r3 — ONE decode of the signed bytes, here, for both facts the send window
     // needs. The nonce used to be re-parsed at the dispatch boundary from the same string.
@@ -1617,14 +1642,30 @@ export class EVMChainAdapterBase {
     let forcedReapprove = false;
     for (;;) {
       try {
-        return await this.populateAndSignAcrossProviders(
-          kaContract,
-          method,
-          [methodParams],
-          signer,
-          `V10 ${method}`,
-          { gasLimitBufferBps: V10_WRITE_GAS_LIMIT_BUFFER_BPS },
-        );
+        for (let preparationPass = 0; ; preparationPass += 1) {
+          try {
+            return await this.populateAndSignAcrossProviders(
+              kaContract,
+              method,
+              [methodParams],
+              signer,
+              `V10 ${method}`,
+              { gasLimitBufferBps: V10_WRITE_GAS_LIMIT_BUFFER_BPS },
+            );
+          } catch (err) {
+            enrichEvmError(err);
+            if (!isRetryableRpcError(err)
+              || preparationPass >= RPC_PREPARATION_ENDPOINT_SET_RETRIES) {
+              throw err;
+            }
+            const baseDelay = Math.min(
+              RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS,
+              RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS * 2 ** preparationPass,
+            );
+            const jitter = Math.floor(Math.random() * Math.max(1, baseDelay / 2));
+            await sleep(baseDelay + jitter);
+          }
+        }
       } catch (err) {
         enrichEvmError(err);
         if (!forcedReapprove && isTooLowAllowanceError(err)) {

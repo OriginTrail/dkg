@@ -17,18 +17,19 @@ import { EVMChainAdapter } from '../src/evm-adapter.js';
 const KA_ID = 7n;
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
-function minimalConfig() {
+function minimalConfig(finalityConfirmations = 1) {
   return {
     rpcUrl: 'http://127.0.0.1:59998',
     privateKey: DEPLOYER_PK,
     hubAddress: '0x0000000000000000000000000000000000000001',
     chainId: 'evm:31337',
     staticNetwork: false,
+    finalityConfirmations,
   } as never;
 }
 
 type Script = {
-  /** The endpoint's FINALIZED height, or null when it cannot serve one. */
+  /** The endpoint's current head height, or null when it cannot serve one. */
   blockNumber: number | null;
   /** When true, this endpoint fails chain-id validation (a wrong-chain RPC). */
   wrongChain?: boolean;
@@ -43,25 +44,26 @@ type Script = {
 const AUTHOR = `0x${'11'.repeat(20)}`;
 const PUBLISHER = `0x${'22'.repeat(20)}`;
 
-function adapterOver(scripts: Script[], opts: { storageDeployed?: boolean } = {}) {
+function adapterOver(
+  scripts: Script[],
+  opts: { storageDeployed?: boolean; finalityConfirmations?: number } = {},
+) {
   const reads: Array<{ provider: number; call: string; blockTag: unknown }> = [];
   const providers = scripts.map((script, index) => ({
     __index: index,
     __script: script,
-    // r13 — the view is pinned to the FINALIZED block, because it drives a durable decision.
     async getNetwork() {
       return { chainId: script.wrongChain ? 999n : 31337n };
     },
-    async getBlock(tag: string) {
+    async getBlockNumber() {
       if (script.stall) return new Promise(() => {}) as never;
-      if (tag !== 'finalized') throw new Error(`expected the finalized tag, got ${tag}`);
-      if (script.blockNumber === null) throw Object.assign(new Error('no finalized view'), { code: 'NETWORK_ERROR' });
-      return { number: script.blockNumber, hash: `0x${'99'.repeat(32)}` };
+      if (script.blockNumber === null) throw Object.assign(new Error('no head view'), { code: 'NETWORK_ERROR' });
+      return script.blockNumber;
     },
   }));
 
   const validated: number[] = [];
-  const a: any = new EVMChainAdapter(minimalConfig());
+  const a: any = new EVMChainAdapter(minimalConfig(opts.finalityConfirmations));
   a.ensureConfiguredStaticChainIdValidated = async (provider: (typeof providers)[number]) => {
     // r17 (3814893080) — faithful to production: under the supported `staticNetwork: false`
     // mode this validator returns early WITHOUT comparing anything, so the harness must not
@@ -122,6 +124,18 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     expect(reads).toHaveLength(4);
   });
 
+  it('uses the configured confirmation depth for the pinned block', async () => {
+    const { adapter, reads } = adapterOver(
+      [{ blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n }],
+      { finalityConfirmations: 3 },
+    );
+
+    const view = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
+
+    expect(view?.blockNumber).toBe(498);
+    expect(reads.every((read) => read.blockTag === 498)).toBe(true);
+  });
+
   it('takes the MOST ADVANCED endpoint, not the first that answers [r11]', async () => {
     // A healthy endpoint can still be behind. First-success ordering would hand recovery a
     // perfectly coherent but stale view — {root A, count 1} while the chain is at A -> B -> A —
@@ -165,7 +179,7 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     // performs, and the shared static-mode validator is a NO-OP under `staticNetwork: false`, so
     // the endpoint's chain id is now compared explicitly against the configured one.
     // so an accidentally configured RPC for another chain could answer with an ABI-compatible view
-    // and WIN the poll by reporting a higher finalized block. Recovery would then materialize that
+    // and WIN the poll by reporting a higher confirmation-depth block. Recovery would then materialize that
     // chain's root and attribution. It is now validated per endpoint before its view is eligible —
     // and because the poll must be unanimous, a wrong-chain endpoint makes the answer inconclusive
     // rather than silently handing the decision to the remaining one.

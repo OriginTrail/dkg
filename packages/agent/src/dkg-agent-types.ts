@@ -1476,6 +1476,16 @@ export interface DKGAgentConfig {
   syncSharedMemoryOnConnect?: boolean;
   /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
   syncReconcilerEnabled?: boolean;
+  /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
+  syncReconcilerIntervalMs?: number;
+  /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
+  syncStalenessThresholdMs?: number;
+  /** Initial per-peer automatic sync retry delay. Default: 5 minutes. */
+  syncBackoffBaseMs?: number;
+  /** Maximum per-peer automatic sync retry delay. Default: 60 minutes. */
+  syncBackoffMaxMs?: number;
+  /** Fractional retry jitter from 0 through 1. Default: 0.25. */
+  syncBackoffJitter?: number;
   /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
   syncOnConnectEnabled?: boolean;
   /**
@@ -1670,6 +1680,8 @@ export interface DKGAgentConfig {
     chainId?: string;
     /** Overall submitted-transaction receipt deadline (default 10 minutes). */
     receiptTimeoutMs?: number;
+    /** Optional operator cap for transaction fee-per-gas fields (wei). */
+    maxFeePerGasWei?: bigint;
     /**
      * Optional V10 allowance-sizing policy. Threaded straight through to
      * the `EVMChainAdapter`; see `ApprovalPolicy` in

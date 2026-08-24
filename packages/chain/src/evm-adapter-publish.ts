@@ -555,15 +555,14 @@ export class PublishMethods extends EVMChainAdapterBase {
    * A lookup failure throws rather than resolving to a status: an RPC error is
    * an absence of information, never information about an absence.
    *
-   * PR #2300 r1 — a MINED receipt is only evidence about the block it sits in, and every mined
+   * A MINED receipt is only evidence about the block it sits in, and every mined
    * verdict this surface emits authorises a real action somewhere downstream: `reverted` releases
    * the job's lifecycle hold as proven-ineffective, `confirmed` finalizes it as published, and
-   * `unrecognized` feeds update recognition. A status-0 receipt in an UNFINALIZED block is not
-   * permanent proof — a reorg can re-include the very same signed transaction on a chain where it
-   * SUCCEEDS, and the released job would then double-publish. So no mined verdict is emitted
-   * until the receipt's block is FINAL and CANONICAL (its hash still occupies its height); until
-   * then the answer is `pending`, which is the honest state: the transaction's fate is literally
-   * not final. The finality read itself failing propagates as a rejection, per the rule above.
+   * `unrecognized` feeds update recognition. The operator-selected
+   * `chain.finalityConfirmations` threshold controls when that verdict may be emitted (default 1,
+   * with the receipt block itself counting as confirmation 1). Canonicality is always checked by
+   * requiring the receipt's block hash to still occupy its height. Until both depth and hash match,
+   * the answer is `pending`. The finality read itself failing propagates as a rejection.
    */
   async resolvePublishTransaction(
     txHash: string,
@@ -586,11 +585,11 @@ export class PublishMethods extends EVMChainAdapterBase {
   }
 
   /**
-   * PR #2300 r1 — is this receipt's block both FINAL and still CANONICAL?
+   * Has this receipt reached the configured confirmation depth and remained canonical?
    *
-   * One `readProvider` callback, so the finalized frontier and the block-at-height read come from
+   * One `readProvider` callback, so the latest frontier and the block-at-height read come from
    * the SAME endpoint — the same pinning discipline as {@link readFinalizedChainProofSnapshot}.
-   * Depth alone is not the test: a receipt can sit at a finalized HEIGHT while the hash at that
+   * Depth alone is not the test: a receipt can sit at an eligible HEIGHT while the hash at that
    * height belongs to a different block (the receipt was fetched before the reorg settled), and a
    * verdict about the orphaned copy would be a verdict about a chain that no longer exists. A
    * throw propagates: the caller's contract is that lookup failures reject rather than resolve.
@@ -607,24 +606,12 @@ export class PublishMethods extends EVMChainAdapterBase {
     return (await this.readProviderRetryingNull(
       'publish receipt finality',
       async (provider) => {
-        const finalized = await provider.getBlock('finalized');
-        // PR #2300 r5 (3812123699) — an endpoint that cannot serve the finalized tag is an EMPTY
-        // view, not a verdict. Returning `false` here answered SUCCESSFULLY, so ordinary failover
-        // stopped and a capable fallback was never consulted: one incapable primary pinned every
-        // held job at `pending` forever. `null` lets the whole attempt move to the next endpoint;
-        // all-null collapses to false below, which is the honest "nobody could establish it".
-        if (!finalized) return null;
-        // r10 (3812960956) — a frontier BEHIND the receipt is this endpoint having nothing to say
-        // yet, not a verdict: finality is monotone, so an endpoint further ahead can settle what
-        // this one cannot. Answering `false` here made a lagging endpoint authoritative and held
-        // jobs at `pending` while a configured peer already had the proof. All endpoints coming up
-        // short collapses to `false` at the call site, which is the honest "not final anywhere".
-        if (finalized.number < receipt.blockNumber) return null;
+        const latestBlockNumber = await provider.getBlockNumber();
+        const requiredBlockNumber = receipt.blockNumber + this.finalityConfirmations - 1;
+        // A lagging endpoint has no verdict. Let a further-ahead configured
+        // endpoint establish the requested confirmation depth.
+        if (latestBlockNumber < requiredBlockNumber) return null;
         const atHeight = await provider.getBlock(receipt.blockNumber);
-        // r8 (3812585310) — the same empty-view rule as the frontier read above: an endpoint that
-        // cannot serve the receipt's (older, possibly pruned) block has no opinion, and answering
-        // `false` there would stop the walk and strand the job behind an incomplete primary.
-        // `false` is reserved for a block that IS served and whose hash does not match.
         if (!atHeight?.hash) return null;
         return atHeight.hash.toLowerCase() === receipt.blockHash.toLowerCase();
       },
@@ -634,6 +621,12 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   /**
    * GH#2270 PR-3 r4 — see {@link ChainAdapter.readFinalizedChainProofSnapshot}.
+   *
+   * The legacy method name says "finalized", but the snapshot now uses the same
+   * operator-selected `chain.finalityConfirmations` threshold as receipt proof.
+   * With the default value `1`, the latest block is the pinned proof block. A
+   * larger value pins `latest - confirmations + 1`. This keeps found-transaction
+   * proof and missing-transaction proof on one explicit finality policy.
    *
    * Everything happens inside ONE `readProvider` callback, so all three reads — the finalized
    * block identity, the account nonce and the minted state — are served by the SAME endpoint, and
@@ -657,16 +650,12 @@ export class PublishMethods extends EVMChainAdapterBase {
   ): Promise<FinalizedChainProofSnapshot | null> {
     await this.init();
     try {
-      // PR #2300 r3 (3811568998) — `readProviderRetryingNull`, not `readProvider`: an endpoint that
-      // cannot serve a finalized block identity is an EMPTY VIEW, not a failure, so the whole
-      // pinned snapshot moves to the next endpoint instead of stopping here. Synthesizing an error
-      // did not fail over at all — a plain `Error` carries no code, so the production classifier
-      // reads it as non-retryable and one endpoint without `finalized` support blocked every
-      // healthy fallback. `null` now means every endpoint came up empty, which the policy layer
-      // treats as inconclusive (the job holds), and the snapshot still never splices: each attempt
-      // reads the block, the nonce and the minted state from ONE provider or yields nothing.
+      // `readProviderRetryingNull`, not `readProvider`: an endpoint that cannot serve the
+      // configured confirmation-depth block is an EMPTY VIEW, so the whole pinned snapshot moves
+      // to the next endpoint. The callback still reads the block, nonce and minted state from ONE
+      // provider, so failover cannot splice facts from different chain views.
       return await this.readProviderRetryingNull(
-        'finalized chain-proof snapshot',
+        'confirmation-depth chain-proof snapshot',
         async (provider) => {
           // r19 (🔴 3816490449) — the endpoint's IDENTITY, before any of its facts are believed.
           // This snapshot authorizes release-by-absence, so a wrong-chain RPC reporting a spent
@@ -681,7 +670,10 @@ export class PublishMethods extends EVMChainAdapterBase {
             const network = await provider.getNetwork();
             if (BigInt(network.chainId) !== expectedChainId) return null;
           }
-          const block = await provider.getBlock('finalized');
+          const latestBlockNumber = await provider.getBlockNumber();
+          const proofBlockNumber = latestBlockNumber - this.finalityConfirmations + 1;
+          if (proofBlockNumber < 0) return null;
+          const block = await provider.getBlock(proofBlockNumber);
           if (!block || !block.hash) return null;
           const accountNonce = await provider.getTransactionCount(params.address, block.number);
           let kaMinted: boolean | null = null;

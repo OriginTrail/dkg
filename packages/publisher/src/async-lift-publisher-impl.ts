@@ -1285,6 +1285,10 @@ export class TripleStoreAsyncLiftPublisher
       return 'unsupported';
     }
 
+    // Chain proof is sufficient to reuse the signing wallet. Local lifecycle repair can retry
+    // independently; it must not serialize later transactions behind an already-confirmed nonce.
+    await this.releaseWalletLockForJob(job);
+
     // --- mutating phase: never raced, never abandoned ---
     // Nothing STARTS past the deadline; that is what bounds the pass in the common case.
     if (options?.signal?.aborted) return 'unresolved';
@@ -1300,13 +1304,8 @@ export class TripleStoreAsyncLiftPublisher
         signal: options?.signal,
       });
     } catch {
-      // Local lifecycle repair is blocked for now. The caller keeps the job tx-bearing.
-      //
-      // Holding the wallet lock here does not strand the wallet even if the repair never
-      // succeeds: the lock carries the claim lease taken at claim time (`claimLeaseExpiresAt`),
-      // `syncWalletLockForJob` re-writes that same fixed deadline rather than extending it, and
-      // `recover()` sweeps expired locks before it retries. The wallet is freed at the lease
-      // deadline; the job stays tx-bearing regardless.
+      // Local lifecycle repair is blocked for now. The caller keeps the job tx-bearing, but the
+      // confirmed transaction no longer owns the wallet lock.
       return 'repair-deferred';
     } finally {
       this.finalizationsInFlight.delete(job.jobId);
@@ -1324,7 +1323,6 @@ export class TripleStoreAsyncLiftPublisher
     // therefore completion, whatever the clock says by then.
 
     // --- persistence: past the deadline's reach, and deliberately so ---
-    await this.releaseWalletLockForJob(job);
     await this.writeJob(
       this.finalizeRecoveredJob(job, origin, resolved.inclusion, resolved.finalization),
       'recovered-finalize',

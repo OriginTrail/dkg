@@ -73,6 +73,7 @@ const capturedAckCollectorDeps: unknown[] = [];
 const capturedStorageACKHandlerConfigs: unknown[] = [];
 const capturedPublishCollectParams: unknown[] = [];
 const capturedUpdateCollectParams: unknown[] = [];
+let publishCollectHook: (() => Promise<{ acks: [] }>) | undefined;
 
 vi.mock('@origintrail-official/dkg-publisher', async () => {
   const actual = await vi.importActual<typeof import('@origintrail-official/dkg-publisher')>(
@@ -92,6 +93,7 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
       // tests can pin the agent-side validation boundary as well as deps.
       async collect(params: unknown): Promise<{ acks: [] }> {
         capturedPublishCollectParams.push(params);
+        if (publishCollectHook) return publishCollectHook();
         return { acks: [] };
       }
       async collectUpdate(params: unknown): Promise<{ acks: [] }> {
@@ -153,7 +155,11 @@ interface ProviderInternals {
   gossip: unknown;
   messenger: unknown;
   config: {
-    storageAckTiming: { handlerDeadlineMs: number; sendTimeoutMs: number };
+    storageAckTiming: {
+      handlerDeadlineMs: number;
+      sendTimeoutMs: number;
+      maxConcurrentCollections: number;
+    };
     ackHandlerDeadlineMs?: number;
     ackSendTimeoutMs?: number;
   };
@@ -200,6 +206,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     capturedStorageACKHandlerConfigs.length = 0;
     capturedPublishCollectParams.length = 0;
     capturedUpdateCollectParams.length = 0;
+    publishCollectHook = undefined;
   });
 
   afterEach(async () => {
@@ -351,6 +358,40 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       burnTokenIds: [],
       newMerkleLeafCount: 0,
     })).rejects.toThrow('zero is valid only for curated encrypted updates');
+  });
+
+  it('runs one StorageACK collection at a time by default', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const provider = boot.internals.createV10ACKProvider('test-cg') as V10ACKProviderObject;
+    let entered = 0;
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    publishCollectHook = async () => {
+      entered += 1;
+      if (entered === 1) await firstBlocked;
+      return { acks: [] };
+    };
+    const input = {
+      merkleRoot: new Uint8Array(32).fill(0x11),
+      contextGraphId: '42',
+      kaCount: 1,
+      rootEntities: [],
+      publicByteSize: 10n,
+      merkleLeafCount: 1,
+      ackMode: { kind: 'public' as const },
+    };
+
+    const first = provider(input);
+    await vi.waitFor(() => expect(entered).toBe(1));
+    const second = provider(input);
+    await Promise.resolve();
+    expect(entered).toBe(1);
+
+    releaseFirst();
+    await expect(first).resolves.toEqual([]);
+    await vi.waitFor(() => expect(entered).toBe(2));
+    await expect(second).resolves.toEqual([]);
   });
 
   it('forwards the complete graph-scoped publish envelope into ACK collection', async () => {
@@ -633,6 +674,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     expect(boot.internals.config.storageAckTiming).toEqual({
       handlerDeadlineMs: 55_000,
       sendTimeoutMs: 60_000,
+      maxConcurrentCollections: 1,
     });
     expect(boot.internals.config.ackHandlerDeadlineMs).toBeUndefined();
     expect(boot.internals.config.ackSendTimeoutMs).toBeUndefined();
@@ -665,6 +707,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     expect(internals.config.storageAckTiming).toEqual({
       handlerDeadlineMs: 0,
       sendTimeoutMs: 20_000,
+      maxConcurrentCollections: 1,
     });
     expect(sendRequestOwned).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 20_000,

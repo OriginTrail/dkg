@@ -35,6 +35,18 @@ export interface EVMAdapterBaseConfig {
   /** Overall submitted-transaction receipt deadline. Defaults to 10 minutes. */
   receiptTimeoutMs?: number;
   /**
+   * Canonical block confirmations required before a mined publish receipt may
+   * become terminal. The receipt block itself counts as confirmation 1.
+   * Defaults to 1.
+   */
+  finalityConfirmations?: number;
+  /**
+   * Optional operator cap for transaction fee-per-gas fields (wei). Applied to
+   * EIP-1559 maxFee/maxPriorityFee and legacy gasPrice after ethers populates a
+   * transaction. Omit for provider-selected fees.
+   */
+  maxFeePerGasWei?: bigint;
+  /**
    * TTL (ms) for re-resolving `RandomSampling` / `RandomSamplingStorage`
    * addresses from the Hub. Defaults to 5 minutes. Values `<= 0` are
    * treated as "use default" and intentionally NOT supported as a

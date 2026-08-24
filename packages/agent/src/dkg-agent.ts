@@ -693,6 +693,7 @@ function constructConfiguredChainAdapter(
       tokenAddress: config.chainConfig.tokenAddress,
       chainId: config.chainConfig.chainId,
       receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
+      maxFeePerGasWei: config.chainConfig.maxFeePerGasWei,
       approvalPolicy: config.chainConfig.approvalPolicy,
       cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
       minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,
@@ -749,6 +750,45 @@ export class DKGAgent extends DKGAgentBase {
   private chainContextGraphScanFailure:
     | { signature: string; count: number }
     | undefined;
+  /**
+   * StorageACK handlers perform store verification. A wallet pool can start
+   * several publishes at once, but sending every ACK round at once overloads
+   * small public core nodes before any chain transaction is submitted. Keep a
+   * node-local FIFO gate for ACK rounds. Chain submission remains concurrent.
+   */
+  private activeStorageACKCollections = 0;
+  private readonly storageACKCollectionWaiters: Array<() => void> = [];
+
+  private async acquireStorageACKCollectionSlot(): Promise<void> {
+    const limit = this.config.storageAckTiming.maxConcurrentCollections;
+    if (this.activeStorageACKCollections < limit) {
+      this.activeStorageACKCollections += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.storageACKCollectionWaiters.push(resolve);
+    });
+  }
+
+  private releaseStorageACKCollectionSlot(): void {
+    const next = this.storageACKCollectionWaiters.shift();
+    if (next) {
+      // Transfer the active slot directly to the oldest waiter. The active
+      // count stays unchanged, so a new caller cannot take the same slot.
+      next();
+      return;
+    }
+    this.activeStorageACKCollections = Math.max(0, this.activeStorageACKCollections - 1);
+  }
+
+  private async withStorageACKCollectionSlot<T>(work: () => Promise<T>): Promise<T> {
+    await this.acquireStorageACKCollectionSlot();
+    try {
+      return await work();
+    } finally {
+      this.releaseStorageACKCollectionSlot();
+    }
+  }
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
     const contextGraphSubscriptionRehydrationEnabled =
@@ -2316,7 +2356,7 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await collector.collect({
+      const result = await this.withStorageACKCollectionSlot(() => collector.collect({
         merkleRoot: params.merkleRoot,
         contextGraphId: cgIdBigInt,
         contextGraphIdStr: params.contextGraphId,
@@ -2344,7 +2384,7 @@ export class DKGAgent extends DKGAgentBase {
         accessPolicy: params.accessPolicy,
         allowedPeers: params.allowedPeers,
         ackMode: params.ackMode,
-      });
+      }));
       return result.acks;
     };
   }
@@ -2483,7 +2523,7 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await collector.collectUpdate({
+      const result = await this.withStorageACKCollectionSlot(() => collector.collectUpdate({
         kaId: params.kaId,
         contextGraphId: cgIdBigInt,
         preUpdateMerkleRootCount: params.preUpdateMerkleRootCount,
@@ -2511,7 +2551,7 @@ export class DKGAgent extends DKGAgentBase {
         publicTripleCount: params.publicTripleCount,
         privateMerkleRoot: params.privateMerkleRoot,
         privateTripleCount: params.privateTripleCount,
-      });
+      }));
       return result.acks;
     };
   }

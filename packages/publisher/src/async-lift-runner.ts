@@ -10,6 +10,8 @@ export interface AsyncLiftRunnerConfig {
   readonly pollIntervalMs?: number;
   readonly errorBackoffMs?: number;
   readonly recoveryIntervalMs?: number;
+  /** Start recovery, but do not claim accepted jobs until an operator restarts unpaused. */
+  readonly startPaused?: boolean;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly onError?: (error: unknown) => void | Promise<void>;
   readonly hasIncludedRecoveryResolver?: boolean;
@@ -33,6 +35,9 @@ export class AsyncLiftRunner {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.errorBackoffMs = config.errorBackoffMs ?? 1000;
     this.recoveryIntervalMs = config.recoveryIntervalMs ?? 60_000;
+    if (!Number.isFinite(this.recoveryIntervalMs) || this.recoveryIntervalMs <= 0) {
+      throw new Error('AsyncLiftRunner recoveryIntervalMs must be a positive finite number');
+    }
     this.sleep = config.sleep ?? defaultSleep;
     this.onError = config.onError;
   }
@@ -47,6 +52,9 @@ export class AsyncLiftRunner {
 
     this.stopped = false;
     try {
+      if (this.config.startPaused === true) {
+        await this.config.publisher.pause();
+      }
       await this.config.publisher.recover();
       this.lastRecoveryAt = Date.now();
       if (!this.config.hasIncludedRecoveryResolver) {

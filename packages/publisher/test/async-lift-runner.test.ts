@@ -38,6 +38,39 @@ function createPublisher(overrides: Partial<AsyncLiftPublisher> = {}): AsyncLift
 }
 
 describe('AsyncLiftRunner', () => {
+  it('can recover in paused maintenance mode before wallet processing starts', async () => {
+    const order: string[] = [];
+    let paused = false;
+    let runner!: AsyncLiftRunner;
+    const publisher = createPublisher({
+      pause: async () => {
+        paused = true;
+        order.push('pause');
+      },
+      recover: async () => {
+        order.push('recover');
+        return 0;
+      },
+      processNext: async () => {
+        order.push(paused ? 'process-paused' : 'process-active');
+        return null;
+      },
+    } as any);
+
+    runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      startPaused: true,
+      sleep: async () => { void runner.stop(); },
+    });
+
+    await runner.start();
+    await waitFor(() => expect(order).toContain('process-paused'));
+    await runner.stop();
+
+    expect(order.slice(0, 3)).toEqual(['pause', 'recover', 'process-paused']);
+  });
+
   it('runs recovery before processing wallets', async () => {
     const order: string[] = [];
     const publisher = createPublisher({

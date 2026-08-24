@@ -307,12 +307,17 @@ export async function startOxigraphServer(
         signal: AbortSignal.timeout(readyIntervalMs + 1_000),
       });
       if (!res.ok) return null;
-      const listenerPid = await launchStrategy.resolveListenerPid(
+      const resolvedListenerPid = await launchStrategy.resolveListenerPid(
         c,
         port,
         host,
         io.findListenOwnerPid,
       );
+      // macOS lsof can briefly omit the owner row for a new listener even after the child has
+      // answered the health request. The managed process is the direct Oxigraph child on macOS,
+      // so its live PID is the verified owner fallback on this platform.
+      const listenerPid = resolvedListenerPid
+        ?? (process.platform === 'darwin' ? c.pid ?? null : null);
       return listenerPid !== null && childAlive(c) ? listenerPid : null;
     } catch {
       return null;

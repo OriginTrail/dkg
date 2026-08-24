@@ -1176,9 +1176,9 @@ export interface ChainAdapter {
   ): Promise<PublishTransactionResolution>;
 
   /**
-   * PR #2300 r2 — is this receipt's block both FINAL and still CANONICAL? Promoted from an
-   * adapter-internal gate to a capability because update recognition (CLI-side) must establish
-   * the same finality before treating a verified update as fact: `resolvePublishTransaction`
+   * Has this receipt reached the adapter's configured confirmation depth and remained canonical?
+   * Promoted from an adapter-internal gate to a capability because update recognition (CLI-side)
+   * must establish the same threshold before treating a verified update as fact: `resolvePublishTransaction`
    * consumes it for its mined verdicts, and `verifyKAUpdate`-based recognition consumes it for
    * the same reason — a merely-mined update receipt can be reorged onto a chain where the same
    * signed transaction lands differently.
@@ -1206,10 +1206,11 @@ export interface ChainAdapter {
    * capabilities it superseded are deleted (they never shipped), and `kaId` is REQUIRED because
    * the decision this feeds is only ever taken over a pinned identity.
    *
-   * `finalized` is load-bearing, not an optimisation: the nonce half proves a recorded
-   * transaction can NEVER mine (its slot is behind the finalized frontier), and read at `latest`
-   * that conclusion can be reorged away. The minted half asks by IDENTITY, which is what closes
-   * the same-calldata-replacement hole nonce consumption cannot see. `kaMinted` is `false` only
+   * The adapter uses its configured confirmation count for this pinned snapshot. The default is
+   * one block. A node owner can select a larger count when a deeper reorg margin is required. The
+   * nonce and minted reads still use one block on one provider. The minted half asks by IDENTITY,
+   * which is what closes the same-calldata-replacement hole nonce consumption cannot see.
+   * `kaMinted` is `false` only
    * for the one revert shape that means "this token does not exist AT the pinned block", `null`
    * for every ambiguity. A `null` RESULT means no pinned pair could be produced on any endpoint,
    * and the caller must treat the absence question as unanswerable rather than fall back to
@@ -1838,6 +1839,9 @@ export interface ChainAdapter {
    * a caller deciding "is this recovered transaction still current" must not mix a root from one
    * view with an author, a publisher or a block height from another, and a healthy-but-lagging
    * endpoint answering first would make an old transaction look current.
+   *
+   * The pinned height uses `chain.finalityConfirmations`: confirmation 1 is the current head,
+   * and larger values pin `head - confirmations + 1`.
    */
   readKnowledgeAssetVersionSnapshot?(
     kaId: bigint,

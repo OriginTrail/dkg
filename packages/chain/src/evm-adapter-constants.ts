@@ -102,6 +102,22 @@ export const RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
 
 export const RPC_RECEIPT_TIMEOUT_MS = 600_000;
 export const MIN_RPC_RECEIPT_TIMEOUT_MS = 1_000;
+export const DEFAULT_FINALITY_CONFIRMATIONS = 1;
+
+/**
+ * Normalize an operator-selected mined-receipt confirmation depth.
+ *
+ * Standard EVM semantics apply: the receipt's own canonical block is
+ * confirmation 1, so a value of 1 makes the receipt eligible immediately
+ * after inclusion. An omitted value defaults to 1.
+ */
+export function resolveFinalityConfirmations(value: unknown): number {
+  if (value === undefined) return DEFAULT_FINALITY_CONFIRMATIONS;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new Error('chain.finalityConfirmations must be an integer >= 1');
+  }
+  return value;
+}
 
 /** Default an omitted deadline, but reject every explicitly invalid value. */
 export function resolveReceiptTimeoutMs(value: unknown): number {
@@ -128,6 +144,19 @@ export function resolveReceiptTimeoutMs(value: unknown): number {
 export const RPC_ENDPOINT_SET_RETRIES = 1;
 
 export const RPC_ENDPOINT_SET_RETRY_BACKOFF_MS = 500;
+
+/**
+ * Bounded retries for the PRE-SIGN transaction-preparation phase after every
+ * configured RPC endpoint reports a transient transport or throttle error.
+ * No nonce is reserved and no transaction exists during this loop, so a full
+ * endpoint-set retry is safe. The exponential delay lets shared public RPC
+ * quotas reset without exposing a terminal publisher failure.
+ */
+export const RPC_PREPARATION_ENDPOINT_SET_RETRIES = 8;
+
+export const RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS = 2_000;
+
+export const RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS = 30_000;
 
 export const ADMIN_KEY_PURPOSE = 1;
 

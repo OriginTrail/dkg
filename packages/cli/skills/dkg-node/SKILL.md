@@ -898,12 +898,16 @@ chain:
   type: evm
   rpcUrl: https://base.llamarpc.com
   hubAddress: '0x...'
+  finalityConfirmations: 1          # receipt block counts as confirmation 1 (default)
   approvalPolicy:
     mode: per-publish                # 'per-publish' | 'replenishing' | 'unlimited'
     # `replenishing` mode only:
     targetAllowance: '1000000000000000000000'   # decimal wei-TRAC string (1000 TRAC = 10^21)
     refillBelowFraction: 0.1                     # refill when current < target × this (default 10%)
 ```
+
+`finalityConfirmations` controls when a mined publish receipt becomes terminal and its publisher wallet may take another queued job. Standard EVM confirmation counting applies: `1` accepts the receipt's own block after verifying that its hash is canonical; `2` waits for one successor, and so on. The default is `1`.
+Ambiguous recovery where a transaction and receipt are both absent still uses the protocol-finalized chain snapshot before releasing or replacing a nonce.
 
 `targetAllowance` is a string because YAML/JSON can't carry bigints natively — the daemon parses it into a bigint at startup, fails fast on garbage input. `refillBelowFraction` clamps to `[0, 1]`; a value of `1` means "refill on every publish" (defeats the policy) and `0` means "never refill until the publish floor (1 wei-TRAC) is breached" (which on a zero-cost CG would mean approve once then never again).
 

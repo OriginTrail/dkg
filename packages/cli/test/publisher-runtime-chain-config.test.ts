@@ -11,6 +11,8 @@ describe('publisher runtime chain config projection', () => {
       tokenAddress: '0x2222222222222222222222222222222222222222',
       chainId: 'evm:31337',
       receiptTimeoutMs: 1_200_000,
+      finalityConfirmations: 1,
+      maxFeePerGasWei: 100_000_000n,
       approvalPolicy: {
         mode: 'replenishing',
         targetAllowance: '123456789',
@@ -29,6 +31,8 @@ describe('publisher runtime chain config projection', () => {
       tokenAddress: '0x2222222222222222222222222222222222222222',
       chainId: 'evm:31337',
       receiptTimeoutMs: 1_200_000,
+      finalityConfirmations: 1,
+      maxFeePerGasWei: 100_000_000n,
       approvalPolicy: {
         mode: 'replenishing',
         targetAllowance: 123456789n,

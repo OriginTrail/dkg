@@ -96,12 +96,47 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect((await p.getStatus(validated))?.status).toBe('validated');
   });
 
+  it('lets only the admission owner explicitly clear one pre-broadcast validated job', async () => {
+    const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
+    const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
+    const p = createPublisher();
+    const validated = await driveToValidated(p, {}, { admittedByAgentAddress: OWNER });
+
+    expect(await p.clearTerminalJob(validated, {
+      pendingTransactionOverride: { requestedBy: OTHER },
+    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect((await p.getStatus(validated))?.status).toBe('validated');
+
+    expect(await p.clearTerminalJob(validated, {
+      pendingTransactionOverride: { requestedBy: OWNER },
+    })).toEqual({ outcome: 'cleared' });
+    expect(await p.getStatus(validated)).toBeNull();
+  });
+
   it('rejects a broadcast job as nonterminal without mutation', async () => {
     const p = createPublisher();
     const broadcast = await driveToValidated(p);
     await p.update(broadcast, 'broadcast', { broadcast: bx });
     expect(await p.clearTerminalJob(broadcast)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     expect((await p.getStatus(broadcast))?.status).toBe('broadcast');
+  });
+
+  it('lets only the admission owner explicitly clear one broadcast job', async () => {
+    const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
+    const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
+    const p = createPublisher();
+    const broadcast = await driveToValidated(p, {}, { admittedByAgentAddress: OWNER });
+    await p.update(broadcast, 'broadcast', { broadcast: bx });
+
+    expect(await p.clearTerminalJob(broadcast, {
+      pendingTransactionOverride: { requestedBy: OTHER },
+    })).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    expect((await p.getStatus(broadcast))?.status).toBe('broadcast');
+
+    expect(await p.clearTerminalJob(broadcast, {
+      pendingTransactionOverride: { requestedBy: OWNER },
+    })).toEqual({ outcome: 'cleared' });
+    expect(await p.getStatus(broadcast)).toBeNull();
   });
 
   it('CLEARS a retry_recovery failed job by id — the targeted override is the operator exit', async () => {

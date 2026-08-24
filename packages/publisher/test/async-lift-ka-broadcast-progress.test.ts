@@ -347,7 +347,7 @@ describe('KA async VM publish broadcast progress', () => {
     expect(finalized).toHaveLength(2);
   });
 
-  it('keeps confirmed KA jobs tx-bearing while local lifecycle recovery is blocked', async () => {
+  it('keeps confirmed KA jobs tx-bearing but releases the wallet while local recovery is blocked', async () => {
     const txHash = `0x${'bb'.repeat(32)}` as `0x${string}`;
     const request = kaVmPublishRequest();
     const kaId = request.seal.reservedKaId!;
@@ -409,7 +409,7 @@ describe('KA async VM publish broadcast progress', () => {
     }`);
     expect(lock.type).toBe('bindings');
     if (lock.type !== 'bindings') return;
-    expect(lock.bindings).toEqual([{ job: jobSubject(jobId) }]);
+    expect(lock.bindings).toHaveLength(0);
   });
 
   it('keeps the legacy named-KA executor and preflight config API working', async () => {
