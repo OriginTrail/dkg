@@ -1579,7 +1579,8 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const signedTx = '0x02f86c0180843b9aca0084773594008252089400000000000000000000000000000000000000018080c001a0' +
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     const txHash = '0x' + '11'.repeat(32);
-    const receipt = { hash: txHash, blockNumber: 45, status: 1, logs: [] };
+    const blockHash = '0x' + '45'.repeat(32);
+    const receipt = { hash: txHash, blockNumber: 45, blockHash, status: 1, logs: [] };
     const primary = {
       broadcastTransaction: recorder(async (_raw: string) => {
         const err = new Error('429 too many requests');
@@ -1587,10 +1588,14 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
         throw err;
       }),
       getTransactionReceipt: recorder(async () => null),
+      getBlockNumber: recorder(async () => 45),
+      getBlock: recorder(async () => ({ number: 45, hash: blockHash })),
     };
     const backup = {
       broadcastTransaction: recorder(async (_raw: string) => ({ hash: txHash })),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 45),
+      getBlock: recorder(async () => ({ number: 45, hash: blockHash })),
     };
     (a as any).providers = [primary, backup];
 
@@ -1812,16 +1817,21 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }));
     const signedTx = '0xdeadbeef';
     const txHash = '0x' + '22'.repeat(32);
-    const receipt = { hash: txHash, blockNumber: 46, status: 1, logs: [] };
+    const blockHash = '0x' + '46'.repeat(32);
+    const receipt = { hash: txHash, blockNumber: 46, blockHash, status: 1, logs: [] };
     const primary = {
       broadcastTransaction: recorder(async () => {
         throw new Error('already known');
       }),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 46),
+      getBlock: recorder(async () => ({ number: 46, hash: blockHash })),
     };
     const backup = {
       broadcastTransaction: recorder(async () => ({ hash: txHash })),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 46),
+      getBlock: recorder(async () => ({ number: 46, hash: blockHash })),
     };
     (a as any).providers = [primary, backup];
 
@@ -1867,14 +1877,19 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }));
     const signedTx = '0xdeadbeef';
     const txHash = '0x' + '33'.repeat(32);
-    const receipt = { hash: txHash, blockNumber: 47, status: 0, logs: [] };
+    const blockHash = '0x' + '47'.repeat(32);
+    const receipt = { hash: txHash, blockNumber: 47, blockHash, status: 0, logs: [] };
     const primary = {
       broadcastTransaction: recorder(async () => ({ hash: txHash })),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 47),
+      getBlock: recorder(async () => ({ number: 47, hash: blockHash })),
     };
     const backup = {
       broadcastTransaction: recorder(async () => ({ hash: txHash })),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 47),
+      getBlock: recorder(async () => ({ number: 47, hash: blockHash })),
     };
     (a as any).providers = [primary, backup];
 

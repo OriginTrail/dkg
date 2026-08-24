@@ -46,6 +46,7 @@ import type {
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
   StorageAckTiming,
+  StorageAckTimingInput,
   WorkspacePublicSnapshotStore,
   CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
@@ -1636,7 +1637,7 @@ export interface DKGAgentConfig {
    * legacy loose aliases below so the handler deadline and publisher send
    * timeout are treated as one invariant.
    */
-  storageAckTiming?: StorageAckTiming;
+  storageAckTiming?: StorageAckTimingInput;
   /**
    * @deprecated Use `storageAckTiming.handlerDeadlineMs`. Kept as a
    * compatibility alias and normalized by `DKGAgent.create`.

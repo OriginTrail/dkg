@@ -37,7 +37,6 @@ import { errorMessage } from './evm-adapter-errors.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import {
   confirmedStateBlockAtHead,
-  requiredHeadBlockForReceipt,
 } from './evm-adapter-constants.js';
 
 type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
@@ -586,44 +585,6 @@ export class PublishMethods extends EVMChainAdapterBase {
     // separates a transaction the node is holding from one it has never seen.
     const transaction = await this.getTransactionWithFailover(txHash, options);
     return transaction ? { status: 'pending' } : { status: 'not-found' };
-  }
-
-  /**
-   * Has this receipt reached the configured confirmation depth and remained canonical?
-   *
-   * One `readProvider` callback, so the latest frontier and the block-at-height read come from
-   * the SAME endpoint — the same pinning discipline as {@link readFinalizedChainProofSnapshot}.
-   * Depth alone is not the test: a receipt can sit at an eligible HEIGHT while the hash at that
-   * height belongs to a different block (the receipt was fetched before the reorg settled), and a
-   * verdict about the orphaned copy would be a verdict about a chain that no longer exists. A
-   * throw propagates: the caller's contract is that lookup failures reject rather than resolve.
-   *
-   * PR #2300 r2 — PUBLIC now (see {@link ChainAdapter.isReceiptBlockFinalAndCanonical}): update
-   * recognition consumes the same gate before treating a verified update as fact, so the
-   * primitive is shared rather than duplicated. `txHash` on the receipt is advisory here — block
-   * identity is the whole truth for a real chain.
-   */
-  async isReceiptBlockFinalAndCanonical(
-    receipt: { txHash?: string; blockNumber: number; blockHash: string },
-    options: ChainReadOptions = {},
-  ): Promise<boolean> {
-    return (await this.readProviderRetryingNull(
-      'publish receipt finality',
-      async (provider) => {
-        const latestBlockNumber = await provider.getBlockNumber();
-        const requiredBlockNumber = requiredHeadBlockForReceipt(
-          receipt.blockNumber,
-          this.finalityConfirmations,
-        );
-        // A lagging endpoint has no verdict. Let a further-ahead configured
-        // endpoint establish the requested confirmation depth.
-        if (latestBlockNumber < requiredBlockNumber) return null;
-        const atHeight = await provider.getBlock(receipt.blockNumber);
-        if (!atHeight?.hash) return null;
-        return atHeight.hash.toLowerCase() === receipt.blockHash.toLowerCase();
-      },
-      { signal: options.signal },
-    )) ?? false;
   }
 
   /**

@@ -44,7 +44,7 @@ import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cu
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
@@ -1574,11 +1574,38 @@ export class EVMChainAdapterBase {
       receiptTimeoutMs: this.receiptTimeoutMs,
       pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
+      isReceiptEligible: (receipt) => this.isReceiptBlockFinalAndCanonical(receipt),
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
         `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
         (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
     });
+  }
+
+  /**
+   * Return true only when the receipt has the configured canonical depth.
+   * The head and block-hash reads use one provider, so a reorg cannot splice
+   * facts from different endpoints into a successful result.
+   */
+  async isReceiptBlockFinalAndCanonical(
+    receipt: { txHash?: string; blockNumber: number; blockHash: string },
+    options: ChainReadOptions = {},
+  ): Promise<boolean> {
+    return (await this.readProviderRetryingNull(
+      'publish receipt finality',
+      async (provider) => {
+        const latestBlockNumber = await provider.getBlockNumber();
+        const requiredBlockNumber = requiredHeadBlockForReceipt(
+          receipt.blockNumber,
+          this.finalityConfirmations,
+        );
+        if (latestBlockNumber < requiredBlockNumber) return null;
+        const atHeight = await provider.getBlock(receipt.blockNumber);
+        if (!atHeight?.hash) return null;
+        return atHeight.hash.toLowerCase() === receipt.blockHash.toLowerCase();
+      },
+      { signal: options.signal },
+    )) ?? false;
   }
 
   protected async signPopulatedTransaction(

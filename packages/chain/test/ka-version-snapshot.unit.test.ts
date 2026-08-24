@@ -136,6 +136,16 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     expect(reads.every((read) => read.blockTag === 498)).toBe(true);
   });
 
+  it('returns no snapshot before the chain has the configured confirmation depth', async () => {
+    const { adapter, reads } = adapterOver(
+      [{ blockNumber: 1, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n }],
+      { finalityConfirmations: 3 },
+    );
+
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+    expect(reads).toEqual([]);
+  });
+
   it('takes the MOST ADVANCED endpoint, not the first that answers [r11]', async () => {
     // A healthy endpoint can still be behind. First-success ordering would hand recovery a
     // perfectly coherent but stale view — {root A, count 1} while the chain is at A -> B -> A —

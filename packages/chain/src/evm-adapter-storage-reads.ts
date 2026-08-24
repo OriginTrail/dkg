@@ -146,7 +146,8 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       const blockNumber = confirmedStateBlockAtHead(
         latestBlockNumber,
         this.finalityConfirmations,
-      ) ?? 0;
+      );
+      if (blockNumber === null) return null;
       const bound = this.rebindContract(kas as Contract, provider);
       const at = { blockTag: blockNumber };
       const [latestRoot, context, latestAuthor, latestPublisher] = await Promise.all([

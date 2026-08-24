@@ -269,7 +269,7 @@ describe('DKGAgent ACK signer gating', () => {
       expect(agent).toBeInstanceOf(DKGAgent);
     });
 
-    it('forwards chainConfig finalityConfirmations to the constructed EVM adapter', async () => {
+    it('forwards chain finality and fee policy to the constructed EVM adapter', async () => {
       const operational = ethers.Wallet.createRandom();
       const agent = await DKGAgent.create({
         name: 'ConfiguredFinalityDepth',
@@ -280,12 +280,14 @@ describe('DKGAgent ACK signer gating', () => {
           hubAddress: ethers.ZeroAddress,
           operationalKeys: [operational.privateKey],
           finalityConfirmations: 3,
+          maxFeePerGasWei: 100n,
         },
         nodeRole: 'edge',
       });
 
       expect((agent as any).chain).toBeInstanceOf(EVMChainAdapter);
       expect((agent as any).chain.finalityConfirmations).toBe(3);
+      expect((agent as any).chain.maxFeePerGasWei).toBe(100n);
     });
 
 
