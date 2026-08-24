@@ -71,6 +71,7 @@ import {
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
+import { withKeyedLocks } from './keyed-lock.js';
 import {
   isDefinitivePreAcceptanceSendFailure,
   isPermanentAuthorCapabilityFailure,
@@ -2066,7 +2067,10 @@ export class TripleStoreAsyncLiftPublisher
     // space/'>'/'{' could break the query out of `<…>` and surface as a 500/injection
     // instead of the bounded outcome.
     if (!isSafeJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
-    return this.withClaimLock(async () => {
+    // Lock order is job transition, then global claim. Live transaction
+    // reconciliation uses the first lock. Admission, retry, and clear use the
+    // second lock. No code acquires them in the reverse order.
+    return this.withJobTransitionLock(jobId, () => this.withClaimLock(async () => {
       await this.ensureGraph();
       const rows = expectBindings(
         await this.store.query(
@@ -2102,7 +2106,7 @@ export class TripleStoreAsyncLiftPublisher
       await this.releaseWalletLockForJob(job);
       await this.deleteJob(jobId);
       return { outcome: 'cleared' };
-    });
+    }));
   }
 
   private async ensureGraph(): Promise<void> {
@@ -2818,22 +2822,7 @@ export class TripleStoreAsyncLiftPublisher
   /** Serialize read-modify-write transitions for one persisted job. */
   private async withJobTransitionLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
     const key = `${this.graphUri}\u0000${jobId}`;
-    const previous = TripleStoreAsyncLiftPublisher.jobTransitionQueues.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    TripleStoreAsyncLiftPublisher.jobTransitionQueues.set(key, next);
-
-    await previous;
-    try {
-      return await fn();
-    } finally {
-      release();
-      if (TripleStoreAsyncLiftPublisher.jobTransitionQueues.get(key) === next) {
-        TripleStoreAsyncLiftPublisher.jobTransitionQueues.delete(key);
-      }
-    }
+    return withKeyedLocks(TripleStoreAsyncLiftPublisher.jobTransitionQueues, [key], fn);
   }
 
   private mergeJob(current: LiftJob, status: LiftJobState, data: Partial<LiftJob>): LiftJob {

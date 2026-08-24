@@ -139,6 +139,40 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect(await p.getStatus(broadcast)).toBeNull();
   });
 
+  it('serializes a targeted broadcast clear with live chain reconciliation', async () => {
+    const OWNER = '0xCCcCCc00000000000000000000000000000000Cc';
+    let enterResolver!: () => void;
+    let releaseResolver!: () => void;
+    const resolverEntered = new Promise<void>((resolve) => { enterResolver = resolve; });
+    const resolverGate = new Promise<void>((resolve) => { releaseResolver = resolve; });
+    const p = createPublisher({
+      chainProofResolver: async () => {
+        enterResolver();
+        await resolverGate;
+        return { status: 'reverted' };
+      },
+    });
+    const broadcast = await driveToValidated(p, {}, { admittedByAgentAddress: OWNER });
+    await p.update(broadcast, 'broadcast', { broadcast: bx });
+
+    const reconciling = p.reconcileTransactions();
+    await resolverEntered;
+    let clearSettled = false;
+    const clearing = p.clearTerminalJob(broadcast, {
+      pendingTransactionOverride: { requestedBy: OWNER },
+    }).then((outcome) => {
+      clearSettled = true;
+      return outcome;
+    });
+    await Promise.resolve();
+    expect(clearSettled).toBe(false);
+
+    releaseResolver();
+    expect(await reconciling).toBe(1);
+    expect(await clearing).toEqual({ outcome: 'cleared' });
+    expect(await p.getStatus(broadcast)).toBeNull();
+  });
+
   it('CLEARS a retry_recovery failed job by id — the targeted override is the operator exit', async () => {
     // GH#2270 follow-up (🔴 3822987650) — this row previously asserted the opposite, because the
     // by-id clear shared the BULK predicate, which treats a retry_recovery failure as

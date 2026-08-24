@@ -29,6 +29,8 @@ import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import {
   DEFAULT_FINALITY_CONFIRMATIONS,
+  confirmedStateBlockAtHead,
+  requiredHeadBlockForReceipt,
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
   RPC_READ_STALL_TIMEOUT_MS,
@@ -69,6 +71,13 @@ it('accepts an explicit confirmation depth and rejects invalid values', () => {
       /finalityConfirmations must be an integer >= 1/,
     );
   }
+});
+
+it('uses one confirmation-depth calculation for receipts and pinned state', () => {
+  expect(requiredHeadBlockForReceipt(100, 1)).toBe(100);
+  expect(requiredHeadBlockForReceipt(100, 7)).toBe(106);
+  expect(confirmedStateBlockAtHead(106, 7)).toBe(100);
+  expect(confirmedStateBlockAtHead(5, 7)).toBeNull();
 });
 
 it('caps populated transaction fee fields when the operator sets maxFeePerGasWei', async () => {

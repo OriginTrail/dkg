@@ -39,6 +39,36 @@ function createPublisher(overrides: Partial<AsyncLiftPublisher> = {}): AsyncLift
 }
 
 describe('AsyncLiftRunner', () => {
+  it('rejects a recovery interval above the Node.js timer limit', () => {
+    expect(() => new AsyncLiftRunner({
+      publisher: createPublisher(),
+      walletIds: ['wallet-1'],
+      recoveryIntervalMs: 2_147_483_648,
+    })).toThrow(/1 through 2147483647 ms/);
+  });
+
+  it('supports the publisher contract from before dedicated reconciliation was added', async () => {
+    let recoverCalls = 0;
+    const publisher = createPublisher({
+      recover: async () => {
+        recoverCalls += 1;
+        return 0;
+      },
+    });
+    delete publisher.reconcileTransactions;
+    delete publisher.drainDetachedExecutions;
+
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 5,
+    });
+    await runner.start();
+    await waitFor(() => expect(recoverCalls).toBeGreaterThanOrEqual(2));
+    await expect(runner.stop()).resolves.toBeUndefined();
+  });
+
   it('can recover in paused maintenance mode before wallet processing starts', async () => {
     const order: string[] = [];
     let paused = false;

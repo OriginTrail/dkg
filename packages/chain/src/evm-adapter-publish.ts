@@ -35,6 +35,10 @@ import {
 } from './publisher-plan.js';
 import { errorMessage } from './evm-adapter-errors.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
+import {
+  confirmedStateBlockAtHead,
+  requiredHeadBlockForReceipt,
+} from './evm-adapter-constants.js';
 
 type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
 
@@ -607,7 +611,10 @@ export class PublishMethods extends EVMChainAdapterBase {
       'publish receipt finality',
       async (provider) => {
         const latestBlockNumber = await provider.getBlockNumber();
-        const requiredBlockNumber = receipt.blockNumber + this.finalityConfirmations - 1;
+        const requiredBlockNumber = requiredHeadBlockForReceipt(
+          receipt.blockNumber,
+          this.finalityConfirmations,
+        );
         // A lagging endpoint has no verdict. Let a further-ahead configured
         // endpoint establish the requested confirmation depth.
         if (latestBlockNumber < requiredBlockNumber) return null;
@@ -671,8 +678,11 @@ export class PublishMethods extends EVMChainAdapterBase {
             if (BigInt(network.chainId) !== expectedChainId) return null;
           }
           const latestBlockNumber = await provider.getBlockNumber();
-          const proofBlockNumber = latestBlockNumber - this.finalityConfirmations + 1;
-          if (proofBlockNumber < 0) return null;
+          const proofBlockNumber = confirmedStateBlockAtHead(
+            latestBlockNumber,
+            this.finalityConfirmations,
+          );
+          if (proofBlockNumber === null) return null;
           const block = await provider.getBlock(proofBlockNumber);
           if (!block || !block.hash) return null;
           const accountNonce = await provider.getTransactionCount(params.address, block.number);

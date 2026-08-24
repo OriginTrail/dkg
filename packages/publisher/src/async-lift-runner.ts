@@ -1,4 +1,5 @@
 import type { AsyncLiftPublisher } from './async-lift-publisher.js';
+import { assertNodeTimerDelayMs } from '@origintrail-official/dkg-core';
 
 export interface AsyncLiftRunnerConfig {
   readonly publisher: AsyncLiftPublisher;
@@ -31,9 +32,7 @@ export class AsyncLiftRunner {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.errorBackoffMs = config.errorBackoffMs ?? 1000;
     this.recoveryIntervalMs = config.recoveryIntervalMs ?? 60_000;
-    if (!Number.isFinite(this.recoveryIntervalMs) || this.recoveryIntervalMs <= 0) {
-      throw new Error('AsyncLiftRunner recoveryIntervalMs must be a positive finite number');
-    }
+    assertNodeTimerDelayMs(this.recoveryIntervalMs, 'AsyncLiftRunner recoveryIntervalMs');
     this.sleep = config.sleep ?? defaultSleep;
     this.onError = config.onError;
   }
@@ -79,7 +78,7 @@ export class AsyncLiftRunner {
     }
     await this.running;
     await this.recoveryInFlight;
-    await this.config.publisher.drainDetachedExecutions();
+    await this.config.publisher.drainDetachedExecutions?.();
   }
 
   private async walletLoop(walletId: string): Promise<void> {
@@ -118,7 +117,7 @@ export class AsyncLiftRunner {
   private startTransactionReconciliation(): void {
     if (this.stopped || this.recoveryInFlight) return;
     this.lastRecoveryAttemptAt = Date.now();
-    const recovery = this.config.publisher.reconcileTransactions()
+    const recovery = (this.config.publisher.reconcileTransactions?.() ?? this.config.publisher.recover())
       .then(() => {
         this.lastRecoveryAt = Date.now();
       })

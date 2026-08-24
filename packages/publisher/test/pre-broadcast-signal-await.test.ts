@@ -57,6 +57,7 @@ class SignalRecordingChain extends MockChainAdapter {
 
   override async updateKnowledgeCollectionV10(params: V10UpdateKAParams): Promise<TxResult> {
     await params.onBroadcast?.({ txHash: TX_HASH, nonce: NONCE });
+    await params.onBroadcastAccepted?.({ txHash: TX_HASH, nonce: NONCE });
     this.hookSettled = true;
     this.sent = true;
     return { success: true, hash: TX_HASH, blockNumber: 1 } as TxResult;
@@ -90,6 +91,21 @@ async function publisherOver(chain: SignalRecordingChain): Promise<{
 }
 
 describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
+  it('forwards RPC acceptance for an update with its operation kind', async () => {
+    const chain = new SignalRecordingChain();
+    const { publisher, quads, precomputedUpdateAttestation } = await publisherOver(chain);
+    const received: PreBroadcastSignal[] = [];
+
+    await publisher.update(KA_ID, {
+      contextGraphId: CG_ID,
+      quads,
+      precomputedUpdateAttestation,
+      onBroadcastAccepted: (signal) => { received.push(signal); },
+    });
+
+    expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE, operationKind: 'update' }]);
+  });
+
   it('delivers the adapter signal verbatim, before the send', async () => {
     const chain = new SignalRecordingChain();
     const { publisher, quads, precomputedUpdateAttestation } = await publisherOver(chain);
@@ -204,6 +220,7 @@ class PublishSignalRecordingChain extends MockChainAdapter {
 
   override async createKnowledgeAssets(params: V10PublishParams): Promise<OnChainPublishResult> {
     await params.onBroadcast?.({ txHash: TX_HASH, nonce: NONCE });
+    await params.onBroadcastAccepted?.({ txHash: TX_HASH, nonce: NONCE });
     this.sent = true;
     return super.createKnowledgeAssets(params);
   }
@@ -242,6 +259,19 @@ async function publishArgs() {
 }
 
 describe('DKGPublisher.publish awaits the pre-broadcast signal [GH#2270]', () => {
+  it('forwards RPC acceptance for a create with its operation kind', async () => {
+    const chain = new PublishSignalRecordingChain();
+    const publisher = await publishOver(chain);
+    const received: PreBroadcastSignal[] = [];
+
+    await publisher.publish({
+      ...(await publishArgs()),
+      onBroadcastAccepted: (signal) => { received.push(signal); },
+    });
+
+    expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE, operationKind: 'create' }]);
+  });
+
   it('POSITIVE CONTROL: a plain publish reaches the chain and fires the signal', async () => {
     // Without this, every row below could pass vacuously by never reaching the adapter at all.
     const chain = new PublishSignalRecordingChain();

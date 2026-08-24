@@ -15,6 +15,7 @@ import type { ChainReadOptions, KnowledgeAssetUpdateContext } from './chain-adap
 import {
   decodeKnowledgeAssetMerkleRootCount,
 } from './evm-knowledge-asset-update-context.js';
+import { confirmedStateBlockAtHead } from './evm-adapter-constants.js';
 
 /**
  * The numeric chain id this adapter is configured for, parsed from ids like `evm:31337`. Returns
@@ -142,7 +143,10 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       // many minutes for the endpoint's consensus finality marker to advance.
       const latestBlockNumber = await provider.getBlockNumber();
       if (!Number.isSafeInteger(latestBlockNumber) || latestBlockNumber < 0) return null;
-      const blockNumber = Math.max(0, latestBlockNumber - this.finalityConfirmations + 1);
+      const blockNumber = confirmedStateBlockAtHead(
+        latestBlockNumber,
+        this.finalityConfirmations,
+      ) ?? 0;
       const bound = this.rebindContract(kas as Contract, provider);
       const at = { blockTag: blockNumber };
       const [latestRoot, context, latestAuthor, latestPublisher] = await Promise.all([

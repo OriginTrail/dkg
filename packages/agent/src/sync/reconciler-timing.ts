@@ -5,6 +5,7 @@ import {
   SYNC_RECONCILER_INTERVAL_MS,
   SYNC_STALENESS_THRESHOLD_MS,
 } from '../dkg-agent-constants.js';
+import { resolveNodeTimerDelayMs } from '@origintrail-official/dkg-core';
 
 export interface SyncReconcilerTimingConfig {
   syncReconcilerIntervalMs?: number;
@@ -23,7 +24,7 @@ export interface SyncReconcilerTiming {
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
-  return Number.isInteger(value) && (value ?? 0) > 0 ? value as number : fallback;
+  return resolveNodeTimerDelayMs(value, fallback);
 }
 
 function unitInterval(value: number | undefined, fallback: number): number {

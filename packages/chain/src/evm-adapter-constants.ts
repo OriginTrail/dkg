@@ -119,6 +119,23 @@ export function resolveFinalityConfirmations(value: unknown): number {
   return value;
 }
 
+/** Head height at which a receipt has the selected confirmation depth. */
+export function requiredHeadBlockForReceipt(
+  receiptBlockNumber: number,
+  confirmations: number,
+): number {
+  return receiptBlockNumber + confirmations - 1;
+}
+
+/** Canonical state block selected by the same confirmation-depth policy. */
+export function confirmedStateBlockAtHead(
+  latestBlockNumber: number,
+  confirmations: number,
+): number | null {
+  const blockNumber = latestBlockNumber - confirmations + 1;
+  return blockNumber >= 0 ? blockNumber : null;
+}
+
 /** Default an omitted deadline, but reject every explicitly invalid value. */
 export function resolveReceiptTimeoutMs(value: unknown): number {
   if (value === undefined) return RPC_RECEIPT_TIMEOUT_MS;

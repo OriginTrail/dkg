@@ -50,4 +50,18 @@ describe('resolveSyncReconcilerTiming', () => {
       backoffJitter: SYNC_BACKOFF_JITTER,
     });
   });
+
+  it('does not let an oversized Node.js timer become a one-millisecond loop', () => {
+    expect(resolveSyncReconcilerTiming({
+      syncReconcilerIntervalMs: 2_147_483_648,
+      syncStalenessThresholdMs: 2_147_483_648,
+      syncBackoffBaseMs: 2_147_483_648,
+      syncBackoffMaxMs: 2_147_483_648,
+    })).toMatchObject({
+      intervalMs: SYNC_RECONCILER_INTERVAL_MS,
+      stalenessThresholdMs: SYNC_STALENESS_THRESHOLD_MS,
+      backoffBaseMs: SYNC_BACKOFF_BASE_MS,
+      backoffMaxMs: SYNC_BACKOFF_MAX_MS,
+    });
+  });
 });

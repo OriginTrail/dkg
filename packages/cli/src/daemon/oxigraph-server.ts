@@ -313,12 +313,10 @@ export async function startOxigraphServer(
         host,
         io.findListenOwnerPid,
       );
-      // macOS lsof can briefly omit the owner row for a new listener even after the child has
-      // answered the health request. The managed process is the direct Oxigraph child on macOS,
-      // so its live PID is the verified owner fallback on this platform.
-      const listenerPid = resolvedListenerPid
-        ?? (process.platform === 'darwin' ? c.pid ?? null : null);
-      return listenerPid !== null && childAlive(c) ? listenerPid : null;
+      // A health response is not ownership proof. On macOS, lsof can briefly omit a new row.
+      // Return null and let the existing readiness loop retry. Never replace a missing owner
+      // with the child PID because a foreign service can answer while this child fails to bind.
+      return resolvedListenerPid !== null && childAlive(c) ? resolvedListenerPid : null;
     } catch {
       return null;
     }
