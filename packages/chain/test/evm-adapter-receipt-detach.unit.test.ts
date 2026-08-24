@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 
@@ -80,5 +80,34 @@ describe('V10 receipt reconciliation detaches from the nonce serializer', () => 
 
     const results = await writes;
     expect(results.map((item) => item.hash)).toEqual(['0xa0', '0xb1']);
+  });
+
+  it('continues receipt reconciliation when the post-acceptance callback fails', async () => {
+    const adapter = new EVMChainAdapter(config());
+    const signer = new ethers.Wallet(PRIVATE_KEY);
+    const txHash = `0x${'ab'.repeat(32)}`;
+    let receiptWaitStarted = false;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    (adapter as any).broadcastSignedTransactionWithRetries = async () => {};
+    (adapter as any).waitForReceiptWithFailover = async () => {
+      receiptWaitStarted = true;
+      return receipt(txHash);
+    };
+
+    try {
+      await expect((adapter as any).dispatchSerializedV10Write(
+        signer,
+        'publish',
+        undefined,
+        async () => ({ signedTx: '0xsigned', txHash, nonce: 7 }),
+        () => { throw new Error('null receipt'); },
+        async () => { throw new Error('local acceptance checkpoint failed'); },
+      )).resolves.toMatchObject({ hash: txHash });
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(receiptWaitStarted).toBe(true);
   });
 });

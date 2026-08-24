@@ -42,6 +42,7 @@ export const LIFT_JOB_FAILURE_CODES = [
   'wallet_claim_timeout',
   'wallet_unavailable',
   'quorum_unmet',
+  'fee_cap_below_base_fee',
   'rpc_unavailable',
   'tx_submit_timeout',
   'tx_reverted',
@@ -96,8 +97,9 @@ export interface LiftJobFailurePolicy {
    *      transaction whose local recording failed, so a re-run can never double-publish.
    *   3. `resolution` is 'reset_to_accepted' — the job is completable by re-running it from
    *      the start, with no chain evidence to reconcile first.
-   * `quorum_unmet` (GH#1620) and `workspace_unavailable` (GH#2270) are the only codes that
-   * qualify today. The field is optional on this PUBLIC interface (external
+   * `quorum_unmet` (GH#1620), `workspace_unavailable` (GH#2270), and
+   * `fee_cap_below_base_fee` are the only codes that qualify today. The field is
+   * optional on this PUBLIC interface (external
    * constructors keep compiling) but REQUIRED on every built-in table entry
    * via `BuiltInLiftJobFailurePolicy`: `autoRetry: false` is an explicit
    * policy decision (manual-only), never an omission a reader must interpret.
@@ -157,7 +159,7 @@ export interface LiftJobFailureMetadata {
  * Table-only strictness: the PUBLIC interface keeps `autoRetry` and `provenIneffective` optional
  * (required fields would source-break external constructors of `LiftJobFailurePolicy`), while every
  * BUILT-IN entry must declare both decisions explicitly — `false` is a policy statement, never an
- * omission. A 23rd code cannot be added without answering "does this retry itself?" and "did its
+ * omission. A new code cannot be added without answering "does this retry itself?" and "did its
  * transaction have no effect?".
  */
 export type BuiltInLiftJobFailurePolicy = LiftJobFailurePolicy & {
@@ -183,6 +185,9 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, BuiltInLiftJo
   // DEAD CODE — no production producer; see the dead-code follow-up.
   wallet_unavailable: { code: 'wallet_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
   quorum_unmet: { code: 'quorum_unmet', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: true },
+  // The adapter rejects this before signing or broadcasting. A bounded retry can
+  // succeed when the base fee falls; an operator can also raise the configured cap.
+  fee_cap_below_base_fee: { code: 'fee_cap_below_base_fee', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: true },
   rpc_unavailable: { code: 'rpc_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
   tx_submit_timeout: { code: 'tx_submit_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', provenIneffective: false, autoRetry: false },
   // provenIneffective: the receipt exists and reports failure — the transaction published nothing.
@@ -217,6 +222,7 @@ const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJ
   wallet_claim_timeout: ['accepted', 'claimed'],
   wallet_unavailable: ['claimed', 'broadcast'],
   quorum_unmet: ['broadcast'],
+  fee_cap_below_base_fee: ['validated'],
   rpc_unavailable: ['broadcast'],
   tx_submit_timeout: ['broadcast'],
   // GH#2270 — also reachable from 'included': the proof-first dispatcher re-records this code on a

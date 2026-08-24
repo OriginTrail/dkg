@@ -16,7 +16,7 @@
  *
  *   State: `none` | `preferred{ url, source: 'read' | 'write', primaryProbeDueAt }`
  *     - `source` distinguishes a preference proven by a READ from one proven by a
- *       nonce-critical POPULATE. A read-established backend may lag the signer's
+ *       nonce-critical POPULATE or accepted BROADCAST. A read-established backend may lag the signer's
  *       pending-nonce state, so a `nonceWrite` (populate) MUST NOT start there —
  *       it re-derives nonce from canonical (primary-first = authoritative) until a
  *       populate proves the backend.
@@ -170,8 +170,10 @@ export class EndpointStickiness {
    *     reaching the primary as a fallback doesn't advance the nonce, and
    *     downgrading could break a legitimate read-your-write allowance re-read).
    *   - a backend succeeded → establish (arm the deadline + fire `onEstablished`)
-   *     or silently re-point; `source` = 'write' for a populate, else 'read'. A
-   *     later populate on the SAME preferred upgrades 'read'→'write'.
+   *     or silently re-point; `source` = 'write' for a populate or accepted
+   *     broadcast, else 'read'. Either write on the SAME preferred upgrades
+   *     'read'→'write'. Exact broadcast acceptance proves that endpoint's pending
+   *     nonce advanced, so the next populate must stay on it.
    */
   private recordSuccess<T extends StickyEndpoint>(
     endpoint: T,
@@ -181,7 +183,6 @@ export class EndpointStickiness {
   ): void {
     if (intent === 'transparentRead' || !this.cfg.isEnabled()) return;
     const primaryUrl = canonical[0]?.rpcUrl;
-    const isPopulate = intent === 'nonceWrite';
     const isWriteOp = intent === 'nonceWrite' || intent === 'write';
     if (endpoint.rpcUrl === primaryUrl) {
       if (triedFirst) {
@@ -195,7 +196,7 @@ export class EndpointStickiness {
       this.state = {
         kind: 'preferred',
         url: endpoint.rpcUrl,
-        source: isPopulate ? 'write' : 'read',
+        source: isWriteOp ? 'write' : 'read',
         primaryProbeDueAt: this.cfg.now() + this.cfg.ttlMs,
       };
       this.cfg.onEstablished?.(endpoint.rpcUrl);
@@ -210,9 +211,9 @@ export class EndpointStickiness {
       const primaryProbeDueAt = this.cfg.now() >= this.state.primaryProbeDueAt
         ? this.cfg.now() + this.cfg.ttlMs
         : this.state.primaryProbeDueAt;
-      this.state = { ...this.state, url: endpoint.rpcUrl, source: isPopulate ? 'write' : 'read', primaryProbeDueAt };
-    } else if (isPopulate && this.state.source !== 'write') {
-      // Same preferred backend, now PROVEN nonce-safe by a populate → upgrade.
+      this.state = { ...this.state, url: endpoint.rpcUrl, source: isWriteOp ? 'write' : 'read', primaryProbeDueAt };
+    } else if (isWriteOp && this.state.source !== 'write') {
+      // Same preferred backend, now PROVEN nonce-safe by a populate or accepted broadcast → upgrade.
       // Never DOWNGRADE on a read (a read hitting the write-proven backend doesn't
       // un-prove its nonce view).
       this.state = { ...this.state, source: 'write' };

@@ -213,7 +213,12 @@ export interface NetworkConfig {
     tokenAddress?: string;
     chainId: string;
     receiptTimeoutMs?: number;
-    /** Mined-receipt confirmation depth; receipt block itself counts as 1. */
+    /**
+     * Operator-selected mined-receipt confirmation depth; the receipt block
+     * itself counts as 1. Lower values reduce wallet wait time but increase the
+     * risk that a chain reorganization reverses an already accepted receipt.
+     * A value of 1 gives no successor-block buffer. Defaults to 1.
+     */
     finalityConfirmations?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint | string | number;
@@ -350,8 +355,11 @@ export interface ChainConfig {
   /** Overall submitted-transaction receipt deadline (default 10 minutes). */
   receiptTimeoutMs?: number;
   /**
-   * Canonical block confirmations required for a mined publish receipt.
-   * The receipt block itself counts as confirmation 1. Defaults to 1.
+   * Operator-selected canonical block confirmations required for a mined
+   * publish receipt. The receipt block itself counts as confirmation 1. Lower
+   * values reduce wallet wait time but increase the risk that a chain
+   * reorganization reverses an already accepted receipt. A value of 1 gives no
+   * successor-block buffer. Defaults to 1.
    */
   finalityConfirmations?: number;
   /** Optional operator cap for transaction fee-per-gas fields (wei). */

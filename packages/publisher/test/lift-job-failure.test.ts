@@ -29,6 +29,7 @@ describe('LiftJob failure classification', () => {
     ]);
     expect(LIFT_JOB_FAILURE_CODES).toContain('validation_timeout');
     expect(LIFT_JOB_FAILURE_CODES).toContain('tx_submit_timeout');
+    expect(LIFT_JOB_FAILURE_CODES).toContain('fee_cap_below_base_fee');
     expect(LIFT_JOB_FAILURE_CODES).toContain('finality_timeout');
     expect(LIFT_JOB_FAILURE_CODES).toContain('recovery_state_inconsistent');
   });
@@ -187,7 +188,7 @@ describe('LiftJob failure classification', () => {
   // the job by itself?) and `provenIneffective` (did its transaction demonstrably do nothing, so
   // the job is not held for chain proof?). Every expected value is written out per code instead of
   // derived from the policy table, so a wrong policy cannot make this row agree with it; and
-  // because the actual map is built from LIFT_JOB_FAILURE_CODES, a 23rd code joining the enum fails
+  // because the actual map is built from LIFT_JOB_FAILURE_CODES, a new code joining the enum fails
   // here instead of silently inheriting either decision.
   const EXPECTED_POLICY_FLAGS: Record<LiftJobFailureCode, { autoRetry: boolean; provenIneffective: boolean }> = {
     workspace_unavailable: { autoRetry: true, provenIneffective: false },
@@ -200,6 +201,7 @@ describe('LiftJob failure classification', () => {
     wallet_claim_timeout: { autoRetry: false, provenIneffective: false },
     wallet_unavailable: { autoRetry: false, provenIneffective: false },
     quorum_unmet: { autoRetry: true, provenIneffective: false },
+    fee_cap_below_base_fee: { autoRetry: true, provenIneffective: false },
     rpc_unavailable: { autoRetry: false, provenIneffective: false },
     tx_submit_timeout: { autoRetry: false, provenIneffective: false },
     tx_reverted: { autoRetry: false, provenIneffective: true },
@@ -214,7 +216,7 @@ describe('LiftJob failure classification', () => {
     recovery_state_inconsistent: { autoRetry: false, provenIneffective: false },
   };
 
-  it('allow-lists autoRetry on exactly workspace_unavailable and quorum_unmet, and proven-ineffective chain effect on exactly tx_reverted and insufficient_funds', () => {
+  it('allow-lists bounded pre-send retries and proven-ineffective chain effects explicitly', () => {
     const actual = Object.fromEntries(
       LIFT_JOB_FAILURE_CODES.map((code) => [code, {
         autoRetry: getLiftJobFailurePolicy(code).autoRetry === true,

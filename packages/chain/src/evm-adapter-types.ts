@@ -35,9 +35,11 @@ export interface EVMAdapterBaseConfig {
   /** Overall submitted-transaction receipt deadline. Defaults to 10 minutes. */
   receiptTimeoutMs?: number;
   /**
-   * Canonical block confirmations required before a mined publish receipt may
-   * become terminal. The receipt block itself counts as confirmation 1.
-   * Defaults to 1.
+   * Operator-selected canonical block confirmations required before a mined
+   * publish receipt may become terminal. The receipt block itself counts as
+   * confirmation 1. Lower values reduce wallet wait time but increase the risk
+   * that a chain reorganization reverses an already accepted receipt. A value
+   * of 1 gives no successor-block buffer. Defaults to 1.
    */
   finalityConfirmations?: number;
   /**

@@ -898,7 +898,8 @@ chain:
   type: evm
   rpcUrl: https://base.llamarpc.com
   hubAddress: '0x...'
-  finalityConfirmations: 1          # receipt block counts as confirmation 1 (default)
+  # Operator-selected. 1 is fastest but gives no successor-block reorg buffer.
+  finalityConfirmations: 1
   approvalPolicy:
     mode: per-publish                # 'per-publish' | 'replenishing' | 'unlimited'
     # `replenishing` mode only:
@@ -906,8 +907,9 @@ chain:
     refillBelowFraction: 0.1                     # refill when current < target × this (default 10%)
 ```
 
-`finalityConfirmations` controls when a mined publish receipt becomes terminal and its publisher wallet may take another queued job. Standard EVM confirmation counting applies: `1` accepts the receipt's own block after verifying that its hash is canonical; `2` waits for one successor, and so on. The default is `1`.
-Ambiguous recovery where a transaction and receipt are both absent still uses the protocol-finalized chain snapshot before releasing or replacing a nonce.
+`finalityConfirmations` is an operator-selected positive integer. It controls when a mined publish receipt becomes terminal and when its publisher wallet may take another queued job. Standard EVM confirmation counting applies: `1` accepts the receipt's own block after verifying that its hash is canonical; `2` waits for one successor, and so on. The default is `1`.
+
+Lower values reduce publish latency, but they increase reorganization risk. A value of `1` gives no successor-block buffer: a chain reorganization can reverse a receipt after the node has accepted it and released the wallet. Choose a larger value when the network can have reorganizations or when reversal risk is more important than publish speed. The node uses the configured value for receipt finality and recovery proof snapshots; it does not replace the operator's value with the protocol's separate finalized-block tag.
 
 `targetAllowance` is a string because YAML/JSON can't carry bigints natively — the daemon parses it into a bigint at startup, fails fast on garbage input. `refillBelowFraction` clamps to `[0, 1]`; a value of `1` means "refill on every publish" (defeats the policy) and `0` means "never refill until the publish floor (1 wei-TRAC) is breached" (which on a zero-cost CG would mean approve once then never again).
 

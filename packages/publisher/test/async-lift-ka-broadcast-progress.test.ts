@@ -119,6 +119,68 @@ describe('KA async VM publish broadcast progress', () => {
     const afterTimeout = await publisher.getStatus(jobId);
     expect(afterTimeout?.status).toBe('broadcast');
     expect(afterTimeout?.failure).toBeUndefined();
+    await publisher.drainDetachedExecutions();
+  });
+
+  it('does not reset a validated job while processNext still owns it', async () => {
+    let releaseExecution!: () => void;
+    const executionWait = new Promise<void>((resolve) => { releaseExecution = resolve; });
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishHandler: {
+        execute: async () => {
+          signalEntered();
+          await executionWait;
+          return {
+            kaId: 11n,
+            ual: 'did:dkg:mock:31337/0xdef/11',
+            merkleRoot: new Uint8Array([0xde, 0xf0]),
+            kaManifest: [],
+            status: 'confirmed',
+            onChainResult: {
+              batchId: 11n,
+              startKAId: 11n,
+              endKAId: 11n,
+              txHash: KA_VM_EXECUTOR_TX_HASH,
+              blockNumber: 77,
+              blockTimestamp: 1_700_000_077,
+              publisherAddress: '0x2222222222222222222222222222222222222222',
+            },
+          };
+        },
+      },
+    });
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processing = publisher.processNext('wallet-1');
+    await entered;
+
+    expect((await publisher.getStatus(jobId))?.status).toBe('validated');
+    expect(await publisher.reconcileTransactions()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('validated');
+
+    releaseExecution();
+    expect((await processing)?.status).toBe('finalized');
+  });
+
+  it('bounds live reconciliation when the chain proof resolver never settles', async () => {
+    const publisher = createPublisher({
+      chainProofDispatchTimeBudgetMs: 20,
+      chainProofResolver: async () => await new Promise(() => {}),
+      knowledgeAssetVmPublishRecoveryResolver: async () => null,
+    });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-1' },
+    });
+
+    const startedAt = Date.now();
+    expect(await publisher.reconcileTransactions()).toBe(0);
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
   });
 
   it('does not detach a receipt for a wallet whose adapter cannot settle the job', async () => {

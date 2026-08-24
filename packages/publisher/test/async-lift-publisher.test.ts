@@ -850,6 +850,37 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(processed?.failure?.code).toBe('canonicalization_failed');
   });
 
+  it('keeps a fee cap below the current base fee in the retryable pre-send lane', async () => {
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          execute: async () => {
+            throw Object.assign(
+              new Error('configured fee cap is temporarily too low'),
+              { code: 'FEE_CAP_BELOW_BASE_FEE' },
+            );
+          },
+        },
+      },
+    });
+    const shareOperationId = 'rootless-fee-cap-op';
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure).toMatchObject({
+      failedFromState: 'validated',
+      code: 'fee_cap_below_base_fee',
+      retryable: true,
+    });
+    expect(processed?.broadcast).toBeUndefined();
+  });
+
   it('exposes the SWM share operation contract', async () => {
     const publisherContract: Publisher = makeTestPublisher({
       store,
@@ -1012,6 +1043,29 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(released.type).toBe('bindings');
     if (released.type !== 'bindings') return;
     expect(released.bindings).toHaveLength(0);
+  });
+
+  it('periodic reconciliation requeues a stranded validated job without a restart', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.seedLegacyRawLift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+
+    expect(await publisher.reconcileTransactions()).toBe(1);
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      jobId,
+      status: 'accepted',
+      recovery: { recoveredFromStatus: 'validated' },
+    });
+    expect(await publisher.claimNext('wallet-1')).toMatchObject({ jobId });
   });
 
   it('clears orphan wallet locks for terminal jobs during recovery', async () => {
@@ -1835,6 +1889,50 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(broadcast?.recovery?.action).toBe('finalized_from_chain');
     expect((await privateStore.getPrivateTriples('music-social', 'dkg:music-social:aloha:person/rihana')).map((quad) => quad.object)).toEqual(['"recover-secret"']);
     expect(await privateStore.getPrivateTriplesForOperation('music-social', 'op-2', 'urn:local:/rihana')).toEqual([]);
+  });
+
+  it('serializes RPC acceptance with reconciliation so stale broadcast state cannot overwrite finality', async () => {
+    const txHash = '0xbbb' as `0x${string}`;
+    const publisher = createPublisher({
+      chainProof: {
+        status: 'recovered',
+        recovery: {
+          inclusion: { txHash, blockNumber: 7 },
+          finalization: {
+            txHash,
+            ual: 'did:dkg:mock:31337/0xbbb/7',
+            batchId: '7',
+            startKAId: '7',
+            endKAId: '7',
+            publisherAddress: '0x1111111111111111111111111111111111111111',
+          },
+        },
+      },
+    });
+    const jobId = await publisher.seedLegacyRawLift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash, walletId: 'wallet-1', nonce: 4 },
+    });
+
+    await expect(Promise.all([
+      (publisher as any).recordRpcAccepted(jobId, { txHash, nonce: 4 }),
+      publisher.reconcileTransactions(),
+    ])).resolves.toBeDefined();
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      jobId,
+      status: 'finalized',
+      broadcast: { txHash },
+    });
   });
 
   it('keeps broadcast jobs in place while inconclusive recovery is still within the timeout window', async () => {

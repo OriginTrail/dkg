@@ -693,6 +693,7 @@ function constructConfiguredChainAdapter(
       tokenAddress: config.chainConfig.tokenAddress,
       chainId: config.chainConfig.chainId,
       receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
+      finalityConfirmations: config.chainConfig.finalityConfirmations,
       maxFeePerGasWei: config.chainConfig.maxFeePerGasWei,
       approvalPolicy: config.chainConfig.approvalPolicy,
       cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,

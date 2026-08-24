@@ -1,9 +1,5 @@
 import type { AsyncLiftPublisher } from './async-lift-publisher.js';
 
-type TransactionReconciliationPublisher = AsyncLiftPublisher & {
-  reconcileTransactions?: () => Promise<number>;
-};
-
 export interface AsyncLiftRunnerConfig {
   readonly publisher: AsyncLiftPublisher;
   readonly walletIds: readonly string[];
@@ -83,6 +79,7 @@ export class AsyncLiftRunner {
     }
     await this.running;
     await this.recoveryInFlight;
+    await this.config.publisher.drainDetachedExecutions();
   }
 
   private async walletLoop(walletId: string): Promise<void> {
@@ -107,7 +104,6 @@ export class AsyncLiftRunner {
 
   private scheduleTransactionReconciliation(): void {
     if (this.stopped || this.recoveryTimer || this.recoveryInFlight) return;
-    if (!this.transactionReconciler()) return;
     const now = Date.now();
     const nextAt = Math.max(
       this.lastRecoveryAt + this.recoveryIntervalMs,
@@ -121,10 +117,8 @@ export class AsyncLiftRunner {
 
   private startTransactionReconciliation(): void {
     if (this.stopped || this.recoveryInFlight) return;
-    const reconcileTransactions = this.transactionReconciler();
-    if (!reconcileTransactions) return;
     this.lastRecoveryAttemptAt = Date.now();
-    const recovery = reconcileTransactions()
+    const recovery = this.config.publisher.reconcileTransactions()
       .then(() => {
         this.lastRecoveryAt = Date.now();
       })
@@ -144,10 +138,6 @@ export class AsyncLiftRunner {
     this.recoveryInFlight = recovery;
   }
 
-  private transactionReconciler(): (() => Promise<number>) | undefined {
-    const publisher = this.config.publisher as TransactionReconciliationPublisher;
-    return publisher.reconcileTransactions?.bind(publisher);
-  }
 }
 
 function defaultSleep(ms: number): Promise<void> {

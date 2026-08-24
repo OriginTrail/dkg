@@ -294,7 +294,10 @@ function liveChainRecoveryOrigin(job: LiftJobBroadcast | LiftJobIncluded): Chain
 type AsyncLiftJobHandler = {
   readonly inspectPreparedPayload: (job: LiftJob) => Promise<AsyncPreparedPublishPayload | null>;
   readonly process: (claimed: LiftJob, walletId: string) => Promise<LiftJob>;
-  readonly recoverInterrupted: (job: LiftJob) => Promise<boolean>;
+  readonly recoverInterrupted: (
+    job: LiftJob,
+    options?: { readonly signal?: AbortSignal },
+  ) => Promise<boolean>;
   readonly canRetryFailedRecovery: (job: PersistedFailedJob) => boolean;
   /**
    * GH#2270 — finalize a FAILED job the dispatcher has proven published, in this job type's own
@@ -404,6 +407,7 @@ function resolveKnowledgeAssetVmPublishHandler(
 export class TripleStoreAsyncLiftPublisher
   implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader, VmPublishTerminalJobClearer, AsyncLiftDetailedRetrier, AsyncLiftRetryStateReader {
   private static readonly claimQueues = new Map<string, Promise<void>>();
+  private static readonly jobTransitionQueues = new Map<string, Promise<void>>();
   // #1829 — dedicated per-lineageKey journal mutex, SEPARATE from claimQueues, so the
   // read-modify-write seq allocation is atomic without touching the claim lock (lock
   // order is always claim→journal; appendJournal never calls writeJob → no reentrancy).
@@ -461,6 +465,10 @@ export class TripleStoreAsyncLiftPublisher
    * while the first is still writing.
    */
   private readonly finalizationsInFlight = new Set<string>();
+  /** Jobs currently owned by processNext before transaction evidence exists. */
+  private readonly activeProcessJobIds = new Set<string>();
+  /** Receipt tasks that continue after the RPC-acceptance fast return. */
+  private readonly detachedExecutions = new Map<string, Promise<void>>();
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   private readonly detachReceiptReconciliation: boolean;
   /** 3825614002 — this instance's ROLE, resolved once from its wiring. */
@@ -476,7 +484,7 @@ export class TripleStoreAsyncLiftPublisher
   private readonly rawLiftJobHandler: AsyncLiftJobHandler = {
     inspectPreparedPayload: (job) => this.inspectRawLiftPreparedPayload(job),
     process: (claimed, walletId) => this.processRawLift(claimed, walletId),
-    recoverInterrupted: (job) => this.recoverRawLiftInterrupted(job),
+    recoverInterrupted: (job, options) => this.recoverRawLiftInterrupted(job, options),
     // GH#2270 PR-3 r1 — the same held predicate the named lane uses. It SUPERSETS the legacy
     // `retry_recovery` + live-broadcast gate: every job that gate admitted persists a txHash and
     // is therefore held, while the gate missed jobs that equally have a transaction unaccounted
@@ -497,7 +505,7 @@ export class TripleStoreAsyncLiftPublisher
   private readonly knowledgeAssetVmPublishJobHandler: AsyncLiftJobHandler = {
     inspectPreparedPayload: async () => null,
     process: (claimed, walletId) => this.processKnowledgeAssetVmPublish(claimed, walletId),
-    recoverInterrupted: (job) => this.recoverKnowledgeAssetVmPublishInterrupted(job),
+    recoverInterrupted: (job, options) => this.recoverKnowledgeAssetVmPublishInterrupted(job, options),
     // GH#2270 — the named lane used to answer `false` here, which is what made a held KA VM job
     // unresolvable without an operator: nothing ever re-asked the chain about it. PR-2's held
     // population IS this lane's work queue, so the eligibility test is exactly that predicate —
@@ -599,6 +607,10 @@ export class TripleStoreAsyncLiftPublisher
 
 
   async claimNext(walletId: string): Promise<LiftJob | null> {
+    return this.claimNextInternal(walletId, false);
+  }
+
+  private async claimNextInternal(walletId: string, markActive: boolean): Promise<LiftJob | null> {
     return this.withClaimLock(async () => {
       await this.ensureGraph();
       if (this.paused) return null;
@@ -625,6 +637,7 @@ export class TripleStoreAsyncLiftPublisher
         claimToken,
         lastHeartbeatAt: now,
       });
+      if (markActive) this.activeProcessJobIds.add(claimedJob.jobId);
       return claimedJob;
     });
   }
@@ -792,11 +805,15 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async processNext(walletId: string): Promise<LiftJob | null> {
-    const claimed = await this.claimNext(walletId);
+    const claimed = await this.claimNextInternal(walletId, true);
     if (!claimed) {
       return null;
     }
-    return await this.jobHandlerFor(claimed.request).process(claimed, walletId);
+    try {
+      return await this.jobHandlerFor(claimed.request).process(claimed, walletId);
+    } finally {
+      this.activeProcessJobIds.delete(claimed.jobId);
+    }
   }
 
   private async processRawLift(claimed: LiftJob, walletId: string): Promise<LiftJob> {
@@ -985,10 +1002,7 @@ export class TripleStoreAsyncLiftPublisher
         // normal publisher can finish any local post-receipt work, but its
         // return value is intentionally not allowed to rewrite queue truth in
         // parallel with recovery.
-        void execution.then(
-          () => undefined,
-          () => undefined,
-        );
+        this.trackDetachedExecution(claimed.jobId, execution);
         return await this.getRequiredJob(claimed.jobId);
       }
       publishResult = outcome.kind === 'settled' ? outcome.result : await execution;
@@ -1040,48 +1054,72 @@ export class TripleStoreAsyncLiftPublisher
    * a crash remains ambiguous and therefore keeps the wallet reserved.
    */
   private async recordRpcAccepted(jobId: string, record: PreBroadcastRecord): Promise<void> {
-    const current = await this.getRequiredJob(jobId);
-    if (current.status !== 'broadcast') {
-      // Independent reconciliation may have already advanced the exact job.
+    await this.withJobTransitionLock(jobId, async () => {
+      const current = await this.getRequiredJob(jobId);
+      if (current.status !== 'broadcast') {
+        // Independent reconciliation may have already advanced the exact job.
+        if (
+          (current.status === 'included' || current.status === 'finalized')
+          && current.broadcast?.txHash === record.txHash
+        ) return;
+        throw new Error(`Cannot record RPC acceptance for LiftJob ${jobId} in state ${current.status}`);
+      }
+      await this.assertActiveClaimLock(current);
+      if (current.broadcast.txHash !== record.txHash) {
+        throw new Error(
+          `RPC-accepted tx ${record.txHash} does not match persisted broadcast tx `
+          + `${current.broadcast.txHash} for job ${jobId}`,
+        );
+      }
       if (
-        (current.status === 'included' || current.status === 'finalized')
-        && current.broadcast?.txHash === record.txHash
-      ) return;
-      throw new Error(`Cannot record RPC acceptance for LiftJob ${jobId} in state ${current.status}`);
-    }
-    await this.assertActiveClaimLock(current);
-    if (current.broadcast.txHash !== record.txHash) {
-      throw new Error(
-        `RPC-accepted tx ${record.txHash} does not match persisted broadcast tx `
-        + `${current.broadcast.txHash} for job ${jobId}`,
-      );
-    }
-    if (
-      current.broadcast.nonce !== undefined
-      && record.nonce !== undefined
-      && current.broadcast.nonce !== record.nonce
-    ) {
-      throw new Error(
-        `RPC-accepted nonce ${record.nonce} does not match persisted broadcast nonce `
-        + `${current.broadcast.nonce} for job ${jobId}`,
-      );
-    }
-    if (current.timestamps.rpcAcceptedAt !== undefined) return;
-    const acceptedAt = this.now();
-    const next = {
-      ...current,
-      timestamps: {
-        ...current.timestamps,
-        rpcAcceptedAt: acceptedAt,
-        updatedAt: acceptedAt,
-      },
-    } as LiftJobBroadcast;
-    this.assertJobMatchesStatus(next);
-    await this.writeJob(next, 'rpc-accepted');
-    await this.syncWalletLockForJob(next);
+        current.broadcast.nonce !== undefined
+        && record.nonce !== undefined
+        && current.broadcast.nonce !== record.nonce
+      ) {
+        throw new Error(
+          `RPC-accepted nonce ${record.nonce} does not match persisted broadcast nonce `
+          + `${current.broadcast.nonce} for job ${jobId}`,
+        );
+      }
+      if (current.timestamps.rpcAcceptedAt !== undefined) return;
+      const acceptedAt = this.now();
+      const next = {
+        ...current,
+        timestamps: {
+          ...current.timestamps,
+          rpcAcceptedAt: acceptedAt,
+          updatedAt: acceptedAt,
+        },
+      } as LiftJobBroadcast;
+      this.assertJobMatchesStatus(next);
+      await this.writeJob(next, 'rpc-accepted');
+      await this.syncWalletLockForJob(next);
+    });
   }
 
-  private async recoverRawLiftInterrupted(job: LiftJob): Promise<boolean> {
+  private trackDetachedExecution(jobId: string, execution: Promise<unknown>): void {
+    let tracked!: Promise<void>;
+    tracked = execution.then(
+      () => undefined,
+      () => undefined,
+    ).finally(() => {
+      if (this.detachedExecutions.get(jobId) === tracked) {
+        this.detachedExecutions.delete(jobId);
+      }
+    });
+    this.detachedExecutions.set(jobId, tracked);
+  }
+
+  async drainDetachedExecutions(): Promise<void> {
+    while (this.detachedExecutions.size > 0) {
+      await Promise.all([...this.detachedExecutions.values()]);
+    }
+  }
+
+  private async recoverRawLiftInterrupted(
+    job: LiftJob,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<boolean> {
     if (job.status !== 'broadcast' && job.status !== 'included') {
       return false;
     }
@@ -1127,7 +1165,8 @@ export class TripleStoreAsyncLiftPublisher
     // A LIVE broadcast always has its metadata, so the lookup is direct here — no derivation
     // and nothing to fail to derive.
     const origin = liveChainRecoveryOrigin(recoverable);
-    const resolution = await this.chainProofResolver(origin.lookup);
+    const resolution = await this.resolveChainProofWithinSignal(origin.lookup, options?.signal);
+    if (resolution === null) return false;
     if (resolution.status === 'recovered') {
       await this.releaseWalletLockForJob(job);
       const finalized = this.finalizeRecoveredJob(
@@ -1149,18 +1188,26 @@ export class TripleStoreAsyncLiftPublisher
     return false;
   }
 
-  private async recoverKnowledgeAssetVmPublishInterrupted(job: LiftJob): Promise<boolean> {
+  private async recoverKnowledgeAssetVmPublishInterrupted(
+    job: LiftJob,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<boolean> {
     if (job.status !== 'broadcast' && job.status !== 'included') return false;
+    // The normal executor still owns this job. Recovery will retry after it
+    // settles. This prevents two writers from finalizing the same lifecycle.
+    if (this.detachedExecutions.has(job.jobId)) return false;
 
     const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
     const origin = liveChainRecoveryOrigin(recoverable);
     if (this.chainProofResolver) {
-      const resolution = await this.chainProofResolver(origin.lookup);
+      const resolution = await this.resolveChainProofWithinSignal(origin.lookup, options?.signal);
+      if (resolution === null) return false;
       if (resolution.status === 'recovered') {
         const outcome = await this.finalizeProvenKnowledgeAssetVmPublish(
           recoverable,
           origin,
           resolution.recovery,
+          options,
         );
         return outcome === 'finalized';
       }
@@ -1200,6 +1247,8 @@ export class TripleStoreAsyncLiftPublisher
     const outcome = await this.finalizeProvenKnowledgeAssetVmPublish(
       recoverable,
       origin,
+      undefined,
+      options,
     );
     if (outcome === 'finalized') return true;
     // Chain success is authoritative, but local lifecycle repair may be temporarily blocked (for
@@ -1406,6 +1455,10 @@ export class TripleStoreAsyncLiftPublisher
       structuredCode = undefined;
     }
     if (structuredCode === 'PUBLISH_INTENT_STALE') return 'publish_intent_stale';
+    // The EVM adapter rejects this before signing or broadcasting. Keep it in
+    // the validated retry lane, where an operator can raise the cap or wait for
+    // the base fee to fall. It must never create durable transaction evidence.
+    if (structuredCode === 'FEE_CAP_BELOW_BASE_FEE') return 'fee_cap_below_base_fee';
     // GH#2273 — multi-valued SWM head: transient local corruption the sync
     // repair heals, NOT a stale intent; the queued request may still be
     // byte-identical to what the head certified at admission.
@@ -1553,37 +1606,83 @@ export class TripleStoreAsyncLiftPublisher
   async recover(): Promise<number> {
     await this.ensureGraph();
     await this.sweepStaleWalletLocks();
-    const interrupted = (await this.list()).filter(
-      (job) => job.status === 'claimed' || job.status === 'validated',
-    );
-
-    let recovered = 0;
-
-    for (const job of interrupted) {
-      await this.releaseWalletLockForJob(job);
-      await this.writeJob(this.resetJobToAccepted(job, job.status, getLiftJobTransactionEvidence(job)), 'recover-reset');
-      recovered += 1;
-    }
-
-    recovered += await this.reconcileTransactions();
-    return recovered;
+    return await this.reconcileTransactions();
   }
 
   async reconcileTransactions(): Promise<number> {
     await this.ensureGraph();
+    let reconciled = await this.recoverInterruptedPreBroadcastJobs();
     const txBearing = (await this.list()).filter(
       (job) => job.status === 'broadcast' || job.status === 'included',
     );
 
-    let reconciled = 0;
-    for (const job of txBearing) {
-      if (await this.jobHandlerFor(job.request).recoverInterrupted(job)) {
-        reconciled += 1;
+    const deadline = new AbortController();
+    const deadlineTimer = setTimeout(
+      () => deadline.abort(),
+      Math.max(0, this.chainProofDispatchTimeBudgetMs),
+    );
+    try {
+      for (const snapshot of txBearing) {
+        if (deadline.signal.aborted) break;
+        await this.withJobTransitionLock(snapshot.jobId, async () => {
+          const current = await this.getStatus(snapshot.jobId);
+          if (!current || (current.status !== 'broadcast' && current.status !== 'included')) return;
+          if (this.activeProcessJobIds.has(current.jobId)) return;
+          if (await this.jobHandlerFor(current.request).recoverInterrupted(current, { signal: deadline.signal })) {
+            reconciled += 1;
+          }
+        });
       }
+    } finally {
+      clearTimeout(deadlineTimer);
+      deadline.abort();
     }
 
     reconciled += await this.dispatchFailedJobsOnChainProof();
     return reconciled;
+  }
+
+  private async resolveChainProofWithinSignal(
+    lookup: AsyncLiftChainProofLookup,
+    signal?: AbortSignal,
+  ): Promise<AsyncLiftChainProofResolution | null> {
+    if (!this.chainProofResolver) return null;
+    if (!signal) return await this.chainProofResolver(lookup);
+    if (signal.aborted) return null;
+    let onAbort!: () => void;
+    const aborted = new Promise<null>((resolve) => {
+      onAbort = () => resolve(null);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([
+        this.chainProofResolver(lookup, { signal }),
+        aborted,
+      ]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  private async recoverInterruptedPreBroadcastJobs(): Promise<number> {
+    const interrupted = (await this.list()).filter(
+      (job) => job.status === 'claimed' || job.status === 'validated',
+    );
+    let recovered = 0;
+    for (const snapshot of interrupted) {
+      await this.withJobTransitionLock(snapshot.jobId, async () => {
+        const current = await this.getStatus(snapshot.jobId);
+        if (!current || (current.status !== 'claimed' && current.status !== 'validated')) return;
+        if (this.activeProcessJobIds.has(current.jobId)) return;
+        await this.releaseWalletLockForJob(current);
+        await this.writeJob(
+          this.resetJobToAccepted(current, current.status, getLiftJobTransactionEvidence(current)),
+          'recover-reset',
+        );
+        recovered += 1;
+      });
+    }
+    return recovered;
   }
 
   /**
@@ -2712,6 +2811,27 @@ export class TripleStoreAsyncLiftPublisher
       release();
       if (TripleStoreAsyncLiftPublisher.claimQueues.get(this.graphUri) === next) {
         TripleStoreAsyncLiftPublisher.claimQueues.delete(this.graphUri);
+      }
+    }
+  }
+
+  /** Serialize read-modify-write transitions for one persisted job. */
+  private async withJobTransitionLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
+    const key = `${this.graphUri}\u0000${jobId}`;
+    const previous = TripleStoreAsyncLiftPublisher.jobTransitionQueues.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    TripleStoreAsyncLiftPublisher.jobTransitionQueues.set(key, next);
+
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (TripleStoreAsyncLiftPublisher.jobTransitionQueues.get(key) === next) {
+        TripleStoreAsyncLiftPublisher.jobTransitionQueues.delete(key);
       }
     }
   }

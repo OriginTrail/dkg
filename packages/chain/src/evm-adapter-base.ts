@@ -1588,6 +1588,16 @@ export class EVMChainAdapterBase {
     const filled = await signer.populateTransaction(populated);
     if (this.maxFeePerGasWei !== undefined) {
       const cap = this.maxFeePerGasWei;
+      if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
+        const latestBlock = await signer.provider?.getBlock('latest');
+        const baseFeePerGas = latestBlock?.baseFeePerGas;
+        if (baseFeePerGas !== null && baseFeePerGas !== undefined && cap < baseFeePerGas) {
+          throw Object.assign(
+            new Error('chain.maxFeePerGasWei is below the current base fee'),
+            { code: 'FEE_CAP_BELOW_BASE_FEE' as const },
+          );
+        }
+      }
       if (filled.gasPrice !== null && filled.gasPrice !== undefined && BigInt(filled.gasPrice) > cap) {
         filled.gasPrice = cap;
       }

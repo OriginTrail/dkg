@@ -79,6 +79,7 @@ it('caps populated transaction fee fields when the operator sets maxFeePerGasWei
     estimateGas: async () => 21_000n,
     getTransactionCount: async () => 3,
     getFeeData: async () => ({ maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1_000_000_000n }),
+    getBlock: async () => ({ baseFeePerGas: 1n }),
     resolveName: async (name: string) => name,
     _isProvider: true,
   } as never);
@@ -97,6 +98,54 @@ it('caps populated transaction fee fields when the operator sets maxFeePerGasWei
   expect(decoded.maxPriorityFeePerGas).toBe(cap);
   expect(() => new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: 0n })))
     .toThrow(/maxFeePerGasWei must be greater than zero/);
+});
+
+it('rejects an EIP-1559 fee cap below the current base fee before signing', async () => {
+  const adapter: any = new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: 100n }));
+  const wallet = new ethers.Wallet(DEPLOYER_PK).connect({
+    getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
+    estimateGas: async () => 21_000n,
+    getTransactionCount: async () => 3,
+    getFeeData: async () => ({ maxFeePerGas: 1_000n, maxPriorityFeePerGas: 100n }),
+    getBlock: async () => ({ baseFeePerGas: 101n }),
+    resolveName: async (name: string) => name,
+    _isProvider: true,
+  } as never);
+
+  await expect(adapter.signPopulatedTransaction(wallet, {
+    to: '0x0000000000000000000000000000000000000002',
+    value: 0n,
+    nonce: 3,
+    gasLimit: 21_000n,
+    chainId: 31337,
+    type: 2,
+    maxFeePerGas: 1_000n,
+    maxPriorityFeePerGas: 100n,
+  })).rejects.toMatchObject({ code: 'FEE_CAP_BELOW_BASE_FEE' });
+});
+
+it('caps a legacy gas price without applying the EIP-1559 base-fee rule', async () => {
+  const cap = 100n;
+  const adapter: any = new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: cap }));
+  const wallet = new ethers.Wallet(DEPLOYER_PK).connect({
+    getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
+    estimateGas: async () => 21_000n,
+    getTransactionCount: async () => 3,
+    getFeeData: async () => ({ gasPrice: 1_000n }),
+    resolveName: async (name: string) => name,
+    _isProvider: true,
+  } as never);
+  const { signedTx } = await adapter.signPopulatedTransaction(wallet, {
+    to: '0x0000000000000000000000000000000000000002',
+    value: 0n,
+    nonce: 3,
+    gasLimit: 21_000n,
+    chainId: 31337,
+    type: 0,
+    gasPrice: 1_000n,
+  });
+
+  expect(ethers.Transaction.from(signedTx).gasPrice).toBe(cap);
 });
 
 describe('EVMChainAdapter historical KA update verification', () => {
@@ -1773,32 +1822,33 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(primary.getTransactionReceipt.calls).toContainEqual([txHash]);
   });
 
-  it('treats nonce-too-low transaction responses as accepted and polls receipts', async () => {
+  it('does not treat a generic nonce-too-low response as proof that the exact transaction was accepted', async () => {
     const a = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',
       rpcUrls: ['https://backup.example'],
     }));
     const signedTx = '0xdeadbeef';
     const txHash = '0x' + '44'.repeat(32);
-    const receipt = { hash: txHash, blockNumber: 48, status: 1, logs: [] };
     const primary = {
       broadcastTransaction: recorder(async () => {
         const err = new Error('nonce too low');
         (err as any).code = 'NONCE_EXPIRED';
         throw err;
       }),
-      getTransactionReceipt: recorder(async () => receipt),
+      getTransactionReceipt: recorder(async () => null),
     };
     const backup = {
       broadcastTransaction: recorder(async () => ({ hash: txHash })),
-      getTransactionReceipt: recorder(async () => receipt),
+      getTransactionReceipt: recorder(async () => null),
     };
     (a as any).providers = [primary, backup];
 
-    await expect((a as any).sendSignedTransactionAndWait(signedTx, txHash, 'unit write')).resolves.toBe(receipt);
+    await expect((a as any).sendSignedTransactionAndWait(signedTx, txHash, 'unit write'))
+      .rejects.toMatchObject({ code: 'NONCE_EXPIRED' });
     expect(primary.broadcastTransaction.calls).toHaveLength(1);
     expect(backup.broadcastTransaction.calls).toEqual([]);
-    expect(primary.getTransactionReceipt.calls).toContainEqual([txHash]);
+    expect(primary.getTransactionReceipt.calls).toEqual([]);
+    expect(backup.getTransactionReceipt.calls).toEqual([]);
   });
 
   it('throws CALL_EXCEPTION when a mined write receipt reverted', async () => {

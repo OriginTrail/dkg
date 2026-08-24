@@ -1680,6 +1680,11 @@ export interface DKGAgentConfig {
     chainId?: string;
     /** Overall submitted-transaction receipt deadline (default 10 minutes). */
     receiptTimeoutMs?: number;
+    /**
+     * Operator-selected receipt confirmation depth. Lower values are faster but
+     * increase reorganization risk; 1 gives no successor-block buffer. Defaults to 1.
+     */
+    finalityConfirmations?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint;
     /**

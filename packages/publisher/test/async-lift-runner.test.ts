@@ -27,6 +27,7 @@ function createPublisher(overrides: Partial<AsyncLiftPublisher> = {}): AsyncLift
     recordPublishFailure: async () => {},
     recover: async () => 0,
     reconcileTransactions: async () => 0,
+    drainDetachedExecutions: async () => {},
     getStats: () => ({}),
     pause: () => {},
     resume: () => {},
@@ -234,6 +235,59 @@ describe('AsyncLiftRunner', () => {
     await runner.stop();
 
     expect(reconciliationCalls).toBeGreaterThanOrEqual(1);
+  });
+
+  it('retries periodic reconciliation after an error', async () => {
+    let reconciliationCalls = 0;
+    const errors: unknown[] = [];
+    const publisher = createPublisher({
+      reconcileTransactions: async () => {
+        reconciliationCalls += 1;
+        if (reconciliationCalls === 1) throw new Error('temporary reconciliation failure');
+        return 0;
+      },
+    });
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 5,
+      errorBackoffMs: 5,
+      onError: (error) => { errors.push(error); },
+    });
+
+    await runner.start();
+    await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(2));
+    await runner.stop();
+
+    expect(errors).toHaveLength(1);
+  });
+
+  it('waits for detached publisher executions during shutdown', async () => {
+    let releaseDrain!: () => void;
+    const drainGate = new Promise<void>((resolve) => { releaseDrain = resolve; });
+    let drainCalls = 0;
+    const publisher = createPublisher({
+      drainDetachedExecutions: async () => {
+        drainCalls += 1;
+        await drainGate;
+      },
+    });
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+    });
+    await runner.start();
+    const stopping = runner.stop();
+    let stopped = false;
+    void stopping.then(() => { stopped = true; });
+    await waitFor(() => expect(drainCalls).toBe(1));
+    expect(stopped).toBe(false);
+
+    releaseDrain();
+    await stopping;
+    expect(stopped).toBe(true);
   });
 
   it('backs off and continues after loop-level errors', async () => {

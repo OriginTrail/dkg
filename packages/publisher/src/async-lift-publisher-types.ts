@@ -111,6 +111,10 @@ export interface AsyncLiftPublisher {
   recordPublishResult(jobId: string, publishResult: PublishResult, options?: { publicByteSize?: number }): Promise<LiftJob>;
   recordPublishFailure(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob>;
   recover(): Promise<number>;
+  /** Reconcile interrupted work without restarting the runner. */
+  reconcileTransactions(): Promise<number>;
+  /** Wait until every receipt task detached after RPC acceptance has stopped. */
+  drainDetachedExecutions(): Promise<void>;
   getStats(): Promise<Record<LiftJobState, number>>;
   pause(): Promise<void>;
   resume(): Promise<void>;
