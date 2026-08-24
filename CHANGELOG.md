@@ -4,32 +4,9 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
-### Async publisher — resolution-aware automatic retries (#2270)
+## [10.0.14] - 2026-08-25
 
-Failed async-publisher jobs that may have submitted a transaction are no longer
-left in indefinite limbo. Recovery asks the chain what actually happened and acts on
-the answer: a transaction proven absent releases the job for a fresh attempt, a
-recognized one is finalized from its on-chain evidence, and anything unproven stays
-held. A job is never re-sent on a guess, so the same Knowledge Asset cannot be
-published twice.
-
-#### Upgrading
-
-| Change | Impact | Action |
-| --- | --- | --- |
-| `AsyncLiftPublisherConfig.chainRecoveryResolver` is replaced by `chainProofResolver` | **Node operators are not affected** — the node wires this itself. This only affects code that constructs `TripleStoreAsyncLiftPublisher` directly from the `@origintrail-official/dkg-publisher` package. The field was renamed and its callback contract changed: it now receives a lookup and returns a verdict (`recovered` / `reverted` / `not-found` / `pending` / `inconclusive`) rather than a job and a nullable result. A configuration still carrying the old key is **rejected at construction** rather than ignored, because a publisher that silently lost its resolver would hold every job forever with nothing to explain why | If you embed the publisher package directly, rename the field and adapt the callback to the verdict contract. If you run a node, no action |
-| Jobs already stuck at upgrade time may need one manual clear | Recovery needs to know whether a held job was creating or updating an asset. Jobs recorded **before** this upgrade do not carry that marker, and the node will not guess: it reports them as needing operator action instead of promising an automatic retry it cannot deliver. Only jobs that were already failed-and-held at the moment of upgrade are affected; everything enqueued afterwards records the marker automatically | Run `dkg publisher jobs --status failed` after upgrading. For any job listed there, verify its transaction on-chain, then clear it by id with `POST /api/publisher/clear-job {"jobId":"<id>"}` (the targeted clear; `dkg publisher clear <status>` is the bulk form and deliberately skips held jobs). Most deployments will have none |
-
-#### Scope
-
-This release implements a deliberately narrow, safe subset of #2270: automatic retry
-is limited to failures that are provably safe to re-run, plus chain-proof resolution
-of transaction-bearing failures. The configurable per-code and per-resolution retry
-policy described in the issue is **not** part of this release.
-
-## [10.0.14] - 2026-08-14
-
-A selected-public convergence release. An Edge node can opt a bounded set of publicly readable Context Graphs into RFC-64: an operator-approved graph-complete provider drives bounded native Shared Memory recovery, while Verifiable Memory remains independently derived from finalized blockchain inventory. Both lanes continue across partial progress and provider gaps, and VM recovery batches assets by bounded byte/quad footprint instead of treating an arbitrarily large graph as one transfer. Signed SWM inventory remains shadow evidence in this release and does not drive receiver synchronization. RFC-64 remains operator-selected and public-only: a valid non-empty bootstrap manifest activates its selected scope when `enabled` is omitted, while an absent block or explicit `enabled: false` remains dormant. Private encrypted live sharing is unchanged, and private catalog-based cold join is not part of this release. **No smart-contract changes or deployments are required.**
+A selected-public convergence and publisher-recovery release. An Edge node can opt a bounded set of publicly readable Context Graphs into RFC-64: an operator-approved graph-complete provider drives bounded native Shared Memory recovery, while Verifiable Memory remains independently derived from finalized blockchain inventory. Both lanes continue across partial progress and provider gaps, and VM recovery batches assets by bounded byte/quad footprint instead of treating an arbitrarily large graph as one transfer. The async publisher now resolves transaction-bearing failures from chain evidence and never re-sends a job on a guess. Operators can select the mined-receipt confirmation depth; the default is one confirmation. Signed SWM inventory remains shadow evidence in this release and does not drive receiver synchronization. RFC-64 remains operator-selected and public-only: a valid non-empty bootstrap manifest activates its selected scope when `enabled` is omitted, while an absent block or explicit `enabled: false` remains dormant. Private encrypted live sharing is unchanged, and private catalog-based cold join is not part of this release. **No smart-contract changes or deployments are required.**
 
 ### Upgrading from 10.0.13
 
@@ -41,6 +18,9 @@ A selected-public convergence release. An Edge node can opt a bounded set of pub
 | Selected VM recovery uses bounded footprint-aware batches | Multiple small assets can share one recovery request, while byte, quad and heap estimates keep large transfers bounded | No action; the scheduler derives safe batches from authoritative or conservative size evidence |
 | Persisted user subscriptions rehydrate on daemon startup | An operator-selected graph resumes automatically after restart instead of remaining a dormant database row | Set `DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED=false` only as an emergency kill-switch |
 | Dashboard SQLite schema 32 → 33 | Selected-VM cursors are fenced by deployment identity; v32 optimization cursors are discarded so a redeploy cannot reuse another chain deployment's numeric IDs or watermark | No action; the graph data is retained and selected VM reconciliation safely resumes from chain inventory |
+| `chain.finalityConfirmations` controls mined-receipt finality | The receipt block counts as confirmation 1. The default of `1` releases a publisher wallet as soon as the receipt block is canonical, with no successor-block reorganization buffer. Larger values wait for more blocks and reduce throughput | Keep the default only when lower latency is worth the reorganization risk. Set a larger positive integer when reversal resistance is more important than publish speed |
+| `AsyncLiftPublisherConfig.chainRecoveryResolver` is replaced by `chainProofResolver` | **Node operators are not affected** — the node wires this itself. This affects code that constructs `TripleStoreAsyncLiftPublisher` directly from `@origintrail-official/dkg-publisher`. The callback now receives a lookup and returns `recovered`, `reverted`, `not-found`, `pending`, or `inconclusive`. The old key is rejected instead of ignored | If you embed the publisher package directly, rename the field and adapt the callback to the verdict contract. If you run a node, no action |
+| Jobs already stuck at upgrade time may need one manual clear | Recovery needs to know whether a held job was creating or updating an asset. Jobs recorded before this upgrade do not carry that marker, so the node reports them as needing operator action instead of guessing. Jobs enqueued after the upgrade record the marker automatically | Run `dkg publisher jobs --status failed`. After verifying a legacy held job on chain, clear that exact job with `POST /api/publisher/clear-job {"jobId":"<id>"}`. Bulk clear deliberately skips held jobs |
 
 ### Added
 
@@ -54,12 +34,14 @@ A selected-public convergence release. An Edge node can opt a bounded set of pub
 - **Selected manifests activate the RFC-64 lane directly** (#2272): a valid accepted non-empty bootstrap manifest with `enabled` omitted is active by default, while an absent block and explicit `enabled: false` stay dormant. This removes a redundant configuration switch without expanding an Edge node beyond its operator-selected Context Graphs.
 - **Cold selected CG bindings resolve directly from chain state** (#2205): a fresh receiver can map the configured public graph to its numeric on-chain identity without relying on pre-existing ontology/store metadata, and ambiguous or stale bindings fail closed.
 - **Publisher workspace-head writes remain on the StorageACK lane** (#2178), preventing unrelated normal-lane store work from delaying acknowledgement-critical state.
+- **Mined-receipt finality is operator-selected** (#2310): `chain.finalityConfirmations` is a positive integer used consistently for receipt finality and recovery proof snapshots. Confirmation 1 is the receipt block itself and is the default; larger values trade publisher-wallet throughput for a deeper reorganization buffer.
 - **Process-level store concurrency respects host CPU capacity** (#2277): `DKG_STORE_MAX_CONCURRENT` is capped at the runtime's available parallelism on hosts with at least two logical CPUs; single-vCPU hosts retain the two-slot minimum needed for the default ACK reservation. Explicitly lower environment values and constructor overrides remain unchanged.
 - **Prime Agent legacy chat memory migrates to numbered, graph-scoped working memory** (#2151, #2153) without mistaking orphan lifecycle rows for legacy drafts.
 
 ### Fixed
 
 - **Node information no longer exposes configured RPC endpoints** (#2211); status retains health and failover evidence without serializing endpoint credentials.
+- **Async publisher recovery is chain-proof aware** (#2270, #2300, #2303, #2304, #2307, #2310): a transaction proven absent can safely retry, a recognized transaction finalizes from on-chain evidence, and an unproven transaction stays held. Recovery never re-sends on a guess, and transaction-bearing jobs retain the signer and nonce evidence needed for reconciliation.
 - **Selected SWM and VM recovery no longer stop after the first partial result** (#2146, #2210), and selected work is not displaced indefinitely by unrelated background synchronization (#2182).
 - **A finalized public Knowledge Asset no longer remains duplicated across SWM and VM** (#2262): both arrival orders use current chain status plus the complete public/private commitment to retire only an exact stale SWM twin; ambiguous, newer or changed SWM remains untouched.
 - **VM recovery cursors cannot cross deployment boundaries** (#2184); upgrading drops only the unsafe optimization cursor, never SWM or VM content.
@@ -68,6 +50,10 @@ A selected-public convergence release. An Edge node can opt a bounded set of pub
 
 - **No contract changes.** No Solidity source, ABI, or deployment-registry update is required.
 - RFC-64 remains dormant when `rfc64PublicCatalog` is absent or `enabled` is explicitly `false`. When `enabled` is omitted, activation requires one bounded, network-matching, accepted public-policy bootstrap manifest. Edge scope remains operator-selected; Core nodes retain their separate coverage responsibilities.
+
+### Validation
+
+- A distributed two-receiver release run used DKG commit `c7afca89baa58f101738c37ff774b63211123ca4` and harness commit `f79c2d887845841816d46f20cd4c2b3bbace0bdb`. It published 500/500 Shared Memory assets and 497/500 Verifiable Memory assets. Both remote Edge nodes synchronized every published asset with zero missing or mismatched pairs. The operator accepted the three unresolved VM cases as a documented release waiver; this evidence is not a strict 500/500 pass. See [the sanitized run report](docs/reports/testnet-release-10.0.14-distributed-500-20260824.md).
 
 ### Known limitations
 
