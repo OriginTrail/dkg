@@ -76,11 +76,11 @@ function clampNodeTimerMs(value: number): number {
 }
 
 interface ManagedOxigraphDeadlines {
-  queryTimeoutS: number;
+  queryTimeoutS?: number;
   clientTimeoutMs: number;
 }
 
-/** Resolve the required native/client pair and enforce native < client. */
+/** Resolve the client deadline and an optional operator-requested native deadline. */
 function resolveManagedOxigraphDeadlines(
   options: Record<string, unknown> | undefined,
 ): ManagedOxigraphDeadlines {
@@ -88,15 +88,15 @@ function resolveManagedOxigraphDeadlines(
     resolvePositiveIntegerOption(options, 'clientTimeoutMs')
       ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
   );
-  const derivedQueryTimeoutS = Math.max(
-    1,
-    Math.floor(
-      (configuredClientTimeoutMs - MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS) / 1_000,
-    ),
-  );
   const configuredQueryTimeoutS = resolvePositiveIntegerOption(options, 'queryTimeoutS');
+  if (configuredQueryTimeoutS === undefined) {
+    return {
+      queryTimeoutS: undefined,
+      clientTimeoutMs: configuredClientTimeoutMs,
+    };
+  }
   const queryTimeoutS = Math.min(
-    configuredQueryTimeoutS ?? derivedQueryTimeoutS,
+    configuredQueryTimeoutS,
     MAX_MANAGED_OXIGRAPH_QUERY_TIMEOUT_S,
   );
   const minimumClientTimeoutMs = clampNodeTimerMs(
@@ -176,8 +176,8 @@ export interface ManagedOxigraphPlan {
   largeLiteralStorage: { enabled: boolean; thresholdBytes?: number; directory: string };
   /** Startup readiness deadline passed to the managed server supervisor. */
   readyTimeoutMs?: number;
-  /** Native Oxigraph query timeout, passed as `oxigraph serve --timeout-s`. */
-  queryTimeoutS: number;
+  /** Optional native Oxigraph query timeout, passed as `oxigraph serve --timeout-s`. */
+  queryTimeoutS?: number;
   /** SPARQL HTTP client deadline; kept after Oxigraph's native timeout when both exist. */
   clientTimeoutMs: number;
   /** Finite limits applied to an isolated systemd user scope. */
@@ -206,10 +206,11 @@ export function planManagedOxigraph(
   const options = config.store.options ?? {};
   const port = resolveManagedOxigraphPort(options);
   const readyTimeoutMs = resolvePositiveIntegerOption(options, 'readyTimeoutMs');
-  // A client-only deadline closes the HTTP socket but cannot cancel an
-  // evaluation already running inside the Oxigraph server. Derive a native
-  // deadline with five seconds of client grace so timed-out queries are
-  // interrupted server-side instead of accumulating as zombies.
+  // Oxigraph 0.5.x implements `--timeout-s` with one sleeping OS thread per
+  // query. Under sustained load those timer threads can exhaust the process
+  // before they expire. Keep the native deadline opt-in; the HTTP adapter's
+  // client deadline remains mandatory and onClientTimeout below restarts the
+  // managed server so a timed-out evaluation cannot remain as a zombie.
   const { queryTimeoutS, clientTimeoutMs } = resolveManagedOxigraphDeadlines(options);
   const memoryLimits = normalizeOxigraphMemoryLimits({
     highMiB: options.memoryHighMiB,

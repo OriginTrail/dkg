@@ -401,3 +401,8 @@ export * from './catalog-seal-binding.js';
 export * from './transferred-catalog-bundle.js';
 export * from './vm-update-convergence.js';
 export * from './ka-ual-identity.js';
+export {
+  MAX_NODE_TIMER_DELAY_MS,
+  assertNodeTimerDelayMs,
+  resolveNodeTimerDelayMs,
+} from './node-timer.js';

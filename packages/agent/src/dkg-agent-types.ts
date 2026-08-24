@@ -46,6 +46,7 @@ import type {
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
   StorageAckTiming,
+  StorageAckTimingInput,
   WorkspacePublicSnapshotStore,
   CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
@@ -67,6 +68,7 @@ import type {
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
+import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -1476,6 +1478,16 @@ export interface DKGAgentConfig {
   syncSharedMemoryOnConnect?: boolean;
   /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
   syncReconcilerEnabled?: boolean;
+  /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
+  syncReconcilerIntervalMs?: number;
+  /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
+  syncStalenessThresholdMs?: number;
+  /** Initial per-peer automatic sync retry delay. Default: 5 minutes. */
+  syncBackoffBaseMs?: number;
+  /** Maximum per-peer automatic sync retry delay. Default: 60 minutes. */
+  syncBackoffMaxMs?: number;
+  /** Fractional retry jitter from 0 through 1. Default: 0.25. */
+  syncBackoffJitter?: number;
   /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
   syncOnConnectEnabled?: boolean;
   /**
@@ -1626,7 +1638,7 @@ export interface DKGAgentConfig {
    * legacy loose aliases below so the handler deadline and publisher send
    * timeout are treated as one invariant.
    */
-  storageAckTiming?: StorageAckTiming;
+  storageAckTiming?: StorageAckTimingInput;
   /**
    * @deprecated Use `storageAckTiming.handlerDeadlineMs`. Kept as a
    * compatibility alias and normalized by `DKGAgent.create`.
@@ -1670,6 +1682,13 @@ export interface DKGAgentConfig {
     chainId?: string;
     /** Overall submitted-transaction receipt deadline (default 10 minutes). */
     receiptTimeoutMs?: number;
+    /**
+     * Operator-selected receipt confirmation depth. Lower values are faster but
+     * increase reorganization risk; 1 gives no successor-block buffer. Defaults to 1.
+     */
+    finalityConfirmations?: number;
+    /** Optional operator cap for transaction fee-per-gas fields (wei). */
+    maxFeePerGasWei?: bigint;
     /**
      * Optional V10 allowance-sizing policy. Threaded straight through to
      * the `EVMChainAdapter`; see `ApprovalPolicy` in
@@ -1833,6 +1852,11 @@ export type ResolvedDKGAgentConfig =
     | 'storageAckTiming'
     | 'ackHandlerDeadlineMs'
     | 'ackSendTimeoutMs'
+    | 'syncReconcilerIntervalMs'
+    | 'syncStalenessThresholdMs'
+    | 'syncBackoffBaseMs'
+    | 'syncBackoffMaxMs'
+    | 'syncBackoffJitter'
     | 'rfc64PublicCatalogActivation'
     | 'rfc64PublicCatalogAutoPublish'
     | 'rfc64PublicCatalogBootstrap'
@@ -1841,6 +1865,7 @@ export type ResolvedDKGAgentConfig =
   > & {
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
+    syncReconcilerTiming: SyncReconcilerTiming;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;

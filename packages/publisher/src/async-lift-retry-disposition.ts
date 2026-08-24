@@ -375,10 +375,13 @@ function ownsLiftJobAdmissionLane(job: LiftJob, agentAddress: string | undefined
 /**
  * What the TARGETED by-id clear may remove.
  *
- * #1837's base predicate treats a `retry_recovery`-failed job as nonterminal-for-cleanup, because
- * periodic recovery may still finalize it from chain. That is right for bulk cleanup and it leaves
- * a held UPDATE with no exit at all: an update has no absence-release path by design, so the by-id
- * clear is its stated exit. This lane therefore accepts ONE named exception on top of the base.
+ * #1837's base predicate treats transaction-bearing jobs as nonterminal-for-cleanup, because
+ * periodic recovery may still finalize them from chain. That is right for bulk cleanup. The
+ * explicit owner override is also the exit when an operator abandons one exact closed-run record:
+ * it accepts a pre-broadcast `validated` record, a `retry_recovery` failure, or a live
+ * `broadcast`/`included` record. The append-only journal remains, and no broad clear receives this
+ * authority. A `claimed` record stays denied because it can still be running before validation;
+ * an operator must stop the runner and let that claim resolve before clearing it.
  *
  * The exception is named rather than expressed as the base predicate's complement: written that
  * way it would silently absorb every future reason a terminal job becomes protected. Additions to
@@ -403,6 +406,7 @@ export function isTargetedClearableLiftJob(
   if (!override) return false;
   // Authority and state eligibility are decided together, so neither can be granted alone.
   if (!ownsLiftJobAdmissionLane(job, override.requestedBy)) return false;
+  if (job.status === 'validated' || job.status === 'broadcast' || job.status === 'included') return true;
   return isTerminalLiftJobState(job.status)
     && isFailedJob(job)
     && job.failure.resolution === 'retry_recovery';

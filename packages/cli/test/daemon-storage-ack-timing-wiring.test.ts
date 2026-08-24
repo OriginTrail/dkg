@@ -214,6 +214,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(createArg.storageAckTiming).toEqual({
       handlerDeadlineMs: 15_000,
       sendTimeoutMs: 20_000,
+      maxConcurrentCollections: 1,
     });
     expect(createArg.chainConfig).toMatchObject({
       rpcUrl: 'https://private-rpc.example',
@@ -378,6 +379,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(createArg.storageAckTiming).toEqual({
       handlerDeadlineMs: 55_000,
       sendTimeoutMs: 60_000,
+      maxConcurrentCollections: 1,
     });
   });
 
@@ -389,6 +391,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(createArg.storageAckTiming).toEqual({
       handlerDeadlineMs: 0,
       sendTimeoutMs: 20_000,
+      maxConcurrentCollections: 1,
     });
   });
 

@@ -26,6 +26,8 @@ function createPublisher(overrides: Partial<AsyncLiftPublisher> = {}): AsyncLift
     recordPublishResult: async () => {},
     recordPublishFailure: async () => {},
     recover: async () => 0,
+    reconcileTransactions: async () => 0,
+    drainDetachedExecutions: async () => {},
     getStats: () => ({}),
     pause: () => {},
     resume: () => {},
@@ -37,6 +39,69 @@ function createPublisher(overrides: Partial<AsyncLiftPublisher> = {}): AsyncLift
 }
 
 describe('AsyncLiftRunner', () => {
+  it('rejects a recovery interval above the Node.js timer limit', () => {
+    expect(() => new AsyncLiftRunner({
+      publisher: createPublisher(),
+      walletIds: ['wallet-1'],
+      recoveryIntervalMs: 2_147_483_648,
+    })).toThrow(/1 through 2147483647 ms/);
+  });
+
+  it('supports the publisher contract from before dedicated reconciliation was added', async () => {
+    let recoverCalls = 0;
+    const publisher = createPublisher({
+      recover: async () => {
+        recoverCalls += 1;
+        return 0;
+      },
+    });
+    delete publisher.reconcileTransactions;
+    delete publisher.drainDetachedExecutions;
+
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 5,
+    });
+    await runner.start();
+    await waitFor(() => expect(recoverCalls).toBeGreaterThanOrEqual(2));
+    await expect(runner.stop()).resolves.toBeUndefined();
+  });
+
+  it('can recover in paused maintenance mode before wallet processing starts', async () => {
+    const order: string[] = [];
+    let paused = false;
+    let runner!: AsyncLiftRunner;
+    const publisher = createPublisher({
+      pause: async () => {
+        paused = true;
+        order.push('pause');
+      },
+      recover: async () => {
+        order.push('recover');
+        return 0;
+      },
+      processNext: async () => {
+        order.push(paused ? 'process-paused' : 'process-active');
+        return null;
+      },
+    } as any);
+
+    runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      startPaused: true,
+      sleep: async () => { void runner.stop(); },
+    });
+
+    await runner.start();
+    await waitFor(() => expect(order).toContain('process-paused'));
+    await runner.stop();
+
+    expect(order.slice(0, 3)).toEqual(['pause', 'recover', 'process-paused']);
+  });
+
   it('runs recovery before processing wallets', async () => {
     const order: string[] = [];
     const publisher = createPublisher({
@@ -98,7 +163,7 @@ describe('AsyncLiftRunner', () => {
     expect(processNextCalls).toContainEqual(['wallet-1']);
   });
 
-  it('processes one job per wallet concurrently and continues immediately after work', async () => {
+  it('processes wallets concurrently and lets each continue immediately after work', async () => {
     const processNextCalls: unknown[][] = [];
     const firstCycleWallets = new Set<string>();
     let releaseFirstCycle!: () => void;
@@ -126,7 +191,7 @@ describe('AsyncLiftRunner', () => {
       walletIds: ['wallet-1', 'wallet-2'],
       sleep: async (...args: unknown[]) => {
         sleepCalls.push(args);
-        void runner.stop();
+        await new Promise((resolve) => setTimeout(resolve, 0));
       },
     } as any);
 
@@ -139,36 +204,120 @@ describe('AsyncLiftRunner', () => {
     expect(firstCycleWallets).toEqual(new Set(['wallet-1', 'wallet-2']));
     expect(processNextCalls.filter((call) => call[0] === 'wallet-1').length).toBeGreaterThanOrEqual(2);
     expect(processNextCalls.filter((call) => call[0] === 'wallet-2').length).toBeGreaterThanOrEqual(2);
-    expect(sleepCalls.length).toBe(1);
+    expect(sleepCalls.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('waits for every wallet attempt to settle before reporting a cycle error', async () => {
-    let walletTwoSettled = false;
-    const errors: unknown[] = [];
-    let runner!: AsyncLiftRunner;
+  it('does not let a stuck wallet block another wallet from processing more jobs', async () => {
+    let releaseStuckWallet!: () => void;
+    const stuckWallet = new Promise<void>((resolve) => { releaseStuckWallet = resolve; });
+    let walletTwoCalls = 0;
     const publisher = createPublisher({
       processNext: async (walletId: string) => {
-        if (walletId === 'wallet-1') throw new Error('wallet one failed');
-        await new Promise((resolve) => setTimeout(resolve, 25));
-        walletTwoSettled = true;
-        return null;
+        if (walletId === 'wallet-1') {
+          await stuckWallet;
+          return null;
+        }
+        walletTwoCalls += 1;
+        return walletTwoCalls <= 3
+          ? { jobId: `wallet-two-job-${walletTwoCalls}` } as LiftJob
+          : null;
       },
     } as any);
 
-    runner = new AsyncLiftRunner({
+    const runner = new AsyncLiftRunner({
       publisher,
       walletIds: ['wallet-1', 'wallet-2'],
-      onError: (error) => { errors.push(error); },
-      errorBackoffMs: 1,
-      sleep: async () => { void runner.stop(); },
+      pollIntervalMs: 1,
     });
 
     await runner.start();
-    await waitFor(() => expect(errors.length).toBeGreaterThan(0));
+    await waitFor(() => expect(walletTwoCalls).toBeGreaterThanOrEqual(3));
+    releaseStuckWallet();
     await runner.stop();
 
-    expect(walletTwoSettled).toBe(true);
-    expect(errors[0]).toMatchObject({ message: 'wallet one failed' });
+    expect(walletTwoCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  it('reconciles transactions while a wallet attempt remains stuck', async () => {
+    let releaseStuckWallet!: () => void;
+    const stuckWallet = new Promise<void>((resolve) => { releaseStuckWallet = resolve; });
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      processNext: async (walletId: string) => {
+        if (walletId === 'wallet-1') await stuckWallet;
+        return null;
+      },
+      reconcileTransactions: async () => {
+        reconciliationCalls += 1;
+        return 0;
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1', 'wallet-2'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 5,
+    });
+
+    await runner.start();
+    await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(1));
+    releaseStuckWallet();
+    await runner.stop();
+
+    expect(reconciliationCalls).toBeGreaterThanOrEqual(1);
+  });
+
+  it('retries periodic reconciliation after an error', async () => {
+    let reconciliationCalls = 0;
+    const errors: unknown[] = [];
+    const publisher = createPublisher({
+      reconcileTransactions: async () => {
+        reconciliationCalls += 1;
+        if (reconciliationCalls === 1) throw new Error('temporary reconciliation failure');
+        return 0;
+      },
+    });
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 5,
+      errorBackoffMs: 5,
+      onError: (error) => { errors.push(error); },
+    });
+
+    await runner.start();
+    await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(2));
+    await runner.stop();
+
+    expect(errors).toHaveLength(1);
+  });
+
+  it('waits for detached publisher executions during shutdown', async () => {
+    let releaseDrain!: () => void;
+    const drainGate = new Promise<void>((resolve) => { releaseDrain = resolve; });
+    let drainCalls = 0;
+    const publisher = createPublisher({
+      drainDetachedExecutions: async () => {
+        drainCalls += 1;
+        await drainGate;
+      },
+    });
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+    });
+    await runner.start();
+    const stopping = runner.stop();
+    let stopped = false;
+    void stopping.then(() => { stopped = true; });
+    await waitFor(() => expect(drainCalls).toBe(1));
+    expect(stopped).toBe(false);
+
+    releaseDrain();
+    await stopping;
+    expect(stopped).toBe(true);
   });
 
   it('backs off and continues after loop-level errors', async () => {

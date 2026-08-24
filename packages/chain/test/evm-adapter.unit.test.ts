@@ -27,7 +27,17 @@ import {
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
-import { resolveReceiptTimeoutMs, RPC_READ_STALL_TIMEOUT_MS, RPC_RECEIPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import {
+  DEFAULT_FINALITY_CONFIRMATIONS,
+  confirmedStateBlockAtHead,
+  requiredHeadBlockForReceipt,
+  resolveFinalityConfirmations,
+  resolveReceiptTimeoutMs,
+  RPC_READ_STALL_TIMEOUT_MS,
+  RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS,
+  RPC_RECEIPT_POLL_INTERVAL_MS,
+  RPC_RECEIPT_TIMEOUT_MS,
+} from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
@@ -46,6 +56,165 @@ it('defaults an omitted receipt deadline to ten minutes', () => {
 it('rejects an explicitly invalid receipt deadline at the adapter boundary', () => {
   expect(() => new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 999 })))
     .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
+});
+
+it('defaults mined-receipt finality to one confirmation', () => {
+  expect(resolveFinalityConfirmations(undefined)).toBe(1);
+  expect(DEFAULT_FINALITY_CONFIRMATIONS).toBe(1);
+  expect((new EVMChainAdapter(minimalConfig()) as any).finalityConfirmations).toBe(1);
+});
+
+it('accepts an explicit confirmation depth and rejects invalid values', () => {
+  expect(resolveFinalityConfirmations(7)).toBe(7);
+  expect((new EVMChainAdapter(minimalConfig({ finalityConfirmations: 7 })) as any)
+    .finalityConfirmations).toBe(7);
+  for (const value of [null, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    expect(() => resolveFinalityConfirmations(value)).toThrow(
+      /finalityConfirmations must be an integer >= 1/,
+    );
+  }
+});
+
+it('uses one confirmation-depth calculation for receipts and pinned state', () => {
+  expect(requiredHeadBlockForReceipt(100, 1)).toBe(100);
+  expect(requiredHeadBlockForReceipt(100, 7)).toBe(106);
+  expect(confirmedStateBlockAtHead(106, 7)).toBe(100);
+  expect(confirmedStateBlockAtHead(5, 7)).toBeNull();
+});
+
+it('retries a transient finality read inside the receipt deadline', async () => {
+  vi.useFakeTimers({ now: 0 });
+  const blockHash = `0x${'44'.repeat(32)}`;
+  const receipt = { hash: `0x${'11'.repeat(32)}`, blockNumber: 10, blockHash, status: 1, index: 0, logs: [] };
+  let finalityAttempt = 0;
+  const adapter: any = new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 5_000 }));
+  try {
+    adapter.providers = [{
+      getNetwork: async () => ({ chainId: 31337n }),
+      getTransactionReceipt: async () => receipt,
+      getBlockNumber: async () => {
+        finalityAttempt += 1;
+        if (finalityAttempt === 1) {
+          const error = new Error('temporary finality RPC failure') as Error & { code: string };
+          error.code = 'NETWORK_ERROR';
+          throw error;
+        }
+        return 10;
+      },
+      getBlock: async () => ({ number: 10, hash: blockHash }),
+    }];
+    const outcome = adapter.waitForReceiptWithFailover(receipt.hash, 'publish');
+    await vi.advanceTimersByTimeAsync(RPC_RECEIPT_POLL_INTERVAL_MS + 1);
+    await expect(outcome).resolves.toMatchObject({ hash: receipt.hash });
+    expect(finalityAttempt).toBe(2);
+  } finally {
+    try { adapter.destroy(); } catch { /* test provider has no destroy */ }
+    vi.useRealTimers();
+  }
+});
+
+it('bounds a stalled finality read by the receipt deadline', async () => {
+  vi.useFakeTimers({ now: 0 });
+  const blockHash = `0x${'55'.repeat(32)}`;
+  const receipt = { hash: `0x${'22'.repeat(32)}`, blockNumber: 10, blockHash, status: 1, index: 0, logs: [] };
+  const adapter: any = new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 1_000 }));
+  try {
+    adapter.providers = [{
+      getNetwork: async () => ({ chainId: 31337n }),
+      getTransactionReceipt: async () => receipt,
+      getBlockNumber: async () => new Promise<number>(() => {}),
+      getBlock: async () => ({ number: 10, hash: blockHash }),
+    }];
+    const outcome = adapter.waitForReceiptWithFailover(receipt.hash, 'publish').then(
+      (value: unknown) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    await vi.advanceTimersByTimeAsync(1_001);
+    await expect(outcome).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'RPC_TIMEOUT' },
+    });
+  } finally {
+    try { adapter.destroy(); } catch { /* test provider has no destroy */ }
+    vi.useRealTimers();
+  }
+});
+
+it('caps populated transaction fee fields when the operator sets maxFeePerGasWei', async () => {
+  const cap = 100_000_000n;
+  const adapter: any = new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: cap }));
+  const wallet = new ethers.Wallet(DEPLOYER_PK).connect({
+    getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
+    estimateGas: async () => 21_000n,
+    getTransactionCount: async () => 3,
+    getFeeData: async () => ({ maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1_000_000_000n }),
+    getBlock: async () => ({ baseFeePerGas: 1n }),
+    resolveName: async (name: string) => name,
+    _isProvider: true,
+  } as never);
+  const { signedTx } = await adapter.signPopulatedTransaction(wallet, {
+    to: '0x0000000000000000000000000000000000000002',
+    value: 0n,
+    nonce: 3,
+    gasLimit: 21_000n,
+    chainId: 31337,
+    type: 2,
+    maxFeePerGas: 1_000_000_000n,
+    maxPriorityFeePerGas: 1_000_000_000n,
+  });
+  const decoded = ethers.Transaction.from(signedTx);
+  expect(decoded.maxFeePerGas).toBe(cap);
+  expect(decoded.maxPriorityFeePerGas).toBe(cap);
+  expect(() => new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: 0n })))
+    .toThrow(/maxFeePerGasWei must be greater than zero/);
+});
+
+it('rejects an EIP-1559 fee cap below the current base fee before signing', async () => {
+  const adapter: any = new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: 100n }));
+  const wallet = new ethers.Wallet(DEPLOYER_PK).connect({
+    getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
+    estimateGas: async () => 21_000n,
+    getTransactionCount: async () => 3,
+    getFeeData: async () => ({ maxFeePerGas: 1_000n, maxPriorityFeePerGas: 100n }),
+    getBlock: async () => ({ baseFeePerGas: 101n }),
+    resolveName: async (name: string) => name,
+    _isProvider: true,
+  } as never);
+
+  await expect(adapter.signPopulatedTransaction(wallet, {
+    to: '0x0000000000000000000000000000000000000002',
+    value: 0n,
+    nonce: 3,
+    gasLimit: 21_000n,
+    chainId: 31337,
+    type: 2,
+    maxFeePerGas: 1_000n,
+    maxPriorityFeePerGas: 100n,
+  })).rejects.toMatchObject({ code: 'FEE_CAP_BELOW_BASE_FEE' });
+});
+
+it('caps a legacy gas price without applying the EIP-1559 base-fee rule', async () => {
+  const cap = 100n;
+  const adapter: any = new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: cap }));
+  const wallet = new ethers.Wallet(DEPLOYER_PK).connect({
+    getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
+    estimateGas: async () => 21_000n,
+    getTransactionCount: async () => 3,
+    getFeeData: async () => ({ gasPrice: 1_000n }),
+    resolveName: async (name: string) => name,
+    _isProvider: true,
+  } as never);
+  const { signedTx } = await adapter.signPopulatedTransaction(wallet, {
+    to: '0x0000000000000000000000000000000000000002',
+    value: 0n,
+    nonce: 3,
+    gasLimit: 21_000n,
+    chainId: 31337,
+    type: 0,
+    gasPrice: 1_000n,
+  });
+
+  expect(ethers.Transaction.from(signedTx).gasPrice).toBe(cap);
 });
 
 describe('EVMChainAdapter historical KA update verification', () => {
@@ -1470,7 +1639,8 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const signedTx = '0x02f86c0180843b9aca0084773594008252089400000000000000000000000000000000000000018080c001a0' +
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     const txHash = '0x' + '11'.repeat(32);
-    const receipt = { hash: txHash, blockNumber: 45, status: 1, logs: [] };
+    const blockHash = '0x' + '45'.repeat(32);
+    const receipt = { hash: txHash, blockNumber: 45, blockHash, status: 1, logs: [] };
     const primary = {
       broadcastTransaction: recorder(async (_raw: string) => {
         const err = new Error('429 too many requests');
@@ -1478,10 +1648,14 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
         throw err;
       }),
       getTransactionReceipt: recorder(async () => null),
+      getBlockNumber: recorder(async () => 45),
+      getBlock: recorder(async () => ({ number: 45, hash: blockHash })),
     };
     const backup = {
       broadcastTransaction: recorder(async (_raw: string) => ({ hash: txHash })),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 45),
+      getBlock: recorder(async () => ({ number: 45, hash: blockHash })),
     };
     (a as any).providers = [primary, backup];
 
@@ -1703,16 +1877,21 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }));
     const signedTx = '0xdeadbeef';
     const txHash = '0x' + '22'.repeat(32);
-    const receipt = { hash: txHash, blockNumber: 46, status: 1, logs: [] };
+    const blockHash = '0x' + '46'.repeat(32);
+    const receipt = { hash: txHash, blockNumber: 46, blockHash, status: 1, logs: [] };
     const primary = {
       broadcastTransaction: recorder(async () => {
         throw new Error('already known');
       }),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 46),
+      getBlock: recorder(async () => ({ number: 46, hash: blockHash })),
     };
     const backup = {
       broadcastTransaction: recorder(async () => ({ hash: txHash })),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 46),
+      getBlock: recorder(async () => ({ number: 46, hash: blockHash })),
     };
     (a as any).providers = [primary, backup];
 
@@ -1722,32 +1901,33 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(primary.getTransactionReceipt.calls).toContainEqual([txHash]);
   });
 
-  it('treats nonce-too-low transaction responses as accepted and polls receipts', async () => {
+  it('does not treat a generic nonce-too-low response as proof that the exact transaction was accepted', async () => {
     const a = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',
       rpcUrls: ['https://backup.example'],
     }));
     const signedTx = '0xdeadbeef';
     const txHash = '0x' + '44'.repeat(32);
-    const receipt = { hash: txHash, blockNumber: 48, status: 1, logs: [] };
     const primary = {
       broadcastTransaction: recorder(async () => {
         const err = new Error('nonce too low');
         (err as any).code = 'NONCE_EXPIRED';
         throw err;
       }),
-      getTransactionReceipt: recorder(async () => receipt),
+      getTransactionReceipt: recorder(async () => null),
     };
     const backup = {
       broadcastTransaction: recorder(async () => ({ hash: txHash })),
-      getTransactionReceipt: recorder(async () => receipt),
+      getTransactionReceipt: recorder(async () => null),
     };
     (a as any).providers = [primary, backup];
 
-    await expect((a as any).sendSignedTransactionAndWait(signedTx, txHash, 'unit write')).resolves.toBe(receipt);
+    await expect((a as any).sendSignedTransactionAndWait(signedTx, txHash, 'unit write'))
+      .rejects.toMatchObject({ code: 'NONCE_EXPIRED' });
     expect(primary.broadcastTransaction.calls).toHaveLength(1);
     expect(backup.broadcastTransaction.calls).toEqual([]);
-    expect(primary.getTransactionReceipt.calls).toContainEqual([txHash]);
+    expect(primary.getTransactionReceipt.calls).toEqual([]);
+    expect(backup.getTransactionReceipt.calls).toEqual([]);
   });
 
   it('throws CALL_EXCEPTION when a mined write receipt reverted', async () => {
@@ -1757,14 +1937,19 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }));
     const signedTx = '0xdeadbeef';
     const txHash = '0x' + '33'.repeat(32);
-    const receipt = { hash: txHash, blockNumber: 47, status: 0, logs: [] };
+    const blockHash = '0x' + '47'.repeat(32);
+    const receipt = { hash: txHash, blockNumber: 47, blockHash, status: 0, logs: [] };
     const primary = {
       broadcastTransaction: recorder(async () => ({ hash: txHash })),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 47),
+      getBlock: recorder(async () => ({ number: 47, hash: blockHash })),
     };
     const backup = {
       broadcastTransaction: recorder(async () => ({ hash: txHash })),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 47),
+      getBlock: recorder(async () => ({ number: 47, hash: blockHash })),
     };
     (a as any).providers = [primary, backup];
 
@@ -5037,6 +5222,42 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     expect(ensureSpy.calls).toEqual([]);    // no TooLowAllowance → no forced approve
   });
 
+  it('waits and retries the full provider set when V10 preparation is temporarily rate limited', async () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    let adapter: EVMChainAdapter | undefined;
+    try {
+      const { a, ensureSpy, signer } = makeRecoveryAdapter();
+      adapter = a;
+      const r429 = () => {
+        const error = new Error('all configured RPC endpoints returned 429');
+        (error as any).status = 429;
+        return error;
+      };
+      let call = 0;
+      const populateAndSign = recorder(async () => {
+        call += 1;
+        if (call <= 2) throw r429();
+        return { signedTx: '0xsigned', txHash: '0xhash' };
+      });
+      (a as any).populateAndSignAcrossProviders = populateAndSign;
+
+      const pending = (a as any).populateAndSignV10WithAllowanceRecovery(
+        signer, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label',
+      );
+      await vi.advanceTimersByTimeAsync(RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS);
+      await vi.advanceTimersByTimeAsync(RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS * 2);
+
+      await expect(pending).resolves.toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
+      expect(populateAndSign.calls).toHaveLength(3);
+      expect(ensureSpy.calls).toEqual([]);
+    } finally {
+      try { adapter?.destroy(); } catch { /* test providers may already be closed */ }
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('enriches the SECOND raw TooLowAllowance before throwing the one-shot failure', async () => {
     const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
     const populate = recorder(async () => { throw rawTooLowAllowanceRevert(); });
@@ -5131,10 +5352,12 @@ describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () 
 
     const received: any[] = [];
     let sentAfterSignal = false;
-    a.sendSignedTransactionAndWait = async () => {
+    a.broadcastSignedTransactionWithRetries = async () => {
       sentAfterSignal = received.length === 1;
-      return { hash: txHash, blockNumber: 1, status: 1, logs: [] };
     };
+    a.waitForReceiptWithFailover = async () => ({
+      hash: txHash, blockNumber: 1, status: 1, logs: [],
+    });
 
     await a.dispatchSerializedV10Write(
       wallet,
@@ -5170,7 +5393,8 @@ describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () 
     const txHash = ethers.Transaction.from(signedTx).hash!;
 
     let sent = false;
-    a.sendSignedTransactionAndWait = async () => { sent = true; return { hash: txHash }; };
+    a.broadcastSignedTransactionWithRetries = async () => { sent = true; };
+    a.waitForReceiptWithFailover = async () => ({ hash: txHash });
 
     await expect(a.dispatchSerializedV10Write(
       wallet,

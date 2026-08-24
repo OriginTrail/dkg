@@ -307,13 +307,16 @@ export async function startOxigraphServer(
         signal: AbortSignal.timeout(readyIntervalMs + 1_000),
       });
       if (!res.ok) return null;
-      const listenerPid = await launchStrategy.resolveListenerPid(
+      const resolvedListenerPid = await launchStrategy.resolveListenerPid(
         c,
         port,
         host,
         io.findListenOwnerPid,
       );
-      return listenerPid !== null && childAlive(c) ? listenerPid : null;
+      // A health response is not ownership proof. On macOS, lsof can briefly omit a new row.
+      // Return null and let the existing readiness loop retry. Never replace a missing owner
+      // with the child PID because a foreign service can answer while this child fails to bind.
+      return resolvedListenerPid !== null && childAlive(c) ? resolvedListenerPid : null;
     } catch {
       return null;
     }

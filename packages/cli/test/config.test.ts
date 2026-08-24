@@ -331,6 +331,7 @@ describe('resolveStorageAckTiming', () => {
     expect(resolveStorageAckTiming()).toEqual({
       handlerDeadlineMs: 15_000,
       sendTimeoutMs: 20_000,
+      maxConcurrentCollections: 1,
     });
   });
 
@@ -338,6 +339,7 @@ describe('resolveStorageAckTiming', () => {
     expect(resolveStorageAckTiming({ handlerDeadlineMs: 55_000 })).toEqual({
       handlerDeadlineMs: 55_000,
       sendTimeoutMs: 60_000,
+      maxConcurrentCollections: 1,
     });
   });
 
@@ -345,11 +347,20 @@ describe('resolveStorageAckTiming', () => {
     expect(resolveStorageAckTiming({ handlerDeadlineMs: 0 })).toEqual({
       handlerDeadlineMs: 0,
       sendTimeoutMs: 20_000,
+      maxConcurrentCollections: 1,
     });
     expect(resolveStorageAckTiming({ handlerDeadlineMs: 0, sendTimeoutMs: 10_000 })).toEqual({
       handlerDeadlineMs: 0,
       sendTimeoutMs: 10_000,
+      maxConcurrentCollections: 1,
     });
+  });
+
+  it('defaults ACK collection concurrency to one and accepts an explicit positive limit', () => {
+    expect(resolveStorageAckTiming({ maxConcurrentCollections: 4 }).maxConcurrentCollections).toBe(4);
+    expect(() => resolveStorageAckTiming({ maxConcurrentCollections: 0 })).toThrow(
+      /storageAck\.maxConcurrentCollections must be a positive safe integer/,
+    );
   });
 
   it('rejects explicitly misaligned handler/send pairs', () => {
@@ -1267,6 +1278,23 @@ describe('resolveChainConfig (field-level merge)', () => {
     })?.receiptTimeoutMs).toBe(300_000);
   });
 
+  it('validates finality confirmations with network fallback and operator precedence', () => {
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, finalityConfirmations: 5 },
+    })?.finalityConfirmations).toBe(5);
+    expect(resolveChainConfig({ chain: { finalityConfirmations: 1 } }, {
+      chain: { ...fullNetworkChain, finalityConfirmations: 5 },
+    })?.finalityConfirmations).toBe(1);
+
+    for (const finalityConfirmations of [null, 0, -1, 1.5, Number.NaN]) {
+      expect(() => resolveChainConfig({
+        chain: { finalityConfirmations: finalityConfirmations as any },
+      }, { chain: fullNetworkChain })).toThrow(
+        /finalityConfirmations must be an integer >= 1/,
+      );
+    }
+  });
+
   it('rejects non-finite and sub-minimum receipt timeouts', () => {
     for (const receiptTimeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 999]) {
       expect(() => resolveChainConfig({ chain: { receiptTimeoutMs } }, { chain: fullNetworkChain }))
@@ -1549,6 +1577,18 @@ describe('resolveChainConfig (field-level merge)', () => {
     );
     expect(overridden?.minPublisherNativeWei).toBe(789n);
     expect(overridden?.minPublisherTracWei).toBe(456n);
+  });
+
+  it('normalizes and validates an operator transaction fee cap', () => {
+    const merged = resolveChainConfig(
+      { chain: { maxFeePerGasWei: '100000000' } },
+      { chain: fullNetworkChain },
+    );
+    expect(merged?.maxFeePerGasWei).toBe(100_000_000n);
+    expect(() => resolveChainConfig(
+      { chain: { maxFeePerGasWei: '0' } },
+      { chain: fullNetworkChain },
+    )).toThrow(/chain\.maxFeePerGasWei must be greater than zero/);
   });
 
   it('normalizes persisted (JSON/YAML) funding-floor strings and numbers to bigint', () => {

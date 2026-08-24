@@ -850,6 +850,37 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(processed?.failure?.code).toBe('canonicalization_failed');
   });
 
+  it('keeps a fee cap below the current base fee in the retryable pre-send lane', async () => {
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          execute: async () => {
+            throw Object.assign(
+              new Error('configured fee cap is temporarily too low'),
+              { code: 'FEE_CAP_BELOW_BASE_FEE' },
+            );
+          },
+        },
+      },
+    });
+    const shareOperationId = 'rootless-fee-cap-op';
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure).toMatchObject({
+      failedFromState: 'validated',
+      code: 'fee_cap_below_base_fee',
+      retryable: true,
+    });
+    expect(processed?.broadcast).toBeUndefined();
+  });
+
   it('exposes the SWM share operation contract', async () => {
     const publisherContract: Publisher = makeTestPublisher({
       store,
@@ -1012,6 +1043,29 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(released.type).toBe('bindings');
     if (released.type !== 'bindings') return;
     expect(released.bindings).toHaveLength(0);
+  });
+
+  it('periodic reconciliation requeues a stranded validated job without a restart', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.seedLegacyRawLift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+
+    expect(await publisher.reconcileTransactions()).toBe(1);
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      jobId,
+      status: 'accepted',
+      recovery: { recoveredFromStatus: 'validated' },
+    });
+    expect(await publisher.claimNext('wallet-1')).toMatchObject({ jobId });
   });
 
   it('clears orphan wallet locks for terminal jobs during recovery', async () => {
@@ -1837,6 +1891,50 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(await privateStore.getPrivateTriplesForOperation('music-social', 'op-2', 'urn:local:/rihana')).toEqual([]);
   });
 
+  it('serializes RPC acceptance with reconciliation so stale broadcast state cannot overwrite finality', async () => {
+    const txHash = '0xbbb' as `0x${string}`;
+    const publisher = createPublisher({
+      chainProof: {
+        status: 'recovered',
+        recovery: {
+          inclusion: { txHash, blockNumber: 7 },
+          finalization: {
+            txHash,
+            ual: 'did:dkg:mock:31337/0xbbb/7',
+            batchId: '7',
+            startKAId: '7',
+            endKAId: '7',
+            publisherAddress: '0x1111111111111111111111111111111111111111',
+          },
+        },
+      },
+    });
+    const jobId = await publisher.seedLegacyRawLift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash, walletId: 'wallet-1', nonce: 4 },
+    });
+
+    await expect(Promise.all([
+      (publisher as any).recordRpcAccepted(jobId, { txHash, nonce: 4 }),
+      publisher.reconcileTransactions(),
+    ])).resolves.toBeDefined();
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      jobId,
+      status: 'finalized',
+      broadcast: { txHash },
+    });
+  });
+
   it('keeps broadcast jobs in place while inconclusive recovery is still within the timeout window', async () => {
     const publisher = createPublisher({ chainProof: { status: 'inconclusive' } });
     const broadcastId = await publisher.seedLegacyRawLift(request());
@@ -2012,7 +2110,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.timestamps?.failedAt).toBeUndefined();
   });
 
-  it('keeps broadcast knowledge asset VM publish jobs pending instead of blind retrying', async () => {
+  it('keeps broadcast knowledge asset VM publish jobs and their wallet reservation pending', async () => {
     const publisher = createPublisher();
 
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -2026,9 +2124,9 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     const recovered = await publisher.recover();
     const job = await publisher.getStatus(jobId);
-    const lock = await store.query(`SELECT ?p ?o WHERE {
+    const lock = await store.query(`SELECT ?job WHERE {
       GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
-        <${walletLockSubject('wallet-1')}> ?p ?o .
+        <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?job .
       }
     }`);
 
@@ -2038,7 +2136,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.recovery).toBeUndefined();
     expect(lock.type).toBe('bindings');
     if (lock.type !== 'bindings') return;
-    expect(lock.bindings.length).toBeGreaterThan(0);
+    expect(lock.bindings).toEqual([{ job: jobSubject(jobId) }]);
   });
 
   // GH#2270 — this row used to end with bulk clear DELETING the failure. The job is terminal, but
@@ -2046,7 +2144,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   // that record hands the KA's lifecycle subject back to admission, which then mints a second job
   // for a transaction nobody has accounted for. Bulk clear now leaves it; an operator removes it
   // by exact id once the transaction's fate is known.
-  it('fails included knowledge asset VM publish jobs and holds them for chain proof', async () => {
+  it('keeps included knowledge asset VM publish jobs unknown while retaining the wallet reservation', async () => {
     const publisher = createPublisher({
       config: {
         recoveryLookupTimeoutMs: 50,
@@ -2069,15 +2167,18 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const recovered = await publisher.recover();
     const job = await publisher.getStatus(jobId);
 
-    expect(recovered).toBe(1);
-    expect(job?.status).toBe('failed');
-    expect(job?.failure?.code).toBe('recovery_state_inconsistent');
-    expect(job?.failure?.resolution).toBe('fail_job');
+    expect(recovered).toBe(0);
+    expect(job?.status).toBe('included');
+    expect(job?.failure).toBeUndefined();
 
-    expect(await publisher.clear('failed')).toBe(0);
-    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
-    expect(await publisher.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
-    expect(await publisher.getStatus(jobId)).toBeNull();
+    const lock = await store.query(`SELECT ?lockedJob WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?lockedJob .
+      }
+    }`);
+    expect(lock.type).toBe('bindings');
+    if (lock.type !== 'bindings') return;
+    expect(lock.bindings).toEqual([{ lockedJob: jobSubject(jobId) }]);
   });
 
   it('supports pause, resume, cancel, retry, and clear', async () => {
