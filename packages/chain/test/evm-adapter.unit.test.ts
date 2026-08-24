@@ -34,6 +34,7 @@ import {
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
   RPC_READ_STALL_TIMEOUT_MS,
+  RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS,
   RPC_RECEIPT_POLL_INTERVAL_MS,
   RPC_RECEIPT_TIMEOUT_MS,
 } from '../src/evm-adapter-constants.js';
@@ -5223,8 +5224,11 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
 
   it('waits and retries the full provider set when V10 preparation is temporarily rate limited', async () => {
     vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    let adapter: EVMChainAdapter | undefined;
     try {
       const { a, ensureSpy, signer } = makeRecoveryAdapter();
+      adapter = a;
       const r429 = () => {
         const error = new Error('all configured RPC endpoints returned 429');
         (error as any).status = 429;
@@ -5241,12 +5245,15 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
       const pending = (a as any).populateAndSignV10WithAllowanceRecovery(
         signer, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label',
       );
-      await vi.runAllTimersAsync();
+      await vi.advanceTimersByTimeAsync(RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS);
+      await vi.advanceTimersByTimeAsync(RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS * 2);
 
       await expect(pending).resolves.toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
       expect(populateAndSign.calls).toHaveLength(3);
       expect(ensureSpy.calls).toEqual([]);
     } finally {
+      try { adapter?.destroy(); } catch { /* test providers may already be closed */ }
+      randomSpy.mockRestore();
       vi.useRealTimers();
     }
   });
