@@ -46,6 +46,7 @@ import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-r
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
+import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -1087,10 +1088,7 @@ export class EVMChainAdapterBase {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
     this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
     this.finalityConfirmations = resolveFinalityConfirmations(config.finalityConfirmations);
-    if (config.maxFeePerGasWei !== undefined && config.maxFeePerGasWei <= 0n) {
-      throw new Error('chain.maxFeePerGasWei must be greater than zero');
-    }
-    this.maxFeePerGasWei = config.maxFeePerGasWei;
+    this.maxFeePerGasWei = resolveMaxFeePerGasWei(config.maxFeePerGasWei);
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
         .map((url) => typeof url === 'string' ? url.trim() : '')
@@ -1574,7 +1572,10 @@ export class EVMChainAdapterBase {
       receiptTimeoutMs: this.receiptTimeoutMs,
       pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
-      isReceiptEligible: (receipt) => this.isReceiptBlockFinalAndCanonical(receipt),
+      isReceiptEligible: (receipt, { deadlineMs }) => this.isReceiptBlockFinalAndCanonical(
+        receipt,
+        { deadlineMs },
+      ),
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
         `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
@@ -1589,7 +1590,7 @@ export class EVMChainAdapterBase {
    */
   async isReceiptBlockFinalAndCanonical(
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
-    options: ChainReadOptions = {},
+    options: ChainReadOptions & { deadlineMs?: number } = {},
   ): Promise<boolean> {
     return (await this.readProviderRetryingNull(
       'publish receipt finality',
@@ -1604,7 +1605,7 @@ export class EVMChainAdapterBase {
         if (!atHeight?.hash) return null;
         return atHeight.hash.toLowerCase() === receipt.blockHash.toLowerCase();
       },
-      { signal: options.signal },
+      { signal: options.signal, deadlineMs: options.deadlineMs },
     )) ?? false;
   }
 
@@ -1612,33 +1613,15 @@ export class EVMChainAdapterBase {
     signer: Wallet,
     populated: ethers.TransactionRequest,
   ): Promise<SignedTransactionEnvelope> {
-    const filled = await signer.populateTransaction(populated);
+    let filled = await signer.populateTransaction(populated);
     if (this.maxFeePerGasWei !== undefined) {
       const cap = this.maxFeePerGasWei;
+      let baseFeePerGas: bigint | null | undefined;
       if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
         const latestBlock = await signer.provider?.getBlock('latest');
-        const baseFeePerGas = latestBlock?.baseFeePerGas;
-        if (baseFeePerGas !== null && baseFeePerGas !== undefined && cap < baseFeePerGas) {
-          throw Object.assign(
-            new Error('chain.maxFeePerGasWei is below the current base fee'),
-            { code: 'FEE_CAP_BELOW_BASE_FEE' as const },
-          );
-        }
+        baseFeePerGas = latestBlock?.baseFeePerGas;
       }
-      if (filled.gasPrice !== null && filled.gasPrice !== undefined && BigInt(filled.gasPrice) > cap) {
-        filled.gasPrice = cap;
-      }
-      if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined && BigInt(filled.maxFeePerGas) > cap) {
-        filled.maxFeePerGas = cap;
-      }
-      if (filled.maxPriorityFeePerGas !== null && filled.maxPriorityFeePerGas !== undefined) {
-        const effectiveCap = filled.maxFeePerGas === null || filled.maxFeePerGas === undefined
-          ? cap
-          : BigInt(filled.maxFeePerGas) < cap ? BigInt(filled.maxFeePerGas) : cap;
-        if (BigInt(filled.maxPriorityFeePerGas) > effectiveCap) {
-          filled.maxPriorityFeePerGas = effectiveCap;
-        }
-      }
+      filled = applyTransactionFeeCap(filled, cap, baseFeePerGas);
     }
     const signedTx = await signer.signTransaction(filled);
     // GH#2270 PR-3 r3 — ONE decode of the signed bytes, here, for both facts the send window

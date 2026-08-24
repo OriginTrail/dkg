@@ -68,6 +68,7 @@ import type {
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
+import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -1851,6 +1852,11 @@ export type ResolvedDKGAgentConfig =
     | 'storageAckTiming'
     | 'ackHandlerDeadlineMs'
     | 'ackSendTimeoutMs'
+    | 'syncReconcilerIntervalMs'
+    | 'syncStalenessThresholdMs'
+    | 'syncBackoffBaseMs'
+    | 'syncBackoffMaxMs'
+    | 'syncBackoffJitter'
     | 'rfc64PublicCatalogActivation'
     | 'rfc64PublicCatalogAutoPublish'
     | 'rfc64PublicCatalogBootstrap'
@@ -1859,6 +1865,7 @@ export type ResolvedDKGAgentConfig =
   > & {
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
+    syncReconcilerTiming: SyncReconcilerTiming;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;

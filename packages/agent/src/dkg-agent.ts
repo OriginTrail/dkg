@@ -390,6 +390,7 @@ import {
   isLocalOxigraphConfig,
   sliceIntoCiphertextChunks,
 } from './dkg-agent-helpers.js';
+import { resolveSyncReconcilerTiming } from './sync/reconciler-timing.js';
 import {
   swmSenderStateKey,
   swmReceiverStateKey,
@@ -924,6 +925,11 @@ export class DKGAgent extends DKGAgentBase {
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogAutoPublish;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogBootstrap;
     delete configWithoutRfc64CatalogControls.contextGraphSubscriptionRehydrationEnabled;
+    delete configWithoutRfc64CatalogControls.syncReconcilerIntervalMs;
+    delete configWithoutRfc64CatalogControls.syncStalenessThresholdMs;
+    delete configWithoutRfc64CatalogControls.syncBackoffBaseMs;
+    delete configWithoutRfc64CatalogControls.syncBackoffMaxMs;
+    delete configWithoutRfc64CatalogControls.syncBackoffJitter;
     const resolvedConfig: ResolvedDKGAgentConfig = {
       ...configWithoutRfc64CatalogControls,
       genesisId,
@@ -933,6 +939,7 @@ export class DKGAgent extends DKGAgentBase {
       rfc64PublicCatalogAutoPublishPolicy,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
+      syncReconcilerTiming: resolveSyncReconcilerTiming(config),
     };
 
     const port = config.listenPort ?? 0;

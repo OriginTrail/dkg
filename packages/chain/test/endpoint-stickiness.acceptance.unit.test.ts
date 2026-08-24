@@ -598,6 +598,33 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     expect(primary.read.calls).toHaveLength(0); // primary NOT tried — the receipt establishment carried over
   });
 
+  it('a receipt-only preference does not prove nonce freshness for the next populate', async () => {
+    const receipt = { status: 1, hash: '0xhash' };
+    const primary: any = { getTransactionReceipt: recorder(async () => { throw retryable429(); }) };
+    const backup: any = { getTransactionReceipt: recorder(async () => receipt) };
+    const populateOrder: string[] = [];
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const contract = { connect: (signer: any) => ({
+      doWrite: {
+        populateTransaction: async () => {
+          populateOrder.push(signer.boundTo === primary ? 'primary' : 'backup');
+          return { to: '0xTO', data: '0x' };
+        },
+      },
+    }) } as any;
+    const client = makeClient(
+      [primary, backup],
+      STICKY_URLS,
+      signPopulated as SignPopulatedFn,
+      { enabled: true },
+    );
+
+    await expect(client.getReceipt('0xhash')).resolves.toBe(receipt);
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'write');
+
+    expect(populateOrder).toEqual(['primary']);
+  });
+
   it('AC-18: multi-backup re-point (preferred backup degrades mid-window → next backup) keeps the cadence (round-4 🟡)', async () => {
     let clock = 0;
     const pRead = readSeq(() => retryable429());     // primary always down

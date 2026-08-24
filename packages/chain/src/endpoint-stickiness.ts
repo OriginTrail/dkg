@@ -27,10 +27,12 @@
  *       canonical order AND no state mutation (a lagging preferred would make the
  *       tip non-monotonic; and it must not clear a preference the heavy paths rely on).
  *     - `nonceWrite`      — `populateAndSign`: prefer ONLY a WRITE-proven backend.
- *     - `write`           — `broadcast` / `getReceipt`: nonce-free, prefer the
+ *     - `write`           — accepted broadcast: nonce-free, prefer the
  *       last-good backend; BUT if the primary takes over a write as a fallback
  *       (the preferred backend failed the write op), the preferred backend's nonce
  *       view is now stale, so downgrade `source` write→read.
+ *     - `receiptRead`     — receipt polling: preserve write-backend ordering,
+ *       but a successful read never proves that endpoint's pending nonce.
  *
  * All methods are synchronous, so concurrent ops on one instance can only observe
  * a slightly stale order, never torn state.
@@ -42,7 +44,7 @@ export interface StickyEndpoint {
   rpcUrl: string;
 }
 
-export type StickinessIntent = 'stickyRead' | 'transparentRead' | 'nonceWrite' | 'write';
+export type StickinessIntent = 'stickyRead' | 'transparentRead' | 'receiptRead' | 'nonceWrite' | 'write';
 
 type StickyState =
   | { kind: 'none' }
@@ -183,11 +185,12 @@ export class EndpointStickiness {
   ): void {
     if (intent === 'transparentRead' || !this.cfg.isEnabled()) return;
     const primaryUrl = canonical[0]?.rpcUrl;
-    const isWriteOp = intent === 'nonceWrite' || intent === 'write';
+    const provesWrite = intent === 'nonceWrite' || intent === 'write';
+    const mayInvalidateWrite = intent === 'write' || intent === 'receiptRead';
     if (endpoint.rpcUrl === primaryUrl) {
       if (triedFirst) {
         this.state = { kind: 'none' };
-      } else if (isWriteOp && this.state.kind === 'preferred' && this.state.source === 'write') {
+      } else if (mayInvalidateWrite && this.state.kind === 'preferred' && this.state.source === 'write') {
         this.state = { ...this.state, source: 'read' };
       }
       return;
@@ -196,7 +199,7 @@ export class EndpointStickiness {
       this.state = {
         kind: 'preferred',
         url: endpoint.rpcUrl,
-        source: isWriteOp ? 'write' : 'read',
+        source: provesWrite ? 'write' : 'read',
         primaryProbeDueAt: this.cfg.now() + this.cfg.ttlMs,
       };
       this.cfg.onEstablished?.(endpoint.rpcUrl);
@@ -211,8 +214,8 @@ export class EndpointStickiness {
       const primaryProbeDueAt = this.cfg.now() >= this.state.primaryProbeDueAt
         ? this.cfg.now() + this.cfg.ttlMs
         : this.state.primaryProbeDueAt;
-      this.state = { ...this.state, url: endpoint.rpcUrl, source: isWriteOp ? 'write' : 'read', primaryProbeDueAt };
-    } else if (isWriteOp && this.state.source !== 'write') {
+      this.state = { ...this.state, url: endpoint.rpcUrl, source: provesWrite ? 'write' : 'read', primaryProbeDueAt };
+    } else if (provesWrite && this.state.source !== 'write') {
       // Same preferred backend, now PROVEN nonce-safe by a populate or accepted broadcast → upgrade.
       // Never DOWNGRADE on a read (a read hitting the write-proven backend doesn't
       // un-prove its nonce view).

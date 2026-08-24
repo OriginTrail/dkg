@@ -341,7 +341,6 @@ import {
 import type { SelectedSharedMemorySyncResult } from './sync/shared-memory-freshness.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
-import { resolveSyncReconcilerTiming } from './sync/reconciler-timing.js';
 import {
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
   catchupAdmissionSource,
@@ -3811,7 +3810,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // `SYNC_STALENESS_THRESHOLD_MS`) and `reconcileSyncFromConnectedPeers`
     // for the full design rationale.
     if (syncReconcilerEnabled(this.config)) {
-      const syncTiming = resolveSyncReconcilerTiming(this.config);
+      const syncTiming = this.config.syncReconcilerTiming;
       this.syncReconcilerTimer = setInterval(() => {
         this.reconcileSyncFromConnectedPeers().catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
@@ -4265,7 +4264,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     delayMs = 3000,
     options: { selectedSwmRetry?: boolean } = {},
   ): boolean {
-    const syncTiming = resolveSyncReconcilerTiming(this.config);
+    const syncTiming = this.config.syncReconcilerTiming;
     const selectedSwmRetryRequired = options.selectedSwmRetry === true
       && this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer);
     // RFC-64 bootstrap is an independently enabled, graph-scoped recovery
@@ -4929,7 +4928,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.started) return;
     if (!syncReconcilerEnabled(this.config) || !syncOnConnectEnabled(this.config)) return;
     const now = Date.now();
-    const syncTiming = resolveSyncReconcilerTiming(this.config);
+    const syncTiming = this.config.syncReconcilerTiming;
     const ctx = createOperationContext('sync');
     this.pruneSyncReconcilerState(now);
     for (const pid of this.node.libp2p.getPeers()) {
@@ -4977,7 +4976,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   pruneSyncReconcilerState(this: DKGAgent, now = Date.now()): void {
-    const syncTiming = resolveSyncReconcilerTiming(this.config);
+    const syncTiming = this.config.syncReconcilerTiming;
     this.syncCheckpoints.pruneExpired?.(now);
     const connected = new Set(this.node.libp2p.getPeers().map((pid) => pid.toString()));
     for (const [peerId, ts] of this.catchupOnConnectAt) {
@@ -5059,7 +5058,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   recordSyncReconcilerFailure(this: DKGAgent, peerId: string, probe: SyncReconcilerProbe): void {
     if (!this.started || !this.isPeerConnectedForSyncBackoff(peerId)) return;
     const failures = (this.syncReconcilerBackoff.get(peerId)?.failures ?? 0) + 1;
-    const syncTiming = resolveSyncReconcilerTiming(this.config);
+    const syncTiming = this.config.syncReconcilerTiming;
     // Clamp the exponent so `2 ** exp` can never overflow before the cap.
     const exp = Math.min(failures - 1, 30);
     const delay = Math.min(syncTiming.backoffBaseMs * 2 ** exp, syncTiming.backoffMaxMs);

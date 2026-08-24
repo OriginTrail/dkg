@@ -34,6 +34,7 @@ import {
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
   RPC_READ_STALL_TIMEOUT_MS,
+  RPC_RECEIPT_POLL_INTERVAL_MS,
   RPC_RECEIPT_TIMEOUT_MS,
 } from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
@@ -78,6 +79,64 @@ it('uses one confirmation-depth calculation for receipts and pinned state', () =
   expect(requiredHeadBlockForReceipt(100, 7)).toBe(106);
   expect(confirmedStateBlockAtHead(106, 7)).toBe(100);
   expect(confirmedStateBlockAtHead(5, 7)).toBeNull();
+});
+
+it('retries a transient finality read inside the receipt deadline', async () => {
+  vi.useFakeTimers({ now: 0 });
+  const blockHash = `0x${'44'.repeat(32)}`;
+  const receipt = { hash: `0x${'11'.repeat(32)}`, blockNumber: 10, blockHash, status: 1, index: 0, logs: [] };
+  let finalityAttempt = 0;
+  const adapter: any = new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 5_000 }));
+  try {
+    adapter.providers = [{
+      getNetwork: async () => ({ chainId: 31337n }),
+      getTransactionReceipt: async () => receipt,
+      getBlockNumber: async () => {
+        finalityAttempt += 1;
+        if (finalityAttempt === 1) {
+          const error = new Error('temporary finality RPC failure') as Error & { code: string };
+          error.code = 'NETWORK_ERROR';
+          throw error;
+        }
+        return 10;
+      },
+      getBlock: async () => ({ number: 10, hash: blockHash }),
+    }];
+    const outcome = adapter.waitForReceiptWithFailover(receipt.hash, 'publish');
+    await vi.advanceTimersByTimeAsync(RPC_RECEIPT_POLL_INTERVAL_MS + 1);
+    await expect(outcome).resolves.toMatchObject({ hash: receipt.hash });
+    expect(finalityAttempt).toBe(2);
+  } finally {
+    try { adapter.destroy(); } catch { /* test provider has no destroy */ }
+    vi.useRealTimers();
+  }
+});
+
+it('bounds a stalled finality read by the receipt deadline', async () => {
+  vi.useFakeTimers({ now: 0 });
+  const blockHash = `0x${'55'.repeat(32)}`;
+  const receipt = { hash: `0x${'22'.repeat(32)}`, blockNumber: 10, blockHash, status: 1, index: 0, logs: [] };
+  const adapter: any = new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 1_000 }));
+  try {
+    adapter.providers = [{
+      getNetwork: async () => ({ chainId: 31337n }),
+      getTransactionReceipt: async () => receipt,
+      getBlockNumber: async () => new Promise<number>(() => {}),
+      getBlock: async () => ({ number: 10, hash: blockHash }),
+    }];
+    const outcome = adapter.waitForReceiptWithFailover(receipt.hash, 'publish').then(
+      (value: unknown) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    await vi.advanceTimersByTimeAsync(1_001);
+    await expect(outcome).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'RPC_TIMEOUT' },
+    });
+  } finally {
+    try { adapter.destroy(); } catch { /* test provider has no destroy */ }
+    vi.useRealTimers();
+  }
 });
 
 it('caps populated transaction fee fields when the operator sets maxFeePerGasWei', async () => {

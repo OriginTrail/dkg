@@ -213,6 +213,11 @@ interface ConfiguredPublisherWallet extends PublisherRuntimeWallet {
   readonly chain: ChainAdapter;
 }
 
+/** Resolve the operator maintenance switch once at a CLI/daemon boundary. */
+export function resolvePublisherStartPaused(value: string | undefined): boolean {
+  return value === '1';
+}
+
 export async function startPublisherRuntimeIfEnabled(args: {
   dataDir: string;
   config: DkgConfig;
@@ -248,6 +253,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       publishEncryptionFactory: args.publishEncryptionFactory,
       knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
       publicSnapshotStore: args.publicSnapshotStore,
+      startPaused: resolvePublisherStartPaused(process.env.DKG_PUBLISHER_START_PAUSED),
     });
     await runtime.runner.start();
     logPublisherWalletAttribution(runtime.wallets, args.log);
@@ -360,6 +366,8 @@ interface PublisherRuntimeBaseArgs {
   closeStoreOnStop: boolean;
   // #1829 — daemon-only append-only journal writes (OFF for standalone `dkg publisher run`).
   journalWrites?: boolean;
+  /** Explicit startup mode resolved by the CLI or daemon boundary. */
+  startPaused?: boolean;
 }
 
 export async function createPublisherRuntime(args: {
@@ -397,6 +405,7 @@ export async function createPublisherRuntime(args: {
     maxRetries: args.maxRetries ?? args.config.publisher?.maxRetries,
     retryTuning: resolvePublisherRetryTuning(args.config.publisher),
     publicSnapshotStore,
+    startPaused: resolvePublisherStartPaused(process.env.DKG_PUBLISHER_START_PAUSED),
     closeStoreOnStop: true,
   });
 }
@@ -514,6 +523,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  startPaused?: boolean;
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -535,6 +545,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     // #1829 — this is the daemon publisher runtime (processes named-KA jobs), so it
     // journals. Standalone `dkg publisher run` (createPublisherRuntime) does not set this.
     journalWrites: true,
+    startPaused: args.startPaused,
   });
 }
 
@@ -683,7 +694,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     recoveryIntervalMs: args.recoveryIntervalMs,
     // Operator-only maintenance seam. Recovery still reconciles signed transactions, but wallet
     // loops cannot claim released jobs while a closed run is being removed from the queue.
-    startPaused: process.env.DKG_PUBLISHER_START_PAUSED === '1',
+    startPaused: args.startPaused ?? false,
     hasIncludedRecoveryResolver: hasChainRecovery,
   });
 

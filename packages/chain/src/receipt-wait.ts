@@ -26,7 +26,10 @@ export interface WaitForReceiptWithDeadlineOptions<TReceipt> {
    * Optional policy gate for a mined receipt. A false result keeps polling.
    * EVM writes use this to wait for the operator-selected canonical depth.
    */
-  isReceiptEligible?: (receipt: TReceipt) => Promise<boolean>;
+  isReceiptEligible?: (
+    receipt: TReceipt,
+    options: { deadlineMs: number },
+  ) => Promise<boolean>;
   assertSuccessfulReceipt: (receipt: TReceipt) => void;
   formatTimeoutMessage: (context: ReceiptWaitTimeoutContext) => string;
 }
@@ -66,7 +69,14 @@ export async function waitForReceiptWithDeadline<TReceipt>(
     // A deterministic mined revert must remain CALL_EXCEPTION even when the
     // lookup completes at or just after the operation deadline.
     if (receipt) {
-      const eligible = await options.isReceiptEligible?.(receipt) ?? true;
+      let eligible = false;
+      try {
+        eligible = await options.isReceiptEligible?.(receipt, { deadlineMs }) ?? true;
+      } catch (err) {
+        if (!isRetryableRpcError(err)) throw err;
+        lastError = err;
+        if (Date.now() >= deadlineMs) break;
+      }
       if (eligible) {
         options.assertSuccessfulReceipt(receipt);
         return receipt;

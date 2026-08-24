@@ -74,6 +74,7 @@ const capturedStorageACKHandlerConfigs: unknown[] = [];
 const capturedPublishCollectParams: unknown[] = [];
 const capturedUpdateCollectParams: unknown[] = [];
 let publishCollectHook: (() => Promise<{ acks: [] }>) | undefined;
+let updateCollectHook: (() => Promise<{ acks: [] }>) | undefined;
 
 vi.mock('@origintrail-official/dkg-publisher', async () => {
   const actual = await vi.importActual<typeof import('@origintrail-official/dkg-publisher')>(
@@ -98,6 +99,7 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
       }
       async collectUpdate(params: unknown): Promise<{ acks: [] }> {
         capturedUpdateCollectParams.push(params);
+        if (updateCollectHook) return updateCollectHook();
         return { acks: [] };
       }
     },
@@ -207,6 +209,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     capturedPublishCollectParams.length = 0;
     capturedUpdateCollectParams.length = 0;
     publishCollectHook = undefined;
+    updateCollectHook = undefined;
   });
 
   afterEach(async () => {
@@ -392,6 +395,69 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     await expect(first).resolves.toEqual([]);
     await vi.waitFor(() => expect(entered).toBe(2));
     await expect(second).resolves.toEqual([]);
+  });
+
+  it('shares a configurable FIFO StorageACK limit across publish and update and releases rejected slots', async () => {
+    const boot = await bootProviderAgent({
+      storageAckTiming: { maxConcurrentCollections: 2 },
+    });
+    agent = boot.agent;
+    const publishProvider = boot.internals.createV10ACKProvider('test-cg') as V10ACKProviderObject;
+    const updateProvider = boot.internals.createV10UpdateACKProvider('test-cg') as V10UpdateACKProvider;
+    const entered: string[] = [];
+    const releases = new Map<number, () => void>();
+    let publishAttempt = 0;
+    publishCollectHook = async () => {
+      const attempt = ++publishAttempt;
+      entered.push(`publish-${attempt}`);
+      await new Promise<void>((resolve) => releases.set(attempt, resolve));
+      return { acks: [] };
+    };
+    updateCollectHook = async () => {
+      entered.push('update');
+      throw new Error('synthetic update collection failure');
+    };
+    const publishInput = {
+      merkleRoot: new Uint8Array(32).fill(0x11),
+      contextGraphId: '42',
+      kaCount: 1,
+      rootEntities: [],
+      publicByteSize: 10n,
+      merkleLeafCount: 1,
+      ackMode: { kind: 'public' as const },
+    };
+    const updateInput = {
+      kaId: 1n,
+      contextGraphId: '42',
+      preUpdateMerkleRootCount: 1n,
+      newMerkleRoot: new Uint8Array(32).fill(0x22),
+      newByteSize: 10n,
+      newTokenAmount: 1n,
+      mintAmount: 0n,
+      burnTokenIds: [],
+      newMerkleLeafCount: 1,
+    };
+
+    const first = publishProvider(publishInput);
+    const second = publishProvider(publishInput);
+    await vi.waitFor(() => expect(entered).toEqual(['publish-1', 'publish-2']));
+
+    const update = updateProvider(updateInput);
+    await Promise.resolve();
+    expect(entered).toEqual(['publish-1', 'publish-2']);
+
+    releases.get(1)!();
+    await expect(first).resolves.toEqual([]);
+    await expect(update).rejects.toThrow('synthetic update collection failure');
+    expect(entered).toEqual(['publish-1', 'publish-2', 'update']);
+
+    const third = publishProvider(publishInput);
+    await vi.waitFor(() => expect(entered).toEqual([
+      'publish-1', 'publish-2', 'update', 'publish-3',
+    ]));
+    releases.get(2)!();
+    releases.get(3)!();
+    await expect(Promise.all([second, third])).resolves.toEqual([[], []]);
   });
 
   it('forwards the complete graph-scoped publish envelope into ACK collection', async () => {
