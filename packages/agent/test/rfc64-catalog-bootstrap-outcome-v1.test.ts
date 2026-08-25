@@ -64,4 +64,25 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
       completionReason: 'no-authorized-provider',
     });
   });
+
+  it('classifies a signed catalog row with unavailable bytes as known-incomplete for private VM', () => {
+    const receiverFailure = new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-incomplete',
+      'the authorized provider does not have the bundle named by the signed row',
+    );
+    const terminalReason = classifyRfc64CatalogReconciliationTerminalReasonV1(receiverFailure);
+    const synchronizationFailure = new Rfc64CatalogSynchronizationErrorV1(
+      terminalReason,
+      receiverFailure.code,
+    );
+
+    expect(classifyRfc64CatalogBootstrapFailureV1(true, synchronizationFailure)).toEqual({
+      outcome: 'known-incomplete',
+      completionReason: 'no-authorized-provider',
+    });
+    expect(classifyRfc64CatalogBootstrapFailureV1(false, synchronizationFailure)).toEqual({
+      outcome: 'failed',
+      completionReason: null,
+    });
+  });
 });

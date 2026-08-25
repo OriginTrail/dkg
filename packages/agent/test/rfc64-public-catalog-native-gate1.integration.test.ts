@@ -1354,6 +1354,27 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     expect(fixture.authorBundleRead).not.toHaveBeenCalled();
   }, 30_000);
 
+  it('reports a signed catalog row whose KA bundle is unavailable as incomplete', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const observed = fixture.createCasObservedReceiver({
+      fetchCatalogObject: fixture.receiverObjectFetch,
+      fetchKaBundle: async () => null,
+    });
+
+    await expect(fixture.synchronize(
+      fixture.announcement,
+      observed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-incomplete' });
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+  }, 30_000);
+
   it('serializes one scope so a competing successor never activates over the winner', async () => {
     const fixture = await setupLiveReceiver();
     await fixture.bootstrap();

@@ -159,6 +159,12 @@ export function classifyRfc64CatalogReconciliationTerminalReasonV1(
 ): Rfc64CatalogReconciliationTerminalReasonV1 | null {
   if (
     error instanceof Rfc64PublicCatalogNativeReceiverErrorV1
+    && error.code === 'catalog-native-receiver-incomplete'
+  ) {
+    return 'no-authorized-provider';
+  }
+  if (
+    error instanceof Rfc64PublicCatalogNativeReceiverErrorV1
     && error.code === 'catalog-native-receiver-activation'
     && error.cause instanceof FinalizedVmCompositionErrorV1
     && error.cause.code === 'finalized-vm-composition-incomplete'
