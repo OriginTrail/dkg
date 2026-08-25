@@ -5,18 +5,37 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(SCRIPT_DIRECTORY, '../..');
+const LANE_MANIFEST_PATH = path.join(SCRIPT_DIRECTORY, 'vitest-junit-lanes.json');
 
-function resolveRepositoryPath(relativePath, optionName) {
+function repositoryPath(relativePath, optionName) {
   if (!relativePath || path.isAbsolute(relativePath)) {
     throw new Error(`${optionName} must be a repository-relative path`);
   }
   const resolved = path.resolve(REPO_ROOT, relativePath);
   const relative = path.relative(REPO_ROOT, resolved);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     throw new Error(`${optionName} must stay inside the repository`);
   }
   return resolved;
+}
+
+export function loadVitestJunitLanes() {
+  const manifest = JSON.parse(fs.readFileSync(LANE_MANIFEST_PATH, 'utf8'));
+  if (manifest?.version !== 1 || !manifest.lanes || typeof manifest.lanes !== 'object') {
+    throw new Error('Vitest JUnit lane manifest must use version 1');
+  }
+  for (const [laneName, lane] of Object.entries(manifest.lanes)) {
+    if (
+      typeof lane?.ciJob !== 'string'
+      || typeof lane?.packageDir !== 'string'
+      || typeof lane?.output !== 'string'
+    ) {
+      throw new Error(`${laneName} must define ciJob, packageDir, and output`);
+    }
+  }
+  return manifest.lanes;
 }
 
 function parseArguments(argv) {
@@ -28,46 +47,50 @@ function parseArguments(argv) {
   for (let index = 0; index < optionArguments.length; index += 2) {
     const option = optionArguments[index];
     const value = optionArguments[index + 1];
-    if (!['--package-dir', '--output'].includes(option) || !value) {
-      throw new Error(`expected --package-dir DIR and --output FILE before --`);
+    if (!['--lane', '--shard'].includes(option) || !value) {
+      throw new Error('expected --lane NAME and optional --shard ID before --');
     }
     options[option.slice(2)] = value;
   }
-  if (!options['package-dir'] || !options.output) {
-    throw new Error('--package-dir and --output are required');
-  }
+  if (!options.lane) throw new Error('--lane is required');
   if (testArguments.some((argument) => argument.startsWith('--reporter') || argument.startsWith('--outputFile'))) {
     throw new Error('reporter and output options are managed by the shared CI runner');
   }
-  return { packageDirectory: options['package-dir'], output: options.output, testArguments };
+  return { laneName: options.lane, shard: options.shard, testArguments };
 }
 
 export function buildVitestJunitInvocation(argv) {
-  const { packageDirectory, output, testArguments } = parseArguments(argv);
-  const absolutePackageDirectory = resolveRepositoryPath(packageDirectory, '--package-dir');
-  const packageJsonPath = path.join(absolutePackageDirectory, 'package.json');
-  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-  if (typeof packageJson.scripts?.test !== 'string') {
-    throw new Error(`${packageDirectory}/package.json must define the authoritative test script`);
+  const { laneName, shard, testArguments } = parseArguments(argv);
+  const lane = loadVitestJunitLanes()[laneName];
+  if (!lane) throw new Error(`unknown Vitest JUnit lane: ${laneName}`);
+
+  const needsShard = lane.output.includes('{shard}');
+  if (needsShard && !/^\d+$/.test(shard ?? '')) {
+    throw new Error(`${laneName} requires a numeric --shard`);
+  }
+  if (!needsShard && shard !== undefined) throw new Error(`${laneName} does not accept --shard`);
+
+  const packageDirectory = repositoryPath(lane.packageDir, 'lane packageDir');
+  const packageJson = JSON.parse(fs.readFileSync(path.join(packageDirectory, 'package.json'), 'utf8'));
+  if (typeof packageJson.scripts?.['test:ci'] !== 'string') {
+    throw new Error(`${lane.packageDir}/package.json must define the package-owned test:ci contract`);
   }
 
-  const absoluteOutput = path.resolve(absolutePackageDirectory, output);
-  const packageRelativeOutput = path.relative(absolutePackageDirectory, absoluteOutput);
-  if (
-    !output
-    || path.isAbsolute(output)
-    || packageRelativeOutput === '..'
-    || packageRelativeOutput.startsWith(`..${path.sep}`)
-  ) {
-    throw new Error('--output must stay inside the package directory');
+  const output = lane.output.replaceAll('{shard}', shard ?? '');
+  const outputPath = path.resolve(packageDirectory, output);
+  const relativeOutput = path.relative(packageDirectory, outputPath);
+  if (relativeOutput === '..' || relativeOutput.startsWith(`..${path.sep}`)) {
+    throw new Error(`${laneName} output must stay inside its package directory`);
   }
+
   return {
     command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm',
-    outputDirectory: path.dirname(absoluteOutput),
+    output,
+    outputPath,
     args: [
       '--dir',
-      absolutePackageDirectory,
-      'test',
+      packageDirectory,
+      'test:ci',
       ...testArguments,
       '--reporter=default',
       '--reporter=junit',
@@ -76,7 +99,7 @@ export function buildVitestJunitInvocation(argv) {
   };
 }
 
-export function runVitestJunit(argv) {
+export function runVitestJunit(argv, { spawnProcess = spawnSync } = {}) {
   let invocation;
   try {
     invocation = buildVitestJunitInvocation(argv);
@@ -85,8 +108,9 @@ export function runVitestJunit(argv) {
     return 2;
   }
 
-  fs.mkdirSync(invocation.outputDirectory, { recursive: true });
-  const result = spawnSync(invocation.command, invocation.args, {
+  fs.mkdirSync(path.dirname(invocation.outputPath), { recursive: true });
+  fs.rmSync(invocation.outputPath, { force: true });
+  const result = spawnProcess(invocation.command, invocation.args, {
     cwd: REPO_ROOT,
     env: process.env,
     stdio: 'inherit',
@@ -99,7 +123,16 @@ export function runVitestJunit(argv) {
     console.error(`vitest-junit: test process terminated by ${result.signal}`);
     return 1;
   }
-  return result.status ?? 1;
+  if (result.status !== 0) return result.status ?? 1;
+
+  try {
+    const report = fs.statSync(invocation.outputPath);
+    if (!report.isFile() || report.size === 0) throw new Error('report is empty');
+  } catch (error) {
+    console.error(`vitest-junit: successful test command did not create ${invocation.output}: ${error.message}`);
+    return 1;
+  }
+  return 0;
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : '';

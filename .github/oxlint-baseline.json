@@ -1,0 +1,3121 @@
+{
+  "version": 1,
+  "description": "Known Oxlint correctness warnings, scoped by rule and repository path.",
+  "entries": [
+    {
+      "rule": "eslint(no-constant-condition)",
+      "path": "packages/cli/src/cli-helpers.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-constant-condition)",
+      "path": "packages/kafka-plugin/test/factory.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "devnet/issue-2052-system-records/extract-rdf.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/adapter-openclaw/src/ChatTurnWriter.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/adapter-openclaw/src/DkgChannelPlugin.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/adapter-openclaw/test/dkg-channel.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/agent/src/rfc64/finalized-vm-runtime-v1.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/cli/src/context-graph-readiness.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/cli/src/daemon/auto-update.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/cli/src/daemon/hermes.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/cli/src/daemon/openclaw.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/cli/src/daemon/routes/hermes.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/cli/src/daemon/routes/shared-assertion-helpers.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/cli/test/context-graph-catchup-readiness.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/core/src/assertion-seal.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/core/src/canonical-graph-scoped-author-seal.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/core/src/ka-lifecycle-logger.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/core/src/sparql-operation.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/core/src/sparql-safe.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/core/src/sync-control-object.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/core/test/project-ontology.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/mcp-dkg/src/tools.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/node-ui/src/ui/components/Modals/cgNameValidation.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/node-ui/src/ui/components/Shell/PanelRight/format.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/node-ui/test/ontology-install.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/okf/src/utils.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/publisher/src/ack-collector.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/publisher/src/context-oracle.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/publisher/src/storage-ack-handler.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/publisher/src/storage-ack-lifecycle-observer.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "packages/rdf-utils/src/index.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-control-regex)",
+      "path": "scripts/lib/manifest.mjs",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-extra-boolean-cast)",
+      "path": "packages/agent/src/dkg-agent-lifecycle.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-irregular-whitespace)",
+      "path": "packages/publisher/test/swm-slice-ack-unbounded.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-irregular-whitespace)",
+      "path": "scripts/audit-create-random.mjs",
+      "count": 4
+    },
+    {
+      "rule": "eslint(no-irregular-whitespace)",
+      "path": "scripts/audit-create-random.test.mjs",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-loss-of-precision)",
+      "path": "packages/core/test/canonical-json.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-sparse-arrays)",
+      "path": "packages/core/test/canonical-json.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unassigned-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.full-complex.part-02.test.ts",
+      "count": 8
+    },
+    {
+      "rule": "eslint(no-unassigned-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.full-complex.part-03.test.ts",
+      "count": 9
+    },
+    {
+      "rule": "eslint(no-unassigned-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.full-complex.part-04.test.ts",
+      "count": 8
+    },
+    {
+      "rule": "eslint(no-unassigned-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.full-complex.part-05.test.ts",
+      "count": 8
+    },
+    {
+      "rule": "eslint(no-unreachable)",
+      "path": "packages/agent/src/dkg-agent-lifecycle.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unreachable)",
+      "path": "packages/chain/src/evm-adapter-context-graph.ts",
+      "count": 10
+    },
+    {
+      "rule": "eslint(no-unsafe-finally)",
+      "path": "packages/adapter-openclaw/src/DkgChannelPlugin.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unsafe-finally)",
+      "path": "packages/publisher/test/draft-lifecycle.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unsafe-optional-chaining)",
+      "path": "packages/cli/test/promote-async-routes.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unsafe-optional-chaining)",
+      "path": "packages/cli/test/publish-async-get-benchmark.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unsafe-optional-chaining)",
+      "path": "packages/cli/test/query-route-lifecycle.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unsafe-optional-chaining)",
+      "path": "packages/node-ui/test/pca-api.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unsafe-optional-chaining)",
+      "path": "packages/publisher/test/async-lift-publisher.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unsafe-optional-chaining)",
+      "path": "packages/storage/test/blazegraph.unit.test.ts",
+      "count": 7
+    },
+    {
+      "rule": "eslint(no-unused-expressions)",
+      "path": "packages/agent/test/rfc64-persistence-owner.typecheck.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-expressions)",
+      "path": "packages/evm-module/test/archive/unit/PublishingConvictionAccount.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-expressions)",
+      "path": "packages/evm-module/test/unit/ContextGraphs.test.ts",
+      "count": 45
+    },
+    {
+      "rule": "eslint(no-unused-expressions)",
+      "path": "packages/evm-module/test/unit/ContextGraphStorage.test.ts",
+      "count": 6
+    },
+    {
+      "rule": "eslint(no-unused-expressions)",
+      "path": "packages/evm-module/test/unit/Profile.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-expressions)",
+      "path": "packages/evm-module/test/unit/ShardingTable.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-expressions)",
+      "path": "packages/evm-module/test/v10-e2e-conviction.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-expressions)",
+      "path": "packages/evm-module/test/v10-pca-agent-dos.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-expressions)",
+      "path": "packages/evm-module/test/v10-pca-lifecycle.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "bench/publish-async-get.bench.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "ccl_v0_1/tests/run_inline_surface_tests.js",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "demo/agent-a.mjs",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "demo/epcis-bike/lib/epc-mapping.mjs",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "demo/epcis-bike/run.mjs",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "demo/epcis-bike/test/etl-mixed-bucket.test.mjs",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "demo/node-b-querier.mjs",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "demo/relay-server.mjs",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "devnet/_bootstrap/verify-1107.cjs",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "devnet/agent-provenance/automated.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "devnet/rfc64-gate2-multi-asset-completeness/live-verifier.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "devnet/rfc64-gate2-multi-asset-completeness/public-vm.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "devnet/rfc64-gate2-multi-asset-completeness/run.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "devnet/rich-scenario/automated.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "devnet/v10-end-to-end/automated.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "devnet/v10-stress/automated.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-01.test.ts",
+      "count": 32
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-02.test.ts",
+      "count": 30
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-03.test.ts",
+      "count": 29
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-04.test.ts",
+      "count": 30
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-05.test.ts",
+      "count": 17
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-06.test.ts",
+      "count": 16
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-07.test.ts",
+      "count": 20
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-08.test.ts",
+      "count": 23
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-09.test.ts",
+      "count": 31
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-10.test.ts",
+      "count": 31
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-11.test.ts",
+      "count": 31
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-12.test.ts",
+      "count": 31
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-13.test.ts",
+      "count": 31
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-14.test.ts",
+      "count": 31
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/openclaw-entry.mjs",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/scripts/probe-registration-mode.mjs",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/src/DkgMemoryPlugin.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/src/DkgNodePlugin.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/before-prompt-build-hook.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-01.test.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-02.test.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-03.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-04.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-05.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-06.test.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-07.test.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-08.test.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-09.test.ts",
+      "count": 4
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-10.test.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-11.test.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-12.test.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-13.test.ts",
+      "count": 4
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-14.test.ts",
+      "count": 4
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-15.test.ts",
+      "count": 4
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-16.test.ts",
+      "count": 4
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-17.test.ts",
+      "count": 4
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-18.test.ts",
+      "count": 4
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/ChatTurnWriter.part-19.test.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/dkg-memory.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-01.test.ts",
+      "count": 10
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-02.test.ts",
+      "count": 12
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-03.test.ts",
+      "count": 12
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-04.test.ts",
+      "count": 12
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-05.test.ts",
+      "count": 10
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-06.test.ts",
+      "count": 9
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-07.test.ts",
+      "count": 8
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-08.test.ts",
+      "count": 10
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-09.test.ts",
+      "count": 11
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-10.test.ts",
+      "count": 12
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-11.test.ts",
+      "count": 11
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-12.test.ts",
+      "count": 10
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-13.test.ts",
+      "count": 10
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-14.test.ts",
+      "count": 6
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-15.test.ts",
+      "count": 9
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-16.test.ts",
+      "count": 9
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-17.test.ts",
+      "count": 6
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-18.test.ts",
+      "count": 11
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/plugin.part-19.test.ts",
+      "count": 6
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-01.test.ts",
+      "count": 24
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-02.test.ts",
+      "count": 23
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-03.test.ts",
+      "count": 23
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-04.test.ts",
+      "count": 20
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-05.test.ts",
+      "count": 19
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-06.test.ts",
+      "count": 20
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-07.test.ts",
+      "count": 18
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-08.test.ts",
+      "count": 19
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-09.test.ts",
+      "count": 22
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-10.test.ts",
+      "count": 24
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-11.test.ts",
+      "count": 24
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-12.test.ts",
+      "count": 25
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-13.test.ts",
+      "count": 23
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-14.test.ts",
+      "count": 21
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-15.test.ts",
+      "count": 24
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-16.test.ts",
+      "count": 25
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-17.test.ts",
+      "count": 24
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-18.test.ts",
+      "count": 22
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-19.test.ts",
+      "count": 21
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-20.test.ts",
+      "count": 22
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-21.test.ts",
+      "count": 23
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-22.test.ts",
+      "count": 23
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-23.test.ts",
+      "count": 24
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-24.test.ts",
+      "count": 25
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-25.test.ts",
+      "count": 25
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-26.test.ts",
+      "count": 22
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-openclaw/test/setup.part-27.test.ts",
+      "count": 25
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/adapter-prime-agent/extension/src/extension.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/ccl-fact-resolution.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/discovery.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-base.ts",
+      "count": 404
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-ccl.ts",
+      "count": 429
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-cg-registry.ts",
+      "count": 433
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-cg-resolve.ts",
+      "count": 430
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-context-graph.ts",
+      "count": 432
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-crypto.ts",
+      "count": 387
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-endorse.ts",
+      "count": 433
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-join.ts",
+      "count": 429
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-lifecycle.ts",
+      "count": 344
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-ownership.ts",
+      "count": 434
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-publish.ts",
+      "count": 368
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-query.ts",
+      "count": 439
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-registry.ts",
+      "count": 410
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-rfc64-catalog.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-swm-host.ts",
+      "count": 379
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-swm-substrate.ts",
+      "count": 424
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent-types.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/dkg-agent.ts",
+      "count": 370
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/endorse.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/gossip-publish-handler.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/profile.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/rfc64/durable-file-store-v1.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/rfc64/finalized-vm-runtime-v1.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/rfc64/inventory-v1/candidate.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/rfc64/public-catalog-current-head-discovery-v1.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/rfc64/public-catalog-transport-v1.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/swm/member-attestation.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/src/sync/responder/graph-plan.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/a2-pointers-and-b3-addressing.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-01.test.ts",
+      "count": 60
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-02.test.ts",
+      "count": 66
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-03.test.ts",
+      "count": 64
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-04.test.ts",
+      "count": 64
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-05.test.ts",
+      "count": 61
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-06.test.ts",
+      "count": 66
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-07.test.ts",
+      "count": 54
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-08.test.ts",
+      "count": 60
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-09.test.ts",
+      "count": 61
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-10.test.ts",
+      "count": 63
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-11.test.ts",
+      "count": 61
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-12.test.ts",
+      "count": 64
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-13.test.ts",
+      "count": 53
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-14.test.ts",
+      "count": 67
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-15.test.ts",
+      "count": 61
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-16.test.ts",
+      "count": 61
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.part-17.test.ts",
+      "count": 66
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/agent.publish-adapters.shared.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/durable-sync-graph-scoped-materialization.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/e2e-chain.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/e2e-memory-layers.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/e2e-network.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/e2e-publish-protocol.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/encrypt-inline-policy.test.ts",
+      "count": 9
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/gossip-validation.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/ka-graph-finalization-recovery.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/publish-jsonld.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/request-authorize.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/rfc64-catalog-row-authorship.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/rfc64-dkg-agent-successor-publication.integration.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/rfc64-inventory-v1-candidates.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/rfc64-public-catalog-native-gate1.integration.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/rfc64-public-catalog-service-v1.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/rootless-durable-bounded-progress.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/swm-late-joiner-deferred-gossip.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/swm-public-snapshot-materialization.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/agent/test/swm-snapshot-materializer.test.ts",
+      "count": 8
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/chain/src/evm-adapter-base.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/chain/src/evm-adapter-context-graph.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/chain/src/evm-adapter-publish.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/chain/src/evm-adapter-random-sampling.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/chain/test/finalized-context-graph-read.unit.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/chain/test/hardhat-harness.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/chain/test/mock-adapter-parity.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/chain/test/mock-adapter-random-sampling.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/catchup-runner-worker-impl.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/catchup-runner.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/cli-helpers.ts",
+      "count": 59
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/agent.ts",
+      "count": 112
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/assertion.ts",
+      "count": 109
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/auth.ts",
+      "count": 110
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/ccl.ts",
+      "count": 109
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/context-graph.ts",
+      "count": 104
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/epcis.ts",
+      "count": 110
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/hermes.ts",
+      "count": 112
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/index-command.ts",
+      "count": 107
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/init.ts",
+      "count": 91
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/knowledge.ts",
+      "count": 101
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/lifecycle.ts",
+      "count": 93
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/maintenance.ts",
+      "count": 84
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/mcp.ts",
+      "count": 109
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/network.ts",
+      "count": 109
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/node-ops.ts",
+      "count": 102
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/openclaw.ts",
+      "count": 112
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/pca.ts",
+      "count": 111
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/publisher.ts",
+      "count": 103
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/query-catalog.ts",
+      "count": 110
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/random-sampling.ts",
+      "count": 106
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/source-worker.ts",
+      "count": 110
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/commands/sync.ts",
+      "count": 110
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/auto-update.ts",
+      "count": 36
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/handle-request.ts",
+      "count": 288
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/lifecycle.ts",
+      "count": 211
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/local-agents.ts",
+      "count": 21
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/manifest.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/openclaw.ts",
+      "count": 12
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/routes/agent-chat.ts",
+      "count": 301
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/routes/context-graph.ts",
+      "count": 279
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/routes/epcis.ts",
+      "count": 308
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/routes/hermes.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/routes/knowledge-assets-import.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/routes/local-agents.ts",
+      "count": 298
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/routes/memory.ts",
+      "count": 299
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/routes/openclaw.ts",
+      "count": 289
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/routes/publisher.ts",
+      "count": 307
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/routes/query.ts",
+      "count": 291
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/daemon/routes/status.ts",
+      "count": 282
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/doctor/index.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/indexer-solidity-ast.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/indexer.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/migration.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/publisher-chain-proof.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/src/publisher-runner.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/catchup-runner-worker-impl.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/config.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/context-graph-write-path-validation.test.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-keystore-extra.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-01.test.ts",
+      "count": 38
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-02.test.ts",
+      "count": 38
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-03.test.ts",
+      "count": 37
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-04.test.ts",
+      "count": 39
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-05.test.ts",
+      "count": 38
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-06.test.ts",
+      "count": 37
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-07.test.ts",
+      "count": 41
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-08.test.ts",
+      "count": 40
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-09.test.ts",
+      "count": 42
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-10.test.ts",
+      "count": 42
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-11.test.ts",
+      "count": 36
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-12.test.ts",
+      "count": 40
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-13.test.ts",
+      "count": 42
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-14.test.ts",
+      "count": 43
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-15.test.ts",
+      "count": 36
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-16.test.ts",
+      "count": 27
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-17.test.ts",
+      "count": 31
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-18.test.ts",
+      "count": 34
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/daemon-openclaw.part-19.test.ts",
+      "count": 43
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/devnet-publish-helpers-smoke.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/dkg-doctor.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-artifact-routes.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-file-integration.part-01.test.ts",
+      "count": 6
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-file-integration.part-02.test.ts",
+      "count": 14
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-file-integration.part-03.test.ts",
+      "count": 10
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-file-integration.part-04.test.ts",
+      "count": 9
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-file-integration.part-05.test.ts",
+      "count": 14
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-file-integration.part-06.test.ts",
+      "count": 16
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-file-integration.part-07.test.ts",
+      "count": 12
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-file-integration.part-08.test.ts",
+      "count": 14
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-file-integration.part-09.test.ts",
+      "count": 16
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-file-integration.part-10.test.ts",
+      "count": 28
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-file-integration.part-11.test.ts",
+      "count": 16
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/import-file-orchestration.shared.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/indexer-solidity-ast.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/mcp-setup.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/promote-route-not-persisted.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/publisher-chain-proof-resolution.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/publisher-clear-job-route.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/publisher-wallets.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/cli/test/rfc-41-bundle-b.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/src/assertion-seal.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/src/cg-shared-projection.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/src/crypto/swm-sender-key.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/src/crypto/term-canon.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/src/genesis.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/src/message-stream-pool.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/src/vm-update-convergence.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/test/author-catalog-codec.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/test/author-catalog-objects.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/test/memory-model-e2e.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/test/networking.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/test/protocol-router.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/test/relay.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/test/v10-crypto-e2e.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/test/v10-crypto.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/core/test/v10-protocol-coverage.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/scripts/fork-setup.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.delegator-scoring.part-01.test.ts",
+      "count": 10
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.delegator-scoring.part-02.test.ts",
+      "count": 8
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.delegator-scoring.part-03.test.ts",
+      "count": 9
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.delegator-scoring.part-04.test.ts",
+      "count": 10
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.delegator-scoring.part-05.test.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.delegator-scoring.part-06.test.ts",
+      "count": 7
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.delegator-scoring.part-07.test.ts",
+      "count": 6
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.delegator-scoring.part-08.test.ts",
+      "count": 7
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.delegator-scoring.part-09.test.ts",
+      "count": 7
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.delegator-scoring.part-10.test.ts",
+      "count": 6
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.delegator-scoring.part-11.test.ts",
+      "count": 8
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.full-complex.part-01.test.ts",
+      "count": 6
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.full-complex.part-02.test.ts",
+      "count": 10
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.full-complex.part-03.test.ts",
+      "count": 8
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.full-complex.part-04.test.ts",
+      "count": 11
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/archive/integration/Staking.full-complex.part-05.test.ts",
+      "count": 14
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/gas/RandomSampling-bit-gas.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/integration/g3-flash-stake-score-snapshot.regression.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/unit/CGWeightTreeStorage.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/unit/DKGPublishingConvictionNFT-extra.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/unit/DKGStakingConvictionNFT.test.ts",
+      "count": 12
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/unit/RandomSampling-curated.test.ts",
+      "count": 16
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/unit/RandomSampling.test.ts",
+      "count": 6
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/v10-cg-registration-deposit.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/v10-conviction.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/v10-e2e-conviction.test.ts",
+      "count": 6
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/v10-emission-schedule.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/v10-pca-agent-dos.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/evm-module/test/v10-rfc-51-publishing-allocation.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/graph-viz/src/core/view-config.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/graph-viz/src/overlays/timeline-overlay.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/graph-viz/tests/view-config.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/kafka-plugin/test/handler.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/mcp-dkg/src/manifest/fetch.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/mcp-dkg/src/manifest/publish.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/mcp-dkg/src/tools.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/mcp-dkg/test/capture-chat-atomic-share.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/mcp-dkg/test/setup-publish-health.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/network-sim/src/components/ControlPanel.tsx",
+      "count": 6
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/network-sim/src/components/StatsDashboard.tsx",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/e2e/bootstrap-devnet.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/e2e/helpers/layer-counts.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/e2e/specs/import-files.spec.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/e2e/specs/settings.spec.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/api.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/chat-memory.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/api.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/components/Modals/CreateProjectModal.tsx",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/components/Modals/ImportFilesModal.tsx",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/components/Shell/PanelRight/PanelRightContainer.tsx",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/hooks/useAgents.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/hooks/useMemoryEntities.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/hooks/useProjectActivity.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/hooks/useVerifiedEntityIdentity.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/pages/conviction/ConvictionOverview.tsx",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/pages/conviction/CreatePcaModal.tsx",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/pages/Operations.tsx",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/views/DashboardView.tsx",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/views/MemoryStackView.tsx",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/views/project/components/graph.tsx",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/views/project/components/ka.tsx",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/views/project/components/overview.tsx",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/views/project/components/subgraph.tsx",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/views/ProjectView.tsx",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/src/ui/web3/walletOwnerActionSubmitter.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/test/chat-memory-persistence-regression.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/test/chat-memory.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/test/composer-autosize.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/test/dashboard-memorystack-contract.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/test/log-push-worker.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/test/operation-tracker.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/test/pca-overview.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/test/pca-writes.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/test/ui-api-pure.test.ts",
+      "count": 9
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/test/ui-api-stream.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/test/use-project-activity-events-joiner.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/node-ui/test/use-shell-routing.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/src/async-lift-control-plane.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/src/async-lift-publisher-impl.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/src/async-lift-publisher-types.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/src/async-lift-subtraction.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/src/async-promote-queue-impl.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/src/auto-partition.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/src/dkg-publisher.ts",
+      "count": 17
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/src/merkle.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/src/metadata.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/src/publish-handler.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/src/update-handler.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/access-protocol.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/agent-provenance-e2e.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/async-lift-chain-proof-dispatch-2270.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/async-lift-journal-serialize.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/async-lift-publisher.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/async-lift-subtraction.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/chain-event-poller-extra.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/draft-lifecycle.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/e2e-publisher-queue.test.ts",
+      "count": 4
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/e2e.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/ka-update.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/legacy-wm-migration.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/merkle.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/phase-sequences.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/publish-lifecycle.test.ts",
+      "count": 8
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/publisher-no-random-wallet.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/security-regressions.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/swm-slice-ack-unbounded.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/swm-subset-cleanup.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/update-handler-gh842.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/v10-protocol-operations.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/v10-publish-e2e.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/publisher/test/v10-remap-wire.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/query/src/dkg-query-engine.ts",
+      "count": 5
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/query/src/query-handler.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/query/test/query-handler.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/query/test/query-security.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/query/test/store-isolation.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/random-sampling/test/e2e-hardhat-chain.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/random-sampling/test/e2e-mock-chain.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/random-sampling/test/ka-extractor.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/storage/src/adapters/blazegraph.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/storage/test/graph-manager-swm-bound.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "packages/storage/test/oxigraph-persistence.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "scripts/chain-analysis.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "scripts/debug-neuroweb-batch.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "scripts/distribute-publisher-trac.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "scripts/import-github.mjs",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "scripts/import-manifest.mjs",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "scripts/import-profile.mjs",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "scripts/publisher-epoch-snapshot-fast.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "scripts/redistribute-memory.mjs",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "scripts/seed-dkg-code-project.mjs",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "scripts/testnet-publish-stress/fetch-wikidata-music.mjs",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "scripts/testnet-publish-stress/publish-loop.mjs",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-unused-vars)",
+      "path": "scripts/verify-addresses.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-catch)",
+      "path": "packages/agent/src/dkg-agent-crypto.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-catch)",
+      "path": "packages/core/src/libp2p-metrics-adapter.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "devnet/rfc64-gate2-multi-asset-completeness/src/schema.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "packages/agent/test/endorse.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "packages/cli/src/auto-update-ref.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "packages/cli/src/daemon/auto-update.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "packages/cli/src/daemon/http-utils.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "packages/core/src/assertion-seal.ts",
+      "count": 4
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "packages/core/src/author-lane-scope-v1.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "packages/core/src/constants.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "packages/graph-viz/src/core/view-config.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "packages/node-ui/src/gelf-push-worker.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "packages/node-ui/test/ui-compat.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "packages/okf/src/paths.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "packages/publisher/test/workspace-snapshot-store.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "scripts/lib/dkg-daemon.mjs",
+      "count": 2
+    },
+    {
+      "rule": "eslint(no-useless-escape)",
+      "path": "tools/observability/lib/w1.mjs",
+      "count": 4
+    },
+    {
+      "rule": "eslint(no-useless-rename)",
+      "path": "packages/publisher/src/update-handler.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(require-yield)",
+      "path": "packages/agent/test/context-graph-discovery.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "eslint(require-yield)",
+      "path": "packages/agent/test/gossip-publish-handler.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(require-yield)",
+      "path": "packages/chain/src/mock-adapter.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(require-yield)",
+      "path": "packages/chain/src/no-chain-adapter.ts",
+      "count": 1
+    },
+    {
+      "rule": "eslint(require-yield)",
+      "path": "packages/core/test/protocol-router.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "eslint(require-yield)",
+      "path": "packages/publisher/test/chain-event-lane-runner.unit.test.ts",
+      "count": 7
+    },
+    {
+      "rule": "eslint(require-yield)",
+      "path": "packages/publisher/test/chain-event-poller-v10-only.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "oxc(const-comparisons)",
+      "path": "packages/chain/src/evm-adapter-base.ts",
+      "count": 1
+    },
+    {
+      "rule": "oxc(const-comparisons)",
+      "path": "packages/chain/src/evm-adapter-publish.ts",
+      "count": 1
+    },
+    {
+      "rule": "oxc(const-comparisons)",
+      "path": "scripts/verify-agent-provenance-deployment.mjs",
+      "count": 2
+    },
+    {
+      "rule": "typescript(no-this-alias)",
+      "path": "packages/agent/src/dkg-agent.ts",
+      "count": 1
+    },
+    {
+      "rule": "typescript(no-this-alias)",
+      "path": "packages/node-ui/test/telemetry.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "typescript(no-unsafe-declaration-merging)",
+      "path": "packages/agent/src/dkg-agent.ts",
+      "count": 1
+    },
+    {
+      "rule": "typescript(no-unsafe-declaration-merging)",
+      "path": "packages/chain/src/evm-adapter.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-invalid-fetch-options)",
+      "path": "devnet/_bootstrap/verify-1107.cjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-invalid-fetch-options)",
+      "path": "scripts/import-binance-demo.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-invalid-fetch-options)",
+      "path": "scripts/lib/dkg-daemon.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-invalid-fetch-options)",
+      "path": "scripts/repro/wm-persistence-regression.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-invalid-fetch-options)",
+      "path": "scripts/testnet-publish-stress/preflight.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-invalid-fetch-options)",
+      "path": "scripts/testnet-publish-stress/publish-loop.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "bench/store-read-latency.bench.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "devnet/_bootstrap/rfc64-evidence.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "devnet/_bootstrap/rfc64-evidence.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "devnet/rfc64-gate2-multi-asset-completeness/test/completeness.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "devnet/rfc64-persistence-lifecycle/evidence.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/agent/src/map-with-concurrency.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/agent/src/rfc64/author-catalog-producer.ts",
+      "count": 5
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/agent/src/rfc64/catalog-row-authorship.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/agent/src/rfc64/control-object-store-v1-internal.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/agent/src/rfc64/public-catalog-inventory-completeness-v1.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/agent/src/sync-verify-worker.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/agent/test/rfc64-author-catalog-producer.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/agent/test/rfc64-catalog-row-authorship.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/agent/test/rfc64-control-object-store-v1.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/agent/test/rfc64-public-catalog-inventory-completeness-v1.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/agent/test/rfc64-public-catalog-service-v1.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/chain/test/current-finalized-evm-call.unit.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/chain/test/evm-adapter-pca-rpc.unit.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/chain/test/strict-current-finalized-evm-rpc.unit.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/chain/test/v10-update-ack-digest-parity.unit.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/cli/src/vector-store.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/cli/test/vector-store-extra.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/core/src/author-catalog-directory.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/core/src/sparql-operation.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/core/test/author-catalog-directory.test.ts",
+      "count": 4
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/core/test/author-catalog-objects.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/core/test/cg-policy-objects.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/core/test/swm-author-inventory-v1.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/core/test/v10-proto.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/core/test/vm-update-convergence.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/evm-module/scripts/phase0-measure.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/query/src/dkg-query-engine.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/storage/test/oxigraph-worker-resilience.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "packages/storage/test/oxigraph-worker-respawn.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "scripts/repro/wm-persistence-regression.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-new-array)",
+      "path": "scripts/testnet-publish-stress/fetch-wikidata-music.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "demo/epcis-bike/run.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "devnet/public-cg-sync-proof/proof.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "devnet/public-cg-sync-proof/verify-fixes.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/adapter-openclaw/src/dkg-client.ts",
+      "count": 4
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/adapter-openclaw/src/DkgChannelPlugin.ts",
+      "count": 9
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/adapter-openclaw/src/openclaw-config.ts",
+      "count": 8
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/agent/src/source-worker.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/agent/test/swm/host-mode-key-canonicalization.test.ts",
+      "count": 2
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/chain/test/loopback-rpc-harness.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/cli/src/api-client.ts",
+      "count": 7
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/cli/src/commands/epcis.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/cli/src/commands/publisher.ts",
+      "count": 2
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/cli/src/daemon/http-utils.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/cli/src/daemon/local-agents.ts",
+      "count": 17
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/cli/src/daemon/routes/local-agents.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/cli/src/daemon/routes/memory.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/cli/src/daemon/routes/status.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/cli/test/daemon-prime-agent.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/cli/test/epcis-subcommands.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/cli/test/helpers/live-daemon.ts",
+      "count": 2
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/cli/test/notifications-route.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/evm-module/hardhat.config.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/evm-module/hardhat.devnet.config.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/network-sim/src/store.tsx",
+      "count": 4
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/node-ui/src/otlp-log-worker.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/node-ui/src/telemetry.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/node-ui/test/pca-wallet-owner-actions.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "packages/publisher/src/async-lift-publisher-impl.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-fallback-in-spread)",
+      "path": "scripts/release-packages.mjs",
+      "count": 2
+    },
+    {
+      "rule": "unicorn(no-useless-length-check)",
+      "path": "packages/adapter-openclaw/src/ChatTurnWriter.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-length-check)",
+      "path": "packages/cli/src/catchup-runner.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-length-check)",
+      "path": "packages/node-ui/src/ui/components/Shell/PanelRight/ConnectedAgentsTab.tsx",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/src/context-graph-meta-projection.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/src/dkg-agent-context-graph.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/src/dkg-agent-lifecycle.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/src/dkg-agent-swm-host.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/src/dkg-agent-swm-substrate.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/src/rfc64/control-object-store-v1-internal.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/src/rfc64/inventory-v1/candidate.ts",
+      "count": 2
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/src/rfc64/ka-bundle-store-v1-internal.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/src/rfc64/public-catalog-receiver-v1.ts",
+      "count": 2
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/src/rfc64/swm-inventory-shadow-runtime-v1.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/src/swm/ack-quorum.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/test/discovery-subscription-boundary.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/agent/test/sync-requester-progress.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/chain/src/publisher-plan.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/cli/src/commands/knowledge-asset.ts",
+      "count": 3
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/cli/src/daemon/lifecycle.ts",
+      "count": 2
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/cli/src/daemon/metrics-queries.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/cli/src/daemon/routes/agent-chat.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/cli/test/publisher-retry-surfacing-2270.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/publisher/src/async-lift-publisher-impl.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "packages/random-sampling/src/ka-extractor.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "scripts/audit-create-random.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(no-useless-spread)",
+      "path": "scripts/lib/__tests__/manifest.test.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(prefer-string-starts-ends-with)",
+      "path": "demo/epcis-bike/lib/epc-mapping.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(prefer-string-starts-ends-with)",
+      "path": "packages/adapter-hermes/test/hermes-adapter.part-08.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(prefer-string-starts-ends-with)",
+      "path": "packages/agent/test/sync-responder-concurrent-interleaving.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "unicorn(prefer-string-starts-ends-with)",
+      "path": "packages/agent/test/sync-responder-oversized-fallback.test.ts",
+      "count": 3
+    },
+    {
+      "rule": "unicorn(prefer-string-starts-ends-with)",
+      "path": "packages/cli/src/cli-helpers.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(prefer-string-starts-ends-with)",
+      "path": "packages/cli/src/config.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(prefer-string-starts-ends-with)",
+      "path": "packages/cli/src/daemon/core-prereq-check.ts",
+      "count": 6
+    },
+    {
+      "rule": "unicorn(prefer-string-starts-ends-with)",
+      "path": "packages/cli/test/import-file-integration.part-04.test.ts",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(prefer-string-starts-ends-with)",
+      "path": "scripts/import-code-graph.mjs",
+      "count": 1
+    },
+    {
+      "rule": "unicorn(prefer-string-starts-ends-with)",
+      "path": "scripts/import-github.mjs",
+      "count": 1
+    }
+  ]
+}

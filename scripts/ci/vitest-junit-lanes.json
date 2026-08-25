@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "lanes": {
+    "core": {
+      "ciJob": "tornado-core",
+      "packageDir": "packages/core",
+      "output": "test-results/core.xml"
+    },
+    "rdf-utils": {
+      "ciJob": "tornado-core",
+      "packageDir": "packages/rdf-utils",
+      "output": "test-results/rdf-utils.xml"
+    },
+    "storage": {
+      "ciJob": "tornado-core",
+      "packageDir": "packages/storage",
+      "output": "test-results/storage.xml"
+    },
+    "chain": {
+      "ciJob": "tornado-core",
+      "packageDir": "packages/chain",
+      "output": "test-results/chain-{shard}.xml"
+    },
+    "publisher": {
+      "ciJob": "tornado-publisher",
+      "packageDir": "packages/publisher",
+      "output": "test-results/publisher-{shard}.xml"
+    },
+    "agent": {
+      "ciJob": "tornado-agent",
+      "packageDir": "packages/agent",
+      "output": "test-results/agent-{shard}.xml"
+    },
+    "cli": {
+      "ciJob": "bura-cli",
+      "packageDir": "packages/cli",
+      "output": "test-results/cli-{shard}.xml"
+    }
+  }
+}

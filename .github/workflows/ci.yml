@@ -449,11 +449,11 @@ jobs:
         if: matrix.suite == 'core'
         run: |
           node scripts/ci/run-vitest-junit.mjs \
-            --package-dir packages/core --output test-results/core.xml
+            --lane core
           node scripts/ci/run-vitest-junit.mjs \
-            --package-dir packages/rdf-utils --output test-results/rdf-utils.xml
+            --lane rdf-utils
           node scripts/ci/run-vitest-junit.mjs \
-            --package-dir packages/storage --output test-results/storage.xml
+            --lane storage
       - name: "Chain tests (shard ${{ matrix.shard }}/3)"
         if: matrix.suite == 'chain'
         env:
@@ -463,8 +463,7 @@ jobs:
           mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs chain "$SHARD_ID")
           test "${#SHARD_FILES[@]}" -gt 0
           node scripts/ci/run-vitest-junit.mjs \
-            --package-dir packages/chain \
-            --output "test-results/chain-${SHARD_ID}.xml" \
+            --lane chain --shard "${SHARD_ID}" \
             -- "${SHARD_FILES[@]}"
 
       - name: Upload Vitest JUnit report
@@ -600,8 +599,7 @@ jobs:
       - name: "Publisher tests (shard ${{ matrix.shard }}/4)"
         run: |
           node scripts/ci/run-vitest-junit.mjs \
-            --package-dir packages/publisher \
-            --output test-results/publisher-${{ matrix.shard }}.xml \
+            --lane publisher --shard ${{ matrix.shard }} \
             -- --shard=${{ matrix.shard }}/4
       - name: Upload Vitest JUnit report
         if: always()
@@ -671,8 +669,7 @@ jobs:
           printf '  %s\n' "${SHARD_FILES[@]}"
           echo "::endgroup::"
           node ../../scripts/ci/run-vitest-junit.mjs \
-            --package-dir packages/agent \
-            --output test-results/agent-${{ matrix.shard }}.xml \
+            --lane agent --shard ${{ matrix.shard }} \
             -- "${SHARD_FILES[@]}"
       - name: Upload Vitest JUnit report
         if: always()
@@ -736,8 +733,7 @@ jobs:
           mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs cli "$SHARD_ID")
           test "${#SHARD_FILES[@]}" -gt 0
           node scripts/ci/run-vitest-junit.mjs \
-            --package-dir packages/cli \
-            --output "test-results/cli-${SHARD_ID}.xml" \
+            --lane cli --shard "${SHARD_ID}" \
             -- "${SHARD_FILES[@]}"
       - name: Upload Vitest JUnit report
         if: always()
