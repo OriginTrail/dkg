@@ -8,18 +8,25 @@
  * applies only to untyped ones — so there is a single place to add a rule and
  * no way to place it wrongly.
  */
-import { isSparqlHttpResponseError } from "@origintrail-official/dkg-storage";
-
 /**
- * Upstream statuses that mean "the SPARQL the caller sent is malformed".
- *
- * Deliberately NOT every 4xx. A configured store can answer 401/403 for stale
- * daemon credentials, 404 for a misconfigured endpoint, or 429 when throttling
- * us — those are server/integration faults, and reporting them as 400 would
- * tell the caller their query is invalid and suppress the retry or operator
- * remediation that would actually fix it.
+ * Recognised structurally rather than by importing `@origintrail-official/dkg-query`.
+ * The cli package does not depend on it directly (the error arrives through the
+ * agent), and adding a dependency would put this change behind the CODEOWNERS
+ * gate on the per-package manifests for no behavioural gain. Source of truth for
+ * the constant is `packages/query/src/caller-sparql-error.ts`.
  */
-const MALFORMED_QUERY_STATUSES = new Set([400, 422]);
+const CALLER_SPARQL_REJECTED_CODE = "CALLER_SPARQL_REJECTED";
+
+function isCallerSparqlRejected(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const c = err as { code?: unknown; status?: unknown; message?: unknown };
+  return (
+    c.code === CALLER_SPARQL_REJECTED_CODE &&
+    typeof c.status === "number" &&
+    Number.isFinite(c.status) &&
+    typeof c.message === "string"
+  );
+}
 
 /**
  * Legacy message families, for errors with no typed carrier.
@@ -27,7 +34,7 @@ const MALFORMED_QUERY_STATUSES = new Set([400, 422]);
  * GH#1758 was a silent re-regression of #889 precisely because this condition
  * lived inline inside a catch block, so nothing could assert on it.
  */
-export function isClientQueryError(msg: string): boolean {
+function isLegacyClientQueryMessage(msg: string): boolean {
   return (
     
         msg.startsWith("SPARQL rejected:") ||
@@ -61,15 +68,20 @@ export function isClientQueryError(msg: string): boolean {
 /**
  * Should `/api/query` answer 400 for this thrown error?
  *
- * `true` renders a 400; `false` rethrows as a server fault. A typed SPARQL
- * HTTP response is terminal — its status decides, and message matching is not
- * consulted, so a store rejecting US can never be reported as the caller's bad
- * query.
+ * `true` renders a 400; `false` rethrows as a server fault.
+ *
+ * A bare upstream status is NOT sufficient (PR #2330 review): one request also
+ * runs engine-generated queries for access control, graph resolution and
+ * metadata scans, and a store rejecting one of those with 400 is an
+ * integration fault, not a malformed caller query. The query engine marks the
+ * single store call that carried caller-supplied SPARQL; only that marker — or
+ * a legacy message family with no typed carrier — yields a 400.
+ *
+ * This is the sole exported classifier. The legacy message matcher stays
+ * private so the provenance-first rule cannot be bypassed.
  */
 export function isClientQueryFailure(err: unknown): boolean {
-  if (isSparqlHttpResponseError(err)) {
-    return MALFORMED_QUERY_STATUSES.has(err.status);
-  }
+  if (isCallerSparqlRejected(err)) return true;
   const msg = (err as { message?: unknown })?.message;
-  return typeof msg === "string" && isClientQueryError(msg);
+  return typeof msg === "string" && isLegacyClientQueryMessage(msg);
 }

@@ -1,3 +1,8 @@
+import { isSparqlHttpResponseError } from '@origintrail-official/dkg-storage';
+import { CallerSparqlRejectedError } from './caller-sparql-error.js';
+
+/** Upstream statuses that mean the SUBMITTED query was malformed. */
+const MALFORMED_CALLER_QUERY_STATUSES = new Set([400, 422]);
 import type {
   TripleStore,
   Quad,
@@ -1202,7 +1207,21 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     sparql: string,
     reads: StoreReadLane,
   ): Promise<QueryResult> {
-    const result = await reads.query(sparql);
+    // GH#1758 — this is the ONLY place caller-supplied SPARQL reaches the
+    // store; every other `.query(...)` in this engine runs a server-generated
+    // query (access checks, graph resolution, metadata scans). Mark a store
+    // rejection HERE so the HTTP boundary can answer 400 for a malformed
+    // caller query without also blaming the caller when an engine-internal
+    // query is rejected by the configured backend (PR #2330 review).
+    let result;
+    try {
+      result = await reads.query(sparql);
+    } catch (err) {
+      if (isSparqlHttpResponseError(err) && MALFORMED_CALLER_QUERY_STATUSES.has(err.status)) {
+        throw new CallerSparqlRejectedError(err.message, err.status, { cause: err });
+      }
+      throw err;
+    }
 
     if (result.type === 'bindings') {
       if (result.bindings.length === 0) {
