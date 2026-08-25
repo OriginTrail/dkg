@@ -2,6 +2,7 @@ import {
   KA_TRANSFER_CHUNK_SIZE_V1,
   KA_TRANSFER_CODEC_V1,
   KA_TRANSFER_PROJECTION_V1,
+  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   assertAuthorCatalogRowV1,
   computeKaChunkTreeRootV1,
   encodeOpaqueKaBundleV1,
@@ -9,6 +10,8 @@ import {
   type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
+  type ContextGraphPolicyV1,
+  type MemberRosterV1,
   type SignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
@@ -31,7 +34,52 @@ const POLICY_DIGEST = `0x${'73'.repeat(32)}` as Digest32V1;
 const SEAL_DIGEST = `0x${'44'.repeat(32)}` as Digest32V1;
 const UTF8 = new TextEncoder();
 
-async function providerFixture() {
+function acceptedPrivatePolicy(options: {
+  era?: string;
+  includeAuthor?: boolean;
+} = {}) {
+  const era = options.era ?? '0';
+  const policy = {
+    networkId: 'otp:20430',
+    contextGraphId: CONTEXT_GRAPH_ID,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    era,
+    version: '0',
+    previousPolicyDigest: null,
+    accessPolicy: 1,
+    publishPolicy: 1,
+    publishAuthority: null,
+    publishAuthorityAccountId: '0',
+    projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+    administrativeDelegationDigest: null,
+    source: {
+      kind: 'owner-signed-unregistered',
+      ownerAddress: AUTHOR,
+      ownerAuthorityEra: era,
+    },
+    effectiveAt: '0',
+    issuedAt: '0',
+  } as ContextGraphPolicyV1;
+  const roster = {
+    networkId: policy.networkId,
+    contextGraphId: policy.contextGraphId,
+    ownershipTransitionDigest: policy.ownershipTransitionDigest,
+    era: policy.era,
+    version: '0',
+    previousRosterDigest: null,
+    policyDigest: POLICY_DIGEST,
+    administrativeDelegationDigest: policy.administrativeDelegationDigest,
+    members: options.includeAuthor === false
+      ? []
+      : [{ agentAddress: AUTHOR, roles: ['holder', 'provider'] }],
+    issuedAt: '0',
+  } as MemberRosterV1;
+  return Object.freeze({ policy, policyDigest: POLICY_DIGEST, roster });
+}
+
+async function providerFixture(accepted = acceptedPrivatePolicy()) {
   const catalogScope = {
     networkId: 'otp:20430',
     contextGraphId: CONTEXT_GRAPH_ID,
@@ -119,6 +167,7 @@ async function providerFixture() {
   const resolve = createRfc64CatalogNativeScopedReadProviderV1({
     controlObjects: { getVerifiedObjectByDigest: controlRead } as never,
     kaBundles: { readKaBundleByDigest: bundleRead },
+    resolveAcceptedPolicySnapshot: async () => accepted,
   });
   const scope = Object.freeze({
     networkId: successor.head.payload.networkId,
@@ -206,6 +255,18 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
     const delegationDigest = fixture.delegation.objectDigest;
     fixture.controlRead.mockImplementation(async ({ objectDigest }) =>
       objectDigest === delegationDigest ? null : fixture.stored.get(objectDigest) ?? null);
+    await expect(fixture.resolve(fixture.scope)).resolves.toBeNull();
+    expect(fixture.bundleRead).not.toHaveBeenCalled();
+  });
+
+  it('refuses a retained head from an old accepted-policy era', async () => {
+    const fixture = await providerFixture(acceptedPrivatePolicy({ era: '1' }));
+    await expect(fixture.resolve(fixture.scope)).resolves.toBeNull();
+    expect(fixture.bundleRead).not.toHaveBeenCalled();
+  });
+
+  it('refuses a head whose author is absent from the current private roster', async () => {
+    const fixture = await providerFixture(acceptedPrivatePolicy({ includeAuthor: false }));
     await expect(fixture.resolve(fixture.scope)).resolves.toBeNull();
     expect(fixture.bundleRead).not.toHaveBeenCalled();
   });
