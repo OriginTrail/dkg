@@ -498,11 +498,13 @@ export class Rfc64PublicCatalogReceiverV1 {
           kind: 'failed',
           taskRevision: task.revision,
           announcement: providers[0]!.announcement,
-          error: new Error(
-            'RFC-64 receiver exhausted the per-provider attempt budget before '
-            + 'reconciling the latest accepted provider hint',
-            lastError === undefined ? undefined : { cause: lastError },
-          ),
+          error: lastError instanceof Error
+            ? lastError
+            : new Error(
+              'RFC-64 receiver exhausted the per-provider attempt budget before '
+              + 'reconciling the latest accepted provider hint',
+              lastError === undefined ? undefined : { cause: lastError },
+            ),
         };
       }
       const { provider, nextCursor } = selection;

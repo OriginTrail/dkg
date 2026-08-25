@@ -333,6 +333,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
   it('does not reset an exhausted provider budget when refreshed during an alternate fetch', async () => {
     const script = scriptedReconciler(['peerA', 'peerB']);
     const onError = vi.fn();
+    const peerAError = new Error('peerA exhausted');
     const receiver = new Rfc64PublicCatalogReceiverV1(
       script.reconciler,
       { maxAttempts: 1, retryBackoffMs: 0, onError },
@@ -341,7 +342,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     receiver.schedule(announcement(), 'peerA');
     await script.steps[0]!.started.promise;
     receiver.schedule(announcement(), 'peerB');
-    script.steps[0]!.result.reject(new Error('peerA exhausted'));
+    script.steps[0]!.result.reject(peerAError);
 
     await script.steps[1]!.started.promise;
     for (let index = 0; index < 50; index += 1) {
@@ -352,6 +353,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
 
     expect(script.peers).toEqual(['peerA', 'peerB']);
     expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe(peerAError);
     expect(receiver.stats()).toMatchObject({
       scheduled: 52,
       dedupedInFlight: 51,
