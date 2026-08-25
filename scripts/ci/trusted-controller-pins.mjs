@@ -1,8 +1,3 @@
-#!/usr/bin/env node
-
-import fs from 'node:fs';
-import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 
 const CHECKOUT_PATTERN = /^actions\/checkout@[0-9a-f]{40}$/;
@@ -125,39 +120,4 @@ export function validateTrustedControllerPins(workflows) {
     throw new Error(`trusted CI controller checkouts use ${refs.size} different refs`);
   }
   return { ref: allCheckouts[0].ref, checkouts: allCheckouts };
-}
-
-function workflowFromPath(filePath) {
-  return {
-    sourceName: filePath,
-    source: fs.readFileSync(filePath, 'utf8'),
-  };
-}
-
-export function runTrustedControllerValidator(argv) {
-  try {
-    if (argv.length === 1 && argv[0] === '--list-controller-files') {
-      console.log(CONTROLLER_POLICY_FILES.join('\n'));
-      return 0;
-    }
-    if (argv.length === 2 && argv[0] === '--validate-provenance-status') {
-      if (!isProtectedHistoryComparison(argv[1])) {
-        throw new Error(`controller comparison status is ${argv[1] || 'missing'}`);
-      }
-      console.log(`controller is reachable from protected history (${argv[1]})`);
-      return 0;
-    }
-    if (argv.length === 0) throw new Error('provide at least one workflow path');
-    const result = validateTrustedControllerPins(argv.map(workflowFromPath));
-    console.log(result.ref);
-    return 0;
-  } catch (error) {
-    console.error(`trusted-controller-pins: ${error.message}`);
-    return 1;
-  }
-}
-
-const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : '';
-if (invokedPath === import.meta.url) {
-  process.exitCode = runTrustedControllerValidator(process.argv.slice(2));
 }

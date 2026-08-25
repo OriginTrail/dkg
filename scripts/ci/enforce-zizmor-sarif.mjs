@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { parseArgs } from 'node:util';
 
 export function evaluateZizmorSarif({ scanOutcome, sarif }) {
   if (scanOutcome !== 'success') {
@@ -44,19 +45,16 @@ export function evaluateZizmorSarif({ scanOutcome, sarif }) {
   return { ok: true, findingCount: 0, message: 'zizmor SARIF contains no findings' };
 }
 
-function parseArguments(argv) {
-  const options = {};
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (argument === '--sarif' || argument === '--scan-outcome') {
-      const value = argv[index + 1];
-      if (!value) throw new Error(`${argument} requires a value`);
-      options[argument.slice(2)] = value;
-      index += 1;
-    } else {
-      throw new Error(`unknown argument: ${argument}`);
-    }
-  }
+export function parseZizmorSarifArguments(argv) {
+  const { values: options } = parseArgs({
+    args: argv,
+    options: {
+      sarif: { type: 'string' },
+      'scan-outcome': { type: 'string' },
+    },
+    strict: true,
+    allowPositionals: false,
+  });
   if (!options.sarif) throw new Error('--sarif is required');
   if (!options['scan-outcome']) throw new Error('--scan-outcome is required');
   return options;
@@ -65,7 +63,7 @@ function parseArguments(argv) {
 export function runZizmorSarifGate(argv) {
   let options;
   try {
-    options = parseArguments(argv);
+    options = parseZizmorSarifArguments(argv);
   } catch (error) {
     console.error(`::error title=zizmor gate configuration::${error.message}`);
     return 2;

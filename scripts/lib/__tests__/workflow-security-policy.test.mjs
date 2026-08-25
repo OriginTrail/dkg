@@ -4,10 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { runZizmorSarifGate } from '../../ci/enforce-zizmor-sarif.mjs';
+import {
+  parseZizmorSarifArguments,
+  runZizmorSarifGate,
+} from '../../ci/enforce-zizmor-sarif.mjs';
 import {
   ciPolicyModeExitCode,
   inspectCiPolicy,
+  parseCiPolicyArguments,
 } from '../../ci/inspect-ci-policy.mjs';
 import {
   CONTROLLER_POLICY_FILES,
@@ -237,7 +241,9 @@ test('one effective policy snapshot drives hard-gate and informational modes', a
     requestedEndpoints.push(endpoint);
     if (endpoint === 'repos/OriginTrail/dkg') return { default_branch: 'main' };
     if (endpoint.includes('/compare/')) return { status: 'ahead' };
-    if (endpoint === 'repos/OriginTrail/dkg/rules/branches/testnet-canary') return effectiveRules;
+    if (endpoint === 'repos/OriginTrail/dkg/rules/branches/testnet-canary?per_page=100&page=1') {
+      return effectiveRules;
+    }
     if (endpoint.includes('/contents/')) return { sha: 'same-controller-blob' };
     throw new Error(`unexpected endpoint: ${endpoint}`);
   };
@@ -252,12 +258,107 @@ test('one effective policy snapshot drives hard-gate and informational modes', a
   assert.equal(snapshot.freshness.ok, true);
   assert.equal(ciPolicyModeExitCode(snapshot, 'enforce'), 0);
   assert.equal(ciPolicyModeExitCode(snapshot, 'report'), 0);
-  assert.ok(requestedEndpoints.includes('repos/OriginTrail/dkg/rules/branches/testnet-canary'));
+  assert.ok(requestedEndpoints.includes(
+    'repos/OriginTrail/dkg/rules/branches/testnet-canary?per_page=100&page=1',
+  ));
   assert.equal(requestedEndpoints.some((endpoint) => endpoint.includes('/rulesets')), false);
 
   const missingPrerequisites = { ...snapshot, prerequisites: { ok: false } };
   assert.equal(ciPolicyModeExitCode(missingPrerequisites, 'enforce'), 1);
   assert.equal(ciPolicyModeExitCode(missingPrerequisites, 'report'), 0);
+});
+
+test('effective policy inspection reads every rules page and rejects malformed pages', async () => {
+  const effectiveRulesEndpoint = 'repos/OriginTrail/dkg/rules/branches/testnet-canary';
+  const requestedRulePages = [];
+  const requestJson = async (endpoint) => {
+    if (endpoint === 'repos/OriginTrail/dkg') return { default_branch: 'main' };
+    if (endpoint.includes('/compare/')) return { status: 'identical' };
+    if (endpoint.includes('/contents/')) return { sha: 'same-controller-blob' };
+    if (endpoint.startsWith(effectiveRulesEndpoint)) {
+      requestedRulePages.push(endpoint);
+      if (endpoint.endsWith('page=1')) {
+        return Array.from({ length: 100 }, (_, index) => ({
+          type: 'creation', ruleset_id: index + 1,
+        }));
+      }
+      if (endpoint.endsWith('page=2')) {
+        return [
+          { type: 'pull_request', ruleset_id: 101 },
+          { type: 'merge_queue', ruleset_id: 101 },
+          {
+            type: 'required_status_checks',
+            ruleset_id: 101,
+            parameters: {
+              required_status_checks: [
+                { context: 'CI gate' },
+                { context: 'EVM integration gate' },
+              ],
+            },
+          },
+        ];
+      }
+    }
+    throw new Error(`unexpected endpoint: ${endpoint}`);
+  };
+  const input = {
+    repository: 'OriginTrail/dkg',
+    branch: 'testnet-canary',
+    workflows: [{ sourceName: 'fixture.yml', source: workflowFixture() }],
+    token: 'test-token',
+  };
+  const snapshot = await inspectCiPolicy({ ...input, requestJson });
+  assert.equal(snapshot.prerequisites.ok, true);
+  assert.deepEqual(requestedRulePages, [
+    `${effectiveRulesEndpoint}?per_page=100&page=1`,
+    `${effectiveRulesEndpoint}?per_page=100&page=2`,
+  ]);
+
+  await assert.rejects(
+    inspectCiPolicy({
+      ...input,
+      requestJson: async (endpoint) => (
+        endpoint.startsWith(effectiveRulesEndpoint) ? {} : requestJson(endpoint)
+      ),
+    }),
+    /returned a non-array page/,
+  );
+});
+
+test('real policy CLIs use strict parsers with intentional repeat behavior', () => {
+  const policyOptions = parseCiPolicyArguments([
+    '--mode', 'enforce',
+    '--repository', 'OriginTrail/dkg',
+    '--branch', 'old-branch',
+    '--branch', 'testnet-canary',
+    '--workflow', 'ci.yml',
+    '--workflow', 'evm.yml',
+  ]);
+  assert.equal(policyOptions.branch, 'testnet-canary');
+  assert.deepEqual(policyOptions.workflows, ['ci.yml', 'evm.yml']);
+  assert.throws(
+    () => parseCiPolicyArguments(['--mode', 'enforce', '--unknown', 'value']),
+    /Unknown option|unknown option/i,
+  );
+  assert.throws(
+    () => parseCiPolicyArguments(['--mode', 'enforce']),
+    /repository, branch, and at least one workflow are required/,
+  );
+
+  const zizmorOptions = parseZizmorSarifArguments([
+    '--sarif', 'first.sarif',
+    '--sarif', 'second.sarif',
+    '--scan-outcome', 'success',
+  ]);
+  assert.equal(zizmorOptions.sarif, 'second.sarif');
+  assert.throws(
+    () => parseZizmorSarifArguments(['--sarif', 'zizmor.sarif', '--unexpected']),
+    /Unknown option|unknown option/i,
+  );
+  assert.throws(
+    () => parseZizmorSarifArguments(['--sarif', 'zizmor.sarif']),
+    /--scan-outcome is required/,
+  );
 });
 
 test('zizmor SARIF gate accepts clean output and rejects findings, failures, and wrong tools', (t) => {

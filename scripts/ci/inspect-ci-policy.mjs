@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { parseArgs } from 'node:util';
 import {
   CONTROLLER_POLICY_FILES,
   isProtectedHistoryComparison,
@@ -11,6 +12,7 @@ import {
 import { evaluateEffectiveDeltaRolloutRules } from './validate-delta-rollout-ruleset.mjs';
 
 const API_ROOT = 'https://api.github.com';
+const API_PAGE_SIZE = 100;
 
 async function githubRequest(endpoint, token) {
   const response = await fetch(`${API_ROOT}/${endpoint}`, {
@@ -24,6 +26,22 @@ async function githubRequest(endpoint, token) {
     throw new Error(`GitHub API ${endpoint} returned ${response.status}`);
   }
   return response.json();
+}
+
+async function githubPaginatedArray(endpoint, token, requestJson) {
+  const items = [];
+  for (let page = 1; ; page += 1) {
+    const separator = endpoint.includes('?') ? '&' : '?';
+    const pageItems = await requestJson(
+      `${endpoint}${separator}per_page=${API_PAGE_SIZE}&page=${page}`,
+      token,
+    );
+    if (!Array.isArray(pageItems)) {
+      throw new Error(`GitHub API ${endpoint} returned a non-array page`);
+    }
+    items.push(...pageItems);
+    if (pageItems.length < API_PAGE_SIZE) return items;
+  }
 }
 
 function repositoryFile(filePath) {
@@ -57,9 +75,10 @@ export async function inspectCiPolicy({
     `repos/${repository}/compare/${encodeURIComponent(controllerModel.ref)}...${encodeURIComponent(defaultBranch)}`,
     token,
   );
-  const effectiveRules = await requestJson(
+  const effectiveRules = await githubPaginatedArray(
     `repos/${repository}/rules/branches/${encodeURIComponent(branch)}`,
     token,
+    requestJson,
   );
   const deltaRollout = evaluateEffectiveDeltaRolloutRules({ branch, rules: effectiveRules });
 
@@ -103,26 +122,29 @@ export async function inspectCiPolicy({
   return snapshot;
 }
 
-function parseArguments(argv) {
-  const options = { workflows: [] };
-  for (let index = 0; index < argv.length; index += 2) {
-    const option = argv[index];
-    const value = argv[index + 1];
-    if (!value || !['--repository', '--branch', '--workflow', '--output', '--mode'].includes(option)) {
-      throw new Error('usage: --mode enforce|report --repository OWNER/REPO --branch BRANCH --workflow FILE [--workflow FILE ...] [--output FILE]');
-    }
-    if (option === '--workflow') options.workflows.push(value);
-    else options[option.slice(2)] = value;
-  }
+export function parseCiPolicyArguments(argv) {
+  const { values: options } = parseArgs({
+    args: argv,
+    options: {
+      mode: { type: 'string' },
+      repository: { type: 'string' },
+      branch: { type: 'string' },
+      workflow: { type: 'string', multiple: true, default: [] },
+      output: { type: 'string' },
+    },
+    strict: true,
+    allowPositionals: false,
+  });
   if (
     !['enforce', 'report'].includes(options.mode)
     || !options.repository
     || !options.branch
-    || options.workflows.length === 0
+    || options.workflow.length === 0
   ) {
     throw new Error('mode, repository, branch, and at least one workflow are required');
   }
-  return options;
+  const { workflow: workflows, ...singleValueOptions } = options;
+  return { ...singleValueOptions, workflows };
 }
 
 function writeSnapshot(filePath, snapshot) {
@@ -132,7 +154,7 @@ function writeSnapshot(filePath, snapshot) {
 export async function runCiPolicyInspector(argv, { token = process.env.GH_TOKEN, requestJson } = {}) {
   let options;
   try {
-    options = parseArguments(argv);
+    options = parseCiPolicyArguments(argv);
     if (!token) throw new Error('GH_TOKEN is required');
     const snapshot = await inspectCiPolicy({
       repository: options.repository,

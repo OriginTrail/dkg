@@ -1,9 +1,3 @@
-#!/usr/bin/env node
-
-import fs from 'node:fs';
-import path from 'node:path';
-import { pathToFileURL } from 'node:url';
-
 export const REQUIRED_GATES = Object.freeze(['CI gate', 'EVM integration gate']);
 
 // Input must come from GitHub's effective branch-rules endpoint:
@@ -46,30 +40,4 @@ export function evaluateEffectiveDeltaRolloutRules({ branch, rules }) {
       ? `${branch} effective rules require PRs, merge queue, and both aggregate gates`
       : `${branch} effective rules are missing: ${missing.join(', ')}`,
   };
-}
-
-function parseArguments(argv) {
-  if (argv[0] !== '--branch' || !argv[1] || argv.length !== 3) {
-    throw new Error('usage: --branch BRANCH EFFECTIVE_RULES.json');
-  }
-  return { branch: argv[1], file: argv[2] };
-}
-
-export function runDeltaRolloutRulesetValidator(argv) {
-  try {
-    const { branch, file } = parseArguments(argv);
-    const rules = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const verdict = evaluateEffectiveDeltaRolloutRules({ branch, rules });
-    if (!verdict.ok) throw new Error(verdict.message);
-    console.log(verdict.message);
-    return 0;
-  } catch (error) {
-    console.error(`delta-rollout-ruleset: ${error.message}`);
-    return 1;
-  }
-}
-
-const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : '';
-if (invokedPath === import.meta.url) {
-  process.exitCode = runDeltaRolloutRulesetValidator(process.argv.slice(2));
 }
