@@ -73,23 +73,19 @@ the promoted range. Generate the block with:
 
 ```bash
 git fetch origin
-for pr in $(git log --format=%s origin/main..origin/testnet-canary \
-            | sed -nE 's/^Merge pull request #([0-9]+) .*/\1/p' | sort -un); do
-  gh pr view "$pr" --repo OriginTrail/dkg --json number,body \
-    --jq '"\(.number)\t\(.body // "" | gsub("\n";" "))"'
-done | while IFS=$'\t' read -r num body; do
-  printf '%s\n' "$body" \
-    | grep -oiE '\b(clos(e|es|ed)|fix(e[sd])?|resolv(e|es|ed))[[:space:]]+#[0-9]+' \
-    | grep -oE '[0-9]+' | sort -u | while read -r iss; do
-        [ "$(gh issue view "$iss" --repo OriginTrail/dkg --json state --jq .state 2>/dev/null)" = "OPEN" ] \
-          && echo "Closes #$iss  <!-- shipped in PR #$num -->"
-      done
-done | sort -u
+pnpm run promotion:closes
 ```
 
-Paste the output into the promotion PR description. Only still-open issues are
-listed, so re-running it is safe. If a promotion has already merged without the
-block, close those issues by hand and link the PR that fixed them.
+Paste the output into the promotion PR description.
+
+Only issues that are still open are listed, so re-running it is safe. Any
+GitHub lookup failure — auth, rate limit, network — aborts with a non-zero exit
+rather than printing a short block that looks complete. Pass an explicit range
+as `node scripts/promotion-closes.mjs <base> <head>` to preview an older
+promotion.
+
+If a promotion has already merged without the block, close those issues by hand
+and link the PR that fixed them.
 
 ## Monorepo Structure
 
