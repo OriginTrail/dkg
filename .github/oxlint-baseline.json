@@ -309,6 +309,7 @@
       "packages/cli/src/daemon/routes/query.ts": 291,
       "packages/cli/src/daemon/routes/status.ts": 282,
       "packages/cli/src/doctor/index.ts": 1,
+      "packages/cli/src/hermes-setup.ts": 1,
       "packages/cli/src/indexer-solidity-ast.ts": 1,
       "packages/cli/src/indexer.ts": 2,
       "packages/cli/src/migration.ts": 1,
