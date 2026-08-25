@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
+  ContextGraphAssetFetchResult,
   ContextGraphReconcileResult,
   ContextGraphSyncMode,
   RandomSamplingDisabledReason,
@@ -1619,6 +1620,22 @@ export class ApiClient {
    */
   async reconcileContextGraph(contextGraphId: string): Promise<ContextGraphReconcileResult> {
     return this.post('/api/context-graph/reconcile', { contextGraphId });
+  }
+
+  /**
+   * Fetch 1-10 exact RFC64 Knowledge Assets without scanning or replacing the
+   * complete Context Graph. The optional peer list is tried in order.
+   */
+  async fetchContextGraphAssets(
+    contextGraphId: string,
+    uals: string[],
+    options: { peerIds?: string[] } = {},
+  ): Promise<ContextGraphAssetFetchResult> {
+    return this.post('/api/context-graph/fetch-assets', {
+      contextGraphId,
+      uals,
+      peerIds: options.peerIds,
+    });
   }
 
   /** @deprecated Use subscribeToContextGraph */

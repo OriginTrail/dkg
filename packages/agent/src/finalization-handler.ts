@@ -378,6 +378,15 @@ interface ChainReconciledKCInput {
   trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
 }
 
+interface ChainReconciledKCOptions {
+  /**
+   * Exact RFC64 fetch already names the one KA it is allowed to inspect.
+   * Keep that path O(1): do not fall back to the legacy all-workspace scan
+   * when the exact graph-scoped state is absent.
+   */
+  allowLegacyScan?: boolean;
+}
+
 type VerifiedGraphScopedConfirmation =
   | {
       kind: 'transaction';
@@ -1548,7 +1557,24 @@ export class FinalizationHandler {
         ctx,
         `Chain-reconcile: corrupt graph-scoped SWM head for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
       );
-      if (!trustedAssertionEvidence) return 'no-swm';
+      if (!trustedAssertionEvidence) {
+        // A corrupt mutable workspace head must not hide an independently
+        // authenticated VM copy. Exact RFC64 fetch can already have verified
+        // and atomically materialized the requested assertion before this
+        // post-fetch check runs. Re-read the immutable confirmed envelope and
+        // verify the exact VM graph against current chain truth. This remains
+        // fail-closed: absent, invalid, stale, or root-mismatched VM state is
+        // still reported as no-swm, and the legacy all-workspace scan stays
+        // disabled for exact fetch callers.
+        return (await this.reconcileConfirmedGraphScopedVmWithoutWorkspaceHead({
+          contextGraphId,
+          ual,
+          merkleRoot,
+          kaId,
+          versionBlock,
+          ...(subGraphName ? { subGraphName } : {}),
+        }, ctx)) ?? 'no-swm';
+      }
       // Named recovery carries receipt/seal-validated immutable evidence. A
       // torn mutable head must not block exact recovery of that assertion.
     }
@@ -2998,7 +3024,11 @@ export class FinalizationHandler {
    *                            in backoff; caller leaves cursor.
    *   - `'stale-target'`    — a newer update is already materialised.
    */
-  async handleChainReconciledKC(input: ChainReconciledKCInput, ctx: OperationContext): Promise<
+  async handleChainReconciledKC(
+    input: ChainReconciledKCInput,
+    ctx: OperationContext,
+    options: ChainReconciledKCOptions = {},
+  ): Promise<
     | 'promoted'
     | 'already-confirmed'
     | 'no-swm'
@@ -3070,6 +3100,14 @@ export class FinalizationHandler {
       // opportunity to verify and repair a consumed-SWM publish.
       this.log.info(ctx, `Chain-reconcile: legacy ${ual} already confirmed in VM, skipping`);
       return 'already-confirmed';
+    }
+
+    if (options.allowLegacyScan === false) {
+      this.log.info(
+        ctx,
+        `Chain-reconcile: exact graph-scoped state is absent for ${ual}; legacy workspace scan disabled`,
+      );
+      return 'no-swm';
     }
 
     // Recover the published roots from the local SWM snapshot. The gossip path

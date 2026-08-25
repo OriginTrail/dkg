@@ -25,6 +25,52 @@ export interface ContextGraphReconcileResult {
   unresolvedOrdinals: number;
 }
 
+export const MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS = 5;
+
+export type ContextGraphAssetFetchItemStatus =
+  | 'already-present'
+  | 'materialized'
+  | 'fetched'
+  | 'unresolved';
+
+export interface ContextGraphAssetFetchItemResult {
+  ual: string;
+  kaId: string;
+  status: ContextGraphAssetFetchItemStatus;
+}
+
+export interface ContextGraphAssetFetchResult {
+  contextGraphId: string;
+  onChainId: string;
+  status: 'current' | 'complete' | 'partial';
+  requestedAssets: number;
+  alreadyPresentAssets: number;
+  materializedAssets: number;
+  fetchedAssets: number;
+  unresolvedAssets: number;
+  networkAttempted: boolean;
+  peerAttempts: number;
+  items: ContextGraphAssetFetchItemResult[];
+}
+
+export class ContextGraphAssetFetchValidationError extends Error {
+  readonly code = 'ContextGraphAssetFetchValidation';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ContextGraphAssetFetchValidationError';
+  }
+}
+
+export class ContextGraphAssetFetchConflictError extends Error {
+  readonly code = 'ContextGraphAssetFetchConflict';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ContextGraphAssetFetchConflictError';
+  }
+}
+
 export class ContextGraphOnChainIdUnresolvedError extends Error {
   readonly code = 'ContextGraphOnChainIdUnresolved';
 

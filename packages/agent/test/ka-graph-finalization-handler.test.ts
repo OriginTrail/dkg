@@ -3131,6 +3131,43 @@ describe('graph-scoped finalization handler', () => {
     }, createOperationContext('system'))).resolves.toBe('no-swm');
   });
 
+  it('recognizes an exact confirmed VM copy when the mutable workspace head is corrupt', async () => {
+    const { message, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    await store.insert([{
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: '"storage-ack-equivalent"',
+    }]);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).rejects.toThrow(/head carries 2 shareOperationId values/);
+
+    const internals = handler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    await expect(handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 124,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'), { allowLegacyScan: false }))
+      .resolves.toBe('already-confirmed');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
   it('advances sweep ordering without rewriting an exact VM graph', async () => {
     const { message, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
