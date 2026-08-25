@@ -1,0 +1,141 @@
+{
+  "catalog": {
+    "catalogVersion": "2",
+    "headObjectDigest": "0xd2eeac7565d9df98f8a6e0c2c5a4fc61c1cd6d61e8aa37a2326b79addabaa410",
+    "inventoryRowCount": "2",
+    "policyDigest": "0xa32f08524cb69e5e4ccb6d55173a1f0f39c2a773abbde9d67553d62b7d2a74cb"
+  },
+  "checks": {
+    "exactTwoAssetPrivateCatalog": true,
+    "finalizedChainPathExecuted": true,
+    "fourStableUniqueDaemonIdentities": true,
+    "nonmemberQueryIsEmpty": true,
+    "outsiderDeniedBeforeApplication": true,
+    "outsiderReceivedNoPrivateGraphs": true,
+    "productionCatalogServiceOnAllRoles": true,
+    "provider2HasExactSwmAndVm": true,
+    "provider2ReceivedExactHead": true,
+    "receiverHasExactSwmAndVm": true,
+    "receiverUsedProvider2AfterOwnerStopped": true,
+    "restartPreservedExactSwmAndVm": true,
+    "restartPreservedIdentityAndExactHead": true
+  },
+  "failoverReceiver": {
+    "appliedHeadDigest": "0xd2eeac7565d9df98f8a6e0c2c5a4fc61c1cd6d61e8aa37a2326b79addabaa410",
+    "bootstrap": {
+      "attempts": 2,
+      "outcome": "applied",
+      "providerPeerId": "12D3KooWEB6nAg3hdsTyUT86cim12fJQhutbHt8FNNpSYPGCeVax"
+    },
+    "catalogVersion": "2",
+    "graphCounts": [
+      {
+        "kaNumber": 41,
+        "swm": 2,
+        "vm": 2
+      },
+      {
+        "kaNumber": 42,
+        "swm": 2,
+        "vm": 2
+      }
+    ],
+    "inventoryRowCount": "2",
+    "receiver": {
+      "applied": 1,
+      "failed": 0
+    },
+    "rpcCalls": 16
+  },
+  "limitation": "Uses a deterministic finalized-chain adapter and loopback RPC, not scripts/devnet.sh Hardhat or the CLI daemon.",
+  "outsider": {
+    "appliedHeadDigest": null,
+    "denied": true,
+    "failureClass": "AggregateError",
+    "graphCounts": [
+      {
+        "kaNumber": 41,
+        "swm": 0,
+        "vm": 0
+      },
+      {
+        "kaNumber": 42,
+        "swm": 0,
+        "vm": 0
+      }
+    ]
+  },
+  "provider2": {
+    "appliedHeadDigest": "0xd2eeac7565d9df98f8a6e0c2c5a4fc61c1cd6d61e8aa37a2326b79addabaa410",
+    "bootstrap": {
+      "attempts": 2,
+      "outcome": "applied",
+      "providerPeerId": "12D3KooWH2rxoYcg6Kz5uLxxr95XXRwrzFkHjKZBng5eoYBn5MBg"
+    },
+    "catalogVersion": "2",
+    "graphCounts": [
+      {
+        "kaNumber": 41,
+        "swm": 2,
+        "vm": 2
+      },
+      {
+        "kaNumber": 42,
+        "swm": 2,
+        "vm": 2
+      }
+    ],
+    "inventoryRowCount": "2",
+    "receiver": {
+      "applied": 1,
+      "failed": 0
+    },
+    "rpcCalls": 16
+  },
+  "restartedReceiver": {
+    "appliedHeadDigest": "0xd2eeac7565d9df98f8a6e0c2c5a4fc61c1cd6d61e8aa37a2326b79addabaa410",
+    "catalogVersion": "2",
+    "graphCounts": [
+      {
+        "kaNumber": 41,
+        "swm": 2,
+        "vm": 2
+      },
+      {
+        "kaNumber": 42,
+        "swm": 2,
+        "vm": 2
+      }
+    ],
+    "inventoryRowCount": "2",
+    "receiver": {
+      "applied": 0,
+      "failed": 0
+    },
+    "rpcCalls": 0
+  },
+  "schema": "dkg-rfc64-private-release-gate-v1",
+  "status": "PASS",
+  "topology": {
+    "authorizedProviderReceiver": {
+      "agentAddress": "0x601950f264f449538af2c6342349f5dd3630f8b1",
+      "agentClass": "DKGAgent",
+      "peerId": "12D3KooWEB6nAg3hdsTyUT86cim12fJQhutbHt8FNNpSYPGCeVax"
+    },
+    "authorizedReceiver": {
+      "agentAddress": "0xdb2430b4e9ac14be6554d3942822be74811a1af9",
+      "agentClass": "DKGAgent",
+      "peerId": "12D3KooWERkXB5LYcFYXrtoKVDAUCLqCaw47MqUwPEJvK6zmPXCU"
+    },
+    "ownerProvider": {
+      "agentAddress": "0x1c5e6f6f6c7866ef146b0c0220d857d12a9058f0",
+      "agentClass": "DKGAgent",
+      "peerId": "12D3KooWH2rxoYcg6Kz5uLxxr95XXRwrzFkHjKZBng5eoYBn5MBg"
+    },
+    "unauthorizedNode": {
+      "agentAddress": "0x5c0fe4435ba32d64fb96ed1c37e6fc1f72641d22",
+      "agentClass": "DKGAgent",
+      "peerId": "12D3KooWCGWFxLm5Z98bmyQrzKT2AyXsipDWmjha359zXer8cyiN"
+    }
+  }
+}
