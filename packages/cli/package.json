@@ -48,7 +48,7 @@
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "@iarna/toml": "^2.2.5",
-    "commander": "^13",
+    "commander": "^15",
     "better-sqlite3": "12.11.1",
     "ethers": "^6",
     "js-yaml": "^4.1.1",
