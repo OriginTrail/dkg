@@ -14,11 +14,16 @@
  * command exists to prevent.
  */
 import { spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import {
-  extractClosingRefs,
+  canonicalIssueRefs,
   formatClosesBlock,
   parseMergedPrNumbers,
 } from './lib/promotion-closes.mjs';
+
+export const DEFAULT_BASE = 'origin/main';
+export const DEFAULT_HEAD = 'origin/testnet-canary';
 
 const REPO = process.env.REPO ?? 'OriginTrail/dkg';
 
@@ -33,9 +38,27 @@ function run(cmd, args, what) {
   return res.stdout;
 }
 
+/** `gh pr view <n> --json body --jq .body` — scalar body text. */
+function prBody(pr) {
+  return run(
+    'gh',
+    ['pr', 'view', String(pr), '--repo', REPO, '--json', 'body', '--jq', '.body // ""'],
+    `gh pr view ${pr}`,
+  );
+}
+
+/** `gh issue view <n> --json state --jq .state` — scalar state string. */
+function issueState(issue) {
+  return run(
+    'gh',
+    ['issue', 'view', String(issue), '--repo', REPO, '--json', 'state', '--jq', '.state'],
+    `gh issue view ${issue}`,
+  ).trim();
+}
+
 function main() {
-  const base = process.argv[2] ?? 'origin/main';
-  const head = process.argv[3] ?? 'origin/testnet-canary';
+  const base = process.argv[2] ?? DEFAULT_BASE;
+  const head = process.argv[3] ?? DEFAULT_HEAD;
 
   const subjects = run('git', ['log', '--format=%s', `${base}..${head}`], `git log ${base}..${head}`);
   const prs = parseMergedPrNumbers(subjects);
@@ -44,23 +67,16 @@ function main() {
     return;
   }
 
+  // Phase 1 — collect bodies, then canonicalise so each issue is resolved once
+  // no matter how many PRs referenced it.
+  const bodies = prs.map((pr) => ({ pr, body: prBody(pr) }));
+  const canonical = canonicalIssueRefs(bodies);
+
+  // Phase 2 — one state lookup per UNIQUE issue.
   const entries = [];
-  for (const pr of prs) {
-    const body = run(
-      'gh',
-      ['pr', 'view', String(pr), '--repo', REPO, '--json', 'body', '--jq', '.body // ""'],
-      `gh pr view ${pr}`,
-    );
-    for (const issue of extractClosingRefs(body)) {
-      const state = run(
-        'gh',
-        ['issue', 'view', String(issue), '--repo', REPO, '--json', 'state', '--jq', '.state'],
-        `gh issue view ${issue}`,
-      ).trim();
-      // Only filter on a state we positively established. Anything else has
-      // already thrown above.
-      if (state === 'OPEN') entries.push({ issue, pr });
-    }
+  for (const [issue, pr] of canonical) {
+    // Only filter on a state positively established; anything else threw above.
+    if (issueState(issue) === 'OPEN') entries.push({ issue, pr });
   }
 
   const block = formatClosesBlock(entries);
@@ -68,9 +84,18 @@ function main() {
   else process.stderr.write('(no still-open issues referenced by the promoted PRs)\n');
 }
 
-try {
-  main();
-} catch (err) {
-  process.stderr.write(`promotion-closes: ${err.message}\n`);
-  process.exit(1);
+// Only run when invoked directly. The test suite imports DEFAULT_BASE /
+// DEFAULT_HEAD to pin the documented no-argument workflow, and importing this
+// module must not shell out to git and gh.
+const invokedDirectly =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+
+if (invokedDirectly) {
+  try {
+    main();
+  } catch (err) {
+    process.stderr.write(`promotion-closes: ${err.message}\n`);
+    process.exit(1);
+  }
 }
