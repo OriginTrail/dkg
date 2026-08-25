@@ -47,7 +47,10 @@ export const STANDALONE_SKILL_VALUES: SkillTokenValues = Object.freeze({
   baseUrl: "_(your node's API base URL — `http://localhost:9200` by default)_",
   peerId: "_(run `dkg status` on your node)_",
   nodeRole: "_(`core` or `edge` — run `dkg status`)_",
-  extractionPipelines: "_(depends on installed converters — run `dkg status`)_",
+  // `dkg status` does NOT report pipelines; the node's served skill doc does
+  // (routes/status.ts builds it with the live list), so point there.
+  extractionPipelines:
+    "_(depends on installed converters — fetch `/.well-known/skill.md` from your running node for the live list)_",
 });
 
 export const REQUIRED_SKILL_TOKENS: ReadonlyArray<keyof SkillTokenValues> =
@@ -86,21 +89,46 @@ export function unknownSkillTokens(template: string = loadSkillTemplate()): stri
 }
 
 /**
- * Substitute every token, LITERALLY.
+ * Substitute every token in ONE pass.
  *
- * The replacement is a function on purpose. `String.replace(needle, string)`
- * interprets `$&`, `$'`, "$`" and `$n` in the replacement, and `baseUrl` is
- * derived from the `X-Forwarded-Host` / `Host` request headers on a public,
- * unauthenticated endpoint. Before this was a callback, a crafted Host could
- * re-insert the placeholder block or append the ~94 KB template suffix per
- * `$'`, giving unbounded response amplification. Do not turn it back into a
- * string.
+ * Two distinct hazards, both reachable from the `X-Forwarded-Host` / `Host`
+ * headers because `/.well-known/skill.md` is public and unauthenticated:
+ *
+ *  1. `$` EXPANSION. `String.replace(needle, replacementString)` interprets
+ *     `$&`, `$'`, "$`" and `$n` in the REPLACEMENT. A crafted Host could
+ *     re-insert the placeholder block or append the ~94 KB template suffix per
+ *     `$'`. The replacement is a FUNCTION, which makes the value literal.
+ *
+ *  2. TOKEN RE-ENTRY. Substituting one token at a time rescans the growing
+ *     OUTPUT on later iterations, so a value could itself invoke the template
+ *     language: `baseUrl: "http://{{peerId}}"` rendered the real peer ID into
+ *     the advertised API URL, and `http://{{nodeVersion}}` left raw token
+ *     syntax because that key had already been processed (PR #2331 review).
+ *     One pass over the ORIGINAL template closes this — a callback resolves
+ *     each match against `values` and its result is never re-examined.
+ *
+ * Neither property is incidental. Do not reintroduce a per-token loop, and do
+ * not turn the callback back into a string.
  */
 export function renderSkillTemplate(values: SkillTokenValues, template = loadSkillTemplate()): string {
-  let out = template;
-  for (const token of REQUIRED_SKILL_TOKENS) {
-    const value = values[token];
-    out = out.replaceAll(`{{${token}}}`, () => value);
+  const unknown = new Set<string>();
+  // Fresh regex per call — no shared lastIndex state.
+  const out = template.replace(/\{\{([a-zA-Z][a-zA-Z0-9]*)\}\}/g, (match, name: string) => {
+    if (Object.prototype.hasOwnProperty.call(values, name)) {
+      return values[name as keyof SkillTokenValues];
+    }
+    unknown.add(name);
+    return match;
+  });
+
+  // Fail loudly at the boundary rather than serving a half-rendered document:
+  // adding `{{networkId}}` to SKILL.md without supplying it is a template bug,
+  // not something an agent reading the doc should have to notice.
+  if (unknown.size > 0) {
+    throw new Error(
+      `SKILL.md references unknown template token(s): ${[...unknown].sort().join(', ')}. ` +
+        `Add them to SkillTokenValues (packages/cli/src/skill-template.ts) or remove them from the template.`,
+    );
   }
   return out;
 }

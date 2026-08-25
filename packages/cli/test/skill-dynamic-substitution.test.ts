@@ -203,3 +203,84 @@ describe('token contract has one source of truth (GH#1125 review)', () => {
     );
   });
 });
+
+// PR #2331 review — substituting one token at a time rescans the growing
+// OUTPUT, so a value could itself invoke the template language. `baseUrl` comes
+// from the `X-Forwarded-Host` / `Host` headers on a public unauthenticated
+// endpoint, so this was request-controlled: `http://{{peerId}}` rendered the
+// real peer ID into the advertised API URL. One pass over the ORIGINAL template
+// closes it.
+describe('buildSkillMd — values are never re-scanned as template syntax (GH#1125 review)', () => {
+  const base = {
+    version: '10.0.14',
+    peerId: '12D3KooWSensitivePeerIdentifier',
+    nodeRole: 'edge',
+    extractionPipelines: ['markitdown'],
+  };
+
+  it('does not resolve a token injected through baseUrl', () => {
+    const md = buildSkillMd({ ...base, baseUrl: 'http://{{peerId}}' });
+    expect(md).toContain('- **Base URL:** http://{{peerId}}');
+    expect(md).not.toContain(`http://${base.peerId}`);
+  });
+
+  it('does not depend on token processing order', () => {
+    // `nodeVersion` sorts before `baseUrl`; under the old loop this left raw
+    // syntax while `{{peerId}}` resolved. Both must now be verbatim.
+    for (const token of ['nodeVersion', 'baseUrl', 'peerId', 'nodeRole', 'extractionPipelines']) {
+      const md = buildSkillMd({ ...base, baseUrl: `http://{{${token}}}` });
+      expect(md).toContain(`- **Base URL:** http://{{${token}}}`);
+    }
+  });
+
+  it('treats injected tokens in every other field as literal too', () => {
+    const md = buildSkillMd({
+      ...base,
+      version: '{{peerId}}',
+      nodeRole: '{{baseUrl}}',
+      baseUrl: 'http://localhost:9200',
+      extractionPipelines: ['{{nodeVersion}}'],
+    });
+    expect(md).toContain('- **Node version:** {{peerId}}');
+    expect(md).toContain('- **Node role:** {{baseUrl}}');
+    expect(md).toContain('- **Available extraction pipelines:** {{nodeVersion}}');
+  });
+
+  it('still emits $-sequences literally and without amplification', () => {
+    const normal = buildSkillMd({ ...base, baseUrl: 'http://localhost:9200' }).length;
+    const md = buildSkillMd({ ...base, baseUrl: "http://h/" + "$'".repeat(5) });
+    expect(md).toContain("- **Base URL:** http://h/$'$'$'$'$'");
+    expect(md.length).toBeLessThan(normal + 200);
+  });
+});
+
+// PR #2331 review — the boundary must enforce its own contract, not leave it to
+// a test. Adding `{{networkId}}` to SKILL.md previously rendered it verbatim
+// into the served document.
+describe('renderSkillTemplate rejects an unsupplied token (GH#1125 review)', () => {
+  it('throws, naming the token, rather than serving it raw', () => {
+    const drifted = loadSkillTemplate().replace('{{peerId}}', '{{networkId}}');
+    expect(() => renderSkillTemplate(
+      {
+        nodeVersion: '1', baseUrl: '2', peerId: '3', nodeRole: '4', extractionPipelines: '5',
+      },
+      drifted,
+    )).toThrow(/networkId/);
+  });
+
+  it('the shipped template renders without throwing', () => {
+    expect(() => renderStandaloneDkgNodeSkill()).not.toThrow();
+  });
+});
+
+// PR #2331 review — the standalone copy told readers to run `dkg status` for
+// extraction pipelines, which does not report them. The served skill doc does.
+describe('standalone guidance points somewhere that answers (GH#1125 review)', () => {
+  it('does not send readers to dkg status for pipelines', () => {
+    const line = renderStandaloneDkgNodeSkill()
+      .split('\n')
+      .find((l) => l.startsWith('- **Available extraction pipelines:**'))!;
+    expect(line).not.toContain('dkg status');
+    expect(line).toContain('/.well-known/skill.md');
+  });
+});
