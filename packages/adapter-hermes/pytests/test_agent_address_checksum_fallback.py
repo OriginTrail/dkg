@@ -25,12 +25,34 @@ LOWER = CHECKSUMMED.lower()
 
 @pytest.fixture
 def no_keccak(monkeypatch):
-    """Force the eth_utils import to fail, as it does on a stock Hermes install."""
+    """Reproduce the ACTUAL stock-Hermes failure: the import succeeds, and the
+    checksum raises lazily when it reaches for a keccak backend.
+
+    PR #2334 review — an earlier version of this fixture made the whole
+    `eth_utils` import fail. That is a different (and rarer) condition, and it
+    would have been satisfied by code that only handled a missing package,
+    giving false confidence about the documented failure path. eth-utils is
+    installed; what it lacks by default is a keccak backend, and
+    `to_checksum_address` raises at CALL time.
+    """
+    eth_utils = pytest.importorskip("eth_utils")
+
+    def raise_backend_unavailable(_value):
+        raise Exception(
+            "The backend `eth_hash.backends.pycryptodome` is not installed."
+        )
+
+    monkeypatch.setattr(eth_utils, "to_checksum_address", raise_backend_unavailable)
+
+
+@pytest.fixture
+def no_eth_utils(monkeypatch):
+    """The rarer variant: the package itself is absent. Still must fail open."""
     real_import = builtins.__import__
 
     def boom(name, *args, **kwargs):
         if name == "eth_utils":
-            raise ImportError("no keccak backend")
+            raise ImportError("No module named 'eth_utils'")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", boom)
@@ -81,3 +103,14 @@ def test_fallback_warns_once_not_per_write(plugin_module, no_keccak, caplog):
 def test_non_address_values_pass_through_untouched(plugin_module):
     assert plugin_module._normalize_wm_agent_address("not-an-address") == "not-an-address"
     assert plugin_module._normalize_wm_agent_address("  ") == ""
+
+
+def test_missing_package_also_fails_open_with_a_warning(plugin_module, no_eth_utils, caplog):
+    """The import-error path is rarer but must behave identically."""
+    plugin_module._CHECKSUM_FALLBACK_WARNED = False
+
+    with caplog.at_level("WARNING"):
+        out = plugin_module._normalize_wm_agent_address(LOWER)
+
+    assert out == LOWER
+    assert "cannot checksum agent address" in caplog.text.lower()
