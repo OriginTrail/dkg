@@ -17,6 +17,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { isSparqlHttpResponseError } from "@origintrail-official/dkg-storage";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -359,17 +360,36 @@ class ApiQueryCallerDisconnectedError extends Error {
 }
 
 /**
- * Own the HTTP-disconnect signal and the exact store-admission options passed
- * by `/api/query`. Exported so the route boundary can be tested without
- * replacing the real query engine with a hand-typed error stub.
+ * Upstream statuses that mean "the SPARQL the caller sent is malformed".
+ *
+ * Deliberately NOT every 4xx (PR #2330 review). A configured store can answer
+ * 401/403 for stale daemon credentials, 404 for a misconfigured endpoint, or
+ * 429 when throttling us — those are server/integration faults, and reporting
+ * them as 400 would tell the caller their query is invalid and suppress the
+ * retry or operator remediation that would actually fix it.
  */
+const MALFORMED_QUERY_STATUSES = new Set([400, 422]);
+
+/**
+ * Classify a thrown store error using the upstream status carried as DATA.
+ *
+ * Returns `undefined` when the error is not a typed SPARQL HTTP response, so
+ * the caller can fall back to the legacy message families below.
+ */
+export function classifySparqlHttpError(err: unknown): 400 | 500 | undefined {
+  if (!isSparqlHttpResponseError(err)) return undefined;
+  return MALFORMED_QUERY_STATUSES.has(err.status) ? 400 : 500;
+}
+
 /**
  * Is this thrown message a CLIENT input error (400) rather than a server
  * fault (500)?
  *
- * Extracted from the /api/query catch block so it can be regression-tested
- * directly — GH#1758 was a silent re-regression of #889, and there was no
- * unit-level guard because the condition lived inline inside a catch.
+ * Message-based, and kept only for the legacy families below that have no
+ * typed carrier. Extracted from the /api/query catch block so it can be
+ * regression-tested directly — GH#1758 was a silent re-regression of #889,
+ * and there was no unit-level guard because the condition lived inline
+ * inside a catch.
  */
 export function isClientQueryError(msg: string): boolean {
   return (
@@ -383,14 +403,6 @@ export function isClientQueryError(msg: string): boolean {
         // existing `SPARQL rejected:` / `must start with ...` handling
         // instead of letting them fall through to a 500.
         /^error at \d+:\d+:/.test(msg) ||
-        // #1758: the store adapter wraps the upstream response as
-        // `SPARQL HTTP <query|construct|update> failed (<status>): <body>`
-        // (packages/storage/src/adapters/sparql-http.ts:387/671/716), which
-        // buries the parse error mid-string so the anchored pattern above
-        // cannot see it. Classify on the wrapped 4xx status instead of the
-        // English text, so a malformed query is a 400 on both the direct and
-        // the wrapped path.
-        /^SPARQL HTTP \w+ failed \(4\d\d\):/.test(msg) ||
         /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
         msg.includes("was removed in V10") ||
         msg.includes("agentAddress is required") ||
@@ -410,6 +422,11 @@ export function isClientQueryError(msg: string): boolean {
   );
 }
 
+/**
+ * Own the HTTP-disconnect signal and the exact store-admission options passed
+ * by `/api/query`. Exported so the route boundary can be tested without
+ * replacing the real query engine with a hand-typed error stub.
+ */
 export function createApiQueryRequestLifecycle(
   req: IncomingMessage,
   res: ServerResponse,
@@ -745,7 +762,14 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       }
       tracker.fail(ctx, err);
       const msg = err?.message ?? "";
-      if (isClientQueryError(msg)) {
+      // #1758 — prefer the typed upstream status over message matching. A
+      // malformed query (400/422) is the caller's fault; 401/403/404/429 mean
+      // the STORE rejected us and must stay a server error.
+      const byStatus = classifySparqlHttpError(err);
+      if (byStatus === 400) {
+        return jsonResponse(res, 400, { error: msg });
+      }
+      if (byStatus === undefined && isClientQueryError(msg)) {
         return jsonResponse(res, 400, { error: msg });
       }
       throw err;

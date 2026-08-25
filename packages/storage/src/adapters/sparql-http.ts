@@ -85,6 +85,43 @@ function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined):
 const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
 const DEFAULT_SLOW_QUERY_SAMPLE_RATE = 1;
 const MANAGED_LIST_GRAPHS_CACHE_MS = 30_000;
+/**
+ * A non-OK response from the configured SPARQL endpoint.
+ *
+ * GH#1758 — the upstream status used to be rendered into the message and then
+ * recovered at the HTTP boundary with a regex, which coupled the daemon route
+ * to this file's exact diagnostic wording. Carrying `status` as data lets the
+ * route distinguish "the caller's SPARQL was malformed" (400/422) from
+ * "the store rejected US" (401/403/404/429) without string matching.
+ *
+ * `message` is unchanged from the previous template so existing log greps and
+ * error-message assertions keep working.
+ */
+export class SparqlHttpResponseError extends Error {
+  readonly status: number;
+  readonly operation: string;
+  readonly responseExcerpt: string;
+
+  constructor(operation: string, status: number, responseExcerpt: string) {
+    super(`SPARQL HTTP ${operation} failed (${status}): ${responseExcerpt}`);
+    this.name = 'SparqlHttpResponseError';
+    this.status = status;
+    this.operation = operation;
+    this.responseExcerpt = responseExcerpt;
+  }
+}
+
+/** True when `err` is a SparqlHttpResponseError, across realm boundaries. */
+export function isSparqlHttpResponseError(err: unknown): err is SparqlHttpResponseError {
+  return (
+    err instanceof SparqlHttpResponseError ||
+    (typeof err === 'object' &&
+      err !== null &&
+      (err as { name?: unknown }).name === 'SparqlHttpResponseError' &&
+      typeof (err as { status?: unknown }).status === 'number')
+  );
+}
+
 export const DEFAULT_SPARQL_HTTP_TIMEOUT_MS = 30_000;
 const monotonicNow = (): number => performance.now();
 
@@ -384,7 +421,7 @@ export class SparqlHttpStore implements TripleStore {
           // Keep scheduler admission until the response body has settled too;
           // otherwise retries can dispatch while an error body is unwinding.
           const text = await res.text().catch(() => '');
-          throw new Error(`SPARQL HTTP ${operation} failed (${res.status}): ${text.slice(0, 300)}`);
+          throw new SparqlHttpResponseError(operation, res.status, text.slice(0, 300));
         }
       } catch (error) {
         if (signal.aborted) {
@@ -668,7 +705,7 @@ export class SparqlHttpStore implements TripleStore {
                 operation: 'query',
                 tolerateReadFailure: true,
               });
-              throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
+              throw new SparqlHttpResponseError('query', res.status, text.slice(0, 300));
             }
 
             const text = await readSparqlResponseText(res, {
@@ -713,7 +750,7 @@ export class SparqlHttpStore implements TripleStore {
             operation: 'construct',
             tolerateReadFailure: true,
           });
-          throw new Error(`SPARQL HTTP construct failed (${res.status}): ${text.slice(0, 300)}`);
+          throw new SparqlHttpResponseError('construct', res.status, text.slice(0, 300));
         }
         const text = await readSparqlResponseText(res, {
           maxResponseBytes: options?.maxResponseBytes,
