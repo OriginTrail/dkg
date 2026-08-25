@@ -57,3 +57,7 @@ a.chip, a.stmt, a.mopt, a.poolchip { text-decoration:none; cursor:pointer; }
 .dkg-nav .row.sub { padding-left:calc(var(--sp-3) + var(--sp-5)); font-size:var(--fs-sm); }
 /* monochrome emoji glyph — renders the brain in the rail's grey like its neighbors */
 .ic-mono { filter: grayscale(1) brightness(1.35) contrast(0.85); opacity: .85; }
+/* named context graphs in the rail (below the CG tabs, above the nav) */
+.dkg-cgs { display:flex; flex-direction:column; border-bottom:1px solid var(--border-subtle); padding-bottom:var(--sp-3); }
+.dkg-cgs .cg { display:flex; align-items:center; gap:var(--sp-2); padding:var(--sp-1) var(--sp-3); color:var(--text-secondary); font-size:var(--fs-sm); }
+.dkg-cgs .cg .ic { color:var(--text-muted); font-size:var(--fs-xs); }
