@@ -102,6 +102,8 @@ interface ReceiverTaskV1 {
   readonly scopeKey: string;
   /** Canonical provider registry; Map insertion order is the round-robin order. */
   readonly providers: Map<string, ReceiverProviderV1>;
+  /** Monotonic accepted mutation revision used to close the settlement race. */
+  revision: bigint;
   /**
    * How many times this task has stepped aside for a busy finalized chain lane.
    * Mutable, and deliberately NOT a provider attempt: contention says nothing
@@ -136,6 +138,24 @@ interface ReceiverProviderV1 {
    */
   hintRevision: bigint;
 }
+
+type ReceiverTaskOutcomeV1 =
+  | { readonly kind: 'defer-admission' }
+  | { readonly kind: 'aborted' }
+  | { readonly kind: 'already-applied' }
+  | {
+    readonly kind: 'applied';
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+    readonly peerId: string;
+  }
+  | { readonly kind: 'staged-only'; readonly taskRevision: bigint }
+  | { readonly kind: 'not-found'; readonly taskRevision: bigint }
+  | {
+    readonly kind: 'failed';
+    readonly taskRevision: bigint;
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+    readonly error: Error;
+  };
 
 const DEFAULTS = Object.freeze({
   maxConcurrent: 4,
@@ -267,6 +287,7 @@ export class Rfc64PublicCatalogReceiverV1 {
           hintRevision: 1n,
         });
       }
+      existing.revision += 1n;
       return;
     }
     if (this.#queue.length >= this.#maxQueue) {
@@ -277,6 +298,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     const task: ReceiverTaskV1 = {
       key,
       scopeKey: catalogScopeKey(announcement),
+      revision: 1n,
       providers: new Map([[providerKey, {
         key: providerKey,
         peerId: remotePeerId,
@@ -347,9 +369,49 @@ export class Rfc64PublicCatalogReceiverV1 {
         // A deferral releases the concurrency slot AND the semantic scope lock
         // before waiting, and keeps the pending key so a duplicate announcement
         // still dedupes onto this task instead of creating a second writer.
-        if (outcome === 'defer-admission' && !this.#closed) {
+        if (outcome.kind === 'defer-admission' && !this.#closed) {
           this.#scheduleAdmissionRetry(task);
           return;
+        }
+        if (
+          !this.#closed
+          && 'taskRevision' in outcome
+          && outcome.taskRevision !== task.revision
+        ) {
+          // `#runTask` chose a non-durable terminal result, then `schedule`
+          // accepted a fresher hint before this completion continuation ran.
+          // Keep the pending key and put the mutated task back through the
+          // scheduler instead of deleting the accepted observation.
+          this.#queue.push(task);
+          return;
+        }
+        switch (outcome.kind) {
+          case 'already-applied':
+            this.#dedupedAlreadyApplied += 1;
+            break;
+          case 'applied':
+            this.#applied += 1;
+            this.#safeNotify(() => this.#onHeadApplied?.(
+              outcome.announcement,
+              outcome.peerId,
+            ));
+            break;
+          case 'staged-only':
+            this.#stagedOnly += 1;
+            break;
+          case 'not-found':
+            this.#notFound += 1;
+            break;
+          case 'failed':
+            this.#failed += 1;
+            this.#safeNotify(() => this.#onError?.(
+              outcome.announcement,
+              outcome.error,
+            ));
+            break;
+          case 'aborted':
+          case 'defer-admission':
+            break;
         }
         this.#pendingByKey.delete(task.key);
       }).finally(() => {
@@ -404,7 +466,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#deferralTimers.add(timer);
   }
 
-  async #runTask(task: ReceiverTaskV1): Promise<'done' | 'defer-admission'> {
+  async #runTask(task: ReceiverTaskV1): Promise<ReceiverTaskOutcomeV1> {
     let lastError: unknown;
     // Resumed, not reset: see `ReceiverTaskV1.attemptsByProvider`.
     const notFoundProviderRevisions = (
@@ -413,7 +475,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     const attemptsByProvider = (task.attemptsByProvider ??= new Map<string, number>());
     let providerCursor = task.providerCursor ?? 0;
     while (true) {
-      if (this.#closing.signal.aborted) return 'done';
+      if (this.#closing.signal.aborted) return { kind: 'aborted' };
       const providers = [...task.providers.values()];
       const selection = nextEligibleProvider(
         providers,
@@ -430,12 +492,18 @@ export class Rfc64PublicCatalogReceiverV1 {
               === provider.hintRevision,
           )
         ) {
-          this.#notFound += 1;
-          return 'done';
+          return { kind: 'not-found', taskRevision: task.revision };
         }
-        this.#failed += 1;
-        this.#safeNotify(() => this.#onError?.(providers[0]!.announcement, lastError));
-        return 'done';
+        return {
+          kind: 'failed',
+          taskRevision: task.revision,
+          announcement: providers[0]!.announcement,
+          error: new Error(
+            'RFC-64 receiver exhausted the per-provider attempt budget before '
+            + 'reconciling the latest accepted provider hint',
+            lastError === undefined ? undefined : { cause: lastError },
+          ),
+        };
       }
       const { provider, nextCursor } = selection;
       providerCursor = nextCursor;
@@ -445,8 +513,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       attemptsByProvider.set(provider.key, providerAttempt);
       try {
         if (await this.#reconciler.isHeadApplied(provider.announcement)) {
-          this.#dedupedAlreadyApplied += 1;
-          return 'done';
+          return { kind: 'already-applied' };
         }
         const result = await this.#reconciler.reconcileHead(
           provider.peerId,
@@ -458,12 +525,13 @@ export class Rfc64PublicCatalogReceiverV1 {
           continue;
         }
         if (result === 'staged-only') {
-          this.#stagedOnly += 1;
-          return 'done';
+          return { kind: 'staged-only', taskRevision: task.revision };
         }
-        this.#applied += 1;
-        this.#safeNotify(() => this.#onHeadApplied?.(provider.announcement, provider.peerId));
-        return 'done';
+        return {
+          kind: 'applied',
+          announcement: provider.announcement,
+          peerId: provider.peerId,
+        };
       } catch (error) {
         if (this.#isDeferrableError(error)) {
           // Not this head's fault and not this provider's fault: roll back ONLY
@@ -472,10 +540,10 @@ export class Rfc64PublicCatalogReceiverV1 {
           // cannot launder a provider back to a full attempt budget.
           if (providerAttempt <= 1) attemptsByProvider.delete(provider.key);
           else attemptsByProvider.set(provider.key, providerAttempt - 1);
-          return 'defer-admission';
+          return { kind: 'defer-admission' };
         }
         lastError = error;
-        if (this.#closing.signal.aborted) return 'done';
+        if (this.#closing.signal.aborted) return { kind: 'aborted' };
         await this.#backoff(providerAttempt - 1);
       }
     }
