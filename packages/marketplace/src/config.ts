@@ -110,6 +110,12 @@ export function loadMarketplaceConfig(dkgHome: string): MarketplaceConfig {
       enabled: raw.enabled === true,           // strict: anything else is off
       providerAddress: typeof raw.providerAddress === "string" ? raw.providerAddress : undefined,
       apiBase: typeof raw.apiBase === "string" ? raw.apiBase : undefined,
+      // P5 fields — declared here the day they were added, so the loader can
+      // never silently drop them (bug #2's class; re-found by the devnet
+      // seating run when enroll rejected its own configured revenue wallet)
+      revenueWallet: typeof raw.revenueWallet === "string" ? raw.revenueWallet : undefined,
+      registryContextGraphId: typeof raw.registryContextGraphId === "string" ? raw.registryContextGraphId : undefined,
+      confirmationDepth: typeof raw.confirmationDepth === "number" && raw.confirmationDepth >= 0 ? raw.confirmationDepth : undefined,
       offerings: Array.isArray(raw.offerings) ? (raw.offerings as OfferingConfig[]) : [],
       chainId: typeof raw.chainId === "number" ? raw.chainId : undefined,
       rpcUrl: typeof raw.rpcUrl === "string" ? raw.rpcUrl : undefined,

@@ -314,5 +314,17 @@ ok("D-cal-3 ask distribution + concentration + statements fields populated",
    cal.askDistribution.length >= 2 && typeof cal.buyerConcentration.topPairShare === "number"
    && typeof cal.statements.disputeRate === "number");
 
+// ── config loader preserves the P5 fields (bug #2's class, regression) ─────
+console.log("— config loader —");
+const { loadMarketplaceConfig } = await import(join(DIST, "config.js"));
+const CT = mkT(join((await import("node:os")).tmpdir(), "v5c-"));
+const { mkdirSync: mkd, writeFileSync: wfx } = await import("node:fs");
+mkd(join(CT, "marketplace"), { recursive: true });
+wfx(join(CT, "marketplace/config.json"), JSON.stringify({ enabled: true, offerings: [],
+  revenueWallet: "0xRev", registryContextGraphId: "nsm-registry", confirmationDepth: 1 }));
+const lc = loadMarketplaceConfig(CT);
+ok("D-cfg-1 loader preserves revenueWallet/registryCG/confirmationDepth",
+   lc.revenueWallet === "0xRev" && lc.registryContextGraphId === "nsm-registry" && lc.confirmationDepth === 1);
+
 console.log(`\n${pass}/${pass + fail} v5 core drills pass`);
 process.exit(fail ? 1 : 0);
