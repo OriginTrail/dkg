@@ -25,7 +25,6 @@ describe('startDashboardLogVolumePruner', () => {
         initialDelayMs: 100,
         catchupIntervalMs: 20,
         reclaimRetryMs: 50,
-        steadyIntervalMs: 1_000,
       },
     });
 
@@ -41,9 +40,10 @@ describe('startDashboardLogVolumePruner', () => {
       'Dashboard log-volume cleanup removed 25000 old routine row(s) and compacted node-ui.db',
     ]);
 
-    handle.stop();
+    // A completed migration is finite work, not a permanent maintenance loop.
     vi.advanceTimersByTime(5_000);
     expect(calls).toHaveLength(2);
+    handle.stop();
   });
 
   it('retries reclaim-pending and thrown maintenance steps on the retry cadence', () => {

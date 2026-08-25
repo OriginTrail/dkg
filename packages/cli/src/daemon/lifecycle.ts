@@ -2588,11 +2588,13 @@ export async function runDaemonInner(
   // already written to daemon.log and served by the dashboard's /api/node-log.
   const redactForRemote = createLogRedactor(config.telemetry?.logs?.redact);
 
-  // Avoid duplicating routine logs into SQLite on the event loop. The sink is
-  // only the remote fan-out; `remoteShippers` is evaluated per record so
-  // runtime enable/disable is reflected without re-wiring.
+  // Avoid duplicating routine logs into SQLite on the event loop. Low-volume
+  // warning/error records remain available to operation and dashboard views;
+  // `remoteShippers` is evaluated per record so runtime enable/disable is
+  // reflected without re-wiring.
   Logger.setSink(
     createDaemonLogSink({
+      insertDiagnosticLog: (rec) => dashDb.insertLog(rec),
       redact: redactForRemote,
       remoteShippers: () => [logPusher, otlpExporter],
     }),
@@ -3003,7 +3005,6 @@ export async function runDaemonInner(
   const logVolumePruner = startDashboardLogVolumePruner({
     dashDb,
     log,
-    intervals: { steadyIntervalMs: PRUNE_INTERVAL_MS },
   });
 
   // RPC usage telemetry — the "RPC credit burn" signal (incident: a node spent

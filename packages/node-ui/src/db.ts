@@ -43,6 +43,8 @@ const DEFAULT_RETENTION_DAYS = 14;
 const LEGACY_IMPLICIT_RETENTION_DAYS = 90;
 const DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS = 25_000;
 const LOGS_VACUUM_DELETE_THRESHOLD = 10_000;
+const LEGACY_ROUTINE_LOG_HIGH_WATER_KEY = 'legacyRoutineLogCleanupHighWater.v1';
+const LEGACY_ROUTINE_LOG_COMPLETE_KEY = 'legacyRoutineLogCleanupComplete.v1';
 // SQLite reports reusable-but-not-yet-reclaimed pages via freelist_count.
 // With the default 4 KiB page size this is roughly 4 MiB, large enough
 // to avoid VACUUM churn on idle nodes but small enough to retry a failed
@@ -252,6 +254,7 @@ export class DashboardDB {
     // autocheckpoint while bounding the worst case.
     this.db.pragma('journal_size_limit = 67108864');
     this.migrate();
+    this.initializeLegacyRoutineLogCleanup();
     this.loadRetentionSetting();
     this.prune();
   }
@@ -1321,7 +1324,7 @@ export class DashboardDB {
     // worker so startup does not rebuild a multi-GB DB before deleting them.
     // This existence probe stops at the first row; unlike the old OFFSET cap
     // scan, its cost does not grow with the routine-log backlog.
-    if (!this.hasLegacyRoutineLogs()) {
+    if (!this.hasPendingLegacyRoutineLogs()) {
       this.reclaimFreePagesIfNeeded(false);
     }
 
@@ -1334,25 +1337,32 @@ export class DashboardDB {
   }
 
   /**
-   * Remove one bounded batch of legacy routine (non-warning/error) logs.
-   * New daemon releases use daemon.log for local logs, so no routine SQLite
-   * rows need to be retained behind the unused compatibility search endpoint.
+   * Remove one bounded batch of unscoped legacy routine logs captured below a
+   * durable upgrade high-water mark. Operation-associated records, warnings,
+   * errors, and any compatibility writes made after cutover are preserved.
    *
    * Deletion is deliberately incremental so an upgrade does not block node
    * startup on a multi-GB transaction. Once the backlog reaches zero, one
    * VACUUM returns the accumulated free pages to the OS and the file shrinks.
    */
   pruneLogVolumeBatch(): LogVolumePruneResult {
+    if (this.isLegacyRoutineLogCleanupComplete()) {
+      return { deleted: 0, status: 'done' };
+    }
+    const highWaterId = this.getLegacyRoutineLogHighWaterId();
     const deleted = this.db.prepare(`
       DELETE FROM logs
       WHERE id IN (
         SELECT id
         FROM logs
-        WHERE level NOT IN ('warn', 'error')
+        WHERE id <= @highWaterId
+          AND operation_id IS NULL
+          AND level NOT IN ('warn', 'error')
         ORDER BY id ASC
         LIMIT @batchRows
       )
     `).run({
+      highWaterId,
       batchRows: this.logVolumePruneBatchRows,
     }).changes;
 
@@ -1363,7 +1373,12 @@ export class DashboardDB {
     const reclaim = hasMore
       ? { compacted: false, reclaimPending: false }
       : this.reclaimFreePagesIfNeeded(deleted > LOGS_VACUUM_DELETE_THRESHOLD);
-    if (!hasMore && !reclaim.reclaimPending) this.truncateWal('log-volume prune');
+    if (!hasMore && !reclaim.reclaimPending) {
+      this.db.prepare(
+        `INSERT OR REPLACE INTO settings (key, value) VALUES (?, '1')`,
+      ).run(LEGACY_ROUTINE_LOG_COMPLETE_KEY);
+      this.truncateWal('log-volume prune');
+    }
     return {
       deleted,
       status: hasMore
@@ -1376,13 +1391,44 @@ export class DashboardDB {
     };
   }
 
-  private hasLegacyRoutineLogs(): boolean {
+  private initializeLegacyRoutineLogCleanup(): void {
+    const marker = this.db.prepare(
+      `SELECT value FROM settings WHERE key IN (?, ?) LIMIT 1`,
+    ).get(
+      LEGACY_ROUTINE_LOG_HIGH_WATER_KEY,
+      LEGACY_ROUTINE_LOG_COMPLETE_KEY,
+    );
+    if (marker !== undefined) return;
+    const row = this.db.prepare(`SELECT COALESCE(MAX(id), 0) AS id FROM logs`).get() as { id: number };
+    this.db.prepare(
+      `INSERT INTO settings (key, value) VALUES (?, ?)`,
+    ).run(LEGACY_ROUTINE_LOG_HIGH_WATER_KEY, String(row.id));
+  }
+
+  private getLegacyRoutineLogHighWaterId(): number {
+    const row = this.db.prepare(
+      `SELECT value FROM settings WHERE key = ?`,
+    ).get(LEGACY_ROUTINE_LOG_HIGH_WATER_KEY) as { value: string } | undefined;
+    const parsed = Number(row?.value ?? 0);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+  }
+
+  private isLegacyRoutineLogCleanupComplete(): boolean {
+    return this.db.prepare(
+      `SELECT 1 FROM settings WHERE key = ? LIMIT 1`,
+    ).get(LEGACY_ROUTINE_LOG_COMPLETE_KEY) !== undefined;
+  }
+
+  private hasPendingLegacyRoutineLogs(): boolean {
+    if (this.isLegacyRoutineLogCleanupComplete()) return false;
     return this.db.prepare(`
       SELECT 1
       FROM logs
-      WHERE level NOT IN ('warn', 'error')
+      WHERE id <= ?
+        AND operation_id IS NULL
+        AND level NOT IN ('warn', 'error')
       LIMIT 1
-    `).get() !== undefined;
+    `).get(this.getLegacyRoutineLogHighWaterId()) !== undefined;
   }
 
   private reclaimFreePagesIfNeeded(force: boolean): {

@@ -7,14 +7,12 @@ export interface DashboardLogVolumePrunerIntervals {
   initialDelayMs: number;
   catchupIntervalMs: number;
   reclaimRetryMs: number;
-  steadyIntervalMs: number;
 }
 
 export const DEFAULT_DASHBOARD_LOG_VOLUME_PRUNER_INTERVALS: DashboardLogVolumePrunerIntervals = {
   initialDelayMs: 60_000,
   catchupIntervalMs: 15_000,
   reclaimRetryMs: 10 * 60_000,
-  steadyIntervalMs: 6 * 60 * 60_000,
 };
 
 export interface DashboardLogVolumePrunerHandle {
@@ -46,7 +44,7 @@ export function startDashboardLogVolumePruner(opts: {
     timer.unref?.();
   };
 
-  const nextDelayFor = (result: LogVolumePruneResult): number => {
+  const nextDelayFor = (result: LogVolumePruneResult): number | null => {
     switch (result.status) {
       case 'more':
         return intervals.catchupIntervalMs;
@@ -54,7 +52,7 @@ export function startDashboardLogVolumePruner(opts: {
         return intervals.reclaimRetryMs;
       case 'done':
       case 'done-compacted':
-        return intervals.steadyIntervalMs;
+        return null;
     }
   };
 
@@ -73,7 +71,8 @@ export function startDashboardLogVolumePruner(opts: {
         }
         rowsDeleted = 0;
       }
-      schedule(nextDelayFor(result));
+      const nextDelay = nextDelayFor(result);
+      if (nextDelay !== null) schedule(nextDelay);
     } catch (error) {
       opts.log(
         `Dashboard log-volume cleanup deferred: ${error instanceof Error ? error.message : String(error)}`,
