@@ -1,8 +1,8 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "categories": {
-    // Existing correctness debt is a warning-count ratchet. The lint command
-    // keeps output quiet but fails if the checked-in maximum is exceeded.
+    // Existing correctness debt is a diagnostic-fingerprint ratchet. The lint
+    // command keeps output quiet but rejects any warning not in the ledger.
     "correctness": "warn"
   },
   "ignorePatterns": [

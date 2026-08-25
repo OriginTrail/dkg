@@ -41,7 +41,10 @@ function parseArguments(argv) {
   return { laneName: options.lane, shard: options.shard, testArguments };
 }
 
-export function buildVitestJunitInvocation(argv) {
+export function buildVitestJunitInvocation(
+  argv,
+  { readPackageJson = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8')) } = {},
+) {
   const { laneName, shard, testArguments } = parseArguments(argv);
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(laneName)) {
     throw new Error('--lane must be a package directory name');
@@ -56,9 +59,9 @@ export function buildVitestJunitInvocation(argv) {
   if (!fs.existsSync(packageJsonPath)) {
     throw new Error(`${packageRelativePath}/package.json does not exist`);
   }
-  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-  if (typeof packageJson.scripts?.test !== 'string') {
-    throw new Error(`${packageRelativePath}/package.json must define the package-owned test contract`);
+  const packageJson = readPackageJson(packageJsonPath);
+  if (typeof packageJson.devDependencies?.vitest !== 'string') {
+    throw new Error(`${packageRelativePath}/package.json must declare Vitest as a devDependency`);
   }
 
   const output = `test-results/${laneName}${shard === undefined ? '' : `-${shard}`}.xml`;
@@ -75,7 +78,9 @@ export function buildVitestJunitInvocation(argv) {
     args: [
       '--dir',
       packageDirectory,
-      'test',
+      'exec',
+      'vitest',
+      'run',
       ...testArguments,
       '--reporter=default',
       '--reporter=junit',

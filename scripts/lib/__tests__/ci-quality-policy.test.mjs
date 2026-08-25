@@ -49,7 +49,9 @@ test('shared Vitest runner derives sharded and unsharded package reports', () =>
     '--lane', 'chain', '--shard', '2', '--', 'test/example.test.ts',
   ]);
   assert.deepEqual(sharded.args.slice(2), [
-    'test',
+    'exec',
+    'vitest',
+    'run',
     'test/example.test.ts',
     '--reporter=default',
     '--reporter=junit',
@@ -59,7 +61,9 @@ test('shared Vitest runner derives sharded and unsharded package reports', () =>
 
   const unsharded = buildVitestJunitInvocation(['--lane', 'core']);
   assert.deepEqual(unsharded.args.slice(2), [
-    'test',
+    'exec',
+    'vitest',
+    'run',
     '--reporter=default',
     '--reporter=junit',
     '--outputFile.junit=test-results/core.xml',
@@ -82,6 +86,21 @@ test('shared Vitest runner derives sharded and unsharded package reports', () =>
       '--lane', 'core', '--', '--reporter=verbose',
     ]),
     /managed by the shared CI runner/,
+  );
+
+  const nonVitestScript = buildVitestJunitInvocation(['--lane', 'core'], {
+    readPackageJson: () => ({
+      scripts: { test: 'node scripts/test.mjs' },
+      devDependencies: { vitest: '^4.0.18' },
+    }),
+  });
+  assert.deepEqual(nonVitestScript.args.slice(2, 5), ['exec', 'vitest', 'run'],
+    'the CI runner owns Vitest and must not invoke an opaque package test script');
+  assert.throws(
+    () => buildVitestJunitInvocation(['--lane', 'core'], {
+      readPackageJson: () => ({ scripts: { test: 'node scripts/test.mjs' } }),
+    }),
+    /must declare Vitest as a devDependency/,
   );
 });
 
@@ -191,17 +210,31 @@ test('coverage workflow keeps the four fixed ratchets direct and CI-gating', () 
   ]);
 });
 
-test('Oxlint baseline is scoped by rule/path and fails closed on runner errors', () => {
-  const baseline = {
-    version: 1,
-    rules: { 'eslint(no-unused-vars)': { 'packages/a/src/a.ts': 1 } },
-  };
+test('Oxlint baseline fingerprints accepted diagnostics and fails closed on runner errors', () => {
   const known = {
     code: 'eslint(no-unused-vars)',
     filename: 'packages/a/src/a.ts',
     severity: 'warning',
+    message: "Identifier 'knownValue' is declared but never used.",
+    sourceText: 'const knownValue = 1;',
+    labels: [{
+      label: "'knownValue' is declared here",
+      span: { offset: 6, length: 10, line: 1, column: 7 },
+    }],
   };
+  const baseline = baselineFromDiagnostics([known]);
   assert.equal(compareOxlintBaseline({ diagnostics: [known], baseline }).ok, true);
+  assert.equal(compareOxlintBaseline({
+    diagnostics: [{
+      ...known,
+      sourceText: '\n\nconst knownValue = 1;',
+      labels: [{
+        ...known.labels[0],
+        span: { offset: 8, length: 10, line: 3, column: 7 },
+      }],
+    }],
+    baseline,
+  }).ok, true, 'unrelated line movement must preserve an accepted diagnostic fingerprint');
 
   const reduced = compareOxlintBaseline({ diagnostics: [], baseline });
   assert.equal(reduced.ok, true, 'removing known debt must not break lint');
@@ -215,18 +248,42 @@ test('Oxlint baseline is scoped by rule/path and fails closed on runner errors',
   assert.deepEqual(newPath.regressions[0], {
     rule: 'eslint(no-unused-vars)',
     path: 'packages/b/src/new.ts',
+    message: known.message,
+    evidence: [{ label: "'knownValue' is declared here", source: 'knownValue' }],
     current: 1,
     allowed: 0,
   });
+  const replacement = {
+    ...known,
+    message: "Identifier 'replacement' is declared but never used.",
+    sourceText: 'const replacement = 1;',
+    labels: [{
+      label: "'replacement' is declared here",
+      span: { offset: 6, length: 11, line: 1, column: 7 },
+    }],
+  };
+  const replaced = compareOxlintBaseline({ diagnostics: [replacement], baseline });
+  assert.equal(replaced.ok, false,
+    'a same-rule warning replacement in the same file must not consume old baseline capacity');
+  assert.equal(replaced.regressions[0].message, replacement.message);
+  assert.equal(replaced.reductions[0].message, known.message);
+
   const generated = baselineFromDiagnostics([
     known,
     known,
-    { ...known, code: 'unicorn(prefer-string-starts-ends-with)', filename: 'packages/b.ts' },
+    {
+      ...known,
+      code: 'unicorn(prefer-string-starts-ends-with)',
+      filename: 'packages/b.ts',
+    },
   ]);
-  assert.deepEqual(generated.rules, {
-    'eslint(no-unused-vars)': { 'packages/a/src/a.ts': 2 },
-    'unicorn(prefer-string-starts-ends-with)': { 'packages/b.ts': 1 },
-  });
+  assert.equal(generated.version, 2);
+  assert.deepEqual(Object.values(generated.rules['eslint(no-unused-vars)'][
+    'packages/a/src/a.ts'
+  ]), [2]);
+  assert.deepEqual(Object.values(generated.rules['unicorn(prefer-string-starts-ends-with)'][
+    'packages/b.ts'
+  ]), [1]);
   const roundTripped = JSON.parse(JSON.stringify(generated));
   assert.equal(compareOxlintBaseline({
     diagnostics: [known, known, {
