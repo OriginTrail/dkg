@@ -1,5 +1,7 @@
 # Surface 03 — Model page (provider-variant table)
 
+**Mount:** node UI · Marketplace · flag `marketplace.enabled` (correction 2026-08-25).
+
 Purpose: OpenRouter's model detail, with reputation that means something.
 Refs: `or-model-detail.png` (column anatomy/density).
 

@@ -1,5 +1,7 @@
 # Surface 11 — Statement line & dispute drawer
 
+**Mount:** node UI · Plans (buyer) · Operate statement queue (seller) · flag `marketplace.enabled` (correction 2026-08-25).
+
 Purpose: verification's new home. One line per pair per period; drill-down
 to the published statement KA; dispute state when counts disagree. The
 per-message chips are retired — this line plus spot-check flags carry the

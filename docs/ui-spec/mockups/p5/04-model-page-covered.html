@@ -2,6 +2,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>M-gate mockup — P5 Model page, two sellers</title>
 <link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
+<link rel="stylesheet" href="../shell.css">
 <style>
   .srow { display:grid; grid-template-columns: 1fr auto auto auto; gap:var(--sp-3); align-items:center; padding:var(--sp-3) var(--sp-4); border-top:1px solid var(--border-subtle); font-size:var(--fs-sm); }
   .srow:first-of-type { border-top:none; }
@@ -11,6 +12,22 @@
   @media (max-width:640px){ .srow { grid-template-columns:1fr auto; } .srow .ask { grid-column:1; } }
 </style></head><body>
 <div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/03-model-page.md §P5 — nothing here is wired</span></div>
+<div class="shell">
+  <aside class="shell-nav">
+    <div class="shell-node"><span class="dot"></span>buyer-node</div>
+    <div class="shell-sec">My context graphs</div>
+    <div class="shell-item">neurosymbolic-marketplace</div>
+    <div class="shell-item">odysseus</div>
+    <div class="shell-sec">Marketplace</div>
+    <div class="shell-item on">◈ Marketplace</div>
+    <div class="shell-item">▤ Plans</div>
+    <div class="shell-item">⚿ Access</div>
+    <div class="shell-item">⚙ Operate</div>
+    <div class="shell-foot">powered by OriginTrail · flag: marketplace.enabled</div>
+  </aside>
+  <div class="shell-main">
+    <header class="shell-top"><span class="shell-tab">Dashboard</span><span class="shell-tab">Knowledge</span><span class="shell-tab on">Marketplace</span><span class="shell-tab">Plans</span><span class="shell-tab">Access</span><span class="shell-tab">Operate</span><span class="shell-addr">:9500/ui — Marketplace · model</span></header>
+
 <div class="frame frame--narrow">
   <div class="state-label">state: one model, two sellers — the routing centerpiece</div>
   <div class="card">
@@ -21,4 +38,5 @@
     <div class="srow"><span><strong>third-node.example</strong></span><span class="ask mono sec">~$0.12/1M</span><span class="chip chip--add">Add to plan</span><span class="muted xs">not covered</span></div>
   </div>
   <p class="muted xs" style="margin-top:var(--sp-3)">A request names the model; the router picks a covered seller under your price cap. Pinned sellers and provenance preferences apply.</p>
-</div></body></html>
+</div></div></div>
+</body></html>

@@ -2,6 +2,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>M-gate mockup — P5 Statement line &amp; dispute</title>
 <link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
+<link rel="stylesheet" href="../shell.css">
 <style>
   .stmt { font-size:var(--fs-md); }
   .stmt.ok { color:var(--state-verified); }
@@ -9,6 +10,22 @@
   .drawer { border-left:2px solid var(--border-strong); margin:var(--sp-3) 0 0 var(--sp-2); padding-left:var(--sp-4); display:grid; gap:var(--sp-2); font-size:var(--fs-sm); color:var(--text-secondary); }
 </style></head><body>
 <div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/11-statements.md — nothing here is wired</span></div>
+<div class="shell">
+  <aside class="shell-nav">
+    <div class="shell-node"><span class="dot"></span>buyer-node</div>
+    <div class="shell-sec">My context graphs</div>
+    <div class="shell-item">neurosymbolic-marketplace</div>
+    <div class="shell-item">odysseus</div>
+    <div class="shell-sec">Marketplace</div>
+    <div class="shell-item">◈ Marketplace</div>
+    <div class="shell-item on">▤ Plans</div>
+    <div class="shell-item">⚿ Access</div>
+    <div class="shell-item">⚙ Operate</div>
+    <div class="shell-foot">powered by OriginTrail · flag: marketplace.enabled</div>
+  </aside>
+  <div class="shell-main">
+    <header class="shell-top"><span class="shell-tab">Dashboard</span><span class="shell-tab">Knowledge</span><span class="shell-tab">Marketplace</span><span class="shell-tab on">Plans</span><span class="shell-tab">Access</span><span class="shell-tab">Operate</span><span class="shell-addr">:9500/ui — Plans · statement</span></header>
+
 <div class="frame frame--narrow">
 
   <div class="state-label">state: agreed</div>
@@ -38,4 +55,5 @@
   <div class="state-label">state: spot-check flag</div>
   <div class="card card--pad"><div class="stmt" style="color:var(--state-pending)">A spot-check didn't match — this pair goes to full recount at close</div></div>
 
-</div></body></html>
+</div></div></div>
+</body></html>

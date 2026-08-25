@@ -1,5 +1,7 @@
 # Surface 04 — Playground (streaming chat with the verified chip)
 
+**Mount:** node UI · Marketplace (playground tab — existing IA) · flag `marketplace.enabled` (correction 2026-08-25).
+
 Purpose: the flagship demo — every message an audited receipt. OpenRouter's
 chat, plus what it cannot copy.
 Refs: `or-chat.png` (layout only).

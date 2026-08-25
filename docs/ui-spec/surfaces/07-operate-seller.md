@@ -1,5 +1,7 @@
 # Surface 07 — Operate (seller / Hermes-facing)
 
+**Mount:** node UI · Operate · flag `marketplace.enabled` (correction 2026-08-25).
+
 Purpose: the seller's cockpit — the honest gauge, the pending queue, the
 margin truth, and a publish wizard whose preview IS the buyer's view.
 

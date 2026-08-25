@@ -1,5 +1,7 @@
 # Surface 01 — Onboarding card ("two steps, beating their three")
 
+**Mount:** node UI · Plans (empty-plan state; deep-linked from Marketplace CTAs) · flag `marketplace.enabled` (correction 2026-08-25).
+
 Purpose: fresh node → copyable OpenAI snippet, with the KPI clock running.
 Refs: `or-credits.png` (balance/top-up presentation), `node-ui-current-dashboard.png`.
 

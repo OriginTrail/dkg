@@ -26,3 +26,9 @@ Reviewed: 05-plans-meters (desktop), 02-plan-composer (mobile), 09-operate-v5
 **Round 3:** payments summary overflowed at 390px (nowrap vs long line) —
 now stacks below 640px. Re-shot; clean. All acceptance-relevant states
 verified at both widths. → CP-R.
+
+**Round 4 (course correction):** all 10 pages re-framed inside the node UI
+shell (PanelLeft-style sidebar + header tabs + path badge + flag footer) per
+rules 11/12; full re-shoot at both widths. Verified on 05-meters desktop:
+chrome present, active states correct, content unchanged; mobile collapses
+the sidebar and keeps the header. Mounting is now evident in the evidence.

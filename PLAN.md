@@ -37,9 +37,9 @@ the tab-rail migration plan. Statuses here get re-stamped as phases land.
 | G8 | Statements: per-pair period totals, co-sign, publish as KA in curated CG; dispute engine = P4 per-leg verifiers over hash-chained logs | 2 |
 | G9 | Spot-checks (1-in-N recount, background, flag→dispute) | 2 |
 | G10 | Calibration telemetry: `nsm calibration export` + `CALIBRATION.md` | 2 |
-| G11 | UI: Subscribe→Key onboarding, Plan composer (shared/scoped toggle), subscription-aware catalog/model page, Plans & meters (Claude usage idiom), statement line, node storefront, allowance-in-context playground, seller Operate v5 | 1 (mockups) / 3 (wiring) |
+| G11 | UI (ALL surfaces mount INSIDE the node UI bundle behind `marketplace.enabled` — nav: Marketplace · Plans · Access · Operate; see docs/CORRECTION-p5-mounting.md): Subscribe→Key onboarding (Plans empty state), Plan composer, subscription-aware catalog/model page, Plans & meters (Claude usage idiom), statement line, node storefront, playground (Marketplace tab), seller Operate v5 | 1 (mockups) / 3 (wiring) |
 | G12 | Dedicated subscription-revenue wallet per seller (never ops wallet — bug-#12 made structurally unrepeatable) | 2 |
-| G13 | Fixture suite: Appendix C drills + updated 404 probes | 2/4 |
+| G13 | Fixture suite: Appendix C drills + updated 404 probes + NO-EXTERNAL-JOURNEY probe (no user-journey page served from any port/path outside the node UI; dev routes carry no product nav) | 2/4 |
 | G14 | Stripe spike (CP3-gated, devnet only) | 6 |
 | G15 | `REPORT-v5.md` + chain-footprint audit (I4 from Basescan) | 7 |
 

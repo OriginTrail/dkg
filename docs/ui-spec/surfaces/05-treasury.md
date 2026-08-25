@@ -1,6 +1,8 @@
 > **P5: RETIRED.** The tab rail is gone; this surface is replaced by
 > `09-plans-meters.md`. Kept for the P4 archive view only.
 
+**Mount:** node UI · RETIRED (replaced by Plans) · flag `marketplace.enabled` (correction 2026-08-25).
+
 # Surface 05 — Treasury (one balance over many tabs)
 
 Purpose: OpenRouter's credits feel, without hiding the tab reality.

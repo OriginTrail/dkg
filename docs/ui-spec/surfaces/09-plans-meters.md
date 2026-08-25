@@ -1,5 +1,7 @@
 # Surface 09 — Plans & meters (replaces 05-treasury; the Claude usage idiom)
 
+**Mount:** node UI · Plans · flag `marketplace.enabled` (correction 2026-08-25).
+
 Purpose: the meter is the product. Structural reference: Claude's own usage
 screen — scope bars, "X% used", plain reset phrasing, approaching-limit
 warning, limit-reached message that offers options. Ref capture:

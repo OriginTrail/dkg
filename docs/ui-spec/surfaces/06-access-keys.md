@@ -1,5 +1,7 @@
 # Surface 06 — Access (keys for agents)
 
+**Mount:** node UI · Access (primary nav) · flag `marketplace.enabled` (correction 2026-08-25).
+
 Purpose: the account console for Hermes/OpenClaw-style sharing, with the
 budget discipline the Codex pattern never had.
 

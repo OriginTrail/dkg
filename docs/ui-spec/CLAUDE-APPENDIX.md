@@ -29,3 +29,12 @@
    labeled mockups. Stale status tables are defects — re-stamp on change.
 10. **Unverifiable ≠ pass, on screen too:** a row whose quote fails
     verification renders as unverifiable and cannot be acted on.
+
+11. **Journeys mount in the node UI.** Every user-facing surface is a view
+    inside the DKG node dashboard, behind the marketplace flag. External
+    tools are for backend provisioning only; dev routes (gallery, mockup
+    runthrough) are for development only and never carry product navigation.
+12. **Mockups wear the shell.** From CP-R onward, every mockup and
+    runthrough page is framed inside the node UI chrome (nav + header), so
+    the operator approves the mounting along with the surface. A shell-less
+    mockup is an incomplete mockup.

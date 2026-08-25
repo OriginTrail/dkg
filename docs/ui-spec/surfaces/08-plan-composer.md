@@ -1,5 +1,7 @@
 # Surface 08 — Plan composer (where a human chooses between sellers)
 
+**Mount:** node UI · Plans · flag `marketplace.enabled` (correction 2026-08-25).
+
 Purpose: allocate a period budget across models and query services; sellers
 resolve automatically under the price cap or are pinned by hand. The brief's
 "independent asks become competition instead of homework."

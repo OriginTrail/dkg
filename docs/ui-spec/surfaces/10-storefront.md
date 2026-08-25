@@ -1,5 +1,7 @@
 # Surface 10 — Node storefront (the second discovery axis)
 
+**Mount:** node UI · Marketplace (node pages) · flag `marketplace.enabled` (correction 2026-08-25).
+
 Purpose: a page per node — everything it serves across ⛓/☁ classes and query
 offerings, its asks and next-cycle changes, reputation, uptime,
 statement-verified volume. Where pin-this-node preferences live.

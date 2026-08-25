@@ -1,5 +1,7 @@
 # Surface 02 — Catalog (model cards, grouped by Model KA)
 
+**Mount:** node UI · Marketplace · flag `marketplace.enabled` (correction 2026-08-25).
+
 Purpose: OpenRouter's /models grid, with settlement-backed numbers.
 Refs: `or-models.png` (structure/density ONLY), `node-ui-current-marketplace.png`.
 

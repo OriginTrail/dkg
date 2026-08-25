@@ -2,6 +2,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>M-gate mockup — P5 Catalog, subscription-aware</title>
 <link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
+<link rel="stylesheet" href="../shell.css">
 <style>
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:var(--sp-4); }
   .mcard { display:grid; gap:var(--sp-2); padding:var(--sp-4); }
@@ -12,6 +13,22 @@
   .chip--add { border:1px solid var(--interactive); color:var(--interactive); }
 </style></head><body>
 <div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/02-catalog.md §P5 — nothing here is wired</span></div>
+<div class="shell">
+  <aside class="shell-nav">
+    <div class="shell-node"><span class="dot"></span>buyer-node</div>
+    <div class="shell-sec">My context graphs</div>
+    <div class="shell-item">neurosymbolic-marketplace</div>
+    <div class="shell-item">odysseus</div>
+    <div class="shell-sec">Marketplace</div>
+    <div class="shell-item on">◈ Marketplace</div>
+    <div class="shell-item">▤ Plans</div>
+    <div class="shell-item">⚿ Access</div>
+    <div class="shell-item">⚙ Operate</div>
+    <div class="shell-foot">powered by OriginTrail · flag: marketplace.enabled</div>
+  </aside>
+  <div class="shell-main">
+    <header class="shell-top"><span class="shell-tab">Dashboard</span><span class="shell-tab">Knowledge</span><span class="shell-tab on">Marketplace</span><span class="shell-tab">Plans</span><span class="shell-tab">Access</span><span class="shell-tab">Operate</span><span class="shell-addr">:9500/ui — Marketplace</span></header>
+
 <div class="frame">
   <div class="state-label">state: browsing with an active plan</div>
   <div class="grid">
@@ -31,4 +48,5 @@
       <div class="row"><span class="sec">Meta · text · 1 provider</span><span style="color:var(--prov-pinned)">⛓ Weights verified</span></div>
       <div class="row"><span class="mono sec">~$0.42/1M tokens</span><span class="chip chip--add">Add to plan</span></div></div>
   </div>
-</div></body></html>
+</div></div></div>
+</body></html>
