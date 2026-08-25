@@ -138,7 +138,7 @@ describe('ProtocolRouter', () => {
       }
     }
 
-    it('rejects non-admitted inbound peers before reading request bytes or dispatching the handler', async () => {
+    it('rejects non-admitted inbound peers after reading bounded request bytes but before handler dispatch', async () => {
       let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
       let handlerCalls = 0;
       const admittedCalls: Array<[string, string, 'inbound' | 'outbound']> = [];
@@ -171,10 +171,7 @@ describe('ProtocolRouter', () => {
 
       expect(admittedCalls).toEqual([[REMOTE_PEER, PROTOCOL, 'inbound']]);
       expect(handlerCalls).toBe(0);
-      // reads === 0 is the discriminator: the body is never pulled off the wire
-      // for a peer the admission boundary rejects. handlerCalls alone would still
-      // pass if the body had been read and then discarded.
-      expect(stream.reads).toBe(0);
+      expect(stream.reads).toBe(2);
       expect(stream.sent).toBeNull();
       expect(stream.aborted?.message).toMatch(/handler error/);
     });
@@ -331,6 +328,85 @@ describe('ProtocolRouter', () => {
       expect(handlerCalls).toBe(1);
       expect(stream.sent).toEqual(new Uint8Array([0xaa]));
       expect(stream.aborted).toBeNull();
+    });
+
+    it('drops an already-rejected inbound peer before reading its request body', async () => {
+      // `reads` is the discriminator: zero pulls proves the body was never taken
+      // off the wire. handlerCalls alone would pass even if it were read then
+      // discarded.
+      let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
+      let handlerCalls = 0;
+      let probeCalls = 0;
+      const node = {
+        libp2p: {
+          handle: (_protocol: string, handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>) => {
+            inbound = handler;
+          },
+          unhandle: () => undefined,
+        },
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node, {
+        isPeerKnownRejected: () => true,
+        isPeerAccepted: () => { probeCalls += 1; return true; },
+      });
+      router.register(PROTOCOL, async () => {
+        handlerCalls += 1;
+        return new Uint8Array([0xaa]);
+      });
+
+      const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+      await inbound!(stream, {
+        remotePeer: {
+          toString: () => REMOTE_PEER,
+          toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+        },
+      });
+
+      expect(stream.reads).toBe(0);
+      expect(handlerCalls).toBe(0);
+      expect(stream.sent).toBeNull();
+      // And the probing check is never reached for a peer already known bad.
+      expect(probeCalls).toBe(0);
+    });
+
+    it('still reads before probing when the peer is not already classified', async () => {
+      // The other half of the contract, and the reason the pre-read gate is
+      // limited to cached verdicts: `isPeerAccepted` performs an admission probe
+      // (outbound I/O) for unclassified peers in production. Probing while the
+      // inbound body is still unread inverts the I/O order against a sender that
+      // is itself mid-write, which stalls request/response exchanges with a
+      // freshly restarted peer. So an unclassified peer keeps the read-first order.
+      let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
+      const order: string[] = [];
+      const node = {
+        libp2p: {
+          handle: (_protocol: string, handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>) => {
+            inbound = handler;
+          },
+          unhandle: () => undefined,
+        },
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node, {
+        isPeerKnownRejected: () => false,
+        isPeerAccepted: () => { order.push('probe'); return true; },
+      });
+      router.register(PROTOCOL, async () => new Uint8Array([0xaa]));
+
+      const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+      const originalIterator = stream[Symbol.asyncIterator].bind(stream);
+      (stream as unknown as { [Symbol.asyncIterator]: () => AsyncIterableIterator<Uint8Array> })[Symbol.asyncIterator] = () => {
+        order.push('read');
+        return originalIterator();
+      };
+      await inbound!(stream, {
+        remotePeer: {
+          toString: () => REMOTE_PEER,
+          toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+        },
+      });
+
+      expect(order).toEqual(['read', 'probe']);
+      expect(stream.sent).toEqual(new Uint8Array([0xaa]));
     });
 
     function makeInboundFixture(stopSignal?: AbortSignal) {

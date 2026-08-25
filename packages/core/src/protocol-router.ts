@@ -158,6 +158,25 @@ export interface ProtocolRouterOptions {
     direction: 'inbound' | 'outbound',
     options?: AdmissionCheckOptions,
   ) => boolean | Promise<boolean>;
+  /**
+   * Optional synchronous, side-effect-free "already known to be rejected" check,
+   * consulted on inbound BEFORE the request body is read.
+   *
+   * This exists because {@link ProtocolRouterOptions.isPeerAccepted} is NOT a
+   * cheap local predicate in production: for an unclassified peer it runs an
+   * admission probe, i.e. outbound network I/O back toward the sender. Running
+   * that before draining the inbound stream inverts the I/O order — the receiver
+   * would dial a peer that is itself still blocked writing to us — which
+   * deterministically stalls announce-style request/response exchanges against a
+   * freshly restarted peer whose admission cache is empty.
+   *
+   * So the pre-read gate is deliberately limited to verdicts already cached:
+   * peers we have positively classified as rejected are dropped without
+   * buffering their body, and everything else keeps the existing order (read the
+   * bounded body, then run the full admission check). Implementations MUST NOT
+   * perform I/O or trigger a probe here, and MUST return false when unsure.
+   */
+  isPeerKnownRejected?: (peerId: string, protocolId: string) => boolean;
   admissionExemptProtocols?: Iterable<string>;
 }
 
@@ -181,6 +200,7 @@ export class ProtocolRouter {
   private readonly node: DKGNode;
   private readonly peerResolver?: PeerResolver;
   private readonly isPeerAccepted?: ProtocolRouterOptions['isPeerAccepted'];
+  private readonly isPeerKnownRejected?: ProtocolRouterOptions['isPeerKnownRejected'];
   private readonly admissionExemptProtocols: ReadonlySet<string>;
   private handlers = new Map<string, DKGStreamHandler>();
   /**
@@ -226,8 +246,22 @@ export class ProtocolRouter {
     this.node = node;
     this.peerResolver = options?.peerResolver;
     this.isPeerAccepted = options?.isPeerAccepted;
+    this.isPeerKnownRejected = options?.isPeerKnownRejected;
     this.admissionExemptProtocols = new Set(options?.admissionExemptProtocols ?? []);
     this.maxReadBytes = options?.maxReadBytes ?? DEFAULT_MAX_READ_BYTES;
+  }
+
+  /**
+   * Pre-read inbound gate. Only consults the cached-verdict predicate; never
+   * probes. Throws the same shape as `requirePeerAccepted` so the existing
+   * catch-path handling (abort + quiet logging) is unchanged.
+   */
+  private rejectKnownRejectedInboundPeer(peerId: string, protocolId: string): void {
+    if (!this.isPeerKnownRejected || this.admissionExemptProtocols.has(protocolId)) return;
+    if (!this.isPeerKnownRejected(peerId, protocolId)) return;
+    throw new Error(
+      `peer ${peerId.slice(-8)} is not admitted for inbound protocol ${protocolId}`,
+    );
   }
 
   private async requirePeerAccepted(
@@ -466,16 +500,16 @@ export class ProtocolRouter {
       const handlerSignal = handlerSignalScope.signal;
       try {
         const remotePeer = connection.remotePeer.toString();
-        // Admission is checked before the request body is read, so work done on
-        // behalf of a peer is bounded by its admission state rather than by the
-        // read limit alone. `requirePeerAccepted` depends only on the peer id and
-        // protocol, never on the request payload, so this ordering is free.
-        // The pooled inbound path above already resolves admission before it
-        // dispatches; this keeps the direct path consistent with it.
+        // Drop peers we have ALREADY classified as rejected before buffering
+        // their body. Deliberately not the full `requirePeerAccepted` here: that
+        // probes unclassified peers over the network, and probing outbound while
+        // holding an unread inbound stream inverts the I/O order against a
+        // sender that is still writing to us. See `isPeerKnownRejected`.
+        this.rejectKnownRejectedInboundPeer(remotePeer, protocolId);
+        const requestData = await readAllWithSignal(stream, limit, handlerSignal);
         await this.requirePeerAccepted(remotePeer, protocolId, 'inbound', {
           signal: handlerSignal,
         });
-        const requestData = await readAllWithSignal(stream, limit, handlerSignal);
         const peerId = {
           toString: () => remotePeer,
           toBytes: () => connection.remotePeer.toMultihash().bytes,
