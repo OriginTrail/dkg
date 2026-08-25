@@ -10,6 +10,7 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
+  asGraphWriteGenSource,
   StoreResponseTooLargeError,
   type QueryOptions,
   type TripleStore,
@@ -234,14 +235,17 @@ export function createResponderGraphListMemo(
   store: TripleStore,
   ttlMs = 10_000,
 ): GraphListMemo {
+  const writeGenerationSource = asGraphWriteGenSource(store);
   let cached: {
     value: readonly string[];
     cachedAt: number;
     refreshGeneration?: string;
+    writeGeneration?: number;
   } | null = null;
   let inflight: {
     promise: Promise<readonly string[]>;
     refreshGeneration?: string;
+    writeGeneration?: number;
   } | null = null;
   return {
     async get(options?: {
@@ -252,8 +256,11 @@ export function createResponderGraphListMemo(
       throwIfAborted(options?.signal);
       while (inflight) {
         const pending = inflight;
-        const supersedesPending = options?.refreshGeneration !== undefined &&
-          options.refreshGeneration !== pending.refreshGeneration;
+        const currentWriteGeneration = writeGenerationSource?.getWriteGen('');
+        const supersedesPending = writeGenerationSource
+          ? currentWriteGeneration !== pending.writeGeneration
+          : options?.refreshGeneration !== undefined &&
+            options.refreshGeneration !== pending.refreshGeneration;
         if (!supersedesPending) {
           return [...(await raceAgainstAbort(pending.promise, options?.signal))];
         }
@@ -264,12 +271,19 @@ export function createResponderGraphListMemo(
         }
       }
       const now = Date.now();
+      const currentWriteGeneration = writeGenerationSource?.getWriteGen('');
+      if (cached) {
+        const invalidated = writeGenerationSource
+          ? cached.writeGeneration !== currentWriteGeneration
+          : options?.refreshGeneration !== undefined &&
+            cached.refreshGeneration !== options.refreshGeneration;
+        if (invalidated) cached = null;
+      }
       if (
         cached &&
-        options?.refreshGeneration !== undefined &&
-        cached.refreshGeneration !== options.refreshGeneration
-      ) cached = null;
-      if (!options?.refresh && cached && now - cached.cachedAt < ttlMs) return [...cached.value];
+        now - cached.cachedAt < ttlMs &&
+        (writeGenerationSource || !options?.refresh)
+      ) return [...cached.value];
       // This load is shared by concurrent responders. Do not bind it to the
       // first stream's abort signal; waiters race their own abort locally via
       // raceAgainstAbort/throwIfAborted below.
@@ -280,6 +294,7 @@ export function createResponderGraphListMemo(
             value: sorted,
             cachedAt: Date.now(),
             refreshGeneration: options?.refreshGeneration,
+            writeGeneration: currentWriteGeneration,
           };
           return sorted;
         })
@@ -289,6 +304,7 @@ export function createResponderGraphListMemo(
       inflight = {
         promise: load,
         refreshGeneration: options?.refreshGeneration,
+        writeGeneration: currentWriteGeneration,
       };
       const graphs = await load;
       throwIfAborted(options?.signal);

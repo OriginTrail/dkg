@@ -1483,6 +1483,58 @@ describe('sync responder pagination interleaving', () => {
     expect(calls).toBe(2);
   });
 
+  it('reuses the sorted graph list across session refreshes until the store mutates', async () => {
+    let generation = 0;
+    let calls = 0;
+    let graphs = ['urn:graph:b', 'urn:graph:a', 'urn:graph:b'];
+    const store = {
+      getWriteGen: (prefix: string) => {
+        expect(prefix).toBe('');
+        return generation;
+      },
+      listGraphs: async () => {
+        calls++;
+        return graphs;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'session-1',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'session-2',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(1);
+
+    generation++;
+    graphs = ['urn:graph:c', 'urn:graph:a'];
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'session-3',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:c']);
+    expect(calls).toBe(2);
+  });
+
+  it('retains the TTL backstop for writers outside the tracked store process', async () => {
+    let calls = 0;
+    const store = {
+      getWriteGen: () => 0,
+      listGraphs: async () => {
+        calls++;
+        return ['urn:graph:a'];
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store, 0);
+
+    await memo.get({ refresh: true, refreshGeneration: 'session-1' });
+    await memo.get({ refresh: true, refreshGeneration: 'session-2' });
+
+    expect(calls).toBe(2);
+  });
+
   it('reloads graph-list and subgraph prerequisites for a newer session generation', async () => {
     const oldGraphs = deferred<string[]>();
     const newGraphs = deferred<string[]>();

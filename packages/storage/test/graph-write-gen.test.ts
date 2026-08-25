@@ -51,6 +51,19 @@ describe('GraphWriteGenTracker', () => {
     expect(tracker.getWriteGen('')).toBeGreaterThan(0);
   });
 
+  it('exposes one stable global generation for all scoped and unscoped writes', () => {
+    const tracker = new GraphWriteGenTracker();
+    const initial = tracker.getWriteGen('');
+
+    tracker.recordGraphWrites([SWM_GRAPH, OTHER_GRAPH]);
+    const afterScoped = tracker.getWriteGen('');
+    expect(afterScoped).toBeGreaterThan(initial);
+    expect(tracker.getWriteGen('')).toBe(afterScoped);
+
+    tracker.recordUnscopedWrite();
+    expect(tracker.getWriteGen('')).toBeGreaterThan(afterScoped);
+  });
+
   it('folds LRU-evicted graphs into the global floor (eviction can only force rescans)', () => {
     const tracker = new GraphWriteGenTracker();
     tracker.recordGraphWrites([SWM_GRAPH]);

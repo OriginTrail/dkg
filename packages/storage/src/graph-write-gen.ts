@@ -66,6 +66,10 @@ export class GraphWriteGenTracker implements GraphWriteGenSource {
   }
 
   getWriteGen(graphPrefix: string): number {
+    // Every graph URI starts with the empty prefix, so the tracker counter is
+    // the exact answer without scanning the bounded per-graph LRU. Responder
+    // graph-list caches use this global generation on every page/session.
+    if (graphPrefix === '') return this.counter;
     let gen = this.globalFloor;
     for (const [graph, graphGen] of this.byGraph) {
       if (graphGen > gen && graph.startsWith(graphPrefix)) gen = graphGen;
