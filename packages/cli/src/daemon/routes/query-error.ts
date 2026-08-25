@@ -8,6 +8,8 @@
  * applies only to untyped ones — so there is a single place to add a rule and
  * no way to place it wrongly.
  */
+import { isSparqlHttpResponseError } from "@origintrail-official/dkg-storage";
+
 /**
  * Recognised structurally rather than by importing `@origintrail-official/dkg-query`.
  * The cli package does not depend on it directly (the error arrives through the
@@ -81,7 +83,18 @@ function isLegacyClientQueryMessage(msg: string): boolean {
  * private so the provenance-first rule cannot be bypassed.
  */
 export function isClientQueryFailure(err: unknown): boolean {
+  // 1. Provenance wins: the engine marked this as the caller's own SPARQL.
   if (isCallerSparqlRejected(err)) return true;
+
+  // 2. A TYPED store error that was NOT marked is terminal — it came from an
+  //    engine-generated query, so it is a server fault no matter what its
+  //    rendered message happens to look like. Without this, a store rejection
+  //    whose body contained e.g. "Query must start with SELECT" would fall
+  //    through to the legacy families below and be reported as the caller's
+  //    fault, defeating the provenance rule (PR #2330 review).
+  if (isSparqlHttpResponseError(err)) return false;
+
+  // 3. Legacy families, for errors with no typed carrier at all.
   const msg = (err as { message?: unknown })?.message;
   return typeof msg === "string" && isLegacyClientQueryMessage(msg);
 }

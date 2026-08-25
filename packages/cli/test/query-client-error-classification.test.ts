@@ -89,3 +89,35 @@ describe('isClientQueryFailure — legacy message families (GH#1758)', () => {
     expect(isClientQueryFailure(new Error(''))).toBe(false);
   });
 });
+
+// PR #2330 review — the provenance rule must hold even when a typed store
+// error's MESSAGE happens to match a legacy family. Without a terminal branch
+// for unmarked typed errors, an engine-internal rejection whose body contained
+// "Query must start with SELECT" would fall through and be blamed on the caller.
+describe('isClientQueryFailure — typed non-caller errors are terminal (GH#1758)', () => {
+  const legacyLookalikes = [
+    'SPARQL rejected: no',
+    'Parse error near line 2',
+    'Query must start with SELECT',
+    'error at 1:15: expected one of REDUCED',
+    "query: 'agentAddress' must be a string",
+    'Invalid minTrust value',
+  ];
+
+  for (const body of legacyLookalikes) {
+    it(`does not classify an unmarked typed 400 whose body reads "${body.slice(0, 28)}…"`, () => {
+      expect(isClientQueryFailure(new SparqlHttpResponseError('query', 400, body))).toBe(false);
+    });
+  }
+
+  it('holds for 422 as well', () => {
+    expect(isClientQueryFailure(new SparqlHttpResponseError('query', 422, 'Parse error near line 2'))).toBe(false);
+  });
+
+  it('but the SAME message still classifies when it has no typed carrier', () => {
+    // The legacy families are for untyped errors; they must keep working.
+    for (const body of legacyLookalikes) {
+      expect(isClientQueryFailure(new Error(body))).toBe(true);
+    }
+  });
+});
