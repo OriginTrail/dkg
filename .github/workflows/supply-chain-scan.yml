@@ -696,7 +696,6 @@ jobs:
           node scripts/ci/inspect-ci-policy.mjs \
             --mode report \
             --repository "${GITHUB_REPOSITORY}" \
-            --branch testnet-canary \
             --workflow .github/workflows/ci.yml \
             --workflow .github/workflows/evm-integration.yml \
             --summary "${GITHUB_STEP_SUMMARY}"

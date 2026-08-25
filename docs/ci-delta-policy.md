@@ -50,22 +50,32 @@ file names cannot alter the decision. Its routing table lives in
   selected job was accidentally skipped, failed, or was cancelled.
 - CI controller changes use a two-phase rollout. The controller implementation
   lands first while every workflow remains pinned to an immutable SHA already
-  present on protected `main`. Only a follow-up PR may rotate that pin to the
-  landed controller. During this rollout, ABI freshness runs unconditionally,
-  so candidate code cannot suppress it by choosing its own planner.
+  present on protected `main` or `testnet-canary` history. Only a follow-up PR
+  may rotate that pin to the landed controller. During this rollout, ABI
+  freshness runs unconditionally, so candidate code cannot suppress it by
+  choosing its own planner.
 
-  Before any follow-up rotates the pin, fetch protected `main` and require this
-  command to exit zero for the proposed immutable SHA:
+  Before any follow-up rotates the pin, fetch protected `testnet-canary` and
+  require this command to exit zero for the proposed immutable SHA:
 
   ```sh
-  git fetch origin main
-  git merge-base --is-ancestor <controller-sha> origin/main
+  git fetch origin testnet-canary
+  git merge-base --is-ancestor <controller-sha> origin/testnet-canary
   ```
 - `CONTROLLER_POLICY_FILES` in `scripts/ci/trusted-controller-pins.mjs` is the
-  single manifest for the narrow controller boundary. After changing it, run
-  `pnpm ci:controller:sync`; CI runs `pnpm ci:controller:check` semantics in
-  the policy tests so the four generated sparse-checkout fragments cannot
-  drift. File ordering is not part of the security contract.
+  single manifest for the narrow controller boundary. The semantic workflow
+  validator parses every trusted checkout and rejects missing, extra, or
+  malformed sparse-checkout entries; there is no second text-rewrite model.
+  File ordering is not part of the security contract.
+- Ruleset enforcement also uses the two-phase controller rollout. The first
+  PR lands the inspector, its policy model, and the aggregate-gate requirement
+  inside `CONTROLLER_POLICY_FILES`, while the runtime workflow remains pinned
+  to the previous protected controller and does not advertise the prerequisite
+  as enforced. After that PR lands, a follow-up pins every trusted checkout to
+  its protected merge commit, adds an unconditional `ci-policy-prerequisites`
+  job that runs `trusted-ci/scripts/ci/inspect-ci-policy.mjs`, and adds that job
+  to `ci-gate.needs`. The newly pinned `ci-results.mjs` then requires the job by
+  name and requires a successful result. Partial wiring is rejected.
 - The merge queue tests every Node/EVM lane and the sharded Solidity suite
   against the exact combined commit before it lands. Protected-branch Solidity
   coverage remains the post-merge safety net.

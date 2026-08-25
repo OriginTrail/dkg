@@ -1,4 +1,3 @@
-export const REQUIRED_GATES = Object.freeze(['CI gate', 'EVM integration gate']);
 export const GITHUB_ACTIONS_INTEGRATION_ID = 15368;
 
 const ENFORCEMENT_RULE_TYPES = new Set([
@@ -6,6 +5,28 @@ const ENFORCEMENT_RULE_TYPES = new Set([
   'merge_queue',
   'required_status_checks',
 ]);
+
+export const TESTNET_CANARY_ROLLOUT_POLICY = Object.freeze({
+  branch: 'testnet-canary',
+  controllerBranches: Object.freeze(['main', 'testnet-canary']),
+  controllerFreshnessBranch: 'testnet-canary',
+  label: 'testnet-canary delta safeguards',
+  expected: 'PR + queue + Actions-owned aggregate gates, no bypass',
+  requiredGates: Object.freeze(['CI gate', 'EVM integration gate']),
+});
+
+export const REQUIRED_GATES = TESTNET_CANARY_ROLLOUT_POLICY.requiredGates;
+
+export function rulesetIdsRequiringDetails(rules) {
+  if (!Array.isArray(rules)) {
+    throw new Error('effective branch rules must be an array');
+  }
+  return [...new Set(rules
+    .filter((rule) => ENFORCEMENT_RULE_TYPES.has(rule?.type))
+    .map((rule) => rule?.ruleset_id)
+    .filter((rulesetId) => rulesetId !== undefined)
+    .map(String))];
+}
 
 function validateRulesetDetail({ branch, repository, rulesetId, ruleset }) {
   const errors = [];
@@ -37,24 +58,27 @@ function validateRulesetDetail({ branch, repository, rulesetId, ruleset }) {
 // applied active enforcement, include/exclude patterns, and layered rulesets
 // to this response. Aggregate every returned rule so protections can be split
 // across multiple matching rulesets without weakening the verdict.
-export function evaluateEffectiveDeltaRolloutRules({ branch, repository, rules, rulesets }) {
+export function evaluateEffectiveDeltaRolloutRules({
+  repository,
+  rules,
+  rulesets,
+  policy = TESTNET_CANARY_ROLLOUT_POLICY,
+}) {
   if (!Array.isArray(rules)) {
     throw new Error('effective branch rules must be an array');
   }
   if (!Array.isArray(rulesets)) {
     throw new Error('effective ruleset details must be an array');
   }
+  const { branch } = policy;
   const requiredChecks = new Map();
   const sources = new Set();
-  const enforcementSources = new Set();
+  const enforcementSources = new Set(rulesetIdsRequiringDetails(rules));
   let hasPullRequests = false;
   let hasMergeQueue = false;
 
   for (const rule of rules) {
     if (rule?.ruleset_id !== undefined) sources.add(String(rule.ruleset_id));
-    if (ENFORCEMENT_RULE_TYPES.has(rule?.type) && rule?.ruleset_id !== undefined) {
-      enforcementSources.add(String(rule.ruleset_id));
-    }
     if (rule?.type === 'pull_request') hasPullRequests = true;
     if (rule?.type === 'merge_queue') hasMergeQueue = true;
     if (rule?.type === 'required_status_checks') {
@@ -80,7 +104,7 @@ export function evaluateEffectiveDeltaRolloutRules({ branch, repository, rules, 
   const missing = [
     ...(!hasPullRequests ? ['pull_request'] : []),
     ...(!hasMergeQueue ? ['merge_queue'] : []),
-    ...REQUIRED_GATES.filter((gate) => (
+    ...policy.requiredGates.filter((gate) => (
       !requiredChecks.get(gate)?.has(GITHUB_ACTIONS_INTEGRATION_ID)
     )).map((gate) => `${gate} from GitHub Actions`),
     ...rulesetErrors,

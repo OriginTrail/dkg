@@ -20,12 +20,13 @@ import {
 import {
   CONTROLLER_POLICY_FILES,
   isProtectedHistoryComparison,
-  synchronizeTrustedControllerSparseCheckouts,
   validateTrustedControllerPins,
 } from '../../ci/trusted-controller-pins.mjs';
 import {
   evaluateEffectiveDeltaRolloutRules,
   GITHUB_ACTIONS_INTEGRATION_ID,
+  rulesetIdsRequiringDetails,
+  TESTNET_CANARY_ROLLOUT_POLICY,
 } from '../../ci/validate-delta-rollout-ruleset.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -47,13 +48,11 @@ function rulesetDetail(id, overrides = {}) {
 }
 
 function rulesetDetailsFor(rules) {
-  return [...new Set(rules.map((rule) => rule.ruleset_id).filter(Boolean).map(String))]
-    .map((rulesetId) => rulesetDetail(rulesetId));
+  return rulesetIdsRequiringDetails(rules).map((rulesetId) => rulesetDetail(rulesetId));
 }
 
 function evaluateDeltaRules(rules, rulesets = rulesetDetailsFor(rules)) {
   return evaluateEffectiveDeltaRolloutRules({
-    branch: 'testnet-canary',
     repository: 'OriginTrail/dkg',
     rules,
     rulesets,
@@ -96,7 +95,8 @@ jobs:
   ci-policy-prerequisites:
     runs-on: ubuntu-latest
     steps:
-      - run: node scripts/ci/inspect-ci-policy.mjs --mode enforce
+${controllerCheckout()}
+      - run: node trusted-ci/scripts/ci/inspect-ci-policy.mjs --mode enforce
   plan:
     runs-on: ubuntu-latest
     steps:
@@ -128,7 +128,8 @@ test('controller validation models quoted and id-first YAML and ignores unrelate
     }),
   }]);
   assert.equal(result.ref, CONTROLLER_SHA);
-  assert.equal(result.checkouts.length, 2);
+  assert.equal(result.checkouts.length, 3);
+  assert.equal(result.rolloutPhase, 'enforced');
 
   const reordered = validateTrustedControllerPins([{
     sourceName: 'reordered.yml',
@@ -210,7 +211,27 @@ test('controller validation rejects missing, inconsistent, fake, and over-broad 
       sourceName: 'non-enforcing-prerequisite.yml',
       source: workflowFixture().replace('--mode enforce', '--mode report'),
     }]),
-    /must run the enforcing inspector once/,
+    /must run the trusted enforcing inspector once/,
+  );
+  assert.throws(
+    () => validateTrustedControllerPins([{
+      sourceName: 'candidate-inspector.yml',
+      source: workflowFixture().replace(
+        'node trusted-ci/scripts/ci/inspect-ci-policy.mjs',
+        'node scripts/ci/inspect-ci-policy.mjs',
+      ),
+    }]),
+    /must run the trusted enforcing inspector once/,
+  );
+  assert.throws(
+    () => validateTrustedControllerPins([{
+      sourceName: 'missing-sparse-checkout.yml',
+      source: workflowFixture().replace(
+        /          sparse-checkout: \|\n(?:            .*\n)+?          sparse-checkout-cone-mode: false\n/,
+        '',
+      ),
+    }]),
+    /trusted checkout needs a sparse-checkout file list/,
   );
 });
 
@@ -227,15 +248,11 @@ test('repository workflows expose one canonical protected-history controller pin
   ]);
   assert.equal(result.ref, CONTROLLER_SHA);
   assert.equal(result.checkouts.length, 4);
-  for (const workflowPath of ['.github/workflows/ci.yml', '.github/workflows/evm-integration.yml']) {
-    const source = fs.readFileSync(path.join(REPO_ROOT, workflowPath), 'utf8');
-    assert.equal(
-      synchronizeTrustedControllerSparseCheckouts(source),
-      source,
-      `${workflowPath} trusted checkout fragments must be generated from the canonical manifest`,
-    );
-  }
+  assert.equal(result.rolloutPhase, 'prepared');
   assert.ok(CONTROLLER_POLICY_FILES.includes('scripts/ci/plan-ci.mjs'));
+  assert.ok(CONTROLLER_POLICY_FILES.includes('scripts/ci/inspect-ci-policy.mjs'));
+  assert.ok(CONTROLLER_POLICY_FILES.includes('scripts/ci/trusted-controller-pins.mjs'));
+  assert.ok(CONTROLLER_POLICY_FILES.includes('scripts/ci/validate-delta-rollout-ruleset.mjs'));
   assert.equal(
     CONTROLLER_POLICY_FILES.includes('scripts/ci/enforce-zizmor-sarif.mjs'),
     false,
@@ -330,7 +347,6 @@ test('prerequisite inspection excludes freshness-only acquisition', async () => 
   ];
   const requestJson = async (endpoint) => {
     requestedEndpoints.push(endpoint);
-    if (endpoint === 'repos/OriginTrail/dkg') return { default_branch: 'main' };
     if (endpoint.includes('/compare/')) return { status: 'ahead' };
     if (endpoint === 'repos/OriginTrail/dkg/rules/branches/testnet-canary?per_page=100&page=1') {
       return effectiveRules;
@@ -343,7 +359,6 @@ test('prerequisite inspection excludes freshness-only acquisition', async () => 
   };
   const prerequisites = await inspectCiPolicyPrerequisites({
     repository: 'OriginTrail/dkg',
-    branch: 'testnet-canary',
     workflows: [{ sourceName: 'fixture.yml', source: workflowFixture() }],
     token: 'test-token',
     requestJson,
@@ -386,7 +401,6 @@ test('effective policy inspection reads every rules page and rejects malformed p
   const effectiveRulesEndpoint = 'repos/OriginTrail/dkg/rules/branches/testnet-canary';
   const requestedRulePages = [];
   const requestJson = async (endpoint) => {
-    if (endpoint === 'repos/OriginTrail/dkg') return { default_branch: 'main' };
     if (endpoint.includes('/compare/')) return { status: 'identical' };
     if (endpoint.includes('/contents/')) return { sha: 'same-controller-blob' };
     if (endpoint.startsWith(effectiveRulesEndpoint)) {
@@ -418,7 +432,6 @@ test('effective policy inspection reads every rules page and rejects malformed p
   };
   const input = {
     repository: 'OriginTrail/dkg',
-    branch: 'testnet-canary',
     workflows: [{ sourceName: 'fixture.yml', source: workflowFixture() }],
     token: 'test-token',
   };
@@ -463,7 +476,6 @@ test('executable policy inspector preserves enforce and report exit boundaries',
     },
   ];
   const validRequest = async (endpoint) => {
-    if (endpoint === 'repos/OriginTrail/dkg') return { default_branch: 'main' };
     if (endpoint.includes('/compare/')) return { status: 'identical' };
     if (endpoint.includes('/rules/branches/')) return validRules;
     if (endpoint.startsWith('repos/OriginTrail/dkg/rulesets/')) {
@@ -475,7 +487,6 @@ test('executable policy inspector preserves enforce and report exit boundaries',
   const args = (mode) => [
     '--mode', mode,
     '--repository', 'OriginTrail/dkg',
-    '--branch', 'testnet-canary',
     '--workflow', workflowPath,
     '--output', outputPath,
     ...(mode === 'report' ? ['--summary', summaryPath] : []),
@@ -529,7 +540,8 @@ test('policy report renderer owns clean, drift, prerequisite, and acquisition st
   const clean = {
     controller: {
       pin: CONTROLLER_SHA,
-      defaultBranch: 'main',
+      protectedBranches: ['main', 'testnet-canary'],
+      freshnessBranch: 'testnet-canary',
       provenance: { ok: true, status: 'ahead' },
       tree: { ok: true, driftedFiles: [] },
     },
@@ -546,7 +558,7 @@ test('policy report renderer owns clean, drift, prerequisite, and acquisition st
     controller: { ...clean.controller, tree: { ok: false, driftedFiles: ['scripts/ci/plan-ci.mjs'] } },
   });
   assert.match(driftReport.markdown, /⚠ policy drift/);
-  assert.match(driftReport.warnings.join('\n'), /differs from main/);
+  assert.match(driftReport.warnings.join('\n'), /differs from testnet-canary/);
 
   const missingReport = renderCiPolicyReport({
     ...clean,
@@ -570,20 +582,25 @@ test('real policy CLIs use strict parsers with intentional repeat behavior', () 
   const policyOptions = parseCiPolicyArguments([
     '--mode', 'enforce',
     '--repository', 'OriginTrail/dkg',
-    '--branch', 'old-branch',
-    '--branch', 'testnet-canary',
     '--workflow', 'ci.yml',
     '--workflow', 'evm.yml',
   ]);
-  assert.equal(policyOptions.branch, 'testnet-canary');
   assert.deepEqual(policyOptions.workflows, ['ci.yml', 'evm.yml']);
+  assert.equal(TESTNET_CANARY_ROLLOUT_POLICY.branch, 'testnet-canary');
+  assert.throws(
+    () => parseCiPolicyArguments([
+      '--mode', 'enforce', '--repository', 'OriginTrail/dkg',
+      '--branch', 'main', '--workflow', 'ci.yml',
+    ]),
+    /Unknown option|unknown option/i,
+  );
   assert.throws(
     () => parseCiPolicyArguments(['--mode', 'enforce', '--unknown', 'value']),
     /Unknown option|unknown option/i,
   );
   assert.throws(
     () => parseCiPolicyArguments(['--mode', 'enforce']),
-    /repository, branch, and at least one workflow are required/,
+    /repository, and at least one workflow are required/,
   );
 
   const zizmorOptions = parseZizmorSarifArguments([
@@ -653,10 +670,11 @@ test('supply-chain workflow preserves SARIF upload and gates findings plus audit
     path.join(REPO_ROOT, '.github/workflows/ci.yml'),
     'utf8',
   ));
-  assert.ok(primaryWorkflow.jobs['ci-policy-prerequisites']);
-  assert.ok(primaryWorkflow.jobs['ci-gate'].needs.includes('ci-policy-prerequisites'));
+  assert.equal(primaryWorkflow.jobs['ci-policy-prerequisites'], undefined);
+  assert.equal(primaryWorkflow.jobs['ci-gate'].needs.includes('ci-policy-prerequisites'), false);
   assert.match(
-    primaryWorkflow.jobs['ci-policy-prerequisites'].steps.at(-1).run,
-    /inspect-ci-policy\.mjs\s+--mode enforce/,
+    fs.readFileSync(path.join(REPO_ROOT, 'scripts/lib/ci-results.mjs'), 'utf8'),
+    /requireSuccess\(needs, 'ci-policy-prerequisites', true, errors\)/,
+    'phase one must land the aggregate requirement before runtime wiring rotates to this controller',
   );
 });

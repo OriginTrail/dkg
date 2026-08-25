@@ -13,8 +13,6 @@
     "build:runtime": "pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui",
     "test": "turbo test && pnpm run test:scripts",
     "test:scripts": "node --test scripts/lib/__tests__/*.test.mjs",
-    "ci:controller:sync": "node scripts/ci/sync-trusted-controller-checkouts.mjs",
-    "ci:controller:check": "node scripts/ci/sync-trusted-controller-checkouts.mjs --check",
     "verify:w1-packet": "node scripts/verify-w1-packet.mjs",
     "bench:w1-sync-telemetry:smoke": "node packages/agent/scripts/bench-sync-telemetry.mjs --ci --json --pages 20 --warmup 5 --rounds 2",
     "characterize:issue-2052:system-records": "pnpm --filter @devnet/issue-2052-system-records characterize",

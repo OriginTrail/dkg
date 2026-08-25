@@ -9,7 +9,11 @@ import {
   isProtectedHistoryComparison,
   validateTrustedControllerPins,
 } from './trusted-controller-pins.mjs';
-import { evaluateEffectiveDeltaRolloutRules } from './validate-delta-rollout-ruleset.mjs';
+import {
+  evaluateEffectiveDeltaRolloutRules,
+  rulesetIdsRequiringDetails,
+  TESTNET_CANARY_ROLLOUT_POLICY,
+} from './validate-delta-rollout-ruleset.mjs';
 
 const API_ROOT = 'https://api.github.com';
 const API_PAGE_SIZE = 100;
@@ -59,52 +63,54 @@ export function ciPolicyModeExitCode(snapshot, mode) {
 
 export async function inspectCiPolicyPrerequisites({
   repository,
-  branch,
   workflows,
   token,
   requestJson = githubRequest,
 }) {
+  const { branch } = TESTNET_CANARY_ROLLOUT_POLICY;
   const controllerModel = validateTrustedControllerPins(workflows);
-  const repositoryMetadata = await requestJson(`repos/${repository}`, token);
-  const defaultBranch = repositoryMetadata?.default_branch;
-  if (typeof defaultBranch !== 'string' || defaultBranch === '') {
-    throw new Error('repository metadata is missing default_branch');
-  }
-
-  const compare = await requestJson(
-    `repos/${repository}/compare/${encodeURIComponent(controllerModel.ref)}...${encodeURIComponent(defaultBranch)}`,
-    token,
-  );
+  const { controllerBranches, controllerFreshnessBranch } = TESTNET_CANARY_ROLLOUT_POLICY;
+  const comparisons = await Promise.all(controllerBranches.map(async (protectedBranch) => {
+    const compare = await requestJson(
+      `repos/${repository}/compare/${encodeURIComponent(controllerModel.ref)}...${encodeURIComponent(protectedBranch)}`,
+      token,
+    );
+    return { branch: protectedBranch, status: compare?.status ?? 'missing' };
+  }));
   const effectiveRules = await githubPaginatedArray(
     `repos/${repository}/rules/branches/${encodeURIComponent(branch)}`,
     token,
     requestJson,
   );
-  const enforcementRuleTypes = new Set(['pull_request', 'merge_queue', 'required_status_checks']);
-  const effectiveRulesetIds = [...new Set(effectiveRules
-    .filter((rule) => enforcementRuleTypes.has(rule?.type))
-    .map((rule) => rule?.ruleset_id)
-    .filter((rulesetId) => rulesetId !== undefined)
-    .map(String))];
+  const effectiveRulesetIds = rulesetIdsRequiringDetails(effectiveRules);
   const rulesets = await Promise.all(effectiveRulesetIds.map((rulesetId) => (
     requestJson(`repos/${repository}/rulesets/${encodeURIComponent(rulesetId)}`, token)
   )));
   const deltaRollout = evaluateEffectiveDeltaRolloutRules({
-    branch,
     repository,
     rules: effectiveRules,
     rulesets,
+    policy: TESTNET_CANARY_ROLLOUT_POLICY,
   });
 
-  const provenanceOk = isProtectedHistoryComparison(compare?.status);
+  const provenanceOk = comparisons.some((comparison) => (
+    isProtectedHistoryComparison(comparison.status)
+  ));
   return {
     version: 1,
     repository,
     branch,
+    policy: TESTNET_CANARY_ROLLOUT_POLICY,
     controller: {
       pin: controllerModel.ref,
-      defaultBranch,
-      provenance: { status: compare?.status ?? 'missing', ok: provenanceOk },
+      protectedBranches: controllerBranches,
+      freshnessBranch: controllerFreshnessBranch,
+      provenance: {
+        status: comparisons.find((comparison) => isProtectedHistoryComparison(comparison.status))?.status
+          ?? comparisons.map((comparison) => `${comparison.branch}:${comparison.status}`).join(', '),
+        comparisons,
+        ok: provenanceOk,
+      },
     },
     deltaRollout,
     prerequisites: {
@@ -122,7 +128,7 @@ export async function inspectCiPolicyFreshness({
   if (
     typeof repository !== 'string'
     || typeof controller?.pin !== 'string'
-    || typeof controller?.defaultBranch !== 'string'
+    || typeof controller?.freshnessBranch !== 'string'
   ) {
     throw new Error('prerequisite snapshot is missing controller metadata');
   }
@@ -131,7 +137,7 @@ export async function inspectCiPolicyFreshness({
     const endpoint = `repos/${repository}/contents/${filePath}`;
     const [pinned, current] = await Promise.all([
       requestJson(`${endpoint}?ref=${encodeURIComponent(controller.pin)}`, token),
-      requestJson(`${endpoint}?ref=${encodeURIComponent(controller.defaultBranch)}`, token),
+      requestJson(`${endpoint}?ref=${encodeURIComponent(controller.freshnessBranch)}`, token),
     ]);
     if (typeof pinned?.sha !== 'string' || typeof current?.sha !== 'string') {
       throw new Error(`${filePath} contents response is missing a blob SHA`);
@@ -163,7 +169,6 @@ export function parseCiPolicyArguments(argv) {
     options: {
       mode: { type: 'string' },
       repository: { type: 'string' },
-      branch: { type: 'string' },
       workflow: { type: 'string', multiple: true, default: [] },
       output: { type: 'string' },
       summary: { type: 'string' },
@@ -174,10 +179,9 @@ export function parseCiPolicyArguments(argv) {
   if (
     !['enforce', 'report'].includes(options.mode)
     || !options.repository
-    || !options.branch
     || options.workflow.length === 0
   ) {
-    throw new Error('mode, repository, branch, and at least one workflow are required');
+    throw new Error('mode, repository, and at least one workflow are required');
   }
   if (options.summary && options.mode !== 'report') {
     throw new Error('--summary is available only in report mode');
@@ -194,25 +198,31 @@ export function renderCiPolicyReport(snapshot) {
   const warnings = [];
   const controller = snapshot.controller ?? {};
   const pinned = typeof controller.pin === 'string' ? controller.pin.slice(0, 12) : '?';
-  const defaultBranch = controller.defaultBranch ?? 'default branch';
-  let controllerExpected = `protected ${defaultBranch} history`;
+  const protectedBranches = Array.isArray(controller.protectedBranches)
+    ? controller.protectedBranches.join(' or ')
+    : 'protected repository history';
+  const freshnessBranch = controller.freshnessBranch ?? 'protected rollout branch';
+  let controllerExpected = `protected ${protectedBranches} history`;
   let controllerStatus = '⚠ unable to inspect';
 
   if (snapshot.acquisitionError) {
     warnings.push(`trusted CI controller inspection failed: ${snapshot.acquisitionError}`);
   } else if (controller.provenance?.ok !== true) {
     controllerStatus = '⚠ untrusted provenance';
-    warnings.push(`trusted CI controller ${pinned} is not in protected ${defaultBranch} history`);
+    warnings.push(`trusted CI controller ${pinned} is not in protected ${protectedBranches} history`);
   } else {
-    controllerExpected = 'default-branch policy tree';
+    controllerExpected = `${freshnessBranch} policy tree`;
     if (controller.tree?.ok === true) {
       controllerStatus = '✓ current';
     } else {
       controllerStatus = '⚠ policy drift';
-      warnings.push(`trusted CI controller ${pinned} differs from ${defaultBranch}`);
+      warnings.push(`trusted CI controller ${pinned} differs from ${freshnessBranch}`);
     }
   }
 
+  const rolloutLabel = snapshot.policy?.label
+    ?? `${snapshot.branch ?? TESTNET_CANARY_ROLLOUT_POLICY.branch} delta safeguards`;
+  const rolloutExpected = snapshot.policy?.expected ?? TESTNET_CANARY_ROLLOUT_POLICY.expected;
   let safeguardsPinned = '?';
   let safeguardsStatus = '⚠ unable to inspect';
   if (snapshot.deltaRollout?.ok === true) {
@@ -220,9 +230,9 @@ export function renderCiPolicyReport(snapshot) {
     safeguardsStatus = '✓ current';
   } else if (snapshot.deltaRollout) {
     safeguardsStatus = '⚠ prerequisites missing';
-    warnings.push(`testnet-canary delta safeguards missing: ${snapshot.deltaRollout.missing.join(', ')}`);
+    warnings.push(`${rolloutLabel} missing: ${snapshot.deltaRollout.missing.join(', ')}`);
   } else if (snapshot.acquisitionError) {
-    warnings.push(`testnet-canary safeguard inspection failed: ${snapshot.acquisitionError}`);
+    warnings.push(`${rolloutLabel} inspection failed: ${snapshot.acquisitionError}`);
   }
 
   const markdown = [
@@ -231,7 +241,7 @@ export function renderCiPolicyReport(snapshot) {
     '| Component | Pinned | Expected upstream | Status |',
     '|-----------|--------|-------------------|--------|',
     `| trusted CI controller | \`${pinned}\` | \`${controllerExpected}\` | ${controllerStatus} |`,
-    `| testnet-canary delta safeguards | \`${safeguardsPinned}\` | \`PR + queue + Actions-owned aggregate gates, no bypass\` | ${safeguardsStatus} |`,
+    `| ${rolloutLabel} | \`${safeguardsPinned}\` | \`${rolloutExpected}\` | ${safeguardsStatus} |`,
     '',
   ].join('\n');
   return { markdown, warnings };
@@ -254,7 +264,6 @@ export async function runCiPolicyInspector(argv, { token = process.env.GH_TOKEN,
     if (!token) throw new Error('GH_TOKEN is required');
     snapshot = await inspectCiPolicyPrerequisites({
       repository: options.repository,
-      branch: options.branch,
       workflows: options.workflows.map(repositoryFile),
       token,
       requestJson,
@@ -271,7 +280,7 @@ export async function runCiPolicyInspector(argv, { token = process.env.GH_TOKEN,
     if (!snapshot.prerequisites.ok) {
       console.error(`ci-policy-inspection: prerequisites missing: ${snapshot.deltaRollout.missing.join(', ') || snapshot.controller.provenance.status}`);
     } else {
-      console.log(`CI policy prerequisites verified for ${options.branch}`);
+      console.log(`CI policy prerequisites verified for ${snapshot.branch}`);
     }
     return ciPolicyModeExitCode(snapshot, options.mode);
   } catch (error) {
@@ -279,7 +288,8 @@ export async function runCiPolicyInspector(argv, { token = process.env.GH_TOKEN,
       ...(snapshot ?? {
         version: 1,
         repository: options?.repository,
-        branch: options?.branch,
+        branch: TESTNET_CANARY_ROLLOUT_POLICY.branch,
+        policy: TESTNET_CANARY_ROLLOUT_POLICY,
         prerequisites: { ok: false },
       }),
       acquisitionError: error.message,

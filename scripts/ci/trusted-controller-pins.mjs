@@ -2,7 +2,7 @@ import { parse as parseYaml } from 'yaml';
 
 const CHECKOUT_PATTERN = /^actions\/checkout@[0-9a-f]{40}$/;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
-const TRUSTED_SCRIPT_PATTERN = /\btrusted-ci\/scripts\/ci\/(plan-ci|assert-ci-results)\.mjs\b/g;
+const TRUSTED_SCRIPT_PATTERN = /\btrusted-ci\/scripts\/ci\/(plan-ci|assert-ci-results|inspect-ci-policy)\.mjs\b/g;
 
 // This is the controller's module boundary. Workflow sparse checkouts and the
 // scheduled freshness comparison are both validated against this exact list;
@@ -10,6 +10,9 @@ const TRUSTED_SCRIPT_PATTERN = /\btrusted-ci\/scripts\/ci\/(plan-ci|assert-ci-re
 export const CONTROLLER_POLICY_FILES = Object.freeze([
   'scripts/ci/plan-ci.mjs',
   'scripts/ci/assert-ci-results.mjs',
+  'scripts/ci/inspect-ci-policy.mjs',
+  'scripts/ci/trusted-controller-pins.mjs',
+  'scripts/ci/validate-delta-rollout-ruleset.mjs',
   'scripts/lib/ci-delta.mjs',
   'scripts/lib/ci-results.mjs',
 ]);
@@ -40,39 +43,6 @@ function sparseCheckoutPaths(step, context) {
   return paths;
 }
 
-export function synchronizeTrustedControllerSparseCheckouts(source) {
-  const lines = source.split('\n');
-  for (let pathIndex = 0; pathIndex < lines.length; pathIndex += 1) {
-    if (!/^\s*path:\s*["']?trusted-ci["']?\s*$/.test(lines[pathIndex])) continue;
-    const pathIndent = lines[pathIndex].match(/^\s*/)[0].length;
-    let sparseIndex = -1;
-    for (let index = pathIndex + 1; index < lines.length; index += 1) {
-      const indent = lines[index].match(/^\s*/)[0].length;
-      if (lines[index].trim() && indent < pathIndent) break;
-      if (/^\s*sparse-checkout:\s*\|\s*$/.test(lines[index])) {
-        sparseIndex = index;
-        break;
-      }
-    }
-    if (sparseIndex === -1) continue;
-    const sparseIndent = lines[sparseIndex].match(/^\s*/)[0].length;
-    let endIndex = sparseIndex + 1;
-    while (endIndex < lines.length) {
-      const indent = lines[endIndex].match(/^\s*/)[0].length;
-      if (lines[endIndex].trim() && indent <= sparseIndent) break;
-      endIndex += 1;
-    }
-    const entryIndent = ' '.repeat(sparseIndent + 2);
-    lines.splice(
-      sparseIndex + 1,
-      endIndex - sparseIndex - 1,
-      ...CONTROLLER_POLICY_FILES.map((filePath) => `${entryIndent}${filePath}`),
-    );
-    pathIndex = sparseIndex + CONTROLLER_POLICY_FILES.length;
-  }
-  return lines.join('\n');
-}
-
 export function trustedControllerCheckouts(source, sourceName = '<workflow>') {
   let workflow;
   try {
@@ -98,7 +68,9 @@ export function trustedControllerCheckouts(source, sourceName = '<workflow>') {
     for (const [stepIndex, step] of steps.entries()) {
       for (const scriptName of trustedScriptNames(step)) {
         consumers.push({ stepIndex, scriptName });
-        scriptCounts.set(scriptName, scriptCounts.get(scriptName) + 1);
+        if (scriptCounts.has(scriptName)) {
+          scriptCounts.set(scriptName, scriptCounts.get(scriptName) + 1);
+        }
       }
     }
     if (consumers.length === 0) continue;
@@ -154,8 +126,8 @@ export function validateTrustedControllerPins(workflows) {
   if (refs.size !== 1) {
     throw new Error(`trusted CI controller checkouts use ${refs.size} different refs`);
   }
-  validatePolicyGateWiring(workflows);
-  return { ref: allCheckouts[0].ref, checkouts: allCheckouts };
+  const rolloutPhase = validatePolicyGateWiring(workflows);
+  return { ref: allCheckouts[0].ref, checkouts: allCheckouts, rolloutPhase };
 }
 
 export function validatePolicyGateWiring(workflows) {
@@ -169,22 +141,31 @@ export function validatePolicyGateWiring(workflows) {
 
   const [{ sourceName, workflow }] = candidates;
   const prerequisite = workflow.jobs['ci-policy-prerequisites'];
+  const gateNeeds = Array.isArray(workflow.jobs['ci-gate'].needs)
+    ? workflow.jobs['ci-gate'].needs
+    : [workflow.jobs['ci-gate'].needs].filter(Boolean);
+  const gateRequiresPrerequisite = gateNeeds.includes('ci-policy-prerequisites');
+
+  // Controller-policy changes deliberately land before their pin rotates.
+  // During that preparation phase, neither half of the runtime wiring may be
+  // present: the old pinned aggregate does not yet know the new prerequisite.
+  if (!prerequisite && !gateRequiresPrerequisite) return 'prepared';
+  if (!prerequisite) {
+    throw new Error(`${sourceName}: ci-gate requires a missing ci-policy-prerequisites job`);
+  }
+  if (!gateRequiresPrerequisite) {
+    throw new Error(`${sourceName}: ci-gate must require ci-policy-prerequisites`);
+  }
   if (!prerequisite || prerequisite.if !== undefined) {
     throw new Error(`${sourceName}: ci-policy-prerequisites must run unconditionally`);
   }
   const inspectorSteps = (prerequisite.steps ?? []).filter((step) => (
     typeof step?.run === 'string'
-    && /\bnode scripts\/ci\/inspect-ci-policy\.mjs\b/.test(step.run)
+    && /\bnode trusted-ci\/scripts\/ci\/inspect-ci-policy\.mjs\b/.test(step.run)
     && /--mode\s+enforce\b/.test(step.run)
   ));
   if (inspectorSteps.length !== 1) {
-    throw new Error(`${sourceName}: ci-policy-prerequisites must run the enforcing inspector once`);
+    throw new Error(`${sourceName}: ci-policy-prerequisites must run the trusted enforcing inspector once`);
   }
-
-  const gateNeeds = Array.isArray(workflow.jobs['ci-gate'].needs)
-    ? workflow.jobs['ci-gate'].needs
-    : [workflow.jobs['ci-gate'].needs].filter(Boolean);
-  if (!gateNeeds.includes('ci-policy-prerequisites')) {
-    throw new Error(`${sourceName}: ci-gate must require ci-policy-prerequisites`);
-  }
+  return 'enforced';
 }
