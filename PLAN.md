@@ -30,8 +30,8 @@ the tab-rail migration plan. Statuses here get re-stamped as phases land.
 | G1 | `AskCommitment` — per-period ask in offer KA, edits land next cycle | 2 |
 | G2 | `Plan` object (period, allocations[], `fundingSource` seam) | 2 |
 | G3 | `Allowance` — **per-offering only (Part-0 correction 2026-08-25): every model/knowledge service meters itself in native units; NO shared value-denominated pool in P5** (cross-offering credit = RFC seam); admission/delivery decrements, expiry, top-up | 2 |
-| G4 | Price-cap ceiling guarantee (allocation ÷ committed ask; cheaper routing beats floor) | 2 |
-| G5 | Router: request names model → subscribed-seller resolution under max price, pins; 402 fork (Top up + wait/switch line; one ceiling hit leaves other meters usable) | 2 |
+| G4 | **DELETED (consolidated delta #2)** — exact ceilings: allocation ÷ the chosen provider's frozen ask; no floor-vs-better math | — |
+| G5 | Gateway lookup (NOT routing): model → the plan's ONE chosen provider; no silent fallback (failure charges nothing, says so); 402 fork = Top up + switch line (no wait option); provider switch lands at next cycle | 2 |
 | G6 | Query offerings: Query Cost Schedule KA (content-addressed), unit computation both seats, admission+delivery decrement split, guard-abort semantics | 2 |
 | G7 | Both-sides metering journals (no delivery → no decrement) | 2 |
 | G8 | Statements: per-pair period totals, co-sign, publish as KA in curated CG; dispute engine = P4 per-leg verifiers over hash-chained logs | 2 |
@@ -41,7 +41,14 @@ the tab-rail migration plan. Statuses here get re-stamped as phases land.
 | G12 | Dedicated subscription-revenue wallet per seller (never ops wallet — bug-#12 made structurally unrepeatable) | 2 |
 | G13 | Fixture suite: Appendix C drills + updated 404 probes + NO-EXTERNAL-JOURNEY probe (no user-journey page served from any port/path outside the node UI; dev routes carry no product nav) | 2/4 |
 | G14 | Stripe spike (CP3-gated, devnet only) | 6 |
-| G15 | `REPORT-v5.md` + chain-footprint audit (I4 from Basescan) | 7 |
+| G15 | `REPORT-v5.md` + chain-footprint audit (I4, I6 from Basescan) + design-evolution section | 7 |
+| G16 | Checkpoint service: SWM emitter+verifier, hash-chained signed running totals, 100-calls/15-min jittered cadence (config, compressed-period scaled), divergence flagging, interim VM publish only on unresolved divergence, freshness-line feed | 2 |
+| G17 | Pair-CG lifecycle: auto-create at first subscription, curated, membership = exactly the pair | 2 |
+| G18 | Marketplace Registry CG publishers (open): Model KAs, offers/asks, tokenizer bundles, cost schedule | 2 |
+| G19 | Query Cost Schedule freeze + parser + guards: admission (base+complexity) on submit, results on delivery, abort keeps admission | 2 |
+| G20 | Provider-switch-at-boundary mechanics | 2 |
+| G21 | Expired state + start-new-period flow (nothing renews; new period = new consented payment) | 2 |
+| G22 | No-fallback error semantics; invariants I5 (every consumed entry references exactly one allowance) + I6 (one statement KA per pair per period); cadence cost audit; data-copy probe in the fixture suite | 2 |
 
 ### Brief items deliberately NOT built (Part 2 / RFC)
 

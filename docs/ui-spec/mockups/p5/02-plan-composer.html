@@ -40,55 +40,55 @@
 
   <div class="state-label">state: composing (live preview)</div>
   <div class="card card--pad stack">
-    <div class="head"><h1 style="font-size:var(--fs-xl)" id="top">Compose your plan</h1>
+    <div class="head"><h1 data-copy="composer.title" style="font-size:var(--fs-xl)" id="top">Compose your plan</h1>
       <div class="sec sm">Period <select><option>monthly</option><option>weekly</option></select></div></div>
     <div class="off-row"><label class="sec">Period budget</label><span><input class="input mono" value="3.6 TRAC" size="9"> <span class="sec">≈ $1.01</span></span></div>
 
     <div class="sellergrp">
       <header><strong>okf-mainnet</strong></header>
       <div class="off-row"><span>✓ Qwen2.5 14B <span style="color:var(--prov-pinned)">⛓</span></span><span class="mono sec">~$0.17/1M</span></div>
-      <div class="off-row"><span>✓ Qwen2.5 7B <span style="color:var(--prov-pinned)">⛓</span></span><span class="mono sec">~$0.10/1M</span></div>
+      <div class="off-row"><span class="muted">— Qwen2.5 7B <span class="xs">(hermes chosen for this model)</span></span><span class="mono muted">~$0.10/1M</span></div>
       <div class="off-row"><span>✓ gpt-5.x <span style="color:var(--prov-claimed)">☁</span></span><span class="mono sec">~$0.31/1M</span></div>
       <div class="off-row"><span>✓ okf knowledge <span class="muted xs">query · CGs: neurosymbolic-marketplace, odysseus</span></span><span class="mono sec">~$4.27/1M units</span></div>
-      <div class="preview">≈ 4.5M Qwen 14B tokens · 2.9M Qwen 7B tokens · 183k query units per period — each with its own meter</div>
+      <div class="preview">≈ 4.5M Qwen 14B tokens · 200k gpt-5.x tokens · 183k query units per period — each with its own meter</div>
     </div>
 
     <div class="sellergrp">
       <header><strong>hermes</strong></header>
-      <div class="off-row"><span>✓ Qwen2.5 7B <span style="color:var(--prov-pinned)">⛓</span> <span class="muted xs">pinned to hermes</span></span><span class="mono sec">~$0.084/1M</span></div>
-      <div class="preview">At least 5,000,000 tokens — more if routed cheaper</div>
+      <div class="off-row"><span>✓ Qwen2.5 7B <span style="color:var(--prov-pinned)">⛓</span> <span class="muted xs">cheapest for this model ✓</span></span><span class="mono sec">~$0.084/1M</span></div>
+      <div class="preview">5,000,000 tokens per period at hermes’s frozen price · cheapest of 2 providers ✓</div>
     </div>
 
-    <details style="border-top:1px solid var(--border-subtle); padding-top:var(--sp-3)"><summary class="sec sm">Advanced</summary>
+    <details style="border-top:1px solid var(--border-subtle); padding-top:var(--sp-3)"><summary data-copy="composer.advanced" class="sec sm">Advanced</summary>
       <div style="display:grid; gap:var(--sp-2); padding:var(--sp-3) 0 0; font-size:var(--fs-sm)">
         <div style="display:flex; justify-content:space-between; gap:var(--sp-3)"><span>Max price</span><span><input class="input mono" value="$0.12/1M" size="8"></span></div>
         <div style="display:flex; justify-content:space-between; gap:var(--sp-3)"><span>Pin providers</span><span class="muted xs">Qwen 7B → hermes</span></div>
       </div></details>
     <div class="pay">
       <div class="off-row stack-sm"><span class="sec">This plan pays 2 providers</span><span class="mono">okf-mainnet 2.8 TRAC · hermes 0.8 TRAC</span></div>
-      <div class="sec sm">Cheaper routing gives you more, never less. Your node picks the cheapest included provider automatically.</div>
+      <div class="sec sm">One provider per offering, chosen here. The cheapest is pre-selected; compare and switch on the model page — changes take effect at the next period.</div>
       <div class="muted xs">Prices are frozen for the period. Changes you make take effect at the next period.</div>
-      <div style="text-align:right"><a class="btn btn--primary" href="#consent2">Review payments →</a></div>
+      <div style="text-align:right"><a class="btn btn--primary" data-copy="composer.review" href="#consent2">Review payments →</a></div>
     </div>
   </div>
 
 
   <div class="state-label" id="consent2">one confirmation — a composed plan lists every provider you chose</div>
   <div class="card card--pad stack">
-    <h2>One confirmation</h2>
+    <h2 data-copy="onboard.consent.title">One confirmation</h2>
     <div style="border:1px solid var(--state-pending); border-radius:var(--r-md); padding:var(--sp-4); display:grid; gap:var(--sp-3); font-size:var(--fs-sm)">
       <div style="display:grid; grid-template-columns:1fr auto auto; gap:var(--sp-3)"><span><strong>okf-mainnet</strong> <span class="muted xs">to 0x…okf revenue wallet</span></span><span class="mono">2.8 TRAC</span><span class="sec">~$0.78</span></div>
       <div style="display:grid; grid-template-columns:1fr auto auto; gap:var(--sp-3)"><span><strong>hermes</strong> <span class="muted xs">to 0x…hermes revenue wallet</span></span><span class="mono">0.8 TRAC</span><span class="sec">~$0.22</span></div>
       <div style="display:grid; grid-template-columns:1fr auto auto; gap:var(--sp-3)" class="sec"><span>2 transfers, sent one after the other</span><span class="mono">3.6 TRAC</span><span>~$1.01</span></div>
       <div style="color:var(--text-secondary); border-top:1px solid var(--border-subtle); padding-top:var(--sp-3)">Payments are final. Unused allowance expires at period end — like any subscription.</div>
-      <div style="display:flex; justify-content:space-between"><a class="btn" href="#top">Cancel</a><a class="btn btn--primary" href="01-subscribe-onboarding.html#key">Confirm</a></div>
+      <div style="display:flex; justify-content:space-between"><a class="btn" data-copy="gate.cancel" href="#top">Cancel</a><a class="btn btn--primary" data-copy="gate.confirm" href="01-subscribe-onboarding.html#key">Confirm</a></div>
     </div>
     <p class="muted xs">Adding a provider is always this explicit — one row you chose, one payment line you see. Nothing subscribes you to a second seller implicitly.</p>
   </div>
 
   <div class="state-label">state: mid-cycle (read-only except top-up)</div>
   <div class="card card--pad stack">
-    <div class="off-row"><span class="sec">Plan active — expires in 12 days</span><a class="btn" href="01-subscribe-onboarding.html#consent">Top up</a></div>
+    <div class="off-row"><span class="sec">Plan active — expires in 12 days</span><a class="btn" data-copy="meter.topup" href="01-subscribe-onboarding.html#consent">Top up</a></div>
     <p class="muted xs">Allocation edits queue for the next cycle. Prices stay frozen until then.</p>
   </div>
 

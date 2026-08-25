@@ -55,3 +55,15 @@ faithfully from `refs/node-ui-current-*.jpg` (header, left rail, center
 tab-chips, Node Log dock, Agents panel) with Layer-1 tokens rebased to the
 node UI's neutral palette. Every mockup shot now shows the actual product
 chrome; Phase-3 integration inherits real components instead of a facsimile.
+
+## 6. Rider lesson (CP-R closure, 2026-08-25)
+
+The gate cycle changed the design (Part 0 removed the pool) and one label
+didn't follow: the runthrough index still advertised "shared drawdown
+itemized" after the surface it described had stopped doing that. Rule-5
+class: a status that changed without its re-stamp. Fixed with a full
+sibling sweep (also caught: two fork wait-options after the expiry doctrine
+killed waiting, three runtime-routing copy lines after provider choice moved
+to plan time). Standing consequence: `copy-probe.mjs` makes string keying
+greppable, and design-delta sweeps now grep mockups AND docs, not just the
+surface that changed.

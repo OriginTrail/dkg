@@ -49,7 +49,7 @@
 
     <div class="state-label">state: normal — every offering meters itself</div>
   <div class="card card--pad stack">
-    <div class="planhead"><h1 style="font-size:var(--fs-xl)">Plan overall: 34% of this period's value used</h1><span class="sec">Expires in 12 days · <a href="01-subscribe-onboarding.html#consent">Top up</a> · <a href="02-plan-composer.html" class="muted">Upgrade next period</a></span></div>
+    <div class="planhead"><h1 data-copy="meter.summary" style="font-size:var(--fs-xl)">Plan overall: 34% of this period's value used</h1><span class="sec">Expires in 12 days · <a href="01-subscribe-onboarding.html#consent">Top up</a> · <a href="02-plan-composer.html" class="muted">Upgrade next period</a></span></div>
     <p class="muted xs">A readout, not a limit — each meter below is its own ceiling.</p>
     <div class="mrow">
       <div class="mhead"><span><strong>Qwen2.5 14B</strong> <span class="muted xs">via okf-mainnet</span> — 24% used · Expires in 12 days</span><span class="mono sec">76% left</span></div>
@@ -58,7 +58,7 @@
       <div class="sparkrow"><span class="spark"><i style="height:16%"></i><i style="height:24%"></i><i style="height:24%"></i><i style="height:32%"></i><i style="height:48%"></i><i style="height:72%"></i><i style="height:96%"></i></span><span class="pace warn">At this pace: runs out ~4 days before expiry</span></div>
     </div>
     <div class="mrow">
-      <div class="mhead"><span><strong>Qwen2.5 7B</strong> <span class="muted xs">via hermes · okf-mainnet</span> — 12% used · Expires in 12 days</span><span class="mono sec">88% left</span></div>
+      <div class="mhead"><span><strong>Qwen2.5 7B</strong> <span class="muted xs">via hermes</span> — 12% used · Expires in 12 days</span><span class="mono sec">88% left</span></div>
       <div class="bar plain"><i style="width:12%"></i></div>
       <div class="sparkrow"><span class="spark"><i style="height:16%"></i><i style="height:16%"></i><i style="height:24%"></i><i style="height:16%"></i><i style="height:24%"></i><i style="height:16%"></i><i style="height:24%"></i></span><span class="pace quiet">On track to expiry</span></div>
     </div>
@@ -85,21 +85,22 @@
   <div class="card card--pad stack">
     <div class="mhead"><span><strong>Qwen2.5 14B</strong> <span class="muted xs">via okf-mainnet</span></span><span style="color:var(--gauge-over)">100%</span></div>
     <div class="bar hit"><i style="width:100%"></i></div>
-    <h2>You've reached this ceiling</h2>
-    <div class="fork"><a class="btn btn--primary" href="01-subscribe-onboarding.html#consent">Top up</a><span class="sec sm">or wait — expires in 12 d · or switch to Qwen 7B, 88% left — every other meter still works</span></div>
+    <h2 data-copy="meter.hit.title">You've reached this ceiling</h2>
+    <div class="fork"><a class="btn btn--primary" data-copy="fork.topup" href="01-subscribe-onboarding.html#consent">Top up</a><span class="sec sm">or switch to Qwen 7B, 88% left — every other meter still works</span></div>
   </div>
 
   <div class="state-label">state: new period — expiry journaled, not returned</div>
   <div class="card card--pad stack">
-    <div class="mhead"><span><strong>Plan: 0% used</strong></span><span class="sec">Expires in 30 days</span></div>
+    <div class="mhead"><span><strong>Period ended</strong></span><span class="sec">No active period</span></div>
     <div class="bar plain"><i style="width:0%"></i></div>
     <p class="sec sm">Expired at period end: $0.05 — value recognized, not returned</p>
+    <div style="display:flex; gap:var(--sp-3); align-items:center; flex-wrap:wrap"><a class="btn btn--primary" data-copy="meter.newperiod" href="01-subscribe-onboarding.html#consent">Start a new period</a><span class="muted xs">Nothing renews by itself — a new period begins only with a new confirmed payment.</span></div>
     <p class="muted xs">Unused allowance expires at period end — like any subscription.</p>
   </div>
 
   <div class="state-label">recent activity — where the allowance went</div>
   <div class="card card--pad stack">
-    <div class="mhead"><h2>Recent activity</h2><span class="fchips"><span class="on">All</span><a href="10-access.html" style="border:1px solid var(--border-strong); border-radius:var(--r-full); padding:var(--sp-1) var(--sp-3); color:var(--text-secondary)">my-agent</a><a href="10-access.html" style="border:1px solid var(--border-strong); border-radius:var(--r-full); padding:var(--sp-1) var(--sp-3); color:var(--text-secondary)">ci-bot</a></span></div>
+    <div class="mhead"><h2 data-copy="activity.title">Recent activity</h2><span class="fchips"><span class="on">All</span><a href="10-access.html" style="border:1px solid var(--border-strong); border-radius:var(--r-full); padding:var(--sp-1) var(--sp-3); color:var(--text-secondary)">my-agent</a><a href="10-access.html" style="border:1px solid var(--border-strong); border-radius:var(--r-full); padding:var(--sp-1) var(--sp-3); color:var(--text-secondary)">ci-bot</a></span></div>
     <table class="act">
       <tr><td>14:32</td><td>Qwen 14B</td><td>via okf-mainnet</td><td>1,840 tokens</td><td>&lt;$0.01</td><td>my-agent</td></tr>
       <tr><td>14:31</td><td>query</td><td>via okf-mainnet</td><td>41 units</td><td>&lt;$0.01</td><td>my-agent</td></tr>

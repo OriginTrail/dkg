@@ -35,16 +35,16 @@
 
   <div class="state-label">state: key list</div>
   <div class="card card--pad stack">
-    <div style="display:flex; justify-content:space-between; align-items:baseline"><h1 style="font-size:var(--fs-xl)">Access</h1><a class="btn btn--primary" href="#mint">+ Mint key</a></div>
+    <div style="display:flex; justify-content:space-between; align-items:baseline"><h1 data-copy="access.title" style="font-size:var(--fs-xl)">Access</h1><a class="btn btn--primary" data-copy="access.mint" href="#mint">+ Mint key</a></div>
     <div class="krow">
       <span><strong>my-agent</strong> <span class="mono muted xs">nsm_k_9f2e…c41a</span><div class="kmix">mostly Qwen 14B · 12% queries</div></span>
-      <span class="chip">61% of cap</span>
-      <button class="btn">Revoke</button>
+      <span class="chip" data-copy="access.cap">61% of cap</span>
+      <button class="btn" data-copy="access.revoke.btn">Revoke</button>
     </div>
     <div class="krow">
       <span><strong>ci-bot</strong> <span class="mono muted xs">nsm_k_77aa…d203</span><div class="kmix">mostly gpt-5.x</div></span>
-      <span class="chip">18% of cap</span>
-      <button class="btn">Revoke</button>
+      <span class="chip" data-copy="access.cap">18% of cap</span>
+      <button class="btn" data-copy="access.revoke.btn">Revoke</button>
     </div>
     <p class="muted xs">Revoke — stops at the next call. Activity per key lives on <a href="05-plans-meters.html">Plans → Recent activity</a>.</p>
   </div>

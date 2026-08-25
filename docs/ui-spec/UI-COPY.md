@@ -389,3 +389,38 @@ The shared value-denominated pool is removed from P5. Superseded keys:
 | meter.offering.line | {offering} — {pct}% used · Resets in {t} |
 | meter.offering.tap | {used} of {ceiling} {unit} · ${usd} spent |
 | composer.preview.offering | ≈ {ceiling} {unit} per period |
+
+---
+
+# Re-shoot delta + keying convention (CP-R riders, 2026-08-25)
+
+**Convention (binding, mockups AND integrated components):** every
+user-facing string node carries `data-copy="<key>"`. Content-derived text
+(model names, node names, numbers) uses `data-copy="_data"`. Node-UI shell
+chrome is outside marketplace copy scope. Probe:
+`mockups/p5/copy-probe.mjs` — a scoped element without a key fails the run.
+
+Superseded by the consolidated delta: `fork.line` (wait option removed) ·
+`meter.hit.wait` · `composer.route.note` (no runtime routing exists).
+
+| key | string |
+|---|---|
+| gate.confirm | Confirm |
+| gate.cancel | Cancel |
+| onboard.sub.cta | Choose this plan |
+| composer.review | Review payments → |
+| composer.provider.note | One provider per offering, chosen here. The cheapest is pre-selected; compare and switch on the model page — changes take effect at the next period. |
+| fork.line.v2 | or switch to {alt}, {pct}% left — every other meter still works |
+| meter.newperiod | Start a new period |
+| meter.newperiod.note | Nothing renews by itself — a new period begins only with a new confirmed payment. |
+| meter.period.ended | Period ended |
+| model.provider.yours | your provider ✓ |
+| model.provider.switch | Switch next period |
+| model.provider.note | One provider per offering, chosen when you subscribe — this page is where you compare. Switching takes effect at the next period. If your provider fails, the call charges nothing and says so. |
+| stmt.freshness | Counts agree ✓ · checked {t} ago |
+| catalog.add | Add to plan |
+| access.title | Access |
+| access.mint | + Mint key |
+| access.revoke.btn | Revoke |
+| op.wallets | Wallets |
+| op.stmt.cosign | Review & co-sign |
