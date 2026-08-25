@@ -27,11 +27,31 @@ export class CallerSparqlRejectedError extends Error {
   }
 }
 
-/** True when `err` carries the caller-SPARQL-rejected contract. */
-export function isCallerSparqlRejectedError(err: unknown): err is CallerSparqlRejectedError {
+/**
+ * The contract a cross-boundary consumer may rely on.
+ *
+ * PR #2330 review — the guard used to narrow to the concrete class while
+ * validating only `code`, `status` and `message`, so
+ * `{ code, status, message }` satisfied it and TypeScript then permitted
+ * `err.name.toUpperCase()` on a value with no `name`. Narrow to the shape
+ * actually validated instead. Mirrors `SparqlHttpResponseErrorLike` in the
+ * storage package.
+ */
+export interface CallerSparqlRejectedErrorLike {
+  readonly code: typeof CALLER_SPARQL_REJECTED_CODE;
+  readonly status: number;
+  readonly message: string;
+}
+
+/**
+ * True when `err` carries the caller-SPARQL-rejected contract — either as the
+ * concrete class, or structurally when `instanceof` cannot survive the
+ * boundary. Every field the interface promises is validated.
+ */
+export function isCallerSparqlRejectedError(err: unknown): err is CallerSparqlRejectedErrorLike {
   if (err instanceof CallerSparqlRejectedError) return true;
   if (typeof err !== 'object' || err === null) return false;
-  const c = err as { code?: unknown; status?: unknown; message?: unknown };
+  const c = err as Partial<Record<keyof CallerSparqlRejectedErrorLike, unknown>>;
   return (
     c.code === CALLER_SPARQL_REJECTED_CODE &&
     typeof c.status === 'number' &&
