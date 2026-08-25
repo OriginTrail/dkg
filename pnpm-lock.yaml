@@ -58,9 +58,6 @@ importers:
       knip:
         specifier: ^6.6.1
         version: 6.23.0
-      lodash:
-        specifier: 4.17.20
-        version: 4.17.20
       tsx:
         specifier: ^4.21.0
         version: 4.21.0
@@ -5084,9 +5081,6 @@ packages:
 
   lodash.truncate@4.4.2:
     resolution: {integrity: sha512-jttmRe7bRse52OsWIMDLaXxWqRAmtIUccAQ3garviCqJjafXOfNMO0yMfNpdD6zbGaTU0P5Nz7e7gAT6cKmJRw==}
-
-  lodash@4.17.20:
-    resolution: {integrity: sha512-PlhdFcillOINfeV7Ni6oF1TAEayyZBoZ8bcshTHqOYJYlrqzRK5hagpagky5o4HfCzzd1TRkXPMFq6cKk9rGmA==}
 
   lodash@4.18.1:
     resolution: {integrity: sha512-dMInicTPVE8d1e5otfwmmjlxkZoUpiVLwyeTdUsi/Caj/gfzzblBcCE5sRHV/AsjuCmxWrte2TNGSYuCeCq+0Q==}
@@ -11391,8 +11385,6 @@ snapshots:
   lodash.isequal@4.5.0: {}
 
   lodash.truncate@4.4.2: {}
-
-  lodash@4.17.20: {}
 
   lodash@4.18.1: {}
 
