@@ -154,7 +154,7 @@ type ReceiverTaskOutcomeV1 =
     readonly kind: 'failed';
     readonly taskRevision: bigint;
     readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
-    readonly error: Error;
+    readonly error: unknown;
   };
 
 const DEFAULTS = Object.freeze({
@@ -498,12 +498,11 @@ export class Rfc64PublicCatalogReceiverV1 {
           kind: 'failed',
           taskRevision: task.revision,
           announcement: providers[0]!.announcement,
-          error: lastError instanceof Error
+          error: lastError !== undefined
             ? lastError
             : new Error(
               'RFC-64 receiver exhausted the per-provider attempt budget before '
               + 'reconciling the latest accepted provider hint',
-              lastError === undefined ? undefined : { cause: lastError },
             ),
         };
       }

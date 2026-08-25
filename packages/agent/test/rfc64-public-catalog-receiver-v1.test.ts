@@ -406,6 +406,24 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(receiver.stats()).toMatchObject({ applied: 0, failed: 1 });
   });
 
+  it('preserves a non-Error reconciliation failure passed to onError', async () => {
+    const failure = { code: 'rate-limited' };
+    const onError = vi.fn();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => {
+        throw failure;
+      }),
+      { maxAttempts: 1, retryBackoffMs: 0, onError },
+    );
+
+    receiver.schedule(announcement(), 'peerA');
+    await receiver.whenIdle();
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0]?.[1]).toBe(failure);
+    expect(receiver.stats()).toMatchObject({ applied: 0, failed: 1 });
+  });
+
   it('retains a same-peer announcement under a rotated accepted policy', async () => {
     const oldPolicy = `0x${'71'.repeat(32)}`;
     const newPolicy = `0x${'72'.repeat(32)}`;
