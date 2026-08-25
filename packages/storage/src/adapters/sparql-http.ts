@@ -549,6 +549,10 @@ export class SparqlHttpStore implements TripleStore {
     const execute = async (update: string, source: string): Promise<void> => {
       await this.postUpdate(update, { ...options, source }, 'replaceGraph');
     };
+    // Advance before dispatch: a timeout/lost response can reject after the
+    // endpoint committed. Consumers must fail open and refresh graph lists in
+    // that indeterminate state, even though this method rethrows.
+    this.writeGen.recordGraphWrites([graphUri]);
     try {
       await execute(plan.update, options?.source ?? 'sparql-http.replaceGraph');
     } catch (error) {
@@ -559,7 +563,6 @@ export class SparqlHttpStore implements TripleStore {
       throw error;
     }
     this.invalidateListGraphsCache();
-    this.writeGen.recordGraphWrites([graphUri]);
   }
 
   async replaceGraphAndSubject(
@@ -590,6 +593,8 @@ export class SparqlHttpStore implements TripleStore {
     const execute = async (update: string, source: string): Promise<void> => {
       await this.postUpdate(update, { ...options, source }, 'replaceGraphAndSubject');
     };
+    // A rejected remote request may already have committed both mutations.
+    this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
     try {
       await execute(plan.update, options?.source ?? 'sparql-http.replaceGraphAndSubject');
     } catch (error) {
@@ -598,7 +603,6 @@ export class SparqlHttpStore implements TripleStore {
       throw error;
     }
     this.invalidateListGraphsCache();
-    this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
   }
 
   async replaceSubject(
@@ -618,6 +622,9 @@ export class SparqlHttpStore implements TripleStore {
       label: 'SparqlHttpStore.replaceSubject',
     });
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
+    // Record the possible write before the request so lost responses cannot
+    // leave generation-backed graph enumeration caches looking current.
+    this.writeGen.recordGraphWrites([graphUri]);
     try {
       await this.postUpdate(
         update,
@@ -634,7 +641,6 @@ export class SparqlHttpStore implements TripleStore {
       throw error;
     }
     this.invalidateListGraphsCache();
-    this.writeGen.recordGraphWrites([graphUri]);
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {

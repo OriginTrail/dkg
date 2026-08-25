@@ -1169,6 +1169,40 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads).toHaveLength(1);
   });
 
+  it('advances write generation when an atomic replace has an indeterminate remote failure', async () => {
+    const failedStore = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl.replace('/update', '/error-update'),
+      atomicUpdates: true,
+    });
+    const graph = 'http://ex.org/possibly-committed';
+    const metaGraph = 'http://ex.org/possibly-committed/meta';
+    const subject = 'http://ex.org/job';
+    const replacement = [{
+      subject,
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph,
+    }];
+    const attempts: Array<() => Promise<void>> = [
+      () => failedStore.replaceGraph(graph, replacement),
+      () => failedStore.replaceGraphAndSubject(
+        graph,
+        replacement,
+        metaGraph,
+        subject,
+        [{ ...replacement[0], graph: metaGraph }],
+      ),
+      () => failedStore.replaceSubject(graph, subject, replacement),
+    ];
+
+    for (const attempt of attempts) {
+      const before = failedStore.getWriteGen('');
+      await expect(attempt()).rejects.toThrow();
+      expect(failedStore.getWriteGen('')).toBeGreaterThan(before);
+    }
+  });
+
   it('deleteByPattern sends DELETE WHERE to update endpoint', async () => {
     insertedQuads.length = 0;
     await store.deleteByPattern({ subject: 'http://ex.org/s', graph: 'http://ex.org/g' });
