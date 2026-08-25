@@ -147,6 +147,11 @@ export interface FinalizationRecoveryMaterializer<
     candidate: ParsedGraphScopedFinalization;
     evidence: VerifiedGraphScopedFinalizationEvidence;
   }): Promise<FinalizationRecoveryReplayMaterializationOutcome>;
+  recoverVerifiedEvidence?(input: {
+    replay: FinalizationRecoveryReplayInput;
+    entry: FinalizationRecoveryEntry;
+    candidate: ParsedGraphScopedFinalization;
+  }): Promise<VerifiedGraphScopedFinalizationEvidence | undefined>;
   invalidateVerified(input: {
     entry: FinalizationRecoveryEntry;
     candidate: ParsedGraphScopedFinalization;
@@ -1786,54 +1791,91 @@ export class FinalizationRecovery<
         );
       }
 
+      let replayEntry = entry;
+      if (
+        replayEntry.state !== 'VERIFIED'
+        && this.materializer.recoverVerifiedEvidence
+      ) {
+        const recoveredEvidence = await this.materializer.recoverVerifiedEvidence({
+          replay: input,
+          entry: replayEntry,
+          candidate,
+        });
+        if (recoveredEvidence) {
+          const recoveredEvidenceMatchesEnvelope = replayEntry.generation > 0
+            ? VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
+                recoveredEvidence,
+                candidate,
+                replayEntry,
+              )
+            : VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
+                recoveredEvidence,
+                candidate,
+                replayEntry,
+              );
+          if (!recoveredEvidenceMatchesEnvelope) {
+            this.log.warn(
+              `Finalization recovery ignored recovered evidence that does not match `
+                + `its envelope for ${replayEntry.ual}`,
+            );
+          } else {
+            replayEntry = await this.recordVerified(replayEntry, recoveredEvidence)
+              ?? replayEntry;
+          }
+        }
+      }
+
       let outcome: FinalizationRecoveryApplyOutcome;
-      if (entry.state === 'VERIFIED' && entry.verifiedEvidence) {
-        const evidence = entry.verifiedEvidence;
-        const evidenceMatchesEnvelope = entry.generation > 0
+      if (replayEntry.state === 'VERIFIED' && replayEntry.verifiedEvidence) {
+        const evidence = replayEntry.verifiedEvidence;
+        const evidenceMatchesEnvelope = replayEntry.generation > 0
           ? VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
               evidence,
               candidate,
-              entry,
+              replayEntry,
             )
           : VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
               evidence,
               candidate,
-              entry,
+              replayEntry,
             );
         if (!evidenceMatchesEnvelope) {
           this.log.warn(
-            `Finalization recovery evidence does not match its envelope for ${entry.ual}`,
+            `Finalization recovery evidence does not match its envelope for ${replayEntry.ual}`,
           );
-          await this.rejectEntry(entry, 'verified evidence does not match immutable envelope');
+          await this.rejectEntry(
+            replayEntry,
+            'verified evidence does not match immutable envelope',
+          );
           return 'none' as const;
         }
         const receiptStatus = await this.verifyPersistedReceipt(
           candidate,
           evidence,
-          entry.generation > 0,
+          replayEntry.generation > 0,
         );
         if (receiptStatus !== 'confirmed') {
           if (receiptStatus === 'reorged') {
             await this.markReorged(
-              entry,
+              replayEntry,
               'persisted receipt disagrees with canonical chain truth',
             );
           } else if (receiptStatus === 'rejected') {
             await this.rejectEntry(
-              entry,
+              replayEntry,
               'persisted transaction failed or contains no finalization event',
             );
           } else if (receiptStatus === 'unsupported') {
-            await this.markUnsupported(entry);
+            await this.markUnsupported(replayEntry);
           } else {
             await this.recordDeferred(
-              entry,
+              replayEntry,
               `persisted receipt is ${receiptStatus}`,
               deferredRetryDelay,
             );
           }
           this.log.info(
-            `Finalization recovery receipt is ${receiptStatus} for ${entry.ual}`,
+            `Finalization recovery receipt is ${receiptStatus} for ${replayEntry.ual}`,
           );
           return deferredRetryDelay !== undefined
             && (receiptStatus === 'pending' || receiptStatus === 'not-found')
@@ -1842,7 +1884,7 @@ export class FinalizationRecovery<
         }
         const replayOutcome = await this.materializer.replayVerified({
           replay: input,
-          entry,
+          entry: replayEntry,
           candidate,
           evidence,
         });
@@ -1866,7 +1908,7 @@ export class FinalizationRecovery<
 
       if (outcome === 'deferred') {
         await this.recordDeferred(
-          entry,
+          replayEntry,
           'replay processing deferred',
           deferredRetryDelay,
         );
@@ -1874,7 +1916,7 @@ export class FinalizationRecovery<
           ? 'none' as const
           : 'retry-pending' as const;
       }
-      const settled = await this.settleEntry(entry, outcome);
+      const settled = await this.settleEntry(replayEntry, outcome);
       return settled ? 'recovered' as const : 'none' as const;
     } catch (error) {
       if (!this.materializer.isRetryableError(error)) throw error;

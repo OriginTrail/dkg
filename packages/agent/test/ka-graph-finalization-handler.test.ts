@@ -3132,6 +3132,70 @@ describe('graph-scoped finalization handler', () => {
     }, createOperationContext('system'))).resolves.toBe('no-swm');
   });
 
+  it('settles a RECEIVED inbox row from exact receipt-backed VM after the workspace head is lost', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-received-vm-settle-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message, vmGraph } = await stageGraph({ accessPolicy: 'ownerOnly' });
+      await seedAuthenticatedLocalControls(message);
+      await handler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      expect(await store.countQuads(vmGraph)).toBe(2);
+
+      await store.deleteByPattern({
+        graph: graphManager.sharedMemoryMetaUri(CG),
+        subject: `${UAL}#dkg-swm-head`,
+      });
+      await expect(resolveKnowledgeAssetWorkspaceHead({
+        store,
+        graphManager,
+        contextGraphId: CG,
+        kaUal: UAL,
+      })).resolves.toBeUndefined();
+
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const recoveryHandler = new FinalizationHandler(
+        store,
+        chain,
+        recoveryOptions(inbox),
+      );
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      expect(await inbox.list()).toMatchObject([{ state: 'RECEIVED' }]);
+
+      await expect(recoveryHandler.handleExactChainReconciledKC(
+        graphReconcileInput(message),
+        createOperationContext('system'),
+      )).resolves.toBe('already-confirmed');
+
+      expect(await store.countQuads(vmGraph)).toBe(2);
+      expect(await inbox.list()).toMatchObject([{
+        state: 'SETTLED',
+        verifiedEvidence: {
+          transactionHash: message.txHash,
+          publisherAddress: PUBLISHER,
+          accessPolicy: 'ownerOnly',
+        },
+      }]);
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('recognizes an exact confirmed VM copy when the mutable workspace head is corrupt', async () => {
     const { message, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);

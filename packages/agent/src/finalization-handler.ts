@@ -492,6 +492,9 @@ export class FinalizationHandler {
     const materializer: FinalizationRecoveryMaterializer<PreparedGraphScopedMaterialization> = {
       prepare: (input) => this.prepareGraphScopedMaterialization(input),
       apply: (input) => this.applyPreparedGraphScopedMaterialization(input),
+      recoverVerifiedEvidence: (input) => (
+        this.recoverVerifiedGraphScopedEvidenceFromConfirmedVm(input)
+      ),
       replayVerified: ({ replay, candidate, evidence }) => this.reconcileGraphScopedKC({
         contextGraphId: replay.contextGraphId,
         ual: replay.ual,
@@ -1503,6 +1506,90 @@ export class FinalizationHandler {
       `Chain-reconcile: exact confirmed VM state survives without a workspace head for ${input.ual}`,
     );
     return 'already-confirmed';
+  }
+
+  /** Recover canonical receipt evidence from an exact, receipt-backed VM assertion. */
+  private async recoverVerifiedGraphScopedEvidenceFromConfirmedVm(input: {
+    replay: {
+      contextGraphId: string;
+      onChainCgId: string;
+      ual: string;
+      merkleRoot: string;
+      kaId: string;
+    };
+    candidate: ParsedGraphScopedFinalization;
+  }): Promise<VerifiedGraphScopedFinalizationEvidence | undefined> {
+    const { replay, candidate } = input;
+    const stored = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(this.store, {
+      contextGraphId: replay.contextGraphId,
+      ual: replay.ual,
+    });
+    if (stored.state !== 'confirmed') return undefined;
+
+    const { envelope } = stored;
+    const messageSubGraphName = candidate.msg.subGraphName || undefined;
+    if (
+      envelope.transactionHash?.toLowerCase() !== candidate.msg.txHash.toLowerCase()
+      || envelope.assertionVersion !== candidate.assertionVersion
+      || envelope.publicTripleCount !== candidate.publicTripleCount
+      || envelope.privateTripleCount !== candidate.privateTripleCount
+      || (envelope.privateMerkleRoot
+        ? ethers.hexlify(envelope.privateMerkleRoot).toLowerCase()
+        : undefined) !== (candidate.privateMerkleRoot
+        ? ethers.hexlify(candidate.privateMerkleRoot).toLowerCase()
+        : undefined)
+      || envelope.batchId !== candidate.batchId
+      || !equalBytes(envelope.merkleRoot, candidate.msg.kcMerkleRoot)
+      || messageSubGraphName !== envelope.subGraphName
+    ) return undefined;
+
+    let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    let kaId: bigint;
+    let onChainContextGraphId: bigint;
+    try {
+      scope = createGraphKnowledgeAssetScope(replay.ual, envelope.assertionVersion);
+      kaId = BigInt(replay.kaId);
+      onChainContextGraphId = BigInt(replay.onChainCgId);
+      if (kaId !== candidate.kaId || onChainContextGraphId <= 0n) return undefined;
+    } catch {
+      return undefined;
+    }
+
+    const verification = await this.verifyExactGraphScopedLayer({
+      contextGraphId: replay.contextGraphId,
+      scope,
+      layer: MemoryLayer.VerifiableMemory,
+      publicTripleCount: envelope.publicTripleCount,
+      ...(envelope.privateMerkleRoot
+        ? { privateMerkleRoot: envelope.privateMerkleRoot }
+        : {}),
+      expectedMerkleRoot: ethers.getBytes(replay.merkleRoot),
+      ...(envelope.subGraphName ? { subGraphName: envelope.subGraphName } : {}),
+    });
+    if (verification.status !== 'verified') return undefined;
+
+    const recovery = await recoverReceiptBackedGraphScopedEvidence({
+      store: this.store,
+      chain: this.chain,
+      contextGraphId: replay.contextGraphId,
+      scope,
+      head: {
+        kaUal: replay.ual,
+        assertionVersion: envelope.assertionVersion,
+        publicQuadsDigest: workspacePublicQuadsDigest(verification.quads),
+        publicTripleCount: envelope.publicTripleCount,
+        ...(envelope.privateMerkleRoot
+          ? { privateMerkleRoot: ethers.hexlify(envelope.privateMerkleRoot) }
+          : {}),
+        privateTripleCount: envelope.privateTripleCount,
+      },
+      merkleRoot: envelope.merkleRoot,
+      publisherAddress: candidate.msg.publisherAddress,
+      kaId,
+      onChainContextGraphId,
+      ...(envelope.subGraphName ? { subGraphName: envelope.subGraphName } : {}),
+    });
+    return recovery.status === 'recovered' ? recovery.evidence : undefined;
   }
 
   /**

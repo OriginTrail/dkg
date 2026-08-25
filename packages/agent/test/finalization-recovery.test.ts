@@ -26,6 +26,7 @@ import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import {
   parseGraphScopedFinalization,
+  type VerifiedGraphScopedFinalizationEvidence,
 } from '../src/finalization-graph-envelope.js';
 import {
   FinalizationRecovery,
@@ -116,6 +117,26 @@ function recoveryMaterializer() {
     replayVerified: async () => 'promoted' as const,
     invalidateVerified: async () => 'invalidated' as const,
     isRetryableError: (error: unknown) => error instanceof StoreSchedulerBusyError,
+  };
+}
+
+function verifiedEvidence(
+  overrides: Partial<VerifiedGraphScopedFinalizationEvidence> = {},
+): VerifiedGraphScopedFinalizationEvidence {
+  return {
+    assertionVersion: '1',
+    publicTripleCount: 1,
+    privateTripleCount: 0,
+    publisherPeerId: '12D3KooWPublisher',
+    publisherAddress: PUBLISHER,
+    transactionHash: message().txHash,
+    blockNumber: 123,
+    blockHash: BLOCK_HASH,
+    txIndex: 4,
+    authorAddress: AUTHOR,
+    accessPolicy: 'public',
+    allowedPeers: [],
+    ...overrides,
   };
 }
 
@@ -802,6 +823,106 @@ describe('graph-scoped finalization recovery admission', () => {
         kaId: PACKED_KA_ID.toString(),
       })).resolves.toBe('recovered');
       expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('settles a RECEIVED entry from independently verified materialized evidence', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recover-vm-evidence-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      const prepare = vi.fn(async () => undefined);
+      const recoverVerifiedEvidence = vi.fn(async () => verifiedEvidence());
+      const replayVerified = vi.fn(async () => 'already-confirmed' as const);
+      const chain = recoveryChain();
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          prepare,
+          recoverVerifiedEvidence,
+          replayVerified,
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await expect(recovery.replayMatching({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('recovered');
+
+      expect(recoverVerifiedEvidence).toHaveBeenCalledOnce();
+      expect(replayVerified).toHaveBeenCalledOnce();
+      expect(prepare).not.toHaveBeenCalled();
+      expect(await store.list()).toMatchObject([{
+        state: 'SETTLED',
+        verifiedEvidence: {
+          transactionHash: message().txHash,
+          publisherAddress: PUBLISHER,
+        },
+      }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a RECEIVED entry when recovered evidence does not match its envelope', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-reject-vm-evidence-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      const prepare = vi.fn(async () => undefined);
+      const replayVerified = vi.fn(async () => 'already-confirmed' as const);
+      const warn = vi.fn();
+      const chain = recoveryChain();
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn },
+        {
+          ...recoveryMaterializer(),
+          prepare,
+          recoverVerifiedEvidence: async () => verifiedEvidence({
+            transactionHash: `0x${'ff'.repeat(32)}`,
+          }),
+          replayVerified,
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await expect(recovery.replayMatching({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('none');
+
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(replayVerified).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(
+        'ignored recovered evidence that does not match its envelope',
+      ));
+      expect(await store.list()).toMatchObject([{ state: 'RECEIVED' }]);
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
