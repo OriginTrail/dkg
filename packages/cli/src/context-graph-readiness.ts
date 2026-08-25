@@ -734,19 +734,23 @@ export async function resetContextGraphReadinessForMissingMetadata(input: {
   agent: DKGAgent;
   store: Partial<ContextGraphReadinessStore>;
   contextGraphId: string;
+  /** Skip the live-positive race check when current metadata is contradictory. */
+  forceReset?: boolean;
 }): Promise<boolean> {
   const contextGraphId = input.contextGraphId.trim();
   if (!contextGraphId) return false;
 
   return withContextGraphReadinessMutationLock(input.agent, contextGraphId, async () => {
-    const locallyCurated = typeof input.agent.isCuratorOf === 'function'
-      ? await input.agent.isCuratorOf(contextGraphId).catch(() => false)
-      : false;
-    const hasConfirmedMeta = await input.agent.hasConfirmedMetaState(
-      contextGraphId,
-      { rejectUnregisteredPlaceholder: !locallyCurated },
-    ).catch(() => false);
-    if (hasConfirmedMeta) return false;
+    if (!input.forceReset) {
+      const locallyCurated = typeof input.agent.isCuratorOf === 'function'
+        ? await input.agent.isCuratorOf(contextGraphId).catch(() => false)
+        : false;
+      const hasConfirmedMeta = await input.agent.hasConfirmedMetaState(
+        contextGraphId,
+        { rejectUnregisteredPlaceholder: !locallyCurated },
+      ).catch(() => false);
+      if (hasConfirmedMeta) return false;
+    }
 
     const patches = missingMetadataReadinessPatches();
     input.agent.markContextGraphSubscriptionState(contextGraphId, patches.statePatch);

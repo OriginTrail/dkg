@@ -1094,6 +1094,25 @@ export async function bootstrapConfiguredContextGraphs(input: {
     const existing = input.agent.getSubscribedContextGraphs().get(contextGraphId);
     input.agent.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
 
+    let chainMetadataConflict = false;
+    try {
+      const repair = await input.agent.repairActivePublicContextGraphMetadata(contextGraphId);
+      chainMetadataConflict = repair.conflictingPolicy;
+      if (repair.repaired) {
+        input.log(
+          `Repaired chain-attested public metadata for configured context graph: ${contextGraphId} (${repair.insertedTriples} triples)`,
+        );
+      } else if (repair.conflictingPolicy) {
+        input.log(
+          `Context graph "${contextGraphId}" has public on-chain policy but conflicting root metadata — leaving it pending`,
+        );
+      }
+    } catch (err) {
+      input.log(
+        `Context graph "${contextGraphId}" public metadata repair failed: ${err instanceof Error ? err.message : String(err)} — continuing fail-closed`,
+      );
+    }
+
     let hasAuthoritativeMetadata = false;
     let locallyCurated = false;
     if (existing?.metaSynced === true) {
@@ -1106,7 +1125,7 @@ export async function bootstrapConfiguredContextGraphs(input: {
       }
     }
 
-    if (existing?.metaSynced === true) {
+    if (existing?.metaSynced === true && !chainMetadataConflict) {
       try {
         // Explicit local ownership is the only safe exception to rejecting an
         // unregistered placeholder. createContextGraph() stamps ownership;
@@ -1132,6 +1151,7 @@ export async function bootstrapConfiguredContextGraphs(input: {
         agent: input.agent,
         store: input.readinessStore ?? {},
         contextGraphId,
+        forceReset: chainMetadataConflict,
       });
       // PROJECT_SYNCED persistence shares the same readiness lock and may
       // have proved this graph while bootstrap was working from `existing`.

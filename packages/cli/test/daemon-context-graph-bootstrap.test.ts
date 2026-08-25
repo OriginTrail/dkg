@@ -48,6 +48,12 @@ function createAgent(
       subscriptions.set(contextGraphId, { ...existing, ...patch });
     },
   );
+  const repairActivePublicContextGraphMetadata = vi.fn(async () => ({
+    chainAttested: false,
+    repaired: false,
+    insertedTriples: 0,
+    conflictingPolicy: false,
+  }));
 
   return {
     agent: {
@@ -58,12 +64,14 @@ function createAgent(
         confirmedMeta[contextGraphId] ?? Boolean(creators[contextGraphId])),
       getSubscribedContextGraphs: () => subscriptions,
       subscribeToContextGraph,
+      repairActivePublicContextGraphMetadata,
       markContextGraphSubscriptionState,
       store,
     } as unknown as DKGAgent,
     ensureContextGraphLocal,
     markContextGraphSubscriptionState,
     subscribeToContextGraph,
+    repairActivePublicContextGraphMetadata,
     subscriptions,
     store,
   };
@@ -199,6 +207,84 @@ describe('configured context graph daemon bootstrap', () => {
       synced: true,
       sharedMemorySynced: true,
       metaSynced: true,
+    });
+  });
+
+  it('repairs chain-attested public metadata before accepting a legacy configured graph', async () => {
+    const contextGraphId = '0x1234567890123456789012345678901234567890/legacy-public';
+    const fixture = createAgent(
+      {
+        [contextGraphId]: {
+          subscribed: true,
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+        },
+      },
+      {},
+      createStore(),
+      { [contextGraphId]: true },
+    );
+    fixture.repairActivePublicContextGraphMetadata.mockResolvedValue({
+      chainAttested: true,
+      repaired: true,
+      insertedTriples: 2,
+      conflictingPolicy: false,
+    });
+    const log = vi.fn();
+
+    await bootstrapConfiguredContextGraphs({
+      agent: fixture.agent,
+      configuredContextGraphIds: [contextGraphId],
+      networkDefaultContextGraphIds: [],
+      log,
+    });
+
+    expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledWith(contextGraphId);
+    expect(log).toHaveBeenCalledWith(
+      `Repaired chain-attested public metadata for configured context graph: ${contextGraphId} (2 triples)`,
+    );
+    expect(log).toHaveBeenCalledWith(
+      `Subscribed to configured context graph: ${contextGraphId} (metadata already confirmed)`,
+    );
+    expect(fixture.markContextGraphSubscriptionState).not.toHaveBeenCalled();
+  });
+
+  it('leaves a chain/root policy conflict pending without overwriting it', async () => {
+    const contextGraphId = '0x1234567890123456789012345678901234567890/policy-conflict';
+    const fixture = createAgent(
+      {
+        [contextGraphId]: {
+          subscribed: true,
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+        },
+      },
+      {},
+      createStore(),
+      { [contextGraphId]: true },
+    );
+    fixture.repairActivePublicContextGraphMetadata.mockResolvedValue({
+      chainAttested: true,
+      repaired: false,
+      insertedTriples: 0,
+      conflictingPolicy: true,
+    });
+
+    await bootstrapConfiguredContextGraphs({
+      agent: fixture.agent,
+      configuredContextGraphIds: [contextGraphId],
+      networkDefaultContextGraphIds: [],
+      log: vi.fn(),
+    });
+
+    expect(fixture.agent.hasConfirmedMetaState).not.toHaveBeenCalled();
+    expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
     });
   });
 

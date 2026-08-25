@@ -31,6 +31,8 @@ export default defineConfig({
       "test/query-source-labels.test.ts",
       "test/query-source-coverage.test.ts",
       "test/context-graph-on-chain-id-source-labels.test.ts",
+      "test/context-graph-public-meta-repair.test.ts",
+      "test/context-graph-public-meta-repair-http.test.ts",
       "test/confirmed-meta-source-labels.test.ts",
       "test/sync-envelope-cursor.test.ts",
       "test/w2-ual-parity.test.ts",

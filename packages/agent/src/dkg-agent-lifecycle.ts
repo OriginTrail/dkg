@@ -166,7 +166,11 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePrivateMetaAskQuery } from './context-graph-private-meta-proof.js';
 import { buildAuthoritativePublicMetaAskQuery } from './context-graph-public-meta-proof.js';
-import { repairCreatorPublicMetaProjections } from './context-graph-public-meta-repair.js';
+import {
+  repairChainAttestedPublicMetaProjection,
+  repairCreatorPublicMetaProjections,
+  type ChainAttestedPublicMetaRepairResult,
+} from './context-graph-public-meta-repair.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -9631,6 +9635,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         `; tore down ${activeUserIds.length} active in-memory subscription(s); system context graphs preserved`,
     );
     return cleared;
+  }
+
+  /**
+   * Repair the canonical public root metadata for a configured legacy graph.
+   * The existing on-chain resolver proves current-network name binding,
+   * liveness, and public access policy before the store can be changed.
+   */
+  async repairActivePublicContextGraphMetadata(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<ChainAttestedPublicMetaRepairResult> {
+    return repairChainAttestedPublicMetaProjection(
+      this.store,
+      contextGraphId,
+      () => this.isContextGraphPublicOnChain(
+        contextGraphId,
+        createOperationContext('init'),
+      ),
+    );
   }
 
   async hasConfirmedMetaState(this: DKGAgent,
