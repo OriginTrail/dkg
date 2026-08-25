@@ -72,8 +72,8 @@ export function buildVitestJunitInvocation(argv) {
 
   const packageDirectory = repositoryPath(lane.packageDir, 'lane packageDir');
   const packageJson = JSON.parse(fs.readFileSync(path.join(packageDirectory, 'package.json'), 'utf8'));
-  if (typeof packageJson.scripts?.['test:ci'] !== 'string') {
-    throw new Error(`${lane.packageDir}/package.json must define the package-owned test:ci contract`);
+  if (typeof packageJson.scripts?.test !== 'string') {
+    throw new Error(`${lane.packageDir}/package.json must define the package-owned test contract`);
   }
 
   const output = lane.output.replaceAll('{shard}', shard ?? '');
@@ -90,7 +90,7 @@ export function buildVitestJunitInvocation(argv) {
     args: [
       '--dir',
       packageDirectory,
-      'test:ci',
+      'test',
       ...testArguments,
       '--reporter=default',
       '--reporter=junit',

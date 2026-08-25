@@ -83,7 +83,6 @@
     "benchmark:sync-worker": "node scripts/sync-worker-benchmark.cjs",
     "benchmark:sync-worker-responsiveness": "node scripts/sync-worker-responsiveness-benchmark.cjs",
     "test": "vitest run",
-    "test:ci": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:rfc64-m0-recovery:unit": "node --test scripts/run-rfc64-m0-recovery-scenario.test.mjs",
     "test:types": "tsc --project tsconfig.type-tests.json",

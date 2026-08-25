@@ -14,8 +14,6 @@ on:
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - '.nvmrc'
-      - 'scripts/ci/node-coverage-packages.json'
-      - 'scripts/ci/run-node-coverage-ratchets.mjs'
       - '.github/workflows/node-coverage.yml'
   schedule:
     - cron: '23 2 * * *'
@@ -59,17 +57,25 @@ jobs:
             node-coverage-${{ runner.os }}-
             turbo-${{ runner.os }}-
       - name: Run hermetic coverage ratchets
-        id: coverage
         env:
           NODE_OPTIONS: --max-old-space-size=4096
         run: >-
-          node scripts/ci/run-node-coverage-ratchets.mjs
-          --github-output "${GITHUB_OUTPUT}"
+          pnpm exec turbo test:coverage
+          --filter='@origintrail-official/dkg-query'
+          --filter='@origintrail-official/dkg-okf'
+          --filter='@origintrail-official/dkg-node-ui'
+          --filter='@origintrail-official/dkg-network-sim'
+          --concurrency=1
+          --continue=always
       - name: Upload coverage reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: node-coverage-${{ github.run_id }}
-          path: ${{ steps.coverage.outputs.report_paths }}
+          path: |
+            packages/query/coverage/
+            packages/okf/coverage/
+            packages/node-ui/coverage/
+            packages/network-sim/coverage/
           retention-days: 14
           if-no-files-found: warn

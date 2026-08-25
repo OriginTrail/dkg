@@ -6,14 +6,11 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import {
+  baselineFromDiagnostics,
   compareOxlintBaseline,
   executeOxlint,
   runOxlintBaseline,
 } from '../../ci/check-oxlint-baseline.mjs';
-import {
-  buildNodeCoverageInvocation,
-  loadNodeCoverageManifest,
-} from '../../ci/run-node-coverage-ratchets.mjs';
 import {
   buildVitestJunitInvocation,
   loadVitestJunitLanes,
@@ -24,12 +21,12 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const readRepositoryFile = (filePath) => fs.readFileSync(path.join(REPO_ROOT, filePath), 'utf8');
 const parseRepositoryYaml = (filePath) => parseYaml(readRepositoryFile(filePath));
 
-test('shared Vitest runner uses explicit package-owned CI lanes', () => {
+test('shared Vitest runner uses package-owned test contracts', () => {
   const invocation = buildVitestJunitInvocation([
     '--lane', 'chain', '--shard', '2', '--', 'test/example.test.ts',
   ]);
   assert.deepEqual(invocation.args.slice(2), [
-    'test:ci',
+    'test',
     'test/example.test.ts',
     '--reporter=default',
     '--reporter=junit',
@@ -48,7 +45,8 @@ test('shared Vitest runner uses explicit package-owned CI lanes', () => {
 
   for (const lane of Object.values(loadVitestJunitLanes())) {
     const packageJson = JSON.parse(readRepositoryFile(`${lane.packageDir}/package.json`));
-    assert.equal(typeof packageJson.scripts['test:ci'], 'string');
+    assert.equal(typeof packageJson.scripts.test, 'string');
+    assert.equal(packageJson.scripts['test:ci'], undefined);
   }
 });
 
@@ -125,34 +123,37 @@ test('shared JUnit runner creates reports and propagates child failures', (t) =>
   }), 2);
 });
 
-test('coverage workflow derives filters and reports from one package manifest', () => {
-  const manifest = loadNodeCoverageManifest();
-  const invocation = buildNodeCoverageInvocation(manifest);
-  assert.equal(invocation.args.includes(`--concurrency=${manifest.maxConcurrency}`), true);
-  assert.deepEqual(
-    invocation.args.filter((argument) => argument.startsWith('--filter=')),
-    manifest.packages.map((entry) => `--filter=${entry.name}`),
-  );
-  assert.deepEqual(
-    invocation.reportPaths,
-    manifest.packages.map((entry) => `${entry.path}/coverage/`),
-  );
-
+test('coverage workflow keeps the four fixed ratchets direct and CI-gating', () => {
+  const packages = [
+    { name: '@origintrail-official/dkg-query', path: 'packages/query' },
+    { name: '@origintrail-official/dkg-okf', path: 'packages/okf' },
+    { name: '@origintrail-official/dkg-node-ui', path: 'packages/node-ui' },
+    { name: '@origintrail-official/dkg-network-sim', path: 'packages/network-sim' },
+  ];
   const workflow = parseRepositoryYaml('.github/workflows/node-coverage.yml');
   const pullRequestPaths = new Set(workflow.on.pull_request.paths);
-  for (const entry of manifest.packages) {
+  for (const entry of packages) {
     assert.equal(pullRequestPaths.has(`${entry.path}/**`), true, `${entry.path} must trigger coverage`);
   }
-  assert.equal(pullRequestPaths.has('scripts/ci/node-coverage-packages.json'), true);
-  assert.equal(pullRequestPaths.has('scripts/ci/run-node-coverage-ratchets.mjs'), true);
 
   const coverageJob = workflow.jobs['node-coverage'];
-  const runStep = coverageJob.steps.find((step) => step?.id === 'coverage');
-  assert.match(runStep.run, /node scripts\/ci\/run-node-coverage-ratchets\.mjs/);
-  assert.match(runStep.run, /--github-output "\$\{GITHUB_OUTPUT\}"/);
+  const runStep = coverageJob.steps.find((step) => step?.name === 'Run hermetic coverage ratchets');
+  assert.match(runStep.run, /^pnpm exec turbo test:coverage/);
+  assert.deepEqual(
+    [...runStep.run.matchAll(/--filter='([^']+)'/g)].map((match) => match[1]),
+    packages.map((entry) => entry.name),
+  );
+  assert.match(runStep.run, /--concurrency=1/);
+  assert.match(runStep.run, /--continue=always/);
+  assert.equal(runStep['continue-on-error'], undefined, 'Turbo threshold failures must gate the job');
+  assert.doesNotMatch(runStep.run, /\|\|\s*true/);
+
   const uploadStep = coverageJob.steps.find((step) => step?.uses?.startsWith('actions/upload-artifact@'));
   assert.equal(uploadStep.if, 'always()');
-  assert.equal(uploadStep.with.path, '${{ steps.coverage.outputs.report_paths }}');
+  assert.deepEqual(
+    uploadStep.with.path.split('\n').map((entry) => entry.trim()).filter(Boolean),
+    packages.map((entry) => `${entry.path}/coverage/`),
+  );
   assert.equal(uploadStep.with['retention-days'], 14);
 
   const turbo = JSON.parse(readRepositoryFile('turbo.json'));
@@ -165,7 +166,7 @@ test('coverage workflow derives filters and reports from one package manifest', 
 test('Oxlint baseline is scoped by rule/path and fails closed on runner errors', () => {
   const baseline = {
     version: 1,
-    entries: [{ rule: 'eslint(no-unused-vars)', path: 'packages/a/src/a.ts', count: 1 }],
+    rules: { 'eslint(no-unused-vars)': { 'packages/a/src/a.ts': 1 } },
   };
   const known = {
     code: 'eslint(no-unused-vars)',
@@ -189,6 +190,24 @@ test('Oxlint baseline is scoped by rule/path and fails closed on runner errors',
     current: 1,
     allowed: 0,
   });
+  const generated = baselineFromDiagnostics([
+    known,
+    known,
+    { ...known, code: 'unicorn(prefer-string-starts-ends-with)', filename: 'packages/b.ts' },
+  ]);
+  assert.deepEqual(generated.rules, {
+    'eslint(no-unused-vars)': { 'packages/a/src/a.ts': 2 },
+    'unicorn(prefer-string-starts-ends-with)': { 'packages/b.ts': 1 },
+  });
+  const roundTripped = JSON.parse(JSON.stringify(generated));
+  assert.equal(compareOxlintBaseline({
+    diagnostics: [known, known, {
+      ...known,
+      code: 'unicorn(prefer-string-starts-ends-with)',
+      filename: 'packages/b.ts',
+    }],
+    baseline: roundTripped,
+  }).ok, true, 'deterministic nested baseline must survive JSON round-trip');
   assert.equal(runOxlintBaseline([], {
     spawnProcess: () => ({
       status: 0,

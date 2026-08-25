@@ -25,13 +25,27 @@ function countsFromDiagnostics(diagnostics) {
 }
 
 function countsFromBaseline(baseline) {
-  if (baseline?.version !== 1 || !Array.isArray(baseline.entries)) {
-    throw new Error('Oxlint baseline must use version 1 with an entries array');
+  if (
+    baseline?.version !== 1
+    || !baseline.rules
+    || typeof baseline.rules !== 'object'
+    || Array.isArray(baseline.rules)
+  ) {
+    throw new Error('Oxlint baseline must use version 1 with a rules mapping');
   }
-  return new Map(baseline.entries.map((entry) => [
-    `${entry.rule}\0${entry.path}`,
-    entry.count,
-  ]));
+  const counts = new Map();
+  for (const [rule, paths] of Object.entries(baseline.rules)) {
+    if (!rule || !paths || typeof paths !== 'object' || Array.isArray(paths)) {
+      throw new Error('every Oxlint baseline rule must map repository paths to counts');
+    }
+    for (const [filePath, count] of Object.entries(paths)) {
+      if (!filePath || !Number.isInteger(count) || count < 1) {
+        throw new Error(`${rule} has an invalid baseline count for ${filePath || '<empty path>'}`);
+      }
+      counts.set(`${rule}\0${filePath}`, count);
+    }
+  }
+  return counts;
 }
 
 export function compareOxlintBaseline({ diagnostics, baseline }) {
@@ -83,15 +97,18 @@ export function executeOxlint(spawnProcess = spawnSync) {
   return report.diagnostics;
 }
 
-function baselineFromDiagnostics(diagnostics) {
+export function baselineFromDiagnostics(diagnostics) {
   const counts = countsFromDiagnostics(diagnostics);
+  const rules = {};
+  for (const [key, count] of [...counts.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    const [rule, filePath] = key.split('\0');
+    rules[rule] ??= {};
+    rules[rule][filePath] = count;
+  }
   return {
     version: 1,
     description: 'Known Oxlint correctness warnings, scoped by rule and repository path.',
-    entries: [...counts.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([key, count]) => {
-      const [rule, filePath] = key.split('\0');
-      return { rule, path: filePath, count };
-    }),
+    rules,
   };
 }
 
