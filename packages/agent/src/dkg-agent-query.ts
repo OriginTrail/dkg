@@ -837,7 +837,7 @@ export class QueryMethods extends DKGAgentBase {
         if (match?.[1]) privateContextGraphIds.add(match[1]);
       }
     }
-    for (const { policyEnvelope } of this.config.rfc64CatalogBootstrap?.acceptedPolicies ?? []) {
+    for (const { policyEnvelope } of this.config?.rfc64CatalogBootstrap?.acceptedPolicies ?? []) {
       if (policyEnvelope.payload.accessPolicy === 1) {
         privateContextGraphIds.add(policyEnvelope.payload.contextGraphId);
       }

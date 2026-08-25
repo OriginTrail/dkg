@@ -8,6 +8,7 @@ import {
   MemoryLayer,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
+  computeAuthorCatalogScopeDigestV1,
   computeContextGraphPolicyObjectDigestV1,
   contextGraphLayerUri,
   contextGraphMetaUri,
@@ -192,6 +193,7 @@ async function execute(): Promise<void> {
     if (publication === null) throw new Error('private successor publication is missing');
     const announcement = record(publication.announcement, 'private successor announcement');
     exact(announcement.policyDigest, POLICY_DIGEST, 'private announcement policy digest');
+    const headDigest = requiredDigest(publication.headObjectDigest, 'private head digest');
 
     const denied = output(await author.request(
       'announce',
@@ -202,6 +204,28 @@ async function execute(): Promise<void> {
     exactJson(denied.announcedPeers, [], 'unbound announcement accepted peers');
     exact(array(denied.failedPeers, 'unbound announcement failed peers').length, 1,
       'unbound announcement failure count');
+    await receiver.request(
+      'awaitReceiverIdle',
+      'private-unbound-receiver-idle',
+      'receiver-idle',
+    );
+    const deniedAppliedHead = await receiver.request(
+      'appliedHeadReadback',
+      'private-unbound-applied-head',
+      'operation-completed',
+      {
+        catalogScopeDigest: computeAuthorCatalogScopeDigestV1(catalogScope()),
+        authorAddress: AUTHOR,
+      },
+    );
+    exact(deniedAppliedHead.output, null, 'unbound receiver applied head');
+    const deniedSynchronization = await receiver.request(
+      'exactInventoryReadback',
+      'private-unbound-inventory',
+      'operation-completed',
+      { catalogHeadDigest: headDigest },
+    );
+    exact(deniedSynchronization.output, null, 'unbound receiver synchronization evidence');
 
     await Promise.all([
       bindPeer(author, receiverPeerId, RECEIVER, 'author-bind-receiver'),
@@ -217,7 +241,6 @@ async function execute(): Promise<void> {
     exactJson(delivery.failedPeers, [], 'authorized announcement failures');
     await receiver.request('awaitReceiverIdle', 'private-receiver-idle', 'receiver-idle');
 
-    const headDigest = requiredDigest(publication.headObjectDigest, 'private head digest');
     const terminalFailure = await receiver.request(
       'terminalFailureReadback',
       'private-terminal-failure',
