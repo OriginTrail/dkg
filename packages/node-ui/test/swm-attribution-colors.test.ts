@@ -94,13 +94,14 @@ describe('buildAgentColorMap (GH#1128)', () => {
     expect(b).toEqual(a);
   });
 
-  it('adding a ninth agent still leaves every agent distinctly coloured', () => {
+  it('adding a ninth agent still uses every palette slot and keeps the colliding agents distinct', () => {
     const eight = COLLIDING.concat(
       Array.from({ length: 3 }, (_, i) => `did:dkg:agent:0x${i.toString(16).padStart(40, 'f')}`),
     );
     const after = buildAgentColorMap(eight.concat('did:dkg:agent:0x' + 'e'.repeat(40)));
-    // All 8 slots still in use, and the originally-colliding five still apart —
-    // colours may have permuted, but nothing collapsed.
+    // Nine agents over eight slots MUST reuse one, so "every agent distinct"
+    // is not achievable and the name no longer claims it. What must hold: all
+    // eight slots stay in use, and the originally-colliding five stay apart.
     expect(new Set(after.values()).size).toBe(8);
     expect(new Set(COLLIDING.map((a) => after.get(a))).size).toBe(COLLIDING.length);
   });
