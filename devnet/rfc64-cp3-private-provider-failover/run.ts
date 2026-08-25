@@ -256,7 +256,7 @@ async function execute(): Promise<void> {
       'synchronizeCatalogProviders',
       'receiver-provider-failover',
       'operation-completed',
-      { remotePeerIds: [providerAPeerId, providerBPeerId], scope: catalogScope() },
+      { remotePeerIds: [providerAPeerId, providerBPeerId], scope: currentHeadScope() },
     );
     await delay(PROVIDER_A_KILL_DELAY_MS);
     const providerAExit = await registry.terminateAndWait(providerA.tracked, 'SIGKILL');
@@ -473,6 +473,16 @@ function catalogScope(): AuthorCatalogScopeV1 {
     authorAddress: AUTHOR,
     era: ZERO_U64,
     bucketCount: '1' as DecimalU64V1,
+  });
+}
+
+function currentHeadScope(): Record<string, unknown> {
+  return Object.freeze({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    subGraphName: null,
+    authorAddress: AUTHOR,
+    catalogEra: ZERO_U64,
   });
 }
 
