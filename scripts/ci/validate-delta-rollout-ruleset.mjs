@@ -46,10 +46,10 @@ function validateRulesetDetail({ branch, repository, rulesetId, ruleset }) {
   if (!Array.isArray(includes) || !includes.includes(`refs/heads/${branch}`)) {
     errors.push(`ruleset ${rulesetId} exact branch binding`);
   }
-  if (Array.isArray(ruleset.bypass_actors) && ruleset.bypass_actors.length > 0) {
+  if (!Array.isArray(ruleset.bypass_actors)) {
+    errors.push(`ruleset ${rulesetId} authoritative bypass configuration`);
+  } else if (ruleset.bypass_actors.length > 0) {
     errors.push(`ruleset ${rulesetId} no bypass actors`);
-  } else if (ruleset.bypass_actors != null && !Array.isArray(ruleset.bypass_actors)) {
-    errors.push(`ruleset ${rulesetId} bypass configuration`);
   }
   return errors;
 }

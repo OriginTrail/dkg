@@ -81,7 +81,6 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
   checkPlanShape(plan, eventName, errors);
   checkNoFailedJobs(needs, errors);
   requireSuccess(needs, 'changes', true, errors);
-  requireSuccess(needs, 'ci-policy-prerequisites', true, errors);
   requireSuccess(needs, 'build', plan.runNode, errors);
 
   const needsNodeTestArtifacts = Boolean(

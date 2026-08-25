@@ -67,15 +67,13 @@ file names cannot alter the decision. Its routing table lives in
   validator parses every trusted checkout and rejects missing, extra, or
   malformed sparse-checkout entries; there is no second text-rewrite model.
   File ordering is not part of the security contract.
-- Ruleset enforcement also uses the two-phase controller rollout. The first
-  PR lands the inspector, its policy model, and the aggregate-gate requirement
-  inside `CONTROLLER_POLICY_FILES`, while the runtime workflow remains pinned
-  to the previous protected controller and does not advertise the prerequisite
-  as enforced. After that PR lands, a follow-up pins every trusted checkout to
-  its protected merge commit, adds an unconditional `ci-policy-prerequisites`
-  job that runs `trusted-ci/scripts/ci/inspect-ci-policy.mjs`, and adds that job
-  to `ci-gate.needs`. The newly pinned `ci-results.mjs` then requires the job by
-  name and requires a successful result. Partial wiring is rejected.
+- Ruleset and controller-tree inspection is a scheduled protected-branch
+  report, not a merge prerequisite. A pull-request workflow controls its own
+  execution envelope and cannot safely attest that it ran a validator; the
+  read-only token may also hide ruleset bypass actors. The report therefore
+  warns on missing or non-authoritative metadata, and no candidate-controlled
+  job is presented as a fail-closed policy gate. A future merge prerequisite
+  requires an independently protected check or attestation mechanism.
 - The merge queue tests every Node/EVM lane and the sharded Solidity suite
   against the exact combined commit before it lands. Protected-branch Solidity
   coverage remains the post-merge safety net.

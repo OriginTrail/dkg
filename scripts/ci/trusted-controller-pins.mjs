@@ -3,7 +3,7 @@ import { TESTNET_CANARY_ROLLOUT_POLICY } from './validate-delta-rollout-ruleset.
 
 const CHECKOUT_PATTERN = /^actions\/checkout@[0-9a-f]{40}$/;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
-const TRUSTED_SCRIPT_PATTERN = /\btrusted-ci\/scripts\/ci\/(plan-ci|assert-ci-results|inspect-ci-policy)\.mjs\b/g;
+const TRUSTED_SCRIPT_PATTERN = /\btrusted-ci\/scripts\/ci\/(plan-ci|assert-ci-results)\.mjs\b/g;
 
 // This is the controller's module boundary. Workflow sparse checkouts and the
 // scheduled freshness comparison are both validated against this exact list;
@@ -11,9 +11,6 @@ const TRUSTED_SCRIPT_PATTERN = /\btrusted-ci\/scripts\/ci\/(plan-ci|assert-ci-re
 export const CONTROLLER_POLICY_FILES = Object.freeze([
   'scripts/ci/plan-ci.mjs',
   'scripts/ci/assert-ci-results.mjs',
-  'scripts/ci/inspect-ci-policy.mjs',
-  'scripts/ci/trusted-controller-pins.mjs',
-  'scripts/ci/validate-delta-rollout-ruleset.mjs',
   'scripts/lib/ci-delta.mjs',
   'scripts/lib/ci-results.mjs',
 ]);
@@ -134,46 +131,5 @@ export function validateTrustedControllerPins(
   if (refs.size !== 1) {
     throw new Error(`trusted CI controller checkouts use ${refs.size} different refs`);
   }
-  const rolloutPhase = validatePolicyGateWiring(workflows);
-  return { ref: allCheckouts[0].ref, checkouts: allCheckouts, rolloutPhase };
-}
-
-export function validatePolicyGateWiring(workflows) {
-  const candidates = workflows.map((workflowFile) => ({
-    sourceName: workflowFile.sourceName,
-    workflow: parseYaml(workflowFile.source),
-  })).filter(({ workflow }) => workflow?.jobs?.['ci-gate']);
-  if (candidates.length !== 1) {
-    throw new Error(`expected one primary workflow with ci-gate, found ${candidates.length}`);
-  }
-
-  const [{ sourceName, workflow }] = candidates;
-  const prerequisite = workflow.jobs['ci-policy-prerequisites'];
-  const gateNeeds = Array.isArray(workflow.jobs['ci-gate'].needs)
-    ? workflow.jobs['ci-gate'].needs
-    : [workflow.jobs['ci-gate'].needs].filter(Boolean);
-  const gateRequiresPrerequisite = gateNeeds.includes('ci-policy-prerequisites');
-
-  // Controller-policy changes deliberately land before their pin rotates.
-  // During that preparation phase, neither half of the runtime wiring may be
-  // present: the old pinned aggregate does not yet know the new prerequisite.
-  if (!prerequisite && !gateRequiresPrerequisite) return 'prepared';
-  if (!prerequisite) {
-    throw new Error(`${sourceName}: ci-gate requires a missing ci-policy-prerequisites job`);
-  }
-  if (!gateRequiresPrerequisite) {
-    throw new Error(`${sourceName}: ci-gate must require ci-policy-prerequisites`);
-  }
-  if (!prerequisite || prerequisite.if !== undefined) {
-    throw new Error(`${sourceName}: ci-policy-prerequisites must run unconditionally`);
-  }
-  const inspectorSteps = (prerequisite.steps ?? []).filter((step) => (
-    typeof step?.run === 'string'
-    && /\bnode trusted-ci\/scripts\/ci\/inspect-ci-policy\.mjs\b/.test(step.run)
-    && /--mode\s+enforce\b/.test(step.run)
-  ));
-  if (inspectorSteps.length !== 1) {
-    throw new Error(`${sourceName}: ci-policy-prerequisites must run the trusted enforcing inspector once`);
-  }
-  return 'enforced';
+  return { ref: allCheckouts[0].ref, checkouts: allCheckouts };
 }

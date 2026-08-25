@@ -93,9 +93,6 @@ jobs:
           sparse-checkout: |
             scripts/ci/plan-ci.mjs
             scripts/ci/assert-ci-results.mjs
-            scripts/ci/inspect-ci-policy.mjs
-            scripts/ci/trusted-controller-pins.mjs
-            scripts/ci/validate-delta-rollout-ruleset.mjs
             scripts/lib/ci-delta.mjs
             scripts/lib/ci-results.mjs
           sparse-checkout-cone-mode: false
@@ -1442,9 +1439,6 @@ jobs:
           sparse-checkout: |
             scripts/ci/plan-ci.mjs
             scripts/ci/assert-ci-results.mjs
-            scripts/ci/inspect-ci-policy.mjs
-            scripts/ci/trusted-controller-pins.mjs
-            scripts/ci/validate-delta-rollout-ruleset.mjs
             scripts/lib/ci-delta.mjs
             scripts/lib/ci-results.mjs
           sparse-checkout-cone-mode: false

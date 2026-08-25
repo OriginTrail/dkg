@@ -78,18 +78,12 @@ function emptySnapshot(policy = TESTNET_CANARY_ROLLOUT_POLICY) {
   };
 }
 
-function prerequisitesPass(snapshot) {
+function policyChecksPass(snapshot) {
   return snapshot.checks?.provenance?.status === 'pass'
     && snapshot.checks?.rollout?.status === 'pass';
 }
 
-export function ciPolicyModeExitCode(snapshot, mode) {
-  if (mode === 'report') return 0;
-  if (mode !== 'enforce') throw new Error(`unknown inspection mode: ${mode}`);
-  return prerequisitesPass(snapshot) ? 0 : 1;
-}
-
-export async function inspectCiPolicyPrerequisites({
+export async function inspectCiPolicyProtections({
   workflows,
   token,
   requestJson = githubRequest,
@@ -104,7 +98,6 @@ export async function inspectCiPolicyPrerequisites({
       pin: controllerModel.ref,
       protectedBranches: controllerBranches,
       freshnessBranch: controllerFreshnessBranch,
-      rolloutPhase: controllerModel.rolloutPhase,
     };
     const comparisons = await Promise.all(controllerBranches.map(async (protectedBranch) => {
       const compare = await requestJson(
@@ -148,18 +141,18 @@ export async function inspectCiPolicyPrerequisites({
 }
 
 export async function inspectCiPolicyFreshness({
-  prerequisites,
+  inspection,
   token,
   requestJson = githubRequest,
 }) {
-  const snapshot = structuredClone(prerequisites);
+  const snapshot = structuredClone(inspection);
   const { repository } = snapshot.policy ?? {};
   const { pin, freshnessBranch } = snapshot.controller ?? {};
   if (typeof repository !== 'string' || typeof pin !== 'string' || !pin || !freshnessBranch) {
     snapshot.checks.freshness = checkResult(
       'error',
       null,
-      'prerequisite inspection did not produce controller metadata',
+      'policy inspection did not produce controller metadata',
     );
     return snapshot;
   }
@@ -198,7 +191,6 @@ export function parseCiPolicyArguments(argv) {
   const { values: options } = parseArgs({
     args: argv,
     options: {
-      mode: { type: 'string' },
       workflow: { type: 'string', multiple: true, default: [] },
       output: { type: 'string' },
       summary: { type: 'string' },
@@ -206,12 +198,7 @@ export function parseCiPolicyArguments(argv) {
     strict: true,
     allowPositionals: false,
   });
-  if (!['enforce', 'report'].includes(options.mode) || options.workflow.length === 0) {
-    throw new Error('mode and at least one workflow are required');
-  }
-  if (options.summary && options.mode !== 'report') {
-    throw new Error('--summary is available only in report mode');
-  }
+  if (options.workflow.length === 0) throw new Error('at least one workflow is required');
   const { workflow: workflows, ...singleValueOptions } = options;
   return { ...singleValueOptions, workflows };
 }
@@ -261,7 +248,7 @@ export function renderCiPolicyReport(snapshot) {
     safeguardsPinned = 'active ruleset';
     safeguardsStatus = '✓ current';
   } else if (rollout.status === 'fail') {
-    safeguardsStatus = '⚠ prerequisites missing';
+    safeguardsStatus = '⚠ safeguards missing';
     warnings.push(`${policy.label} missing: ${rollout.details.missing.join(', ')}`);
   } else if (rollout.status === 'error') {
     warnings.push(`${policy.label} inspection failed: ${rollout.error}`);
@@ -290,7 +277,7 @@ function writePolicySummary(filePath, snapshot) {
   }
 }
 
-function prerequisiteFailureSummary(snapshot) {
+function policyFailureSummary(snapshot) {
   return ['provenance', 'rollout'].flatMap((name) => {
     const result = snapshot.checks[name];
     if (result.status === 'pass') return [];
@@ -317,22 +304,20 @@ export async function runCiPolicyInspector(argv, { token = process.env.GH_TOKEN,
       snapshot.checks.provenance = checkResult('error', null, 'GH_TOKEN is required');
       snapshot.checks.rollout = checkResult('error', null, 'GH_TOKEN is required');
     } else {
-      snapshot = await inspectCiPolicyPrerequisites({ workflows, token, requestJson });
+      snapshot = await inspectCiPolicyProtections({ workflows, token, requestJson });
     }
-    if (options.mode === 'report') {
-      snapshot = await inspectCiPolicyFreshness({ prerequisites: snapshot, token, requestJson });
-    }
+    snapshot = await inspectCiPolicyFreshness({ inspection: snapshot, token, requestJson });
     writeSnapshot(options.output, snapshot);
     writePolicySummary(options.summary, snapshot);
-    if (!prerequisitesPass(snapshot)) {
-      console.error(`ci-policy-inspection: prerequisites missing: ${prerequisiteFailureSummary(snapshot)}`);
+    if (!policyChecksPass(snapshot)) {
+      console.error(`ci-policy-inspection: report detected issues: ${policyFailureSummary(snapshot)}`);
     } else {
-      console.log(`CI policy prerequisites verified for ${snapshot.policy.branch}`);
+      console.log(`CI policy safeguards verified for ${snapshot.policy.branch}`);
     }
-    return ciPolicyModeExitCode(snapshot, options.mode);
+    return 0;
   } catch (error) {
     console.error(`ci-policy-inspection: ${error.message}`);
-    return options.mode === 'report' ? 0 : 1;
+    return 0;
   }
 }
 
