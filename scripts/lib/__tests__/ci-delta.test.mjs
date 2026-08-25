@@ -21,6 +21,7 @@ import {
   validateEvmResults,
   validatePrimaryResults,
 } from '../ci-results.mjs';
+import { validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 // This SHA is already reachable from the protected default branch. Candidate
@@ -450,26 +451,7 @@ test('workflows execute the planner and aggregate gates from one immutable trust
   ]);
 
   for (const [name, workflow] of workflows) {
-    const trustedCheckoutCount = workflow.match(/^\s+path: trusted-ci$/gm)?.length ?? 0;
-    const trustedPinCount = workflow.match(
-      new RegExp(`^\\s+ref: ${TRUSTED_CI_CONTROLLER_SHA}$`, 'gm'),
-    )?.length ?? 0;
-    const trustedRepositoryCount = workflow.match(
-      /^\s+repository: OriginTrail\/dkg$/gm,
-    )?.length ?? 0;
-
     assert.match(TRUSTED_CI_CONTROLLER_SHA, /^[0-9a-f]{40}$/);
-    assert.ok(trustedCheckoutCount >= 2, `${name} must trust-pin both its planner and gate`);
-    assert.equal(
-      trustedPinCount,
-      trustedCheckoutCount,
-      `${name} trusted checkouts must all use the reviewed controller SHA`,
-    );
-    assert.equal(
-      trustedRepositoryCount,
-      trustedCheckoutCount,
-      `${name} trusted checkouts must all use the base repository`,
-    );
     assert.match(workflow, /node trusted-ci\/scripts\/ci\/plan-ci\.mjs\b/);
     assert.match(workflow, /node trusted-ci\/scripts\/ci\/assert-ci-results\.mjs\b/);
     assert.doesNotMatch(
@@ -478,6 +460,13 @@ test('workflows execute the planner and aggregate gates from one immutable trust
       `${name} must not execute CI policy from the merge candidate`,
     );
   }
+
+  const controller = validateTrustedControllerPins([
+    { sourceName: 'primary', source: workflows.get('primary'), expectedCount: 2 },
+    { sourceName: 'evm', source: workflows.get('evm'), expectedCount: 2 },
+  ]);
+  assert.equal(controller.ref, TRUSTED_CI_CONTROLLER_SHA);
+  assert.equal(controller.checkouts.length, 4);
 
   const primaryWorkflow = workflows.get('primary');
   assert.doesNotMatch(
@@ -604,12 +593,11 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     workflow.includes('run: node candidate/scripts/check-npm-metadata.mjs'),
     'docs-only package README changes must retain the npm metadata gate',
   );
+  const deltaPredicate = "vars.CI_DELTA_ENABLED == 'true' && (github.base_ref == 'main' || github.base_ref == 'testnet-canary')";
   assert.ok(
-    workflow.includes("vars.CI_DELTA_ENABLED == 'true'"),
-    'repository administrators must retain the delta rollback switch',
+    workflow.includes(`DELTA_ENABLED: \${{ ${deltaPredicate} }}`),
+    'both protected branches must remain subordinate to the rollback switch',
   );
-  assert.ok(workflow.includes("github.base_ref == 'main'"));
-  assert.ok(workflow.includes("github.base_ref == 'testnet-canary'"));
   assert.ok(workflow.includes('git -C candidate diff --name-status -z \\\n'));
   assert.ok(workflow.includes('"${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"'));
   assert.equal(workflow.includes('"${BASE_SHA}" "${HEAD_SHA}"'), false);
@@ -647,9 +635,10 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     'utf8',
   );
   assert.ok(evmWorkflow.includes('fromJSON(needs.plan.outputs.evm_matrix)'));
-  assert.ok(evmWorkflow.includes("vars.CI_DELTA_ENABLED == 'true'"));
-  assert.ok(evmWorkflow.includes("github.base_ref == 'main'"));
-  assert.ok(evmWorkflow.includes("github.base_ref == 'testnet-canary'"));
+  assert.ok(
+    evmWorkflow.includes(`DELTA_ENABLED: \${{ ${deltaPredicate} }}`),
+    'the EVM planner must use the same grouped rollback predicate',
+  );
   assert.ok(evmWorkflow.includes('git -C candidate diff --name-status -z \\\n'));
   assert.ok(evmWorkflow.includes('"${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"'));
   assert.ok(evmWorkflow.includes('BASE_SHA="$(git -C candidate rev-parse "${MERGE_SHA}^1")"'));

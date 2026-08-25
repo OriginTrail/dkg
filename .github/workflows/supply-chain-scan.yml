@@ -47,6 +47,8 @@ on:
       # until the next unrelated lockfile change.
       - '.github/dependency-deny-list.json'
       - 'scripts/check-dependency-deny-list.mjs'
+      - 'scripts/ci/enforce-zizmor-sarif.mjs'
+      - 'scripts/ci/trusted-controller-pins.mjs'
       # Recursive filename deny-list entries that are themselves IoCs.
       # Keep this in sync with denied_filenames[] so an IoC-only PR
       # cannot avoid the scanner by touching no package metadata.
@@ -64,6 +66,8 @@ on:
       - '.npmrc'
       - '.github/dependency-deny-list.json'
       - 'scripts/check-dependency-deny-list.mjs'
+      - 'scripts/ci/enforce-zizmor-sarif.mjs'
+      - 'scripts/ci/trusted-controller-pins.mjs'
       - '.cursorrules'
       - '**/.cursorrules'
   schedule:
@@ -224,18 +228,16 @@ jobs:
           category: zizmor
 
       - name: Enforce zizmor verdict
-        # The SARIF-producing scan above already executed the complete online
-        # ruleset. Propagate that result after the best-effort upload instead
-        # of repeating hundreds of identical GitHub API calls.
+        # Zizmor intentionally exits zero for findings in SARIF mode. Enforce
+        # both dimensions explicitly after the best-effort upload: the scan
+        # must have completed successfully and its SARIF must contain no
+        # results. Malformed/missing SARIF also fails closed.
         env:
           SCAN_OUTCOME: ${{ steps.zizmor_scan.outcome }}
-        run: |
-          set -euo pipefail
-          if [ "${SCAN_OUTCOME}" != "success" ]; then
-            echo "::error::zizmor reported findings; inspect the uploaded SARIF and scan log."
-            exit 1
-          fi
-          echo 'zizmor gate passed.'
+        run: >-
+          node scripts/ci/enforce-zizmor-sarif.mjs
+          --sarif zizmor.sarif
+          --scan-outcome "${SCAN_OUTCOME}"
 
   dependency-deny-list:
     name: Dependency deny-list (named-package blocklist)
@@ -297,7 +299,6 @@ jobs:
 
   npm-audit:
     name: pnpm audit (informational)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -574,7 +575,7 @@ jobs:
         run: ./actionlint -color
 
   scanner-freshness:
-    name: Scanner pin freshness check
+    name: CI tooling and controller pin freshness
     # This job is the answer to PR460-06 / P3 of the security review:
     # "Add a documented scheduled check or Dependabot-compatible
     # mechanism for scanner versions and hashes." Dependabot does not
@@ -600,17 +601,17 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Compare pinned scanner versions against upstream latest
+      - name: Compare pinned CI tooling and controller policy
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           STALE=0
           {
-            echo '## Scanner pin freshness'
+            echo '## CI policy pin freshness'
             echo
-            echo '| Scanner | Pinned | Latest upstream | Status |'
-            echo '|---------|--------|-----------------|--------|'
+            echo '| Component | Pinned | Expected upstream | Status |'
+            echo '|-----------|--------|-------------------|--------|'
           } >> "$GITHUB_STEP_SUMMARY"
 
           report() {
@@ -618,7 +619,7 @@ jobs:
             echo "| ${name} | \`${pinned}\` | \`${latest}\` | ${status} |" >> "$GITHUB_STEP_SUMMARY"
             if [ "${status}" != "✓ current" ]; then
               STALE=1
-              echo "::warning title=Scanner pin stale::${name} pinned to ${pinned}, upstream latest is ${latest}"
+              echo "::warning title=CI policy pin stale::${name} pinned to ${pinned}, expected ${latest}"
             fi
           }
 
@@ -682,22 +683,20 @@ jobs:
           # that SHA and that its checked-out policy tree still matches the
           # default branch. Policy changes therefore produce a weekly reminder
           # until the reviewed controller pin is rotated in a follow-up PR.
-          CONTROLLER_REFS=$(grep -hE '^[[:space:]]+ref: [0-9a-f]{40}$' \
-            "${GITHUB_WORKSPACE}/.github/workflows/ci.yml" \
-            "${GITHUB_WORKSPACE}/.github/workflows/evm-integration.yml" \
-            | awk '{print $2}' | sort -u)
-          CONTROLLER_REF_COUNT=$(printf '%s\n' "${CONTROLLER_REFS}" | grep -c . || true)
-          CONTROLLER_PINNED=$(printf '%s\n' "${CONTROLLER_REFS}" | head -1)
-          if [ "${CONTROLLER_REF_COUNT}" -ne 1 ] || [ -z "${CONTROLLER_PINNED}" ]; then
-            report 'trusted CI controller' "${CONTROLLER_PINNED:-?}" 'one shared immutable SHA' '⚠ inconsistent pins'
-          elif git fetch --no-tags --depth=1 origin "${CONTROLLER_PINNED}" \
-            && git diff --quiet "${CONTROLLER_PINNED}" HEAD -- \
-              scripts/ci \
-              scripts/lib/ci-delta.mjs \
-              scripts/lib/ci-results.mjs; then
-            report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" 'default-branch policy tree' '✓ current'
+          if CONTROLLER_PINNED=$(node scripts/ci/trusted-controller-pins.mjs \
+            .github/workflows/ci.yml=2 \
+            .github/workflows/evm-integration.yml=2); then
+            if git fetch --no-tags --depth=1 origin "${CONTROLLER_PINNED}" \
+              && git diff --quiet "${CONTROLLER_PINNED}" HEAD -- \
+                scripts/ci \
+                scripts/lib/ci-delta.mjs \
+                scripts/lib/ci-results.mjs; then
+              report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" 'default-branch policy tree' '✓ current'
+            else
+              report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" 'default-branch policy tree' '⚠ policy drift'
+            fi
           else
-            report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" 'default-branch policy tree' '⚠ policy drift'
+            report 'trusted CI controller' '?' 'one shared immutable SHA' '⚠ invalid checkout model'
           fi
 
           # shellcheck disable=SC2016
@@ -707,8 +706,8 @@ jobs:
           {
             echo
             if [ "${STALE}" -eq 0 ]; then
-              echo '_All scanners up to date._'
+              echo '_All CI policy pins are current._'
             else
-              echo '_One or more scanners are behind upstream. Open a bump PR — recompute hash pins where applicable (zizmor PyPI wheels in `supply-chain-scan.yml`, actionlint release `checksums.txt`, slither-action commit SHA in `ci.yml`)._'
+              echo '_One or more CI policy pins need attention. Open a focused rotation PR and recompute integrity hashes where applicable._'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
