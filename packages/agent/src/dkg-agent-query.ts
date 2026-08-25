@@ -778,6 +778,30 @@ export class QueryMethods extends DKGAgentBase {
     return false;
   }
 
+  /** Current accepted RFC-64 private roster; null means selected but unavailable. */
+  resolveRfc64PrivateReadRosterV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): readonly string[] | null | undefined {
+    const configured = this.config.rfc64CatalogBootstrap?.acceptedPolicies.filter(
+      ({ policyEnvelope }) => (
+        policyEnvelope.payload.contextGraphId === contextGraphId
+        && policyEnvelope.payload.accessPolicy === 1
+      ),
+    ) ?? [];
+    if (configured.length === 0) return undefined;
+    const service = this.rfc64PublicCatalogServiceV1;
+    if (service === undefined) return null;
+    for (const { policyEnvelope } of configured) {
+      const policy = policyEnvelope.payload;
+      const current = service.acceptedPolicySnapshot(policy.networkId, policy.contextGraphId);
+      if (current !== null && current.policy.accessPolicy === 1 && current.roster !== null) {
+        return Object.freeze(current.roster.members.map(({ agentAddress }) => agentAddress));
+      }
+    }
+    return null;
+  }
+
   /**
    * Resolve the current accepted RFC-64 roster for a selected private CG.
    * `undefined` means the CG is not owned by RFC-64 activation. `null` means
