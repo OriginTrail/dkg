@@ -110,12 +110,9 @@ export type AuthorCatalogGovernanceV1 =
   };
 
 /** Exact nine-key scope committed by every author-catalog era. */
-export type AuthorCatalogScopeV1 = Omit<
-  AuthorLaneScopeV1,
-  'governanceChainId' | 'governanceContractAddress'
-> & AuthorCatalogGovernanceV1 & {
+export interface AuthorCatalogScopeV1 extends AuthorLaneScopeV1 {
   readonly bucketCount: CountV1;
-};
+}
 
 /** Exact seven-key live author-catalog row. */
 export interface AuthorCatalogRowV1 {
