@@ -122,6 +122,9 @@ describe('RFC-64 author catalog identifiers and graph names', () => {
       0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
     ]) {
       expect(isCatalogForbiddenCodePointV1(codePoint)).toBe(true);
+      const value = `a${String.fromCodePoint(codePoint)}b`;
+      expect(() => assertAssertionCoordinateV1(value)).toThrow();
+      expect(() => assertSubGraphNameV1(value)).toThrow();
     }
     for (const codePoint of [
       0x0020, 0x007e,
@@ -132,6 +135,9 @@ describe('RFC-64 author catalog identifiers and graph names', () => {
       0xfefe, 0xff00,
     ]) {
       expect(isCatalogForbiddenCodePointV1(codePoint)).toBe(false);
+      const value = `a${String.fromCodePoint(codePoint)}b`;
+      expect(() => assertAssertionCoordinateV1(value)).not.toThrow();
+      expect(() => assertSubGraphNameV1(value)).not.toThrow();
     }
   });
 });

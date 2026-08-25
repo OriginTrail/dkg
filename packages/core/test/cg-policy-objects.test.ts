@@ -33,6 +33,8 @@ import {
 } from '../src/cg-policy-objects.js';
 import {
   CONTROL_OBJECT_SIGNATURE_SUITES,
+  canonicalizeSignedControlEnvelopeBytes,
+  computeControlObjectDigestHex,
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
 } from '../src/sync-control-object.js';
@@ -453,6 +455,21 @@ describe('MemberRosterV1 codec', () => {
       ROSTER_UNSIGNED_CANONICAL.replace(
         '"objectType":"MemberRosterV1"',
         `"objectType":"${CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1}"`,
+      ),
+    )).toThrow(/cg-policy-type/);
+    const signedWrongTypeUnsigned = {
+      ...ROSTER_UNSIGNED,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+    };
+    const signedWrongType = signed(
+      signedWrongTypeUnsigned,
+      computeControlObjectDigestHex(signedWrongTypeUnsigned),
+    );
+    expect(() => assertSignedMemberRosterEnvelopeV1(signedWrongType))
+      .toThrow(/cg-policy-type/);
+    expect(() => parseCanonicalSignedMemberRosterEnvelopeV1(
+      new TextDecoder().decode(
+        canonicalizeSignedControlEnvelopeBytes(signedWrongType),
       ),
     )).toThrow(/cg-policy-type/);
     expect(() => assertSignedMemberRosterEnvelopeV1({
