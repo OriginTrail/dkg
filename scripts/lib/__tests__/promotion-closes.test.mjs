@@ -50,6 +50,23 @@ test('parseMergedPrNumbers ignores a mid-subject issue reference', () => {
   assert.deepEqual(parseMergedPrNumbers('fix(#12) something else'), []);
 });
 
+test('a topic commit inside a merged PR is not a promoted PR', () => {
+  // PR #2327 review — this is why discovery must use --first-parent. Walking
+  // every commit descends into merged PRs, where topic subjects carry an ISSUE
+  // number in the same trailing `(#N)` slot a squash merge uses. The parser
+  // cannot tell them apart, so the RANGE must exclude them.
+  const insideMergedPr = [
+    'Merge pull request #2131 from OriginTrail/fix/1763-mock-subgraphs-export',
+    'fix(ui): address PR #2131 review — fixture fidelity + wrapper routing',
+    "Merge branch 'testnet-canary' into fix/1763-mock-subgraphs-export",
+    'fix(ui): export a typed MOCK_SUBGRAPHS map from the mock data module (#1763)',
+  ].join('\n');
+  // Given the full walk the parser necessarily sees the issue number too...
+  assert.deepEqual(parseMergedPrNumbers(insideMergedPr), [1763, 2131]);
+  // ...which is exactly what --first-parent prevents reaching it.
+  assert.deepEqual(parseMergedPrNumbers(insideMergedPr.split('\n')[0]), [2131]);
+});
+
 test('parseMergedPrNumbers tolerates empty and nullish input', () => {
   assert.deepEqual(parseMergedPrNumbers(''), []);
   assert.deepEqual(parseMergedPrNumbers(null), []);
@@ -141,7 +158,7 @@ test('extractClosingRefs does not match a keyword inside another word', () => {
   assert.deepEqual(extractClosingRefs('unclosed #12'), []);
 });
 
-test('extractClosingRefs is not order-dependent across calls (lastIndex reset)', () => {
+test('extractClosingRefs is not order-dependent across calls', () => {
   assert.deepEqual(extractClosingRefs('Closes #1'), [1]);
   assert.deepEqual(extractClosingRefs('Closes #2'), [2]);
   assert.deepEqual(extractClosingRefs('Closes #3'), [3]);

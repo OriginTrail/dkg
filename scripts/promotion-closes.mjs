@@ -60,7 +60,19 @@ function main() {
   const base = process.argv[2] ?? DEFAULT_BASE;
   const head = process.argv[3] ?? DEFAULT_HEAD;
 
-  const subjects = run('git', ['log', '--format=%s', `${base}..${head}`], `git log ${base}..${head}`);
+  // --first-parent is load-bearing. PRs merge directly into the promoted
+  // branch, so its first-parent history is exactly the merge/squash commits.
+  // Walking every commit descends INTO each merged PR, where topic-commit
+  // subjects like `fix(ui): export … (#1763)` carry an ISSUE number in the same
+  // trailing `(#N)` position a squash merge uses — so #1763 was being treated
+  // as a promoted PR. `gh pr view 1763` then aborts the run (it is an issue),
+  // or worse silently pulls closing refs from an unrelated PR that happens to
+  // share the number.
+  const subjects = run(
+    'git',
+    ['log', '--first-parent', '--format=%s', `${base}..${head}`],
+    `git log --first-parent ${base}..${head}`,
+  );
   const prs = parseMergedPrNumbers(subjects);
   if (prs.length === 0) {
     process.stderr.write(`(no merged PRs in ${base}..${head})\n`);
