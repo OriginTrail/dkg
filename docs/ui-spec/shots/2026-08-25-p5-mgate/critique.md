@@ -32,3 +32,14 @@ shell (PanelLeft-style sidebar + header tabs + path badge + flag footer) per
 rules 11/12; full re-shoot at both widths. Verified on 05-meters desktop:
 chrome present, active states correct, content unchanged; mobile collapses
 the sidebar and keeps the header. Mounting is now evident in the evidence.
+
+**Round 5 (convergence):** operator flagged the round-4 shell as generic —
+not the DKG node UI. Rebuilt against refs/node-ui-current-*.jpg: full header
+bar (DKG v10 · powered by origintrail · node identity+address · syncing/peers
+· icon row), left rail (+New/Join CG buttons, CONTEXT GRAPHS|ORACLE tabs,
+row-highlight nav, CG card, flag line), center tab-chips, Node Log dock,
+right Agents panel (Hermes chip + message input). Layer-1 grays rebased to
+the node UI's neutral palette (the rebase tokens.css always allowed). One
+cascade leak fixed (page-local `.row` justify bleeding into rail nav —
+shell selectors hardened). Verified: 03-catalog desktop + 09-operate desktop
+read as the node UI with the mockup banner above. Mobile keeps header+tabs.

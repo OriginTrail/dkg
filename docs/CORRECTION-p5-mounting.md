@@ -47,3 +47,11 @@ Flag off ⇒ no nav entries, routes 404. Flag on ⇒ all four present.
 - Surface specs 01–11: `Mount:` line added per the map above.
 - `PLAN.md` re-stamped (G11 names node-UI mounts; G13 gains the probe).
 - Hermes's P5 runbook (Phase 5) will reference node-UI paths only.
+
+## 5. Convergence pass (same day, operator follow-up)
+
+The first shell was a generic dashboard frame — not the DKG node UI. Rebuilt
+faithfully from `refs/node-ui-current-*.jpg` (header, left rail, center
+tab-chips, Node Log dock, Agents panel) with Layer-1 tokens rebased to the
+node UI's neutral palette. Every mockup shot now shows the actual product
+chrome; Phase-3 integration inherits real components instead of a facsimile.

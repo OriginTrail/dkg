@@ -6,9 +6,11 @@
 
 :root {
   /* ---------- Layer 1 · primitives ---------- */
-  --gray-0:#0b0d10; --gray-1:#12151a; --gray-2:#1a1e25; --gray-3:#242a33;
-  --gray-4:#39414d; --gray-5:#5b6572; --gray-6:#8b95a3; --gray-7:#c3cad4;
-  --gray-8:#e8ecf1; --gray-9:#f7f9fb;
+  /* Layer-1 REBASED 2026-08-25 to the node UI's neutral palette (sampled
+     from refs/node-ui-current-*.jpg) — the rebase this file always allowed. */
+  --gray-0:#0a0a0b; --gray-1:#111113; --gray-2:#18181b; --gray-3:#232327;
+  --gray-4:#3a3a40; --gray-5:#5c5c64; --gray-6:#8e8e96; --gray-7:#c6c6cc;
+  --gray-8:#ececef; --gray-9:#f8f8fa;
   --accent-500:#4f7cff;            /* re-base to node-UI brand at integration */
   --accent-600:#3b63d9;
   --green-500:#2fbf71;  --green-700:#1f7a4b;
