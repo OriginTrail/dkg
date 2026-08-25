@@ -363,6 +363,53 @@ class ApiQueryCallerDisconnectedError extends Error {
  * by `/api/query`. Exported so the route boundary can be tested without
  * replacing the real query engine with a hand-typed error stub.
  */
+/**
+ * Is this thrown message a CLIENT input error (400) rather than a server
+ * fault (500)?
+ *
+ * Extracted from the /api/query catch block so it can be regression-tested
+ * directly — GH#1758 was a silent re-regression of #889, and there was no
+ * unit-level guard because the condition lived inline inside a catch.
+ */
+export function isClientQueryError(msg: string): boolean {
+  return (
+    
+        msg.startsWith("SPARQL rejected:") ||
+        msg.startsWith("Parse error") ||
+        // #889: oxigraph surfaces SPARQL syntax errors as
+        // `error at <line>:<col>: expected one of ...` (e.g. a missing
+        // closing brace or an incomplete triple). These are client input
+        // errors, not server faults — classify them as 400 to match the
+        // existing `SPARQL rejected:` / `must start with ...` handling
+        // instead of letting them fall through to a 500.
+        /^error at \d+:\d+:/.test(msg) ||
+        // #1758: the store adapter wraps the upstream response as
+        // `SPARQL HTTP <query|construct|update> failed (<status>): <body>`
+        // (packages/storage/src/adapters/sparql-http.ts:387/671/716), which
+        // buries the parse error mid-string so the anchored pattern above
+        // cannot see it. Classify on the wrapped 4xx status instead of the
+        // English text, so a malformed query is a 400 on both the direct and
+        // the wrapped path.
+        /^SPARQL HTTP \w+ failed \(4\d\d\):/.test(msg) ||
+        /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
+        msg.includes("was removed in V10") ||
+        msg.includes("agentAddress is required") ||
+        msg.includes("requires a contextGraphId") ||
+        msg.includes("cannot be combined with") ||
+        msg.startsWith("Scoped query violation:") ||
+        // A-1 review: DKGAgent.query throws these when the caller sends
+        // a non-string `agentAddress` / `callerAgentAddress` in the
+        // body. Classify as 400 so malformed input is a clean client
+        // error instead of a 500.
+        msg.startsWith("query: 'agentAddress' must be a string") ||
+        msg.startsWith("query: 'callerAgentAddress' must be a string") ||
+        // P-13 review: `resolveViewGraphs` validates `minTrust` now,
+        // so direct callers that forward a string / out-of-range
+        // value get a 400 instead of a 500.
+        msg.startsWith("Invalid minTrust")
+  );
+}
+
 export function createApiQueryRequestLifecycle(
   req: IncomingMessage,
   res: ServerResponse,
@@ -698,33 +745,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       }
       tracker.fail(ctx, err);
       const msg = err?.message ?? "";
-      if (
-        msg.startsWith("SPARQL rejected:") ||
-        msg.startsWith("Parse error") ||
-        // #889: oxigraph surfaces SPARQL syntax errors as
-        // `error at <line>:<col>: expected one of ...` (e.g. a missing
-        // closing brace or an incomplete triple). These are client input
-        // errors, not server faults — classify them as 400 to match the
-        // existing `SPARQL rejected:` / `must start with ...` handling
-        // instead of letting them fall through to a 500.
-        /^error at \d+:\d+:/.test(msg) ||
-        /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
-        msg.includes("was removed in V10") ||
-        msg.includes("agentAddress is required") ||
-        msg.includes("requires a contextGraphId") ||
-        msg.includes("cannot be combined with") ||
-        msg.startsWith("Scoped query violation:") ||
-        // A-1 review: DKGAgent.query throws these when the caller sends
-        // a non-string `agentAddress` / `callerAgentAddress` in the
-        // body. Classify as 400 so malformed input is a clean client
-        // error instead of a 500.
-        msg.startsWith("query: 'agentAddress' must be a string") ||
-        msg.startsWith("query: 'callerAgentAddress' must be a string") ||
-        // P-13 review: `resolveViewGraphs` validates `minTrust` now,
-        // so direct callers that forward a string / out-of-range
-        // value get a 400 instead of a 500.
-        msg.startsWith("Invalid minTrust")
-      ) {
+      if (isClientQueryError(msg)) {
         return jsonResponse(res, 400, { error: msg });
       }
       throw err;
