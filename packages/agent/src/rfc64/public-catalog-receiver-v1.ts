@@ -95,6 +95,10 @@ export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly deferred: number;
   readonly inFlight: number;
   readonly queued: number;
+  readonly providerAttempts: number;
+  readonly providerSwitches: number;
+  readonly providerSuccesses: number;
+  readonly providerBackoffMs: number;
 }
 
 interface ReceiverTaskV1 {
@@ -120,6 +124,7 @@ interface ReceiverTaskV1 {
   attemptsByProvider?: Map<string, number>;
   notFoundProviders?: Set<string>;
   providerCursor?: number;
+  lastProviderKey?: string;
 }
 
 interface ReceiverProviderV1 {
@@ -199,6 +204,10 @@ export class Rfc64PublicCatalogReceiverV1 {
   #failed = 0;
   #droppedQueueFull = 0;
   #droppedProviders = 0;
+  #providerAttempts = 0;
+  #providerSwitches = 0;
+  #providerSuccesses = 0;
+  #providerBackoffMs = 0;
 
   constructor(
     reconciler: Rfc64PublicCatalogReceiverReconcilerV1,
@@ -236,36 +245,48 @@ export class Rfc64PublicCatalogReceiverV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ): void {
+    this.scheduleMany([{ announcement, remotePeerId }]);
+  }
+
+  /** Atomically retain all discovered providers before the first fetch starts. */
+  scheduleMany(
+    inputs: readonly Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      remotePeerId: string;
+    }>[],
+  ): void {
     if (this.#closed) return;
-    this.#scheduled += 1;
-    const key = headKey(announcement);
-    const existing = this.#pendingByKey.get(key);
-    if (existing !== undefined) {
-      this.#dedupedInFlight += 1;
-      const providerKey = providerContextKey(remotePeerId, announcement);
-      if (!existing.providerKeys.has(providerKey)) {
-        if (existing.providers.length >= this.#maxProvidersPerHead) {
-          this.#droppedProviders += 1;
-          return;
+    for (const { announcement, remotePeerId } of inputs) {
+      this.#scheduled += 1;
+      const key = headKey(announcement);
+      const existing = this.#pendingByKey.get(key);
+      if (existing !== undefined) {
+        this.#dedupedInFlight += 1;
+        const providerKey = providerContextKey(remotePeerId, announcement);
+        if (!existing.providerKeys.has(providerKey)) {
+          if (existing.providers.length >= this.#maxProvidersPerHead) {
+            this.#droppedProviders += 1;
+            continue;
+          }
+          existing.providerKeys.add(providerKey);
+          existing.providers.push({ key: providerKey, peerId: remotePeerId, announcement });
         }
-        existing.providerKeys.add(providerKey);
-        existing.providers.push({ key: providerKey, peerId: remotePeerId, announcement });
+        continue;
       }
-      return;
+      if (this.#queue.length >= this.#maxQueue) {
+        this.#droppedQueueFull += 1;
+        continue;
+      }
+      const providerKey = providerContextKey(remotePeerId, announcement);
+      const task: ReceiverTaskV1 = {
+        key,
+        scopeKey: catalogScopeKey(announcement),
+        providers: [{ key: providerKey, peerId: remotePeerId, announcement }],
+        providerKeys: new Set([providerKey]),
+      };
+      this.#pendingByKey.set(key, task);
+      this.#queue.push(task);
     }
-    if (this.#queue.length >= this.#maxQueue) {
-      this.#droppedQueueFull += 1;
-      return;
-    }
-    const providerKey = providerContextKey(remotePeerId, announcement);
-    const task: ReceiverTaskV1 = {
-      key,
-      scopeKey: catalogScopeKey(announcement),
-      providers: [{ key: providerKey, peerId: remotePeerId, announcement }],
-      providerKeys: new Set([providerKey]),
-    };
-    this.#pendingByKey.set(key, task);
-    this.#queue.push(task);
     this.#pump();
   }
 
@@ -311,6 +332,10 @@ export class Rfc64PublicCatalogReceiverV1 {
       deferred: this.#deferred.size,
       inFlight: this.#active.size,
       queued: this.#queue.length,
+      providerAttempts: this.#providerAttempts,
+      providerSwitches: this.#providerSwitches,
+      providerSuccesses: this.#providerSuccesses,
+      providerBackoffMs: this.#providerBackoffMs,
     });
   }
 
@@ -413,6 +438,11 @@ export class Rfc64PublicCatalogReceiverV1 {
       const { provider, nextCursor } = selection;
       providerCursor = nextCursor;
       task.providerCursor = nextCursor;
+      this.#providerAttempts += 1;
+      if (task.lastProviderKey !== undefined && task.lastProviderKey !== provider.key) {
+        this.#providerSwitches += 1;
+      }
+      task.lastProviderKey = provider.key;
       const providerAttempt = (attemptsByProvider.get(provider.key) ?? 0) + 1;
       attemptsByProvider.set(provider.key, providerAttempt);
       try {
@@ -434,6 +464,7 @@ export class Rfc64PublicCatalogReceiverV1 {
           return 'done';
         }
         this.#applied += 1;
+        this.#providerSuccesses += 1;
         this.#safeNotify(() => this.#onHeadApplied?.(provider.announcement, provider.peerId));
         return 'done';
       } catch (error) {
@@ -456,6 +487,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   #backoff(attempt: number): Promise<void> {
     const delay = this.#retryBackoffMs * 2 ** attempt;
     if (delay <= 0) return Promise.resolve();
+    this.#providerBackoffMs += delay;
     return new Promise<void>((resolve) => {
       const signal = this.#closing.signal;
       const timer = setTimeout(() => {
@@ -534,20 +566,31 @@ function nextEligibleProvider(
   maxAttempts: number,
   cursor: number,
 ): { readonly provider: ReceiverProviderV1; readonly nextCursor: number } | null {
+  let selected: {
+    readonly provider: ReceiverProviderV1;
+    readonly nextCursor: number;
+    readonly attempts: number;
+  } | null = null;
   for (let offset = 0; offset < providers.length; offset += 1) {
     const index = (cursor + offset) % providers.length;
     const provider = providers[index];
+    const attempts = provider === undefined
+      ? maxAttempts
+      : attemptsByProvider.get(provider.key) ?? 0;
     if (
       provider !== undefined
       && !notFoundProviders.has(provider.key)
-      && (attemptsByProvider.get(provider.key) ?? 0) < maxAttempts
+      && attempts < maxAttempts
+      && (selected === null || attempts < selected.attempts)
     ) {
-      // Keep this monotonic. A modulo cursor would select the first provider
-      // again when a new provider is appended after the first attempt.
-      return { provider, nextCursor: cursor + offset + 1 };
+      selected = { provider, nextCursor: cursor + offset + 1, attempts };
     }
   }
-  return null;
+  if (selected === null) return null;
+  // Keep this monotonic. A modulo cursor would select the first provider again
+  // when a new provider is appended after the first attempt. Lowest-attempt
+  // scoring makes a healthy alternate win immediately after one provider fails.
+  return { provider: selected.provider, nextCursor: selected.nextCursor };
 }
 
 function positiveInt(value: number | undefined, fallback: number): number {

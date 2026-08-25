@@ -759,6 +759,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       controlObjects: persistence.controlObjects,
       kaBundles: persistence.kaBundles,
     });
+    let readNativeResourceStats: () => ReturnType<
+      Rfc64PublicCatalogNativeReceiverV1['resourceStats']
+    > | null = () => null;
     return Object.freeze({
       readCatalogObjectByDigest: async (objectDigest: Digest32V1) => {
         const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
@@ -769,6 +772,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       },
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
       resolveScopedReadCapability,
+      readResourceStats: () => readNativeResourceStats(),
       createReconciler: (clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>) => {
         const chainConfig = this.config.chainConfig;
         const acceptedPolicySnapshotForCatalogScope = (scope: AuthorCatalogScopeV1) =>
@@ -825,6 +829,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           beforeAppliedHeadCommit,
           transportTimeoutMs: clients.transportTimeoutMs,
         });
+        readNativeResourceStats = () => nativeReceiver.resourceStats();
         const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
           nativeReceiver: Object.freeze({
             synchronizeBoundedPublicRootCatalog: async (...args) => {

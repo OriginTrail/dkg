@@ -129,6 +129,24 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     const publicProvider = '12D3KooPublicProviderMayAppear';
     const response = await requestStatusWithAgent(
       {
+        rfc64PublicCatalogStatsV1: () => ({
+          started: true,
+          acceptedPolicies: 1,
+          receiver: {
+            providerAttempts: 3,
+            providerSwitches: 1,
+            providerSuccesses: 1,
+            providerBackoffMs: 20,
+          },
+          nativeReceiver: {
+            controlObjectCacheHits: 4,
+            controlObjectNetworkFetches: 5,
+            kaBundleCacheHits: 6,
+            kaBundleNetworkFetches: 7,
+            kaBundleCacheBytes: 800,
+            kaBundleNetworkBytes: 900,
+          },
+        }),
         readRfc64PublicCatalogBootstrapStatusV1: () => ({
           running: false,
           pass: 1,
@@ -215,6 +233,18 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       outcomeCounts: { 'known-incomplete': 1 },
       completionReasons: ['no-authorized-provider'],
     }]);
+    expect(response.body.rfc64Catalog.resourceTelemetry).toEqual({
+      providerAttempts: 3,
+      providerSwitches: 1,
+      providerSuccesses: 1,
+      providerBackoffMs: 20,
+      controlObjectCacheHits: 4,
+      controlObjectNetworkFetches: 5,
+      kaBundleCacheHits: 6,
+      kaBundleNetworkFetches: 7,
+      kaBundleCacheBytes: 800,
+      kaBundleNetworkBytes: 900,
+    });
     expect(response.body.rfc64PublicCatalog.bootstrap.targets).toHaveLength(1);
     expect(response.body.rfc64PublicCatalog.bootstrap.targets[0]).toMatchObject({
       scope: { contextGraphId: publicContextGraph },

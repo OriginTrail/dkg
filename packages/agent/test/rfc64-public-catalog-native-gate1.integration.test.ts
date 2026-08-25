@@ -293,7 +293,6 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     expect(fixture.authorObjectRead.mock.calls.map(([digest]) => digest)).toEqual([
       fixture.catalogIssuerDelegation.objectDigest,
       fixture.genesis.head.payload.directoryRootDigest,
-      fixture.catalogIssuerDelegation.objectDigest,
       fixture.successor.head.payload.directoryRootDigest,
       fixture.successor.bucket?.objectDigest,
     ]);
@@ -386,6 +385,51 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
   }, 30_000);
 
+  it('checkpoints verified bundles and resumes the exact head after receiver restart', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    const interruptedReceiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      fixture.receiverPersistence.controlObjects,
+      undefined,
+      fixture.receiverStore,
+      () => {
+        throw new Error('simulated process loss after exact transfer');
+      },
+    );
+
+    await expect(fixture.synchronizeAny(
+      fixture.multiAssetAnnouncement,
+      interruptedReceiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-activation' });
+    await expect(fixture.receiverPersistence.kaBundles.readKaBundleByDigest(
+      fixture.secondRowBundle.row.transfer.blobDigest,
+    )).resolves.not.toBeNull();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+
+    fixture.receiverBundleFetch.mockClear();
+    const restartedReceiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      fixture.receiverPersistence.controlObjects,
+    );
+    await expect(fixture.synchronizeAny(
+      fixture.multiAssetAnnouncement,
+      restartedReceiver,
+    )).resolves.toMatchObject({
+      appliedHeadStatus: 'applied',
+      inventoryRowCount: 2,
+    });
+    expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
+    expect(restartedReceiver.resourceStats()).toMatchObject({
+      kaBundleCacheHits: 2,
+      kaBundleNetworkFetches: 0,
+    });
+  }, 30_000);
+
   it('converges a valid two-to-one successor by removing the omitted SWM projection and seal before CAS', async () => {
     const fixture = await setupLiveReceiver();
     await fixture.bootstrap();
@@ -464,7 +508,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.removalAnnouncement,
       observed.receiver,
     )).rejects.toMatchObject({ code: 'catalog-native-receiver-transfer' });
-    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.stageVerifiedObjects).toHaveBeenCalled();
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     await expect(fixture.receiverStore.hasGraph(omittedSwmGraph)).resolves.toBe(true);
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
@@ -784,7 +828,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       observed.receiver,
     )).rejects.toMatchObject({ code: 'catalog-native-receiver-transfer' });
     expect(fixture.receiverBundleFetch).toHaveBeenCalledTimes(2);
-    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.stageVerifiedObjects).toHaveBeenCalled();
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       fixture.scopeDigest,
@@ -848,7 +892,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       observed.receiver,
     )).rejects.toMatchObject({ code: 'catalog-native-receiver-slice' });
     expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
-    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.stageVerifiedObjects).toHaveBeenCalled();
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       fixture.scopeDigest,
@@ -871,7 +915,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     )).rejects.toMatchObject({ code: 'catalog-native-receiver-slice' });
     expect(fixture.receiverObjectFetch).not.toHaveBeenCalled();
     expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
-    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.stageVerifiedObjects).toHaveBeenCalled();
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       fixture.scopeDigest,
@@ -902,7 +946,10 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     const observed = fixture.createCasObservedReceiver(
       undefined,
       fixture.receiverStore,
-      { putKaBundle },
+      {
+        putKaBundle,
+        readKaBundleByDigest: vi.fn(async () => null),
+      },
     );
 
     await expect(fixture.synchronize(
@@ -910,7 +957,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       observed.receiver,
     )).rejects.toMatchObject({ code: 'catalog-native-receiver-catalog' });
     expect(putKaBundle).toHaveBeenCalledTimes(1);
-    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.stageVerifiedObjects).toHaveBeenCalled();
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       fixture.scopeDigest,
@@ -1005,9 +1052,9 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       signal,
     );
 
-    expect(fixture.receiverHeadFetch).toHaveBeenCalledTimes(3);
-    expect(fixture.receiverObjectFetch).toHaveBeenCalledTimes(8);
-    expect(fixture.receiverBundleFetch).toHaveBeenCalledTimes(2);
+    expect(fixture.receiverHeadFetch).toHaveBeenCalledTimes(2);
+    expect(fixture.receiverObjectFetch).toHaveBeenCalledTimes(4);
+    expect(fixture.receiverBundleFetch).toHaveBeenCalledTimes(1);
     for (const fetch of [
       fixture.receiverHeadFetch,
       fixture.receiverObjectFetch,
@@ -1114,7 +1161,12 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.forgedCatalogIssuerDelegation,
     );
     fixture.authorBundleRead.mockClear();
-    const observed = fixture.createCasObservedReceiver();
+    const observed = fixture.createCasObservedReceiver(
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      vi.fn(async () => null),
+    );
 
     await expect(fixture.synchronize(fixture.announcement, observed.receiver)).rejects.toMatchObject({
       code: 'catalog-native-receiver-authorization',
@@ -1156,14 +1208,14 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     const observed = fixture.createCasObservedReceiver({
       fetchCatalogObject,
       fetchKaBundle: fixture.receiverBundleFetch,
-    });
+    }, fixture.receiverStore, undefined, vi.fn(async () => null));
 
     await expect(fixture.synchronize(
       fixture.announcement,
       observed.receiver,
     )).rejects.toMatchObject({ code: 'catalog-native-receiver-authorization' });
     expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
-    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.stageVerifiedObjects).toHaveBeenCalled();
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       fixture.scopeDigest,
@@ -1883,7 +1935,10 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     },
     store: TripleStore = receiverStore,
     beforeAppliedHeadCommit?: Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
-    kaBundles: Pick<Rfc64PersistenceV1['kaBundles'], 'putKaBundle'> =
+    kaBundles: Pick<
+      Rfc64PersistenceV1['kaBundles'],
+      'putKaBundle' | 'readKaBundleByDigest'
+    > =
       receiverPersistence.kaBundles,
   ) => new Rfc64PublicCatalogNativeReceiverV1({
     headTransport: { fetchCatalogHead: receiverHeadFetch },
@@ -1899,8 +1954,11 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     'fetchCatalogObject' | 'fetchKaBundle'
   >, store: TripleStore = receiverStore, kaBundles: Pick<
     Rfc64PersistenceV1['kaBundles'],
-    'putKaBundle'
-  > = receiverPersistence.kaBundles) => {
+    'putKaBundle' | 'readKaBundleByDigest'
+  > | undefined = undefined, getVerifiedObjectByDigest: Rfc64PersistenceV1[
+    'controlObjects'
+  ]['getVerifiedObjectByDigest'] = receiverPersistence.controlObjects
+    .getVerifiedObjectByDigest.bind(receiverPersistence.controlObjects)) => {
     const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
       receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
         receiverPersistence.inventory,
@@ -1911,10 +1969,14 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
         receiverPersistence.controlObjects,
       ),
     );
-    const getVerifiedObjectByDigest =
-      receiverPersistence.controlObjects.getVerifiedObjectByDigest.bind(
-        receiverPersistence.controlObjects,
-      );
+    const selectedKaBundles = kaBundles ?? {
+      putKaBundle: receiverPersistence.kaBundles.putKaBundle.bind(
+        receiverPersistence.kaBundles,
+      ),
+      // Security-path tests alter transport bundles. Keep those tests on the
+      // network path; restart/cache behavior has a separate explicit test.
+      readKaBundleByDigest: vi.fn(async () => null),
+    };
     return Object.freeze({
       compareAndSwapAppliedCatalogHeadV1,
       stageVerifiedObjects,
@@ -1927,7 +1989,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       }, {
         stageVerifiedObjects,
         getVerifiedObjectByDigest,
-      }, contentTransport, store, undefined, kaBundles),
+      }, contentTransport, store, undefined, selectedKaBundles),
     });
   };
   const receiver = createReceiver(receiverPersistence.inventory);

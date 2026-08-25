@@ -74,6 +74,7 @@ import { ethers } from 'ethers';
 
 import { parseNQuads } from '../dkg-agent-utils.js';
 import { unpackKnowledgeAssetId } from '../ka-identity.js';
+import { assertRfc64ExactIssuerSignatureProofV1 } from './catalog-transport-wire-v1-internal.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
   verifyAuthorCatalogRowAuthorshipV1,
@@ -132,7 +133,10 @@ export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
     'readAppliedCatalogHeadV1' | 'compareAndSwapAppliedCatalogHeadV1'
   >;
   /** Durable immutable cache that makes every applied receiver a provider. */
-  readonly kaBundles: Pick<Rfc64KaBundleOperationsV1, 'putKaBundle'>;
+  readonly kaBundles: Pick<
+    Rfc64KaBundleOperationsV1,
+    'putKaBundle' | 'readKaBundleByDigest'
+  >;
   readonly store: TripleStore;
   /**
    * Final fail-closed same-process barrier. It runs after the exact SWM
@@ -142,6 +146,16 @@ export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
    */
   readonly beforeAppliedHeadCommit?: Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1;
   readonly transportTimeoutMs?: number;
+}
+
+/** Bounded local resource telemetry. It contains no scope or provider identity. */
+export interface Rfc64PublicCatalogNativeReceiverResourceStatsV1 {
+  readonly controlObjectCacheHits: number;
+  readonly controlObjectNetworkFetches: number;
+  readonly kaBundleCacheHits: number;
+  readonly kaBundleNetworkFetches: number;
+  readonly kaBundleCacheBytes: number;
+  readonly kaBundleNetworkBytes: number;
 }
 
 /** Process-local verified row capabilities withheld from serializable receiver evidence. */
@@ -258,6 +272,12 @@ export class Rfc64PublicCatalogNativeReceiverErrorV1 extends Error {
 export class Rfc64PublicCatalogNativeReceiverV1 {
   readonly #timeoutMs: number;
   readonly #scopeSynchronizations = new Map<string, Promise<void>>();
+  #controlObjectCacheHits = 0;
+  #controlObjectNetworkFetches = 0;
+  #kaBundleCacheHits = 0;
+  #kaBundleNetworkFetches = 0;
+  #kaBundleCacheBytes = 0;
+  #kaBundleNetworkBytes = 0;
 
   constructor(private readonly options: Rfc64PublicCatalogNativeReceiverOptionsV1) {
     if (
@@ -269,6 +289,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       || typeof options.inventory?.readAppliedCatalogHeadV1 !== 'function'
       || typeof options.inventory?.compareAndSwapAppliedCatalogHeadV1 !== 'function'
       || typeof options.kaBundles?.putKaBundle !== 'function'
+      || typeof options.kaBundles?.readKaBundleByDigest !== 'function'
       || typeof options.store?.query !== 'function'
       || (
         options.beforeAppliedHeadCommit !== undefined
@@ -282,6 +303,17 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       fail('catalog-native-receiver-input', 'transportTimeoutMs must be a positive safe integer');
     }
     this.#timeoutMs = timeoutMs;
+  }
+
+  resourceStats(): Readonly<Rfc64PublicCatalogNativeReceiverResourceStatsV1> {
+    return Object.freeze({
+      controlObjectCacheHits: this.#controlObjectCacheHits,
+      controlObjectNetworkFetches: this.#controlObjectNetworkFetches,
+      kaBundleCacheHits: this.#kaBundleCacheHits,
+      kaBundleNetworkFetches: this.#kaBundleNetworkFetches,
+      kaBundleCacheBytes: this.#kaBundleCacheBytes,
+      kaBundleNetworkBytes: this.#kaBundleNetworkBytes,
+    });
   }
 
   private async runBeforeAppliedHeadCommitV1(
@@ -404,16 +436,20 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     signal: AbortSignal | undefined,
   ): Promise<Rfc64PublicCatalogNativeSynchronizationEvidenceV1> {
     throwIfAborted(signal);
-    const fetchedHead = await this.options.headTransport.fetchCatalogHead(
+    const fetchedHead = await this.fetchCatalogHeadWithCacheV1(
       remotePeerId,
       announcement,
-      { timeoutMs: this.#timeoutMs, signal },
+      signal,
     );
     if (fetchedHead === null) {
       fail('catalog-native-receiver-not-found', 'announced catalog head was not found');
     }
     const head = fetchedHead.envelope;
     assertFetchedHeadMatchesTrustedScope(head, trustedCatalogScope);
+    await this.stageVerifiedControlObjectV1(
+      fetchedHead,
+      'verified catalog head could not be staged for restart-safe recovery',
+    );
     if (expected === 'genesis' || (expected === 'any' && claimsGenesisHistory(head))) {
       return this.bootstrapEmptyBoundedPublicRootCatalogFetched(
         remotePeerId,
@@ -466,15 +502,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       trustedCatalogScope,
       signal,
     );
-    const fetchedDirectory = await this.options.contentTransport.fetchCatalogObject(
+    const fetchedDirectory = await this.fetchCatalogObjectWithCacheV1(
       remotePeerId,
-      {
-        ...scope,
-        kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
-        targetObjectType: AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
-        targetObjectDigest: head.payload.directoryRootDigest,
-      },
-      { timeoutMs: this.#timeoutMs, signal },
+      scope,
+      AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+      head.payload.directoryRootDigest,
+      signal,
     );
     if (fetchedDirectory === null) {
       fail('catalog-native-receiver-not-found', 'genesis directory root was not found');
@@ -505,6 +538,10 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     } catch (cause) {
       fail('catalog-native-receiver-catalog', 'empty genesis directory is invalid', cause);
     }
+    await this.stageVerifiedControlObjectV1(
+      fetchedDirectory,
+      'verified genesis directory could not be staged for restart-safe recovery',
+    );
 
     try {
       await this.options.controlObjects.stageVerifiedObjects([
@@ -606,15 +643,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       signal,
     );
 
-    const fetchedDirectory = await this.options.contentTransport.fetchCatalogObject(
+    const fetchedDirectory = await this.fetchCatalogObjectWithCacheV1(
       remotePeerId,
-      {
-        ...scope,
-        kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
-        targetObjectType: AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
-        targetObjectDigest: head.payload.directoryRootDigest,
-      },
-      { timeoutMs: this.#timeoutMs, signal },
+      scope,
+      AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+      head.payload.directoryRootDigest,
+      signal,
     );
     if (fetchedDirectory === null) {
       fail('catalog-native-receiver-not-found', 'successor directory root was not found');
@@ -634,6 +668,10 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     } catch (cause) {
       fail('catalog-native-receiver-catalog', 'directory root is not bound to the successor head', cause);
     }
+    await this.stageVerifiedControlObjectV1(
+      fetchedDirectory,
+      'verified successor directory could not be staged for restart-safe recovery',
+    );
 
     let directoryPathProof: ReturnType<typeof verifyAuthorCatalogDirectoryPathV1>;
     let descriptor: ReturnType<typeof readVerifiedAuthorCatalogBucketDescriptorV1>;
@@ -653,15 +691,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       );
     }
 
-    const fetchedBucket = await this.options.contentTransport.fetchCatalogObject(
+    const fetchedBucket = await this.fetchCatalogObjectWithCacheV1(
       remotePeerId,
-      {
-        ...scope,
-        kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
-        targetObjectType: AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
-        targetObjectDigest: descriptor.bucketDigest,
-      },
-      { timeoutMs: this.#timeoutMs, signal },
+      scope,
+      AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
+      descriptor.bucketDigest,
+      signal,
     );
     if (fetchedBucket === null) {
       fail('catalog-native-receiver-not-found', 'successor catalog bucket was not found');
@@ -688,6 +723,10 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     } catch (cause) {
       fail('catalog-native-receiver-catalog', 'catalog bucket is not bound to its directory', cause);
     }
+    await this.stageVerifiedControlObjectV1(
+      fetchedBucket,
+      'verified successor bucket could not be staged for restart-safe recovery',
+    );
     try {
       assertRfc64PublicCatalogExactSetBundleBytesV1(
         bucket.payload.rows.map((row) => row.transfer.byteLength),
@@ -706,7 +745,6 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       readonly projectionMetadata: ReturnType<typeof readVerifiedCgSharedProjectionMetadataV1>;
       readonly sealBinding: VerifiedCatalogSealBindingSnapshotV1;
       readonly sealBindingCapability: VerifiedCatalogSealBindingV1;
-      readonly bundleBytes: Uint8Array;
       readonly projectionBytes: Uint8Array;
       readonly expectedEvidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
     }> = [];
@@ -737,15 +775,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         );
       }
 
-      const bundle = await this.options.contentTransport.fetchKaBundle(
+      const bundle = await this.fetchKaBundleWithCacheV1(
         remotePeerId,
-        {
-          ...scope,
-          kind: RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
-          blobDigest: row.transfer.blobDigest,
-          byteLength: row.transfer.byteLength as never,
-        },
-        { timeoutMs: this.#timeoutMs, signal },
+        scope,
+        row.transfer.blobDigest,
+        row.transfer.byteLength,
+        signal,
       );
       if (bundle === null) {
         fail('catalog-native-receiver-not-found', `catalog row ${row.kaId} KA bundle was not found`);
@@ -790,6 +825,25 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           cause,
         );
       }
+      try {
+        const receipt = await this.options.kaBundles.putKaBundle({
+          blobDigest: row.transfer.blobDigest,
+          bundleBytes: new Uint8Array(bundle),
+        });
+        if (
+          receipt.durable !== true
+          || receipt.blobDigest !== row.transfer.blobDigest
+          || receipt.byteLength.toString() !== row.transfer.byteLength
+        ) {
+          throw new Error('KA-bundle store returned a different durable receipt');
+        }
+      } catch (cause) {
+        fail(
+          'catalog-native-receiver-catalog',
+          `verified KA bundle for row ${row.kaId} could not be checkpointed`,
+          cause,
+        );
+      }
       const expectedEvidence = Object.freeze({
         kaId: row.kaId,
         catalogRowDigest: projectionMetadata.catalogRowDigest,
@@ -806,7 +860,6 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         projectionMetadata,
         sealBinding,
         sealBindingCapability,
-        bundleBytes: new Uint8Array(bundle),
         projectionBytes,
         expectedEvidence,
       }));
@@ -865,22 +918,9 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       .map((row) => planOwnedRowRemoval(trustedCatalogScope, row));
 
     try {
-      // An applied-head pointer advertises this node as a current provider, so
-      // every exact bundle must cross its immutable durability barrier before
-      // semantic activation and before that pointer can advance.
-      for (const prepared of preparedRows) {
-        const receipt = await this.options.kaBundles.putKaBundle({
-          blobDigest: prepared.row.transfer.blobDigest,
-          bundleBytes: prepared.bundleBytes,
-        });
-        if (
-          receipt.durable !== true
-          || receipt.blobDigest !== prepared.row.transfer.blobDigest
-          || receipt.byteLength.toString() !== prepared.row.transfer.byteLength
-        ) {
-          throw new Error('KA-bundle store returned a different durable receipt');
-        }
-      }
+      // Every exact bundle crossed its immutable durability barrier directly
+      // after verification above. This preserves restart/failover progress
+      // without making a staged-only head authoritative.
       await this.options.controlObjects.stageVerifiedObjects([
         fetchedDelegation,
         fetchedHead,
@@ -1110,15 +1150,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   }> {
     let fetched: FetchedRfc64PublicCatalogObjectV1 | null;
     try {
-      fetched = await this.options.contentTransport.fetchCatalogObject(
+      fetched = await this.fetchCatalogObjectWithCacheV1(
         remotePeerId,
-        {
-          ...scope,
-          kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
-          targetObjectType: AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
-          targetObjectDigest: head.payload.catalogIssuerDelegationDigest,
-        },
-        { timeoutMs: this.#timeoutMs, signal },
+        scope,
+        AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
+        head.payload.catalogIssuerDelegationDigest,
+        signal,
       );
     } catch (cause) {
       if (signal?.aborted) throw signal.reason;
@@ -1133,6 +1170,10 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     }
     throwIfAborted(signal);
     try {
+      assertRfc64ExactIssuerSignatureProofV1(
+        fetched.envelope,
+        fetched.issuerSignature,
+      );
       assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(fetched.envelope);
       assertDirectAuthorCatalogIssuerDelegationBindingV1(
         fetched.envelope,
@@ -1146,10 +1187,115 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         cause,
       );
     }
+    await this.stageVerifiedControlObjectV1(
+      fetched,
+      'verified catalog issuer delegation could not be staged for restart-safe recovery',
+    );
     return Object.freeze({
       envelope: fetched.envelope,
       issuerSignature: fetched.issuerSignature,
     });
+  }
+
+  private async fetchCatalogHeadWithCacheV1(
+    remotePeerId: string,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    signal: AbortSignal | undefined,
+  ): Promise<FetchedRfc64PublicCatalogHeadV1 | null> {
+    const cached = await this.options.controlObjects.getVerifiedObjectByDigest({
+      objectDigest: announcement.catalogHeadObjectDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    if (cached !== null) {
+      assertSignedAuthorCatalogHeadEnvelopeV1(cached.envelope);
+      const signatureVariantDigest = computeControlSignatureVariantDigestHex(
+        cached.envelope.objectDigest,
+        cached.envelope.signature,
+      );
+      if (signatureVariantDigest === announcement.signatureVariantDigest) {
+        this.#controlObjectCacheHits += 1;
+        return Object.freeze({
+          envelope: cached.envelope,
+          issuerSignature: cached.issuerSignature,
+        });
+      }
+    }
+    this.#controlObjectNetworkFetches += 1;
+    return this.options.headTransport.fetchCatalogHead(
+      remotePeerId,
+      announcement,
+      { timeoutMs: this.#timeoutMs, signal },
+    );
+  }
+
+  private async fetchCatalogObjectWithCacheV1(
+    remotePeerId: string,
+    scope: Rfc64PublicCatalogNativeFetchScopeV1,
+    targetObjectType: string,
+    targetObjectDigest: Digest32V1,
+    signal: AbortSignal | undefined,
+  ): Promise<FetchedRfc64PublicCatalogObjectV1 | null> {
+    const cached = await this.options.controlObjects.getVerifiedObjectByDigest({
+      objectDigest: targetObjectDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    if (cached !== null && cached.envelope.objectType === targetObjectType) {
+      this.#controlObjectCacheHits += 1;
+      return Object.freeze({
+        envelope: cached.envelope,
+        issuerSignature: cached.issuerSignature,
+      });
+    }
+    this.#controlObjectNetworkFetches += 1;
+    return this.options.contentTransport.fetchCatalogObject(
+      remotePeerId,
+      {
+        ...scope,
+        kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
+        targetObjectType,
+        targetObjectDigest,
+      },
+      { timeoutMs: this.#timeoutMs, signal },
+    );
+  }
+
+  private async fetchKaBundleWithCacheV1(
+    remotePeerId: string,
+    scope: Rfc64PublicCatalogNativeFetchScopeV1,
+    blobDigest: Digest32V1,
+    byteLength: string,
+    signal: AbortSignal | undefined,
+  ): Promise<Uint8Array | null> {
+    const cached = await this.options.kaBundles.readKaBundleByDigest(blobDigest);
+    if (cached !== null) {
+      this.#kaBundleCacheHits += 1;
+      this.#kaBundleCacheBytes += cached.byteLength;
+      return cached;
+    }
+    this.#kaBundleNetworkFetches += 1;
+    const fetched = await this.options.contentTransport.fetchKaBundle(
+      remotePeerId,
+      {
+        ...scope,
+        kind: RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
+        blobDigest,
+        byteLength: byteLength as never,
+      },
+      { timeoutMs: this.#timeoutMs, signal },
+    );
+    if (fetched !== null) this.#kaBundleNetworkBytes += fetched.byteLength;
+    return fetched;
+  }
+
+  private async stageVerifiedControlObjectV1(
+    object: FetchedRfc64PublicCatalogObjectV1 | FetchedRfc64PublicCatalogHeadV1,
+    failureMessage: string,
+  ): Promise<void> {
+    try {
+      await this.options.controlObjects.stageVerifiedObjects([object]);
+    } catch (cause) {
+      fail('catalog-native-receiver-catalog', failureMessage, cause);
+    }
   }
 
   private async withScopeSerialization<T>(

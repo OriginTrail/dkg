@@ -32,7 +32,9 @@ const OWNER = '0x1111111111111111111111111111111111111111' as EvmAddressV1;
 const LOCAL = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const PROVIDER = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
 const OUTSIDER = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
+const PROVIDER_TWO = '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 const PROVIDER_PEER = '12D3KooPrivateProvider';
+const PROVIDER_TWO_PEER = '12D3KooPrivateProviderTwo';
 
 function policy(contextGraphId: ContextGraphIdV1, accessPolicy: 0 | 1): ContextGraphPolicyV1 {
   return {
@@ -95,6 +97,7 @@ function rosterEnvelope(
           ? ['holder'] as const
           : ['holder', 'provider'] as const,
       },
+      { agentAddress: PROVIDER_TWO, roles: ['holder', 'provider'] as const },
     ],
     issuedAt: '0',
   };
@@ -111,15 +114,17 @@ function privateActivation(options: {
   roster?: UnsignedMemberRosterEnvelopeV1;
   localAgentAddress?: EvmAddressV1;
   boundAgentAddress?: EvmAddressV1;
+  providers?: readonly string[];
 } = {}) {
   const envelope = policyEnvelope(policy(PRIVATE_CG, 1));
+  const providers = options.providers ?? [PROVIDER_PEER];
   return {
     bootstrap: {
       acceptedPolicies: [{
         policyEnvelope: envelope,
         rosterEnvelope: options.roster ?? rosterEnvelope(envelope),
-        targets: [{ authorAddress: PROVIDER, providers: [PROVIDER_PEER] }],
-        completeSwmProviders: [PROVIDER_PEER],
+        targets: [{ authorAddress: PROVIDER, providers }],
+        completeSwmProviders: providers,
       }],
       retryIntervalMs: 1_000,
     },
@@ -128,7 +133,9 @@ function privateActivation(options: {
       peerAgentBindings: [{
         peerId: PROVIDER_PEER,
         agentAddress: options.boundAgentAddress ?? PROVIDER,
-      }],
+      }, ...(providers.includes(PROVIDER_TWO_PEER)
+        ? [{ peerId: PROVIDER_TWO_PEER, agentAddress: PROVIDER_TWO }]
+        : [])],
     },
   } as const;
 }
@@ -241,7 +248,16 @@ describe('RFC-64 private catalog activation', () => {
     }), chainIdentity)).toThrow(/not a current roster provider/u);
   });
 
-  it('keeps every private target on the one complete provider and in the roster', () => {
+  it('accepts multiple complete providers and keeps every target on the exact ordered set', () => {
+    const multiProvider = resolveRfc64CatalogActivationConfigV1(
+      privateActivation({ providers: [PROVIDER_PEER, PROVIDER_TWO_PEER] }),
+      chainIdentity,
+    );
+    expect(multiProvider.bootstrap?.acceptedPolicies[0]).toMatchObject({
+      completeSwmProviders: [PROVIDER_PEER, PROVIDER_TWO_PEER],
+      targets: [{ providers: [PROVIDER_PEER, PROVIDER_TWO_PEER] }],
+    });
+
     const activation = privateActivation();
     expect(() => resolveRfc64CatalogActivationConfigV1({
       ...activation,
@@ -252,7 +268,7 @@ describe('RFC-64 private catalog activation', () => {
           targets: [{ authorAddress: PROVIDER, providers: ['12D3KooOtherProvider'] }],
         }],
       },
-    }, chainIdentity)).toThrow(/must use the one completeSwmProvider/u);
+    }, chainIdentity)).toThrow(/must use the exact completeSwmProviders list/u);
 
     expect(() => resolveRfc64CatalogActivationConfigV1({
       ...activation,

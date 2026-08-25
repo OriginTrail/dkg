@@ -632,8 +632,9 @@ export interface DkgConfig {
   rfc64PublicCatalog?: Rfc64PublicCatalogActivationConfig;
   /**
    * Additive, bounded RFC-64 activation for explicitly selected public or
-   * invite-only CGs. Private Releases 1-2 selections require a manual policy,
-   * roster, and exact peer-to-agent authority map.
+   * invite-only CGs. Private selections require a manual policy, roster, and
+   * exact peer-to-agent authority map. Release 3 permits up to eight complete
+   * current-roster providers for bounded failover.
    */
   rfc64Catalog?: Rfc64CatalogActivationConfig;
   /**

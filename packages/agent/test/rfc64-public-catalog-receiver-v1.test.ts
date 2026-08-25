@@ -89,6 +89,32 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(receiver.stats()).toMatchObject({ scheduled: 2, applied: 1, notFound: 0 });
   });
 
+  it('retains a complete provider set before work and fails over immediately', async () => {
+    const peers: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      if (peerId === 'peerA') throw new Error('provider lost during transfer');
+      return 'applied';
+    }), { maxAttempts: 2, retryBackoffMs: 0 });
+
+    receiver.scheduleMany([
+      { announcement: announcement(), remotePeerId: 'peerA' },
+      { announcement: announcement(), remotePeerId: 'peerB' },
+    ]);
+    await receiver.whenIdle();
+
+    expect(peers).toEqual(['peerA', 'peerB']);
+    expect(receiver.stats()).toMatchObject({
+      scheduled: 2,
+      applied: 1,
+      failed: 0,
+      providerAttempts: 2,
+      providerSwitches: 1,
+      providerSuccesses: 1,
+      providerBackoffMs: 0,
+    });
+  });
+
   it('never retries an authoritative not-found peer while a viable peer can retry', async () => {
     const peers: string[] = [];
     let peerBAttempts = 0;

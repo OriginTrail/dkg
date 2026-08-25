@@ -979,6 +979,81 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     }
   });
 
+  it('selects the highest exact head, retains all matching providers, and fails over', async () => {
+    const router = new RecordingRouter();
+    const reconciledPeers: string[] = [];
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      receiver: { maxAttempts: 2, retryBackoffMs: 0 },
+      native: nativeOptions(() => ({
+        isHeadApplied: async () => false,
+        reconcileHead: async (peerId) => {
+          reconciledPeers.push(peerId);
+          if (peerId === 'peer-a') throw new Error('provider lost');
+          return 'applied';
+        },
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const low = announcement(policy.policyDigest);
+    const high = {
+      ...low,
+      catalogVersion: '1',
+      catalogHeadObjectDigest: `0x${'cc'.repeat(32)}` as Digest32V1,
+      signatureVariantDigest: `0x${'dd'.repeat(32)}` as Digest32V1,
+    } satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+    vi.spyOn(service, 'discoverCurrentCatalogHead').mockImplementation(async ({
+      remotePeerId,
+    }) => Object.freeze({
+      announcement: remotePeerId === 'peer-old' ? low : high,
+      head: {} as never,
+    }));
+
+    await expect(service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: ['peer-a', 'peer-b', 'peer-old'],
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+      },
+    })).resolves.toMatchObject({
+      current: { announcement: high },
+      providerPeerIds: ['peer-a', 'peer-b'],
+    });
+    expect(reconciledPeers).toEqual(['peer-a', 'peer-b']);
+    expect(service.stats().receiver).toMatchObject({
+      providerAttempts: 2,
+      providerSwitches: 1,
+      providerSuccesses: 1,
+    });
+
+    const conflicting = {
+      ...high,
+      catalogHeadObjectDigest: `0x${'ee'.repeat(32)}` as Digest32V1,
+    } satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+    vi.mocked(service.discoverCurrentCatalogHead).mockImplementation(async ({
+      remotePeerId,
+    }) => Object.freeze({
+      announcement: remotePeerId === 'peer-a' ? high : conflicting,
+      head: {} as never,
+    }));
+    await expect(service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: ['peer-a', 'peer-b'],
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+      },
+    })).rejects.toThrow(/conflicting heads/u);
+    await service.close();
+  });
+
   it('keeps diagnostic staging-only mode explicitly non-applied across replays', async () => {
     const router = new RecordingRouter();
     const store = controlObjects();
