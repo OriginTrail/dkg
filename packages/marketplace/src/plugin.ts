@@ -307,7 +307,9 @@ export const plugin: RoutePlugin = {
             ask: askInForce(home, a.offeringId, mounted.seller.providerAddress, cyc), queuedAsk: null });
         }
       }
-      send(res, 200, { seller: mounted.seller.providerAddress, revenueWallet: cfg.revenueWallet ?? null, offers });
+      send(res, 200, { seller: mounted.seller.providerAddress, revenueWallet: cfg.revenueWallet ?? null,
+        chainId: cfg.chainId ?? 8453, tracContract: cfg.tracContract ?? "0xA81a52B4dda010896cDd386C7fBdc5CDc835ba23",
+        registryContextGraphId: cfg.registryContextGraphId ?? "nsm-registry", offers });
       return;
     }
 
