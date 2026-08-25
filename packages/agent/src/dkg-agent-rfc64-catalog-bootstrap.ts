@@ -399,8 +399,12 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       if (applied !== null) {
         target.outcome = 'applied';
         target.completionReason = null;
-        target.providerPeerId = applied.appliedProviderPeerId;
-        target.attempts = applied.providerAttempts;
+        target.providerPeerId = applied.appliedProviderPeerId
+          ?? applied.providerPeerIds[0]
+          ?? null;
+        // Discovery is hedged across the full bounded provider set before the
+        // receiver selects an exact highest head for activation.
+        target.attempts = target.providers.length;
         target.appliedHeadDigest = applied.currentCatalogHeadDigest;
         target.catalogVersion = applied.catalogVersion;
         target.inventoryRowCount = applied.inventoryRowCount;
@@ -408,6 +412,9 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         target.updatedAtMs = Date.now();
         return;
       }
+      // A null result means the bounded provider loop completed without a
+      // current head. Preserve the number of providers that were attempted.
+      target.attempts = target.providers.length;
     } catch (error) {
       if (signal.aborted) return;
       terminalError = error;

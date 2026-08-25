@@ -882,7 +882,7 @@ export class DKGAgent extends DKGAgentBase {
       syncContextGraphs: [
         ...new Set([
           ...(normalizedConfig.syncContextGraphs ?? []),
-          ...catalogActivation.selectedContextGraphs,
+          ...catalogActivation.selectedPublicContextGraphs,
         ]),
       ],
     };
@@ -935,7 +935,12 @@ export class DKGAgent extends DKGAgentBase {
     const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
     const rfc64CatalogBootstrap = mergeRfc64CatalogBootstrapsV1(
       catalogActivation.bootstrap,
-      rfc64PublicCatalogBootstrap,
+      // resolveRfc64CatalogActivationsV1 already folds the compatibility
+      // activation into catalogActivation. Only the legacy standalone block
+      // still has to be added here.
+      normalizedConfig.rfc64PublicCatalogActivation === undefined
+        ? rfc64PublicCatalogBootstrap
+        : undefined,
     );
     let wallet: DKGAgentWallet;
     if (config.dataDir) {

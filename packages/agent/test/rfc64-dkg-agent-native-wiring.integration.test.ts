@@ -842,6 +842,47 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect((agent as any).config.syncContextGraphs).toContain(CONTEXT_GRAPH_ID);
   });
 
+  it('keeps a private catalog selection out of the legacy durable sync scope', async () => {
+    const policy = privateCatalogPolicy();
+    const policyEnvelope = {
+      issuer: AUTHOR,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+      payload: policy,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedContextGraphPolicyEnvelopeV1;
+    const policyDigest = computeContextGraphPolicyObjectDigestV1(policyEnvelope);
+    const rosterEnvelope = {
+      issuer: AUTHOR,
+      objectType: MEMBER_ROSTER_OBJECT_TYPE_V1,
+      payload: privateCatalogRoster(policy, policyDigest),
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedMemberRosterEnvelopeV1;
+    const providerPeerId = '12D3KooPrivateCatalogProvider';
+    const agent = await startNativeAgentWithOptions({
+      name: 'direct-private-catalog-scope',
+      catalogActivation: {
+        enabled: true,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        accessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          peerAgentBindings: [{ peerId: providerPeerId, agentAddress: AUTHOR }],
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope,
+            rosterEnvelope,
+            targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+            completeSwmProviders: [providerPeerId],
+          }],
+        },
+      },
+    });
+
+    expect((agent as any).config.syncContextGraphs).not.toContain(CONTEXT_GRAPH_ID);
+  });
+
   it('projects a manifest-selected activation without an explicit enabled switch', async () => {
     const selectedPolicy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -1904,9 +1945,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       ownerAddress: AUTHOR,
     });
     const appliedHeadDigest = `0x${'a1'.repeat(32)}` as Digest32V1;
+    const providerPeerId = '12D3KooStatusProvider';
     const synchronize = vi.spyOn(
       DKGAgent.prototype,
-      'synchronizeRfc64PublicCatalogFromProviderV1',
+      'synchronizeRfc64CatalogFromProvidersV1',
     ).mockResolvedValueOnce({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -1914,11 +1956,15 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       appliedInventoryDigest: `0x${'b2'.repeat(32)}` as Digest32V1,
       catalogVersion: '2' as never,
       inventoryRowCount: '3' as never,
+      providerPeerIds: [providerPeerId],
+      appliedProviderPeerId: providerPeerId,
+      providerAttempts: 1,
+      signatureVariantDigest: `0x${'c3'.repeat(32)}` as Digest32V1,
     }).mockResolvedValue(null);
     const bootstrap: Rfc64PublicCatalogBootstrapConfigV1 = {
       acceptedPublicPolicies: [{
         policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
-        targets: [{ authorAddress: AUTHOR, providers: ['12D3KooStatusProvider'] }],
+        targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
       }],
       retryIntervalMs: 1_000,
     };
