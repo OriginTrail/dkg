@@ -48,6 +48,7 @@ on:
       - '.github/dependency-deny-list.json'
       - 'scripts/check-dependency-deny-list.mjs'
       - 'scripts/ci/enforce-zizmor-sarif.mjs'
+      - 'scripts/ci/inspect-ci-policy.mjs'
       - 'scripts/ci/trusted-controller-pins.mjs'
       - 'scripts/ci/validate-delta-rollout-ruleset.mjs'
       # Recursive filename deny-list entries that are themselves IoCs.
@@ -68,6 +69,7 @@ on:
       - '.github/dependency-deny-list.json'
       - 'scripts/check-dependency-deny-list.mjs'
       - 'scripts/ci/enforce-zizmor-sarif.mjs'
+      - 'scripts/ci/inspect-ci-policy.mjs'
       - 'scripts/ci/trusted-controller-pins.mjs'
       - 'scripts/ci/validate-delta-rollout-ruleset.mjs'
       - '.cursorrules'
@@ -261,31 +263,13 @@ jobs:
       - name: Verify controller provenance and testnet rollout safeguards
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          CONTROLLER_PINNED=$(node scripts/ci/trusted-controller-pins.mjs \
-            .github/workflows/ci.yml \
-            .github/workflows/evm-integration.yml)
-          DEFAULT_BRANCH=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')
-          CONTROLLER_PROVENANCE=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/compare/${CONTROLLER_PINNED}...${DEFAULT_BRANCH}" \
-            --jq '.status')
-          node scripts/ci/trusted-controller-pins.mjs \
-            --validate-provenance-status "${CONTROLLER_PROVENANCE}"
-
-          mapfile -t RULESET_IDS < <(
-            gh api "repos/${GITHUB_REPOSITORY}/rulesets" --paginate \
-              --jq '.[] | select(.enforcement == "active") | .id'
-          )
-          test "${#RULESET_IDS[@]}" -gt 0
-          RULESET_FILES=()
-          for ruleset_id in "${RULESET_IDS[@]}"; do
-            ruleset_file="${RUNNER_TEMP}/ruleset-${ruleset_id}.json"
-            gh api "repos/${GITHUB_REPOSITORY}/rulesets/${ruleset_id}" > "${ruleset_file}"
-            RULESET_FILES+=("${ruleset_file}")
-          done
-          node scripts/ci/validate-delta-rollout-ruleset.mjs \
-            --branch testnet-canary "${RULESET_FILES[@]}"
+        run: >-
+          node scripts/ci/inspect-ci-policy.mjs
+          --mode enforce
+          --repository "${GITHUB_REPOSITORY}"
+          --branch testnet-canary
+          --workflow .github/workflows/ci.yml
+          --workflow .github/workflows/evm-integration.yml
 
   dependency-deny-list:
     name: Dependency deny-list (named-package blocklist)
@@ -733,54 +717,29 @@ jobs:
             fi
           fi
 
-          # Trusted CI controller: structurally validate every checkout and
-          # consumer, prove the shared pin is reachable from the protected
-          # default branch, then compare only the canonical controller module.
-          # Unrelated CI helpers do not create controller-rotation noise.
-          if CONTROLLER_PINNED=$(node scripts/ci/trusted-controller-pins.mjs \
-            .github/workflows/ci.yml \
-            .github/workflows/evm-integration.yml); then
-            DEFAULT_BRANCH=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')
-            CONTROLLER_PROVENANCE=$(gh api \
-              "repos/${GITHUB_REPOSITORY}/compare/${CONTROLLER_PINNED}...${DEFAULT_BRANCH}" \
-              --jq '.status' || true)
-            mapfile -t CONTROLLER_FILES < <(
-              node scripts/ci/trusted-controller-pins.mjs --list-controller-files
-            )
-            if ! node scripts/ci/trusted-controller-pins.mjs \
-              --validate-provenance-status "${CONTROLLER_PROVENANCE}"; then
-              report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" "protected ${DEFAULT_BRANCH} history" '⚠ untrusted provenance'
-            elif git fetch --no-tags --depth=1 origin "${CONTROLLER_PINNED}" \
-              && git diff --quiet "${CONTROLLER_PINNED}" HEAD -- "${CONTROLLER_FILES[@]}"; then
-              report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" 'default-branch policy tree' '✓ current'
-            else
-              report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" 'default-branch policy tree' '⚠ policy drift'
-            fi
+          # Acquire controller provenance/tree state and GitHub's effective
+          # branch rules once. The hard gate consumes the same structured
+          # verdict; this job changes only presentation and severity.
+          POLICY_SNAPSHOT="${RUNNER_TEMP}/ci-policy-snapshot.json"
+          node scripts/ci/inspect-ci-policy.mjs \
+            --mode report \
+            --repository "${GITHUB_REPOSITORY}" \
+            --branch testnet-canary \
+            --workflow .github/workflows/ci.yml \
+            --workflow .github/workflows/evm-integration.yml \
+            --output "${POLICY_SNAPSHOT}"
+
+          CONTROLLER_PINNED=$(jq -r '.controller.pin // "?"' "${POLICY_SNAPSHOT}")
+          DEFAULT_BRANCH=$(jq -r '.controller.defaultBranch // "default branch"' "${POLICY_SNAPSHOT}")
+          if ! jq -e '.controller.provenance.ok == true' "${POLICY_SNAPSHOT}" > /dev/null; then
+            report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" "protected ${DEFAULT_BRANCH} history" '⚠ untrusted provenance'
+          elif jq -e '.controller.tree.ok == true' "${POLICY_SNAPSHOT}" > /dev/null; then
+            report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" 'default-branch policy tree' '✓ current'
           else
-            report 'trusted CI controller' '?' 'one shared immutable SHA' '⚠ invalid checkout model'
+            report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" 'default-branch policy tree' '⚠ policy drift'
           fi
 
-          # Delta CI on testnet-canary is safe only while repository policy
-          # requires PRs, both aggregate gates, and the merge queue. Fetch every
-          # active ruleset through the API and validate the branch semantically.
-          mapfile -t RULESET_IDS < <(
-            gh api "repos/${GITHUB_REPOSITORY}/rulesets" --paginate \
-              --jq '.[] | select(.enforcement == "active") | .id'
-          )
-          RULESET_FILES=()
-          RULESET_FETCH_OK=1
-          for ruleset_id in "${RULESET_IDS[@]}"; do
-            ruleset_file="${RUNNER_TEMP}/ruleset-${ruleset_id}.json"
-            if gh api "repos/${GITHUB_REPOSITORY}/rulesets/${ruleset_id}" > "${ruleset_file}"; then
-              RULESET_FILES+=("${ruleset_file}")
-            else
-              RULESET_FETCH_OK=0
-            fi
-          done
-          if [ "${RULESET_FETCH_OK}" -eq 1 ] \
-            && [ "${#RULESET_FILES[@]}" -gt 0 ] \
-            && node scripts/ci/validate-delta-rollout-ruleset.mjs \
-              --branch testnet-canary "${RULESET_FILES[@]}"; then
+          if jq -e '.deltaRollout.ok == true' "${POLICY_SNAPSHOT}" > /dev/null; then
             report 'testnet-canary delta safeguards' 'active ruleset' 'PR + queue + aggregate gates' '✓ current'
           else
             report 'testnet-canary delta safeguards' '?' 'PR + queue + aggregate gates' '⚠ prerequisites missing'

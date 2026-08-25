@@ -4,48 +4,64 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const REQUIRED_GATES = Object.freeze(['CI gate', 'EVM integration gate']);
+export const REQUIRED_GATES = Object.freeze(['CI gate', 'EVM integration gate']);
 
-function rulesetCoversBranch(ruleset, branch) {
-  const includes = ruleset?.conditions?.ref_name?.include;
-  return Array.isArray(includes) && includes.includes(`refs/heads/${branch}`);
-}
+// Input must come from GitHub's effective branch-rules endpoint:
+// GET /repos/{owner}/{repo}/rules/branches/{branch}. GitHub has already
+// applied active enforcement, include/exclude patterns, and layered rulesets
+// to this response. Aggregate every returned rule so protections can be split
+// across multiple matching rulesets without weakening the verdict.
+export function evaluateEffectiveDeltaRolloutRules({ branch, rules }) {
+  if (!Array.isArray(rules)) {
+    throw new Error('effective branch rules must be an array');
+  }
+  const requiredChecks = new Set();
+  const sources = new Set();
+  let hasPullRequests = false;
+  let hasMergeQueue = false;
 
-export function evaluateDeltaRolloutRulesets({ branch, rulesets }) {
-  for (const ruleset of rulesets) {
-    if (ruleset?.enforcement !== 'active' || !rulesetCoversBranch(ruleset, branch)) continue;
-    const rules = Array.isArray(ruleset.rules) ? ruleset.rules : [];
-    const statusRule = rules.find((rule) => rule?.type === 'required_status_checks');
-    const requiredChecks = new Set(
-      statusRule?.parameters?.required_status_checks?.map((check) => check.context) ?? [],
-    );
-    const missingGates = REQUIRED_GATES.filter((gate) => !requiredChecks.has(gate));
-    const hasPullRequests = rules.some((rule) => rule?.type === 'pull_request');
-    const hasMergeQueue = rules.some((rule) => rule?.type === 'merge_queue');
-    if (hasPullRequests && hasMergeQueue && missingGates.length === 0) {
-      return { ok: true, ruleset: ruleset.name ?? ruleset.id ?? '<unnamed>' };
+  for (const rule of rules) {
+    if (rule?.ruleset_id !== undefined) sources.add(String(rule.ruleset_id));
+    if (rule?.type === 'pull_request') hasPullRequests = true;
+    if (rule?.type === 'merge_queue') hasMergeQueue = true;
+    if (rule?.type === 'required_status_checks') {
+      for (const check of rule?.parameters?.required_status_checks ?? []) {
+        if (typeof check?.context === 'string') requiredChecks.add(check.context);
+      }
     }
   }
+
+  const missing = [
+    ...(!hasPullRequests ? ['pull_request'] : []),
+    ...(!hasMergeQueue ? ['merge_queue'] : []),
+    ...REQUIRED_GATES.filter((gate) => !requiredChecks.has(gate)),
+  ];
   return {
-    ok: false,
-    message: `${branch} needs an active pull-request ruleset with merge queue and both aggregate gates`,
+    ok: missing.length === 0,
+    branch,
+    missing,
+    requiredChecks: [...requiredChecks].sort(),
+    rulesetIds: [...sources].sort(),
+    message: missing.length === 0
+      ? `${branch} effective rules require PRs, merge queue, and both aggregate gates`
+      : `${branch} effective rules are missing: ${missing.join(', ')}`,
   };
 }
 
 function parseArguments(argv) {
-  if (argv[0] !== '--branch' || !argv[1] || argv.length < 3) {
-    throw new Error('usage: --branch BRANCH RULESET.json [RULESET.json ...]');
+  if (argv[0] !== '--branch' || !argv[1] || argv.length !== 3) {
+    throw new Error('usage: --branch BRANCH EFFECTIVE_RULES.json');
   }
-  return { branch: argv[1], files: argv.slice(2) };
+  return { branch: argv[1], file: argv[2] };
 }
 
 export function runDeltaRolloutRulesetValidator(argv) {
   try {
-    const { branch, files } = parseArguments(argv);
-    const rulesets = files.map((filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8')));
-    const verdict = evaluateDeltaRolloutRulesets({ branch, rulesets });
+    const { branch, file } = parseArguments(argv);
+    const rules = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const verdict = evaluateEffectiveDeltaRolloutRules({ branch, rules });
     if (!verdict.ok) throw new Error(verdict.message);
-    console.log(`${branch} delta prerequisites verified by ruleset ${verdict.ruleset}`);
+    console.log(verdict.message);
     return 0;
   } catch (error) {
     console.error(`delta-rollout-ruleset: ${error.message}`);

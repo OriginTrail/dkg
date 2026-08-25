@@ -6,11 +6,15 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runZizmorSarifGate } from '../../ci/enforce-zizmor-sarif.mjs';
 import {
+  ciPolicyModeExitCode,
+  inspectCiPolicy,
+} from '../../ci/inspect-ci-policy.mjs';
+import {
   CONTROLLER_POLICY_FILES,
   isProtectedHistoryComparison,
   validateTrustedControllerPins,
 } from '../../ci/trusted-controller-pins.mjs';
-import { evaluateDeltaRolloutRulesets } from '../../ci/validate-delta-rollout-ruleset.mjs';
+import { evaluateEffectiveDeltaRolloutRules } from '../../ci/validate-delta-rollout-ruleset.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const CONTROLLER_SHA = '780f14aa60c39bdca788967121085c3c0d82d85c';
@@ -37,16 +41,21 @@ function controllerCheckout({
   ].join('\n');
 }
 
-function workflowFixture({ planCheckout = controllerCheckout(), gateCheckout = controllerCheckout(), unrelated = '' } = {}) {
+function workflowFixture({
+  planCheckout = controllerCheckout(),
+  gateCheckout = controllerCheckout(),
+  unrelated = '',
+  planCheckoutAfterConsumer = false,
+} = {}) {
+  const planConsumer = `      - name: Plan
+        run: node trusted-ci/scripts/ci/plan-ci.mjs --event pull_request`;
   return `
 name: fixture
 jobs:
   plan:
     runs-on: ubuntu-latest
     steps:
-${unrelated}${planCheckout}
-      - name: Plan
-        run: node trusted-ci/scripts/ci/plan-ci.mjs --event pull_request
+${unrelated}${planCheckoutAfterConsumer ? `${planConsumer}\n${planCheckout}` : `${planCheckout}\n${planConsumer}`}
   gate:
     runs-on: ubuntu-latest
     steps:
@@ -109,6 +118,29 @@ test('controller validation rejects missing, inconsistent, fake, and over-broad 
     }]),
     /canonical controller file list/,
   );
+  assert.throws(
+    () => validateTrustedControllerPins([{
+      sourceName: 'untrusted-repository.yml',
+      source: workflowFixture({
+        planCheckout: controllerCheckout({ repository: 'attacker/fork' }),
+      }),
+    }]),
+    /must use OriginTrail\/dkg/,
+  );
+  assert.throws(
+    () => validateTrustedControllerPins([{
+      sourceName: 'mutable-ref.yml',
+      source: workflowFixture({ planCheckout: controllerCheckout({ ref: 'main' }) }),
+    }]),
+    /immutable 40-character ref/,
+  );
+  assert.throws(
+    () => validateTrustedControllerPins([{
+      sourceName: 'late-checkout.yml',
+      source: workflowFixture({ planCheckoutAfterConsumer: true }),
+    }]),
+    /must precede its controller consumer/,
+  );
 });
 
 test('repository workflows expose one canonical protected-history controller pin', () => {
@@ -138,49 +170,94 @@ test('repository workflows expose one canonical protected-history controller pin
     path.join(REPO_ROOT, '.github/workflows/supply-chain-scan.yml'),
     'utf8',
   );
-  assert.match(freshnessWorkflow, /compare\/\$\{CONTROLLER_PINNED\}\.\.\.\$\{DEFAULT_BRANCH\}/);
-  assert.match(freshnessWorkflow, /--validate-provenance-status "\$\{CONTROLLER_PROVENANCE\}"/);
-  assert.match(freshnessWorkflow, /--list-controller-files/);
-  assert.match(freshnessWorkflow, /git diff --quiet[^\n]*"\$\{CONTROLLER_FILES\[@\]\}"/);
+  assert.equal(freshnessWorkflow.match(/node scripts\/ci\/inspect-ci-policy\.mjs/g)?.length, 2);
+  assert.doesNotMatch(freshnessWorkflow, /repos\/\$\{GITHUB_REPOSITORY\}\/rulesets/);
+  assert.doesNotMatch(freshnessWorkflow, /git diff --quiet/);
 });
 
 test('testnet delta rollout requires PRs, merge queue, and both aggregate gates', () => {
-  const validRuleset = {
-    name: 'protect-testnet-canary',
-    enforcement: 'active',
-    conditions: { ref_name: { include: ['refs/heads/testnet-canary'], exclude: [] } },
-    rules: [
-      { type: 'pull_request' },
-      { type: 'merge_queue' },
-      {
-        type: 'required_status_checks',
-        parameters: {
-          required_status_checks: [
-            { context: 'CI gate' },
-            { context: 'EVM integration gate' },
-          ],
-        },
+  const effectiveRules = [
+    { type: 'pull_request', ruleset_id: 10 },
+    { type: 'merge_queue', ruleset_id: 20 },
+    {
+      type: 'required_status_checks',
+      ruleset_id: 20,
+      parameters: {
+        required_status_checks: [
+          { context: 'CI gate' },
+          { context: 'EVM integration gate' },
+        ],
       },
-    ],
+    },
+  ];
+  const layered = evaluateEffectiveDeltaRolloutRules({
+    branch: 'testnet-canary', rules: effectiveRules,
+  });
+  assert.equal(layered.ok, true, 'protections split across effective rulesets must aggregate');
+  assert.deepEqual(layered.rulesetIds, ['10', '20']);
+
+  assert.equal(evaluateEffectiveDeltaRolloutRules({
+    branch: 'testnet-canary',
+    rules: effectiveRules.filter((rule) => rule.type !== 'pull_request'),
+  }).ok, false);
+  assert.equal(evaluateEffectiveDeltaRolloutRules({
+    branch: 'testnet-canary',
+    rules: effectiveRules.filter((rule) => rule.type !== 'merge_queue'),
+  }).ok, false);
+  assert.equal(evaluateEffectiveDeltaRolloutRules({
+    branch: 'testnet-canary',
+    rules: effectiveRules.map((rule) => (
+      rule.type === 'required_status_checks'
+        ? { ...rule, parameters: { required_status_checks: [{ context: 'CI gate' }] } }
+        : rule
+    )),
+  }).ok, false);
+  assert.equal(evaluateEffectiveDeltaRolloutRules({
+    branch: 'testnet-canary', rules: [],
+  }).ok, false, 'an excluded, inactive, or other-branch ruleset is absent from effective rules');
+});
+
+test('one effective policy snapshot drives hard-gate and informational modes', async () => {
+  const requestedEndpoints = [];
+  const effectiveRules = [
+    { type: 'pull_request', ruleset_id: 1 },
+    { type: 'merge_queue', ruleset_id: 2 },
+    {
+      type: 'required_status_checks',
+      ruleset_id: 2,
+      parameters: {
+        required_status_checks: [
+          { context: 'CI gate' },
+          { context: 'EVM integration gate' },
+        ],
+      },
+    },
+  ];
+  const requestJson = async (endpoint) => {
+    requestedEndpoints.push(endpoint);
+    if (endpoint === 'repos/OriginTrail/dkg') return { default_branch: 'main' };
+    if (endpoint.includes('/compare/')) return { status: 'ahead' };
+    if (endpoint === 'repos/OriginTrail/dkg/rules/branches/testnet-canary') return effectiveRules;
+    if (endpoint.includes('/contents/')) return { sha: 'same-controller-blob' };
+    throw new Error(`unexpected endpoint: ${endpoint}`);
   };
-  assert.equal(evaluateDeltaRolloutRulesets({
-    branch: 'testnet-canary', rulesets: [validRuleset],
-  }).ok, true);
-  assert.equal(evaluateDeltaRolloutRulesets({
+  const snapshot = await inspectCiPolicy({
+    repository: 'OriginTrail/dkg',
     branch: 'testnet-canary',
-    rulesets: [{ ...validRuleset, rules: validRuleset.rules.filter((rule) => rule.type !== 'merge_queue') }],
-  }).ok, false);
-  assert.equal(evaluateDeltaRolloutRulesets({
-    branch: 'testnet-canary',
-    rulesets: [{
-      ...validRuleset,
-      rules: validRuleset.rules.map((rule) => (
-        rule.type === 'required_status_checks'
-          ? { ...rule, parameters: { required_status_checks: [{ context: 'CI gate' }] } }
-          : rule
-      )),
-    }],
-  }).ok, false);
+    workflows: [{ sourceName: 'fixture.yml', source: workflowFixture() }],
+    token: 'test-token',
+    requestJson,
+  });
+  assert.equal(snapshot.prerequisites.ok, true);
+  assert.equal(snapshot.freshness.ok, true);
+  assert.equal(ciPolicyModeExitCode(snapshot, 'enforce'), 0);
+  assert.equal(ciPolicyModeExitCode(snapshot, 'report'), 0);
+  assert.ok(requestedEndpoints.includes('repos/OriginTrail/dkg/rules/branches/testnet-canary'));
+  assert.equal(requestedEndpoints.some((endpoint) => endpoint.includes('/rulesets')), false);
+
+  const missingPrerequisites = { ...snapshot, prerequisites: { ok: false } };
+  assert.equal(ciPolicyModeExitCode(missingPrerequisites, 'enforce'), 1);
+  assert.equal(ciPolicyModeExitCode(missingPrerequisites, 'report'), 0);
 });
 
 test('zizmor SARIF gate accepts clean output and rejects findings, failures, and wrong tools', (t) => {
