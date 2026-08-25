@@ -462,6 +462,133 @@ describe('RFC-64 finalized VM runtime', () => {
     }
   });
 
+  it('continues rollback after one reverse restore fails and retries only that row', async () => {
+    const store = new OxigraphStore();
+    const graphlessProjection: Quad[] = [
+      { subject: 'urn:rfc64:rollback-all', predicate: 'urn:rfc64:value', object: '"new"', graph: '' },
+    ];
+    const assertionRoot = ethers.hexlify(computeFlatKCRootV10(
+      graphlessProjection,
+      [],
+    )).toLowerCase() as Digest32V1;
+    const [first, second] = await Promise.all([
+      createRfc64FinalizedVmPlacementFixture({
+        kaNumber: 1n,
+        assertionRoot,
+        publicTripleCount: graphlessProjection.length,
+      }),
+      createRfc64FinalizedVmPlacementFixture({
+        kaNumber: 2n,
+        assertionRoot,
+        publicTripleCount: graphlessProjection.length,
+      }),
+    ]);
+    const metaGraph = contextGraphMetaUri(RFC64_VM_CONTEXT_GRAPH_NAME);
+    const predecessors = new Map<number, {
+      readonly graphQuads: readonly Quad[];
+      readonly metadataQuads: readonly Quad[];
+      readonly vmGraph: string;
+    }>();
+    for (const kaNumber of [1, 2]) {
+      const swmGraph = contextGraphLayerUri(
+        RFC64_VM_CONTEXT_GRAPH_NAME,
+        MemoryLayer.SharedWorkingMemory,
+        RFC64_VM_AUTHOR,
+        kaNumber,
+      );
+      const vmGraph = contextGraphLayerUri(
+        RFC64_VM_CONTEXT_GRAPH_NAME,
+        MemoryLayer.VerifiableMemory,
+        RFC64_VM_AUTHOR,
+        kaNumber,
+      );
+      const graphQuads = [{
+        subject: `urn:rfc64:rollback-all:old:${kaNumber}`,
+        predicate: 'urn:rfc64:value',
+        object: `"old-${kaNumber}"`,
+        graph: vmGraph,
+      }] satisfies Quad[];
+      const metadataQuads = [{
+        subject: rfc64VmUal(BigInt(kaNumber)),
+        predicate: 'urn:rfc64:rollback-all-marker',
+        object: `"old-${kaNumber}"`,
+        graph: metaGraph,
+      }] satisfies Quad[];
+      await store.insert(graphlessProjection.map((quad) => ({ ...quad, graph: swmGraph })));
+      await store.insert([...graphQuads, ...metadataQuads]);
+      predecessors.set(kaNumber, { graphQuads, metadataQuads, vmGraph });
+    }
+
+    const secondVmGraph = predecessors.get(2)!.vmGraph;
+    const replace = store.replaceGraphAndSubject!.bind(store);
+    const rollbackAttempts: string[] = [];
+    let injectedFailure = false;
+    store.replaceGraphAndSubject = async (...args) => {
+      if (args[5]?.source === 'rfc64-finalized-vm-exact-rollback') {
+        rollbackAttempts.push(args[0]);
+        if (args[0] === secondVmGraph && !injectedFailure) {
+          injectedFailure = true;
+          throw new Error('injected first reverse-order restore failure');
+        }
+      }
+      await replace(...args);
+    };
+    const storeMaterializer = createFinalizedVmStoreMaterializerV1({ store });
+    let materialized = 0;
+    const failingMaterializer = Object.assign(
+      async (...args: Parameters<FinalizedVmMaterializerV1>) => {
+        const receipt = await storeMaterializer(...args);
+        materialized += 1;
+        if (materialized === 2) throw new Error('injected failure after both VM rows');
+        return receipt;
+      },
+      {
+        commit: () => storeMaterializer.commit(),
+        rollback: (cause?: unknown) => storeMaterializer.rollback(cause),
+      },
+    );
+    const runtime = createFinalizedVmRuntimeV1(runtimeConfig(
+      snapshotTransport({ accessPolicy: 1, kaNumbers: [1n, 2n], assertionRoot }).snapshot,
+      failingMaterializer,
+    ));
+
+    await expect(runtime(privateRequest([first, second]))).rejects.toThrow(
+      /finalized VM runtime and exact rollback both failed/u,
+    );
+    expect(rollbackAttempts).toEqual([
+      predecessors.get(2)!.vmGraph,
+      predecessors.get(1)!.vmGraph,
+    ]);
+    await expect(readExactGraphPaged(store, predecessors.get(1)!.vmGraph, {
+      expectedQuadCount: 1,
+      outputGraph: predecessors.get(1)!.vmGraph,
+    })).resolves.toEqual(predecessors.get(1)!.graphQuads);
+    await expect(readExactGraphPaged(store, secondVmGraph, {
+      expectedQuadCount: 1,
+      outputGraph: secondVmGraph,
+    })).resolves.not.toEqual(predecessors.get(2)!.graphQuads);
+
+    await expect(failingMaterializer.rollback()).resolves.toBeUndefined();
+    expect(rollbackAttempts).toEqual([
+      predecessors.get(2)!.vmGraph,
+      predecessors.get(1)!.vmGraph,
+      predecessors.get(2)!.vmGraph,
+    ]);
+    for (const [kaNumber, predecessor] of predecessors) {
+      await expect(readExactGraphPaged(store, predecessor.vmGraph, {
+        expectedQuadCount: predecessor.graphQuads.length,
+        outputGraph: predecessor.vmGraph,
+      })).resolves.toEqual(predecessor.graphQuads);
+      await expect(store.query(
+        `SELECT ?predicate ?object WHERE { GRAPH <${metaGraph}> { `
+          + `<${rfc64VmUal(BigInt(kaNumber))}> ?predicate ?object } } ORDER BY ?predicate ?object`,
+      )).resolves.toEqual({
+        type: 'bindings',
+        bindings: predecessor.metadataQuads.map(({ predicate, object }) => ({ predicate, object })),
+      });
+    }
+  });
+
   it('rolls back a private VM write when accepted authority changes during atomic commit', async () => {
     const store = new OxigraphStore();
     const graphlessProjection: Quad[] = [

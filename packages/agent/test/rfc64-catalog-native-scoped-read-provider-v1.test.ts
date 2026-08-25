@@ -79,7 +79,11 @@ function acceptedPrivatePolicy(options: {
   return Object.freeze({ policy, policyDigest: POLICY_DIGEST, roster });
 }
 
-async function providerFixture(accepted = acceptedPrivatePolicy()) {
+async function providerFixture(
+  accepted = acceptedPrivatePolicy(),
+  verifyIssuerSignature: typeof verifyControlEnvelopeIssuerSignatureV1 =
+    verifyControlEnvelopeIssuerSignatureV1,
+) {
   const catalogScope = {
     networkId: 'otp:20430',
     contextGraphId: CONTEXT_GRAPH_ID,
@@ -160,13 +164,26 @@ async function providerFixture(accepted = acceptedPrivatePolicy()) {
     envelope: unrelated,
     issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(unrelated),
   });
-  const controlRead = vi.fn(async ({ objectDigest }: { objectDigest: Digest32V1 }) =>
-    stored.get(objectDigest) ?? null);
+  const controlRead = vi.fn(async ({
+    objectDigest,
+    verifyIssuerSignature: verifyStoredIssuerSignature,
+  }: {
+    objectDigest: Digest32V1;
+    verifyIssuerSignature: typeof verifyControlEnvelopeIssuerSignatureV1;
+  }) => {
+    const retained = stored.get(objectDigest);
+    if (retained === undefined) return null;
+    return {
+      envelope: retained.envelope,
+      issuerSignature: await verifyStoredIssuerSignature(retained.envelope),
+    };
+  });
   const bundleRead = vi.fn(async (blobDigest: Digest32V1) =>
     blobDigest === bundle.blobDigest ? bundle.bundleBytes : null);
   const resolve = createRfc64CatalogNativeScopedReadProviderV1({
     controlObjects: { getVerifiedObjectByDigest: controlRead } as never,
     kaBundles: { readKaBundleByDigest: bundleRead },
+    verifyIssuerSignature,
     resolveAcceptedPolicySnapshot: async () => accepted,
   });
   const scope = Object.freeze({
@@ -256,6 +273,22 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
     fixture.controlRead.mockImplementation(async ({ objectDigest }) =>
       objectDigest === delegationDigest ? null : fixture.stored.get(objectDigest) ?? null);
     await expect(fixture.resolve(fixture.scope)).resolves.toBeNull();
+    expect(fixture.bundleRead).not.toHaveBeenCalled();
+  });
+
+  it('denies private bundle delivery when the configured signature verifier rejects cache', async () => {
+    const configuredVerifier = vi.fn(async () => {
+      throw new Error('catalog signer revoked by configured verifier');
+    });
+    const fixture = await providerFixture(acceptedPrivatePolicy(), configuredVerifier);
+
+    const delivered = await fixture.resolve(fixture.scope).then(async (capability) => (
+      capability === null
+        ? null
+        : capability.readKaBundleByDigest(fixture.bundle.blobDigest)
+    ));
+    expect(delivered).toBeNull();
+    expect(configuredVerifier).toHaveBeenCalledWith(fixture.successor.head);
     expect(fixture.bundleRead).not.toHaveBeenCalled();
   });
 

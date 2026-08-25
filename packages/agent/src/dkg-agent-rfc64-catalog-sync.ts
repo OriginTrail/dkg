@@ -103,6 +103,15 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
       ...(signal === undefined ? {} : { signal }),
     });
     if (synchronized === null) return null;
+    if (
+      synchronized.completionOutcome !== 'applied'
+      && synchronized.completionOutcome !== 'already-applied'
+    ) {
+      throw new Error(
+        'RFC-64 current catalog head synchronization did not complete successfully'
+        + ` (${synchronized.completionOutcome})`,
+      );
+    }
     const catalogScope = deriveAuthorCatalogScopeFromHeadV1(
       synchronized.current.head.envelope.payload,
     );

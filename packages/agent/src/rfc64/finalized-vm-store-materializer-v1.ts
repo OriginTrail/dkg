@@ -69,11 +69,14 @@ export function createFinalizedVmStoreMaterializerV1(
 ): FinalizedVmTransactionalMaterializerV1 {
   const { store, isCurrent } = options;
   const rollbackJournal: FinalizedVmStoreRollbackEntryV1[] = [];
-  let closed = false;
+  let transactionState: 'open' | 'rollback-pending' | 'closed' = 'open';
+  let rollbackInFlight: Promise<void> | null = null;
   const materialize: FinalizedVmMaterializerV1 = async (
     request,
   ): Promise<FinalizedVmMaterializationReceiptV1> => {
-    if (closed) throw new Error('finalized VM materialization transaction is closed');
+    if (transactionState !== 'open') {
+      throw new Error('finalized VM materialization transaction is closed');
+    }
     request.signal.throwIfAborted();
     const binding = readVerifiedCatalogSealBindingV1(request.placement.sealBinding);
     const { seal } = binding;
@@ -265,18 +268,60 @@ export function createFinalizedVmStoreMaterializerV1(
   };
   return Object.freeze(Object.assign(materialize, {
     commit(): void {
-      closed = true;
+      if (transactionState === 'rollback-pending') {
+        throw new Error('finalized VM materialization transaction has pending rollback failures');
+      }
+      transactionState = 'closed';
       rollbackJournal.length = 0;
     },
     async rollback(): Promise<void> {
-      if (closed) return;
-      closed = true;
-      for (const entry of rollbackJournal.reverse()) {
-        await restoreFinalizedVmStoreStateV1(store, entry);
+      if (transactionState === 'closed') return;
+      if (rollbackInFlight !== null) {
+        await rollbackInFlight;
+        return;
       }
-      rollbackJournal.length = 0;
+      transactionState = 'rollback-pending';
+      const run = rollbackFinalizedVmStoreJournalV1(store, rollbackJournal)
+        .then(() => {
+          transactionState = 'closed';
+        });
+      rollbackInFlight = run;
+      try {
+        await run;
+      } finally {
+        if (rollbackInFlight === run) rollbackInFlight = null;
+      }
     },
   }));
+}
+
+async function rollbackFinalizedVmStoreJournalV1(
+  store: TripleStore,
+  rollbackJournal: FinalizedVmStoreRollbackEntryV1[],
+): Promise<void> {
+  const failedEntries: FinalizedVmStoreRollbackEntryV1[] = [];
+  const failures: Error[] = [];
+  for (const entry of [...rollbackJournal].reverse()) {
+    try {
+      await restoreFinalizedVmStoreStateV1(store, entry);
+    } catch (cause) {
+      // Preserve original journal order so a later retry still restores in
+      // reverse materialization order. Successful entries are removed and
+      // cannot be restored a second time over a newer external state.
+      failedEntries.unshift(entry);
+      failures.push(new Error(
+        `finalized VM exact rollback failed for ${entry.ual}`,
+        { cause },
+      ));
+    }
+  }
+  rollbackJournal.splice(0, rollbackJournal.length, ...failedEntries);
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `finalized VM exact rollback failed for ${failures.length} row(s)`,
+    );
+  }
 }
 
 async function snapshotFinalizedVmStoreStateV1(

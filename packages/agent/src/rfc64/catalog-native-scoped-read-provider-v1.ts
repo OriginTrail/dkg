@@ -34,8 +34,11 @@ import {
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SignedAuthorCatalogIssuerDelegationEnvelopeV1,
+  type SignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import type {
+  VerifiedControlEnvelopeIssuerSignatureV1,
+} from '@origintrail-official/dkg-chain';
 
 import {
   verifyAuthorCatalogRowAuthorshipV1,
@@ -54,6 +57,10 @@ import {
 export interface Rfc64CatalogNativeScopedReadProviderOptionsV1 {
   readonly controlObjects: Pick<Rfc64ControlObjectOperationsV1, 'getVerifiedObjectByDigest'>;
   readonly kaBundles: Pick<Rfc64KaBundleOperationsV1, 'readKaBundleByDigest'>;
+  /** The exact verifier configured for every other catalog service path. */
+  readonly verifyIssuerSignature: (
+    envelope: SignedControlEnvelopeV1,
+  ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
   /** Accepted-current authority; never derive policy scope from the request. */
   readonly resolveAcceptedPolicySnapshot: (
     networkId: Rfc64PublicCatalogNativeFetchScopeV1['networkId'],
@@ -77,6 +84,7 @@ export function createRfc64CatalogNativeScopedReadProviderV1(
   if (
     typeof options?.controlObjects?.getVerifiedObjectByDigest !== 'function'
     || typeof options?.kaBundles?.readKaBundleByDigest !== 'function'
+    || typeof options?.verifyIssuerSignature !== 'function'
     || typeof options?.resolveAcceptedPolicySnapshot !== 'function'
   ) {
     throw new TypeError('RFC-64 scoped read provider dependencies are incomplete');
@@ -297,7 +305,7 @@ async function readStored(
 ) {
   return options.controlObjects.getVerifiedObjectByDigest({
     objectDigest,
-    verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    verifyIssuerSignature: options.verifyIssuerSignature,
   });
 }
 

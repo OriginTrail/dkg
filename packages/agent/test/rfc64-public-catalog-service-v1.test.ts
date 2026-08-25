@@ -1115,6 +1115,70 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await service.close();
   });
 
+  it('rejects a failed mandatory replay of one durable head under a rotated private policy', async () => {
+    const router = new RecordingRouter();
+    const initialDigest = `0x${'41'.repeat(32)}` as Digest32V1;
+    const rotatedDigest = `0x${'42'.repeat(32)}` as Digest32V1;
+    const initialPolicy = catalogPolicy(CONTEXT_GRAPH_ID, 1, 1);
+    const rotatedPolicy = {
+      ...catalogPolicy(CONTEXT_GRAPH_ID, 1, 1),
+      version: '1',
+      previousPolicyDigest: initialDigest,
+    } satisfies ContextGraphPolicyV1;
+    const rejectedPrecommit = new Error('current private finalized precommit rejected');
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      receiver: { maxAttempts: 1, retryBackoffMs: 0 },
+      native: nativeOptions(() => ({
+        isHeadApplied: async () => false,
+        reconcileHead: async (_peerId, head) => {
+          if (head.policyDigest === rotatedDigest) throw rejectedPrecommit;
+          return 'applied';
+        },
+      })),
+    });
+    service.acceptPolicySnapshot({
+      policy: initialPolicy,
+      policyDigest: initialDigest,
+      roster: memberRoster(initialPolicy, initialDigest),
+    });
+    const sameDurableHead = announcement(initialDigest);
+    const discovery = vi.spyOn(service, 'discoverCurrentCatalogHead').mockResolvedValue(
+      Object.freeze({ announcement: sameDurableHead, head: {} as never }),
+    );
+    const scope = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0' as const,
+    };
+    await expect(service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: ['peer-a'],
+      scope,
+    })).resolves.toMatchObject({ completionOutcome: 'applied' });
+
+    service.acceptPolicySnapshot({
+      policy: rotatedPolicy,
+      policyDigest: rotatedDigest,
+      roster: memberRoster(rotatedPolicy, rotatedDigest),
+    });
+    discovery.mockResolvedValue(Object.freeze({
+      announcement: { ...sameDurableHead, policyDigest: rotatedDigest },
+      head: {} as never,
+    }));
+    await expect(service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: ['peer-a', 'peer-b'],
+      scope,
+    })).rejects.toMatchObject({
+      message: 'RFC-64 current-head synchronization ended with failed',
+      cause: rejectedPrecommit,
+    });
+    await service.close();
+  });
+
   it('keeps diagnostic staging-only mode explicitly non-applied across replays', async () => {
     const router = new RecordingRouter();
     const store = controlObjects();

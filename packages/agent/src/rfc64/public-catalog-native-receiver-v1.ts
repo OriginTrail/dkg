@@ -1126,6 +1126,36 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     );
 
     let appliedHeadStatus: 'applied' | 'existing';
+    let headCommitDisposition: 'predecessor' | 'target' | 'indeterminate' =
+      historyDisposition === 'replay' ? 'target' : 'predecessor';
+    let precommitFinalized = false;
+    const finalizeTargetTransition = (): void => {
+      if (precommitFinalized) return;
+      // Set the fence before invoking operator code. A throwing commit hook
+      // cannot make a known-durable target safe to roll back to its predecessor.
+      precommitFinalized = true;
+      precommitTransaction?.commit();
+    };
+    const rollbackRejectedTransition = async (cause: unknown): Promise<void> => {
+      const rollbackFailures: unknown[] = [];
+      try {
+        await this.rollbackAppliedHeadPrecommitV1(precommitTransaction, cause);
+      } catch (rollbackCause) {
+        rollbackFailures.push(rollbackCause);
+      }
+      try {
+        await restoreExactPredecessorAfterFailure(cause, 'catalog applied-head precommit');
+      } catch (rollbackCause) {
+        rollbackFailures.push(rollbackCause);
+      }
+      if (rollbackFailures.length > 0) {
+        fail(
+          'catalog-native-receiver-activation',
+          'rejected catalog head could not restore one exact SWM/VM predecessor',
+          new AggregateError([cause, ...rollbackFailures]),
+        );
+      }
+    };
     try {
       if (historyDisposition === 'replay') {
         if (currentAppliedHead!.appliedInventoryDigest !== completion.inventoryDigest) {
@@ -1137,7 +1167,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         appliedHeadStatus = 'existing';
       } else {
         try {
-          appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
+          const casResult = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
             catalogScopeDigest,
             authorAddress: head.payload.authorAddress,
             expectedCurrentCatalogHeadDigest: historyDisposition === 'cold-bootstrap'
@@ -1147,12 +1177,28 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
             appliedInventoryDigest: completion.inventoryDigest,
             catalogVersion: head.payload.version,
             inventoryRowCount: head.payload.totalRows,
-          }).status;
+          });
+          headCommitDisposition = 'target';
+          appliedHeadStatus = casResult.status;
         } catch (cause) {
-          const reconciled = this.options.inventory.readAppliedCatalogHeadV1(
-            catalogScopeDigest,
-            head.payload.authorAddress,
-          );
+          // The CAS adapter can throw after its durable write. Until its exact
+          // state is read, predecessor rollback is unsafe.
+          headCommitDisposition = 'indeterminate';
+          let reconciled: ReturnType<
+            typeof this.options.inventory.readAppliedCatalogHeadV1
+          >;
+          try {
+            reconciled = this.options.inventory.readAppliedCatalogHeadV1(
+              catalogScopeDigest,
+              head.payload.authorAddress,
+            );
+          } catch (reconciliationCause) {
+            fail(
+              'catalog-native-receiver-history',
+              'applied-head CAS outcome is indeterminate; target SWM/VM state is retained',
+              new AggregateError([cause, reconciliationCause]),
+            );
+          }
           if (
             reconciled === null
             || reconciled.currentCatalogHeadDigest !== head.objectDigest
@@ -1162,15 +1208,21 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
               completion.inventoryDigest,
             )
           ) {
+            headCommitDisposition = 'predecessor';
             fail(
               'catalog-native-receiver-history',
               'applied-head CAS lost outside the serialized receiver; semantic state requires repair',
               cause,
             );
           }
+          headCommitDisposition = 'target';
           appliedHeadStatus = 'existing';
         }
       }
+      // Once the exact target head is known durable, SWM and VM are the target
+      // generation. Finalize that recovery unit before a diagnostic post-read:
+      // a later read fault must never restore VM behind the committed head.
+      finalizeTargetTransition();
       const durablePostRead = this.options.inventory.readAppliedCatalogHeadV1(
         catalogScopeDigest,
         head.payload.authorAddress,
@@ -1186,10 +1238,15 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         );
       }
     } catch (cause) {
-      await this.rollbackAppliedHeadPrecommitV1(precommitTransaction, cause);
+      if (headCommitDisposition === 'predecessor') {
+        await rollbackRejectedTransition(cause);
+      } else {
+        // A confirmed or possibly committed CAS fences predecessor rollback.
+        // Keep both semantic journals on the target for exact durable repair.
+        finalizeTargetTransition();
+      }
       throw cause;
     }
-    precommitTransaction?.commit();
 
     if (activatedRows.length === 1) {
       const [only] = activatedRows;

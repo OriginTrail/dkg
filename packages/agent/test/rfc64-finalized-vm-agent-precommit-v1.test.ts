@@ -1,9 +1,21 @@
-import type { MemberRosterV1 } from '@origintrail-official/dkg-core';
+import {
+  MemoryLayer,
+  contextGraphLayerUri,
+  contextGraphMetaUri,
+  type Digest32V1,
+  type MemberRosterV1,
+} from '@origintrail-official/dkg-core';
+import {
+  readExactGraphPaged,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
+import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createRfc64FinalizedVmAgentPrecommitV1 } from '../src/rfc64/finalized-vm-agent-precommit-v1.js';
 import { FinalizedVmCompositionErrorV1 } from '../src/rfc64/finalized-vm-composer-v1.js';
+import { createFinalizedVmStoreMaterializerV1 } from '../src/rfc64/finalized-vm-store-materializer-v1.js';
 import {
   RFC64_VM_ASSERTION_ROOT,
   RFC64_VM_AUTHOR,
@@ -63,7 +75,9 @@ function privateFinalizedSnapshot(issuedAt = '1700000000000') {
   return Object.freeze({ ...accepted, policy, roster });
 }
 
-function finalizedChainFixture(): FinalizedVmLoopbackFixtureConfigV1 {
+function finalizedChainFixture(
+  assertionRoot: Digest32V1 = RFC64_VM_ASSERTION_ROOT,
+): FinalizedVmLoopbackFixtureConfigV1 {
   return {
     accessPolicy: 1,
     active: true,
@@ -71,7 +85,7 @@ function finalizedChainFixture(): FinalizedVmLoopbackFixtureConfigV1 {
     assertedAtKav10Address: RFC64_VM_KAV10,
     knowledgeAssetStorageAddress: RFC64_VM_KA_STORAGE,
     assets: [{
-      assertionRoot: RFC64_VM_ASSERTION_ROOT,
+      assertionRoot,
       assertionVersion: '2',
       authorAddress: RFC64_VM_AUTHOR,
       kaId: rfc64VmPackKaId(1n),
@@ -88,8 +102,8 @@ function finalizedChainFixture(): FinalizedVmLoopbackFixtureConfigV1 {
   };
 }
 
-async function liveRpcEndpoint(): Promise<string> {
-  const rpc = createFinalizedVmLoopbackRpcV1(finalizedChainFixture());
+async function liveRpcEndpoint(assertionRoot?: Digest32V1): Promise<string> {
+  const rpc = createFinalizedVmLoopbackRpcV1(finalizedChainFixture(assertionRoot));
   const server = await rpcHarness.start((call, response) => {
     try {
       sendJsonRpcResult(response, call, rpc.respond(call.method, call.params));
@@ -187,28 +201,73 @@ describe('RFC-64 finalized VM agent precommit', () => {
   });
 
   it('rejects a roster change after private VM materialization and before head commit', async () => {
-    const placement = await createRfc64FinalizedVmPlacementFixture();
+    const graphlessProjection: Quad[] = [{
+      subject: 'urn:rfc64:precommit-roster-change',
+      predicate: 'urn:rfc64:value',
+      object: '"new"',
+      graph: '',
+    }];
+    const assertionRoot = ethers.hexlify(computeFlatKCRootV10(
+      graphlessProjection,
+      [],
+    )).toLowerCase() as Digest32V1;
+    const placement = await createRfc64FinalizedVmPlacementFixture({
+      assertionRoot,
+      publicTripleCount: graphlessProjection.length,
+    });
     const initial = privateFinalizedSnapshot();
     const changed = privateFinalizedSnapshot('1700000000001');
-    const acceptedPolicySnapshotForCatalogScope = vi.fn()
-      .mockReturnValueOnce(initial)
-      .mockReturnValue(changed);
-    const materialize = vi.fn(async ({ candidate }: {
-      candidate: { kaId: string; ordinal: string; ual: string };
-    }) => ({
-      kaId: candidate.kaId,
-      ordinal: candidate.ordinal,
-      ual: candidate.ual,
-      status: 'materialized' as const,
-      vmGraphIri: `${rfc64VmUal(1n)}/VerifiableMemory/2`,
-      tripleCount: '10' as const,
-      postReadDigest: `0x${'ee'.repeat(32)}` as const,
-    }));
+    let rosterChanged = false;
+    const acceptedPolicySnapshotForCatalogScope = vi.fn(() => (
+      rosterChanged ? changed : initial
+    ));
+    const options = baseOptions();
+    const store = options.store;
+    const swmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.SharedWorkingMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    const vmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.VerifiableMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    const metaGraph = contextGraphMetaUri(RFC64_VM_CONTEXT_GRAPH_NAME);
+    const predecessorGraph: Quad[] = [{
+      subject: 'urn:rfc64:precommit-roster-change:old',
+      predicate: 'urn:rfc64:value',
+      object: '"old"',
+      graph: vmGraph,
+    }];
+    const predecessorMetadata: Quad[] = [{
+      subject: rfc64VmUal(1n),
+      predicate: 'urn:rfc64:precommit-roster-change-marker',
+      object: '"old"',
+      graph: metaGraph,
+    }];
+    await store.insert(graphlessProjection.map((quad) => ({ ...quad, graph: swmGraph })));
+    await store.insert([...predecessorGraph, ...predecessorMetadata]);
+    const storeMaterializer = createFinalizedVmStoreMaterializerV1({ store });
+    const rollback = vi.fn((cause?: unknown) => storeMaterializer.rollback(cause));
+    const materialize = Object.assign(
+      async (...args: Parameters<typeof storeMaterializer>) => {
+        const receipt = await storeMaterializer(...args);
+        rosterChanged = true;
+        return receipt;
+      },
+      {
+        commit: () => storeMaterializer.commit(),
+        rollback,
+      },
+    );
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
-      ...baseOptions(),
+      ...options,
       acceptedPolicySnapshotForCatalogScope,
-      rpcEndpoints: [await liveRpcEndpoint()],
-      materialize: materialize as never,
+      rpcEndpoints: [await liveRpcEndpoint(assertionRoot)],
+      materialize,
     });
 
     await expect(handler(Object.freeze({
@@ -218,8 +277,19 @@ describe('RFC-64 finalized VM agent precommit', () => {
     }), new AbortController().signal)).rejects.toThrow(
       /accepted policy or roster changed during catalog precommit/u,
     );
-    expect(materialize).toHaveBeenCalledOnce();
+    expect(rollback).toHaveBeenCalledOnce();
     expect(acceptedPolicySnapshotForCatalogScope).toHaveBeenCalledTimes(2);
+    await expect(readExactGraphPaged(store, vmGraph, {
+      expectedQuadCount: predecessorGraph.length,
+      outputGraph: vmGraph,
+    })).resolves.toEqual(predecessorGraph);
+    await expect(store.query(
+      `SELECT ?predicate ?object WHERE { GRAPH <${metaGraph}> { `
+        + `<${rfc64VmUal(1n)}> ?predicate ?object } } ORDER BY ?predicate ?object`,
+    )).resolves.toEqual({
+      type: 'bindings',
+      bindings: predecessorMetadata.map(({ predicate, object }) => ({ predicate, object })),
+    });
   });
 
   it('canonicalizes chain-service scalar responses at the precommit boundary', async () => {

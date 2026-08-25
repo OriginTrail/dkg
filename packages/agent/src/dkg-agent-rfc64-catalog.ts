@@ -285,11 +285,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) return;
+    const verifyIssuerSignature = verifyControlEnvelopeIssuerSignatureV1;
     const service = new Rfc64PublicCatalogServiceV1({
       router: this.router,
       controlObjects: persistence.controlObjects,
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority,
-      native: this.createRfc64PublicCatalogNativeOptionsV1(),
+      native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
+      verifyIssuerSignature,
       currentHeadDiscovery: {
         readCurrentAppliedCatalogHeadDigest: async (trustedScope) => {
           const applied = persistence.inventory.readAppliedCatalogHeadV1(
@@ -747,6 +749,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   /** Build native mode only when a local deployment source exists. */
   private createRfc64PublicCatalogNativeOptionsV1(
     this: DKGAgent,
+    verifyIssuerSignature: typeof verifyControlEnvelopeIssuerSignatureV1,
   ): Rfc64PublicCatalogServiceNativeOptionsV1 | undefined {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) return undefined;
@@ -765,6 +768,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const resolveScopedReadCapability = createRfc64CatalogNativeScopedReadProviderV1({
       controlObjects: persistence.controlObjects,
       kaBundles: persistence.kaBundles,
+      verifyIssuerSignature,
       resolveAcceptedPolicySnapshot: (networkId, contextGraphId) =>
         this.requireRfc64PublicCatalogServiceV1().acceptedPolicySnapshot(
           networkId,
@@ -778,7 +782,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       readCatalogObjectByDigest: async (objectDigest: Digest32V1) => {
         const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
           objectDigest,
-          verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+          verifyIssuerSignature,
         });
         return stored?.envelope ?? null;
       },

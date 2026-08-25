@@ -62,6 +62,7 @@ import {
 } from './catalog-access-policy-v1.js';
 import {
   Rfc64PublicCatalogReceiverV1,
+  type Rfc64PublicCatalogReceiverCompletionOutcomeV1,
   type Rfc64PublicCatalogReceiverReconcilerV1,
   type Rfc64PublicCatalogReceiverOptionsV1,
   type Rfc64PublicCatalogReceiverStatsV1,
@@ -257,9 +258,11 @@ export type SynchronizedRfc64PublicCatalogCurrentHeadV1 =
 
 export interface SynchronizedRfc64CatalogCurrentHeadProvidersV1 {
   readonly current: DiscoveredRfc64PublicCatalogCurrentHeadV1;
+  /** Exact successful terminal result for the current accepted policy attempt. */
+  readonly completionOutcome: Rfc64PublicCatalogReceiverCompletionOutcomeV1;
   /** Providers that proved the exact selected current head before reconciliation. */
   readonly providerPeerIds: readonly string[];
-  /** Provider that produced the applied transition; null for durable replay/failure. */
+  /** Provider that produced the applied transition; null for a durable replay. */
   readonly appliedProviderPeerId: string | null;
   /** Actual reconciliation attempts for this exact scheduled task. */
   readonly providerAttempts: number;
@@ -763,8 +766,15 @@ export class Rfc64PublicCatalogServiceV1 {
         'RFC-64 receiver completed through a provider outside the requested failover set',
       );
     }
+    if (completion.outcome !== 'applied' && completion.outcome !== 'already-applied') {
+      throw new Error(
+        `RFC-64 current-head synchronization ended with ${completion.outcome}`,
+        completion.error === null ? {} : { cause: completion.error },
+      );
+    }
     return Object.freeze({
       current: selected[0]!.discovered,
+      completionOutcome: completion.outcome,
       providerPeerIds,
       appliedProviderPeerId: completion.appliedProviderPeerId,
       providerAttempts: completion.providerAttempts,

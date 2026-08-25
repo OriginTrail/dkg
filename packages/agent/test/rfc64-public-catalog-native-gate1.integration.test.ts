@@ -103,6 +103,9 @@ const DEPLOYMENT = Object.freeze({
   assertedAtChainId: '20430',
   assertedAtKav10Address: KAV10,
 }) as CatalogSealDeploymentProfileV1;
+const TRANSACTION_TEST_VM_GRAPH = 'urn:rfc64:test:private-vm-generation';
+const TRANSACTION_TEST_VM_SUBJECT = 'urn:rfc64:test:private-vm-asset';
+const TRANSACTION_TEST_VM_PREDICATE = 'urn:rfc64:test:private-vm-head';
 
 const temporaryDirectories: string[] = [];
 const nodes: DKGNode[] = [];
@@ -1421,7 +1424,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
   }, 30_000);
 
-  it('repairs the semantic-before-CAS crash gap idempotently on a new receiver instance', async () => {
+  it('rolls back a semantic-before-CAS failure and accepts an idempotent retry', async () => {
     const fixture = await setupLiveReceiver();
     await fixture.bootstrap();
     const crashGapReceiver = fixture.createReceiver({
@@ -1440,7 +1443,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.scopeDigest,
       AUTHOR,
     )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
-    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
 
     const repaired = await fixture.synchronize(
       fixture.announcement,
@@ -1452,6 +1455,100 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       AUTHOR,
     )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
+  }, 30_000);
+
+  it('restores SWM and VM together when the applied-head CAS rejects the target', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+    const commit = vi.fn();
+    const rollback = vi.fn();
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+      compareAndSwapAppliedCatalogHeadV1: () => {
+        throw new Error('injected CAS rejection before durable commit');
+      },
+    }, undefined, undefined, fixture.receiverStore, async () => {
+      await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
+      return {
+        commit,
+        rollback: async (cause) => {
+          rollback(cause);
+          await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+        },
+      };
+    });
+
+    await expect(fixture.synchronize(fixture.announcement, receiver)).rejects.toMatchObject({
+      code: 'catalog-native-receiver-history',
+    });
+
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
+    await expect(fixture.receiverStore.hasGraph(
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
+    )).resolves.toBe(false);
+    await expect(readTransactionTestVmGeneration(fixture.receiverStore))
+      .resolves.toBe('predecessor');
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(commit).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it('keeps target SWM and VM when the committed head post-read fails', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+    const readAppliedCatalogHeadV1 = vi.fn(
+      fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      ),
+    );
+    readAppliedCatalogHeadV1.mockImplementationOnce(
+      fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      ),
+    ).mockImplementationOnce(() => {
+      throw new Error('injected durable post-CAS read failure');
+    });
+    const commit = vi.fn();
+    const rollback = vi.fn();
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1,
+      compareAndSwapAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+    }, undefined, undefined, fixture.receiverStore, async () => {
+      await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
+      return {
+        commit,
+        rollback: async (cause) => {
+          rollback(cause);
+          await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+        },
+      };
+    });
+
+    await expect(fixture.synchronize(fixture.announcement, receiver)).rejects.toThrow(
+      'injected durable post-CAS read failure',
+    );
+
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+    await expect(fixture.receiverStore.hasGraph(
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
+    )).resolves.toBe(true);
+    await expect(readTransactionTestVmGeneration(fixture.receiverStore))
+      .resolves.toBe('target');
+    expect(commit).toHaveBeenCalledOnce();
+    expect(rollback).not.toHaveBeenCalled();
   }, 30_000);
 
   it('retries a partially materialized two-row precommit before committing the head', async () => {
@@ -2240,6 +2337,37 @@ async function readExactSemanticPairForTest(
     graph: Object.freeze(graphResult.bindings.map((row) => Object.freeze({ ...row }))),
     seal: Object.freeze(sealResult.bindings.map((row) => Object.freeze({ ...row }))),
   });
+}
+
+async function setTransactionTestVmGeneration(
+  store: TripleStore,
+  generation: 'predecessor' | 'target',
+): Promise<void> {
+  if (store.replaceGraph === undefined) {
+    throw new Error('transaction test requires atomic graph replacement');
+  }
+  await store.replaceGraph(TRANSACTION_TEST_VM_GRAPH, [{
+    subject: TRANSACTION_TEST_VM_SUBJECT,
+    predicate: TRANSACTION_TEST_VM_PREDICATE,
+    object: `"${generation}"`,
+    graph: TRANSACTION_TEST_VM_GRAPH,
+  }]);
+}
+
+async function readTransactionTestVmGeneration(
+  store: TripleStore,
+): Promise<'predecessor' | 'target'> {
+  const result = await store.query(
+    `SELECT ?generation WHERE { GRAPH <${TRANSACTION_TEST_VM_GRAPH}> { `
+      + `<${TRANSACTION_TEST_VM_SUBJECT}> <${TRANSACTION_TEST_VM_PREDICATE}> ?generation } }`,
+  );
+  if (result.type !== 'bindings' || result.bindings.length !== 1) {
+    throw new Error('transaction test VM generation is not exact');
+  }
+  const generation = result.bindings[0]?.generation;
+  if (generation === '"predecessor"') return 'predecessor';
+  if (generation === '"target"') return 'target';
+  throw new Error('transaction test VM generation is invalid');
 }
 
 async function buildDirectCatalogIssuerDelegation(options: {
