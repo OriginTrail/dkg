@@ -37,19 +37,6 @@ function validateJunitUploadCoverage(workflow) {
     if (uploads.length !== 1) {
       throw new Error(`${jobName} must define exactly one Vitest JUnit upload step`);
     }
-    const patterns = uploads[0].with?.['report-path']
-      ?.split('\n')
-      .map((entry) => entry.trim())
-      .filter(Boolean) ?? [];
-    const conventionalReports = [
-      'packages/example/test-results/example.xml',
-      'packages/example/test-results/example-1.xml',
-    ];
-    if (!conventionalReports.every((report) => (
-      patterns.some((pattern) => path.posix.matchesGlob(report, pattern))
-    ))) {
-      throw new Error(`${jobName} upload path does not cover conventional Vitest JUnit reports`);
-    }
     for (const step of runnerSteps) assert.doesNotMatch(step.run, /--reporter=junit/);
     uploadsByJob.set(jobName, uploads);
   }
@@ -105,17 +92,18 @@ test('every shared JUnit runner job uploads convention-derived reports', () => {
   for (const [, [step]] of uploadsByJob) {
     assert.equal(step.if, 'always()');
     assert.equal(typeof step.with?.['artifact-name'], 'string');
-    assert.equal(step.with?.['report-path'], JUNIT_UPLOAD_PATTERN);
+    assert.deepEqual(Object.keys(step.with), ['artifact-name']);
   }
 
   const mismatchedWorkflow = structuredClone(workflow);
-  const publisherUpload = mismatchedWorkflow.jobs['tornado-publisher'].steps.find(
-    (step) => step?.uses === './.github/actions/upload-vitest-junit',
+  mismatchedWorkflow.jobs['tornado-publisher'].steps = mismatchedWorkflow.jobs[
+    'tornado-publisher'
+  ].steps.filter(
+    (step) => step?.uses !== './.github/actions/upload-vitest-junit',
   );
-  publisherUpload.with['report-path'] = 'packages/publisher/test-result/*.xml';
   assert.throws(
     () => validateJunitUploadCoverage(mismatchedWorkflow),
-    /tornado-publisher upload path does not cover conventional Vitest JUnit reports/,
+    /tornado-publisher must define exactly one Vitest JUnit upload step/,
   );
 
   const uploadAction = parseRepositoryYaml('.github/actions/upload-vitest-junit/action.yml');
@@ -125,10 +113,16 @@ test('every shared JUnit runner job uploads convention-derived reports', () => {
   assert.match(upload.uses, /^actions\/upload-artifact@[0-9a-f]{40}$/);
   assert.deepEqual(upload.with, {
     name: '${{ inputs.artifact-name }}',
-    path: '${{ inputs.report-path }}',
+    path: JUNIT_UPLOAD_PATTERN,
     'retention-days': 14,
     'if-no-files-found': 'ignore',
   });
+  for (const report of [
+    'packages/example/test-results/example.xml',
+    'packages/example/test-results/example-1.xml',
+  ]) {
+    assert.equal(path.posix.matchesGlob(report, upload.with.path), true);
+  }
 });
 
 test('shared JUnit runner creates reports and propagates child failures', (t) => {
