@@ -1,7 +1,7 @@
 import React, { Suspense, useState, useEffect } from 'react';
 import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
-import { MarketplaceV35View } from '../../views/MarketplaceV35View.js';
+import { MarketplaceV5View } from '../../views/MarketplaceV5View.js';
 import { OperateV35View } from '../../views/OperateV35View.js';
 import { PlansV5View } from '../../views/PlansV5View.js';
 import { ProjectView } from '../../views/ProjectView.js';
@@ -283,7 +283,7 @@ function ViewContainer() {
 
   if (activeTabId === 'dashboard') return <DashboardView />;
 
-  if (activeTabId === 'marketplace') return <MarketplaceV35View />;
+  if (activeTabId === 'marketplace') return <MarketplaceV5View />;
 
   if (activeTabId === 'nsm-plans') return <PlansV5View />;
 

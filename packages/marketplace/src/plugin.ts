@@ -277,6 +277,36 @@ export const plugin: RoutePlugin = {
       return;
     }
 
+    // ── public discovery: this seller's shelf (offerings + committed asks).
+    // The registry CG is the durable path; this is the live storefront read.
+    if (path === BASE + "/subs/offers" && method === "GET") {
+      if (!mounted.seller) { send(res, 200, { seller: null, offerings: [] }); return; }
+      const cyc = nextCycle(home) - 1 || 1;
+      const uniq = [...new Map([...mounted.seller.offerings.values()].map((o) => [o.offering.id, o])).values()];
+      const offers = uniq.map((ob) => ({
+        offeringId: ob.offering.id,
+        modelId: ob.binding.kind === "llamacpp" ? ob.binding.modelId : ob.binding.model,
+        provenanceClass: ob.offering.provenanceClass,
+        tokenizerBundleRef: ob.tokenizerBundleRef,
+        weightsDigest: ob.binding.kind === "llamacpp" ? ob.binding.ggufSha256 : null,
+        offeringUal: ob.offeringUal ?? null,
+        ask: askInForce(home, ob.offering.id, mounted!.seller!.providerAddress, cyc),
+        queuedAsk: queuedAsk(home, ob.offering.id, mounted!.seller!.providerAddress, cyc),
+      }));
+      // query offerings exist as asks without a model binding
+      const modelIds = new Set(offers.map((o) => o.offeringId));
+      for (const a of readAsks(home)) {
+        if (!modelIds.has(a.offeringId) && a.seller.toLowerCase() === mounted.seller.providerAddress.toLowerCase()) {
+          modelIds.add(a.offeringId);
+          offers.push({ offeringId: a.offeringId, modelId: a.offeringId, provenanceClass: "query" as never,
+            tokenizerBundleRef: "schedule", weightsDigest: null, offeringUal: null,
+            ask: askInForce(home, a.offeringId, mounted.seller.providerAddress, cyc), queuedAsk: null });
+        }
+      }
+      send(res, 200, { seller: mounted.seller.providerAddress, revenueWallet: cfg.revenueWallet ?? null, offers });
+      return;
+    }
+
     // ── subscription wire: enroll (buyer → seller, payment-verified) ───────
     if (path === BASE + "/subs/enroll" && method === "POST") {
       try {
@@ -385,6 +415,23 @@ export const plugin: RoutePlugin = {
 
     // ── buyer loopback rails (operator-only): plan / meters / actions ──────
     if (path.startsWith(BASE + "/subs/") && !isLocalOrToken(ctx)) { send(res, 401, { error: "E_TOKEN" }); return; }
+
+    // buyer-side catalog: THIS node fetches each configured seller's shelf
+    // server-side (the UI never goes cross-origin) and merges its own meters.
+    if (path === BASE + "/subs/catalog" && method === "GET") {
+      const bc = readBuyerCfg(home);
+      const plan = activePlan(home, now);
+      const meters = plan ? allowances(home, plan) : [];
+      const sellers = Object.entries(bc?.sellers ?? {});
+      const shelves = await Promise.all(sellers.map(async ([addr, s]) => {
+        try {
+          const r = await fetch(s.apiBase + BASE + "/subs/offers", { signal: AbortSignal.timeout(10_000) });
+          return { seller: addr, ok: r.ok, ...(await r.json()) as Record<string, unknown> };
+        } catch (e) { return { seller: addr, ok: false, error: String((e as Error).message).slice(0, 80) }; }
+      }));
+      send(res, 200, { shelves, meters, plan: plan ? { periodId: plan.periodId, expiresAt: plan.expiresAt } : null });
+      return;
+    }
 
     if (path === BASE + "/subs/status" && method === "GET") {
       const bc = readBuyerCfg(home);
@@ -535,6 +582,22 @@ export const plugin: RoutePlugin = {
         const b = JSON.parse((await readBody(req)) || "{}") as { label?: string; budgetMicroTrac?: number };
         send(res, 200, mintKey(home, { label: b.label ?? "key", budgetMicroTrac: b.budgetMicroTrac ?? 1_000_000, expiresAt: null, modelAllowlist: null, allowQuery: true, rps: 5 }));
       } catch (e) { send(res, 400, { error: String((e as Error).message).slice(0, 140) }); }
+      return;
+    }
+
+    const revokeMatch = path.match(new RegExp(`^${BASE}/gateway/v1/keys/([^/]+)/revoke$`));
+    if (revokeMatch && method === "POST") {
+      if (!isLocalOrToken(ctx)) { send(res, 401, { error: "E_TOKEN" }); return; }
+      const { revokeKey } = await import("./gateway/keys.js");
+      revokeKey(home, revokeMatch[1]);
+      send(res, 200, { revoked: revokeMatch[1] });
+      return;
+    }
+
+    if (path === BASE + "/operate/calibration" && method === "GET") {
+      if (!isLocalOrToken(ctx)) { send(res, 401, { error: "E_TOKEN" }); return; }
+      const { exportCalibration } = await import("./subs/calibration.js");
+      send(res, 200, exportCalibration(home, now));
       return;
     }
 
