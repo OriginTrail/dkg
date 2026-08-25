@@ -31,6 +31,8 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-public-catalog-gate1.integration.test.ts",
   "test/rfc64-dkg-agent-native-wiring.integration.test.ts",
   "test/rfc64-public-catalog-native-transport-v1.test.ts",
+  "test/rfc64-private-catalog-native-scoped-transport-v1.test.ts",
+  "test/rfc64-catalog-native-scoped-read-provider-v1.test.ts",
   "test/rfc64-public-catalog-native-reconciler-v1.test.ts",
   "test/rfc64-public-catalog-native-gate1.integration.test.ts",
   "test/rfc64-public-catalog-inventory-completeness-v1.test.ts",
@@ -38,5 +40,6 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-public-catalog-successor-producer-v1.test.ts",
   "test/rfc64-dkg-agent-successor-publication.integration.test.ts",
   "test/rfc64-catalog-access-policy-v1.test.ts",
+  "test/rfc64-private-catalog-activation-config-v1.test.ts",
   "test/rfc64-policy-cell-v1.test.ts",
 ] as const;

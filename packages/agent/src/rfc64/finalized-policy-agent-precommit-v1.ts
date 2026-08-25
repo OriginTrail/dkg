@@ -2,12 +2,15 @@ import {
   assertCanonicalDecimalU256,
   assertCanonicalDigest,
   canonicalizeContextGraphPolicyPayloadV1,
+  canonicalizeMemberRosterPayloadV1,
   parseCanonicalContextGraphPolicyPayloadV1,
+  parseCanonicalMemberRosterPayloadV1,
   type AuthorCatalogScopeV1,
   type ChainIdV1,
   type ContextGraphIdV1,
   type DecimalU256V1,
   type EvmAddressV1,
+  type MemberRosterV1,
 } from '@origintrail-official/dkg-core';
 import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from '@origintrail-official/dkg-chain';
 
@@ -55,31 +58,56 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
     plan.catalogScope,
   );
   let policy: AcceptedRfc64CatalogAccessSnapshotV1['policy'];
+  let roster: Readonly<MemberRosterV1> | null;
   try {
+    assertCanonicalDigest(plan.policyDigest, 'RFC-64 finalized precommit plan policy digest');
     assertCanonicalDigest(
       untrustedAcceptedPolicy.policyDigest,
       'RFC-64 finalized precommit policy digest',
     );
+    if (untrustedAcceptedPolicy.policyDigest !== plan.policyDigest) {
+      throw new Error('accepted-current policy generation differs from the transfer plan');
+    }
     policy = parseCanonicalContextGraphPolicyPayloadV1(
       canonicalizeContextGraphPolicyPayloadV1(untrustedAcceptedPolicy.policy),
     );
+    roster = untrustedAcceptedPolicy.roster === null
+      ? null
+      : parseCanonicalMemberRosterPayloadV1(
+        canonicalizeMemberRosterPayloadV1(untrustedAcceptedPolicy.roster),
+      );
+    assertAcceptedPolicyMatchesPlanV1(policy, plan.catalogScope);
+    assertRosterMatchesAcceptedPolicyV1(
+      roster,
+      policy,
+      untrustedAcceptedPolicy.policyDigest,
+      plan.catalogScope.authorAddress,
+    );
   } catch (cause) {
-    throw new Error('RFC-64 finalized precommit accepted policy is not canonical', { cause });
+    const detail = cause instanceof Error ? `: ${cause.message}` : '';
+    throw new Error(
+      `RFC-64 finalized precommit accepted policy is not canonical${detail}`,
+      { cause },
+    );
+  }
+  if (policy.accessPolicy === 1 && policy.source.kind === 'finalized-chain') {
+    throw new Error(
+      'RFC-64 Release 1 does not activate registered private catalog inventories',
+    );
   }
   if (policy.source.kind !== 'finalized-chain') return null;
-  if (untrustedAcceptedPolicy.roster !== null) {
+  if (roster !== null) {
     throw new Error('RFC-64 finalized precommit public policy forbids a private member roster');
   }
   const acceptedPolicy = Object.freeze({
     policy,
     policyDigest: untrustedAcceptedPolicy.policyDigest,
-    roster: null,
+    roster,
   });
   const chainId = policy.governanceChainId;
   const contextGraphStorageAddress = policy.governanceContractAddress;
   if (
-    policy.accessPolicy !== 0
-    || chainId === null
+    chainId === null
     || contextGraphStorageAddress === null
   ) {
     throw new Error('RFC-64 finalized precommit requires one public finalized policy');
@@ -137,7 +165,10 @@ export function createRfc64FinalizedPolicyAgentPrecommitV1(
       plan,
       signal,
     );
-    if (resolved === null) return;
+    if (resolved === null) {
+      assertPlanPolicyAndRosterCurrentV1(options, plan);
+      return;
+    }
     const snapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
       chainId: resolved.chainId,
       endpoints: resolved.rpcEndpoints,
@@ -165,5 +196,99 @@ export function createRfc64FinalizedPolicyAgentPrecommitV1(
         session,
       ),
     );
+    assertAcceptedSnapshotStillCurrentV1(options, plan, resolved.acceptedPolicy);
   });
+}
+
+function assertPlanPolicyAndRosterCurrentV1(
+  options: Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1,
+  plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+): void {
+  const current = options.acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
+  assertCanonicalDigest(current.policyDigest, 'RFC-64 current precommit policy digest');
+  if (current.policyDigest !== plan.policyDigest) {
+    throw new Error('RFC-64 accepted policy changed during catalog precommit');
+  }
+  const policy = parseCanonicalContextGraphPolicyPayloadV1(
+    canonicalizeContextGraphPolicyPayloadV1(current.policy),
+  );
+  const roster = current.roster === null
+    ? null
+    : parseCanonicalMemberRosterPayloadV1(
+      canonicalizeMemberRosterPayloadV1(current.roster),
+    );
+  assertAcceptedPolicyMatchesPlanV1(policy, plan.catalogScope);
+  assertRosterMatchesAcceptedPolicyV1(
+    roster,
+    policy,
+    current.policyDigest,
+    plan.catalogScope.authorAddress,
+  );
+}
+
+function assertAcceptedPolicyMatchesPlanV1(
+  policy: AcceptedRfc64CatalogAccessSnapshotV1['policy'],
+  scope: Readonly<AuthorCatalogScopeV1>,
+): void {
+  if (
+    policy.networkId !== scope.networkId
+    || policy.contextGraphId !== scope.contextGraphId
+    || policy.governanceChainId !== scope.governanceChainId
+    || policy.governanceContractAddress !== scope.governanceContractAddress
+    || policy.ownershipTransitionDigest !== scope.ownershipTransitionDigest
+    || policy.era !== scope.era
+  ) {
+    throw new Error('accepted policy differs from the exact catalog scope');
+  }
+}
+
+function assertRosterMatchesAcceptedPolicyV1(
+  roster: Readonly<MemberRosterV1> | null,
+  policy: AcceptedRfc64CatalogAccessSnapshotV1['policy'],
+  policyDigest: AcceptedRfc64CatalogAccessSnapshotV1['policyDigest'],
+  authorAddress: EvmAddressV1,
+): void {
+  if (policy.accessPolicy === 0) {
+    if (roster !== null) {
+      throw new Error('public RFC-64 policy forbids a private member roster');
+    }
+    return;
+  }
+  if (
+    roster === null
+    || roster.networkId !== policy.networkId
+    || roster.contextGraphId !== policy.contextGraphId
+    || roster.ownershipTransitionDigest !== policy.ownershipTransitionDigest
+    || roster.era !== policy.era
+    || roster.policyDigest !== policyDigest
+    || roster.administrativeDelegationDigest !== policy.administrativeDelegationDigest
+    || !roster.members.some((member) => member.agentAddress === authorAddress)
+  ) {
+    throw new Error(
+      'private RFC-64 precommit requires the exact current policy-bound roster and author membership',
+    );
+  }
+}
+
+function assertAcceptedSnapshotStillCurrentV1(
+  options: Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1,
+  plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+  expected: Readonly<AcceptedRfc64CatalogAccessSnapshotV1>,
+): void {
+  const current = options.acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
+  if (
+    current.policyDigest !== plan.policyDigest
+    || current.policyDigest !== expected.policyDigest
+    || canonicalizeContextGraphPolicyPayloadV1(current.policy)
+      !== canonicalizeContextGraphPolicyPayloadV1(expected.policy)
+    || (current.roster === null) !== (expected.roster === null)
+    || (
+      current.roster !== null
+      && expected.roster !== null
+      && canonicalizeMemberRosterPayloadV1(current.roster)
+        !== canonicalizeMemberRosterPayloadV1(expected.roster)
+    )
+  ) {
+    throw new Error('RFC-64 accepted policy or roster changed during catalog precommit');
+  }
 }

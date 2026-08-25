@@ -60,6 +60,8 @@ const masterKeyHex = process.env.DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX;
 const runtimeBuildManifestDigest = process.env.DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST;
 const finalizedVmConfigInput = process.env.DKG_RFC64_GATE2_FINALIZED_VM_CONFIG;
 const networkChainIdInput = process.env.DKG_RFC64_GATE2_NETWORK_CHAIN_ID;
+const localCatalogAgentAddressInput =
+  process.env.DKG_RFC64_GATE2_CATALOG_LOCAL_AGENT_ADDRESS;
 if (role !== 'author' && role !== 'receiver') throw new Error('adapter role is required');
 if (!dataDirInput) throw new Error('DKG_RFC64_GATE2_ADAPTER_DATA_DIR is required');
 if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
@@ -75,6 +77,7 @@ let agent: DKGAgent | undefined;
 let finalizedVmRuntime: Readonly<FinalizedVmHarnessRuntimeV1> | undefined;
 let stopping = false;
 let commandTail = Promise.resolve();
+const peerCatalogAgentAddresses = new Map<string, EvmAddressV1>();
 
 interface Command {
   readonly command: string;
@@ -135,6 +138,12 @@ async function boot(): Promise<void> {
   if (networkChainIdInput !== undefined) {
     assertNetworkIdV1(networkChainIdInput);
   }
+  const localCatalogAgentAddress = localCatalogAgentAddressInput === undefined
+    ? null
+    : canonicalNonZeroEvmAddress(
+        localCatalogAgentAddressInput,
+        'DKG_RFC64_GATE2_CATALOG_LOCAL_AGENT_ADDRESS',
+      );
   if (
     finalizedVmConfig !== null
     && networkChainIdInput !== RFC64_GATE2_DEPLOYMENT.networkId
@@ -160,6 +169,13 @@ async function boot(): Promise<void> {
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
     rfc64CatalogDeploymentProfile: RFC64_GATE2_DEPLOYMENT as never,
+    ...(localCatalogAgentAddress === null ? {} : {
+      rfc64CatalogAccessPolicyAuthority: {
+        localAgentAddress: localCatalogAgentAddress,
+        resolveRemoteAgentAddress: async (remotePeerId: string) =>
+          peerCatalogAgentAddresses.get(remotePeerId) ?? null,
+      },
+    }),
     ...(networkChainAdapter === undefined ? {} : { chainAdapter: networkChainAdapter }),
     ...(finalizedVmRuntime === undefined ? {} : {
       chainConfig: {
@@ -224,6 +240,24 @@ async function handle(command: Command): Promise<void> {
   }
   const currentAgent = requireAgent();
   switch (command.command) {
+    case 'bindCatalogPeerAgent': {
+      const input = plainRecord(command.input, 'bindCatalogPeerAgent input');
+      const peerId = requiredString(input.peerId, 'bindCatalogPeerAgent.peerId');
+      if (Buffer.byteLength(peerId, 'utf8') > 256) {
+        throw new Error('bindCatalogPeerAgent.peerId is too long');
+      }
+      const agentAddress = canonicalNonZeroEvmAddress(
+        input.agentAddress,
+        'bindCatalogPeerAgent.agentAddress',
+      );
+      const current = peerCatalogAgentAddresses.get(peerId);
+      if (current !== undefined && current !== agentAddress) {
+        throw new Error('bindCatalogPeerAgent cannot replace an existing peer binding');
+      }
+      peerCatalogAgentAddresses.set(peerId, agentAddress);
+      emitOperationResult(command, { agentAddress, peerId });
+      return;
+    }
     case 'dial': {
       const input = plainRecord(command.input, 'dial input');
       const address = requiredString(input.multiaddr, 'dial.multiaddr');
@@ -1053,6 +1087,18 @@ function requiredString(value: unknown, label: string): string {
     throw new TypeError(`${label} must be a bounded non-empty string`);
   }
   return value;
+}
+
+function canonicalNonZeroEvmAddress(value: unknown, label: string): EvmAddressV1 {
+  const input = requiredString(value, label);
+  if (!ethers.isAddress(input)) {
+    throw new TypeError(`${label} must be a non-zero EVM address`);
+  }
+  const canonical = ethers.getAddress(input).toLowerCase();
+  if (canonical === ethers.ZeroAddress.toLowerCase()) {
+    throw new TypeError(`${label} must be a non-zero EVM address`);
+  }
+  return canonical as EvmAddressV1;
 }
 
 function requiredDigest(value: unknown, label: string): Digest32V1 {

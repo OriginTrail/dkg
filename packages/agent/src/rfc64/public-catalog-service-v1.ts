@@ -84,9 +84,6 @@ import {
 import {
   type Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1,
 } from './public-catalog-native-reconciler-v1.js';
-import {
-  deriveRfc64PublicRootCatalogScopeV1,
-} from './public-open-catalog-scope-v1.js';
 import type {
   Rfc64PublicCatalogIssuerAuthorizationV1,
 } from './public-catalog-successor-producer-v1.js';
@@ -152,7 +149,9 @@ export interface Rfc64PublicCatalogReconcilerClientsV1 {
 
 export interface Rfc64PublicCatalogServiceNativeOptionsV1 extends Pick<
   Rfc64PublicCatalogNativeTransportOptionsV1,
-  'readCatalogObjectByDigest' | 'readKaBundleByDigest'
+  | 'readCatalogObjectByDigest'
+  | 'readKaBundleByDigest'
+  | 'resolveScopedReadCapability'
 > {
   /** Construct exactly one reconciler around the service-owned transports. */
   readonly createReconciler: (
@@ -293,6 +292,7 @@ export class Rfc64PublicCatalogServiceV1 {
       : new Rfc64PublicCatalogNativeTransportV1(options.router, {
         readCatalogObjectByDigest: options.native.readCatalogObjectByDigest,
         readKaBundleByDigest: options.native.readKaBundleByDigest,
+        resolveScopedReadCapability: options.native.resolveScopedReadCapability,
         authorizeCatalogOperation: this.#policies.authorize,
         verifyIssuerSignature: this.#verifyIssuerSignature,
       });
@@ -444,7 +444,11 @@ export class Rfc64PublicCatalogServiceV1 {
     }
     assertAcceptedPolicyMatchesCatalogScope(this.#policies, heldPolicy, scope);
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
-    assertSupportedCatalogFanout(heldPolicy, peers);
+    assertSupportedCatalogFanout(
+      heldPolicy,
+      peers,
+      this.#nativeTransport?.privateScopeBoundReadsConfigured === true,
+    );
     return this.#publishAuthorCatalogGenesis(input, heldPolicy, peers);
   }
 
@@ -548,7 +552,11 @@ export class Rfc64PublicCatalogServiceV1 {
     );
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
     const heldPolicy = this.#assertAcceptedCatalogAnnouncement(announcement);
-    assertSupportedCatalogFanout(heldPolicy, peers);
+    assertSupportedCatalogFanout(
+      heldPolicy,
+      peers,
+      this.#nativeTransport?.privateScopeBoundReadsConfigured === true,
+    );
     return this.#announceCatalogHeadSnapshot(announcement, peers);
   }
 
@@ -717,9 +725,23 @@ export class Rfc64PublicCatalogServiceV1 {
       return null;
     }
     const record = this.#policies.lookup(input.networkId, input.contextGraphId);
-    if (record === null || record.policy.accessPolicy !== 0) return null;
+    if (record === null || record.policyDigest !== input.policyDigest) return null;
+    const authorization = await this.#policies.authorize(Object.freeze({
+      operation: input.operation === 'current-head-discovery-inbound'
+        ? 'fetch-inbound'
+        : 'fetch-outbound',
+      remotePeerId: input.remotePeerId,
+      networkId: input.networkId,
+      contextGraphId: input.contextGraphId,
+      policyDigest: input.policyDigest,
+    }));
+    if (
+      authorization === null
+      || authorization.policyDigest !== record.policyDigest
+      || authorization.accessPolicy !== record.policy.accessPolicy
+    ) return null;
     return Object.freeze({
-      accessPolicy: 0,
+      accessPolicy: authorization.accessPolicy,
       policyDigest: record.policyDigest,
       trustedCatalogScope,
     });
@@ -752,7 +774,7 @@ export class Rfc64PublicCatalogServiceV1 {
     const record = this.#policies.lookup(input.networkId, input.contextGraphId);
     if (record === null) {
       throw new Error(
-        'RFC-64 current-head query is not bound to the accepted public root policy',
+        'RFC-64 current-head query is not bound to an accepted policy snapshot',
       );
     }
     try {
@@ -764,10 +786,27 @@ export class Rfc64PublicCatalogServiceV1 {
       })) {
         throw new Error('catalog author is not authorized by the accepted policy');
       }
-      return deriveRfc64PublicRootCatalogScopeV1(input, record.policy);
+      if (
+        record.policy.networkId !== input.networkId
+        || record.policy.contextGraphId !== input.contextGraphId
+        || record.policy.era !== input.catalogEra
+      ) {
+        throw new Error('catalog identity differs from the accepted policy');
+      }
+      return Object.freeze({
+        networkId: record.policy.networkId,
+        contextGraphId: record.policy.contextGraphId,
+        governanceChainId: record.policy.governanceChainId,
+        governanceContractAddress: record.policy.governanceContractAddress,
+        ownershipTransitionDigest: record.policy.ownershipTransitionDigest,
+        subGraphName: input.subGraphName,
+        authorAddress: input.authorAddress,
+        era: record.policy.era,
+        bucketCount: '1',
+      }) as Readonly<AuthorCatalogScopeV1>;
     } catch (cause) {
       throw new Error(
-        'RFC-64 current-head query is not bound to the accepted public root policy',
+        'RFC-64 current-head query is not bound to the accepted policy snapshot',
         { cause },
       );
     }
@@ -813,8 +852,13 @@ export class Rfc64PublicCatalogServiceV1 {
 function assertSupportedCatalogFanout(
   heldPolicy: AcceptedRfc64CatalogAccessSnapshotV1,
   peers: readonly string[],
+  privateScopeBoundReadsConfigured: boolean,
 ): void {
-  if (heldPolicy.policy.accessPolicy === 1 && peers.length > 0) {
+  if (
+    heldPolicy.policy.accessPolicy === 1
+    && peers.length > 0
+    && !privateScopeBoundReadsConfigured
+  ) {
     throw new Error(
       'RFC-64 private catalog peer fan-out requires scope-bound private content transport',
     );
@@ -874,6 +918,7 @@ function assertAcceptedPolicyMatchesCatalogScope(
     || policy.governanceChainId !== scope.governanceChainId
     || policy.governanceContractAddress !== scope.governanceContractAddress
     || policy.ownershipTransitionDigest !== scope.ownershipTransitionDigest
+    || policy.era !== scope.era
     || !registry.isSwmAuthorAuthorized({
       networkId: scope.networkId,
       contextGraphId: scope.contextGraphId,
@@ -882,7 +927,7 @@ function assertAcceptedPolicyMatchesCatalogScope(
     })
   ) {
     throw new Error(
-      'RFC-64 policy snapshot is not bound to the exact catalog network, CG, governance scope, and author',
+      'RFC-64 policy snapshot is not bound to the exact catalog network, CG, governance scope, era, and author',
     );
   }
 }

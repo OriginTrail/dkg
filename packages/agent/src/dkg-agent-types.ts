@@ -41,6 +41,7 @@ import type {
   SubGraphNameV1,
   TimestampMsV1,
   UnsignedContextGraphPolicyEnvelopeV1,
+  UnsignedMemberRosterEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
@@ -60,6 +61,7 @@ import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import type {
+  Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
   ResolvedRfc64PublicCatalogAutoPublishPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
@@ -1368,6 +1370,25 @@ export interface Rfc64PublicCatalogBootstrapConfigV1 {
   readonly retryIntervalMs?: number;
 }
 
+/**
+ * One policy-neutral, operator-verified RFC-64 catalog selection.  The
+ * canonical roster envelope is present exactly for invite-only policies; its
+ * payload is bound to the exact policy object digest before agent startup.
+ */
+export interface Rfc64CatalogBootstrapPolicyV1 {
+  readonly policyEnvelope: UnsignedContextGraphPolicyEnvelopeV1;
+  readonly rosterEnvelope?: UnsignedMemberRosterEnvelopeV1;
+  readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
+  /** Release 1 requires exactly one graph-complete provider for private SWM. */
+  readonly completeSwmProviders?: readonly string[];
+}
+
+/** Explicit policy-neutral cold-start manifest used by additive `rfc64Catalog`. */
+export interface Rfc64CatalogBootstrapConfigV1 {
+  readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
+  readonly retryIntervalMs?: number;
+}
+
 export interface DKGAgentConfig {
   name: string;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
@@ -1387,6 +1408,12 @@ export interface DKGAgentConfig {
    * RFC-64 catalog policy. Omission preserves the legacy open-only lane.
    */
   rfc64CatalogAccessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
+  /**
+   * Additive policy-neutral RFC-64 activation. It can select public and
+   * invite-only CGs. Existing selected-public callers may continue to use
+   * `rfc64PublicCatalogActivation`.
+   */
+  rfc64CatalogActivation?: Rfc64CatalogActivationInputV1;
   /**
    * Canonical selected-public activation resolved through the versioned,
    * side-effect-free activation surface. Mutually exclusive with the legacy
@@ -1857,6 +1884,7 @@ export type ResolvedDKGAgentConfig =
     | 'syncBackoffBaseMs'
     | 'syncBackoffMaxMs'
     | 'syncBackoffJitter'
+    | 'rfc64CatalogActivation'
     | 'rfc64PublicCatalogActivation'
     | 'rfc64PublicCatalogAutoPublish'
     | 'rfc64PublicCatalogBootstrap'
@@ -1867,6 +1895,7 @@ export type ResolvedDKGAgentConfig =
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
+    rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
     rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

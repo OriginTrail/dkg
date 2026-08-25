@@ -364,6 +364,8 @@ import {
   type SharedMemorySyncResult,
   type DKGAgentConfig,
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  type Rfc64CatalogBootstrapConfigV1,
+  type Rfc64CatalogBootstrapPolicyV1,
   type DKGAgentACKTransportOptions,
   type ImportedArtifactByteStore,
   type ReplicationEvent,
@@ -418,8 +420,8 @@ import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-p
 import { Rfc64CatalogBootstrapMethods } from './dkg-agent-rfc64-catalog-bootstrap.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import {
+  resolveRfc64CatalogActivationsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
-  resolveRfc64PublicCatalogActivationInputV1,
   resolveRfc64PublicCatalogControlsV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
@@ -480,6 +482,8 @@ export type {
   CatchupSyncDiagnostics,
   DKGAgentConfig,
   Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  Rfc64CatalogBootstrapConfigV1,
+  Rfc64CatalogBootstrapPolicyV1,
   DKGAgentACKTransportOptions,
   ImportedArtifactByteStore,
 };
@@ -825,12 +829,14 @@ export class DKGAgent extends DKGAgentBase {
     const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(
       constructedAgentChainId,
     );
+    const activations = resolveRfc64CatalogActivationsV1({
+      catalog: normalizedConfig.rfc64CatalogActivation,
+      publicCatalog: normalizedConfig.rfc64PublicCatalogActivation,
+    }, chainIdentity);
+    const catalogActivation = activations.catalog;
     const activation = normalizedConfig.rfc64PublicCatalogActivation === undefined
       ? undefined
-      : resolveRfc64PublicCatalogActivationInputV1(
-        normalizedConfig.rfc64PublicCatalogActivation,
-        chainIdentity,
-      );
+      : activations.publicCatalog;
     const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
       activation,
       legacyDeploymentProfile: normalizedConfig.rfc64CatalogDeploymentProfile,
@@ -842,7 +848,7 @@ export class DKGAgent extends DKGAgentBase {
       syncContextGraphs: [
         ...new Set([
           ...(normalizedConfig.syncContextGraphs ?? []),
-          ...(activation?.selectedContextGraphs ?? []),
+          ...catalogActivation.selectedContextGraphs,
         ]),
       ],
     };
@@ -852,13 +858,48 @@ export class DKGAgent extends DKGAgentBase {
     if (rfc64PublicCatalogControls.requiresDataDir && !config.dataDir) {
       throw new TypeError('rfc64PublicCatalogBootstrap requires dataDir');
     }
-    const rfc64CatalogDeploymentProfile = rfc64PublicCatalogControls.deploymentProfile;
-    const rfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
+    if (catalogActivation.bootstrap !== undefined && !config.dataDir) {
+      throw new TypeError('rfc64Catalog bootstrap requires dataDir');
+    }
+    if (
+      catalogActivation.deploymentProfile !== undefined
+      && rfc64PublicCatalogControls.deploymentProfile !== undefined
+      && JSON.stringify(catalogActivation.deploymentProfile)
+        !== JSON.stringify(rfc64PublicCatalogControls.deploymentProfile)
+    ) {
+      throw new TypeError('RFC-64 catalog deployment profiles conflict');
+    }
+    const rfc64CatalogDeploymentProfile = catalogActivation.deploymentProfile
+      ?? rfc64PublicCatalogControls.deploymentProfile;
+    const legacyRfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
       config.rfc64CatalogAccessPolicyAuthority,
     );
+    if (
+      legacyRfc64CatalogAccessPolicyAuthority !== undefined
+      && catalogActivation.accessPolicyAuthority !== undefined
+    ) {
+      throw new TypeError(
+        'rfc64Catalog.accessPolicyAuthority is mutually exclusive with the legacy function authority',
+      );
+    }
+    const activationPeerAgentBindings = catalogActivation.accessPolicyAuthority === undefined
+      ? undefined
+      : new Map(catalogActivation.accessPolicyAuthority.peerAgentBindings.map(
+        ({ peerId, agentAddress }) => [peerId, agentAddress] as const,
+      ));
+    const rfc64CatalogAccessPolicyAuthority = legacyRfc64CatalogAccessPolicyAuthority
+      ?? (catalogActivation.accessPolicyAuthority === undefined
+        ? undefined
+        : snapshotRfc64CatalogAccessPolicyAuthorityV1({
+          localAgentAddress: catalogActivation.accessPolicyAuthority.localAgentAddress,
+          resolveRemoteAgentAddress: async (remotePeerId) => (
+            activationPeerAgentBindings!.get(remotePeerId) ?? null
+          ),
+        }));
     const rfc64PublicCatalogAutoPublishPolicy =
       rfc64PublicCatalogControls.autoPublishPolicy;
     const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
+    const rfc64CatalogBootstrap = catalogActivation.bootstrap;
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -921,6 +962,7 @@ export class DKGAgent extends DKGAgentBase {
     };
     const configWithoutRfc64CatalogControls = { ...config };
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogActivation;
+    delete configWithoutRfc64CatalogControls.rfc64CatalogActivation;
     delete configWithoutRfc64CatalogControls.rfc64CatalogDeploymentProfile;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogAutoPublish;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogBootstrap;
@@ -936,6 +978,7 @@ export class DKGAgent extends DKGAgentBase {
       networkIdentity,
       rfc64CatalogAccessPolicyAuthority,
       rfc64CatalogDeploymentProfile,
+      rfc64CatalogBootstrap,
       rfc64PublicCatalogAutoPublishPolicy,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,

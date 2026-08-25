@@ -153,6 +153,8 @@ export interface Rfc64PublicCatalogNativePrecommitRowPlanV1 {
 /** Generic same-process barrier plan executed after semantic post-read and before head CAS. */
 export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1 {
   readonly catalogScope: Readonly<AuthorCatalogScopeV1>;
+  /** Exact accepted-current generation that authorized every fetched byte. */
+  readonly policyDigest: Digest32V1;
   readonly catalogHeadDigest: Digest32V1;
   readonly inventoryDigest: Digest32V1;
   /** Strictly increasing by mathematical KA ID. */
@@ -517,6 +519,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     await this.runBeforeAppliedHeadCommitV1(
       Object.freeze({
         catalogScope: trustedCatalogScope,
+        policyDigest: announcement.policyDigest,
         catalogHeadDigest: head.objectDigest as Digest32V1,
         inventoryDigest,
         rows: Object.freeze([]),
@@ -986,6 +989,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     await this.runBeforeAppliedHeadCommitV1(
       Object.freeze({
         catalogScope: trustedCatalogScope,
+        policyDigest: announcement.policyDigest,
         catalogHeadDigest: head.objectDigest as Digest32V1,
         inventoryDigest: completion.inventoryDigest,
         rows: Object.freeze(preparedRows.map((prepared) => Object.freeze({

@@ -14,6 +14,8 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type {
+  Rfc64CatalogBootstrapConfigV1,
+  Rfc64CatalogBootstrapPolicyV1,
   Rfc64PublicCatalogBootstrapConfigV1,
   Rfc64PublicCatalogBootstrapScopeV1,
 } from './dkg-agent-types.js';
@@ -66,7 +68,10 @@ interface MutableTargetStatusV1 {
 }
 
 interface BootstrapStateV1 {
-  readonly config: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
+  readonly config: Readonly<{
+    readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
+    readonly retryIntervalMs?: number;
+  }>;
   readonly targets: MutableTargetStatusV1[];
   readonly ctx: OperationContext;
   closed: boolean;
@@ -87,22 +92,30 @@ const STATES = new WeakMap<DKGAgent, BootstrapStateV1>();
  * reservation.
  */
 export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
-  config: Readonly<Rfc64PublicCatalogBootstrapConfigV1> | undefined,
+  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
+    | undefined,
 ): readonly string[] {
   if (config === undefined) return Object.freeze([]);
-  return Object.freeze(config.acceptedPublicPolicies
-    .filter(({ completeSwmProviders = [] }) => completeSwmProviders.length > 0)
+  return Object.freeze(acceptedPoliciesV1(config)
+    .filter(({ policyEnvelope, completeSwmProviders = [] }) => (
+      policyEnvelope.payload.accessPolicy === 0
+      && completeSwmProviders.length > 0
+    ))
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
 
 /** Selected recovery scopes for which one peer is explicitly graph-complete. */
 export function resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
-  config: Readonly<Rfc64PublicCatalogBootstrapConfigV1> | undefined,
+  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
+    | undefined,
   providerPeerId: string,
 ): readonly string[] {
   if (config === undefined) return Object.freeze([]);
-  return Object.freeze(config.acceptedPublicPolicies
-    .filter(({ completeSwmProviders = [] }) => completeSwmProviders.includes(providerPeerId))
+  return Object.freeze(acceptedPoliciesV1(config)
+    .filter(({ policyEnvelope, completeSwmProviders = [] }) => (
+      policyEnvelope.payload.accessPolicy === 0
+      && completeSwmProviders.includes(providerPeerId)
+    ))
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
 
@@ -116,30 +129,38 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
-    const config = this.config.rfc64PublicCatalogBootstrap;
+    const config = this.config.rfc64CatalogBootstrap
+      ?? this.config.rfc64PublicCatalogBootstrap;
     if (config === undefined) return Object.freeze([]);
-    const policy = config.acceptedPublicPolicies.find(
+    const policy = acceptedPoliciesV1(config).find(
       ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
     );
-    return policy?.completeSwmProviders ?? Object.freeze([]);
+    return policy?.policyEnvelope.payload.accessPolicy === 0
+      ? policy.completeSwmProviders ?? Object.freeze([])
+      : Object.freeze([]);
   }
 
   /** Accept pinned policies and start the first bounded provider pass. */
   startRfc64PublicCatalogBootstrapV1(this: DKGAgent, ctx: OperationContext): void {
-    const config = this.config.rfc64PublicCatalogBootstrap;
+    const config = this.resolveRuntimeRfc64CatalogBootstrapV1();
     if (config === undefined || STATES.has(this)) return;
     const service = this.rfc64PublicCatalogServiceV1;
     if (service === undefined) {
       throw new Error('RFC-64 bootstrap requires the public catalog service');
     }
-    for (const accepted of config.acceptedPublicPolicies) {
+    for (const accepted of config.acceptedPolicies) {
       service.acceptPolicySnapshot({
         policy: accepted.policyEnvelope.payload,
         policyDigest: computeContextGraphPolicyObjectDigestV1(accepted.policyEnvelope),
+        roster: accepted.rosterEnvelope?.payload,
       });
     }
-    const targets = config.acceptedPublicPolicies.flatMap(({ policyEnvelope, targets }) => (
-      targets.map((target) => ({
+    const targets = config.acceptedPolicies.flatMap(({
+      policyEnvelope,
+      targets: policyTargets,
+      completeSwmProviders = [],
+    }) => (
+      policyTargets.map((target) => ({
         scope: Object.freeze({
           networkId: policyEnvelope.payload.networkId,
           contextGraphId: policyEnvelope.payload.contextGraphId,
@@ -147,7 +168,12 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           authorAddress: target.authorAddress,
           catalogEra: policyEnvelope.payload.era,
         }),
-        providers: target.providers,
+        // Release 1 private recovery is deliberately single-provider. The
+        // graph-complete provider is the only source used for every signed
+        // author catalog; configured target candidates do not widen it.
+        providers: policyEnvelope.payload.accessPolicy === 1
+          ? completeSwmProviders
+          : target.providers,
       }))
     ));
     const state: BootstrapStateV1 = {
@@ -256,8 +282,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     state.abortController = abortController;
     try {
       const completeSwmProviders = [...new Set(
-        state.config.acceptedPublicPolicies.flatMap(
-          ({ completeSwmProviders: providers = [] }) => providers,
+        state.config.acceptedPolicies.flatMap(
+          ({ policyEnvelope, completeSwmProviders: providers = [] }) => (
+            policyEnvelope.payload.accessPolicy === 0 ? providers : []
+          ),
         ),
       )];
       await mapWithConcurrency(
@@ -357,6 +385,29 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     target.lastError = lastError;
     target.updatedAtMs = Date.now();
   }
+
+  private resolveRuntimeRfc64CatalogBootstrapV1(
+    this: DKGAgent,
+  ): BootstrapStateV1['config'] | undefined {
+    const current = this.config.rfc64CatalogBootstrap;
+    if (current !== undefined) return current;
+    const legacy = this.config.rfc64PublicCatalogBootstrap;
+    if (legacy === undefined) return undefined;
+    return Object.freeze({
+      acceptedPolicies: legacy.acceptedPublicPolicies,
+      ...(legacy.retryIntervalMs === undefined
+        ? {}
+        : { retryIntervalMs: legacy.retryIntervalMs }),
+    });
+  }
+}
+
+function acceptedPoliciesV1(
+  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>,
+): readonly Rfc64CatalogBootstrapPolicyV1[] {
+  return 'acceptedPolicies' in config
+    ? config.acceptedPolicies
+    : config.acceptedPublicPolicies;
 }
 
 function snapshotTargetStatusV1(

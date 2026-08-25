@@ -773,6 +773,13 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     // snapshot. A missing field is broken request-context wiring, not a disabled
     // feature, so keep the RequestContext contract strict here.
     const rfc64PublicCatalogActivation = ctx.rfc64PublicCatalog;
+    const rfc64CatalogActivation = ctx.rfc64Catalog ?? {
+      enabled: rfc64PublicCatalogActivation.enabled,
+      selectedContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
+      selectedPublicContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
+      selectedPrivateContextGraphs: [],
+      accessPolicyAuthority: undefined,
+    };
     const rfc64PublicCatalogService =
       rfc64PublicCatalogActivation.enabled
       && typeof agent.rfc64PublicCatalogStatsV1 === 'function'
@@ -912,6 +919,16 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         completeSwmProviders: rfc64CompleteSwmProviders,
         service: rfc64PublicCatalogService,
         bootstrap: rfc64PublicCatalogBootstrap,
+      },
+      // Local operator projection only. Never expose roster members, peer-to-
+      // wallet bindings, or private provider identities through status.
+      rfc64Catalog: {
+        enabled: rfc64CatalogActivation.enabled,
+        selectedContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
+        selectedPublicContextGraphs: rfc64CatalogActivation.selectedPublicContextGraphs,
+        selectedPrivateContextGraphs: rfc64CatalogActivation.selectedPrivateContextGraphs,
+        privateAuthorityConfigured:
+          rfc64CatalogActivation.accessPolicyAuthority !== undefined,
       },
       // Product-default scheduling is deliberately separate from the signed
       // catalog authority surface above. Every explicitly requested CG is

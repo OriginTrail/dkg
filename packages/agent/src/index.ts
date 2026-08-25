@@ -217,6 +217,8 @@ export {
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  type Rfc64CatalogBootstrapConfigV1,
+  type Rfc64CatalogBootstrapPolicyV1,
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
   type ContextGraphSyncMode,

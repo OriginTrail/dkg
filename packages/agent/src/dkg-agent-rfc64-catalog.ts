@@ -99,6 +99,7 @@ import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from './rfc64/public-catalog-transport-v1.js';
+import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -518,11 +519,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const scope = deriveAuthorCatalogScopeFromHeadV1(history.previousHead.payload);
     const heldPolicy = service.acceptedPolicySnapshotForCatalogScope(scope);
     const policyDigest = heldPolicy.policyDigest;
-    if (heldPolicy.policy.accessPolicy === 1 && peers.length > 0) {
-      throw new Error(
-        'RFC-64 private catalog peer fan-out requires scope-bound private content transport',
-      );
-    }
     const authorAddress = params.author.address.toLowerCase() as EvmAddressV1;
     if (authorAddress !== scope.authorAddress) {
       throw new Error('RFC-64 successor author must equal the exact predecessor author');
@@ -757,6 +753,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         announcement.networkId,
         signal,
       );
+    const resolveScopedReadCapability = createRfc64CatalogNativeScopedReadProviderV1({
+      controlObjects: persistence.controlObjects,
+      kaBundles: persistence.kaBundles,
+    });
     return Object.freeze({
       readCatalogObjectByDigest: async (objectDigest: Digest32V1) => {
         const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
@@ -766,6 +766,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         return stored?.envelope ?? null;
       },
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
+      resolveScopedReadCapability,
       createReconciler: (clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>) => {
         const chainConfig = this.config.chainConfig;
         const beforeAppliedHeadCommit = createRfc64FinalizedPolicyAgentPrecommitV1({

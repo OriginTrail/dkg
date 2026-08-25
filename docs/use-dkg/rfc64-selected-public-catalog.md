@@ -121,6 +121,64 @@ deterministic harness and must exactly match the selected network.
 Its `networkId` and numeric `assertedAtChainId` are checked against the same
 effective chain identity before subscriptions, stores, or agent startup begin.
 
+### Experimental Release 1: selected private SWM
+
+`rfc64Catalog` is the additive policy-neutral form. Release 1 lets a current
+member recover SWM for one explicitly selected owner-signed, unregistered
+private CG from one pinned complete provider. It does not recover private VM
+or registered private CGs yet. A registered private policy stops activation;
+support for registered private CGs is part of Release 2.
+
+The bounded operator shape is:
+
+```json
+{
+  "rfc64Catalog": {
+    "bootstrap": {
+      "acceptedPolicies": [
+        {
+          "policyEnvelope": "<canonical independently verified ContextGraphPolicyV1 envelope>",
+          "rosterEnvelope": "<canonical independently verified MemberRosterV1 envelope>",
+          "completeSwmProviders": ["12D3Koo...private-provider"],
+          "targets": [
+            {
+              "authorAddress": "0x...catalog-author",
+              "providers": ["12D3Koo...private-provider"]
+            }
+          ]
+        }
+      ]
+    },
+    "accessPolicyAuthority": {
+      "localAgentAddress": "0x...current-local-member",
+      "peerAgentBindings": [
+        {
+          "peerId": "12D3Koo...private-provider",
+          "agentAddress": "0x...current-roster-provider"
+        }
+      ]
+    }
+  }
+}
+```
+
+The envelope strings above stand for full JSON objects; they are abbreviated
+only to keep the example readable. `peerAgentBindings` is manual operator trust,
+not discovery output. Every private target or complete provider needs an exact
+binding to a current roster member with the `provider` role. The local address
+must also be a current member. The daemon rejects a missing or conflicting
+policy, roster, provider binding, network, or local membership before it starts.
+
+Release 1 does not follow roster successors automatically. When a member is
+removed, install the new independently verified policy/roster snapshot, remove
+obsolete peer bindings, and restart the node. This fences the removed peer from
+new Release-1 transfers. Content already received by that member cannot be
+revoked.
+
+`rfc64PublicCatalog` remains valid. If both blocks select the same CG, their
+canonical policy, targets, and completeness assertion must be identical; a
+conflict stops activation.
+
 ## Verify activation
 
 Restart the daemon and inspect `GET /api/status`:

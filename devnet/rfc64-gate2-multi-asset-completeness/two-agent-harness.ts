@@ -55,6 +55,7 @@ export function assertGate2HarnessSourceStateV1(
 }
 
 export function spawnGate2HarnessAgentV1(input: {
+  readonly catalogLocalAgentAddress?: string;
   readonly dataDir: string;
   readonly finalizedVmConfigJson?: string;
   readonly networkChainId?: string;
@@ -82,6 +83,12 @@ export function spawnGate2HarnessAgentV1(input: {
         DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX: ROLE_MASTER_KEYS[input.role],
         DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST: input.runtimeManifestDigest,
         DKG_RFC64_GATE2_RUNTIME_SOURCE_COMMIT: input.sourceCommit,
+        ...(input.catalogLocalAgentAddress === undefined
+          ? {}
+          : {
+              DKG_RFC64_GATE2_CATALOG_LOCAL_AGENT_ADDRESS:
+                input.catalogLocalAgentAddress,
+            }),
         ...(input.networkChainId === undefined
           ? {}
           : { DKG_RFC64_GATE2_NETWORK_CHAIN_ID: input.networkChainId }),

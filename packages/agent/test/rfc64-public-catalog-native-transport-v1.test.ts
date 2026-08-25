@@ -97,10 +97,8 @@ describe('RFC-64 public catalog native content transport v1', () => {
     ])).toThrow(/exceed.*ceiling/);
   });
 
-  // Only the publicly-readable cells are servable over the native content protocols: the serve path
-  // resolves by digest out of an agent-wide store and is not bound back to the authorizing graph, so
-  // private content stays denied (see requireCatalogPolicy). publishPolicy must not affect this —
-  // it governs finalized-VM admission only, never read/SWM authorization.
+  // The legacy V1 digest protocols remain public-only. publishPolicy must not
+  // affect this — it governs finalized-VM admission, never read authorization.
   it.each([
     { accessPolicy: 0 as const, publishPolicy: 0 as const },
     { accessPolicy: 0 as const, publishPolicy: 1 as const },
@@ -221,6 +219,9 @@ describe('RFC-64 public catalog native content transport v1', () => {
     expect(authorAuthorizations).toEqual([
       'catalog-object-fetch-inbound',
       'catalog-object-fetch-inbound',
+      'catalog-object-fetch-inbound',
+      'catalog-object-fetch-inbound',
+      'ka-bundle-fetch-inbound',
       'ka-bundle-fetch-inbound',
       'ka-bundle-fetch-inbound',
     ]);
@@ -280,7 +281,7 @@ describe('RFC-64 public catalog native content transport v1', () => {
     expect(providerRead).not.toHaveBeenCalled();
   }, 15_000);
 
-  it('denies a private-policy request before provider lookup on both content protocols', async () => {
+  it('denies a private-policy request before provider lookup on both V1 content protocols', async () => {
     const [authorNode, receiverNode] = await Promise.all([startNode(), startNode()]);
     await connect(receiverNode, authorNode);
     const providerObjectRead = vi.fn(async () => null);
@@ -290,10 +291,8 @@ describe('RFC-64 public catalog native content transport v1', () => {
       {
         readCatalogObjectByDigest: providerObjectRead,
         readKaBundleByDigest: providerBundleRead,
-        // A provider that has itself accepted a private cell must STILL refuse to serve that cell's
-        // content over the native protocols. The serve path resolves purely by the digest in the
-        // request, out of a store shared by every graph on the node, so serving private content here
-        // would hand it to anyone authorized under any public cell the node happens to hold.
+        // A provider that accepted a private cell must still refuse that cell
+        // over the legacy digest-only V1 protocols.
         authorizeCatalogOperation: async () => ({
           accessPolicy: 1,
           policyDigest: POLICY_DIGEST,
@@ -398,7 +397,9 @@ describe('RFC-64 public catalog native content transport v1', () => {
       code: 'catalog-native-policy-denied',
     });
     expect(providerRead).toHaveBeenCalledOnce();
-    expect(providerAuthorizationChecks).toBe(2);
+    // Route selection checks the policy before choosing V1 or V2. The V1
+    // handler then checks before and after the awaited provider read.
+    expect(providerAuthorizationChecks).toBe(3);
   }, 15_000);
 
   it('rechecks current authorization after the outbound bundle-fetch await', async () => {

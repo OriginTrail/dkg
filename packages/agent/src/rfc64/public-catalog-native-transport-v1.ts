@@ -47,10 +47,12 @@ import type {
 import {
   normalizeRfc64CatalogTransportAuthorizerV1,
   recheckCurrentRfc64CatalogPolicyAfterAwaitV1,
-  withAuthorizedCurrentRfc64CatalogPolicyV1,
-  withCurrentRfc64CatalogPolicyV1,
 } from './catalog-transport-authorization-v1.js';
 import type { Rfc64AuthorizedCatalogWorkResultV1 } from './catalog-transport-authorization-v1.js';
+import {
+  isMintedRfc64CatalogNativeScopedReadCapabilityV1,
+  type Rfc64CatalogNativeScopedReadCapabilityV1,
+} from './catalog-native-scoped-read-capability-v1-internal.js';
 import {
   assertRfc64ExactIssuerSignatureProofV1,
   createRfc64CatalogTransportWireAdapterV1,
@@ -64,11 +66,19 @@ export const RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1 =
   '/dkg/catalog/1/control-object/by-digest' as const;
 export const RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1 =
   '/dkg/catalog/1/ka-bundle/by-digest' as const;
+export const RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2 =
+  '/dkg/catalog/2/control-object/by-scope' as const;
+export const RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2 =
+  '/dkg/catalog/2/ka-bundle/by-scope' as const;
 
 export const RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1 =
   'rfc64-public-catalog-object-fetch-v1' as const;
 export const RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1 =
   'rfc64-public-catalog-bundle-fetch-v1' as const;
+export const RFC64_CATALOG_OBJECT_FETCH_KIND_V2 =
+  'rfc64-catalog-object-fetch-v2' as const;
+export const RFC64_CATALOG_BUNDLE_FETCH_KIND_V2 =
+  'rfc64-catalog-bundle-fetch-v2' as const;
 
 export const RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1 = 4 * 1024;
 export const RFC64_PUBLIC_CATALOG_OBJECT_FETCH_RESPONSE_MAX_BYTES_V1 =
@@ -195,6 +205,11 @@ export type Rfc64PublicCatalogNativeOperationV1 =
   | 'ka-bundle-fetch-outbound'
   | 'ka-bundle-fetch-inbound';
 
+type Rfc64CatalogNativeContentProtocolV1 =
+  | 'select-outbound'
+  | 'public-v1'
+  | 'scoped-v2';
+
 export interface Rfc64PublicCatalogNativeAuthorizationInputV1 {
   readonly operation: Rfc64PublicCatalogNativeOperationV1;
   readonly remotePeerId: string;
@@ -213,15 +228,38 @@ export interface FetchedRfc64PublicCatalogObjectV1 {
   readonly issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
 }
 
+/**
+ * One provider capability bound to one exact accepted catalog head.
+ *
+ * Private content MUST be exposed through this contract. The resolver mints a
+ * capability only after it has proved that the exact head belongs to the
+ * requested network/CG/catalog scope. The transport independently compares the
+ * returned scope with the canonical wire request before either digest lookup is
+ * called. This keeps a digest from becoming a cross-CG read capability.
+ */
+export type { Rfc64CatalogNativeScopedReadCapabilityV1 } from './catalog-native-scoped-read-capability-v1-internal.js';
+
+export type ResolveRfc64CatalogNativeScopedReadCapabilityV1 = (
+  scope: Readonly<Rfc64PublicCatalogNativeFetchScopeV1>,
+) => Promise<Rfc64CatalogNativeScopedReadCapabilityV1 | null>;
+
 export interface Rfc64PublicCatalogNativeTransportOptionsV1 {
-  /** Provider-side exact immutable catalog-object lookup. */
-  readonly readCatalogObjectByDigest: (
+  /**
+   * Provider-side exact immutable catalog-object lookup for public V1
+   * compatibility. It is never used for private content.
+   */
+  readonly readCatalogObjectByDigest?: (
     objectDigest: Digest32V1,
   ) => Promise<SignedControlEnvelopeV1 | null>;
-  /** Provider-side exact immutable bundle lookup. */
-  readonly readKaBundleByDigest: (
+  /** Public V1 compatibility lookup. It is never used for private content. */
+  readonly readKaBundleByDigest?: (
     blobDigest: Digest32V1,
   ) => Promise<Uint8Array | null>;
+  /**
+   * Provider-side private-capable lookup. A capability is valid for exactly
+   * the supplied accepted-current head scope and no other graph or head.
+   */
+  readonly resolveScopedReadCapability?: ResolveRfc64CatalogNativeScopedReadCapabilityV1;
   /** Preferred V2 contract: the accepted-current access-policy registry. */
   readonly authorizeCatalogOperation?: Rfc64CatalogAccessPolicyRegistryV1['authorize'];
   /** @deprecated Gate-1 compatibility until the service wiring migrates. */
@@ -263,11 +301,23 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     private readonly router: ProtocolRouter,
     private readonly options: Rfc64PublicCatalogNativeTransportOptionsV1,
   ) {
-    if (typeof options?.readCatalogObjectByDigest !== 'function') {
-      fail('catalog-native-input', 'readCatalogObjectByDigest must be a function');
+    if (
+      typeof options?.readCatalogObjectByDigest !== 'function'
+      && typeof options?.resolveScopedReadCapability !== 'function'
+    ) {
+      fail(
+        'catalog-native-input',
+        'readCatalogObjectByDigest or resolveScopedReadCapability must be a function',
+      );
     }
-    if (typeof options.readKaBundleByDigest !== 'function') {
-      fail('catalog-native-input', 'readKaBundleByDigest must be a function');
+    if (
+      typeof options.readKaBundleByDigest !== 'function'
+      && typeof options.resolveScopedReadCapability !== 'function'
+    ) {
+      fail(
+        'catalog-native-input',
+        'readKaBundleByDigest or resolveScopedReadCapability must be a function',
+      );
     }
     this.#authorizeCatalogOperation = normalizeRfc64CatalogTransportAuthorizerV1({
       current: options.authorizeCatalogOperation,
@@ -283,24 +333,49 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     return this.#started;
   }
 
+  /** True only when this provider can serve exact-scope private reads. */
+  get privateScopeBoundReadsConfigured(): boolean {
+    return typeof this.options.resolveScopedReadCapability === 'function';
+  }
+
   start(): void {
     if (this.#started) return;
     this.#started = true;
     try {
       this.router.register(
         RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
-        async (data, peerId) => this.handleCatalogObjectFetch(data, peerId.toString()),
+        async (data, peerId) => this.handleCatalogObjectFetch(
+          data,
+          peerId.toString(),
+          'public-v1',
+        ),
         { maxReadBytes: RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1 },
       );
       this.router.register(
         RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
-        async (data, peerId) => this.handleBundleFetch(data, peerId.toString()),
+        async (data, peerId) => this.handleBundleFetch(data, peerId.toString(), 'public-v1'),
+        { maxReadBytes: RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1 },
+      );
+      this.router.register(
+        RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2,
+        async (data, peerId) => this.handleCatalogObjectFetch(
+          data,
+          peerId.toString(),
+          'scoped-v2',
+        ),
+        { maxReadBytes: RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1 },
+      );
+      this.router.register(
+        RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2,
+        async (data, peerId) => this.handleBundleFetch(data, peerId.toString(), 'scoped-v2'),
         { maxReadBytes: RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1 },
       );
     } catch (cause) {
       this.#started = false;
       this.router.unregister(RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1);
       this.router.unregister(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1);
+      this.router.unregister(RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2);
+      this.router.unregister(RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2);
       throw cause;
     }
   }
@@ -310,6 +385,8 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     this.#started = false;
     this.router.unregister(RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1);
     this.router.unregister(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1);
+    this.router.unregister(RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2);
+    this.router.unregister(RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2);
   }
 
   async fetchCatalogObject(
@@ -324,18 +401,31 @@ export class Rfc64PublicCatalogNativeTransportV1 {
       'catalog-object-fetch-outbound',
       remotePeerId,
       request,
-      () => this.router.send(
-        remotePeerId,
-        RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
-        encodeRequest(request),
-        sendOptions,
-      ),
+      'select-outbound',
+      (authorization) => {
+        const privateContent = authorization.accessPolicy === 1;
+        return this.router.send(
+          remotePeerId,
+          privateContent
+            ? RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2
+            : RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
+          privateContent
+            ? encodePrivateObjectRequest(request)
+            : encodeRequest(request),
+          sendOptions,
+        );
+      },
     );
     const envelope = parseCatalogObjectResponse(response);
     if (envelope === null) return null;
     assertCatalogObjectMatchesRequest(envelope, request);
     const issuerSignature = await recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
-      () => this.requireCatalogPolicy('catalog-object-fetch-outbound', remotePeerId, request),
+      () => this.assertCatalogPolicyCurrent(
+        'catalog-object-fetch-outbound',
+        remotePeerId,
+        request,
+        'select-outbound',
+      ),
       () => this.verifyExactIssuerSignature(envelope),
     );
     return Object.freeze({ envelope: deepFreeze(envelope), issuerSignature });
@@ -360,12 +450,20 @@ export class Rfc64PublicCatalogNativeTransportV1 {
       'ka-bundle-fetch-outbound',
       remotePeerId,
       request,
-      () => this.router.send(
-        remotePeerId,
-        RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
-        encodeRequest(request),
-        sendOptions,
-      ),
+      'select-outbound',
+      (authorization) => {
+        const privateContent = authorization.accessPolicy === 1;
+        return this.router.send(
+          remotePeerId,
+          privateContent
+            ? RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2
+            : RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
+          privateContent
+            ? encodePrivateBundleRequest(request)
+            : encodeRequest(request),
+          sendOptions,
+        );
+      },
     );
     const bundle = parseBundleResponse(response, request);
     return bundle;
@@ -374,19 +472,36 @@ export class Rfc64PublicCatalogNativeTransportV1 {
   private async handleCatalogObjectFetch(
     data: Uint8Array,
     remotePeerIdInput: string,
+    protocol: Exclude<Rfc64CatalogNativeContentProtocolV1, 'select-outbound'>,
   ): Promise<Uint8Array> {
     this.requireStarted();
     const remotePeerId = snapshotPeerId(remotePeerIdInput);
-    const request = parseCatalogObjectRequest(data);
+    const request = protocol === 'public-v1'
+      ? parseCatalogObjectRequest(data)
+      : parsePrivateCatalogObjectRequest(data);
     const served = await this.withAuthorizedCurrentCatalogPolicy(
       'catalog-object-fetch-inbound',
       remotePeerId,
       request,
-      async () => {
-        const envelope = await this.options.readCatalogObjectByDigest(request.targetObjectDigest);
+      protocol,
+      async (authorization) => {
+        const envelope = await this.readCatalogObject(
+          authorization,
+          remotePeerId,
+          request,
+          protocol,
+        );
         if (envelope === null) return null;
         assertCatalogObjectMatchesRequest(envelope, request);
-        await this.verifyExactIssuerSignature(envelope);
+        await recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
+          () => this.assertCatalogPolicyCurrent(
+            'catalog-object-fetch-inbound',
+            remotePeerId,
+            request,
+            protocol,
+          ),
+          () => this.verifyExactIssuerSignature(envelope),
+        );
         const bytes = canonicalizeSignedControlEnvelopeBytes(envelope);
         if (bytes.byteLength + 1 > RFC64_PUBLIC_CATALOG_OBJECT_FETCH_RESPONSE_MAX_BYTES_V1) {
           fail('catalog-native-resource-refused', 'catalog object exceeds the response ceiling');
@@ -403,10 +518,13 @@ export class Rfc64PublicCatalogNativeTransportV1 {
   private async handleBundleFetch(
     data: Uint8Array,
     remotePeerIdInput: string,
+    protocol: Exclude<Rfc64CatalogNativeContentProtocolV1, 'select-outbound'>,
   ): Promise<Uint8Array> {
     this.requireStarted();
     const remotePeerId = snapshotPeerId(remotePeerIdInput);
-    const request = parseBundleRequest(data);
+    const request = protocol === 'public-v1'
+      ? parseBundleRequest(data)
+      : parsePrivateBundleRequest(data);
     if (BigInt(request.byteLength) + 1n
       > BigInt(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1)) {
       fail('catalog-native-resource-refused', 'requested KA bundle exceeds the response ceiling');
@@ -415,8 +533,14 @@ export class Rfc64PublicCatalogNativeTransportV1 {
       'ka-bundle-fetch-inbound',
       remotePeerId,
       request,
-      async () => {
-        const bundle = await this.options.readKaBundleByDigest(request.blobDigest);
+      protocol,
+      async (authorization) => {
+        const bundle = await this.readKaBundle(
+          authorization,
+          remotePeerId,
+          request,
+          protocol,
+        );
         if (bundle === null) return null;
         assertExactBundle(bundle, request);
         return foundResponse(bundle);
@@ -433,12 +557,28 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     remotePeerId: string,
     request: Rfc64PublicCatalogObjectFetchRequestV1
       | Rfc64PublicCatalogBundleFetchRequestV1,
-    work: () => Value | Promise<Value>,
+    protocol: Rfc64CatalogNativeContentProtocolV1,
+    work: (
+      authorization: Rfc64PublicCatalogNativeAuthorizationV1,
+    ) => Value | Promise<Value>,
   ): Promise<Rfc64AuthorizedCatalogWorkResultV1<Value>> {
-    return withAuthorizedCurrentRfc64CatalogPolicyV1(
-      () => this.isCatalogPolicyAuthorized(operation, remotePeerId, request),
-      work,
-    );
+    let authorization: Rfc64PublicCatalogNativeAuthorizationV1;
+    try {
+      authorization = await this.requireCatalogPolicy(
+        operation,
+        remotePeerId,
+        request,
+        protocol,
+      );
+    } catch (cause) {
+      if (isPolicyDenied(cause)) return Object.freeze({ authorized: false });
+      throw cause;
+    }
+    const value = await work(authorization);
+    if (!await this.isCatalogPolicyAuthorized(operation, remotePeerId, request, protocol)) {
+      return Object.freeze({ authorized: false });
+    }
+    return Object.freeze({ authorized: true, value });
   }
 
   private async isCatalogPolicyAuthorized(
@@ -446,9 +586,10 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     remotePeerId: string,
     request: Rfc64PublicCatalogObjectFetchRequestV1
       | Rfc64PublicCatalogBundleFetchRequestV1,
+    protocol: Rfc64CatalogNativeContentProtocolV1,
   ): Promise<boolean> {
     try {
-      await this.requireCatalogPolicy(operation, remotePeerId, request);
+      await this.requireCatalogPolicy(operation, remotePeerId, request, protocol);
       return true;
     } catch (cause) {
       if (
@@ -464,12 +605,32 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     remotePeerId: string,
     request: Rfc64PublicCatalogObjectFetchRequestV1
       | Rfc64PublicCatalogBundleFetchRequestV1,
-    work: () => Value | Promise<Value>,
+    protocol: Rfc64CatalogNativeContentProtocolV1,
+    work: (
+      authorization: Rfc64PublicCatalogNativeAuthorizationV1,
+    ) => Value | Promise<Value>,
   ): Promise<Value> {
-    return withCurrentRfc64CatalogPolicyV1(
-      () => this.requireCatalogPolicy(operation, remotePeerId, request),
-      work,
-    );
+    return (async () => {
+      const authorization = await this.requireCatalogPolicy(
+        operation,
+        remotePeerId,
+        request,
+        protocol,
+      );
+      const value = await work(authorization);
+      await this.assertCatalogPolicyCurrent(operation, remotePeerId, request, protocol);
+      return value;
+    })();
+  }
+
+  private async assertCatalogPolicyCurrent(
+    operation: Rfc64PublicCatalogNativeOperationV1,
+    remotePeerId: string,
+    request: Rfc64PublicCatalogObjectFetchRequestV1
+      | Rfc64PublicCatalogBundleFetchRequestV1,
+    protocol: Rfc64CatalogNativeContentProtocolV1,
+  ): Promise<void> {
+    await this.requireCatalogPolicy(operation, remotePeerId, request, protocol);
   }
 
   private async requireCatalogPolicy(
@@ -477,7 +638,8 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     remotePeerId: string,
     request: Rfc64PublicCatalogObjectFetchRequestV1
       | Rfc64PublicCatalogBundleFetchRequestV1,
-  ): Promise<void> {
+    protocol: Rfc64CatalogNativeContentProtocolV1,
+  ): Promise<Rfc64PublicCatalogNativeAuthorizationV1> {
     let authorization: Rfc64PublicCatalogNativeAuthorizationV1 | null;
     try {
       authorization = await this.#authorizeCatalogOperation(Object.freeze({
@@ -492,17 +654,7 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     } catch (cause) {
       fail('catalog-native-policy-denied', 'catalog access-policy authorization failed', cause);
     }
-    // The native content protocols resolve objects and bundles purely by the digest carried in the
-    // request, out of a store that is shared by every context graph on this node, and nothing on the
-    // serve path binds what is served back to the context graph that authorized the request. Admitting
-    // a private cell (accessPolicy === 1) here would therefore let any peer authorized under ANY public
-    // cell this node happens to hold read another graph's control objects and KA bundles by digest
-    // alone, and would leave a removed member's remembered digests a permanent read capability.
-    // Public cells are safe because their content is open by definition. Serving private content needs
-    // the serve path to be scope-bound first (heads carry networkId/contextGraphId, buckets carry
-    // catalogScopeDigest, bundles bind only via row membership in the announced head) — that is a
-    // design slice for the private-CG milestone, not a widening of this gate.
-    if (authorization === null || authorization.accessPolicy !== 0) {
+    if (authorization === null) {
       fail('catalog-native-policy-denied', 'catalog content fetch is not access-policy authorized');
     }
     try {
@@ -513,6 +665,116 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     if (authorization.policyDigest !== request.policyDigest) {
       fail('catalog-native-policy-denied', 'catalog policy generation is stale or mismatched');
     }
+    if (protocol === 'public-v1' && authorization.accessPolicy !== 0) {
+      fail('catalog-native-policy-denied', 'private catalog content is forbidden on V1 protocols');
+    }
+    if (
+      protocol === 'scoped-v2'
+      && typeof this.options.resolveScopedReadCapability !== 'function'
+    ) {
+      fail(
+        'catalog-native-policy-denied',
+        'V2 catalog content requires an exact-scope read capability',
+      );
+    }
+    return authorization;
+  }
+
+  private async readCatalogObject(
+    authorization: Rfc64PublicCatalogNativeAuthorizationV1,
+    remotePeerId: string,
+    request: Rfc64PublicCatalogObjectFetchRequestV1,
+    protocol: Exclude<Rfc64CatalogNativeContentProtocolV1, 'select-outbound'>,
+  ): Promise<SignedControlEnvelopeV1 | null> {
+    if (protocol === 'public-v1') {
+      if (authorization.accessPolicy !== 0 || this.options.readCatalogObjectByDigest === undefined) {
+        fail('catalog-native-policy-denied', 'V1 catalog object read is not public-capable');
+      }
+      return recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
+        () => this.assertCatalogPolicyCurrent(
+          'catalog-object-fetch-inbound',
+          remotePeerId,
+          request,
+          protocol,
+        ),
+        () => this.options.readCatalogObjectByDigest!(request.targetObjectDigest),
+      );
+    }
+    const capability = await this.resolveExactScopedReadCapability(
+      'catalog-object-fetch-inbound',
+      remotePeerId,
+      request,
+      protocol,
+    );
+    if (capability === null) return null;
+    return recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
+      () => this.assertCatalogPolicyCurrent(
+        'catalog-object-fetch-inbound',
+        remotePeerId,
+        request,
+        protocol,
+      ),
+      () => capability.readCatalogObjectByDigest(request.targetObjectDigest),
+    );
+  }
+
+  private async readKaBundle(
+    authorization: Rfc64PublicCatalogNativeAuthorizationV1,
+    remotePeerId: string,
+    request: Rfc64PublicCatalogBundleFetchRequestV1,
+    protocol: Exclude<Rfc64CatalogNativeContentProtocolV1, 'select-outbound'>,
+  ): Promise<Uint8Array | null> {
+    if (protocol === 'public-v1') {
+      if (authorization.accessPolicy !== 0 || this.options.readKaBundleByDigest === undefined) {
+        fail('catalog-native-policy-denied', 'V1 KA bundle read is not public-capable');
+      }
+      return recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
+        () => this.assertCatalogPolicyCurrent(
+          'ka-bundle-fetch-inbound',
+          remotePeerId,
+          request,
+          protocol,
+        ),
+        () => this.options.readKaBundleByDigest!(request.blobDigest),
+      );
+    }
+    const capability = await this.resolveExactScopedReadCapability(
+      'ka-bundle-fetch-inbound',
+      remotePeerId,
+      request,
+      protocol,
+    );
+    if (capability === null) return null;
+    return recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
+      () => this.assertCatalogPolicyCurrent(
+        'ka-bundle-fetch-inbound',
+        remotePeerId,
+        request,
+        protocol,
+      ),
+      () => capability.readKaBundleByDigest(request.blobDigest),
+    );
+  }
+
+  private async resolveExactScopedReadCapability(
+    operation: 'catalog-object-fetch-inbound' | 'ka-bundle-fetch-inbound',
+    remotePeerId: string,
+    request: Rfc64PublicCatalogObjectFetchRequestV1
+      | Rfc64PublicCatalogBundleFetchRequestV1,
+    protocol: 'scoped-v2',
+  ): Promise<Rfc64CatalogNativeScopedReadCapabilityV1 | null> {
+    const resolve = this.options.resolveScopedReadCapability;
+    if (resolve === undefined) {
+      fail('catalog-native-policy-denied', 'exact-scope read capability is not configured');
+    }
+    const expectedScope = fetchScope(request);
+    const capability = await recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
+      () => this.assertCatalogPolicyCurrent(operation, remotePeerId, request, protocol),
+      () => resolve(expectedScope),
+    );
+    if (capability === null) return null;
+    assertExactScopedReadCapability(capability, expectedScope);
+    return capability;
   }
 
   private async verifyExactIssuerSignature(
@@ -561,9 +823,71 @@ function parseCatalogObjectRequest(input: Uint8Array): Rfc64PublicCatalogObjectF
   return validateObjectRequest(parsed);
 }
 
+function encodePrivateObjectRequest(
+  request: Rfc64PublicCatalogObjectFetchRequestV1,
+): Uint8Array {
+  return encodeRequest({ ...request, kind: RFC64_CATALOG_OBJECT_FETCH_KIND_V2 });
+}
+
+function parsePrivateCatalogObjectRequest(
+  input: Uint8Array,
+): Rfc64PublicCatalogObjectFetchRequestV1 {
+  const snapshot = snapshotExactWireRecord(
+    parseRequest(input, OBJECT_REQUEST_KEYS),
+    OBJECT_REQUEST_KEYS,
+  );
+  const scope = validateScope(snapshot, RFC64_CATALOG_OBJECT_FETCH_KIND_V2);
+  if (
+    typeof snapshot.targetObjectType !== 'string'
+    || snapshot.targetObjectType.length < 1
+    || UTF8.encode(snapshot.targetObjectType).byteLength > 256
+  ) {
+    fail('catalog-native-wire', 'targetObjectType is empty or oversized');
+  }
+  try {
+    assertCanonicalDigest(snapshot.targetObjectDigest, 'targetObjectDigest');
+  } catch (cause) {
+    fail('catalog-native-wire', 'targetObjectDigest is invalid', cause);
+  }
+  return Object.freeze({
+    ...scope,
+    kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
+    targetObjectType: snapshot.targetObjectType,
+    targetObjectDigest: snapshot.targetObjectDigest,
+  }) as Rfc64PublicCatalogObjectFetchRequestV1;
+}
+
 function parseBundleRequest(input: Uint8Array): Rfc64PublicCatalogBundleFetchRequestV1 {
   const parsed = parseRequest(input, BUNDLE_REQUEST_KEYS);
   return validateBundleRequest(parsed);
+}
+
+function encodePrivateBundleRequest(
+  request: Rfc64PublicCatalogBundleFetchRequestV1,
+): Uint8Array {
+  return encodeRequest({ ...request, kind: RFC64_CATALOG_BUNDLE_FETCH_KIND_V2 });
+}
+
+function parsePrivateBundleRequest(
+  input: Uint8Array,
+): Rfc64PublicCatalogBundleFetchRequestV1 {
+  const snapshot = snapshotExactWireRecord(
+    parseRequest(input, BUNDLE_REQUEST_KEYS),
+    BUNDLE_REQUEST_KEYS,
+  );
+  const scope = validateScope(snapshot, RFC64_CATALOG_BUNDLE_FETCH_KIND_V2);
+  try {
+    assertCanonicalDigest(snapshot.blobDigest, 'blobDigest');
+    assertCanonicalDecimalU64(snapshot.byteLength, 'byteLength');
+  } catch (cause) {
+    fail('catalog-native-wire', 'bundle request contains an invalid digest or length', cause);
+  }
+  return Object.freeze({
+    ...scope,
+    kind: RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
+    blobDigest: snapshot.blobDigest,
+    byteLength: snapshot.byteLength,
+  }) as Rfc64PublicCatalogBundleFetchRequestV1;
 }
 
 function validateObjectRequest(value: unknown): Rfc64PublicCatalogObjectFetchRequestV1 {
@@ -606,7 +930,9 @@ function validateBundleRequest(value: unknown): Rfc64PublicCatalogBundleFetchReq
 function validateScope(
   value: unknown,
   kind: typeof RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1
-    | typeof RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
+    | typeof RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1
+    | typeof RFC64_CATALOG_OBJECT_FETCH_KIND_V2
+    | typeof RFC64_CATALOG_BUNDLE_FETCH_KIND_V2,
 ): Rfc64PublicCatalogNativeFetchScopeV1 {
   if (!isPlainRecord(value) || value.kind !== kind) {
     fail('catalog-native-wire', `catalog native request kind must be ${kind}`);
@@ -737,6 +1063,68 @@ function assertExactBundle(
     if (cause instanceof Rfc64PublicCatalogNativeTransportErrorV1) throw cause;
     fail('catalog-native-object-mismatch', 'KA bundle is not one exact opaque bundle', cause);
   }
+}
+
+function fetchScope(
+  request: Rfc64PublicCatalogObjectFetchRequestV1
+    | Rfc64PublicCatalogBundleFetchRequestV1,
+): Readonly<Rfc64PublicCatalogNativeFetchScopeV1> {
+  return Object.freeze({
+    networkId: request.networkId,
+    contextGraphId: request.contextGraphId,
+    subGraphName: request.subGraphName,
+    authorAddress: request.authorAddress,
+    catalogEra: request.catalogEra,
+    catalogVersion: request.catalogVersion,
+    policyDigest: request.policyDigest,
+    catalogHeadObjectDigest: request.catalogHeadObjectDigest,
+  });
+}
+
+function assertExactScopedReadCapability(
+  capability: Rfc64CatalogNativeScopedReadCapabilityV1,
+  expectedScope: Readonly<Rfc64PublicCatalogNativeFetchScopeV1>,
+): void {
+  if (
+    !isMintedRfc64CatalogNativeScopedReadCapabilityV1(capability)
+    || typeof capability.readCatalogObjectByDigest !== 'function'
+    || typeof capability.readKaBundleByDigest !== 'function'
+    || !isPlainRecord(capability.scope)
+  ) {
+    fail('catalog-native-policy-denied', 'scoped read resolver returned an invalid capability');
+  }
+  let actualScope: Readonly<Rfc64PublicCatalogNativeFetchScopeV1>;
+  try {
+    actualScope = validateScope(
+      {
+        ...capability.scope,
+        kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
+      },
+      RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
+    );
+  } catch (cause) {
+    fail('catalog-native-policy-denied', 'scoped read capability has an invalid scope', cause);
+  }
+  if (
+    actualScope.networkId !== expectedScope.networkId
+    || actualScope.contextGraphId !== expectedScope.contextGraphId
+    || actualScope.subGraphName !== expectedScope.subGraphName
+    || actualScope.authorAddress !== expectedScope.authorAddress
+    || actualScope.catalogEra !== expectedScope.catalogEra
+    || actualScope.catalogVersion !== expectedScope.catalogVersion
+    || actualScope.policyDigest !== expectedScope.policyDigest
+    || actualScope.catalogHeadObjectDigest !== expectedScope.catalogHeadObjectDigest
+  ) {
+    fail(
+      'catalog-native-policy-denied',
+      'scoped read capability does not match the exact requested catalog head scope',
+    );
+  }
+}
+
+function isPolicyDenied(cause: unknown): boolean {
+  return cause instanceof Rfc64PublicCatalogNativeTransportErrorV1
+    && cause.code === 'catalog-native-policy-denied';
 }
 
 function foundResponse(payload: Uint8Array): Uint8Array {

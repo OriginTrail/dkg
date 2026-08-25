@@ -31,6 +31,8 @@ import {
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
 } from '../src/rfc64/public-catalog-current-head-discovery-v1.js';
 import {
+  RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2,
+  RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2,
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
@@ -375,7 +377,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
           ownershipTransitionDigest: policy.ownershipTransitionDigest,
           subGraphName: 'service-lane',
           authorAddress: OTHER_WALLET.address.toLowerCase() as EvmAddressV1,
-          era: '7',
+          era: policy.era,
           bucketCount: '1',
         })).toBe(policyDigest);
       }
@@ -388,6 +390,59 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       policyDigest: `0x${'f'.repeat(64)}` as Digest32V1,
     }))).rejects.toThrow(/requires a current member roster/);
     await service.close();
+  });
+
+  it('allows private fan-out only when exact scope-bound native reads are configured', async () => {
+    const policy = catalogPolicy(`${CONTEXT_GRAPH_ID}-private-fanout`, 1, 1);
+    const policyDigest = `0x${'2b'.repeat(32)}` as Digest32V1;
+    const createService = (scopeBound: boolean) => {
+      const router = new RecordingRouter();
+      router.sendResponse = async () => Uint8Array.of(1);
+      const service = new Rfc64PublicCatalogServiceV1({
+        router: router.asProtocolRouter(),
+        controlObjects: controlObjects(),
+        accessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          resolveRemoteAgentAddress: async () => (
+            OTHER_WALLET.address.toLowerCase() as EvmAddressV1
+          ),
+        },
+        native: {
+          ...nativeOptions(() => inertReconciler()),
+          ...(scopeBound ? { resolveScopedReadCapability: async () => null } : {}),
+        },
+      });
+      service.acceptPolicySnapshot({
+        policy,
+        policyDigest,
+        roster: memberRoster(policy, policyDigest),
+      });
+      service.start();
+      return { router, service };
+    };
+    const unscoped = createService(false);
+    await expect(unscoped.service.announceCatalogHead({
+      announcement: {
+        ...announcement(policyDigest),
+        contextGraphId: policy.contextGraphId,
+      },
+      peers: ['private-provider'],
+    })).rejects.toThrow(/requires scope-bound private content transport/u);
+    expect(unscoped.router.events.some((event) => event.startsWith('send:'))).toBe(false);
+    await unscoped.service.close();
+
+    const scoped = createService(true);
+    await expect(scoped.service.announceCatalogHead({
+      announcement: {
+        ...announcement(policyDigest),
+        contextGraphId: policy.contextGraphId,
+      },
+      peers: ['private-provider'],
+    })).resolves.toMatchObject({
+      announcedPeers: ['private-provider'],
+      failedPeers: [],
+    });
+    await scoped.service.close();
   });
 
   it('denies a private-cell author that is absent from the current member roster', async () => {
@@ -429,7 +484,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
       peers: [],
-    })).rejects.toThrow(/not bound to the exact catalog network, CG, governance scope, and author/);
+    })).rejects.toThrow(/not bound to the exact catalog network, CG, governance scope, era, and author/);
 
     // Receive side (#assertAcceptedCatalogAnnouncement): an announcement naming an off-roster author
     // must not resolve a trusted catalog scope.
@@ -799,6 +854,8 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(router.events.filter((event) => event.startsWith('register:'))).toEqual([
       `register:${RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1}`,
       `register:${RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1}`,
+      `register:${RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2}`,
+      `register:${RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2}`,
       `register:${RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1}`,
       `register:${RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1}`,
     ]);
@@ -826,6 +883,14 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(countEvent(
       router,
       `unregister:${RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1}`,
+    )).toBe(1);
+    expect(countEvent(
+      router,
+      `unregister:${RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2}`,
+    )).toBe(1);
+    expect(countEvent(
+      router,
+      `unregister:${RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2}`,
     )).toBe(1);
     expect(countEvent(
       router,
@@ -873,6 +938,8 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(router.handlers.has(RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1)).toBe(true);
     expect(router.handlers.has(RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1)).toBe(true);
     expect(router.handlers.has(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1)).toBe(true);
+    expect(router.handlers.has(RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2)).toBe(true);
+    expect(router.handlers.has(RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2)).toBe(true);
 
     await expect(clients!.headTransport.fetchCatalogHead('peer-b', head)).resolves.toBeNull();
     await expect(clients!.contentTransport.fetchKaBundle('peer-b', {
@@ -905,6 +972,8 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
       RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
       RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
+      RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2,
+      RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2,
     ]) {
       expect(countEvent(router, `unregister:${protocolId}`)).toBe(1);
     }

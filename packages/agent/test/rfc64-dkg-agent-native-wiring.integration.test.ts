@@ -325,7 +325,7 @@ function privateCatalogPolicy(): ContextGraphPolicyV1 {
     governanceChainId: null,
     governanceContractAddress: null,
     ownershipTransitionDigest: null,
-    era: '7',
+    era: '0',
     version: '0',
     previousPolicyDigest: null,
     accessPolicy: 1,
@@ -2091,11 +2091,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
     } as const;
-    await expect(configured.publishAuthorCatalogGenesisV1({
+    const published = await configured.publishAuthorCatalogGenesisV1({
       ...privateGenesis,
       peers: ['12D3KooPrivateReceiver'],
-    })).rejects.toThrow(/private catalog peer fan-out requires scope-bound/u);
-    const published = await configured.publishAuthorCatalogGenesisV1(privateGenesis);
+    });
+    expect(published.announcedPeers).toEqual([]);
+    expect(published.failedPeers).toHaveLength(1);
     expect(published.announcement).toMatchObject({
       policyDigest,
       subGraphName: 'service-lane',
@@ -2120,11 +2121,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     } as const;
     await expect(configured.publishOpenAuthorCatalogExactSetSuccessorV1(privateSuccessor))
       .rejects.toThrow(/public\/open compatibility successor requires the root lane/u);
-    await expect(configured.publishAuthorCatalogExactSetSuccessorV1({
+    const successor = await configured.publishAuthorCatalogExactSetSuccessorV1({
       ...privateSuccessor,
       peers: ['12D3KooPrivateReceiver'],
-    })).rejects.toThrow(/private catalog peer fan-out requires scope-bound/u);
-    const successor = await configured.publishAuthorCatalogExactSetSuccessorV1(privateSuccessor);
+    });
+    expect(successor.announcedPeers).toEqual([]);
+    expect(successor.failedPeers).toHaveLength(1);
     expect(successor).toMatchObject({
       announcement: {
         policyDigest,
