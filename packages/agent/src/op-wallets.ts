@@ -191,8 +191,17 @@ function createWalletEntry(): WalletEntry {
   return { address: wallet.address, privateKey: wallet.privateKey };
 }
 
-/** Matches an ethers-acceptable secp256k1 key: 0x + 32 bytes of hex. */
-const PRIVATE_KEY_RE = /^0x[0-9a-fA-F]{64}$/;
+/**
+ * Matches an ethers-acceptable secp256k1 key: 32 bytes of hex, with the `0x`
+ * prefix OPTIONAL.
+ *
+ * The prefix really is optional to ethers — `new ethers.Wallet('11'.repeat(32))`
+ * derives the same address as the `0x`-prefixed form — so requiring it here
+ * would reject a wallets.json that works today. This guard exists to turn an
+ * unactionable ethers error into a diagnosable one, not to tighten what the
+ * loader accepts.
+ */
+const PRIVATE_KEY_RE = /^(?:0x)?[0-9a-fA-F]{64}$/;
 
 function validateWalletEntry(entry: WalletEntry, path: string): WalletEntry {
   // GH#1432 — `new ethers.Wallet(...)` throws INVALID_ARGUMENT with the value
@@ -204,7 +213,7 @@ function validateWalletEntry(entry: WalletEntry, path: string): WalletEntry {
       ? 'is missing'
       : typeof entry.privateKey !== 'string'
         ? `is a ${typeof entry.privateKey}, not a string`
-        : `is ${entry.privateKey.length} characters (expected 66: 0x + 64 hex)`;
+        : `is ${entry.privateKey.length} characters (expected 64 hex characters, optionally 0x-prefixed)`;
     throw new Error(
       `Invalid operational wallet key at ${path} in wallets.json: privateKey ${shape}. ` +
         `Entries must carry either an encrypted \`keystore\` or a plaintext \`privateKey\`; ` +

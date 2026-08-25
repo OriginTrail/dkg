@@ -67,6 +67,21 @@ describe('loadOpWallets — actionable key diagnostics (GH#1432)', () => {
     await expect(loadOpWallets(dir)).rejects.toThrow(/adminWallet/);
   });
 
+  it('accepts a bare-hex key with no 0x prefix, as ethers does', async () => {
+    // Regression guard: ethers derives the same address from `'11'.repeat(32)`
+    // as from the 0x-prefixed form, so a wallets.json using the bare form works
+    // today. This guard must diagnose bad keys, not narrow what loads.
+    const dir = await tempDir();
+    const bare = '11'.repeat(32);
+    const { Wallet } = await import('ethers');
+    await writeWallets(dir, [{ address: new Wallet(bare).address, privateKey: bare }]);
+
+    const cfg = await loadOpWallets(dir);
+    expect(cfg.wallets).toHaveLength(1);
+    // Normalised to the 0x form on the way out, as before.
+    expect(cfg.wallets[0]!.privateKey).toBe('0x' + bare);
+  });
+
   it('still loads a well-formed plaintext wallets.json', async () => {
     const dir = await tempDir();
     const key = '0x' + '11'.repeat(32);
