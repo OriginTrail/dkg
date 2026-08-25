@@ -379,13 +379,338 @@ describe('SparqlHttpStore (test server)', () => {
     }) as typeof fetch;
     try {
       const store = new SparqlHttpStore({ queryEndpoint: 'http://example.test/query', timeout: 5 });
-      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeDefined();
+      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        backend: 'sparql-http',
+        operation: 'query',
+      });
       expect(active).toBe(0);
 
       await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).resolves.toMatchObject({
         type: 'bindings',
       });
       expect(maxActive).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('emits complete timeout metadata for a timed-out mutation', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      })) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://example.test/query',
+        updateEndpoint: 'http://example.test/update',
+        timeout: 5,
+      });
+      await expect(store.insert([
+        { subject: 'http://s', predicate: 'http://p', object: '"o"', graph: 'http://g' },
+      ])).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        backend: 'sparql-http',
+        operation: 'insert',
+        timeoutMs: 5,
+        outcome: 'indeterminate',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('notifies managed Oxigraph recovery when the client query deadline fires', async () => {
+    const originalFetch = globalThis.fetch;
+    const timedOutOperations: string[] = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      })) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        managedOxigraph: true,
+        timeout: 5,
+        onClientTimeout: (operation) => timedOutOperations.push(operation),
+      });
+      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'query',
+        timeoutMs: 5,
+      });
+      expect(timedOutOperations).toEqual(['query']);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('classifies a concurrent write and new work during query-triggered recovery', async () => {
+    const originalFetch = globalThis.fetch;
+    let recovery = { recovering: false, generation: 0 };
+    let fetchCalls = 0;
+    let resolveQueryStarted!: () => void;
+    let resolveUpdateStarted!: () => void;
+    let rejectUpdate!: (error: unknown) => void;
+    const queryStarted = new Promise<void>((resolve) => { resolveQueryStarted = resolve; });
+    const updateStarted = new Promise<void>((resolve) => { resolveUpdateStarted = resolve; });
+
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls += 1;
+      const body = String(init?.body ?? '');
+      if (recovery.generation > 0 && !recovery.recovering) {
+        return new Response(JSON.stringify({ head: {}, boolean: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        });
+      }
+      if (body.startsWith('INSERT')) {
+        resolveUpdateStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          rejectUpdate = reject;
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+        });
+      }
+      resolveQueryStarted();
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    }) as typeof fetch;
+
+    try {
+      const managed = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        updateEndpoint: 'http://managed-oxigraph.test/update',
+        managedOxigraph: true,
+        timeout: 100,
+        getRecoveryState: () => recovery,
+        onClientTimeout: (operation) => {
+          if (operation !== 'query') return;
+          recovery = { recovering: true, generation: 1 };
+          rejectUpdate(new TypeError('fetch failed: managed server restarted'));
+        },
+      });
+
+      const query = managed.query('SELECT ?s WHERE { ?s ?p ?o }');
+      const queryFailure = query.catch((error) => error);
+      await queryStarted;
+      const update = managed.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/g',
+      }]);
+      const updateFailure = update.catch((error) => error);
+      await updateStarted;
+
+      expect(await queryFailure).toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'query',
+        outcome: 'indeterminate',
+      });
+      expect(await updateFailure).toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'insert',
+        outcome: 'indeterminate',
+      });
+
+      await expect(managed.query('ASK { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'query',
+        outcome: 'not_started',
+      });
+      expect(fetchCalls).toBe(2);
+
+      recovery = { recovering: false, generation: 1 };
+      await expect(managed.query('ASK { ?s ?p ?o }')).resolves.toMatchObject({
+        type: 'boolean',
+        value: true,
+      });
+      expect(fetchCalls).toBe(3);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('classifies an in-flight write after recovery has already completed', async () => {
+    const originalFetch = globalThis.fetch;
+    let recovery = { recovering: false, generation: 0 };
+    let rejectWrite!: (error: unknown) => void;
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    globalThis.fetch = (async () => await new Promise<Response>((_resolve, reject) => {
+      rejectWrite = reject;
+      markWriteStarted();
+    })) as typeof fetch;
+
+    try {
+      const managed = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        updateEndpoint: 'http://managed-oxigraph.test/update',
+        managedOxigraph: true,
+        timeout: 5_000,
+        getRecoveryState: () => recovery,
+      });
+      const writeFailure = managed.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/g',
+      }]).catch((error) => error);
+      await writeStarted;
+
+      // The transport rejects only after the supervisor is healthy again.
+      // The generation change is therefore the sole evidence that this
+      // in-flight write crossed a recovery boundary.
+      recovery = { recovering: false, generation: 1 };
+      rejectWrite(new TypeError('socket closed by completed recovery'));
+
+      expect(await writeFailure).toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'insert',
+        outcome: 'indeterminate',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('rejects a partial managed Oxigraph SELECT response when the native deadline cancels it', async () => {
+    const originalFetch = globalThis.fetch;
+    const onClientTimeout = vi.fn();
+    globalThis.fetch = (async () => new Response(
+      '{"head":{"vars":["s"]},"results":{"bindings":[The SPARQL operation has been cancelled',
+      { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+    )) as typeof fetch;
+    try {
+      const managed = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        managedByDkg: true,
+        onClientTimeout,
+      });
+      await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        backend: 'oxigraph-server',
+        operation: 'query',
+      });
+      expect(onClientTimeout).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('preserves managed Oxigraph timeout semantics behind GraphSetIndexStore', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      'query failed\nThe SPARQL operation has been cancelled',
+      { status: 500 },
+    )) as typeof fetch;
+    const managed = await createTripleStore({
+      backend: 'sparql-http',
+      options: {
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        managedByDkg: true,
+        managedOxigraph: true,
+      },
+      graphSetIndex: true,
+    });
+    try {
+      await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'query',
+      });
+    } finally {
+      await managed.close();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('rejects rather than parsing a partial managed Oxigraph CONSTRUCT response', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      '<http://s> <http://p> "partial" <http://g> .\nThe SPARQL operation has been cancelled',
+      { status: 200, headers: { 'Content-Type': 'application/n-quads' } },
+    )) as typeof fetch;
+    try {
+      const managed = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        managedByDkg: true,
+      });
+      await expect(
+        managed.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'),
+      ).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        backend: 'oxigraph-server',
+        operation: 'construct',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('rejects a managed Oxigraph cancellation body on a non-OK response', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      'query failed\nThe SPARQL operation has been cancelled',
+      { status: 500 },
+    )) as typeof fetch;
+    try {
+      const managed = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        managedByDkg: true,
+      });
+      await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'query',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does not apply the managed Oxigraph cancellation policy to generic endpoints', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      'query failed\nThe SPARQL operation has been cancelled',
+      { status: 500 },
+    )) as typeof fetch;
+    try {
+      const generic = new SparqlHttpStore({
+        queryEndpoint: 'http://generic-sparql.test/query',
+      });
+      let failure: unknown;
+      try {
+        await generic.query('SELECT ?s WHERE { ?s ?p ?o }');
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).toMatchObject({
+        message: expect.stringContaining('SPARQL HTTP query failed (500)'),
+      });
+      expect((failure as { code?: unknown }).code).toBeUndefined();
     } finally {
       globalThis.fetch = originalFetch;
     }

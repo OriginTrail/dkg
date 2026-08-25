@@ -36,7 +36,10 @@ beforeAll(async () => {
       const url = req.url ?? '/';
       if (url.includes('/api/prime-agent-channel/stream')) {
         writeStreamAndHold(res, [
+          ': open\n\n',
+          ': keepalive\n\n',
           'data: {"type":"delta","text":"Hel"}\n\n',
+          ': keepalive\n\n',
           'data: {"type":"delta","text":"lo!"}\n\n',
           'data: {"type":"final","text":"Hello!","correlationId":"p1","sessionId":"s1"}\n\n',
         ]);

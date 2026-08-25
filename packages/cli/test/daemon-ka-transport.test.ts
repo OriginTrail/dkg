@@ -7,6 +7,10 @@
 // daemon / storage / native deps.
 import { describe, it, expect } from 'vitest';
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
+import {
+  StoreOperationTimeoutError,
+  StoreSchedulerBusyError,
+} from '@origintrail-official/dkg-storage';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -59,6 +63,42 @@ const ACCEPT_PROBE = {
 };
 function publishAgent(extra: Record<string, unknown>) {
   return { probeContextGraphWritePreflight: async () => ACCEPT_PROBE, ...extra };
+}
+
+const STORE_FAILURE_CASES = [
+  {
+    label: 'store timeout',
+    makeError: (operation: string) => new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation,
+      timeoutMs: 30_000,
+    }),
+    code: 'STORE_OPERATION_TIMEOUT',
+    outcome: 'indeterminate',
+  },
+  {
+    label: 'scheduler pressure',
+    makeError: (operation: string) => new StoreSchedulerBusyError(
+      'queue_wait_timeout',
+      'normal',
+      operation,
+    ),
+    code: 'STORE_SCHEDULER_BUSY',
+    outcome: 'not_started',
+  },
+] as const;
+
+function expectStoreUnavailableResponse(
+  res: ReturnType<typeof fakeRes>,
+  expected: { code: string; outcome: string },
+): void {
+  expect(res.statusCode).toBe(503);
+  expect(res.headers['Retry-After']).toBe('1');
+  expect(JSON.parse(res.body)).toMatchObject({
+    code: expected.code,
+    retryable: true,
+    outcome: expected.outcome,
+  });
 }
 function exhaustion() {
   const e: any = new Error(
@@ -128,6 +168,136 @@ describe('knowledge-assets publish routes — transport-status mapping (#1329)',
       expect(res.statusCode).toBe(404);
       expect(JSON.parse(res.body).code).toBe('DIRECT_PUBLISH_ROUTE_REMOVED');
       expect(called).toBe(false);
+    });
+  });
+
+  describe.each(STORE_FAILURE_CASES)('$label route mapping', ({ makeError, code, outcome }) => {
+    it('maps the create catch boundary to the shared retryable 503 contract', async () => {
+      const agent = publishAgent({
+        assertion: {
+          history: async () => null,
+          create: async () => { throw makeError('create'); },
+        },
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets',
+        agent,
+        { contextGraphId: 'cg-1', name: 'timeout-create' },
+      );
+
+      await done;
+      expectStoreUnavailableResponse(res, { code, outcome });
+    });
+
+    it('maps the WM mutation catch boundary to the shared retryable 503 contract', async () => {
+      const agent = publishAgent({
+        assertion: {
+          history: async () => ({ state: 'draft-open' }),
+          write: async () => { throw makeError('write'); },
+        },
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets/timeout-write/wm/write',
+        agent,
+        {
+          contextGraphId: 'cg-1',
+          quads: [{ subject: 'http://s', predicate: 'http://p', object: '"o"' }],
+        },
+      );
+
+      await done;
+      expectStoreUnavailableResponse(res, { code, outcome });
+    });
+
+    it('maps the VM publish catch boundary to the shared retryable 503 contract', async () => {
+      const agent = publishAgent({
+        publishFromFinalizedAssertion: async () => { throw makeError('publish'); },
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets/timeout-publish/vm/publish',
+        agent,
+        { contextGraphId: 'cg-1' },
+      );
+
+      await done;
+      expectStoreUnavailableResponse(res, { code, outcome });
+    });
+
+    it('preserves partial-create context when the optional SWM tail is unavailable', async () => {
+      const agent = publishAgent({
+        assertion: {
+          history: async () => null,
+          create: async () => {},
+          write: async () => {},
+          finalize: async () => ({
+            merkleRoot: new Uint8Array(32),
+            authorAddress: '0x0000000000000000000000000000000000000001',
+          }),
+          promote: async () => { throw makeError('promote'); },
+        },
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets',
+        agent,
+        {
+          contextGraphId: 'cg-1',
+          name: 'partial-swm',
+          quads: [{ subject: 'http://s', predicate: 'http://p', object: '"o"' }],
+          alsoShareSwm: true,
+        },
+      );
+
+      await done;
+      expectStoreUnavailableResponse(res, { code, outcome });
+      expect(JSON.parse(res.body)).toMatchObject({
+        created: true,
+        name: 'partial-swm',
+        status: 'wm-sealed',
+        phase: 'swm-share',
+        retryAction: 'retry_same_knowledge_asset',
+        retryKnowledgeAssetName: 'partial-swm',
+      });
+    });
+
+    it('preserves partial-create context when the optional VM tail is unavailable', async () => {
+      const agent = publishAgent({
+        assertion: {
+          history: async () => null,
+          create: async () => {},
+          write: async () => {},
+          finalize: async () => ({
+            merkleRoot: new Uint8Array(32),
+            authorAddress: '0x0000000000000000000000000000000000000001',
+          }),
+        },
+        publishFromFinalizedAssertion: async () => { throw makeError('publish'); },
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets',
+        agent,
+        {
+          contextGraphId: 'cg-1',
+          name: 'partial-vm',
+          quads: [{ subject: 'http://s', predicate: 'http://p', object: '"o"' }],
+          alsoPublishVm: true,
+        },
+      );
+
+      await done;
+      expectStoreUnavailableResponse(res, { code, outcome });
+      expect(JSON.parse(res.body)).toMatchObject({
+        created: true,
+        name: 'partial-vm',
+        status: 'wm-sealed',
+        phase: 'vm-publish',
+        retryAction: 'retry_same_knowledge_asset',
+        retryKnowledgeAssetName: 'partial-vm',
+      });
     });
   });
 

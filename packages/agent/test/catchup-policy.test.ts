@@ -35,6 +35,35 @@ function virtualClock(startMs = 1_000) {
 }
 
 describe('runCatchupPlanesWithPolicy', () => {
+  it('runs selected shared memory first and suppresses durable after its deferral', async () => {
+    const order: string[] = [];
+    const syncSharedMemory = vi.fn(async () => {
+      order.push('shared');
+      return { deferredBackpressure: 1 };
+    });
+    const syncDurable = vi.fn(async () => {
+      order.push('durable');
+      return { deferredBackpressure: 0 };
+    });
+
+    const result = await runCatchupPlanesWithPolicy({
+      mode: 'foreground',
+      includeSharedMemory: true,
+      planeOrder: 'shared-first',
+      syncDurable,
+      syncSharedMemory,
+      retry: { maxWaitMs: 0 },
+    });
+
+    expect(result).toEqual({
+      durable: null,
+      shared: { deferredBackpressure: 1 },
+      skippedPlanes: { durable: 'leading-plane-deferred' },
+    });
+    expect(order).toEqual(['shared']);
+    expect(syncDurable).not.toHaveBeenCalled();
+  });
+
   it('derives foreground priority and source and retries durable before starting SWM', async () => {
     const order: string[] = [];
     const priorities: Array<number | undefined> = [];
@@ -66,6 +95,7 @@ describe('runCatchupPlanesWithPolicy', () => {
     expect(result).toEqual({
       durable: { deferredBackpressure: 0 },
       shared: { deferredBackpressure: 0 },
+      skippedPlanes: {},
     });
     expect(order).toEqual(['durable-1', 'durable-2', 'shared']);
     expect(priorities).toEqual([
@@ -124,6 +154,7 @@ describe('runCatchupPlanesWithPolicy', () => {
 
     expect(result.durable.deferredBackpressure).toBe(1);
     expect(result.shared).toBeNull();
+    expect(result.skippedPlanes).toEqual({ shared: 'leading-plane-deferred' });
     expect(syncSharedMemory).not.toHaveBeenCalled();
     // Far past the four attempts the fixed ladder allowed.
     expect(syncDurable.mock.calls.length).toBeGreaterThan(4);
@@ -262,6 +293,7 @@ describe('runCatchupPlanesWithPolicy', () => {
 
     expect(result.durable.deferredBackpressure).toBe(1);
     expect(result.shared).toBeNull();
+    expect(result.skippedPlanes).toEqual({ shared: 'leading-plane-deferred' });
     expect(syncDurable).toHaveBeenCalledTimes(1);
     expect(syncSharedMemory).not.toHaveBeenCalled();
     expect(priorities).toEqual([undefined]);

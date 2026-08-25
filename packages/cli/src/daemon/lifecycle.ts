@@ -127,7 +127,10 @@ import {
   type LocalAgentIntegrationStatus,
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
+  resolveContextGraphSubscriptionRehydrationEnabled,
   resolveNetworkDefaultContextGraphs,
+  isPublisherRuntimeEnabled,
+  resolvePublisherRetryTuning,
   resolveRfc64PublicCatalogActivation,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveSharedMemoryTtlMs,
@@ -156,7 +159,7 @@ import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
-import { createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
+import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
@@ -416,6 +419,7 @@ import { handleRequest } from './handle-request.js';
 import { configureApiQueryPriority } from './api-query-priority.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
+import { buildChatMemoryStack } from './memory-tool-context.js';
 import {
   createPromoteWorkerSupervisor,
   type PromoteWorkerConfig,
@@ -1149,6 +1153,11 @@ export async function runDaemonInner(
   startedAt: number,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
+  const contextGraphSubscriptionRehydrationEnabled =
+    resolveContextGraphSubscriptionRehydrationEnabled(
+      config.contextGraphSubscriptionRehydrationEnabled,
+      process.env.DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED,
+    );
   // Resolve the local collector toggle before constructing daemon resources.
   // This is independent from OTLP metrics export configuration.
   const metricsCollectorConfig = resolveMetricsCollectorConfig(config);
@@ -1291,6 +1300,20 @@ export async function runDaemonInner(
   }
 
   const storageAckTiming = resolveStorageAckTiming(config.storageAck);
+  // GH#2270 — fail the boot here, at the same boundary as StorageACK timing, on
+  // a bad publisher retry knob — but ONLY when the publisher will actually run:
+  // with `publisher.enabled` false no retry scheduler is constructed, and a
+  // typo in a dormant block must not stop the node from serving (operators
+  // disable the publisher precisely to keep the node up while fixing its
+  // config). When enabled, the publisher runtime starts deferred and folds its
+  // construction error into `publisher_startup_failed`, so without this gate a
+  // typo'd knob leaves a node that boots and serves but never publishes,
+  // announced only by one deferred-startup log line.
+  // Validate exactly the configs that will construct a publisher — the
+  // shared predicate is the same one the runner's start gates consult.
+  if (isPublisherRuntimeEnabled(config.publisher)) {
+    resolvePublisherRetryTuning(config.publisher);
+  }
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
     config,
     loadNetworkConfig,
@@ -1640,6 +1663,7 @@ export async function runDaemonInner(
     dkgDir(),
     { sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage },
     snapshotPageIndexStore,
+    log,
   );
   const chainCursorScope = chainBase?.type === 'mock'
     ? (chainBase.chainId ?? 'mock:31337')
@@ -1762,6 +1786,7 @@ export async function runDaemonInner(
         ? config.rfc64PublicCatalog
         : { enabled: false },
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
+    contextGraphSubscriptionRehydrationEnabled,
     // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
     // tiers, discovery rate limits, and the `stripCiphertext` private-ciphertext
     // strip kill-switch) from config.json. Without this forward the whole
@@ -1788,11 +1813,18 @@ export async function runDaemonInner(
     publicSnapshotStore,
     syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
     syncReconcilerEnabled: config.syncReconcilerEnabled,
+    syncReconcilerIntervalMs: config.syncReconcilerIntervalMs,
+    syncStalenessThresholdMs: config.syncStalenessThresholdMs,
+    syncBackoffBaseMs: config.syncBackoffBaseMs,
+    syncBackoffMaxMs: config.syncBackoffMaxMs,
+    syncBackoffJitter: config.syncBackoffJitter,
     syncOnConnectEnabled: config.syncOnConnectEnabled,
+    syncSystemContextGraphsOnConnect: config.syncSystemContextGraphsOnConnect,
     durableSyncEnabled: config.durableSyncEnabled,
     syncGlobalMaxInflight: config.syncGlobalMaxInflight,
     syncGlobalLimit: config.syncGlobalLimit,
     syncGlobalQueueLimit: config.syncGlobalQueueLimit,
+    syncAdmission: config.syncAdmission,
     syncResponderSnapshotLimits: config.syncResponderSnapshotLimits,
     syncContextGraphPriorities: config.syncContextGraphPriorities,
     storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
@@ -1915,6 +1947,36 @@ export async function runDaemonInner(
         dashDb.deleteVmReconcileNegativesForContextGraph(contextGraphId);
       },
     },
+    selectedVmReconcileCursorStore: {
+      loadSelectedVmReconcileCursor: async (
+        deploymentId,
+        contextGraphId,
+        onChainContextGraphId,
+      ) => {
+        const row = dashDb.getSelectedVmReconcileCursor(
+          deploymentId,
+          contextGraphId,
+          onChainContextGraphId,
+        );
+        return row ? {
+          deploymentId: row.deployment_id,
+          contextGraphId: row.context_graph_id,
+          onChainContextGraphId: row.on_chain_context_graph_id,
+          nameHash: row.name_hash,
+          watermark: row.watermark,
+        } : null;
+      },
+      saveSelectedVmReconcileCursor: async (record) => {
+        dashDb.upsertSelectedVmReconcileCursor({
+          deployment_id: record.deploymentId,
+          context_graph_id: record.contextGraphId,
+          on_chain_context_graph_id: record.onChainContextGraphId,
+          name_hash: record.nameHash,
+          watermark: record.watermark,
+          updated_at: Date.now(),
+        });
+      },
+    },
     contextGraphMembershipStore: {
       loadAll: async () => dashDb.listContextGraphMembers().map((row) => {
         let metadata: Record<string, unknown> | undefined;
@@ -2024,6 +2086,20 @@ export async function runDaemonInner(
     // budget; without it every API-admitted VM-publish job was stamped with the
     // built-in default (10) even when publisher.maxRetries was configured (incl. 0).
     maxRetries: config.publisher?.maxRetries,
+    // GH#2270 — the retry knobs must reach this instance too: it derives the `retryState`
+    // the job-detail routes serve. A DORMANT publisher block is deliberately not resolved
+    // (a typo there must not stop a node that publishes nothing — the boot gate above skips
+    // it for the same reason); with no runtime there is no automatic lane at all, which is
+    // exactly what `autoRetryEnabled: false` makes the projection report.
+    retryTuning: isPublisherRuntimeEnabled(config.publisher)
+      ? resolvePublisherRetryTuning(config.publisher)
+      : { autoRetryEnabled: false },
+    // GH#2270 follow-up (🔴 3822987482) — admission asks the LIVE runtime whether an automatic
+    // exit exists for this job's wallet and operation, instead of inferring "no" from its own
+    // deliberately resolver-less wiring. `publisherState` is late-bound (the runtime starts after
+    // this instance is built), which is why this is a closure and not a value — the same pattern
+    // the RPC-usage drain above already uses.
+    chainProofCapableForWallet: createAdmissionRecoveryCapabilityProbe(() => publisherState),
   });
   // #1828 — one-time idempotent backfill of the durable-admission intent index
   // for VM-publish jobs admitted before it existed. Additive-only (RDF set
@@ -3203,77 +3279,16 @@ export async function runDaemonInner(
     }
   });
 
-  const agentToolsContext = {
-    query: (
-      sparql: string,
-      opts?: {
-        contextGraphId?: string;
-        graphSuffix?: "_shared_memory";
-        includeSharedMemory?: boolean;
-        view?: "working-memory" | "shared-working-memory" | "verifiable-memory";
-        agentAddress?: string;
-        assertionName?: string;
-        subGraphName?: string;
-      },
-    ) => agent.query(sparql, opts),
-    createAssertion: async (
-      contextGraphId: string,
-      name: string,
-      opts?: { subGraphName?: string },
-    ): Promise<{ assertionUri: string | null; alreadyExists: boolean }> => {
-      try {
-        const assertionUri = await agent.assertion.create(
-          contextGraphId,
-          name,
-          opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined,
-        );
-        return { assertionUri, alreadyExists: false };
-      } catch (err: any) {
-        if (err?.message?.includes("already exists")) {
-          return { assertionUri: null, alreadyExists: true };
-        }
-        throw err;
-      }
-    },
-    writeAssertion: async (
-      contextGraphId: string,
-      name: string,
-      quads: any[],
-      opts?: { subGraphName?: string },
-    ): Promise<{ written: number }> => {
-      await agent.assertion.write(
-        contextGraphId,
-        name,
-        quads,
-        opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined,
-      );
-      emitMemoryGraphChanged({
-        contextGraphId,
-        layers: ["wm"],
-        subGraphName: opts?.subGraphName,
-        operation: "assertion_written",
-        source: "agent_tool",
-        counts: { triples: quads.length },
-      });
-      return { written: quads.length };
-    },
-    createContextGraph: (opts: {
-      id: string;
-      name: string;
-      description?: string;
-      private?: boolean;
-    }) => agent.createContextGraph(opts),
-    listContextGraphs: () => agent.listContextGraphs(),
-  };
-  // See `resolveMemoryAgentAddress` for the write/read-URI invariant
-  // this encodes (issue #277). The helper is exported purely so the
-  // daemon-wiring contract stays unit-testable without a real agent.
-  const memoryAgentAddress = resolveMemoryAgentAddress(agent);
-  const memoryManager = new ChatMemoryManager(
-    agentToolsContext,
-    config.llm ?? { apiKey: '' },
-    { agentAddress: memoryAgentAddress },
-  );
+  // Chat-memory tool context + manager are built as one unit so the
+  // assertion the migration policy may upgrade is by construction the
+  // assertion the manager writes to. See `resolveMemoryAgentAddress` for the
+  // write/read-URI invariant the address encodes (issue #277).
+  const { toolContext: agentToolsContext, manager: memoryManager } = buildChatMemoryStack({
+    agent,
+    emitMemoryGraphChanged,
+    llmConfig: config.llm ?? { apiKey: '' },
+    agentAddress: resolveMemoryAgentAddress(agent),
+  });
   log('Memory manager ready');
   if (config.llm) log('Memory enrichment LLM ready');
   else log('Memory enrichment LLM not configured');

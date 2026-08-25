@@ -114,6 +114,38 @@ describe('ApiClient', () => {
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
     });
 
+    it('normalizes catch-up jobStatus from a pre-field daemon response', async () => {
+      globalThis.fetch = mockFetchOk({
+        jobId: 'legacy-job',
+        contextGraphId: 'cg-legacy',
+        includeWorkspace: true,
+        status: 'unreachable',
+        queuedAt: 1,
+      });
+
+      const result = await client.catchupStatus('cg-legacy');
+
+      expect(result.status).toBe('unreachable');
+      expect(result.jobStatus).toBe('unreachable');
+      expect(result.includeSharedMemory).toBe(true);
+    });
+
+    it('preserves the precise catch-up jobStatus from an upgraded daemon', async () => {
+      globalThis.fetch = mockFetchOk({
+        jobId: 'partial-job',
+        contextGraphId: 'cg-partial',
+        includeWorkspace: true,
+        status: 'unreachable',
+        jobStatus: 'partial',
+        queuedAt: 1,
+      });
+
+      const result = await client.catchupStatus('cg-partial');
+
+      expect(result.status).toBe('unreachable');
+      expect(result.jobStatus).toBe('partial');
+    });
+
     it('connect() gives DKG_AUTH_TOKEN precedence over the selected home token file', async () => {
       process.env.DKG_HOME = tempDir;
       process.env.DKG_API_PORT = String(PORT);
@@ -470,6 +502,7 @@ describe('ApiClient', () => {
       await client.subscribeToContextGraph('cg-selected', {
         includeSharedMemory: true,
         syncMode: 'on-demand',
+        forceCatchup: true,
       });
 
       expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/subscribe`);
@@ -477,6 +510,7 @@ describe('ApiClient', () => {
         contextGraphId: 'cg-selected',
         includeWorkspace: true,
         syncMode: 'on-demand',
+        forceCatchup: true,
       });
     });
 
@@ -1273,6 +1307,22 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(calls[0].url).toBe(`${base}/api/publisher/clear-job`);
     expect(calls[0].opts.method).toBe('POST');
     expect(JSON.parse(calls[0].opts.body as string)).toEqual({ jobId: 'lift job 7' });
+  });
+
+  // GH#2270 follow-up (🟡 3824484894) — the escape-hatch option is the CHANGED public behaviour,
+  // and only the unchanged default was covered. Removing or inverting the conditional spread would
+  // have sent the plain body while every existing row stayed green — and the plain body is exactly
+  // what cannot clear a held job.
+  it('publisherClearJob serializes the pending-transaction override only when asked', async () => {
+    const calls = track({ outcome: 'cleared', jobId: 'lift job 7' });
+    await client.publisherClearJob('lift job 7', { allowPendingTransaction: true });
+    expect(JSON.parse(calls[0].opts.body as string))
+      .toEqual({ jobId: 'lift job 7', allowPendingTransaction: true });
+
+    // The discriminating half: an explicit false must not opt in, so a caller cannot request the
+    // destructive override by passing the option around with a falsy value.
+    await client.publisherClearJob('lift job 7', { allowPendingTransaction: false });
+    expect(JSON.parse(calls[1].opts.body as string)).toEqual({ jobId: 'lift job 7' });
   });
 
   it('knowledgeAssetShareAsync rejects unsupported sync-only options before HTTP serialization', async () => {

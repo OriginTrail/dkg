@@ -1,5 +1,5 @@
-import type { RequestContext, RoutePlugin } from '@origintrail-official/dkg/daemon/plugin-api';
-import { createHandler, type KafkaPluginCtx } from './handler.js';
+import type { RoutePlugin } from '@origintrail-official/dkg/daemon/plugin-api';
+import { createHandler } from './handler.js';
 import { coreSchema } from './schema.js';
 import { validateExtensionAgainstCore, type KafkaPluginExtension } from './extension.js';
 
@@ -35,12 +35,7 @@ export function createKafkaPlugin<TParsed = Record<string, unknown>>(
     publishOptions: opts.publishOptions,
     extension: opts.extension as KafkaPluginExtension<Record<string, unknown>> | undefined,
   });
-  return {
-    name: 'kafka-plugin',
-    handle(ctx: RequestContext) {
-      return handle(ctx as unknown as KafkaPluginCtx);
-    },
-  };
+  return { name: 'kafka-plugin', handle };
 }
 
 const defaultPlugin: RoutePlugin = createKafkaPlugin();

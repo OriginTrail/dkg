@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
+  QuorumUnmetError,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
@@ -12,7 +13,12 @@ import {
   knowledgeAssetVmPublishLifecycleKey,
   serializeJob,
 } from '../src/async-lift-control-plane.js';
-import { KA_VM_BROADCAST_TX, KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
+import {
+  KA_VM_BROADCAST_TX,
+  KA_VM_INCLUSION,
+  KA_VM_VALIDATION,
+  kaVmPublishRequest,
+} from './_helpers/ka-vm-publish.js';
 
 // #1828 — durable-admission recovery: exact intent lookup keyed on the lifecycle
 // facts a client retains, with a materialized index and deterministic
@@ -41,14 +47,65 @@ describe('#1828 async lift intent lookup', () => {
   // The facts a recovering client retains (never the jobId or intentKey).
   const facts = { contextGraphId: 'music-social', name: 'albums' };
 
+  /**
+   * A failed job whose transaction is UNACCOUNTED FOR: recovery could not reconcile the
+   * broadcast it had recorded (`recovery_state_inconsistent`). GH#2270 keeps such a job on its
+   * lifecycle subject even though the failure is terminal — pinned by its own row below.
+   */
   async function driveToFailed(request: ReturnType<typeof kaVmPublishRequest>): Promise<string> {
-    const publisher = createPublisher({ recoveryLookupTimeoutMs: 10 });
+    const publisher = createPublisher();
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
     await publisher.update(jobId, 'broadcast', { broadcast: KA_VM_BROADCAST_TX });
-    now += 20;
-    await publisher.recover();
+    await publisher.update(jobId, 'included', {
+      broadcast: KA_VM_BROADCAST_TX,
+      inclusion: KA_VM_INCLUSION,
+    });
+    await publisher.recordPublishFailure(jobId, {
+      error: new Error('on-chain confirmation mismatch'),
+      failedFromState: 'included',
+      errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+    });
+    const job = await publisher.getStatus(jobId);
+    expect(job?.status).toBe('failed');
+    return jobId;
+  }
+
+  /**
+   * A RETRYABLE failure with no transaction to account for (ACK quorum is collected before the
+   * publish tx is signed): it occupies its subject, and nothing holds it — the shape the
+   * sibling-supersession rule still applies to.
+   */
+  async function driveToRetryableFailed(request: ReturnType<typeof kaVmPublishRequest>): Promise<string> {
+    const publisher = createPublisher();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.recordPublishFailure(jobId, {
+      error: new QuorumUnmetError({ collected: 2, required: 3, dialled: 2 }),
+      failedFromState: 'broadcast',
+      errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+    });
+    return jobId;
+  }
+
+  /**
+   * A terminal failure with NO transaction to account for — the publish reverted before any
+   * broadcast metadata was written. Nothing holds it, so it supersedes normally; this is the
+   * fixture for the "terminal → superseded" half of the partition, which a tx-bearing terminal
+   * job stopped being an example of when GH#2270 started holding those.
+   */
+  async function driveToTerminalFailed(request: ReturnType<typeof kaVmPublishRequest>): Promise<string> {
+    const publisher = createPublisher();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.recordPublishFailure(jobId, {
+      error: new Error('execution reverted'),
+      failedFromState: 'broadcast',
+      errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+    });
     const job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('failed');
     return jobId;
@@ -190,7 +247,7 @@ describe('#1828 async lift intent lookup', () => {
   });
 
   it('finds the job after a restart and for terminal jobs (AC4)', async () => {
-    const jobId = await driveToFailed(kaVmPublishRequest());
+    const jobId = await driveToTerminalFailed(kaVmPublishRequest());
     // Fresh instance over the same durable store — models a daemon restart.
     const restarted = createPublisher();
     const result = await restarted.lookupKnowledgeAssetVmPublishJobByIntent(facts);
@@ -201,7 +258,7 @@ describe('#1828 async lift intent lookup', () => {
 
   it('returns the active job with terminal siblings as superseded', async () => {
     const request = kaVmPublishRequest();
-    const failedId = await driveToFailed(request);
+    const failedId = await driveToTerminalFailed(request);
     // Add an active job under the same lifecycle subject (a real re-admission
     // scenario after a terminal failure). Built from the stored request wrapper.
     const failed = (await createPublisher().getStatus(failedId))!;
@@ -254,13 +311,89 @@ describe('#1828 async lift intent lookup', () => {
     expect(recoverable.kind).toBe('active');
     if (recoverable.kind === 'active') expect(recoverable.job.jobId).toBe(jobId);
 
-    // Exhausted retries → genuinely superseded (admission would not reaccept it).
+    // GH#2270 — an exhausted budget no longer supersedes the job: admission reaccepts it on a
+    // fresh client mandate (same jobId, budget re-armed), so it still owns the subject. This row
+    // pinned 'superseded' while admission would instead have minted a REPLACEMENT job.
     await insertFailed(true, 10);
-    expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('superseded');
+    expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('active');
 
     // Non-retryable failure → superseded even with retries nominally remaining.
     await insertFailed(false, 0);
     expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('superseded');
+  });
+
+  it('classifies a terminal failure with an unaccounted transaction as active (GH#2270)', async () => {
+    // A confirmation mismatch is terminal, but its transaction may be on chain. Reporting it as
+    // SUPERSEDED told a recovering client the subject was free —
+    // and admission agreed, minting a second job for the same KA. It now stays the live job,
+    // which is what makes the re-submit answer `LIFT_JOB_PENDING_CHAIN_PROOF`.
+    const jobId = await driveToFailed(kaVmPublishRequest());
+
+    const result = await createPublisher().lookupKnowledgeAssetVmPublishJobByIntent(facts);
+
+    expect(result.kind).toBe('active');
+    if (result.kind !== 'active') return;
+    expect([result.job.jobId, result.job.failure?.code, result.job.failure?.retryable])
+      .toEqual([jobId, 'confirmation_mismatch', false]);
+  });
+
+  it('reports an ordinary failed job with a NEWER sibling as superseded, not as a second active job (GH#2270)', async () => {
+    // The upgrade shape: a pre-GH#2270 store let a failed job's subject fall vacant and minted a
+    // successor. Both records survive, and the widened occupancy makes the old one look live — so
+    // without sibling awareness this lookup answers `conflict` (two active jobs, the broken #1828
+    // invariant) for a lifecycle that is simply one job followed by another. This is the ORDINARY
+    // failure; one whose transaction is unaccounted for is exempt (see the row below).
+    const failedId = await driveToRetryableFailed(kaVmPublishRequest());
+    const failed = (await createPublisher().getStatus(failedId))!;
+    const successor: LiftJob = {
+      jobId: 'successor-1',
+      jobSlug: 'successor-1',
+      request: failed.request,
+      status: 'accepted',
+      timestamps: {
+        acceptedAt: failed.timestamps.acceptedAt + 1_000,
+        updatedAt: failed.timestamps.acceptedAt + 1_000,
+      },
+      retries: { retryCount: 0, maxRetries: 10 },
+      controlPlane: { jobRef: jobSubject('successor-1') },
+    };
+    await store.insert(serializeJob(successor, DEFAULT_CONTROL_GRAPH_URI));
+
+    const result = await createPublisher().lookupKnowledgeAssetVmPublishJobByIntent(facts);
+
+    expect(result.kind).toBe('active');
+    if (result.kind !== 'active') return;
+    expect(result.job.jobId).toBe('successor-1');
+    expect(result.superseded.map((j) => j.jobId)).toEqual([failedId]);
+  });
+
+  it('reports BOTH records when a held job has a live successor (GH#2270)', async () => {
+    // A newer sibling is not chain proof, so the held record is never demoted — and a lifecycle
+    // with two records both claiming it is exactly the conflict #1828 exists to surface. A
+    // recovering client sees both: the successor that is running, and the predecessor whose
+    // transaction nobody has accounted for.
+    const heldId = await driveToFailed(kaVmPublishRequest());
+    const held = (await createPublisher().getStatus(heldId))!;
+    const successor: LiftJob = {
+      jobId: 'successor-1',
+      jobSlug: 'successor-1',
+      request: held.request,
+      status: 'accepted',
+      timestamps: {
+        acceptedAt: held.timestamps.acceptedAt + 1_000,
+        updatedAt: held.timestamps.acceptedAt + 1_000,
+      },
+      retries: { retryCount: 0, maxRetries: 10 },
+      controlPlane: { jobRef: jobSubject('successor-1') },
+    };
+    await store.insert(serializeJob(successor, DEFAULT_CONTROL_GRAPH_URI));
+
+    const result = await createPublisher().lookupKnowledgeAssetVmPublishJobByIntent(facts);
+
+    expect(result.kind).toBe('conflict');
+    if (result.kind !== 'conflict') return;
+    // Held first: it is the record admission answers for.
+    expect(result.jobs.map((j) => j.jobId)).toEqual([heldId, 'successor-1']);
   });
 
   it('partitions the recovery identity by subGraphName (Chunk 1)', async () => {

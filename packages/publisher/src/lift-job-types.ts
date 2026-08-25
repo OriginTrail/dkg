@@ -163,6 +163,8 @@ export interface LiftJobTimestamps {
   readonly claimedAt?: number;
   readonly validatedAt?: number;
   readonly broadcastAt?: number;
+  /** RPC endpoint acceptance, durably recorded after the pre-send WAL checkpoint. */
+  readonly rpcAcceptedAt?: number;
   readonly includedAt?: number;
   readonly finalizedAt?: number;
   readonly failedAt?: number;
@@ -174,14 +176,63 @@ export interface LiftJobTimestamps {
 
 export interface LiftJobRetryMetadata {
   readonly retryCount: number;
+  /**
+   * ONE budget shared by every reaccept of this job — automatic (registry `autoRetry` codes,
+   * scheduled with jittered backoff) and manual (`retry()`, admission re-submit) alike. Snapshot
+   * from the publisher's `maxRetries` at admission and immutable thereafter, so raising the
+   * daemon setting does not re-arm jobs already queued. Once `retryCount` reaches it the job is
+   * terminal for the automatic lane: nothing further is scheduled and the sweep skips it.
+   */
   readonly maxRetries: number;
   readonly lastRetryReason?: string;
 }
+
+// GH#2270 — the DERIVED retry read model (`LiftJobRetryProjection`, `LiftJobRetryWaitingReason`)
+// lives in async-lift-retry-disposition.ts, beside the classifier that produces it. This file is
+// the PERSISTED job shape; nothing derived on read belongs in it.
 
 export interface LiftJobRecoveryResetToAccepted {
   readonly action: 'reset_to_accepted';
   readonly recoveredFromStatus: LiftJobResettableState;
   readonly txHashChecked?: LiftJobHex;
+  /**
+   * GH#2270 PR-3 r3 — the chain ACCOUNTED for `txHashChecked`, and this reset is what it decided.
+   *
+   * The hash is kept for audit either way, but it stops being an open question. Without this a
+   * proven-absent release is self-defeating: the reset carries the hash forward so a LATER failure
+   * is still held, which is right while the transaction's fate is unknown — and wrong the moment
+   * recovery has just proven it. The job would go back on the queue, fail again before ever
+   * signing anything, and be held on a transaction the dispatcher itself established does not
+   * exist, with no second proof possible because nothing new was ever sent.
+   *
+   * Written ONLY by the proof-first dispatcher's release paths: a proven absence, and a proven
+   * revert of a transaction some earlier attempt sent. Never by the interrupted-recovery reset,
+   * the retry sweep, or a manual reaccept — none of those has asked the chain anything, and a hash
+   * they carry forward is still genuinely unaccounted for.
+   *
+   * A NEW post-sign failure records fresh `broadcast` metadata, which is unconditional evidence:
+   * this flag only ever speaks about the INHERITED hash it sits beside.
+   */
+  readonly txHashAccounted?: boolean;
+  /**
+   * GH#2270 PR #2300 r3 — the branch the checked transaction signed, carried across resets exactly
+   * like `txHashChecked` is: a reset rebuilds the job and drops `broadcast`, so without this a job
+   * that signed a CREATE would fall back to the pre-marker default (update, i.e. held) the moment
+   * recovery released it for a re-run.
+   */
+  readonly operationKind?: 'create' | 'update';
+  /**
+   * GH#2270 PR #2300 r21 (🔴 3812632539) — the WALLET that signed `txHashChecked`, carried
+   * across the reset for the same reason the hash and the operation marker are. A reset drops
+   * `broadcast`, and the job can then be claimed by a DIFFERENT wallet; pairing the inherited hash
+   * with that later claim builds a lookup for a transaction/account combination that never
+   * existed, and update recognition binds the publisher to the wrong wallet — stranding a job
+   * whose transaction actually mined. Absent (a pre-r21 record), the inherited hash has no
+   * authoritative signer and the job stays held rather than being asked about under a guess.
+   */
+  readonly walletIdChecked?: string;
+  /** The nonce that transaction consumed, preserved with its signer for the absence proof. */
+  readonly nonceChecked?: number;
   readonly note?: string;
 }
 
@@ -235,6 +286,29 @@ export interface LiftJobBroadcastMetadata {
   readonly walletId: string;
   readonly merkleRoot?: LiftJobHex;
   readonly publicByteSize?: number;
+  /**
+   * GH#2270 PR-3 — the account nonce the signed transaction reserved, written in the same pre-send
+   * write-ahead as `txHash`.
+   *
+   * This is what lets recovery PROVE absence. A null transaction lookup is point-in-time and
+   * backend-local: a broadcast whose response timed out can still be accepted and mined later, so
+   * "the node does not have it" is never on its own proof that nothing published. Once this slot
+   * is spent at a FINALIZED block and the transaction is still missing, it can never mine — that
+   * is proof, and it is the only thing that releases a held job by absence.
+   *
+   * Optional because it is only as available as the signing path makes it: records written before
+   * this field existed, and any signed transaction whose nonce could not be parsed, carry none.
+   * Recovery reads a missing nonce as no proof and keeps holding.
+   */
+  readonly nonce?: number;
+  /**
+   * GH#2270 PR #2300 r3 — the branch this transaction actually signed, recorded at the write-ahead
+   * because it cannot be recovered from the request afterwards (a queued publish can resolve its
+   * update branch from the LIVE lifecycle pointer, not only from `vmCurrentAssertion`). Recovery's
+   * absence-release is create-only, so this is what makes that decision honest for any job this
+   * build writes; a record without it predates the marker and is treated as an update, i.e. held.
+   */
+  readonly operationKind?: 'create' | 'update';
 }
 
 export interface LiftJobInclusionMetadata {
@@ -263,6 +337,9 @@ export const LIFT_JOB_IMMUTABLE_FIELDS = [
   'jobId',
   'jobSlug',
   'request',
+  // GH#2270 follow-up (3825614166) — who admitted the job is fixed at creation and never
+  // rewritten. A reset that rebuilds the job carries it forward; nothing may reassign it.
+  'admission',
   'timestamps.acceptedAt',
   'retries.maxRetries',
 ] as const;
@@ -291,10 +368,28 @@ export const LIFT_JOB_MUTABLE_PERSISTED_FIELDS = [
   'controlPlane',
 ] as const;
 
+/**
+ * Who admitted this job — queue metadata, not part of any operation's payload.
+ *
+ * GH#2270 follow-up (🟡 3824743779). This is the AUTHENTICATED identity that enqueued the job and
+ * it exists for authorization only, so it lives at the job level where a generic boundary can read
+ * it without knowing which operation the job carries. It is deliberately NOT
+ * `KnowledgeAssetVmPublishRequest.callerAgentAddress`: that field is an author RESOLUTION HINT
+ * (GH#1778) which is absent for a node-level token and carries author-selection meaning, so
+ * authorizing against it both denied every node-token job its advertised force-clear and risked
+ * changing what gets published.
+ *
+ * Immutable: stamped once at admission and never mutated, like `request` and `jobId`.
+ */
+export interface LiftJobAdmissionMetadata {
+  readonly byAgentAddress: string;
+}
+
 export interface LiftJobBase {
   readonly jobId: string;
   readonly jobSlug: string;
   readonly request: LiftJobRequest;
+  readonly admission?: LiftJobAdmissionMetadata;
   readonly status: LiftJobState;
   readonly timestamps: LiftJobTimestamps;
   readonly retries: LiftJobRetryMetadata;
@@ -466,6 +561,7 @@ export type JournalKind =
   | 'claimed'
   | 'validated'
   | 'broadcast'
+  | 'rpc-accepted'
   | 'included'
   | 'finalized'
   | 'noop-finalized'

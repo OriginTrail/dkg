@@ -52,6 +52,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
 
     expect(subscribeToContextGraph).toHaveBeenCalledWith('selected-cg', {
       syncMode: 'on-demand',
+      forceCatchup: false,
     });
     expect(configMocks.saveConfig).not.toHaveBeenCalled();
     expect(logLines.join('\n')).toContain('Synchronization mode: on demand');
@@ -68,6 +69,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
 
     expect(subscribeToContextGraph).toHaveBeenCalledWith('selected-cg', {
       syncMode: 'always-on',
+      forceCatchup: false,
     });
     expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
       contextGraphs: ['selected-cg'],
@@ -86,9 +88,25 @@ describe('knowledge subscribe CLI sync lifetime', () => {
 
     expect(subscribeToContextGraph).toHaveBeenCalledWith('selected-cg', {
       syncMode: 'on-demand',
+      forceCatchup: false,
     });
     expect(configMocks.saveConfig).not.toHaveBeenCalled();
     expect(logLines.join('\n')).toContain('Synchronization mode: always on');
     expect(logLines.join('\n')).not.toContain('Synchronization mode: on demand');
+  });
+
+  it('forces catch-up when --repair is requested', async () => {
+    const subscribeToContextGraph = vi.fn().mockResolvedValue({
+      subscribed: 'selected-cg',
+      syncMode: 'on-demand',
+    });
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue({ subscribeToContextGraph } as unknown as ApiClient);
+
+    await commandProgram().parseAsync(['node', 'dkg', 'subscribe', 'selected-cg', '--repair']);
+
+    expect(subscribeToContextGraph).toHaveBeenCalledWith('selected-cg', {
+      syncMode: 'on-demand',
+      forceCatchup: true,
+    });
   });
 });

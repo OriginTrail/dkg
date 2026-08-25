@@ -13,6 +13,7 @@ import {
   type FinalizationRecoveryVerifyResult,
 } from './finalization-recovery-store.js';
 import {
+  finalizationEnvelopeFromRow,
   finalizationEnvelopeSha256,
   finalizationRecoveryRowToEntry,
   sameFinalizationRecoveryEvidence,
@@ -23,8 +24,10 @@ import {
 } from './finalization-recovery-sqlite-schema.js';
 import {
   hasFinalizationRecoveryCapacity,
+  hasFinalizationRecoveryDeferredCapacity,
   pruneFinalizationRecoveryRowsWithinTransaction,
   readFinalizationRecoveryCapacity,
+  readFinalizationRecoveryDeferredCapacity,
   resolveFinalizationRecoveryRetentionPolicy,
   type FinalizationRecoveryRetentionPolicy,
   type SqliteFinalizationRecoveryStoreOptions,
@@ -58,6 +61,63 @@ function sameFinalizationRecoveryIdentity(
     && existing.kaId === input.kaId
     && existing.batchId === input.batchId
     && existing.targetContextGraphId === input.targetContextGraphId;
+}
+
+interface PendingFinalizationRow {
+  key: string;
+  chain_id: string;
+  context_graph_id: string;
+  source_peer_id: string | null;
+  trusted_publisher_peer_id: string | null;
+  ual: string;
+  tx_hash: string;
+  assertion_version: string;
+  merkle_root: string;
+  ka_id: string;
+  batch_id: string;
+  target_context_graph_id: string | null;
+  envelope_sha256: string;
+  raw_envelope: Uint8Array;
+  created_at: number;
+  updated_at: number;
+}
+
+function pendingRowToReceiveInput(row: PendingFinalizationRow): FinalizationRecoveryReceiveInput {
+  const { raw } = finalizationEnvelopeFromRow(row as unknown as Record<string, unknown>);
+  return {
+    key: row.key,
+    chainId: row.chain_id,
+    contextGraphId: row.context_graph_id,
+    ...(row.source_peer_id ? { sourcePeerId: row.source_peer_id } : {}),
+    ual: row.ual,
+    txHash: row.tx_hash,
+    assertionVersion: row.assertion_version,
+    merkleRoot: row.merkle_root,
+    kaId: row.ka_id,
+    batchId: row.batch_id,
+    ...(row.target_context_graph_id
+      ? { targetContextGraphId: row.target_context_graph_id }
+      : {}),
+    rawMessage: new Uint8Array(raw),
+  };
+}
+
+function samePendingFinalization(
+  row: PendingFinalizationRow,
+  input: FinalizationRecoveryReceiveInput,
+  digest: string,
+): boolean {
+  return row.envelope_sha256 === digest
+    && Buffer.from(row.raw_envelope).equals(Buffer.from(input.rawMessage))
+    && row.chain_id === input.chainId
+    && row.context_graph_id === input.contextGraphId
+    && row.ual === input.ual
+    && row.tx_hash.toLowerCase() === input.txHash.toLowerCase()
+    && row.assertion_version === input.assertionVersion
+    && row.merkle_root.toLowerCase() === input.merkleRoot.toLowerCase()
+    && row.ka_id === input.kaId
+    && row.batch_id === input.batchId
+    && (row.target_context_graph_id ?? undefined) === input.targetContextGraphId;
 }
 
 export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStore {
@@ -101,6 +161,72 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     return row ? finalizationRecoveryRowToEntry(row) : undefined;
   }
 
+  private insertLiveWithinTransaction(
+    input: FinalizationRecoveryReceiveInput,
+    digest: string,
+    createdAt: number,
+    updatedAt = createdAt,
+    trustedPublisherPeerId?: string,
+  ): void {
+    this.database.prepare(`
+      INSERT INTO finalization_inbox_v1 (
+        key, state, chain_id, context_graph_id, source_peer_id,
+        trusted_publisher_peer_id, ual, tx_hash,
+        assertion_version, merkle_root, ka_id, batch_id, target_context_graph_id,
+        envelope_sha256, raw_envelope, created_at, updated_at
+      ) VALUES (?, 'RECEIVED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.key,
+      input.chainId,
+      input.contextGraphId,
+      input.sourcePeerId ?? null,
+      trustedPublisherPeerId ?? null,
+      input.ual,
+      input.txHash.toLowerCase(),
+      input.assertionVersion,
+      input.merkleRoot.toLowerCase(),
+      input.kaId,
+      input.batchId,
+      input.targetContextGraphId ?? null,
+      digest,
+      Buffer.from(input.rawMessage),
+      createdAt,
+      updatedAt,
+    );
+  }
+
+  private insertPendingWithinTransaction(
+    input: FinalizationRecoveryReceiveInput,
+    digest: string,
+    now: number,
+  ): void {
+    this.database.prepare(`
+      INSERT INTO finalization_pending_v2 (
+        key, chain_id, context_graph_id, source_peer_id,
+        trusted_publisher_peer_id, ual, tx_hash,
+        assertion_version, merkle_root, ka_id, batch_id, target_context_graph_id,
+        envelope_sha256, raw_envelope, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.key,
+      input.chainId,
+      input.contextGraphId,
+      input.sourcePeerId ?? null,
+      null,
+      input.ual,
+      input.txHash.toLowerCase(),
+      input.assertionVersion,
+      input.merkleRoot.toLowerCase(),
+      input.kaId,
+      input.batchId,
+      input.targetContextGraphId ?? null,
+      digest,
+      Buffer.from(input.rawMessage),
+      now,
+      now,
+    );
+  }
+
   receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult> {
     if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
     return this.mutate(() => {
@@ -136,40 +262,110 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         ) return { status: 'conflict' };
         return { status: 'existing', entry: existing };
       }
-      if (!hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
-        return { status: 'capacity' };
+      const pendingRow = this.database.prepare(
+        'SELECT * FROM finalization_pending_v2 WHERE key = ?',
+      ).get(input.key) as PendingFinalizationRow | undefined;
+      if (pendingRow) {
+        try {
+          pendingRowToReceiveInput(pendingRow);
+          return samePendingFinalization(pendingRow, input, digest)
+            ? { status: 'pending' }
+            : { status: 'conflict' };
+        } catch {
+          this.database.prepare(
+            'DELETE FROM finalization_pending_v2 WHERE key = ?',
+          ).run(pendingRow.key);
+          return { status: 'conflict' };
+        }
       }
       const now = this.#policy.now();
+      if (!hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
+        if (!hasFinalizationRecoveryDeferredCapacity(this.database, this.#policy, input)) {
+          return { status: 'capacity' };
+        }
+        this.transaction(() => {
+          this.insertPendingWithinTransaction(input, digest, now);
+        });
+        return { status: 'pending' };
+      }
       this.transaction(() => {
-        this.database.prepare(`
-          INSERT INTO finalization_inbox_v1 (
-            key, state, chain_id, context_graph_id, source_peer_id, ual, tx_hash,
-            assertion_version, merkle_root, ka_id, batch_id, target_context_graph_id,
-            envelope_sha256, raw_envelope, created_at, updated_at
-          ) VALUES (?, 'RECEIVED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          input.key,
-          input.chainId,
-          input.contextGraphId,
-          input.sourcePeerId ?? null,
-          input.ual,
-          input.txHash.toLowerCase(),
-          input.assertionVersion,
-          input.merkleRoot.toLowerCase(),
-          input.kaId,
-          input.batchId,
-          input.targetContextGraphId ?? null,
-          digest,
-          Buffer.from(input.rawMessage),
-          now,
-          now,
-        );
+        this.insertLiveWithinTransaction(input, digest, now);
       });
       const row = this.database.prepare(
         'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
       ).get(input.key);
       if (!row) throw new Error('Finalization inbox insert returned no row');
       return { status: 'inserted', entry: finalizationRecoveryRowToEntry(row) };
+    });
+  }
+
+  promotePending(limit: number): Promise<number> {
+    if (this.#closed || this.#closing) return Promise.resolve(0);
+    const boundedLimit = Math.max(1, Math.trunc(limit));
+    return this.mutate(() => {
+      if (this.#closed) return 0;
+      let promoted = 0;
+      this.transaction(() => {
+        const now = this.#policy.now();
+        this.pruneWithinTransaction(now);
+        const rows = this.database.prepare(`
+          SELECT * FROM finalization_pending_v2
+          ORDER BY created_at ASC, key ASC
+          LIMIT ?
+        `).all(this.#policy.maxDeferredEntries) as unknown as PendingFinalizationRow[];
+        for (const row of rows) {
+          if (promoted >= boundedLimit) break;
+          let input: FinalizationRecoveryReceiveInput;
+          try {
+            input = pendingRowToReceiveInput(row);
+          } catch {
+            this.database.prepare(
+              'DELETE FROM finalization_pending_v2 WHERE key = ?',
+            ).run(row.key);
+            continue;
+          }
+          if (!hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
+            continue;
+          }
+          this.insertLiveWithinTransaction(
+            input,
+            row.envelope_sha256,
+            row.created_at,
+            now,
+            row.trusted_publisher_peer_id ?? undefined,
+          );
+          this.database.prepare(
+            'DELETE FROM finalization_pending_v2 WHERE key = ?',
+          ).run(row.key);
+          promoted += 1;
+        }
+      });
+      return promoted;
+    });
+  }
+
+  recordPendingTrustedPublisher(
+    key: string,
+    publisherPeerId: string,
+  ): Promise<boolean> {
+    if (
+      this.#closed
+      || this.#closing
+      || publisherPeerId.length === 0
+      || publisherPeerId.trim() !== publisherPeerId
+    ) return Promise.resolve(false);
+    return this.mutate(() => {
+      if (this.#closed) return false;
+      const result = this.database.prepare(`
+        UPDATE finalization_pending_v2
+        SET trusted_publisher_peer_id = ?, updated_at = ?
+        WHERE key = ?
+          AND (
+            trusted_publisher_peer_id IS NULL
+            OR trusted_publisher_peer_id = ?
+          )
+      `).run(publisherPeerId, this.#policy.now(), key, publisherPeerId);
+      return result.changes > 0;
     });
   }
 
@@ -596,6 +792,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       WHERE ${DUE_FINALIZATION_SQL_PREDICATE}
     `).get(now) as { count: number | bigint; oldest: number | bigint | null };
     const capacity = readFinalizationRecoveryCapacity(this.database, this.#policy);
+    const deferred = readFinalizationRecoveryDeferredCapacity(this.database);
     return {
       available: true,
       closed: false,
@@ -604,12 +801,17 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       stateCounts,
       livePayloadBytes: capacity.livePayloadBytes,
       dueEntries: Number(due.count),
+      deferredEntries: deferred.entries,
+      deferredPayloadBytes: deferred.payloadBytes,
       ...(due.oldest === null
         ? {}
         : { oldestDueAgeMs: Math.max(0, now - Number(due.oldest)) }),
       ...(capacity.oldest === undefined
         ? {}
         : { oldestPendingAgeMs: Math.max(0, now - capacity.oldest) }),
+      ...(deferred.oldest === undefined
+        ? {}
+        : { oldestDeferredAgeMs: Math.max(0, now - deferred.oldest) }),
     };
   }
 

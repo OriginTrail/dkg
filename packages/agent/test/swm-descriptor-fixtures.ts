@@ -89,6 +89,11 @@ export function swmFixtures(contextGraphId: string) {
         publicTripleCount: payload.length,
         privateTripleCount: 0,
         publisherPeerId: 'peer-source',
+        // Production share paths always stamp the effective policy row (see
+        // the async-lift options default); a policy-less op is the
+        // OLD-metadata interop shape, constructed per-row where a test needs
+        // it — the preserve gate refuses winners without the explicit row.
+        accessPolicy: 'public',
         timestamp: new Date(0),
       }, metaGraph),
       { subject: operationSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${digest}"`, graph: metaGraph },

@@ -32,6 +32,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   AsyncLiftJobConflictError,
+  LiftJobPendingChainProofError,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
@@ -445,6 +446,151 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
     expect(String(res.body.error)).toContain('re-share');
     expect(enqueueCalls).toBe(0);
+  });
+
+  it('vm/publish-async: KA_WORKSPACE_HEAD_CORRUPT → 503 { code, error, retryable }', async () => {
+    // GH#2273 — a multi-valued SWM head now fails closed in the resolver during the
+    // enqueue-time intent resolution. That is transient SERVER-side corruption the sync
+    // repair heals, not a stale client intent: a 409 would tell the caller to re-share
+    // for nothing, and pre-fix the code matched no catch branch and surfaced as a
+    // generic 500. The 503 + retryable tells the caller to retry the SAME enqueue after
+    // catch-up converges the head.
+    let enqueueCalls = 0;
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => {
+        throw Object.assign(
+          new Error('Corrupt graph-scoped SWM head for did:dkg:test/1: head carries 2 shareOperationId values (op-a, storage-ack-b)'),
+          { code: 'KA_WORKSPACE_HEAD_CORRUPT' },
+        );
+      },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        enqueueCalls += 1;
+        return 'job-should-not-exist';
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('KA_WORKSPACE_HEAD_CORRUPT');
+    expect(res.body.retryable).toBe(true);
+    expect(String(res.body.error)).toContain('shareOperationId');
+    expect(enqueueCalls).toBe(0);
+  });
+
+  it('vm/publish-async: LIFT_JOB_PENDING_CHAIN_PROOF → 503 { code, error, retryable: true, existingJobId }', async () => {
+    // GH#2270 — a re-submit of a job that failed after a transaction may have been sent is
+    // refused by admission: republishing it could double-publish. That is neither a client
+    // mistake (the 409 conflict above would tell them to re-share for nothing) nor a node
+    // bug — pre-fix this code matched no catch branch and surfaced as a generic 500.
+    //
+    // `retryable: false` is the honest half: NO lane in this build clears the hold by itself
+    // (the chain-recovery loop never re-checks a failed KA-VM publish job), so a client that
+    // kept retrying this enqueue would loop forever. The body says who can end it instead.
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'pending-proof-op',
+        roots: ['urn:test:root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        throw new LiftJobPendingChainProofError(
+          'LiftJob job-7 failed as rpc_unavailable after a transaction may have been submitted; '
+            + 'it cannot be republished until chain recovery proves the transaction absent',
+          'job-7',
+          // PR #2300 r1 — retryable is JOB-SPECIFIC, computed at the publisher's throw site from
+          // hasAutomaticRecoveryExit; the route forwards whatever the error carries.
+          true,
+        );
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('LIFT_JOB_PENDING_CHAIN_PROOF');
+    // GH#2270 PR-3 — TRUE when the proof-first dispatcher has a lane for this job (it re-checks
+    // it every recover() tick and releases it on a proven verdict). Retrying this enqueue then
+    // converges without an operator, which is exactly what `retryable` promises.
+    expect(res.body.retryable).toBe(true);
+    expect(res.body.retryable).not.toBe(false);
+    expect(res.body.existingJobId).toBe('job-7');
+    // The message names the automatic lane FIRST and the by-id clear as the impatient-operator
+    // exit, with the exact job to act on.
+    expect(String(res.body.error)).toContain('Chain recovery re-checks this job');
+    expect(String(res.body.error)).toContain('/api/publisher/clear-job');
+    expect(String(res.body.error)).toContain('job-7');
+    // The pre-PR-3 wording promised nobody was coming.
+    expect(String(res.body.error)).not.toContain('No automatic lane resolves this');
+    // GH#2270 follow-up (🔴 3824098486, 🔴 3824353564, 🔴 3824484756) — the command handed
+    // back must be one that WORKS. A held job's clear needs the explicit override, and
+    // retryability does not decide that: a recoverable job can still be `retry_recovery`. This is
+    // asserted on the EMITTED body rather than the source, so an override left in dead source
+    // cannot pass for a usable instruction.
+    expect(String(res.body.error)).toContain('{"jobId":"job-7","allowPendingTransaction":true}');
+  });
+
+  it('vm/publish-async: LIFT_JOB_PENDING_CHAIN_PROOF forwards retryable: FALSE for an operator-only record [PR#2300 r1]', async () => {
+    // The other polarity, so the route cannot pass by hardcoding `true`: a record with no
+    // automatic exit (legacy no-nonce create, an update with no formable recognition) carries
+    // false from the throw site, and the body stops promising convergence and points straight at
+    // the by-id clear.
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'pending-proof-op-false',
+        roots: ['urn:test:root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        throw new LiftJobPendingChainProofError(
+          'LiftJob job-8 failed as rpc_unavailable after a transaction may have been submitted; '
+            + 'it cannot be republished until chain recovery proves the transaction absent',
+          'job-8',
+          false,
+        );
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('LIFT_JOB_PENDING_CHAIN_PROOF');
+    expect(res.body.retryable).toBe(false);
+    expect(res.body.existingJobId).toBe('job-8');
+    expect(String(res.body.error)).toContain('no automatic exit');
+    expect(String(res.body.error)).toContain('/api/publisher/clear-job');
+    expect(String(res.body.error)).toContain('job-8');
+    expect(String(res.body.error)).not.toContain('Chain recovery re-checks this job');
+    // The other polarity of the same guarantee: BOTH retryable values must be handed a command
+    // that can actually clear the job, which is what makes this pair discriminating rather than
+    // a single-branch check that a reversal could satisfy.
+    expect(String(res.body.error)).toContain('{"jobId":"job-8","allowPendingTransaction":true}');
   });
 
   // GH#1778 — the disambiguation error surfaces as a 409 with the candidate
@@ -869,6 +1015,60 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(seenResolveOptions).toHaveLength(1);
     expect(seenResolveOptions[0]).toMatchObject({ callerAgentAddress: tokenAgentAddress });
     expect(enqueuedIntents[0]).toMatchObject({ agentAddress: tokenAgentAddress });
+  });
+
+  it('vm/publish-async stamps the AUTHENTICATED enqueuer as admission metadata, beside the intent', async () => {
+    // 🟡 3824743785 — this stamp is the authorization basis for the destructive by-id force-clear,
+    // and until now only publisher-level tests exercised it, constructing the field themselves. If
+    // this route line were dropped, those stayed green while every NODE-TOKEN job lost the clear
+    // the daemon advertises to it — the exact dead end GH#2270's follow-up set out to remove.
+    //
+    // The node-token shape is the one under test: `resolveAgentByToken` yields nothing (the author
+    // hint is deliberately absent for a node token), yet the request still has an authenticated
+    // identity.
+    const NODE_OWNER = '0x00000000000000000000000000000000000000n0'.toLowerCase();
+    const enqueueCalls: Array<{ intent: any; admission: any }> = [];
+
+    await startWith({}, {
+      resolveAgentByToken: () => undefined,
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'share-node-token',
+        roots: ['urn:test:node-token-root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'db'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, { requestAgentAddress: NODE_OWNER }, {
+      enqueueKnowledgeAssetVmPublish: async (intent: unknown, admission: unknown) => {
+        enqueueCalls.push({ intent, admission });
+        return 'job-node-token';
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+
+    expect(res.status).toBe(202);
+    expect(enqueueCalls).toHaveLength(1);
+    // The stamp reaches the queue, for a caller that has NO author hint at all.
+    expect(enqueueCalls[0]?.admission).toEqual({ admittedByAgentAddress: NODE_OWNER });
+    // Discriminating half (🟡 3824743779): it travels BESIDE the request, never inside it. If the
+    // principal leaked back into the payload, execution and recovery would carry an authorization
+    // identity they have no use for, and the generic clear boundary would go back to casting.
+    expect(enqueueCalls[0]?.intent).not.toHaveProperty('admittedByAgentAddress');
+    // And it did not become an author-selection input: a node token still resolves no author hint,
+    // so what gets published is unchanged.
+    expect(enqueueCalls[0]?.intent).not.toHaveProperty('callerAgentAddress');
   });
 
   // GH#1786 — the resident-author selector. The load-bearing property is that it can

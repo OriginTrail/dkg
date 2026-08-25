@@ -106,8 +106,7 @@ export function registerMaintenanceCommands(program: Command): void {
 // automatically on first `dkg start` via `noteEdgeLegacyReleases`
 // (see migration.ts + cli.ts dkg start). Core node operators
 // who still hold a git-checkout install follow the manual
-// procedure documented in `docs/archive/MIGRATE_TO_NPM.md`
-// (formerly `docs/operator/MIGRATE_TO_NPM.md`).
+// procedure documented in `docs/use-dkg/migrate-to-npm.md`.
 
 
 program
@@ -265,7 +264,7 @@ program
       '  - Then re-run `dkg update` from a fresh `npm install -g\n' +
       '    @origintrail-official/dkg` install.\n' +
       '\n' +
-      '  RFC: https://github.com/OriginTrail/dkgv10-spec/blob/main/rfcs/OT-RFC-41-edge-node-npm-only-install-and-update.md\n' +
+      '  Guide: https://github.com/OriginTrail/dkg/blob/main/docs/use-dkg/updates-and-rollback.md\n' +
       '\n',
     );
     process.exit(1);

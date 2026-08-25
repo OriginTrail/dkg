@@ -8,7 +8,7 @@
 // these tests assert the copy, not just the presence of an element.
 
 import React, { act } from 'react';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot } from 'react-dom/client';
 
 // The pinned happy-dom build exposes a `localStorage` that lacks the Storage
@@ -108,6 +108,65 @@ async function renderAddSurface(primeAgent: Record<string, unknown>) {
   };
 }
 
+async function renderChatSurface(
+  primeAgent: Record<string, unknown>,
+  onSelectIntegration: (...args: any[]) => void = noop,
+) {
+  const { ConnectedAgentsTab } = await import('../src/ui/components/Shell/PanelRight.js');
+  const selected = integration({
+    configured: true,
+    detected: true,
+    persistentChat: true,
+    chatReady: true,
+    bridgeOnline: true,
+    status: 'chat_ready',
+    statusLabel: 'Chat ready',
+    ...primeAgent,
+  });
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(React.createElement(ConnectedAgentsTab, {
+      integrations: [selected],
+      selectedIntegrationId: 'prime-agent',
+      selectedIntegration: selected,
+      selectedSessionId: selected.activeSessionId ?? null,
+      selectedHasConversation: false,
+      selectedIntegrationHasAnyConversation: false,
+      onSelectIntegration,
+      onConnectIntegration: noop,
+      onDisconnectIntegration: noop,
+      onRefreshIntegration: noop,
+      connectBusyId: null,
+      refreshBusyId: null,
+      connectNotice: null,
+      connectError: null,
+      localMessages: [],
+      localHistoryLoaded: true,
+      localChatEndRef: { current: null },
+      localInput: '',
+      onLocalInputChange: noop,
+      onSendLocalMessage: noop,
+      onStopLocalStream: noop,
+      localSending: false,
+      activeProjectId: 'testing',
+      availableProjects: [{ id: 'testing', name: 'Testing' }],
+      projectsLoading: false,
+      attachments: [],
+      onAddAttachments: noop,
+      onRemoveAttachment: noop,
+    } as any));
+  });
+  return {
+    container,
+    unmount: async () => {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    },
+  };
+}
+
 describe('Prime Agent panel block', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
@@ -146,6 +205,41 @@ describe('Prime Agent panel block', () => {
     expect(logo).not.toBeNull();
     // Painted as a mask so it follows the theme's text colour.
     expect((logo as HTMLElement).style.maskImage).toContain('data:image/png;base64,');
+    await unmount();
+  });
+
+  it('shows a recoverable working state after the browser stream disconnects', async () => {
+    const { container, unmount } = await renderChatSurface({
+      busy: true,
+      detail: 'Prime Agent is still working after the browser stream disconnected.',
+    });
+    const status = container.querySelector('[data-testid="prime-agent-active-turn-status"]');
+    expect(status?.textContent).toContain('still working');
+    const composer = container.querySelector('textarea');
+    expect(composer?.hasAttribute('disabled')).toBe(true);
+    await unmount();
+  });
+
+  it('lets the operator explicitly switch among live Prime sessions', async () => {
+    const onSelect = vi.fn();
+    const { container, unmount } = await renderChatSurface({
+      activeSessionId: 'session-a',
+      defaultSessionId: 'session-a',
+      liveSessions: [
+        { sessionId: 'session-a', sessionName: 'Research' },
+        { sessionId: 'session-b', sessionName: 'Publishing' },
+      ],
+    }, onSelect);
+    const trigger = container.querySelector('button[aria-label="Prime Agent session"]') as HTMLButtonElement;
+    expect(trigger).not.toBeNull();
+    expect(trigger.textContent).toContain('Research');
+
+    await act(async () => { trigger.click(); });
+    const publishing = [...document.querySelectorAll('[role="option"]')]
+      .find((option) => option.textContent?.includes('Publishing')) as HTMLElement;
+    expect(publishing).toBeDefined();
+    await act(async () => { publishing.click(); });
+    expect(onSelect).toHaveBeenCalledWith('prime-agent', { sessionId: 'session-b' });
     await unmount();
   });
 });

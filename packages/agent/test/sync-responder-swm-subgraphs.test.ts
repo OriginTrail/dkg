@@ -349,6 +349,52 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       expect(graphs.has(ROOT_SWM)).toBe(true);
       expect(graphs.has(SUB_SWM)).toBe(true);
     });
+
+    it('plans fresh roots independently of the historical per-KA graph count', async () => {
+      const freshIso = new Date(Date.now() - 1_000).toISOString();
+      const targetRoot = 'urn:swm:fresh:historical-descendant';
+      const targetGraph = `${ROOT_SWM}/0x00000000000000000000000000000000000000ab/77`;
+      const historicalRows = Array.from({ length: 2_000 }, (_, index) => ({
+        graph: `${ROOT_SWM}/0x${index.toString(16).padStart(40, '0')}/${index + 100}`,
+        subject: `urn:historical:noise:${index}`,
+        predicate: 'http://schema.org/n',
+        object: `"noise-${index}"`,
+      }));
+      await storeTtl.insert([
+        ...historicalRows,
+        { graph: targetGraph, subject: targetRoot, predicate: 'http://schema.org/n', object: '"target"' },
+        ...workspaceOpQuads('op-fresh-historical', targetRoot, ROOT_SWM_META, freshIso),
+      ]);
+
+      const originalQuery = storeTtl.query.bind(storeTtl);
+      let rootLocationQueries = 0;
+      storeTtl.query = (async (sparql: string, options?: unknown) => {
+        const source = (options as { source?: string } | undefined)?.source;
+        if (source === 'sync.responder.planFreshSwmGraphRoots') {
+          rootLocationQueries += 1;
+          const normalized = sparql.replace(/\s+/g, ' ').trim();
+          expect(normalized).toContain('VALUES ?root');
+          expect(normalized).toContain('GRAPH ?g');
+          expect(normalized).not.toContain('UNION');
+          expect(normalized).not.toContain('WorkspaceOperation');
+        }
+        return originalQuery(sparql, options as never);
+      }) as OxigraphStore['query'];
+
+      const out = await capTtl.invoke({
+        contextGraphId: CG_ID,
+        offset: 0,
+        limit: 5000,
+        includeSharedMemory: true,
+        phase: 'data',
+      });
+
+      expect(out).toContain('"target"');
+      expect(lineGraphsFromNquads(out).has(targetGraph)).toBe(true);
+      // One root-location query for the root bucket and one for the registered
+      // sub-graph bucket. Adding 2,000 historical graphs must not add queries.
+      expect(rootLocationQueries).toBe(2);
+    });
   });
 
   describe('phase=meta (TTL on, graph-scoped heads)', () => {

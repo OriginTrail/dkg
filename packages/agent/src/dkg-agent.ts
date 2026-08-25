@@ -87,6 +87,7 @@ import {
   pickNetworkTunables,
   ENTITY_PRED_ALT,
   LegacyKnowledgeAssetReadOnlyError,
+  isAllocatableKaAuthorV1,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
@@ -240,6 +241,7 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
+import { resolveDiscoveredContextGraphBinding } from './context-graph-chain-discovery-binding.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -342,6 +344,8 @@ import {
   type ContextGraphDiscoveryOptions,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
+  type SelectedVmReconcileCursorStore,
+  type SelectedVmReconcileCursorRecord,
   type ContextGraphWritePreflightProbe,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
@@ -386,6 +390,7 @@ import {
   isLocalOxigraphConfig,
   sliceIntoCiphertextChunks,
 } from './dkg-agent-helpers.js';
+import { resolveSyncReconcilerTiming } from './sync/reconciler-timing.js';
 import {
   swmSenderStateKey,
   swmReceiverStateKey,
@@ -457,6 +462,8 @@ export type {
   ContextGraphDiscoveryOptions,
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
+  SelectedVmReconcileCursorStore,
+  SelectedVmReconcileCursorRecord,
   ContextGraphWritePreflightProbe,
   ContextGraphMemberPrincipalType,
   ContextGraphMemberStatus,
@@ -687,6 +694,8 @@ function constructConfiguredChainAdapter(
       tokenAddress: config.chainConfig.tokenAddress,
       chainId: config.chainConfig.chainId,
       receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
+      finalityConfirmations: config.chainConfig.finalityConfirmations,
+      maxFeePerGasWei: config.chainConfig.maxFeePerGasWei,
       approvalPolicy: config.chainConfig.approvalPolicy,
       cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
       minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,
@@ -743,8 +752,56 @@ export class DKGAgent extends DKGAgentBase {
   private chainContextGraphScanFailure:
     | { signature: string; count: number }
     | undefined;
+  /**
+   * StorageACK handlers perform store verification. A wallet pool can start
+   * several publishes at once, but sending every ACK round at once overloads
+   * small public core nodes before any chain transaction is submitted. Keep a
+   * node-local FIFO gate for ACK rounds. Chain submission remains concurrent.
+   */
+  private activeStorageACKCollections = 0;
+  private readonly storageACKCollectionWaiters: Array<() => void> = [];
+
+  private async acquireStorageACKCollectionSlot(): Promise<void> {
+    const limit = this.config.storageAckTiming.maxConcurrentCollections;
+    if (this.activeStorageACKCollections < limit) {
+      this.activeStorageACKCollections += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.storageACKCollectionWaiters.push(resolve);
+    });
+  }
+
+  private releaseStorageACKCollectionSlot(): void {
+    const next = this.storageACKCollectionWaiters.shift();
+    if (next) {
+      // Transfer the active slot directly to the oldest waiter. The active
+      // count stays unchanged, so a new caller cannot take the same slot.
+      next();
+      return;
+    }
+    this.activeStorageACKCollections = Math.max(0, this.activeStorageACKCollections - 1);
+  }
+
+  private async withStorageACKCollectionSlot<T>(work: () => Promise<T>): Promise<T> {
+    await this.acquireStorageACKCollectionSlot();
+    try {
+      return await work();
+    } finally {
+      this.releaseStorageACKCollectionSlot();
+    }
+  }
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
+    const contextGraphSubscriptionRehydrationEnabled =
+      inputConfig.contextGraphSubscriptionRehydrationEnabled === undefined
+        ? true
+        : inputConfig.contextGraphSubscriptionRehydrationEnabled;
+    if (typeof contextGraphSubscriptionRehydrationEnabled !== 'boolean') {
+      throw new Error(
+        'DKGAgentConfig.contextGraphSubscriptionRehydrationEnabled must be a boolean',
+      );
+    }
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
     const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
@@ -867,6 +924,12 @@ export class DKGAgent extends DKGAgentBase {
     delete configWithoutRfc64CatalogControls.rfc64CatalogDeploymentProfile;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogAutoPublish;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogBootstrap;
+    delete configWithoutRfc64CatalogControls.contextGraphSubscriptionRehydrationEnabled;
+    delete configWithoutRfc64CatalogControls.syncReconcilerIntervalMs;
+    delete configWithoutRfc64CatalogControls.syncStalenessThresholdMs;
+    delete configWithoutRfc64CatalogControls.syncBackoffBaseMs;
+    delete configWithoutRfc64CatalogControls.syncBackoffMaxMs;
+    delete configWithoutRfc64CatalogControls.syncBackoffJitter;
     const resolvedConfig: ResolvedDKGAgentConfig = {
       ...configWithoutRfc64CatalogControls,
       genesisId,
@@ -875,6 +938,8 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogDeploymentProfile,
       rfc64PublicCatalogAutoPublishPolicy,
       rfc64PublicCatalogBootstrap,
+      contextGraphSubscriptionRehydrationEnabled,
+      syncReconcilerTiming: resolveSyncReconcilerTiming(config),
     };
 
     const port = config.listenPort ?? 0;
@@ -1512,12 +1577,16 @@ export class DKGAgent extends DKGAgentBase {
       return err.partialResults;
     };
 
-    // Build a set of all known on-chain IDs (stored and computed) for fast dedup
-    const knownOnChainIds = new Set<string>();
+    // NameRegistry enumeration is keyed by bytes32 name hashes, while all
+    // authoritative agent bindings are positive decimal ContextGraphStorage
+    // ids. Keep those namespaces separate: the legacy
+    // ContextGraphOnChain.contextGraphId field is the former, not the latter.
+    const knownNameHashes = new Set<string>();
     for (const [localId, sub] of this.subscribedContextGraphs) {
-      if (sub.onChainId) knownOnChainIds.add(sub.onChainId);
-      // Also compute expected hash for locally-known context graph IDs
-      knownOnChainIds.add(ethers.keccak256(ethers.toUtf8Bytes(localId)));
+      if (sub.onChainHash && ethers.isHexString(sub.onChainHash, 32)) {
+        knownNameHashes.add(sub.onChainHash.toLowerCase());
+      }
+      knownNameHashes.add(ethers.keccak256(ethers.toUtf8Bytes(localId)).toLowerCase());
     }
     const readDurableContextGraphOnChainId = async (contextGraphId: string): Promise<string | null> => {
       const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
@@ -1534,18 +1603,27 @@ export class DKGAgent extends DKGAgentBase {
     let discovered = 0;
     const applyDiscoveredContextGraphs = async (contextGraphs: ContextGraphOnChain[]): Promise<void> => {
       for (const p of contextGraphs) {
-        if (knownOnChainIds.has(p.contextGraphId)) {
-          if (!p.name) continue;
-          const durableOnChainId = await readDurableContextGraphOnChainId(p.name);
-          if (durableOnChainId === p.contextGraphId) continue;
-          knownOnChainIds.delete(p.contextGraphId);
-        }
+        const binding = await resolveDiscoveredContextGraphBinding(this.chain, p);
+        const registryNameHash = binding.registryNameHash;
 
-        if (!p.name) {
+        if (binding.kind === 'unrevealed') {
           // Hash-only entry (metadata not revealed) — record for dedup but don't
           // subscribe to gossip topics since hash-keyed topics are unusable.
+          if (registryNameHash && knownNameHashes.has(registryNameHash)) continue;
           this.log.info(ctx, `Noted unresolved on-chain context graph ${p.contextGraphId.slice(0, 16)}… (no metadata)`);
-          knownOnChainIds.add(p.contextGraphId);
+          if (registryNameHash) knownNameHashes.add(registryNameHash);
+          continue;
+        }
+
+        if (binding.kind === 'skipped') {
+          this.log.warn(ctx, binding.warning);
+          if (binding.rememberNameHash && registryNameHash) knownNameHashes.add(registryNameHash);
+          continue;
+        }
+
+        const durableOnChainId = await readDurableContextGraphOnChainId(binding.name);
+        if (durableOnChainId === binding.onChainId) {
+          if (registryNameHash) knownNameHashes.add(registryNameHash);
           continue;
         }
 
@@ -1560,7 +1638,7 @@ export class DKGAgent extends DKGAgentBase {
             && p.creator.toLowerCase() === this.defaultAgentAddress.toLowerCase();
           if (!isCurator) {
             this.log.info(ctx, `Skipping private chain entry "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — not curator`);
-            knownOnChainIds.add(p.contextGraphId);
+            if (registryNameHash) knownNameHashes.add(registryNameHash);
             continue;
           }
         }
@@ -1568,7 +1646,7 @@ export class DKGAgent extends DKGAgentBase {
         // Persist the on-chain ID to the ontology graph so the publisher's
         // VM registration guard can find it via RDF (it has no access to
         // the in-memory subscribedContextGraphs map).
-        const cgUri = contextGraphDataGraphUri(p.name);
+        const cgUri = contextGraphDataGraphUri(binding.name);
         const ontoGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
         // Single-valued binding guard (RS heal): on-chain id is immutable; clear
         // any prior value so the cgId resolver / heal never read a multi-valued
@@ -1584,20 +1662,21 @@ export class DKGAgent extends DKGAgentBase {
         await this.store.insert([{
           subject: cgUri,
           predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-          object: `"${p.contextGraphId}"`,
+          object: `"${binding.onChainId}"`,
           graph: ontoGraph,
         }]);
 
-        this.recordDiscoveredContextGraph(p.name, {
-          name: p.name,
-          onChainId: p.contextGraphId,
+        this.recordDiscoveredContextGraph(binding.name, {
+          name: binding.name,
+          onChainId: binding.onChainId,
+          ...(registryNameHash ? { onChainHash: registryNameHash } : {}),
         }, { trackSyncScope: false });
-        this.contextGraphMetaProjection.markDirty(p.name);
+        this.contextGraphMetaProjection.markDirty(binding.name);
         const roleOutcome = (this.config.nodeRole ?? 'edge') === 'core'
           ? 'auto-subscribed for core ACK hosting'
           : 'catalogued (not subscribed)';
-        this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — ${roleOutcome}`);
-        knownOnChainIds.add(p.contextGraphId);
+        this.log.info(ctx, `Discovered on-chain context graph "${binding.name}" (${binding.onChainId}) — ${roleOutcome}`);
+        if (registryNameHash) knownNameHashes.add(registryNameHash);
         discovered++;
       }
     };
@@ -1916,6 +1995,14 @@ export class DKGAgent extends DKGAgentBase {
       await this.node.stop();
     } finally {
       this.finalizationRuntime.markStopped();
+      // Node stop aborts active transport first; now drain the peer-serial
+      // owners and release every retained selected-SWM prefix/checkpoint before
+      // the backing store closes.
+      try {
+        await this.closeSelectedSwmMetaTransfers();
+      } finally {
+        this.selectedSwmBootstrapAdmission.clearAll();
+      }
     }
     if (this.syncVerifyWorker) {
       await this.syncVerifyWorker.close();
@@ -2277,7 +2364,7 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await collector.collect({
+      const result = await this.withStorageACKCollectionSlot(() => collector.collect({
         merkleRoot: params.merkleRoot,
         contextGraphId: cgIdBigInt,
         contextGraphIdStr: params.contextGraphId,
@@ -2305,7 +2392,7 @@ export class DKGAgent extends DKGAgentBase {
         accessPolicy: params.accessPolicy,
         allowedPeers: params.allowedPeers,
         ackMode: params.ackMode,
-      });
+      }));
       return result.acks;
     };
   }
@@ -2444,7 +2531,7 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await collector.collectUpdate({
+      const result = await this.withStorageACKCollectionSlot(() => collector.collectUpdate({
         kaId: params.kaId,
         contextGraphId: cgIdBigInt,
         preUpdateMerkleRootCount: params.preUpdateMerkleRootCount,
@@ -2472,7 +2559,7 @@ export class DKGAgent extends DKGAgentBase {
         publicTripleCount: params.publicTripleCount,
         privateMerkleRoot: params.privateMerkleRoot,
         privateTripleCount: params.privateTripleCount,
-      });
+      }));
       return result.acks;
     };
   }
@@ -2576,28 +2663,60 @@ export class DKGAgent extends DKGAgentBase {
   get assertion() {
     const agent = this;
     const agentAddress = this.defaultAgentAddress ?? this.peerId;
+    // The single identity-allocation lane for every operation that can mint a
+    // graph-scoped KA number (create + legacy-WM migrate). Both operations
+    // MUST allocate identity for the same resolved author, so the gate lives
+    // in one place:
+    //
+    // Gate on a valid 0x EVM author: when no default agent is registered,
+    // `agentAddress` falls back to the libp2p peerId, which the allocator
+    // rejects (`ethers.getAddress` throws). A peerId-author draft falls back
+    // to the legacy name-keyed WM graph instead of hard-failing. Mirrors the
+    // publisher's own self-allocation guard.
+    // Allow an explicit author (the daemon's import-file route acts for the
+    // request's agent) so the kaNumber mints for the RIGHT address and data
+    // lands in that agent's per-KA …/_working_memory/{addr}/{number} graph
+    // (not the default agent's, and not the legacy name-keyed fallback used
+    // when no number is minted).
+    const resolveAuthorAndAllocator = (explicitAuthor: string | undefined): {
+      author: string;
+      allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
+    } => {
+      const author = explicitAuthor ?? agentAddress;
+      const isEvmAuthor = isAllocatableKaAuthorV1(author);
+      // The allocator MUST consume `author`'s lane, never the outer default:
+      // the number is minted into the reserved UAL the lifecycle is stamped
+      // with, so allocating from a different address strands the draft under
+      // one author with an identity from another (finalize then fails with
+      // KaIdNamespaceMismatch, OT-RFC-43 §F2).
+      const allocateKaNumber = agent.kaNumberAllocator && isEvmAuthor
+        ? () => reconcileAndAllocateKaNumber(agent.kaNumberAllocator!, agent.chain, agent.reconciledKaAuthors, author)
+        : undefined;
+      return { author, allocateKaNumber };
+    };
     return {
       async create(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<string> {
         // D1 (identity-at-create): mint the KA number/UAL at create so the UAL is the
         // KA's identity from the first write. assertionCreate only allocates when the
         // draft has no preserved kaId (the re-open guard lives there), so passing the
         // callback is safe — re-opens reuse the preserved identity.
-        //
-        // Gate on a valid 0x EVM author: when no default agent is registered,
-        // `agentAddress` falls back to the libp2p peerId, which the allocator rejects
-        // (`ethers.getAddress` throws). A peerId-author draft falls back to the legacy
-        // name-keyed WM graph instead of hard-failing create. Mirrors the publisher's
-        // own self-allocation guard.
-        // Allow an explicit author (the daemon's import-file route acts for the request's
-        // agent) so the kaNumber mints for the RIGHT address and data lands in that agent's
-        // per-KA …/_working_memory/{addr}/{number} graph (not the default agent's, and not
-        // the legacy name-keyed fallback used when no number is minted).
-        const author = opts?.agentAddress ?? agentAddress;
-        const isEvmAuthor = /^0x[a-fA-F0-9]{40}$/.test(author);
-        const allocateKaNumber = agent.kaNumberAllocator && isEvmAuthor
-          ? () => reconcileAndAllocateKaNumber(agent.kaNumberAllocator!, agent.chain, agent.reconciledKaAuthors, author)
-          : undefined;
+        const { author, allocateKaNumber } = resolveAuthorAndAllocator(opts?.agentAddress);
         return agent.publisher.assertionCreate(contextGraphId, name, author, opts?.subGraphName, { allocateKaNumber });
+      },
+
+      async migrateLegacyRootScopedWorkingMemory(
+        contextGraphId: string,
+        name: string,
+        opts?: { subGraphName?: string; agentAddress?: string },
+      ) {
+        const { author, allocateKaNumber } = resolveAuthorAndAllocator(opts?.agentAddress);
+        return agent.publisher.migrateLegacyRootScopedWorkingMemory(
+          contextGraphId,
+          name,
+          author,
+          opts?.subGraphName,
+          { allocateKaNumber },
+        );
       },
 
       /**

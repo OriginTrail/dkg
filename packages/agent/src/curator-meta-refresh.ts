@@ -27,10 +27,12 @@ import { hasAuthoritativePublicMetaDefinition } from './context-graph-public-met
 import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
 import {
   hasSyncAdmissionSource,
-  withSyncAdmissionSource,
 } from './sync/attempt-telemetry.js';
 import { insertWithOversizeGuard, type OversizeDrop } from './sync/oversize-filter.js';
-import type { SyncPageResult } from './sync/requester/page-fetch.js';
+import type {
+  SyncPageFetchOptions,
+  SyncPageResult,
+} from './sync/requester/page-fetch.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import { stripLiteral } from './dkg-agent-utils.js';
 
@@ -98,12 +100,19 @@ interface CuratorMetaRefreshAgent {
     phase: SyncPhase,
     graphUri: string,
     deadline: number,
-    snapshotRef?: string,
-    sinceBatchId?: string,
-    signal?: AbortSignal,
-    recovery?: boolean,
-    forceFreshSession?: boolean,
+    options?: SyncPageFetchOptions,
   ): Promise<SyncPageResult>;
+  runContextGraphSyncWithBackpressure<T>(
+    ctx: OperationContext,
+    contextGraphId: string,
+    lane: 'durable',
+    label: string,
+    work: () => Promise<T>,
+    admission: {
+      operationSignal?: AbortSignal;
+      source: 'control-plane';
+    },
+  ): Promise<T>;
   bindSubscriptionOnChainId?(
     localCgId: string,
     sub: CuratorBoundSubscription,
@@ -365,15 +374,29 @@ async function fetchAuthoritativeMetaSnapshot(
     // pages. Use the normal bounded sync budget instead of a special 10-second
     // cap that made sufficiently populated private CGs impossible to join.
     Date.now() + SYNC_TOTAL_TIMEOUT_MS,
-    undefined,
-    undefined,
-    options.signal,
-    undefined,
-    true,
+    {
+      signal: options.signal,
+      forceFreshSession: true,
+    },
   );
+  // A standalone control-plane refresh is real outbound sync work. Admit it
+  // through the node-wide scheduler so partitioned mode can route it to fast
+  // capacity and the global cap still bounds it. Nested refreshes deliberately
+  // stay inside their enclosing admission: acquiring twice could deadlock a
+  // saturated partition, and the enclosing trigger remains the honest source.
   const result = await (hasSyncAdmissionSource()
     ? runFetch()
-    : withSyncAdmissionSource('control-plane', runFetch));
+    : agent.runContextGraphSyncWithBackpressure(
+      ctx,
+      contextGraphId,
+      'durable',
+      'durable:control-plane',
+      runFetch,
+      {
+        operationSignal: options.signal,
+        source: 'control-plane',
+      },
+    ));
   throwIfCuratorMetaRefreshAborted(options.signal);
 
   // The shared N-Quads parser admits any graph under the CG prefix. This

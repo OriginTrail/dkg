@@ -6,9 +6,16 @@ import {
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapshot-budget.js';
+import { estimateStringRowHeapBytes } from '../src/sync/memory-telemetry.js';
+import {
+  SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+  SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+} from '../src/sync/responder/snapshot-cache.js';
 import {
   createResponderFreshSwmMetaPlanMemo,
+  FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE,
   FRESH_SWM_META_PLAN_MAX_SUBJECTS,
+  FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS,
 } from '../src/sync/responder/graph-plan.js';
 import {
   DKG_NS,
@@ -25,7 +32,7 @@ import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
 /**
  * #1847 — SWM meta lane ceiling. A CG whose `_meta` crossed
- * SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS (64,000) raw rows became permanently
+ * the legacy 64,000-row snapshot build limit became permanently
  * unsyncable for TTL-filtered sessions: the bounded snapshot applied its budget
  * to the RAW graph before the TTL filter, and `readSwmMetaPage` passed
  * `params.cutoffIso == null` POSITIONALLY as `fallbackOnPerSnapshotBudget`, so
@@ -42,6 +49,13 @@ const TINY_SNAPSHOT_BUDGET = {
   maxRows: 1_000_000,
   maxBytesEstimate: Number.MAX_SAFE_INTEGER,
   maxSnapshotRows: 1,
+  maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+} as const;
+
+const PLAN_FORCED_SNAPSHOT_BUDGET = {
+  maxRows: 1_000_000,
+  maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+  maxSnapshotRows: 60_000,
   maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
 } as const;
 
@@ -121,7 +135,17 @@ function forbidSwmMetaSortOrOffsetQueries(store: OxigraphStore) {
   };
 }
 
-describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
+describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', () => {
+  it('keeps plan-only ceilings pinned below the snapshot materialization caps', () => {
+    expect(FRESH_SWM_META_PLAN_MAX_SUBJECTS).toBe(64_000);
+    expect(FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS).toBe(64_000);
+    expect(FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE).toBe(32 * 1024 * 1024);
+    expect(FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS)
+      .toBeLessThan(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS);
+    expect(FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE)
+      .toBeLessThan(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE);
+  });
+
   it('serves a 64,000+-row _meta with a small fresh subset completely at DEFAULT budgets (the fifa-world-cup-2026 shape)', async () => {
     const cgId = 'meta-ceiling-fifa';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
@@ -200,7 +224,23 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
     await insertChunked(store, quads);
     const seedDurationMs = Date.now() - seedStartedAt;
 
-    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 5000 });
+    // The point of this test is the DEGRADATION path — an admitted set larger
+    // than the per-snapshot ceiling must still be served, page by page, rather
+    // than refused. Express that ceiling EXPLICITLY instead of relying on the
+    // global build cap: snapshotLoadLimits is min(BUILD_CAP, configured), so a
+    // 60,000-row session limit forces degradation no matter what the build cap
+    // is. Relying on the constant is how this test would silently stop
+    // exercising the degradation path the next time the cap moves.
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: TTL_MS,
+      syncPageSize: 5000,
+      snapshotBudget: {
+        maxRows: 1_000_000,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 60_000,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
     const watch = forbidSwmMetaSortOrOffsetQueries(store);
 
     const serveStartedAt = Date.now();
@@ -513,6 +553,101 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
     await store.close();
   });
 
+  it('refuses fresh-SWM plan scalar growth at the plan byte cap, independent of snapshot caps', async () => {
+    const cgId = `plan-bytes-${'g'.repeat(2_048)}`;
+    const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const subjects = Array.from(
+      { length: 16_000 },
+      (_, index) => `urn:plan-subject:${String(index).padStart(5, '0')}`,
+    );
+    const planBytesEstimate = subjects.reduce(
+      (sum, subject) => sum + estimateStringRowHeapBytes(subject, '', '', metaGraph),
+      0,
+    );
+    expect(planBytesEstimate).toBeGreaterThan(FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE);
+    expect(planBytesEstimate).toBeLessThan(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE);
+
+    const store = new OxigraphStore();
+    await store.insert([{
+      graph: metaGraph,
+      subject: 'urn:plan-seed',
+      predicate: `${DKG_NS}publishedAt`,
+      object: `"${freshIso()}"^^<${XSD_DT}>`,
+    }]);
+    const originalQuery = store.query.bind(store);
+    const planResponseCaps: number[] = [];
+    let failPlanResponse = false;
+    store.query = (async (sparql: string, options?: unknown) => {
+      const queryOptions = options as { source?: string; maxResponseBytes?: number } | undefined;
+      const source = queryOptions?.source;
+      if (
+        source === 'sync.responder.readFreshSwmMetaSubjects' ||
+        source === 'sync.responder.readFreshSwmMetaHeadSubjects'
+      ) {
+        planResponseCaps.push(queryOptions?.maxResponseBytes ?? 0);
+        if (failPlanResponse) {
+          throw new StoreResponseTooLargeError(
+            FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE * 2,
+            FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE * 2 + 1,
+          );
+        }
+        return {
+          type: 'bindings' as const,
+          bindings: source === 'sync.responder.readFreshSwmMetaSubjects'
+            ? subjects.map((subject) => ({ s: subject }))
+            : [],
+        };
+      }
+      if (source === 'sync.responder.countFreshSwmMetaSubjectRows') {
+        planResponseCaps.push(queryOptions?.maxResponseBytes ?? 0);
+        const requestedSubjects = [...sparql.matchAll(/<(urn:plan-subject:[^>]+)>/g)]
+          .map((match) => match[1] as string);
+        return {
+          type: 'bindings' as const,
+          bindings: requestedSubjects.map((subject) => ({ s: subject, count: '1' })),
+        };
+      }
+      return originalQuery(sparql, options as never);
+    }) as OxigraphStore['query'];
+
+    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 500 });
+    await expect(cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      offset: 0,
+      limit: 500,
+      syncSessionId: 'plan-byte-cap-session',
+    })).rejects.toMatchObject({
+      name: 'QuietRetryableHandlerError',
+      message: expect.stringContaining(`limit=${FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE}`),
+    });
+    expect(planResponseCaps.length).toBeGreaterThan(2);
+    expect(new Set(planResponseCaps)).toEqual(new Set([
+      FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE * 2,
+    ]));
+
+    // The store-cap translation must report the same PLAN heap ceiling, not
+    // the larger snapshot materialization ceiling.
+    failPlanResponse = true;
+    const storeCapHandler = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: TTL_MS,
+      syncPageSize: 500,
+    });
+    await expect(storeCapHandler.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      offset: 0,
+      limit: 500,
+      syncSessionId: 'plan-byte-store-cap-session',
+    })).rejects.toMatchObject({
+      name: 'QuietRetryableHandlerError',
+      message: expect.stringContaining(`limit=${FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE}`),
+    });
+    await store.close();
+  }, 120_000);
+
   it('refuses a fresh subject set beyond the plan cardinality cap as a TYPED bounded refusal, via LIMIT-bounded discovery', async () => {
     const cgId = 'meta-ceiling-cardinality';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
@@ -604,38 +739,56 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
     await store.close();
   }, 120_000);
 
-  it('keeps a bounded refusal ONLY for a single pathological subject exceeding the hard 64,000-row build cap', async () => {
+  it('keeps a bounded refusal for a single subject above the independent row-group cap', async () => {
     const cgId = 'meta-ceiling-monster';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
     const fresh = freshIso();
     const store = new OxigraphStore();
-    // ONE fresh subject carrying 64,001 rows. Whole-subject windows are the
-    // consistency unit of the plan lane (they are what keeps a seal/head
-    // row-group atomic per #1788), so this single row-group can never be
-    // served coherently within the hard build cap — a bounded refusal, at
-    // DEFAULT budgets, is the correct answer. Ordinary multi-row subjects
-    // under a shrunken session budget are covered by the paged tests above.
+    // ONE fresh subject carrying the plan lane's subject-window cap + 1 rows.
+    // Whole-subject windows are the consistency unit of the plan lane (they are
+    // what keeps a seal/head row-group atomic per #1788), so this single
+    // row-group can never be served coherently. A local 60,000-row snapshot
+    // budget forces plan mode independently of the production build cap, so a
+    // future snapshot-cap change cannot make this regression test expensive or
+    // silently stop exercising the row-group refusal.
     const subject = 'urn:monster';
     const monsterQuads: Quad[] = [
       { graph: metaGraph, subject, predicate: `${DKG_NS}publishedAt`, object: `"${fresh}"^^<${XSD_DT}>` },
     ];
-    for (let index = 1; index <= 64_000; index += 1) {
+    for (let index = 1; index <= FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS; index += 1) {
       monsterQuads.push({
         graph: metaGraph, subject, predicate: `${DKG_NS}note`, object: `"filler-${index}"`,
       });
     }
     await insertChunked(store, monsterQuads);
 
-    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 500 });
-
-    await expect(cap.invoke({
-      contextGraphId: cgId,
-      includeSharedMemory: true,
-      phase: 'meta',
-      offset: 0,
-      limit: 500,
-      syncSessionId: 'monster-session',
-    })).rejects.toThrow(/per-snapshot rows budget/);
+    for (const [sessionSuffix, snapshotBudget] of [
+      ['default', undefined],
+      ['forced-plan', PLAN_FORCED_SNAPSHOT_BUDGET],
+    ] as const) {
+      const cap = registerTestSyncHandler(store, {
+        sharedMemoryTtlMs: TTL_MS,
+        syncPageSize: 500,
+        ...(snapshotBudget ? { snapshotBudget } : {}),
+      });
+      await expect(cap.invoke({
+        contextGraphId: cgId,
+        includeSharedMemory: true,
+        phase: 'meta',
+        offset: 0,
+        limit: 500,
+        syncSessionId: `monster-session-${sessionSuffix}`,
+      })).rejects.toMatchObject({
+        // The protocol boundary deliberately converts the internal
+        // SyncRowSnapshotBudgetError into a quiet retryable response while
+        // preserving its typed budget details in the message.
+        name: 'QuietRetryableHandlerError',
+        message: expect.stringContaining(
+          `actual=${FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS + 1}, ` +
+          `limit=${FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS}`,
+        ),
+      });
+    }
     await store.close();
   }, 120_000);
 

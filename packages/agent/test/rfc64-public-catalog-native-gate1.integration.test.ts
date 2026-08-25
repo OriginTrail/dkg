@@ -1326,7 +1326,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       rejectingReceiver,
     )).rejects.toMatchObject({
       code: 'catalog-native-receiver-activation',
-      message: expect.stringContaining('finalized VM precommit rejected'),
+      message: expect.stringContaining('catalog applied-head precommit rejected'),
     });
     expect(partialPrecommit).toHaveBeenCalledOnce();
     const [rejectedPlan, rejectedSignal] = partialPrecommit.mock.calls[0]!;
@@ -1354,7 +1354,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.scopeDigest,
       AUTHOR,
     )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
-    await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
 
     const repaired = await fixture.synchronizeAny(
       fixture.multiAssetAnnouncement,
@@ -1385,7 +1385,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
   }, 30_000);
 
-  it('keeps the governed successor head unapplied when the production VM precommit lacks RPC', async () => {
+  it('keeps the governed genesis head unapplied when an explicit VM precommit lacks RPC', async () => {
     const fixture = await setupLiveReceiver();
     const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
       fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
@@ -1441,11 +1441,9 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       compareAndSwapAppliedCatalogHeadV1,
     }, undefined, undefined, fixture.receiverStore, precommit);
 
-    await fixture.bootstrapGoverned(receiver);
-    compareAndSwapAppliedCatalogHeadV1.mockClear();
-    await expect(fixture.synchronizeGoverned(receiver)).rejects.toMatchObject({
+    await expect(fixture.bootstrapGoverned(receiver)).rejects.toMatchObject({
       code: 'catalog-native-receiver-activation',
-      message: expect.stringContaining('finalized VM precommit rejected'),
+      message: expect.stringContaining('catalog applied-head precommit rejected'),
     });
 
     expect(getOnChainContextGraphId).not.toHaveBeenCalled();
@@ -1455,7 +1453,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       computeAuthorCatalogScopeDigestV1(fixture.governedScope),
       AUTHOR,
-    )?.currentCatalogHeadDigest).toBe(fixture.governedGenesis.head.objectDigest);
+    )).toBeNull();
   }, 30_000);
 });
 

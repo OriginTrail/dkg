@@ -7,6 +7,7 @@ export {
   SqliteChangelogCursorStore,
   SqliteChangelogEraGuard,
   SqliteKaNumberStore,
+  SCHEMA_VERSION,
   // Notifications-pane redesign (V16): activity-digest primitives shared
   // with the daemon's `assertion_activity` emitters + scoped read path.
   ACTIVITY_DIGEST_WINDOW_MS,
@@ -64,7 +65,7 @@ export { LogPushWorker } from './gelf-push-worker.js';
 export type { LogPushWorkerOptions } from './gelf-push-worker.js';
 export { OtlpLogWorker } from './otlp-log-worker.js';
 export type { OtlpLogWorkerOptions } from './otlp-log-worker.js';
-export { ChatMemoryManager } from './chat-memory.js';
+export { ChatMemoryManager, AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION } from './chat-memory.js';
 export type {
   MemoryToolContext,
   MemoryStats,

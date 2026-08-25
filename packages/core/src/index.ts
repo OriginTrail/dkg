@@ -14,6 +14,7 @@ export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
 export * from './sync-control-object.js';
+export * from './sync-checkpoint-state.js';
 export * from './cg-policy-objects.js';
 export * from './administrative-authority-objects.js';
 export * from './author-catalog-authority-objects.js';
@@ -400,3 +401,8 @@ export * from './catalog-seal-binding.js';
 export * from './transferred-catalog-bundle.js';
 export * from './vm-update-convergence.js';
 export * from './ka-ual-identity.js';
+export {
+  MAX_NODE_TIMER_DELAY_MS,
+  assertNodeTimerDelayMs,
+  resolveNodeTimerDelayMs,
+} from './node-timer.js';

@@ -9,6 +9,7 @@ import {
   type DKGAgent,
   type CatchupPassDecisionReason,
   type DurableProgressSummary,
+  type DurableProgressClassification,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
   type SwmSnapshotCoverage,
@@ -141,6 +142,8 @@ export interface CatchupJobResult {
 export interface CatchupRunRequest {
   contextGraphId: string;
   includeSharedMemory: boolean;
+  /** Host agent owns one durable transfer across every peer-shaped Worker round. */
+  graphOwnedDurableRecovery?: boolean;
 }
 
 export interface CatchupPhaseProgress extends DurableProgressSummary {
@@ -543,6 +546,12 @@ export interface CatchupPlaneCompletionEvidence {
   verifiedDataPeers: number;
   /** Peers that cleanly verified one or more V2 KAs with no public triples. */
   verifiedPrivateOnlyPeers?: number;
+  /**
+   * RFC-64 providers whose selected public-SWM scope reached its explicit
+   * terminal boundary. Unlike an ordinary peer's empty response, this is a
+   * graph-complete proof tied to the accepted provider policy.
+   */
+  selectedScopeCompletePeers?: number;
   emptyPeers: number;
   /**
    * The metadata-resolved curator cleanly completed this plane while hosting
@@ -620,8 +629,15 @@ export function catchupPeerPlaneEvidence(
      * mistake here settles a plane nobody proved.
      */
     plane: 'durable' | 'shared-memory';
-    /** Durable-only lifecycle state; the shared plane has no `complete` concept. */
+    /** Durable lifecycle state; selected SWM supplies its own typed equivalent. */
     complete?: boolean;
+    /**
+     * Lane-specific clean-completion verdict when raw diagnostics deliberately
+     * retain superseded failures. Selected SWM is the current producer: its
+     * freshness classifier resolves bounded historical yields while preserving
+     * those counters for telemetry.
+     */
+    completedWithoutFailure?: boolean;
     fromAuthority?: boolean;
   },
 ): CatchupPlaneCompletionEvidence {
@@ -632,7 +648,8 @@ export function catchupPeerPlaneEvidence(
     authorityEmptyPeers: 0,
   };
   if (!plane) return none;
-  if (!catchupPlaneCompletedWithoutFailure(plane, options.complete)) {
+  if (!(options.completedWithoutFailure
+    ?? catchupPlaneCompletedWithoutFailure(plane, options.complete))) {
     // The peer answered and its round was not clean. A pure transport failure is
     // NOT that: we never heard from it, it is already counted in `failedPeers`,
     // and treating unreachable strangers as unresolved evidence would stop a
@@ -690,6 +707,10 @@ export function addCatchupPlaneEvidence(
     total.verifiedPrivateOnlyPeers = (total.verifiedPrivateOnlyPeers ?? 0)
       + peer.verifiedPrivateOnlyPeers;
   }
+  if (peer.selectedScopeCompletePeers) {
+    total.selectedScopeCompletePeers = (total.selectedScopeCompletePeers ?? 0)
+      + peer.selectedScopeCompletePeers;
+  }
   total.emptyPeers += peer.emptyPeers;
   if (peer.authorityEmptyPeers) {
     total.authorityEmptyPeers = (total.authorityEmptyPeers ?? 0) + peer.authorityEmptyPeers;
@@ -710,6 +731,20 @@ export function catchupPlaneProvenByData(
 ): boolean {
   return (completion?.verifiedDataPeers ?? 0) > 0
     || (completion?.verifiedPrivateOnlyPeers ?? 0) > 0;
+}
+
+/**
+ * Positive RFC-64 proof: an explicitly selected graph-complete SWM provider
+ * reached the terminal boundary of the accepted public scope.
+ *
+ * This stays separate from `verifiedDataPeers`: a repeat run may prove the
+ * exact same already-materialized scope while inserting zero new triples, and
+ * calling that "verified data received" would corrupt the transfer telemetry.
+ */
+export function catchupPlaneProvenBySelectedScope(
+  completion: CatchupPlaneCompletionEvidence | undefined,
+): boolean {
+  return (completion?.selectedScopeCompletePeers ?? 0) > 0;
 }
 
 /**
@@ -880,6 +915,7 @@ export function catchupPlaneReady(
   options: { isPrivate: boolean },
 ): boolean {
   return catchupPlaneProvenByData(completion)
+    || catchupPlaneProvenBySelectedScope(completion)
     || catchupPlaneProvenByAuthorityHostedEmpty(completion, diagnostics, options)
     || catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options);
 }
@@ -889,9 +925,16 @@ export function catchupPeerSucceeded(
   shared: CatchupPhaseProgress | null | undefined,
   peerDenied: boolean,
   durableComplete?: boolean,
+  sharedCompletion?: {
+    progress: DurableProgressClassification;
+    /** This lane requires an explicit terminal boundary, not just clean I/O. */
+    terminalBoundaryRequired: boolean;
+  },
 ): boolean {
   const durableProgress = classifyDurableProgress(durable, { complete: durableComplete });
-  const sharedProgress = shared ? classifyDurableProgress(shared) : null;
+  const sharedProgress = shared
+    ? sharedCompletion?.progress ?? classifyDurableProgress(shared)
+    : null;
   if (
     !catchupPeerResponded(durable, shared)
     || peerDenied
@@ -904,6 +947,8 @@ export function catchupPeerSucceeded(
   const peerPhaseFailed = durableProgress.phaseFailed || Boolean(sharedProgress?.phaseFailed);
   if (peerPhaseFailed) return false;
   if (durableProgress.integrityRejected || sharedProgress?.integrityRejected) return false;
+  if (sharedCompletion?.terminalBoundaryRequired
+    && !sharedCompletion.progress.completedWithoutFailure) return false;
   const peerMadeProgress = durableProgress.madeReadinessProgress
     || Boolean(sharedProgress?.madeReadinessProgress);
   const peerMetadataOnly = !peerMadeProgress
@@ -1029,7 +1074,15 @@ class WorkerCatchupRunner implements CatchupRunner {
     const runId = this.nextRunId++;
     return new Promise<CatchupJobResult>((resolve, reject) => {
       this.pendingRuns.set(runId, { resolve, reject });
-      this.worker.postMessage({ type: 'run', runId, request });
+      this.worker.postMessage({
+        type: 'run',
+        runId,
+        request: {
+          ...request,
+          graphOwnedDurableRecovery:
+            typeof this.agent.syncDurableRecoveryContextGraph === 'function',
+        },
+      });
     });
   }
 
@@ -1054,7 +1107,7 @@ class WorkerCatchupRunner implements CatchupRunner {
     const agent = this.agent as any;
     switch (method) {
       case 'prepareCatchup': {
-        const [contextGraphId] = args as [string];
+        const [contextGraphId, includeSharedMemory = true] = args as [string, boolean?];
         const isPrivateContextGraph = await agent.isPrivateContextGraph(contextGraphId);
         // ONE resolution, two notions. Ranking uses whatever peer is available;
         // letting one peer's answer stand for the whole graph requires the
@@ -1078,22 +1131,49 @@ class WorkerCatchupRunner implements CatchupRunner {
         // of it: a renamed or added provenance value has to break here rather
         // than silently downgrade every curator to non-authoritative.
         const authoritativePeerId = authoritativeSyncPeerId(resolution);
-        if (preferredPeerId) {
-          await agent.ensurePeerConnected(preferredPeerId);
-        }
+        const authoritativeSharedMemoryPeerIds: readonly string[] =
+          includeSharedMemory
+          && typeof agent.resolveRfc64CompleteSwmProviderPeerIdsV1 === 'function'
+            ? agent.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId)
+            : [];
+        // Connection attempts only expand the candidate set. A stale curator
+        // address (for example, a relayed peer returning NO_RESERVATION) must
+        // not abort a public multi-peer repair before already-connected peers
+        // can contribute their RFC-64 snapshot union. Private graphs remain
+        // fail-closed in selectCatchupPeers; with no eligible curator they
+        // simply produce an unreachable bounded job.
+        await Promise.allSettled([
+          ...(preferredPeerId === undefined
+            ? []
+            : [agent.ensurePeerConnected(preferredPeerId)]),
+          ...authoritativeSharedMemoryPeerIds.map(
+            (peerId) => agent.ensurePeerConnected(peerId),
+          ),
+        ]);
         await agent.primeCatchupConnections();
 
-        const peerIds = agent.selectCatchupPeers(
+        const selectedPeerIds = agent.selectCatchupPeers(
           [...new Map(
             agent.node.libp2p.getConnections().map((connection: any) => [connection.remotePeer.toString(), connection.remotePeer]),
           ).values()],
           preferredPeerId,
           isPrivateContextGraph,
         ).map((peer: { toString(): string }) => peer.toString());
+        const prioritizedPeerIds = [...new Set([
+          ...authoritativeSharedMemoryPeerIds,
+          ...(preferredPeerId === undefined ? [] : [preferredPeerId]),
+        ])];
+        const selectedPeerIdSet = new Set(selectedPeerIds);
+        const prioritizedPeerIdSet = new Set(prioritizedPeerIds);
+        const peerIds = [
+          ...prioritizedPeerIds.filter((peerId) => selectedPeerIdSet.has(peerId)),
+          ...selectedPeerIds.filter((peerId: string) => !prioritizedPeerIdSet.has(peerId)),
+        ];
 
         return {
           preferredPeerId,
           authoritativePeerId,
+          authoritativeSharedMemoryPeerIds,
           isPrivateContextGraph,
           peerIds,
           connectedPeers: peerIds.length,
@@ -1128,19 +1208,38 @@ class WorkerCatchupRunner implements CatchupRunner {
           },
         );
       }
+      case 'syncDurableRecovery': {
+        const [peerId, contextGraphId] = args as [string, string];
+        const recovery = await this.agent.syncDurableRecoveryContextGraph(contextGraphId, {
+          candidatePeerIds: [peerId],
+          candidatesAreSyncCapable: true,
+        });
+        return recovery.result;
+      }
       case 'syncSharedMemory': {
-        const [peerId, contextGraphId, priority, source] = args as [
-          string, string, number | undefined, unknown,
+        const [peerId, contextGraphId, priority, source, selected] = args as [
+          string, string, number | undefined, unknown, unknown,
         ];
+        const admission = {
+          ...(priority === undefined ? {} : { priority }),
+          source: normalizeSyncAdmissionSource(
+            typeof source === 'string' ? source : undefined,
+          ),
+        };
+        // One bridge operation owns producer selection. The Worker supplies a
+        // closed boolean, and only literal `true` may enter the selected lane;
+        // malformed structured-clone values retain ordinary behavior.
+        if (selected === true) {
+          return agent.syncSelectedSharedMemoryFromPeerDetailed(
+            peerId,
+            [contextGraphId],
+            { ...admission, selectedSwmPriority: true },
+          );
+        }
         return agent.syncSharedMemoryFromPeerDetailed(
           peerId,
           [contextGraphId],
-          {
-            ...(priority === undefined ? {} : { priority }),
-            source: normalizeSyncAdmissionSource(
-              typeof source === 'string' ? source : undefined,
-            ),
-          },
+          admission,
         );
       }
       case 'logCatchupPass': {

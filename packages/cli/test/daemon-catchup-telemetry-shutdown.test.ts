@@ -71,6 +71,7 @@ const {
   beginWalkCatchupJob,
   catchupLedgerSize,
   drainCatchupJobs,
+  recordSyntheticCatchupJob,
   releaseCatchupJob,
   resetCatchupJobLedger,
 } = await import('../src/daemon/catchup-telemetry.js');
@@ -248,6 +249,13 @@ async function createHarness(opts: HarnessOptions = {}) {
     resolveAgentByToken: () => undefined,
     getDefaultAgentAddress: () =>
       opts.callerAddress ?? '0x0000000000000000000000000000000000000001',
+    getRfc64SelectedSwmGraphSyncStatus: () => ({
+      mechanism: 'rfc64-selected-on-connect',
+      state: 'inactive',
+      configuredProviderCount: 0,
+      retryRequiredProviderCount: 0,
+      terminalProviderCount: 0,
+    }),
     eventBus: { emit: () => {} },
     refreshMetaSyncedFlags: async () => {},
   };
@@ -357,6 +365,26 @@ afterEach(() => {
   resetCatchupJobLedger();
   daemonState.catchupRunner = previousRunner;
   daemonState.catchupAcceptingJobs = true;
+});
+
+describe('I8 — partial bounded jobs retain their terminal label', () => {
+  it('records `partial` instead of collapsing it to `failed`', () => {
+    recordSyntheticCatchupJob({
+      jobId: 'partial-job',
+      contextGraphId: 'cg-partial',
+      includeWorkspace: true,
+      status: 'partial',
+      queuedAt: 0,
+      startedAt: 0,
+      finishedAt: 1,
+    });
+
+    expect(metrics.jobs()).toHaveLength(1);
+    expect(metrics.jobs()[0].attrs).toMatchObject({
+      status: 'partial',
+      admission: 'synthetic',
+    });
+  });
 });
 
 describe('I7 — one requests_total point per subscribe-route return', () => {
