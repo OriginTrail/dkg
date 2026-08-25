@@ -237,6 +237,7 @@ export type Rfc64PublicCatalogNativeSynchronizationEvidenceV1 =
 export type Rfc64PublicCatalogNativeReceiverErrorCodeV1 =
   | 'catalog-native-receiver-input'
   | 'catalog-native-receiver-not-found'
+  | 'catalog-native-receiver-incomplete'
   | 'catalog-native-receiver-slice'
   | 'catalog-native-receiver-catalog'
   | 'catalog-native-receiver-authorization'
@@ -748,7 +749,10 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         { timeoutMs: this.#timeoutMs, signal },
       );
       if (bundle === null) {
-        fail('catalog-native-receiver-not-found', `catalog row ${row.kaId} KA bundle was not found`);
+        fail(
+          'catalog-native-receiver-incomplete',
+          `catalog row ${row.kaId} names a KA bundle that the authorized provider cannot supply`,
+        );
       }
 
       let projectionMetadata: ReturnType<typeof readVerifiedCgSharedProjectionMetadataV1>;
