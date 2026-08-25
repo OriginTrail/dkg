@@ -17,6 +17,7 @@ import {
 
 const API_ROOT = 'https://api.github.com';
 const API_PAGE_SIZE = 100;
+const CHECK_STATUSES = new Set(['pass', 'fail', 'error', 'not-run']);
 
 async function githubRequest(endpoint, token) {
   const response = await fetch(`${API_ROOT}/${endpoint}`, {
@@ -55,68 +56,95 @@ function repositoryFile(filePath) {
   };
 }
 
+function checkResult(status, details = null, error = null) {
+  if (!CHECK_STATUSES.has(status)) throw new Error(`invalid CI policy check status: ${status}`);
+  return {
+    status,
+    ...(details === null ? {} : { details }),
+    ...(error === null ? {} : { error }),
+  };
+}
+
+function emptySnapshot(policy = TESTNET_CANARY_ROLLOUT_POLICY) {
+  return {
+    version: 2,
+    policy,
+    controller: { pin: null },
+    checks: {
+      provenance: checkResult('not-run'),
+      rollout: checkResult('not-run'),
+      freshness: checkResult('not-run'),
+    },
+  };
+}
+
+function prerequisitesPass(snapshot) {
+  return snapshot.checks?.provenance?.status === 'pass'
+    && snapshot.checks?.rollout?.status === 'pass';
+}
+
 export function ciPolicyModeExitCode(snapshot, mode) {
   if (mode === 'report') return 0;
   if (mode !== 'enforce') throw new Error(`unknown inspection mode: ${mode}`);
-  return snapshot.prerequisites?.ok === true ? 0 : 1;
+  return prerequisitesPass(snapshot) ? 0 : 1;
 }
 
 export async function inspectCiPolicyPrerequisites({
-  repository,
   workflows,
   token,
   requestJson = githubRequest,
+  policy = TESTNET_CANARY_ROLLOUT_POLICY,
 }) {
-  const { branch } = TESTNET_CANARY_ROLLOUT_POLICY;
-  const controllerModel = validateTrustedControllerPins(workflows);
-  const { controllerBranches, controllerFreshnessBranch } = TESTNET_CANARY_ROLLOUT_POLICY;
-  const comparisons = await Promise.all(controllerBranches.map(async (protectedBranch) => {
-    const compare = await requestJson(
-      `repos/${repository}/compare/${encodeURIComponent(controllerModel.ref)}...${encodeURIComponent(protectedBranch)}`,
-      token,
-    );
-    return { branch: protectedBranch, status: compare?.status ?? 'missing' };
-  }));
-  const effectiveRules = await githubPaginatedArray(
-    `repos/${repository}/rules/branches/${encodeURIComponent(branch)}`,
-    token,
-    requestJson,
-  );
-  const effectiveRulesetIds = rulesetIdsRequiringDetails(effectiveRules);
-  const rulesets = await Promise.all(effectiveRulesetIds.map((rulesetId) => (
-    requestJson(`repos/${repository}/rulesets/${encodeURIComponent(rulesetId)}`, token)
-  )));
-  const deltaRollout = evaluateEffectiveDeltaRolloutRules({
-    repository,
-    rules: effectiveRules,
-    rulesets,
-    policy: TESTNET_CANARY_ROLLOUT_POLICY,
-  });
+  const snapshot = emptySnapshot(policy);
+  const { repository, branch, controllerBranches, controllerFreshnessBranch } = policy;
 
-  const provenanceOk = comparisons.some((comparison) => (
-    isProtectedHistoryComparison(comparison.status)
-  ));
-  return {
-    version: 1,
-    repository,
-    branch,
-    policy: TESTNET_CANARY_ROLLOUT_POLICY,
-    controller: {
+  try {
+    const controllerModel = validateTrustedControllerPins(workflows, policy);
+    snapshot.controller = {
       pin: controllerModel.ref,
       protectedBranches: controllerBranches,
       freshnessBranch: controllerFreshnessBranch,
-      provenance: {
-        status: comparisons.find((comparison) => isProtectedHistoryComparison(comparison.status))?.status
-          ?? comparisons.map((comparison) => `${comparison.branch}:${comparison.status}`).join(', '),
-        comparisons,
-        ok: provenanceOk,
-      },
-    },
-    deltaRollout,
-    prerequisites: {
-      ok: provenanceOk && deltaRollout.ok,
-    },
-  };
+      rolloutPhase: controllerModel.rolloutPhase,
+    };
+    const comparisons = await Promise.all(controllerBranches.map(async (protectedBranch) => {
+      const compare = await requestJson(
+        `repos/${repository}/compare/${encodeURIComponent(controllerModel.ref)}...${encodeURIComponent(protectedBranch)}`,
+        token,
+      );
+      return { branch: protectedBranch, status: compare?.status ?? 'missing' };
+    }));
+    const protectedHistory = comparisons.find((comparison) => (
+      isProtectedHistoryComparison(comparison.status)
+    ));
+    snapshot.checks.provenance = checkResult(
+      protectedHistory ? 'pass' : 'fail',
+      { comparisons, protectedHistory: protectedHistory?.branch ?? null },
+    );
+  } catch (error) {
+    snapshot.checks.provenance = checkResult('error', null, error.message);
+  }
+
+  try {
+    const effectiveRules = await githubPaginatedArray(
+      `repos/${repository}/rules/branches/${encodeURIComponent(branch)}`,
+      token,
+      requestJson,
+    );
+    const effectiveRulesetIds = rulesetIdsRequiringDetails(effectiveRules);
+    const rulesets = await Promise.all(effectiveRulesetIds.map((rulesetId) => (
+      requestJson(`repos/${repository}/rulesets/${encodeURIComponent(rulesetId)}`, token)
+    )));
+    const evaluation = evaluateEffectiveDeltaRolloutRules({
+      rules: effectiveRules,
+      rulesets,
+      policy,
+    });
+    snapshot.checks.rollout = checkResult(evaluation.ok ? 'pass' : 'fail', evaluation);
+  } catch (error) {
+    snapshot.checks.rollout = checkResult('error', null, error.message);
+  }
+
+  return snapshot;
 }
 
 export async function inspectCiPolicyFreshness({
@@ -124,43 +152,46 @@ export async function inspectCiPolicyFreshness({
   token,
   requestJson = githubRequest,
 }) {
-  const { repository, controller } = prerequisites;
-  if (
-    typeof repository !== 'string'
-    || typeof controller?.pin !== 'string'
-    || typeof controller?.freshnessBranch !== 'string'
-  ) {
-    throw new Error('prerequisite snapshot is missing controller metadata');
+  const snapshot = structuredClone(prerequisites);
+  const { repository } = snapshot.policy ?? {};
+  const { pin, freshnessBranch } = snapshot.controller ?? {};
+  if (typeof repository !== 'string' || typeof pin !== 'string' || !pin || !freshnessBranch) {
+    snapshot.checks.freshness = checkResult(
+      'error',
+      null,
+      'prerequisite inspection did not produce controller metadata',
+    );
+    return snapshot;
   }
 
-  const controllerFiles = await Promise.all(CONTROLLER_POLICY_FILES.map(async (filePath) => {
-    const endpoint = `repos/${repository}/contents/${filePath}`;
-    const [pinned, current] = await Promise.all([
-      requestJson(`${endpoint}?ref=${encodeURIComponent(controller.pin)}`, token),
-      requestJson(`${endpoint}?ref=${encodeURIComponent(controller.freshnessBranch)}`, token),
-    ]);
-    if (typeof pinned?.sha !== 'string' || typeof current?.sha !== 'string') {
-      throw new Error(`${filePath} contents response is missing a blob SHA`);
-    }
-    return {
-      path: filePath,
-      pinnedSha: pinned.sha,
-      currentSha: current.sha,
-      current: pinned.sha === current.sha,
-    };
-  }));
-
-  const driftedFiles = controllerFiles.filter((file) => !file.current).map((file) => file.path);
-  return {
-    ...prerequisites,
-    controller: {
-      ...controller,
-      tree: { ok: driftedFiles.length === 0, driftedFiles, files: controllerFiles },
-    },
-    freshness: {
-      ok: prerequisites.prerequisites?.ok === true && driftedFiles.length === 0,
-    },
-  };
+  try {
+    const controllerFiles = await Promise.all(CONTROLLER_POLICY_FILES.map(async (filePath) => {
+      const endpoint = `repos/${repository}/contents/${filePath}`;
+      const [pinned, current] = await Promise.all([
+        requestJson(`${endpoint}?ref=${encodeURIComponent(pin)}`, token),
+        requestJson(`${endpoint}?ref=${encodeURIComponent(freshnessBranch)}`, token),
+      ]);
+      if (typeof pinned?.sha !== 'string' || typeof current?.sha !== 'string') {
+        throw new Error(`${filePath} contents response is missing a blob SHA`);
+      }
+      return {
+        path: filePath,
+        pinnedSha: pinned.sha,
+        currentSha: current.sha,
+        current: pinned.sha === current.sha,
+      };
+    }));
+    const driftedFiles = controllerFiles
+      .filter((file) => !file.current)
+      .map((file) => file.path);
+    snapshot.checks.freshness = checkResult(
+      driftedFiles.length === 0 ? 'pass' : 'fail',
+      { branch: freshnessBranch, driftedFiles, files: controllerFiles },
+    );
+  } catch (error) {
+    snapshot.checks.freshness = checkResult('error', null, error.message);
+  }
+  return snapshot;
 }
 
 export function parseCiPolicyArguments(argv) {
@@ -168,7 +199,6 @@ export function parseCiPolicyArguments(argv) {
     args: argv,
     options: {
       mode: { type: 'string' },
-      repository: { type: 'string' },
       workflow: { type: 'string', multiple: true, default: [] },
       output: { type: 'string' },
       summary: { type: 'string' },
@@ -176,12 +206,8 @@ export function parseCiPolicyArguments(argv) {
     strict: true,
     allowPositionals: false,
   });
-  if (
-    !['enforce', 'report'].includes(options.mode)
-    || !options.repository
-    || options.workflow.length === 0
-  ) {
-    throw new Error('mode, repository, and at least one workflow are required');
+  if (!['enforce', 'report'].includes(options.mode) || options.workflow.length === 0) {
+    throw new Error('mode and at least one workflow are required');
   }
   if (options.summary && options.mode !== 'report') {
     throw new Error('--summary is available only in report mode');
@@ -196,43 +222,51 @@ function writeSnapshot(filePath, snapshot) {
 
 export function renderCiPolicyReport(snapshot) {
   const warnings = [];
+  const policy = snapshot.policy ?? TESTNET_CANARY_ROLLOUT_POLICY;
   const controller = snapshot.controller ?? {};
+  const provenance = snapshot.checks?.provenance ?? checkResult('not-run');
+  const freshness = snapshot.checks?.freshness ?? checkResult('not-run');
+  const rollout = snapshot.checks?.rollout ?? checkResult('not-run');
   const pinned = typeof controller.pin === 'string' ? controller.pin.slice(0, 12) : '?';
-  const protectedBranches = Array.isArray(controller.protectedBranches)
-    ? controller.protectedBranches.join(' or ')
-    : 'protected repository history';
-  const freshnessBranch = controller.freshnessBranch ?? 'protected rollout branch';
+  const protectedBranches = policy.controllerBranches?.join(' or ') ?? 'protected repository history';
   let controllerExpected = `protected ${protectedBranches} history`;
   let controllerStatus = '⚠ unable to inspect';
 
-  if (snapshot.acquisitionError) {
-    warnings.push(`trusted CI controller inspection failed: ${snapshot.acquisitionError}`);
-  } else if (controller.provenance?.ok !== true) {
+  if (provenance.status === 'error') {
+    warnings.push(`trusted CI controller inspection failed: ${provenance.error}`);
+  } else if (provenance.status === 'fail') {
     controllerStatus = '⚠ untrusted provenance';
     warnings.push(`trusted CI controller ${pinned} is not in protected ${protectedBranches} history`);
-  } else {
-    controllerExpected = `${freshnessBranch} policy tree`;
-    if (controller.tree?.ok === true) {
-      controllerStatus = '✓ current';
+  } else if (provenance.status === 'pass') {
+    if (freshness.status === 'not-run') {
+      controllerStatus = '✓ protected';
     } else {
-      controllerStatus = '⚠ policy drift';
-      warnings.push(`trusted CI controller ${pinned} differs from ${freshnessBranch}`);
+      controllerExpected = `${policy.controllerFreshnessBranch} policy tree`;
+      if (freshness.status === 'pass') {
+        controllerStatus = '✓ current';
+      } else if (freshness.status === 'fail') {
+        controllerStatus = '⚠ policy drift';
+        warnings.push(`trusted CI controller ${pinned} differs from ${policy.controllerFreshnessBranch}`);
+      } else {
+        warnings.push(`trusted CI controller freshness inspection failed: ${freshness.error}`);
+      }
     }
+  } else {
+    warnings.push('trusted CI controller inspection did not run');
   }
 
-  const rolloutLabel = snapshot.policy?.label
-    ?? `${snapshot.branch ?? TESTNET_CANARY_ROLLOUT_POLICY.branch} delta safeguards`;
-  const rolloutExpected = snapshot.policy?.expected ?? TESTNET_CANARY_ROLLOUT_POLICY.expected;
   let safeguardsPinned = '?';
   let safeguardsStatus = '⚠ unable to inspect';
-  if (snapshot.deltaRollout?.ok === true) {
+  if (rollout.status === 'pass') {
     safeguardsPinned = 'active ruleset';
     safeguardsStatus = '✓ current';
-  } else if (snapshot.deltaRollout) {
+  } else if (rollout.status === 'fail') {
     safeguardsStatus = '⚠ prerequisites missing';
-    warnings.push(`${rolloutLabel} missing: ${snapshot.deltaRollout.missing.join(', ')}`);
-  } else if (snapshot.acquisitionError) {
-    warnings.push(`${rolloutLabel} inspection failed: ${snapshot.acquisitionError}`);
+    warnings.push(`${policy.label} missing: ${rollout.details.missing.join(', ')}`);
+  } else if (rollout.status === 'error') {
+    warnings.push(`${policy.label} inspection failed: ${rollout.error}`);
+  } else {
+    warnings.push(`${policy.label} inspection did not run`);
   }
 
   const markdown = [
@@ -241,7 +275,7 @@ export function renderCiPolicyReport(snapshot) {
     '| Component | Pinned | Expected upstream | Status |',
     '|-----------|--------|-------------------|--------|',
     `| trusted CI controller | \`${pinned}\` | \`${controllerExpected}\` | ${controllerStatus} |`,
-    `| ${rolloutLabel} | \`${safeguardsPinned}\` | \`${rolloutExpected}\` | ${safeguardsStatus} |`,
+    `| ${policy.label} | \`${safeguardsPinned}\` | \`${policy.expected}\` | ${safeguardsStatus} |`,
     '',
   ].join('\n');
   return { markdown, warnings };
@@ -256,49 +290,49 @@ function writePolicySummary(filePath, snapshot) {
   }
 }
 
+function prerequisiteFailureSummary(snapshot) {
+  return ['provenance', 'rollout'].flatMap((name) => {
+    const result = snapshot.checks[name];
+    if (result.status === 'pass') return [];
+    if (result.status === 'error') return [`${name}: ${result.error}`];
+    if (name === 'rollout') return result.details.missing;
+    return [`${name}: not in protected history`];
+  }).join(', ');
+}
+
 export async function runCiPolicyInspector(argv, { token = process.env.GH_TOKEN, requestJson } = {}) {
   let options;
-  let snapshot;
   try {
     options = parseCiPolicyArguments(argv);
-    if (!token) throw new Error('GH_TOKEN is required');
-    snapshot = await inspectCiPolicyPrerequisites({
-      repository: options.repository,
-      workflows: options.workflows.map(repositoryFile),
-      token,
-      requestJson,
-    });
+  } catch (error) {
+    console.error(`ci-policy-inspection: ${error.message}`);
+    return 2;
+  }
+
+  try {
+    const workflows = options.workflows.map(repositoryFile);
+    let snapshot;
+    if (!token) {
+      snapshot = emptySnapshot();
+      snapshot.checks.provenance = checkResult('error', null, 'GH_TOKEN is required');
+      snapshot.checks.rollout = checkResult('error', null, 'GH_TOKEN is required');
+    } else {
+      snapshot = await inspectCiPolicyPrerequisites({ workflows, token, requestJson });
+    }
     if (options.mode === 'report') {
-      snapshot = await inspectCiPolicyFreshness({
-        prerequisites: snapshot,
-        token,
-        requestJson,
-      });
+      snapshot = await inspectCiPolicyFreshness({ prerequisites: snapshot, token, requestJson });
     }
     writeSnapshot(options.output, snapshot);
     writePolicySummary(options.summary, snapshot);
-    if (!snapshot.prerequisites.ok) {
-      console.error(`ci-policy-inspection: prerequisites missing: ${snapshot.deltaRollout.missing.join(', ') || snapshot.controller.provenance.status}`);
+    if (!prerequisitesPass(snapshot)) {
+      console.error(`ci-policy-inspection: prerequisites missing: ${prerequisiteFailureSummary(snapshot)}`);
     } else {
-      console.log(`CI policy prerequisites verified for ${snapshot.branch}`);
+      console.log(`CI policy prerequisites verified for ${snapshot.policy.branch}`);
     }
     return ciPolicyModeExitCode(snapshot, options.mode);
   } catch (error) {
-    const failedSnapshot = {
-      ...(snapshot ?? {
-        version: 1,
-        repository: options?.repository,
-        branch: TESTNET_CANARY_ROLLOUT_POLICY.branch,
-        policy: TESTNET_CANARY_ROLLOUT_POLICY,
-        prerequisites: { ok: false },
-      }),
-      acquisitionError: error.message,
-      freshness: { ok: false },
-    };
-    writeSnapshot(options?.output, failedSnapshot);
-    writePolicySummary(options?.summary, failedSnapshot);
     console.error(`ci-policy-inspection: ${error.message}`);
-    return options?.mode === 'report' ? 0 : 1;
+    return options.mode === 'report' ? 0 : 1;
   }
 }
 

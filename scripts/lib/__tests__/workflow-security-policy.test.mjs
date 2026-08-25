@@ -1,14 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
-import {
-  parseZizmorSarifArguments,
-  runZizmorSarifGate,
-} from '../../ci/enforce-zizmor-sarif.mjs';
 import {
   ciPolicyModeExitCode,
   inspectCiPolicyFreshness,
@@ -37,7 +34,7 @@ function rulesetDetail(id, overrides = {}) {
     id: Number(id),
     enforcement: 'active',
     source_type: 'Repository',
-    source: 'OriginTrail/dkg',
+    source: TESTNET_CANARY_ROLLOUT_POLICY.repository,
     target: 'branch',
     bypass_actors: null,
     conditions: {
@@ -53,7 +50,6 @@ function rulesetDetailsFor(rules) {
 
 function evaluateDeltaRules(rules, rulesets = rulesetDetailsFor(rules)) {
   return evaluateEffectiveDeltaRolloutRules({
-    repository: 'OriginTrail/dkg',
     rules,
     rulesets,
   });
@@ -61,7 +57,7 @@ function evaluateDeltaRules(rules, rulesets = rulesetDetailsFor(rules)) {
 
 function controllerCheckout({
   ref = CONTROLLER_SHA,
-  repository = 'OriginTrail/dkg',
+  repository = TESTNET_CANARY_ROLLOUT_POLICY.repository,
   uses = 'actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0',
   quotedPath = false,
   idFirst = false,
@@ -358,13 +354,13 @@ test('prerequisite inspection excludes freshness-only acquisition', async () => 
     throw new Error(`unexpected endpoint: ${endpoint}`);
   };
   const prerequisites = await inspectCiPolicyPrerequisites({
-    repository: 'OriginTrail/dkg',
     workflows: [{ sourceName: 'fixture.yml', source: workflowFixture() }],
     token: 'test-token',
     requestJson,
   });
-  assert.equal(prerequisites.prerequisites.ok, true);
-  assert.equal('freshness' in prerequisites, false);
+  assert.equal(prerequisites.checks.provenance.status, 'pass');
+  assert.equal(prerequisites.checks.rollout.status, 'pass');
+  assert.equal(prerequisites.checks.freshness.status, 'not-run');
   assert.equal(
     requestedEndpoints.some((endpoint) => endpoint.includes('/contents/')),
     false,
@@ -376,8 +372,9 @@ test('prerequisite inspection excludes freshness-only acquisition', async () => 
     token: 'test-token',
     requestJson,
   });
-  assert.equal(snapshot.prerequisites.ok, true);
-  assert.equal(snapshot.freshness.ok, true);
+  assert.equal(snapshot.checks.provenance.status, 'pass');
+  assert.equal(snapshot.checks.rollout.status, 'pass');
+  assert.equal(snapshot.checks.freshness.status, 'pass');
   assert.equal(ciPolicyModeExitCode(snapshot, 'enforce'), 0);
   assert.equal(ciPolicyModeExitCode(snapshot, 'report'), 0);
   assert.ok(requestedEndpoints.includes(
@@ -392,7 +389,10 @@ test('prerequisite inspection excludes freshness-only acquisition', async () => 
     ['repos/OriginTrail/dkg/rulesets/1', 'repos/OriginTrail/dkg/rulesets/2'],
   );
 
-  const missingPrerequisites = { ...snapshot, prerequisites: { ok: false } };
+  const missingPrerequisites = structuredClone(snapshot);
+  missingPrerequisites.checks.rollout = {
+    status: 'fail', details: { missing: ['merge_queue'] },
+  };
   assert.equal(ciPolicyModeExitCode(missingPrerequisites, 'enforce'), 1);
   assert.equal(ciPolicyModeExitCode(missingPrerequisites, 'report'), 0);
 });
@@ -431,26 +431,26 @@ test('effective policy inspection reads every rules page and rejects malformed p
     throw new Error(`unexpected endpoint: ${endpoint}`);
   };
   const input = {
-    repository: 'OriginTrail/dkg',
     workflows: [{ sourceName: 'fixture.yml', source: workflowFixture() }],
     token: 'test-token',
   };
   const snapshot = await inspectCiPolicyPrerequisites({ ...input, requestJson });
-  assert.equal(snapshot.prerequisites.ok, true);
+  assert.equal(snapshot.checks.provenance.status, 'pass');
+  assert.equal(snapshot.checks.rollout.status, 'pass');
   assert.deepEqual(requestedRulePages, [
     `${effectiveRulesEndpoint}?per_page=100&page=1`,
     `${effectiveRulesEndpoint}?per_page=100&page=2`,
   ]);
 
-  await assert.rejects(
-    inspectCiPolicyPrerequisites({
-      ...input,
-      requestJson: async (endpoint) => (
-        endpoint.startsWith(effectiveRulesEndpoint) ? {} : requestJson(endpoint)
-      ),
-    }),
-    /returned a non-array page/,
-  );
+  const malformed = await inspectCiPolicyPrerequisites({
+    ...input,
+    requestJson: async (endpoint) => (
+      endpoint.startsWith(effectiveRulesEndpoint) ? {} : requestJson(endpoint)
+    ),
+  });
+  assert.equal(malformed.checks.provenance.status, 'pass');
+  assert.equal(malformed.checks.rollout.status, 'error');
+  assert.match(malformed.checks.rollout.error, /returned a non-array page/);
 });
 
 test('executable policy inspector preserves enforce and report exit boundaries', async (t) => {
@@ -486,7 +486,6 @@ test('executable policy inspector preserves enforce and report exit boundaries',
   };
   const args = (mode) => [
     '--mode', mode,
-    '--repository', 'OriginTrail/dkg',
     '--workflow', workflowPath,
     '--output', outputPath,
     ...(mode === 'report' ? ['--summary', summaryPath] : []),
@@ -501,8 +500,9 @@ test('executable policy inspector preserves enforce and report exit boundaries',
     },
   }), 0);
   let snapshot = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
-  assert.equal(snapshot.prerequisites.ok, true);
-  assert.equal('freshness' in snapshot, false);
+  assert.equal(snapshot.checks.provenance.status, 'pass');
+  assert.equal(snapshot.checks.rollout.status, 'pass');
+  assert.equal(snapshot.checks.freshness.status, 'not-run');
   assert.equal(enforceRequests.some((endpoint) => endpoint.includes('/contents/')), false);
 
   assert.equal(await runCiPolicyInspector(args('enforce'), {
@@ -512,15 +512,18 @@ test('executable policy inspector preserves enforce and report exit boundaries',
     ),
   }), 1);
   snapshot = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
-  assert.equal(snapshot.prerequisites.ok, false);
+  assert.equal(snapshot.checks.provenance.status, 'pass');
+  assert.equal(snapshot.checks.rollout.status, 'fail');
 
   assert.equal(await runCiPolicyInspector(args('enforce'), {
     token: 'test-token',
     requestJson: async () => { throw new Error('policy API unavailable'); },
   }), 1);
   snapshot = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
-  assert.equal(snapshot.prerequisites.ok, false);
-  assert.match(snapshot.acquisitionError, /policy API unavailable/);
+  assert.equal(snapshot.checks.provenance.status, 'error');
+  assert.equal(snapshot.checks.rollout.status, 'error');
+  assert.match(snapshot.checks.provenance.error, /policy API unavailable/);
+  assert.match(snapshot.checks.rollout.error, /policy API unavailable/);
 
   assert.equal(await runCiPolicyInspector(args('report'), {
     token: 'test-token',
@@ -530,23 +533,27 @@ test('executable policy inspector preserves enforce and report exit boundaries',
     },
   }), 0);
   snapshot = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
-  assert.equal(snapshot.prerequisites.ok, true);
-  assert.equal(snapshot.freshness.ok, false);
-  assert.match(snapshot.acquisitionError, /freshness API unavailable/);
+  assert.equal(snapshot.checks.provenance.status, 'pass');
+  assert.equal(snapshot.checks.rollout.status, 'pass');
+  assert.equal(snapshot.checks.freshness.status, 'error');
+  assert.match(snapshot.checks.freshness.error, /freshness API unavailable/);
   assert.match(fs.readFileSync(summaryPath, 'utf8'), /⚠ unable to inspect/);
 });
 
 test('policy report renderer owns clean, drift, prerequisite, and acquisition statuses', () => {
   const clean = {
+    version: 2,
+    policy: TESTNET_CANARY_ROLLOUT_POLICY,
     controller: {
       pin: CONTROLLER_SHA,
       protectedBranches: ['main', 'testnet-canary'],
       freshnessBranch: 'testnet-canary',
-      provenance: { ok: true, status: 'ahead' },
-      tree: { ok: true, driftedFiles: [] },
     },
-    deltaRollout: { ok: true, missing: [] },
-    prerequisites: { ok: true },
+    checks: {
+      provenance: { status: 'pass', details: { protectedHistory: 'main' } },
+      rollout: { status: 'pass', details: { missing: [] } },
+      freshness: { status: 'pass', details: { driftedFiles: [] } },
+    },
   };
   const cleanReport = renderCiPolicyReport(clean);
   assert.equal(cleanReport.warnings.length, 0);
@@ -555,24 +562,49 @@ test('policy report renderer owns clean, drift, prerequisite, and acquisition st
 
   const driftReport = renderCiPolicyReport({
     ...clean,
-    controller: { ...clean.controller, tree: { ok: false, driftedFiles: ['scripts/ci/plan-ci.mjs'] } },
+    checks: {
+      ...clean.checks,
+      freshness: {
+        status: 'fail', details: { driftedFiles: ['scripts/ci/plan-ci.mjs'] },
+      },
+    },
   });
   assert.match(driftReport.markdown, /⚠ policy drift/);
   assert.match(driftReport.warnings.join('\n'), /differs from testnet-canary/);
 
+  const untrustedReport = renderCiPolicyReport({
+    ...clean,
+    checks: {
+      ...clean.checks,
+      provenance: {
+        status: 'fail',
+        details: { comparisons: [{ branch: 'main', status: 'diverged' }] },
+      },
+      freshness: { status: 'not-run' },
+    },
+  });
+  assert.match(untrustedReport.markdown, /⚠ untrusted provenance/);
+  assert.match(untrustedReport.warnings.join('\n'), /not in protected main or testnet-canary/);
+
   const missingReport = renderCiPolicyReport({
     ...clean,
-    deltaRollout: { ok: false, missing: ['merge_queue'] },
-    prerequisites: { ok: false },
+    checks: {
+      ...clean.checks,
+      rollout: { status: 'fail', details: { missing: ['merge_queue'] } },
+    },
   });
   assert.match(missingReport.markdown, /⚠ prerequisites missing/);
   assert.match(missingReport.warnings.join('\n'), /merge_queue/);
 
   const failedReport = renderCiPolicyReport({
-    version: 1,
-    acquisitionError: 'GitHub API unavailable',
-    prerequisites: { ok: false },
-    freshness: { ok: false },
+    version: 2,
+    policy: TESTNET_CANARY_ROLLOUT_POLICY,
+    controller: { pin: null },
+    checks: {
+      provenance: { status: 'error', error: 'GitHub API unavailable' },
+      rollout: { status: 'error', error: 'GitHub API unavailable' },
+      freshness: { status: 'not-run' },
+    },
   });
   assert.match(failedReport.markdown, /⚠ unable to inspect/);
   assert.match(failedReport.warnings.join('\n'), /GitHub API unavailable/);
@@ -581,16 +613,15 @@ test('policy report renderer owns clean, drift, prerequisite, and acquisition st
 test('real policy CLIs use strict parsers with intentional repeat behavior', () => {
   const policyOptions = parseCiPolicyArguments([
     '--mode', 'enforce',
-    '--repository', 'OriginTrail/dkg',
     '--workflow', 'ci.yml',
     '--workflow', 'evm.yml',
   ]);
   assert.deepEqual(policyOptions.workflows, ['ci.yml', 'evm.yml']);
+  assert.equal(TESTNET_CANARY_ROLLOUT_POLICY.repository, 'OriginTrail/dkg');
   assert.equal(TESTNET_CANARY_ROLLOUT_POLICY.branch, 'testnet-canary');
   assert.throws(
     () => parseCiPolicyArguments([
-      '--mode', 'enforce', '--repository', 'OriginTrail/dkg',
-      '--branch', 'main', '--workflow', 'ci.yml',
+      '--mode', 'enforce', '--repository', 'example/fork', '--workflow', 'ci.yml',
     ]),
     /Unknown option|unknown option/i,
   );
@@ -600,51 +631,11 @@ test('real policy CLIs use strict parsers with intentional repeat behavior', () 
   );
   assert.throws(
     () => parseCiPolicyArguments(['--mode', 'enforce']),
-    /repository, and at least one workflow are required/,
-  );
-
-  const zizmorOptions = parseZizmorSarifArguments([
-    '--sarif', 'first.sarif',
-    '--sarif', 'second.sarif',
-    '--scan-outcome', 'success',
-  ]);
-  assert.equal(zizmorOptions.sarif, 'second.sarif');
-  assert.throws(
-    () => parseZizmorSarifArguments(['--sarif', 'zizmor.sarif', '--unexpected']),
-    /Unknown option|unknown option/i,
-  );
-  assert.throws(
-    () => parseZizmorSarifArguments(['--sarif', 'zizmor.sarif']),
-    /--scan-outcome is required/,
+    /mode and at least one workflow are required/,
   );
 });
 
-test('zizmor SARIF gate accepts clean output and rejects findings, failures, and wrong tools', (t) => {
-  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-zizmor-gate-'));
-  t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
-  const sarifPath = path.join(temporaryDirectory, 'zizmor.sarif');
-  const writeSarif = (results, driverName = 'zizmor') => fs.writeFileSync(sarifPath, JSON.stringify({
-    version: '2.1.0',
-    runs: [{ tool: { driver: { name: driverName } }, results }],
-  }));
-
-  writeSarif([]);
-  assert.equal(runZizmorSarifGate(['--sarif', sarifPath, '--scan-outcome', 'success']), 0);
-
-  writeSarif([{ ruleId: 'unpinned-uses', message: { text: 'mutable action ref' } }]);
-  assert.equal(runZizmorSarifGate(['--sarif', sarifPath, '--scan-outcome', 'success']), 1);
-  writeSarif([]);
-  assert.equal(runZizmorSarifGate(['--sarif', sarifPath, '--scan-outcome', 'failure']), 1);
-
-  fs.writeFileSync(sarifPath, JSON.stringify({ version: '2.1.0', runs: [{}] }));
-  assert.equal(runZizmorSarifGate(['--sarif', sarifPath, '--scan-outcome', 'success']), 1);
-  writeSarif([], 'another-scanner');
-  assert.equal(runZizmorSarifGate(['--sarif', sarifPath, '--scan-outcome', 'success']), 1);
-  fs.writeFileSync(sarifPath, '{not-json');
-  assert.equal(runZizmorSarifGate(['--sarif', sarifPath, '--scan-outcome', 'success']), 2);
-});
-
-test('supply-chain workflow preserves SARIF upload and gates findings plus audit events', () => {
+test('supply-chain workflow preserves SARIF upload and gates findings plus audit events', (t) => {
   const workflow = fs.readFileSync(
     path.join(REPO_ROOT, '.github/workflows/supply-chain-scan.yml'),
     'utf8',
@@ -653,12 +644,41 @@ test('supply-chain workflow preserves SARIF upload and gates findings plus audit
   assert.match(workflow, /^        continue-on-error: true$/m);
   assert.match(workflow, /if: \|\n\s+always\(\)/);
   assert.match(workflow, /SCAN_OUTCOME: \$\{\{ steps\.zizmor_scan\.outcome \}\}/);
-  assert.match(workflow, /node scripts\/ci\/enforce-zizmor-sarif\.mjs/);
+  assert.doesNotMatch(workflow, /enforce-zizmor-sarif\.mjs/);
+  assert.match(workflow, /jq -e/);
   assert.doesNotMatch(workflow, /^  ci-policy-prerequisites:$/m);
   assert.match(workflow, /- 'pnpm-lock\.yaml'/);
   assert.match(workflow, /- '\*\*\/package\.json'/);
   assert.match(workflow, /^  schedule:$/m);
   assert.match(workflow, /^  workflow_dispatch:$/m);
+
+  const workflowModel = parseYaml(workflow);
+  const verdictStep = workflowModel.jobs.zizmor.steps.find(
+    (step) => step.name === 'Enforce zizmor verdict',
+  );
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-zizmor-gate-'));
+  t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
+  const runVerdict = (sarif, scanOutcome = 'success') => {
+    fs.writeFileSync(
+      path.join(temporaryDirectory, 'zizmor.sarif'),
+      typeof sarif === 'string' ? sarif : JSON.stringify(sarif),
+    );
+    return spawnSync('bash', ['-c', verdictStep.run], {
+      cwd: temporaryDirectory,
+      env: { ...process.env, SCAN_OUTCOME: scanOutcome },
+      encoding: 'utf8',
+    });
+  };
+  const sarif = (results = [], driverName = 'zizmor') => ({
+    version: '2.1.0',
+    runs: [{ tool: { driver: { name: driverName } }, results }],
+  });
+  assert.equal(runVerdict(sarif()).status, 0);
+  assert.notEqual(runVerdict(sarif([{ ruleId: 'unpinned-uses' }])).status, 0);
+  assert.notEqual(runVerdict(sarif(), 'failure').status, 0);
+  assert.notEqual(runVerdict(sarif([], 'another-scanner')).status, 0);
+  assert.notEqual(runVerdict({ version: '2.1.0', runs: [{}] }).status, 0);
+  assert.notEqual(runVerdict('{not-json').status, 0);
 
   const auditStart = workflow.indexOf('  npm-audit:\n');
   const auditRemainder = workflow.slice(auditStart + '  npm-audit:\n'.length);

@@ -47,7 +47,6 @@ on:
       # until the next unrelated lockfile change.
       - '.github/dependency-deny-list.json'
       - 'scripts/check-dependency-deny-list.mjs'
-      - 'scripts/ci/enforce-zizmor-sarif.mjs'
       - 'scripts/ci/inspect-ci-policy.mjs'
       - 'scripts/ci/trusted-controller-pins.mjs'
       - 'scripts/ci/validate-delta-rollout-ruleset.mjs'
@@ -68,7 +67,6 @@ on:
       - '.npmrc'
       - '.github/dependency-deny-list.json'
       - 'scripts/check-dependency-deny-list.mjs'
-      - 'scripts/ci/enforce-zizmor-sarif.mjs'
       - 'scripts/ci/inspect-ci-policy.mjs'
       - 'scripts/ci/trusted-controller-pins.mjs'
       - 'scripts/ci/validate-delta-rollout-ruleset.mjs'
@@ -238,10 +236,25 @@ jobs:
         # results. Malformed/missing SARIF also fails closed.
         env:
           SCAN_OUTCOME: ${{ steps.zizmor_scan.outcome }}
-        run: >-
-          node scripts/ci/enforce-zizmor-sarif.mjs
-          --sarif zizmor.sarif
-          --scan-outcome "${SCAN_OUTCOME}"
+        run: |
+          set -euo pipefail
+          if [[ "${SCAN_OUTCOME}" != "success" ]]; then
+            echo "::error title=zizmor gate failed::scan outcome was ${SCAN_OUTCOME:-missing}"
+            exit 1
+          fi
+          if ! jq -e '
+            .version == "2.1.0"
+            and (.runs | type == "array" and length > 0)
+            and all(.runs[];
+              type == "object"
+              and (.tool.driver.name | type == "string")
+              and (.tool.driver.name | ascii_downcase) == "zizmor"
+              and (.results | type == "array" and length == 0)
+            )
+          ' zizmor.sarif > /dev/null; then
+            echo "::error title=zizmor gate failed::SARIF must contain only empty zizmor result arrays"
+            exit 1
+          fi
 
   dependency-deny-list:
     name: Dependency deny-list (named-package blocklist)
@@ -695,7 +708,6 @@ jobs:
           # cannot block protected-history or ruleset enforcement.
           node scripts/ci/inspect-ci-policy.mjs \
             --mode report \
-            --repository "${GITHUB_REPOSITORY}" \
             --workflow .github/workflows/ci.yml \
             --workflow .github/workflows/evm-integration.yml \
             --summary "${GITHUB_STEP_SUMMARY}"

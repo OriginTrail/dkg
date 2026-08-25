@@ -7,6 +7,7 @@ const ENFORCEMENT_RULE_TYPES = new Set([
 ]);
 
 export const TESTNET_CANARY_ROLLOUT_POLICY = Object.freeze({
+  repository: 'OriginTrail/dkg',
   branch: 'testnet-canary',
   controllerBranches: Object.freeze(['main', 'testnet-canary']),
   controllerFreshnessBranch: 'testnet-canary',
@@ -59,7 +60,6 @@ function validateRulesetDetail({ branch, repository, rulesetId, ruleset }) {
 // to this response. Aggregate every returned rule so protections can be split
 // across multiple matching rulesets without weakening the verdict.
 export function evaluateEffectiveDeltaRolloutRules({
-  repository,
   rules,
   rulesets,
   policy = TESTNET_CANARY_ROLLOUT_POLICY,
@@ -71,6 +71,7 @@ export function evaluateEffectiveDeltaRolloutRules({
     throw new Error('effective ruleset details must be an array');
   }
   const { branch } = policy;
+  const { repository } = policy;
   const requiredChecks = new Map();
   const sources = new Set();
   const enforcementSources = new Set(rulesetIdsRequiringDetails(rules));

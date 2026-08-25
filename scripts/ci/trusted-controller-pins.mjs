@@ -1,4 +1,5 @@
 import { parse as parseYaml } from 'yaml';
+import { TESTNET_CANARY_ROLLOUT_POLICY } from './validate-delta-rollout-ruleset.mjs';
 
 const CHECKOUT_PATTERN = /^actions\/checkout@[0-9a-f]{40}$/;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
@@ -108,14 +109,21 @@ export function trustedControllerCheckouts(source, sourceName = '<workflow>') {
   return checkouts;
 }
 
-export function validateTrustedControllerPins(workflows) {
+export function validateTrustedControllerPins(
+  workflows,
+  policy = TESTNET_CANARY_ROLLOUT_POLICY,
+) {
+  const repository = policy?.repository;
+  if (typeof repository !== 'string' || repository === '') {
+    throw new Error('trusted controller validation requires a canonical repository');
+  }
   const allCheckouts = workflows.flatMap((workflow) => (
     trustedControllerCheckouts(workflow.source, workflow.sourceName)
   ));
 
   for (const checkout of allCheckouts) {
-    if (checkout.repository !== 'OriginTrail/dkg') {
-      throw new Error(`${checkout.sourceName}: job ${checkout.jobName}: trusted checkout must use OriginTrail/dkg`);
+    if (checkout.repository !== repository) {
+      throw new Error(`${checkout.sourceName}: job ${checkout.jobName}: trusted checkout must use ${repository}`);
     }
     if (!SHA_PATTERN.test(checkout.ref ?? '')) {
       throw new Error(`${checkout.sourceName}: job ${checkout.jobName}: trusted checkout needs an immutable 40-character ref`);
