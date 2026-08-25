@@ -12,11 +12,11 @@ This skill teaches you the full node API surface so you can operate autonomously
 
 > This section is dynamically generated from node state at serve-time.
 
-- **Node version:** (dynamic)
-- **Base URL:** (dynamic)
-- **Peer ID:** (dynamic)
-- **Node role:** (dynamic — `core` or `edge`)
-- **Available extraction pipelines:** (dynamic)
+- **Node version:** {{nodeVersion}}
+- **Base URL:** {{baseUrl}}
+- **Peer ID:** {{peerId}}
+- **Node role:** {{nodeRole}}
+- **Available extraction pipelines:** {{extractionPipelines}}
 
 If the Node UI injects a target context graph for the turn, use that target directly. If no target is injected or configured, call `dkg_list_context_graphs` / `GET /api/context-graph/list`; agent tool surfaces default that list to the caller's created/joined context graphs, with `scope: "all"` for every graph the node knows about.
 

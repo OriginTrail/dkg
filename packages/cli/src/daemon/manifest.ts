@@ -798,38 +798,63 @@ export function buildSkillMd(opts: {
   extractionPipelines: string[];
 }): string {
   const template = loadSkillTemplate();
-  const dynamicSection = [
-    `- **Node version:** ${opts.version}`,
-    `- **Base URL:** ${opts.baseUrl}`,
-    `- **Peer ID:** ${opts.peerId}`,
-    `- **Node role:** ${opts.nodeRole}`,
-    `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(", ") : "none (install markitdown to enable document conversion)"}`,
-  ].join("\n");
 
-  // GH#1763 sibling / GH#1125 — match ONLY the bullet block. The template's
-  // trailing paragraph after the pipelines line is prose that has already
-  // drifted out of sync with this file once (the two `dkg_list_context_graphs`
-  // / `GET /api/context-graph/list` mentions are order-swapped in SKILL.md),
-  // and because `String.replace` with a literal needle fails silently, that
-  // one-word divergence meant the ENTIRE section was never substituted and the
-  // served doc shipped `(dynamic)` placeholders to every agent that read it.
-  // Anchoring on just the bullets keeps prose edits from breaking substitution.
-  const staticPlaceholder = [
-    "- **Node version:** (dynamic)",
-    "- **Base URL:** (dynamic)",
-    "- **Peer ID:** (dynamic)",
-    "- **Node role:** (dynamic — `core` or `edge`)",
-    "- **Available extraction pipelines:** (dynamic)",
-  ].join("\n");
+  // GH#1125 — substitute NAMED tokens, one at a time.
+  //
+  // The previous implementation rebuilt a copy of the template's Markdown and
+  // swapped the whole block with a single literal `String.replace`. Two things
+  // went wrong with that, and the token form fixes both:
+  //
+  //  1. DRIFT. A literal needle fails SILENTLY when it does not match. The copy
+  //     here and the block in SKILL.md had drifted by a single reordered
+  //     sentence, so nothing was ever substituted and every agent that read
+  //     /.well-known/skill.md got `(dynamic)` placeholders. Per-token
+  //     substitution means prose and label edits in the template cannot
+  //     disable it — only renaming a token can, and that is validated below.
+  //
+  //  2. `$` INJECTION. `String.replace(needle, replacement)` interprets `$&`,
+  //     `$'`, "$`" and `$n` in the REPLACEMENT string. `baseUrl` is built from
+  //     the `X-Forwarded-Host` / `Host` request headers (routes/status.ts:641)
+  //     and this endpoint is public and unauthenticated, so those tokens were
+  //     attacker-controlled: `$&` re-inserted the placeholder block (putting
+  //     `(dynamic)` back), and each `$'` appended the ~94 KB template suffix,
+  //     giving unbounded response amplification. Passing a FUNCTION as the
+  //     replacement makes the value literal — this is the load-bearing detail,
+  //     do not turn it back into a string.
+  const values: Record<string, string> = {
+    nodeVersion: opts.version,
+    baseUrl: opts.baseUrl,
+    peerId: opts.peerId,
+    nodeRole: opts.nodeRole,
+    extractionPipelines:
+      opts.extractionPipelines.length > 0
+        ? opts.extractionPipelines.join(", ")
+        : "none (install markitdown to enable document conversion)",
+  };
 
-  if (!template.includes(staticPlaceholder)) {
-    // Fail loudly in dev rather than silently serving placeholders.
-    console.warn(
-      "[skill.md] dynamic Node Info block not found in SKILL.md — served doc will contain (dynamic) placeholders",
-    );
+  let out = template;
+  for (const [token, value] of Object.entries(values)) {
+    // Function replacement: `value` is inserted verbatim, `$` and all.
+    out = out.replaceAll(`{{${token}}}`, () => value);
   }
+  return out;
+}
 
-  return template.replace(staticPlaceholder, dynamicSection);
+/** Tokens SKILL.md must carry for `buildSkillMd` to produce a complete doc. */
+export const REQUIRED_SKILL_TOKENS = Object.freeze([
+  "nodeVersion",
+  "baseUrl",
+  "peerId",
+  "nodeRole",
+  "extractionPipelines",
+]);
+
+/**
+ * Validate that the template still carries every token, ONCE at load time
+ * rather than warning on every request. Returns the missing token names.
+ */
+export function missingSkillTokens(template: string = loadSkillTemplate()): string[] {
+  return REQUIRED_SKILL_TOKENS.filter((t) => !template.includes(`{{${t}}}`));
 }
 
 export function skillEtag(content: string): string {
