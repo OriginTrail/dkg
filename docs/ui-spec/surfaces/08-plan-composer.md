@@ -63,3 +63,11 @@ segmented pool bars w/ --usage-seg-*/--usage-query tokens + plain legend
 (D9) · playground before/after linkage w/ Pool chip (D10) · Recent-activity
 list, key-filterable, on Plans (D11) · Access restored to nav + runthrough
 (D12).
+
+## Part-0 revision (2026-08-25): separate meters
+The shared value-denominated pool is REMOVED from P5. Per-offering meters in
+native units only; one display-only "Plan overall" readout line (never a
+limit); composer Advanced = max price + pinning (pool toggle gone); the
+segmented bar is superseded by one plain bar per offering, each with
+sparkline + one pace sentence. Nav: Plans/Access/Operate are collapsible
+children of "Neurosymbolic Marketplace".

@@ -68,3 +68,15 @@ a provider adds exactly that one seller. Re-shot; verified 01 desktop.
 **Round 8:** catalog cards were missing the serving node — added "via
 <node>" lines on all five cards (inference and query), each name linking to
 the node storefront; 14B corrected to its actual single provider.
+
+**Round 9 (Part-0 consolidated correction + nav instruction):** shared pool
+removed everywhere — four per-offering bars in native units (gpt-5.x now has
+its own), "Plan overall: 34%" as an explicit readout-not-limit, per-meter
+sparkline + single pace sentence (amber early-exhaustion on 14B), ceiling-hit
+state renamed to show other meters stay usable and the fork line says so;
+composer previews per-offering, pool toggle deleted from Advanced; playground
+before/after now moves the knowledge meter chip (92→91% left); model page
+carries ONE meter chip at the title, seller rows show "included in your
+plan". Nav restructured per operator: "Neurosymbolic Marketplace ▾" parent
+with Plans/Access/Operate as indented collapsible children; center tab
+renamed. Verified on 05 desktop.

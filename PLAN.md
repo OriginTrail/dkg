@@ -29,9 +29,9 @@ the tab-rail migration plan. Statuses here get re-stamped as phases land.
 |---|---|---|
 | G1 | `AskCommitment` — per-period ask in offer KA, edits land next cycle | 2 |
 | G2 | `Plan` object (period, allocations[], `fundingSource` seam) | 2 |
-| G3 | `Allowance` — scoped (unit-denominated) & shared (value at frozen asks, one seller) with admission/delivery decrements, expiry, top-up | 2 |
+| G3 | `Allowance` — **per-offering only (Part-0 correction 2026-08-25): every model/knowledge service meters itself in native units; NO shared value-denominated pool in P5** (cross-offering credit = RFC seam); admission/delivery decrements, expiry, top-up | 2 |
 | G4 | Price-cap ceiling guarantee (allocation ÷ committed ask; cheaper routing beats floor) | 2 |
-| G5 | Router: request names model → subscribed-seller resolution under price cap, pins/provenance prefs; 402 fork (wait/upgrade/top-up) | 2 |
+| G5 | Router: request names model → subscribed-seller resolution under max price, pins; 402 fork (Top up + wait/switch line; one ceiling hit leaves other meters usable) | 2 |
 | G6 | Query offerings: Query Cost Schedule KA (content-addressed), unit computation both seats, admission+delivery decrement split, guard-abort semantics | 2 |
 | G7 | Both-sides metering journals (no delivery → no decrement) | 2 |
 | G8 | Statements: per-pair period totals, co-sign, publish as KA in curated CG; dispute engine = P4 per-leg verifiers over hash-chained logs | 2 |

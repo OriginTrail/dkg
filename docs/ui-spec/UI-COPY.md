@@ -372,3 +372,20 @@ unit basis. These words may appear only one reveal deeper (drawers, tooltips).
 
 Removed (D7): `meter.expired.tip` former text ("What you don't use funds the
 network…") — false in P5; unused value accrues to the seller until the RFC.
+
+---
+
+# Part-0 revision (separate meters) — supersedes pool keys above
+
+The shared value-denominated pool is removed from P5. Superseded keys:
+`meter.pool.line` · `meter.line.shared` · `composer.pool.one` ·
+`composer.pool.separate` · `meter.legend` · `play.pool` · `composer.shared*`
+· `composer.scoped*` · `meter.separate.label`. Replacements:
+
+| key | string |
+|---|---|
+| meter.summary | Plan overall: {pct}% of this period's value used |
+| meter.summary.note | A readout, not a limit — each meter below is its own ceiling. |
+| meter.offering.line | {offering} — {pct}% used · Resets in {t} |
+| meter.offering.tap | {used} of {ceiling} {unit} · ${usd} spent |
+| composer.preview.offering | ≈ {ceiling} {unit} per period |

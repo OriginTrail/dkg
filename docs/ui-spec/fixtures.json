@@ -277,73 +277,6 @@
         }
       ]
     },
-    "allowances": [
-      {
-        "kind": "shared",
-        "seller": "okf-mainnet",
-        "scope": [
-          "Qwen2.5 14B ⛓",
-          "Qwen2.5 7B ⛓",
-          "gpt-5.x ☁",
-          "okf knowledge (query)"
-        ],
-        "ceilingValueMicro": 2800000,
-        "consumedValueMicro": 1064000,
-        "pct": 38,
-        "itemized": [
-          {
-            "offering": "Qwen2.5 14B",
-            "units": 1080000,
-            "unit": "tokens",
-            "valueMicro": 649000,
-            "usd": 0.18,
-            "segPct": 61,
-            "segToken": "--usage-seg-1"
-          },
-          {
-            "offering": "Qwen2.5 7B",
-            "units": 760000,
-            "unit": "tokens",
-            "valueMicro": 266000,
-            "usd": 0.07,
-            "segPct": 25,
-            "segToken": "--usage-seg-2"
-          },
-          {
-            "offering": "gpt-5.x",
-            "units": 77000,
-            "unit": "tokens",
-            "valueMicro": 85000,
-            "usd": 0.02,
-            "segPct": 8,
-            "segToken": "--usage-seg-3"
-          },
-          {
-            "offering": "okf knowledge",
-            "units": 4200,
-            "unit": "query units",
-            "valueMicro": 64000,
-            "usd": 0.02,
-            "segPct": 6,
-            "segToken": "--usage-query"
-          }
-        ],
-        "usdConsumed": 0.3,
-        "usdCeiling": 0.78,
-        "legend": "Mostly Qwen 14B (61%) · Qwen 7B 25% · gpt-5.x 8% · queries 6%"
-      },
-      {
-        "kind": "scoped",
-        "seller": "hermes",
-        "offering": "Qwen2.5 7B ⛓",
-        "unit": "tokens",
-        "ceilingUnits": 5000000,
-        "consumedUnits": 1200000,
-        "pct": 24,
-        "guaranteedFloor": 5000000,
-        "note": "At least 5M tokens at your max price — routed cheaper twice, +140k extra"
-      }
-    ],
     "meterStates": {
       "normal": {
         "pct": 38
@@ -470,41 +403,12 @@
       "freshNodeToFirstMeteredSeconds": null,
       "target": "< 60 s mainnet"
     },
-    "pace": {
-      "okfPool": {
-        "spark": [
-          2,
-          3,
-          3,
-          4,
-          6,
-          9,
-          12
-        ],
-        "projection": "At this pace: runs out ~4 days before reset",
-        "tone": "warn"
-      },
-      "hermes": {
-        "spark": [
-          2,
-          2,
-          3,
-          2,
-          3,
-          2,
-          3
-        ],
-        "projection": "On track to reset",
-        "tone": "quiet"
-      }
-    },
     "chips": {
       "qwen14b": "76% left",
       "qwen7b": "88% left",
       "gpt": "62% left",
       "knowledge": "92% left",
-      "pool": "62% left",
-      "poolAfter": "61% left"
+      "knowledgeAfter": "91% left"
     },
     "activity": [
       {
@@ -585,6 +489,92 @@
           "to": "0x…hermes revenue wallet"
         }
       ]
-    }
+    },
+    "planSummary": {
+      "pct": 34,
+      "note": "readout, not a limit"
+    },
+    "meters": [
+      {
+        "offering": "Qwen2.5 14B",
+        "via": "okf-mainnet",
+        "pct": 24,
+        "used": "1.08M",
+        "ceiling": "4.5M",
+        "unit": "tokens",
+        "usd": 0.18,
+        "spark": [
+          2,
+          3,
+          3,
+          4,
+          6,
+          9,
+          12
+        ],
+        "projection": "At this pace: runs out ~4 days before reset",
+        "tone": "warn"
+      },
+      {
+        "offering": "Qwen2.5 7B",
+        "via": "hermes · okf-mainnet",
+        "pct": 12,
+        "used": "0.9M",
+        "ceiling": "7.6M",
+        "unit": "tokens",
+        "usd": 0.08,
+        "spark": [
+          2,
+          2,
+          3,
+          2,
+          3,
+          2,
+          3
+        ],
+        "projection": "On track to reset",
+        "tone": "quiet"
+      },
+      {
+        "offering": "gpt-5.x",
+        "via": "okf-mainnet",
+        "pct": 38,
+        "used": "77k",
+        "ceiling": "200k",
+        "unit": "tokens",
+        "usd": 0.02,
+        "spark": [
+          1,
+          2,
+          2,
+          3,
+          3,
+          4,
+          4
+        ],
+        "projection": "On track to reset",
+        "tone": "quiet"
+      },
+      {
+        "offering": "okf knowledge",
+        "via": "okf-mainnet",
+        "pct": 9,
+        "used": "4,200",
+        "ceiling": "50k",
+        "unit": "query units",
+        "usd": 0.02,
+        "spark": [
+          1,
+          1,
+          2,
+          1,
+          2,
+          2,
+          2
+        ],
+        "projection": "On track to reset",
+        "tone": "quiet"
+      }
+    ]
   }
 }

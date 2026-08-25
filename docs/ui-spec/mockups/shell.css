@@ -51,3 +51,7 @@
 a.btn { text-decoration:none; display:inline-flex; align-items:center; justify-content:center; }
 .dkg-nav a.row, .dkg-tabs a.t { text-decoration:none; }
 a.chip, a.stmt, a.mopt, a.poolchip { text-decoration:none; cursor:pointer; }
+/* collapsible marketplace group (operator instruction 2026-08-25) */
+.dkg-nav .row .car { margin-left:auto; color:var(--text-muted); font-size:var(--fs-xs); }
+.dkg-nav .subnav { display:flex; flex-direction:column; }
+.dkg-nav .row.sub { padding-left:calc(var(--sp-3) + var(--sp-5)); font-size:var(--fs-sm); }
