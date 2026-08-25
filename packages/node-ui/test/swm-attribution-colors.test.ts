@@ -71,15 +71,38 @@ describe('buildAgentColorMap (GH#1128)', () => {
     }
   });
 
-  it('crossing the palette boundary does not recolour the agents below it', () => {
+  // PR #2333 review — an earlier version of this test claimed the agents below
+  // the boundary keep their colours, but asserted only cardinality, so it would
+  // have passed while every one of them moved. Measured: adding a ninth agent
+  // recolours 3 of the existing 8.
+  //
+  // That is inherent, not a defect. Distinctness requires coordinating slots
+  // across the whole set, so assignment MUST depend on set membership;
+  // per-agent stability would mean going back to the raw hash, which is the
+  // collision this issue is about. #1128 asks for distinct colours, so
+  // distinctness wins and colours may permute when the roster changes.
+  //
+  // What IS guaranteed, and what these assert:
+  it('is fully determined by the agent set — same membership, same colours', () => {
     const eight = COLLIDING.concat(
       Array.from({ length: 3 }, (_, i) => `did:dkg:agent:0x${i.toString(16).padStart(40, 'f')}`),
     );
-    const before = buildAgentColorMap(eight);
+    // The load-bearing property: a re-render with unchanged membership must not
+    // move the legend, in any input order.
+    const a = [...buildAgentColorMap(eight).entries()].sort();
+    const b = [...buildAgentColorMap([...eight].reverse()).entries()].sort();
+    expect(b).toEqual(a);
+  });
+
+  it('adding a ninth agent still leaves every agent distinctly coloured', () => {
+    const eight = COLLIDING.concat(
+      Array.from({ length: 3 }, (_, i) => `did:dkg:agent:0x${i.toString(16).padStart(40, 'f')}`),
+    );
     const after = buildAgentColorMap(eight.concat('did:dkg:agent:0x' + 'e'.repeat(40)));
+    // All 8 slots still in use, and the originally-colliding five still apart —
+    // colours may have permuted, but nothing collapsed.
     expect(new Set(after.values()).size).toBe(8);
     expect(new Set(COLLIDING.map((a) => after.get(a))).size).toBe(COLLIDING.length);
-    expect(before.size).toBe(8);
   });
 
   it('returns an empty map for no agents', () => {
