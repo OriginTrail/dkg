@@ -7,6 +7,7 @@ import {
   ASSERTION_SEAL_PREDICATES,
   CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+  MEMBER_ROSTER_OBJECT_TYPE_V1,
   MemoryLayer,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAssertionSealQuads,
@@ -33,6 +34,7 @@ import {
   type NetworkIdV1,
   type TimestampMsV1,
   type UnsignedContextGraphPolicyEnvelopeV1,
+  type UnsignedMemberRosterEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -61,6 +63,7 @@ import {
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationConfigV1,
   resolveRfc64PublicCatalogControlsV1,
+  type Rfc64CatalogActivationInputV1,
   type Rfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import type {
@@ -207,6 +210,7 @@ interface NativeAgentStartOptionsV1 {
   }>;
   readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   readonly bootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
+  readonly catalogActivation?: Rfc64CatalogActivationInputV1;
   readonly activation?: Rfc64PublicCatalogActivationInputV1;
   readonly persistentStorePath?: string;
   readonly networkIdentityChainId?: NetworkIdV1;
@@ -223,9 +227,12 @@ async function startNativeAgentWithOptions(
     finalizedRuntime,
     autoPublish,
     bootstrap,
+    catalogActivation,
     activation,
     persistentStorePath,
-    networkIdentityChainId = activation === undefined ? undefined : deployment.networkId,
+    networkIdentityChainId = activation === undefined && catalogActivation === undefined
+      ? undefined
+      : deployment.networkId,
   } = options;
   const dataDir = existingDataDir
     ?? await mkdtemp(join(tmpdir(), `dkg-rfc64-native-${name}-`));
@@ -250,10 +257,12 @@ async function startNativeAgentWithOptions(
         chainId: networkIdentityChainId,
       },
     }),
-    ...(activation === undefined ? {
+    ...(activation === undefined && catalogActivation === undefined ? {
       rfc64CatalogDeploymentProfile: deployment,
       rfc64PublicCatalogAutoPublish: autoPublish,
       rfc64PublicCatalogBootstrap: bootstrap,
+    } : catalogActivation !== undefined ? {
+      rfc64CatalogActivation: catalogActivation,
     } : {
       rfc64PublicCatalogActivation: activation,
     }),
@@ -2489,6 +2498,242 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
     })).toBeNull();
   }, 60_000);
+
+  it('reports the real private finalized missing-placement path as known-incomplete', async () => {
+    const providerAgentAddress = `0x${'91'.repeat(20)}` as EvmAddressV1;
+    const coldAgentAddress = `0x${'92'.repeat(20)}` as EvmAddressV1;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
+    const firstAsset = Object.freeze({
+      assertionRoot: ASSERTION_ROOT,
+      assertionVersion: '1',
+      authorAddress: AUTHOR,
+      kaId: ((BigInt(AUTHOR) << 96n) | 41n).toString(),
+      publisherAddress: AUTHOR,
+    });
+    const secondAsset = Object.freeze({
+      assertionRoot: ASSERTION_ROOT,
+      assertionVersion: '1',
+      authorAddress: AUTHOR,
+      kaId: ((BigInt(AUTHOR) << 96n) | 42n).toString(),
+      publisherAddress: AUTHOR,
+    });
+    const fixture = (assets: readonly typeof firstAsset[]) => Object.freeze({
+      accessPolicy: 1 as const,
+      active: true,
+      assertedAtChainId: NATIVE_DEPLOYMENT.assertedAtChainId,
+      assertedAtKav10Address: KAV10,
+      knowledgeAssetStorageAddress: KA_STORAGE,
+      assets: Object.freeze([...assets]),
+      blockHash: FINALIZED_BLOCK_HASH,
+      blockNumberQuantity: '0x7c',
+      contextGraphStorageAddress: CONTEXT_GRAPH_STORAGE,
+      nameHash: nameHash as Digest32V1,
+      networkId: NETWORK_ID,
+      onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+      publishPolicy: 0 as const,
+    } satisfies FinalizedVmLoopbackFixtureConfigV1);
+    const emptyFixture = fixture([]);
+    const providerFixture = fixture([firstAsset]);
+    const coldFixture = fixture([firstAsset, secondAsset]);
+    let providerRpc = createFinalizedVmLoopbackRpcV1(emptyFixture);
+    const providerRpcServer = await rpcHarness.start((call, response) => {
+      try {
+        sendJsonRpcResult(response, call, providerRpc.respond(call.method, call.params));
+      } catch (cause) {
+        sendJsonRpcError(
+          response,
+          call,
+          -32602,
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      }
+    });
+    const coldRpc = createFinalizedVmLoopbackRpcV1(coldFixture);
+    const coldRpcServer = await rpcHarness.start((call, response) => {
+      try {
+        sendJsonRpcResult(response, call, coldRpc.respond(call.method, call.params));
+      } catch (cause) {
+        sendJsonRpcError(
+          response,
+          call,
+          -32602,
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      }
+    });
+
+    const policy: ContextGraphPolicyV1 = {
+      ...finalizedPublicCatalogPolicy({ publishPolicy: 0, publishAuthority: AUTHOR }),
+      accessPolicy: 1,
+    };
+    const policyEnvelope = {
+      issuer: CONTEXT_GRAPH_STORAGE,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+      payload: policy,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedContextGraphPolicyEnvelopeV1;
+    const policyDigest = computeContextGraphPolicyObjectDigestV1(policyEnvelope);
+    const roster: MemberRosterV1 = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownershipTransitionDigest: null,
+      era: '0',
+      version: '0',
+      previousRosterDigest: null,
+      policyDigest,
+      administrativeDelegationDigest: null,
+      members: [AUTHOR, providerAgentAddress, coldAgentAddress].map((agentAddress) => ({
+        agentAddress,
+        roles: ['holder', 'provider'] as const,
+      })),
+      issuedAt: policy.issuedAt,
+    };
+    const rosterEnvelope = {
+      issuer: CONTEXT_GRAPH_STORAGE,
+      objectType: MEMBER_ROSTER_OBJECT_TYPE_V1,
+      payload: roster,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedMemberRosterEnvelopeV1;
+
+    const authorPeerAddresses = new Map<string, EvmAddressV1>();
+    const author = await startNativeAgentWithOptions({
+      name: 'private-incomplete-author',
+      networkIdentityChainId: NETWORK_ID,
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async (peerId) => authorPeerAddresses.get(peerId) ?? null,
+      },
+    });
+    const providerAdapter = new FinalizedVmLoopbackMockChainAdapterV1(emptyFixture);
+    await providerAdapter.createOnChainContextGraph({
+      accessPolicy: 1,
+      publishPolicy: 0,
+      nameHash,
+    });
+    const providerPeerAddresses = new Map<string, EvmAddressV1>([
+      [author.peerId, AUTHOR],
+    ]);
+    const provider = await startNativeAgentWithOptions({
+      name: 'private-incomplete-provider',
+      networkIdentityChainId: NETWORK_ID,
+      accessPolicyAuthority: {
+        localAgentAddress: providerAgentAddress,
+        resolveRemoteAgentAddress: async (peerId) => (
+          providerPeerAddresses.get(peerId) ?? coldAgentAddress
+        ),
+      },
+      finalizedRuntime: {
+        rpcUrl: providerRpcServer.url,
+        chainAdapter: providerAdapter,
+      },
+    });
+    authorPeerAddresses.set(provider.peerId, providerAgentAddress);
+    for (const agent of [author, provider]) {
+      agent.acceptRfc64CatalogAccessSnapshotV1({ policy, policyDigest, roster });
+    }
+    await connectBothWays(author, provider);
+    const scope = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: '20430',
+      governanceContractAddress: CONTEXT_GRAPH_STORAGE,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    } as const;
+    const genesis = await author.publishAuthorCatalogGenesisV1({
+      scope,
+      author: AUTHOR_WALLET,
+      peers: [provider.peerId],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
+    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    })?.currentCatalogHeadDigest).toBe(genesis.headObjectDigest);
+
+    providerRpc = createFinalizedVmLoopbackRpcV1(providerFixture);
+    const successor = await author.publishAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest,
+        signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [{
+        assertionCoordinate: 'private-incomplete-41' as never,
+        projectionBytes: PROJECTION,
+        seal: await authorSeal(41n),
+      }],
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [provider.peerId],
+    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    })?.currentCatalogHeadDigest).toBe(successor.headObjectDigest);
+
+    const coldAdapter = new FinalizedVmLoopbackMockChainAdapterV1(coldFixture);
+    await coldAdapter.createOnChainContextGraph({
+      accessPolicy: 1,
+      publishPolicy: 0,
+      nameHash,
+    });
+    const cold = await startNativeAgentWithOptions({
+      name: 'private-incomplete-cold',
+      finalizedRuntime: {
+        rpcUrl: coldRpcServer.url,
+        chainAdapter: coldAdapter,
+        initialSubscription: CONTEXT_GRAPH_ID,
+      },
+      catalogActivation: {
+        enabled: true,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        accessPolicyAuthority: {
+          localAgentAddress: coldAgentAddress,
+          peerAgentBindings: [{
+            peerId: provider.peerId,
+            agentAddress: providerAgentAddress,
+          }],
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope,
+            rosterEnvelope,
+            targets: [{ authorAddress: AUTHOR, providers: [provider.peerId] }],
+            completeSwmProviders: [provider.peerId],
+          }],
+          retryIntervalMs: 0,
+        },
+      },
+    });
+    providerPeerAddresses.set(cold.peerId, coldAgentAddress);
+    await cold.whenRfc64PublicCatalogBootstrapIdleV1();
+
+    expect(cold.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+      outcome: 'known-incomplete',
+      completionReason: 'no-authorized-provider',
+      providerPeerId: null,
+      appliedHeadDigest: null,
+    });
+    expect(cold.readRfc64PublicCatalogReconciliationFailureV1(
+      successor.headObjectDigest,
+    )).toMatchObject({
+      errorName: 'Rfc64PublicCatalogNativeReceiverErrorV1',
+      errorCode: 'catalog-native-receiver-activation',
+      causeCode: 'finalized-vm-composition-incomplete',
+    });
+  }, 90_000);
 
   it('leaves the applied head null for finalized-chain policy in the dormant SWM-only lane', async () => {
     const [author, receiver] = await Promise.all([

@@ -70,6 +70,13 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void;
+  /**
+   * Called once when a distinct exact-head schedule request starts. This also
+   * clears a stale result when bounded admission later rejects that request.
+   */
+  readonly onAttemptStart?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ) => void;
   readonly onError?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     error: unknown,
@@ -167,6 +174,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #maxProvidersPerHead: number;
   readonly #retryBackoffMs: number;
   readonly #onHeadApplied?: Rfc64PublicCatalogReceiverOptionsV1['onHeadApplied'];
+  readonly #onAttemptStart?: Rfc64PublicCatalogReceiverOptionsV1['onAttemptStart'];
   readonly #onError?: Rfc64PublicCatalogReceiverOptionsV1['onError'];
 
   readonly #queue: ReceiverTaskV1[] = [];
@@ -232,6 +240,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     );
     this.#isDeferrableError = options.isDeferrableError ?? DEFAULT_DEFERRABLE_ERROR;
     this.#onHeadApplied = options.onHeadApplied;
+    this.#onAttemptStart = options.onAttemptStart;
     this.#onError = options.onError;
   }
 
@@ -273,6 +282,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         }
         continue;
       }
+      this.#safeNotify(() => this.#onAttemptStart?.(announcement));
       if (this.#queue.length >= this.#maxQueue) {
         this.#droppedQueueFull += 1;
         continue;

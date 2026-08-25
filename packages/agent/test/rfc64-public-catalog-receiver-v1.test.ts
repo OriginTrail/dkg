@@ -234,14 +234,16 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
 
   it('drops distinct heads when the bounded queue is full', async () => {
     const gate = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const onAttemptStart = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(
       reconciler(async () => gate.promise),
-      { maxConcurrent: 1, maxQueue: 1 },
+      { maxConcurrent: 1, maxQueue: 1, onAttemptStart },
     );
     receiver.schedule(headWith(`0x${'a1'.repeat(32)}`), 'peer');
     receiver.schedule(headWith(`0x${'a2'.repeat(32)}`), 'peer');
     receiver.schedule(headWith(`0x${'a3'.repeat(32)}`), 'peer');
     expect(receiver.stats().droppedQueueFull).toBe(1);
+    expect(onAttemptStart).toHaveBeenCalledTimes(3);
     gate.resolve('not-found');
     await receiver.whenIdle();
   });
@@ -269,6 +271,23 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     await receiver.whenIdle();
     expect(onError).toHaveBeenCalledTimes(1);
     expect(receiver.stats()).toMatchObject({ failed: 1, applied: 0 });
+  });
+
+  it('starts a new semantic attempt only after the prior same-head task is terminal', async () => {
+    const onAttemptStart = vi.fn();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => { throw new Error('terminal'); }),
+      { maxAttempts: 1, retryBackoffMs: 0, onAttemptStart },
+    );
+    const head = announcement();
+    receiver.schedule(head, 'peerA');
+    receiver.schedule(head, 'peerB');
+    await receiver.whenIdle();
+    expect(onAttemptStart).toHaveBeenCalledTimes(1);
+
+    receiver.schedule(head, 'peerA');
+    await receiver.whenIdle();
+    expect(onAttemptStart).toHaveBeenCalledTimes(2);
   });
 
   it('serializes different heads in one catalog scope', async () => {

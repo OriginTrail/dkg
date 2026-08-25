@@ -12,6 +12,7 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { Rfc64CatalogSynchronizationErrorV1 } from './dkg-agent-rfc64-catalog-sync.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type {
   Rfc64CatalogBootstrapConfigV1,
@@ -24,7 +25,6 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 const MAX_STATUS_ERROR_BYTES_V1 = 1024;
 const MAX_CONCURRENT_TARGETS_V1 = 4;
 const COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1 = 10_000;
-const PRIVATE_VM_INCOMPLETE_ERROR_CODE_V1 = 'finalized-vm-composition-incomplete';
 const UTF8 = new TextEncoder();
 
 export type Rfc64PublicCatalogBootstrapOutcomeV1 =
@@ -68,7 +68,8 @@ export function classifyRfc64CatalogBootstrapFailureV1(
   completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
 }> {
   const knownIncomplete = requiresPrivateVm
-    && hasErrorCodeV1(error, PRIVATE_VM_INCOMPLETE_ERROR_CODE_V1);
+    && error instanceof Rfc64CatalogSynchronizationErrorV1
+    && error.terminalReason === 'no-authorized-provider';
   return Object.freeze({
     outcome: knownIncomplete
       ? 'known-incomplete'
@@ -438,17 +439,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         ? {}
         : { retryIntervalMs: legacy.retryIntervalMs }),
     });
-  }
-}
-
-function hasErrorCodeV1(error: unknown, expected: string): boolean {
-  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
-    return false;
-  }
-  try {
-    return (error as { readonly code?: unknown }).code === expected;
-  } catch {
-    return false;
   }
 }
 

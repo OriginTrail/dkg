@@ -2,13 +2,28 @@
 
 import type { Digest32V1 } from '@origintrail-official/dkg-core';
 
+import { FinalizedVmCompositionErrorV1 } from './finalized-vm-composer-v1.js';
+import { Rfc64PublicCatalogNativeReceiverErrorV1 } from './public-catalog-native-receiver-v1.js';
+
+/** User-visible terminal meanings emitted once at the receiver boundary. */
+export type Rfc64CatalogReconciliationTerminalReasonV1 =
+  | 'no-authorized-provider';
+
 /** Stable process-local evidence for one scheduler-terminal reconciliation failure. */
 export interface Rfc64PublicCatalogReconciliationFailureV1 {
   readonly catalogHeadDigest: Digest32V1;
   readonly errorName: string;
   readonly errorCode: string | null;
-  /** Stable immediate/deep cause code when a typed receiver wrapper retained it. */
+  /** Stable immediate cause code retained for diagnostics only. */
   readonly causeCode?: string;
+}
+
+/** Result of the most recently started scheduler attempt for one exact head. */
+export interface Rfc64CatalogReconciliationAttemptFailureV1 {
+  readonly catalogHeadDigest: Digest32V1;
+  readonly terminalReason: Rfc64CatalogReconciliationTerminalReasonV1 | null;
+  readonly errorName: string;
+  readonly errorCode: string | null;
 }
 
 /** Hard process-memory bound for distinct terminal receiver failures. */
@@ -23,27 +38,40 @@ const STABLE_ERROR_TOKEN_V1 = /^[A-Za-z][A-Za-z0-9._:-]*$/;
  */
 export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
   readonly #failures = new Map<Digest32V1, Rfc64PublicCatalogReconciliationFailureV1>();
+  readonly #currentAttemptFailures = new Map<
+    Digest32V1,
+    Rfc64CatalogReconciliationAttemptFailureV1
+  >();
+
+  /** Start a new semantic attempt without changing immutable diagnostic history. */
+  beginAttempt(catalogHeadDigest: Digest32V1): void {
+    this.#currentAttemptFailures.delete(catalogHeadDigest);
+  }
 
   /** Scheduler-terminal callback sink. The first failure for one head wins. */
-  record(catalogHeadDigest: Digest32V1, error: unknown): void {
-    if (this.#failures.has(catalogHeadDigest)) return;
-    if (
-      this.#failures.size
-      >= RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1
-    ) {
-      const oldestCatalogHeadDigest = this.#failures.keys().next().value as
-        | Digest32V1
-        | undefined;
-      if (oldestCatalogHeadDigest !== undefined) {
-        this.#failures.delete(oldestCatalogHeadDigest);
-      }
+  record(
+    catalogHeadDigest: Digest32V1,
+    error: unknown,
+    terminalReason: Rfc64CatalogReconciliationTerminalReasonV1 | null = null,
+  ): void {
+    const errorName = stableErrorNameV1(error);
+    const errorCode = stableErrorCodeV1(error);
+    const causeCode = stableImmediateCauseCodeV1(error);
+    if (!this.#failures.has(catalogHeadDigest)) {
+      evictOldestWhenFullV1(this.#failures);
+      this.#failures.set(catalogHeadDigest, Object.freeze({
+        catalogHeadDigest,
+        errorName,
+        errorCode,
+        ...(causeCode === null ? {} : { causeCode }),
+      }));
     }
-    const causeCode = stableCauseCodeV1(error);
-    this.#failures.set(catalogHeadDigest, Object.freeze({
+    evictOldestWhenFullV1(this.#currentAttemptFailures);
+    this.#currentAttemptFailures.set(catalogHeadDigest, Object.freeze({
       catalogHeadDigest,
-      errorName: stableErrorNameV1(error),
-      errorCode: stableErrorCodeV1(error),
-      ...(causeCode === null ? {} : { causeCode }),
+      terminalReason,
+      errorName,
+      errorCode,
     }));
   }
 
@@ -52,8 +80,15 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
     return failure === undefined ? null : failure;
   }
 
+  readCurrentAttempt(
+    catalogHeadDigest: Digest32V1,
+  ): Rfc64CatalogReconciliationAttemptFailureV1 | null {
+    return this.#currentAttemptFailures.get(catalogHeadDigest) ?? null;
+  }
+
   clear(): void {
     this.#failures.clear();
+    this.#currentAttemptFailures.clear();
   }
 
   /** Internal test/diagnostic bound assertion; never exposed on DKGAgent. */
@@ -85,14 +120,8 @@ function stableErrorCodeV1(error: unknown): string | null {
   return stableErrorTokenV1(candidate);
 }
 
-function stableCauseCodeV1(error: unknown): string | null {
-  let current = readCauseV1(error);
-  for (let depth = 0; current !== null && depth < 8; depth += 1) {
-    const code = stableErrorCodeV1(current);
-    if (code !== null) return code;
-    current = readCauseV1(current);
-  }
-  return null;
+function stableImmediateCauseCodeV1(error: unknown): string | null {
+  return stableErrorCodeV1(readCauseV1(error));
 }
 
 function readCauseV1(error: unknown): unknown | null {
@@ -113,4 +142,28 @@ function stableErrorTokenV1(value: unknown): string | null {
     && STABLE_ERROR_TOKEN_V1.test(value)
     ? value
     : null;
+}
+
+function evictOldestWhenFullV1<T>(map: Map<Digest32V1, T>): void {
+  if (map.size < RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1) return;
+  const oldestCatalogHeadDigest = map.keys().next().value as Digest32V1 | undefined;
+  if (oldestCatalogHeadDigest !== undefined) map.delete(oldestCatalogHeadDigest);
+}
+
+/**
+ * Translate the one supported low-level private-VM terminal condition at the
+ * receiver boundary. No message parsing or recursive cause traversal is used.
+ */
+export function classifyRfc64CatalogReconciliationTerminalReasonV1(
+  error: unknown,
+): Rfc64CatalogReconciliationTerminalReasonV1 | null {
+  if (
+    error instanceof Rfc64PublicCatalogNativeReceiverErrorV1
+    && error.code === 'catalog-native-receiver-activation'
+    && error.cause instanceof FinalizedVmCompositionErrorV1
+    && error.cause.code === 'finalized-vm-composition-incomplete'
+  ) {
+    return 'no-authorized-provider';
+  }
+  return null;
 }
