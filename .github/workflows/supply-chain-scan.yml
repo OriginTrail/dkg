@@ -717,9 +717,10 @@ jobs:
             fi
           fi
 
-          # Acquire controller provenance/tree state and GitHub's effective
-          # branch rules once. The hard gate consumes the same structured
-          # verdict; this job changes only presentation and severity.
+          # Scheduled reporting composes the prerequisite inspection with the
+          # controller-tree freshness inspection. The per-PR hard gate runs
+          # only the prerequisite half, so optional contents-API drift checks
+          # cannot block protected-history or ruleset enforcement.
           POLICY_SNAPSHOT="${RUNNER_TEMP}/ci-policy-snapshot.json"
           node scripts/ci/inspect-ci-policy.mjs \
             --mode report \

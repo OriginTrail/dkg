@@ -10,8 +10,10 @@ import {
 } from '../../ci/enforce-zizmor-sarif.mjs';
 import {
   ciPolicyModeExitCode,
-  inspectCiPolicy,
+  inspectCiPolicyFreshness,
+  inspectCiPolicyPrerequisites,
   parseCiPolicyArguments,
+  runCiPolicyInspector,
 } from '../../ci/inspect-ci-policy.mjs';
 import {
   CONTROLLER_POLICY_FILES,
@@ -221,7 +223,7 @@ test('testnet delta rollout requires PRs, merge queue, and both aggregate gates'
   }).ok, false, 'an excluded, inactive, or other-branch ruleset is absent from effective rules');
 });
 
-test('one effective policy snapshot drives hard-gate and informational modes', async () => {
+test('prerequisite inspection excludes freshness-only acquisition', async () => {
   const requestedEndpoints = [];
   const effectiveRules = [
     { type: 'pull_request', ruleset_id: 1 },
@@ -247,10 +249,23 @@ test('one effective policy snapshot drives hard-gate and informational modes', a
     if (endpoint.includes('/contents/')) return { sha: 'same-controller-blob' };
     throw new Error(`unexpected endpoint: ${endpoint}`);
   };
-  const snapshot = await inspectCiPolicy({
+  const prerequisites = await inspectCiPolicyPrerequisites({
     repository: 'OriginTrail/dkg',
     branch: 'testnet-canary',
     workflows: [{ sourceName: 'fixture.yml', source: workflowFixture() }],
+    token: 'test-token',
+    requestJson,
+  });
+  assert.equal(prerequisites.prerequisites.ok, true);
+  assert.equal('freshness' in prerequisites, false);
+  assert.equal(
+    requestedEndpoints.some((endpoint) => endpoint.includes('/contents/')),
+    false,
+    'the merge prerequisite gate must not acquire controller-tree freshness',
+  );
+
+  const snapshot = await inspectCiPolicyFreshness({
+    prerequisites,
     token: 'test-token',
     requestJson,
   });
@@ -261,6 +276,10 @@ test('one effective policy snapshot drives hard-gate and informational modes', a
   assert.ok(requestedEndpoints.includes(
     'repos/OriginTrail/dkg/rules/branches/testnet-canary?per_page=100&page=1',
   ));
+  assert.equal(
+    requestedEndpoints.filter((endpoint) => endpoint.includes('/contents/')).length,
+    CONTROLLER_POLICY_FILES.length * 2,
+  );
   assert.equal(requestedEndpoints.some((endpoint) => endpoint.includes('/rulesets')), false);
 
   const missingPrerequisites = { ...snapshot, prerequisites: { ok: false } };
@@ -307,7 +326,7 @@ test('effective policy inspection reads every rules page and rejects malformed p
     workflows: [{ sourceName: 'fixture.yml', source: workflowFixture() }],
     token: 'test-token',
   };
-  const snapshot = await inspectCiPolicy({ ...input, requestJson });
+  const snapshot = await inspectCiPolicyPrerequisites({ ...input, requestJson });
   assert.equal(snapshot.prerequisites.ok, true);
   assert.deepEqual(requestedRulePages, [
     `${effectiveRulesEndpoint}?per_page=100&page=1`,
@@ -315,7 +334,7 @@ test('effective policy inspection reads every rules page and rejects malformed p
   ]);
 
   await assert.rejects(
-    inspectCiPolicy({
+    inspectCiPolicyPrerequisites({
       ...input,
       requestJson: async (endpoint) => (
         endpoint.startsWith(effectiveRulesEndpoint) ? {} : requestJson(endpoint)
@@ -323,6 +342,85 @@ test('effective policy inspection reads every rules page and rejects malformed p
     }),
     /returned a non-array page/,
   );
+});
+
+test('executable policy inspector preserves enforce and report exit boundaries', async (t) => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ci-policy-inspector-'));
+  t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
+  const workflowPath = path.join(temporaryDirectory, 'workflow.yml');
+  const outputPath = path.join(temporaryDirectory, 'snapshot.json');
+  fs.writeFileSync(workflowPath, workflowFixture());
+
+  const validRules = [
+    { type: 'pull_request', ruleset_id: 1 },
+    { type: 'merge_queue', ruleset_id: 1 },
+    {
+      type: 'required_status_checks',
+      ruleset_id: 1,
+      parameters: {
+        required_status_checks: [
+          { context: 'CI gate' },
+          { context: 'EVM integration gate' },
+        ],
+      },
+    },
+  ];
+  const validRequest = async (endpoint) => {
+    if (endpoint === 'repos/OriginTrail/dkg') return { default_branch: 'main' };
+    if (endpoint.includes('/compare/')) return { status: 'identical' };
+    if (endpoint.includes('/rules/branches/')) return validRules;
+    if (endpoint.includes('/contents/')) return { sha: 'same-controller-blob' };
+    throw new Error(`unexpected endpoint: ${endpoint}`);
+  };
+  const args = (mode) => [
+    '--mode', mode,
+    '--repository', 'OriginTrail/dkg',
+    '--branch', 'testnet-canary',
+    '--workflow', workflowPath,
+    '--output', outputPath,
+  ];
+
+  const enforceRequests = [];
+  assert.equal(await runCiPolicyInspector(args('enforce'), {
+    token: 'test-token',
+    requestJson: async (endpoint) => {
+      enforceRequests.push(endpoint);
+      return validRequest(endpoint);
+    },
+  }), 0);
+  let snapshot = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+  assert.equal(snapshot.prerequisites.ok, true);
+  assert.equal('freshness' in snapshot, false);
+  assert.equal(enforceRequests.some((endpoint) => endpoint.includes('/contents/')), false);
+
+  assert.equal(await runCiPolicyInspector(args('enforce'), {
+    token: 'test-token',
+    requestJson: async (endpoint) => (
+      endpoint.includes('/rules/branches/') ? [] : validRequest(endpoint)
+    ),
+  }), 1);
+  snapshot = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+  assert.equal(snapshot.prerequisites.ok, false);
+
+  assert.equal(await runCiPolicyInspector(args('enforce'), {
+    token: 'test-token',
+    requestJson: async () => { throw new Error('policy API unavailable'); },
+  }), 1);
+  snapshot = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+  assert.equal(snapshot.prerequisites.ok, false);
+  assert.match(snapshot.acquisitionError, /policy API unavailable/);
+
+  assert.equal(await runCiPolicyInspector(args('report'), {
+    token: 'test-token',
+    requestJson: async (endpoint) => {
+      if (endpoint.includes('/contents/')) throw new Error('freshness API unavailable');
+      return validRequest(endpoint);
+    },
+  }), 0);
+  snapshot = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+  assert.equal(snapshot.prerequisites.ok, true);
+  assert.equal(snapshot.freshness.ok, false);
+  assert.match(snapshot.acquisitionError, /freshness API unavailable/);
 });
 
 test('real policy CLIs use strict parsers with intentional repeat behavior', () => {

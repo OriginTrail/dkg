@@ -57,7 +57,7 @@ export function ciPolicyModeExitCode(snapshot, mode) {
   return snapshot.prerequisites?.ok === true ? 0 : 1;
 }
 
-export async function inspectCiPolicy({
+export async function inspectCiPolicyPrerequisites({
   repository,
   branch,
   workflows,
@@ -82,11 +82,42 @@ export async function inspectCiPolicy({
   );
   const deltaRollout = evaluateEffectiveDeltaRolloutRules({ branch, rules: effectiveRules });
 
+  const provenanceOk = isProtectedHistoryComparison(compare?.status);
+  return {
+    version: 1,
+    repository,
+    branch,
+    controller: {
+      pin: controllerModel.ref,
+      defaultBranch,
+      provenance: { status: compare?.status ?? 'missing', ok: provenanceOk },
+    },
+    deltaRollout,
+    prerequisites: {
+      ok: provenanceOk && deltaRollout.ok,
+    },
+  };
+}
+
+export async function inspectCiPolicyFreshness({
+  prerequisites,
+  token,
+  requestJson = githubRequest,
+}) {
+  const { repository, controller } = prerequisites;
+  if (
+    typeof repository !== 'string'
+    || typeof controller?.pin !== 'string'
+    || typeof controller?.defaultBranch !== 'string'
+  ) {
+    throw new Error('prerequisite snapshot is missing controller metadata');
+  }
+
   const controllerFiles = await Promise.all(CONTROLLER_POLICY_FILES.map(async (filePath) => {
     const endpoint = `repos/${repository}/contents/${filePath}`;
     const [pinned, current] = await Promise.all([
-      requestJson(`${endpoint}?ref=${encodeURIComponent(controllerModel.ref)}`, token),
-      requestJson(`${endpoint}?ref=${encodeURIComponent(defaultBranch)}`, token),
+      requestJson(`${endpoint}?ref=${encodeURIComponent(controller.pin)}`, token),
+      requestJson(`${endpoint}?ref=${encodeURIComponent(controller.defaultBranch)}`, token),
     ]);
     if (typeof pinned?.sha !== 'string' || typeof current?.sha !== 'string') {
       throw new Error(`${filePath} contents response is missing a blob SHA`);
@@ -99,27 +130,17 @@ export async function inspectCiPolicy({
     };
   }));
 
-  const provenanceOk = isProtectedHistoryComparison(compare?.status);
   const driftedFiles = controllerFiles.filter((file) => !file.current).map((file) => file.path);
-  const snapshot = {
-    version: 1,
-    repository,
-    branch,
+  return {
+    ...prerequisites,
     controller: {
-      pin: controllerModel.ref,
-      defaultBranch,
-      provenance: { status: compare?.status ?? 'missing', ok: provenanceOk },
+      ...controller,
       tree: { ok: driftedFiles.length === 0, driftedFiles, files: controllerFiles },
     },
-    deltaRollout,
+    freshness: {
+      ok: prerequisites.prerequisites?.ok === true && driftedFiles.length === 0,
+    },
   };
-  snapshot.prerequisites = {
-    ok: provenanceOk && deltaRollout.ok,
-  };
-  snapshot.freshness = {
-    ok: snapshot.prerequisites.ok && snapshot.controller.tree.ok,
-  };
-  return snapshot;
 }
 
 export function parseCiPolicyArguments(argv) {
@@ -153,16 +174,24 @@ function writeSnapshot(filePath, snapshot) {
 
 export async function runCiPolicyInspector(argv, { token = process.env.GH_TOKEN, requestJson } = {}) {
   let options;
+  let snapshot;
   try {
     options = parseCiPolicyArguments(argv);
     if (!token) throw new Error('GH_TOKEN is required');
-    const snapshot = await inspectCiPolicy({
+    snapshot = await inspectCiPolicyPrerequisites({
       repository: options.repository,
       branch: options.branch,
       workflows: options.workflows.map(repositoryFile),
       token,
       requestJson,
     });
+    if (options.mode === 'report') {
+      snapshot = await inspectCiPolicyFreshness({
+        prerequisites: snapshot,
+        token,
+        requestJson,
+      });
+    }
     writeSnapshot(options.output, snapshot);
     if (!snapshot.prerequisites.ok) {
       console.error(`ci-policy-inspection: prerequisites missing: ${snapshot.deltaRollout.missing.join(', ') || snapshot.controller.provenance.status}`);
@@ -171,15 +200,17 @@ export async function runCiPolicyInspector(argv, { token = process.env.GH_TOKEN,
     }
     return ciPolicyModeExitCode(snapshot, options.mode);
   } catch (error) {
-    const snapshot = {
-      version: 1,
-      repository: options?.repository,
-      branch: options?.branch,
+    const failedSnapshot = {
+      ...(snapshot ?? {
+        version: 1,
+        repository: options?.repository,
+        branch: options?.branch,
+        prerequisites: { ok: false },
+      }),
       acquisitionError: error.message,
-      prerequisites: { ok: false },
       freshness: { ok: false },
     };
-    writeSnapshot(options?.output, snapshot);
+    writeSnapshot(options?.output, failedSnapshot);
     console.error(`ci-policy-inspection: ${error.message}`);
     return options?.mode === 'report' ? 0 : 1;
   }
