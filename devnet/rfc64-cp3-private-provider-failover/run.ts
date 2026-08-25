@@ -75,8 +75,9 @@ const FIRST_KA_NUMBER = 2_000n;
 const ASSERTION_ROOT =
   '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f' as Digest32V1;
 const PROJECTION_NQUADS =
-  '<https://example.org/failover> <https://schema.org/name> "Release 3" .\n'
-  + '<https://example.org/failover> <https://schema.org/version> "3" .\n';
+  '<https://example.org/alice> <https://schema.org/age> '
+  + '"42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
+  + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n';
 const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: CHAIN_ID,
