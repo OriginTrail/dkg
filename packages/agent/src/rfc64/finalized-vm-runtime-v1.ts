@@ -70,14 +70,19 @@ export interface FinalizedVmMaterializeRequestV1 {
   readonly signal: AbortSignal;
 }
 
-/**
- * Idempotently materialize one already-authorized row and post-read the exact VM graph.
- * A thrown error may leave earlier rows materialized; callers must not advance their
- * applied-head CAS until the complete runtime result has been returned.
- */
+/** Idempotently materialize one already-authorized row and post-read the exact VM graph. */
 export interface FinalizedVmMaterializerV1 {
   (request: FinalizedVmMaterializeRequestV1):
     Promise<FinalizedVmMaterializationReceiptV1>;
+}
+
+/**
+ * Optional transaction boundary used by the RFC-64 store materializer. Rollback restores
+ * the exact predecessor state for every row written by the current catalog precommit.
+ */
+export interface FinalizedVmTransactionalMaterializerV1 extends FinalizedVmMaterializerV1 {
+  commit(): void;
+  rollback(cause?: unknown): Promise<void>;
 }
 
 export interface FinalizedVmRuntimeConfigV1 {
@@ -206,41 +211,62 @@ export function createFinalizedVmRuntimeV1(
     );
 
     const receipts: Readonly<FinalizedVmMaterializationReceiptV1>[] = [];
-    for (const prepared of verified.composed.materializations) {
-      request.signal.throwIfAborted();
-      let untrustedReceipt: FinalizedVmMaterializationReceiptV1;
-      try {
-        untrustedReceipt = await config.materialize(Object.freeze({
-          acceptedPolicy: request.acceptedPolicy,
-          acceptedPolicyDigest: request.acceptedPolicyDigest,
-          catalogLane: verified.composed.catalogLane,
-          finalizedContextGraph: verified.finalizedContextGraph,
-          candidate: prepared.candidate,
-          placement: prepared.placement,
-          row: prepared.row,
-          signal: request.signal,
-        }));
-      } catch (cause) {
-        if (request.signal.aborted) request.signal.throwIfAborted();
-        fail(
-          'finalized-vm-runtime-materialization',
-          `materializer failed at finalized ordinal ${prepared.row.ordinal}`,
-          cause,
-        );
+    try {
+      for (const prepared of verified.composed.materializations) {
+        request.signal.throwIfAborted();
+        let untrustedReceipt: FinalizedVmMaterializationReceiptV1;
+        try {
+          untrustedReceipt = await config.materialize(Object.freeze({
+            acceptedPolicy: request.acceptedPolicy,
+            acceptedPolicyDigest: request.acceptedPolicyDigest,
+            catalogLane: verified.composed.catalogLane,
+            finalizedContextGraph: verified.finalizedContextGraph,
+            candidate: prepared.candidate,
+            placement: prepared.placement,
+            row: prepared.row,
+            signal: request.signal,
+          }));
+        } catch (cause) {
+          if (request.signal.aborted) request.signal.throwIfAborted();
+          fail(
+            'finalized-vm-runtime-materialization',
+            `materializer failed at finalized ordinal ${prepared.row.ordinal}`,
+            cause,
+          );
+        }
+        request.signal.throwIfAborted();
+        receipts.push(snapshotReceipt(untrustedReceipt, prepared.candidate));
       }
-      request.signal.throwIfAborted();
-      receipts.push(snapshotReceipt(untrustedReceipt, prepared.candidate));
-    }
 
-    return Object.freeze({
-      acceptedPolicyDigest: request.acceptedPolicyDigest,
-      finalizedContextGraph: verified.finalizedContextGraph,
-      inventory: verified.inventory,
-      composed: verified.composed,
-      receipts: Object.freeze(receipts),
-    });
+      return Object.freeze({
+        acceptedPolicyDigest: request.acceptedPolicyDigest,
+        finalizedContextGraph: verified.finalizedContextGraph,
+        inventory: verified.inventory,
+        composed: verified.composed,
+        receipts: Object.freeze(receipts),
+      });
+    } catch (cause) {
+      if (isTransactionalMaterializerV1(config.materialize)) {
+        try {
+          await config.materialize.rollback(cause);
+        } catch (rollbackCause) {
+          throw new AggregateError(
+            [cause, rollbackCause],
+            'finalized VM runtime and exact rollback both failed',
+          );
+        }
+      }
+      throw cause;
+    }
   };
   return Object.freeze(runtime);
+}
+
+function isTransactionalMaterializerV1(
+  materializer: FinalizedVmMaterializerV1,
+): materializer is FinalizedVmTransactionalMaterializerV1 {
+  const candidate = materializer as Partial<FinalizedVmTransactionalMaterializerV1>;
+  return typeof candidate.commit === 'function' && typeof candidate.rollback === 'function';
 }
 
 function snapshotConfig(input: FinalizedVmRuntimeConfigV1): RuntimeConfigSnapshotV1 {

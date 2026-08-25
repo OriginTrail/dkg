@@ -1135,6 +1135,8 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
 
   it('retries genesis idempotently after verified staging wins but its CAS crashes', async () => {
     const fixture = await setupLiveReceiver();
+    const rollback = vi.fn(async () => {});
+    const commit = vi.fn();
     const crashGapReceiver = fixture.createReceiver({
       readAppliedCatalogHeadV1:
         fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
@@ -1143,7 +1145,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       compareAndSwapAppliedCatalogHeadV1: () => {
         throw new Error('simulated crash after genesis staging and before applied-head CAS');
       },
-    });
+    }, undefined, undefined, fixture.receiverStore, async () => ({ commit, rollback }));
 
     await expect(fixture.bootstrap(
       fixture.genesisAnnouncement,
@@ -1153,10 +1155,27 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.scopeDigest,
       AUTHOR,
     )).toBeNull();
-    await expect(fixture.bootstrap()).resolves.toMatchObject({
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(commit).not.toHaveBeenCalled();
+
+    const successfulCommit = vi.fn();
+    const successfulRollback = vi.fn(async () => {});
+    const successfulReceiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      async () => ({ commit: successfulCommit, rollback: successfulRollback }),
+    );
+    await expect(fixture.bootstrap(
+      fixture.genesisAnnouncement,
+      successfulReceiver,
+    )).resolves.toMatchObject({
       appliedHeadStatus: 'applied',
       inventoryRowCount: 0,
     });
+    expect(successfulCommit).toHaveBeenCalledOnce();
+    expect(successfulRollback).not.toHaveBeenCalled();
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
   }, 30_000);
 
@@ -1366,7 +1385,8 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.announcement,
       observed.receiver,
     )).rejects.toMatchObject({ code: 'catalog-native-receiver-incomplete' });
-    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    // The signed catalog control objects can be retained safely before the receiver
+    // discovers that the row's content-addressed bundle bytes are unavailable.
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       fixture.scopeDigest,

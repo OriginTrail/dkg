@@ -12,12 +12,15 @@ import {
 import {
   quadsToNQuads,
   readExactGraphPaged,
+  readExactGraphPagedWithDiscoveredCount,
+  tryReplaceGraphAndSubjectAtomically,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10,
   generateGraphKnowledgeAssetMetadata,
+  withMaterializationLock,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
@@ -28,15 +31,33 @@ import {
 import type {
   FinalizedVmMaterializationReceiptV1,
   FinalizedVmMaterializerV1,
+  FinalizedVmTransactionalMaterializerV1,
 } from './finalized-vm-runtime-v1.js';
 
 const POST_READ_DIGEST_DOMAIN_V1 = ethers.toUtf8Bytes(
   'OT-RFC-64:finalized-vm-post-read:v1\0',
 );
 const PUBLISHED_AT_PREDICATE = 'http://dkg.io/ontology/publishedAt';
+const MAX_ROLLBACK_METADATA_ROWS_V1 = 1_024;
 
 export interface FinalizedVmStoreMaterializerOptionsV1 {
   readonly store: TripleStore;
+  /** Accepted-current guard checked at every atomic materialization boundary. */
+  readonly isCurrent?: () => boolean;
+}
+
+interface FinalizedVmStoreStateV1 {
+  readonly graphQuads: readonly Quad[];
+  readonly metadataQuads: readonly Quad[];
+  readonly identity: string;
+}
+
+interface FinalizedVmStoreRollbackEntryV1 {
+  readonly assertionGraph: string;
+  readonly metaGraph: string;
+  readonly ual: string;
+  readonly before: FinalizedVmStoreStateV1;
+  readonly after: FinalizedVmStoreStateV1;
 }
 
 /**
@@ -45,9 +66,14 @@ export interface FinalizedVmStoreMaterializerOptionsV1 {
  */
 export function createFinalizedVmStoreMaterializerV1(
   options: FinalizedVmStoreMaterializerOptionsV1,
-): FinalizedVmMaterializerV1 {
-  const { store } = options;
-  return Object.freeze(async (request): Promise<FinalizedVmMaterializationReceiptV1> => {
+): FinalizedVmTransactionalMaterializerV1 {
+  const { store, isCurrent } = options;
+  const rollbackJournal: FinalizedVmStoreRollbackEntryV1[] = [];
+  let closed = false;
+  const materialize: FinalizedVmMaterializerV1 = async (
+    request,
+  ): Promise<FinalizedVmMaterializationReceiptV1> => {
+    if (closed) throw new Error('finalized VM materialization transaction is closed');
     request.signal.throwIfAborted();
     const binding = readVerifiedCatalogSealBindingV1(request.placement.sealBinding);
     const { seal } = binding;
@@ -141,55 +167,166 @@ export function createFinalizedVmStoreMaterializerV1(
       dataQuads: graphlessProjection.map((quad) => ({ ...quad, graph: vmGraph })),
       metadataQuads: [...metadataQuads],
     }) satisfies VerifiedGraphScopedAsset;
-    const existingBefore = await hasExactFinalizedMaterialization(
-      store,
-      asset,
-      graphlessProjection,
-    );
-    const outcome = existingBefore
-      ? 'stale'
-      : await materializeVerifiedGraphScopedAsset({
-          store,
-          asset,
-          options: { source: 'rfc64-finalized-vm-materialization' },
-        });
-    if (outcome === 'quarantined') {
-      throw new Error('finalized VM projection was quarantined by store limits');
-    }
-    request.signal.throwIfAborted();
+    return withMaterializationLock(metaGraph, asset.ual, async () => {
+      if (isCurrent?.() === false) {
+        throw new Error('finalized VM accepted policy or roster is no longer current');
+      }
+      const existingBefore = await hasExactFinalizedMaterialization(
+        store,
+        asset,
+        graphlessProjection,
+      );
+      const before = existingBefore
+        ? null
+        : await snapshotFinalizedVmStoreStateV1(store, asset);
+      const outcome = existingBefore
+        ? 'stale'
+        : await materializeVerifiedGraphScopedAsset({
+            store,
+            asset,
+            isCurrent,
+            lockAlreadyHeldByCaller: true,
+            options: { source: 'rfc64-finalized-vm-materialization' },
+          });
+      if (before !== null) {
+        const after = await snapshotFinalizedVmStoreStateV1(store, asset);
+        rollbackJournal.push(Object.freeze({
+          assertionGraph: asset.assertionGraph,
+          metaGraph: asset.metaGraph,
+          ual: asset.ual,
+          before,
+          after,
+        }));
+      }
+      if (outcome === 'quarantined') {
+        throw new Error('finalized VM projection lost accepted-current authority during commit');
+      }
+      request.signal.throwIfAborted();
 
-    const postRead = await readExactGraphPaged(store, vmGraph, {
-      expectedQuadCount: publicTripleCount,
-      maxQuadCount: publicTripleCount,
-      maxNQuadsBytes:
-        DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1.maxProjectionBytes,
-      outputGraph: '',
-      queryOptions: { source: 'rfc64-finalized-vm-post-read' },
-    });
-    assertProjectionRoot(postRead, privateMerkleRoot, request.candidate.assertionRoot);
-    if (quadsToNQuads(postRead) !== quadsToNQuads(graphlessProjection)) {
-      throw new Error('finalized VM post-read differs from the verified catalog projection');
-    }
-    if (
-      existingBefore
-      && !(await hasExactFinalizedMaterialization(store, asset, graphlessProjection))
-    ) {
-      throw new Error('finalized VM replay metadata changed during exact post-read');
-    }
-    const postReadDigest = ethers.keccak256(ethers.concat([
-      POST_READ_DIGEST_DOMAIN_V1,
-      ethers.toUtf8Bytes(quadsToNQuads(postRead)),
-    ])).toLowerCase() as Digest32V1;
-    return Object.freeze({
-      kaId: binding.kaId,
-      ordinal: request.candidate.ordinal,
-      ual: request.candidate.ual,
-      status: outcome === 'stale' ? 'existing' : 'materialized',
-      vmGraphIri: vmGraph,
-      tripleCount: String(postRead.length) as DecimalU64V1,
-      postReadDigest,
-    });
+      const postRead = await readExactGraphPaged(store, vmGraph, {
+        expectedQuadCount: publicTripleCount,
+        maxQuadCount: publicTripleCount,
+        maxNQuadsBytes:
+          DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1.maxProjectionBytes,
+        outputGraph: '',
+        queryOptions: { source: 'rfc64-finalized-vm-post-read' },
+      });
+      assertProjectionRoot(postRead, privateMerkleRoot, request.candidate.assertionRoot);
+      if (quadsToNQuads(postRead) !== quadsToNQuads(graphlessProjection)) {
+        throw new Error('finalized VM post-read differs from the verified catalog projection');
+      }
+      if (
+        existingBefore
+        && !(await hasExactFinalizedMaterialization(store, asset, graphlessProjection))
+      ) {
+        throw new Error('finalized VM replay metadata changed during exact post-read');
+      }
+      const postReadDigest = ethers.keccak256(ethers.concat([
+        POST_READ_DIGEST_DOMAIN_V1,
+        ethers.toUtf8Bytes(quadsToNQuads(postRead)),
+      ])).toLowerCase() as Digest32V1;
+      return Object.freeze({
+        kaId: binding.kaId,
+        ordinal: request.candidate.ordinal,
+        ual: request.candidate.ual,
+        status: outcome === 'stale' ? 'existing' : 'materialized',
+        vmGraphIri: vmGraph,
+        tripleCount: String(postRead.length) as DecimalU64V1,
+        postReadDigest,
+      });
+    }, { signal: request.signal });
+  };
+  return Object.freeze(Object.assign(materialize, {
+    commit(): void {
+      closed = true;
+      rollbackJournal.length = 0;
+    },
+    async rollback(): Promise<void> {
+      if (closed) return;
+      closed = true;
+      for (const entry of rollbackJournal.reverse()) {
+        await restoreFinalizedVmStoreStateV1(store, entry);
+      }
+      rollbackJournal.length = 0;
+    },
+  }));
+}
+
+async function snapshotFinalizedVmStoreStateV1(
+  store: TripleStore,
+  asset: Pick<VerifiedGraphScopedAsset, 'assertionGraph' | 'metaGraph' | 'ual'>,
+): Promise<FinalizedVmStoreStateV1> {
+  const graphQuads = await readExactGraphPagedWithDiscoveredCount(store, asset.assertionGraph, {
+    maxQuadCount: DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1.maxPublicTriples,
+    maxNQuadsBytes: DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1.maxProjectionBytes,
+    queryOptions: { source: 'rfc64-finalized-vm-rollback-graph-snapshot' },
   });
+  const metadata = await store.query(`
+    SELECT ?predicate ?object WHERE {
+      GRAPH <${assertSafeIri(asset.metaGraph)}> {
+        <${assertSafeIri(asset.ual)}> ?predicate ?object .
+      }
+    }
+    LIMIT ${MAX_ROLLBACK_METADATA_ROWS_V1 + 1}
+  `, { source: 'rfc64-finalized-vm-rollback-meta-snapshot' });
+  if (
+    metadata.type !== 'bindings'
+    || metadata.bindings.length > MAX_ROLLBACK_METADATA_ROWS_V1
+    || metadata.bindings.some((row) => row.predicate === undefined || row.object === undefined)
+  ) {
+    throw new Error('finalized VM metadata predecessor exceeds the exact rollback bound');
+  }
+  const metadataQuads = metadata.bindings.map((row) => ({
+    subject: asset.ual,
+    predicate: row.predicate!,
+    object: row.object!,
+    graph: asset.metaGraph,
+  }));
+  return Object.freeze({
+    graphQuads: Object.freeze(graphQuads.map((quad) => Object.freeze({ ...quad }))),
+    metadataQuads: Object.freeze(metadataQuads.map((quad) => Object.freeze({ ...quad }))),
+    identity: storeStateIdentityV1(graphQuads, metadataQuads),
+  });
+}
+
+async function restoreFinalizedVmStoreStateV1(
+  store: TripleStore,
+  entry: FinalizedVmStoreRollbackEntryV1,
+): Promise<void> {
+  await withMaterializationLock(entry.metaGraph, entry.ual, async () => {
+    const current = await snapshotFinalizedVmStoreStateV1(store, entry);
+    if (current.identity !== entry.after.identity) {
+      throw new Error(
+        `finalized VM rollback conflict for ${entry.ual}: current state was replaced externally`,
+      );
+    }
+    const restored = await tryReplaceGraphAndSubjectAtomically(
+      store,
+      entry.assertionGraph,
+      [...entry.before.graphQuads],
+      entry.metaGraph,
+      entry.ual,
+      [...entry.before.metadataQuads],
+      { source: 'rfc64-finalized-vm-exact-rollback' },
+    );
+    if (!restored) {
+      throw new Error('finalized VM store cannot atomically restore rollback state');
+    }
+    const postRead = await snapshotFinalizedVmStoreStateV1(store, entry);
+    if (postRead.identity !== entry.before.identity) {
+      throw new Error(`finalized VM exact rollback post-read differs for ${entry.ual}`);
+    }
+  });
+}
+
+function storeStateIdentityV1(
+  graphQuads: readonly Quad[],
+  metadataQuads: readonly Quad[],
+): string {
+  const lines = [...graphQuads, ...metadataQuads]
+    .map((quad) => `${quad.subject}\0${quad.predicate}\0${quad.object}\0${quad.graph}`)
+    .sort();
+  return ethers.keccak256(ethers.toUtf8Bytes(lines.join('\n'))).toLowerCase();
 }
 
 async function hasExactFinalizedMaterialization(

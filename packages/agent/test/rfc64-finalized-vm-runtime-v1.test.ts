@@ -296,6 +296,122 @@ describe('RFC-64 finalized VM runtime', () => {
       }],
     });
   });
+
+  it('restores the exact predecessor when the second private VM asset fails', async () => {
+    const store = new OxigraphStore();
+    const graphlessProjection: Quad[] = [
+      { subject: 'urn:rfc64:rollback', predicate: 'urn:rfc64:value', object: '"one"', graph: '' },
+    ];
+    const assertionRoot = ethers.hexlify(computeFlatKCRootV10(
+      graphlessProjection,
+      [],
+    )).toLowerCase() as Digest32V1;
+    const [first, second] = await Promise.all([
+      createRfc64FinalizedVmPlacementFixture({
+        kaNumber: 1n,
+        assertionRoot,
+        publicTripleCount: graphlessProjection.length,
+      }),
+      createRfc64FinalizedVmPlacementFixture({
+        kaNumber: 2n,
+        assertionRoot,
+        publicTripleCount: graphlessProjection.length,
+      }),
+    ]);
+    for (const kaNumber of [1, 2]) {
+      const swmGraph = contextGraphLayerUri(
+        RFC64_VM_CONTEXT_GRAPH_NAME,
+        MemoryLayer.SharedWorkingMemory,
+        RFC64_VM_AUTHOR,
+        kaNumber,
+      );
+      await store.insert(graphlessProjection.map((quad) => ({ ...quad, graph: swmGraph })));
+    }
+    const storeMaterializer = createFinalizedVmStoreMaterializerV1({ store });
+    let calls = 0;
+    const failingMaterializer = Object.assign(
+      async (...args: Parameters<FinalizedVmMaterializerV1>) => {
+        calls += 1;
+        if (calls === 2) throw new Error('injected second-asset failure');
+        return storeMaterializer(...args);
+      },
+      {
+        commit: () => storeMaterializer.commit(),
+        rollback: (cause?: unknown) => storeMaterializer.rollback(cause),
+      },
+    );
+    const runtime = createFinalizedVmRuntimeV1(runtimeConfig(
+      snapshotTransport({ accessPolicy: 1, kaNumbers: [1n, 2n], assertionRoot }).snapshot,
+      failingMaterializer,
+    ));
+
+    await expect(runtime(privateRequest([first, second]))).rejects.toThrow(
+      /materializer failed at finalized ordinal 1/u,
+    );
+    for (const kaNumber of [1, 2]) {
+      const vmGraph = contextGraphLayerUri(
+        RFC64_VM_CONTEXT_GRAPH_NAME,
+        MemoryLayer.VerifiableMemory,
+        RFC64_VM_AUTHOR,
+        kaNumber,
+      );
+      await expect(store.hasGraph(vmGraph)).resolves.toBe(false);
+      await expect(store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
+          + `<${rfc64VmUal(BigInt(kaNumber))}> ?predicate ?object } }`,
+      )).resolves.toEqual({ type: 'boolean', value: false });
+    }
+  });
+
+  it('rolls back a private VM write when accepted authority changes during atomic commit', async () => {
+    const store = new OxigraphStore();
+    const graphlessProjection: Quad[] = [
+      { subject: 'urn:rfc64:authority', predicate: 'urn:rfc64:value', object: '"one"', graph: '' },
+    ];
+    const assertionRoot = ethers.hexlify(computeFlatKCRootV10(
+      graphlessProjection,
+      [],
+    )).toLowerCase() as Digest32V1;
+    const placement = await createRfc64FinalizedVmPlacementFixture({
+      assertionRoot,
+      publicTripleCount: graphlessProjection.length,
+    });
+    const swmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.SharedWorkingMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    const vmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.VerifiableMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    await store.insert(graphlessProjection.map((quad) => ({ ...quad, graph: swmGraph })));
+    let current = true;
+    const replace = store.replaceGraphAndSubject!.bind(store);
+    store.replaceGraphAndSubject = async (...args) => {
+      await replace(...args);
+      current = false;
+    };
+    const runtime = createFinalizedVmRuntimeV1(runtimeConfig(
+      snapshotTransport({ accessPolicy: 1, assertionRoot }).snapshot,
+      createFinalizedVmStoreMaterializerV1({ store, isCurrent: () => current }),
+    ));
+
+    await expect(runtime(privateRequest(placement))).rejects.toMatchObject({
+      code: 'finalized-vm-runtime-materialization',
+      cause: expect.objectContaining({
+        message: expect.stringMatching(/lost accepted-current authority during commit/u),
+      }),
+    });
+    await expect(store.hasGraph(vmGraph)).resolves.toBe(false);
+    await expect(store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
+        + `<${rfc64VmUal(1n)}> ?predicate ?object } }`,
+    )).resolves.toEqual({ type: 'boolean', value: false });
+  });
 });
 
 function runtimeConfig(

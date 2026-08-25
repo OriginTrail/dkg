@@ -820,16 +820,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         const beforeAppliedHeadCommit = Object.freeze(async (
           plan: Parameters<typeof finalizedPolicyPrecommit>[0],
           signal: AbortSignal,
-        ): Promise<void> => {
+        ): ReturnType<typeof finalizedVmPrecommit> => {
           const accepted = acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
           if (
             accepted.policy.accessPolicy === 1
             && accepted.policy.source.kind === 'finalized-chain'
           ) {
-            await finalizedVmPrecommit(plan, signal);
-            return;
+            return finalizedVmPrecommit(plan, signal);
           }
-          await finalizedPolicyPrecommit(plan, signal);
+          return finalizedPolicyPrecommit(plan, signal);
         });
         const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
           headTransport: clients.headTransport,

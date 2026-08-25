@@ -312,6 +312,8 @@ export async function materializeVerifiedGraphScopedAsset(params: {
   asset: VerifiedGraphScopedAsset;
   isCurrent?: () => boolean;
   shouldQuarantineCommitted?: () => boolean;
+  /** Internal composition seam for callers that already hold this asset's shared lock. */
+  lockAlreadyHeldByCaller?: boolean;
   options?: QueryOptions;
   oversizeHooks?: OversizeGuardHooks;
 }): Promise<GraphScopedMaterializationOutcome> {
@@ -320,6 +322,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     asset,
     isCurrent,
     shouldQuarantineCommitted,
+    lockAlreadyHeldByCaller = false,
     options = {},
     oversizeHooks,
   } = params;
@@ -340,7 +343,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     return 'quarantined';
   }
 
-  return withMaterializationLock(asset.metaGraph, asset.ual, async () => {
+  const materializeUnderLock = async (): Promise<GraphScopedMaterializationOutcome> => {
     assertCurrent();
     const currentVersion = await readCurrentAssertionVersion(
       store,
@@ -416,7 +419,12 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     }
     if (isCurrent?.() === false) return 'quarantined';
     return 'applied';
-  }, { signal: options.signal });
+  };
+  return lockAlreadyHeldByCaller
+    ? materializeUnderLock()
+    : withMaterializationLock(asset.metaGraph, asset.ual, materializeUnderLock, {
+        signal: options.signal,
+      });
 }
 
 /** Read the current subject once; publisher metadata helpers own typed merging. */

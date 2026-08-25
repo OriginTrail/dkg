@@ -185,7 +185,13 @@ export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
   (
     plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
     signal: AbortSignal,
-  ): Promise<void>;
+  ): Promise<void | Rfc64PublicCatalogNativePrecommitTransactionV1>;
+}
+
+/** Side effects that become durable only when the catalog head CAS succeeds. */
+export interface Rfc64PublicCatalogNativePrecommitTransactionV1 {
+  commit(): void;
+  rollback(cause?: unknown): Promise<void>;
 }
 
 export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
@@ -336,16 +342,65 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     signal: AbortSignal | undefined,
     failureMessage: string,
     rollback?: (cause: unknown) => Promise<void>,
-  ): Promise<void> {
+  ): Promise<Rfc64PublicCatalogNativePrecommitTransactionV1 | null> {
     const precommitSignal = signal ?? new AbortController().signal;
+    let transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null = null;
     try {
       throwIfAborted(precommitSignal);
-      await this.options.beforeAppliedHeadCommit?.(Object.freeze(plan), precommitSignal);
+      const returned = await this.options.beforeAppliedHeadCommit?.(
+        Object.freeze(plan),
+        precommitSignal,
+      );
+      if (returned !== undefined) {
+        if (
+          returned === null
+          || typeof returned !== 'object'
+          || typeof returned.commit !== 'function'
+          || typeof returned.rollback !== 'function'
+        ) {
+          throw new TypeError('catalog applied-head precommit returned an invalid transaction');
+        }
+        transaction = returned;
+      }
       throwIfAborted(precommitSignal);
+      return transaction;
     } catch (cause) {
-      await rollback?.(cause);
+      const rollbackFailures: unknown[] = [];
+      try {
+        await transaction?.rollback(cause);
+      } catch (rollbackCause) {
+        rollbackFailures.push(rollbackCause);
+      }
+      try {
+        await rollback?.(cause);
+      } catch (rollbackCause) {
+        rollbackFailures.push(rollbackCause);
+      }
+      if (rollbackFailures.length > 0) {
+        fail(
+          'catalog-native-receiver-activation',
+          `${failureMessage}; exact rollback also failed`,
+          new AggregateError([cause, ...rollbackFailures]),
+        );
+      }
       if (precommitSignal.aborted && cause === precommitSignal.reason) throw cause;
       fail('catalog-native-receiver-activation', failureMessage, cause);
+    }
+  }
+
+  private async rollbackAppliedHeadPrecommitV1(
+    transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null,
+    cause: unknown,
+  ): Promise<void> {
+    if (transaction === null) return;
+    try {
+      await transaction.rollback(cause);
+    } catch (rollbackCause) {
+      fail(
+        'catalog-native-receiver-activation',
+        'catalog applied-head failure could not restore exact precommit side effects',
+        new AggregateError([cause, rollbackCause]),
+      );
     }
   }
 
@@ -568,7 +623,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       fail('catalog-native-receiver-catalog', 'verified genesis objects could not be staged', cause);
     }
 
-    await this.runBeforeAppliedHeadCommitV1(
+    const precommitTransaction = await this.runBeforeAppliedHeadCommitV1(
       Object.freeze({
         catalogScope: trustedCatalogScope,
         policyDigest: announcement.policyDigest,
@@ -581,44 +636,50 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     );
 
     let appliedHeadStatus: 'applied' | 'existing';
-    if (replay) {
-      appliedHeadStatus = 'existing';
-    } else {
-      try {
-        appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
-          catalogScopeDigest,
-          authorAddress: head.payload.authorAddress,
-          expectedCurrentCatalogHeadDigest: null,
-          currentCatalogHeadDigest: head.objectDigest as Digest32V1,
-          appliedInventoryDigest: inventoryDigest,
-          catalogVersion: head.payload.version,
-          inventoryRowCount: '0' as never,
-        }).status;
-      } catch (cause) {
-        const reconciled = this.options.inventory.readAppliedCatalogHeadV1(
-          catalogScopeDigest,
-          head.payload.authorAddress,
-        );
-        if (!isExactEmptyGenesisSnapshot(reconciled, head, inventoryDigest)) {
-          fail(
-            'catalog-native-receiver-history',
-            'genesis applied-head CAS lost to a different durable history',
-            cause,
-          );
-        }
+    try {
+      if (replay) {
         appliedHeadStatus = 'existing';
+      } else {
+        try {
+          appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
+            catalogScopeDigest,
+            authorAddress: head.payload.authorAddress,
+            expectedCurrentCatalogHeadDigest: null,
+            currentCatalogHeadDigest: head.objectDigest as Digest32V1,
+            appliedInventoryDigest: inventoryDigest,
+            catalogVersion: head.payload.version,
+            inventoryRowCount: '0' as never,
+          }).status;
+        } catch (cause) {
+          const reconciled = this.options.inventory.readAppliedCatalogHeadV1(
+            catalogScopeDigest,
+            head.payload.authorAddress,
+          );
+          if (!isExactEmptyGenesisSnapshot(reconciled, head, inventoryDigest)) {
+            fail(
+              'catalog-native-receiver-history',
+              'genesis applied-head CAS lost to a different durable history',
+              cause,
+            );
+          }
+          appliedHeadStatus = 'existing';
+        }
       }
-    }
-    const postRead = this.options.inventory.readAppliedCatalogHeadV1(
-      catalogScopeDigest,
-      head.payload.authorAddress,
-    );
-    if (!isExactEmptyGenesisSnapshot(postRead, head, inventoryDigest)) {
-      fail(
-        'catalog-native-receiver-history',
-        'empty genesis durable post-read differs in head, digest, version, or row count',
+      const postRead = this.options.inventory.readAppliedCatalogHeadV1(
+        catalogScopeDigest,
+        head.payload.authorAddress,
       );
+      if (!isExactEmptyGenesisSnapshot(postRead, head, inventoryDigest)) {
+        fail(
+          'catalog-native-receiver-history',
+          'empty genesis durable post-read differs in head, digest, version, or row count',
+        );
+      }
+    } catch (cause) {
+      await this.rollbackAppliedHeadPrecommitV1(precommitTransaction, cause);
+      throw cause;
     }
+    precommitTransaction?.commit();
     return Object.freeze({
       inventoryDigest,
       catalogHeadDigest: head.objectDigest as Digest32V1,
@@ -1045,7 +1106,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       );
     }
 
-    await this.runBeforeAppliedHeadCommitV1(
+    const precommitTransaction = await this.runBeforeAppliedHeadCommitV1(
       Object.freeze({
         catalogScope: trustedCatalogScope,
         policyDigest: announcement.policyDigest,
@@ -1065,65 +1126,70 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     );
 
     let appliedHeadStatus: 'applied' | 'existing';
-    if (historyDisposition === 'replay') {
-      if (currentAppliedHead!.appliedInventoryDigest !== completion.inventoryDigest) {
-        fail(
-          'catalog-native-receiver-history',
-          'durable applied-head digest differs from exact semantic post-read',
-        );
-      }
-      appliedHeadStatus = 'existing';
-    } else {
-      try {
-        appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
-          catalogScopeDigest,
-          authorAddress: head.payload.authorAddress,
-          expectedCurrentCatalogHeadDigest: historyDisposition === 'cold-bootstrap'
-            ? null
-            : head.payload.previousHeadDigest,
-          currentCatalogHeadDigest: head.objectDigest as Digest32V1,
-          appliedInventoryDigest: completion.inventoryDigest,
-          catalogVersion: head.payload.version,
-          inventoryRowCount: head.payload.totalRows,
-        }).status;
-      } catch (cause) {
-        const reconciled = this.options.inventory.readAppliedCatalogHeadV1(
-          catalogScopeDigest,
-          head.payload.authorAddress,
-        );
-        if (
-          reconciled === null
-          || reconciled.currentCatalogHeadDigest !== head.objectDigest
-          || !isExactAppliedSuccessorSnapshot(
-            reconciled,
-            head,
-            completion.inventoryDigest,
-          )
-        ) {
+    try {
+      if (historyDisposition === 'replay') {
+        if (currentAppliedHead!.appliedInventoryDigest !== completion.inventoryDigest) {
           fail(
             'catalog-native-receiver-history',
-            'applied-head CAS lost outside the serialized receiver; semantic state requires repair',
-            cause,
+            'durable applied-head digest differs from exact semantic post-read',
           );
         }
         appliedHeadStatus = 'existing';
+      } else {
+        try {
+          appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
+            catalogScopeDigest,
+            authorAddress: head.payload.authorAddress,
+            expectedCurrentCatalogHeadDigest: historyDisposition === 'cold-bootstrap'
+              ? null
+              : head.payload.previousHeadDigest,
+            currentCatalogHeadDigest: head.objectDigest as Digest32V1,
+            appliedInventoryDigest: completion.inventoryDigest,
+            catalogVersion: head.payload.version,
+            inventoryRowCount: head.payload.totalRows,
+          }).status;
+        } catch (cause) {
+          const reconciled = this.options.inventory.readAppliedCatalogHeadV1(
+            catalogScopeDigest,
+            head.payload.authorAddress,
+          );
+          if (
+            reconciled === null
+            || reconciled.currentCatalogHeadDigest !== head.objectDigest
+            || !isExactAppliedSuccessorSnapshot(
+              reconciled,
+              head,
+              completion.inventoryDigest,
+            )
+          ) {
+            fail(
+              'catalog-native-receiver-history',
+              'applied-head CAS lost outside the serialized receiver; semantic state requires repair',
+              cause,
+            );
+          }
+          appliedHeadStatus = 'existing';
+        }
       }
-    }
-
-    const durablePostRead = this.options.inventory.readAppliedCatalogHeadV1(
-      catalogScopeDigest,
-      head.payload.authorAddress,
-    );
-    if (!isExactAppliedSuccessorSnapshot(
-      durablePostRead,
-      head,
-      completion.inventoryDigest,
-    )) {
-      fail(
-        'catalog-native-receiver-history',
-        'successor durable post-read differs in head, digest, version, or exact row count',
+      const durablePostRead = this.options.inventory.readAppliedCatalogHeadV1(
+        catalogScopeDigest,
+        head.payload.authorAddress,
       );
+      if (!isExactAppliedSuccessorSnapshot(
+        durablePostRead,
+        head,
+        completion.inventoryDigest,
+      )) {
+        fail(
+          'catalog-native-receiver-history',
+          'successor durable post-read differs in head, digest, version, or exact row count',
+        );
+      }
+    } catch (cause) {
+      await this.rollbackAppliedHeadPrecommitV1(precommitTransaction, cause);
+      throw cause;
     }
+    precommitTransaction?.commit();
 
     if (activatedRows.length === 1) {
       const [only] = activatedRows;
