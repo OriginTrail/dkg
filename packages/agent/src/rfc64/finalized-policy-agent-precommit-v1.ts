@@ -90,15 +90,7 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
       { cause },
     );
   }
-  if (policy.accessPolicy === 1 && policy.source.kind === 'finalized-chain') {
-    throw new Error(
-      'RFC-64 Release 1 does not activate registered private catalog inventories',
-    );
-  }
   if (policy.source.kind !== 'finalized-chain') return null;
-  if (roster !== null) {
-    throw new Error('RFC-64 finalized precommit public policy forbids a private member roster');
-  }
   const acceptedPolicy = Object.freeze({
     policy,
     policyDigest: untrustedAcceptedPolicy.policyDigest,
@@ -110,7 +102,7 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
     chainId === null
     || contextGraphStorageAddress === null
   ) {
-    throw new Error('RFC-64 finalized precommit requires one public finalized policy');
+    throw new Error('RFC-64 finalized precommit requires one finalized policy');
   }
   if (
     policy.source.chainId !== chainId
@@ -153,7 +145,7 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
 /**
  * Guard a finalized-chain SWM catalog before its applied-head CAS without
  * treating catalog rows as a second VM inventory. The chain remains the VM
- * catalog; this barrier verifies the accepted public policy, cleartext CG name,
+ * catalog; this barrier verifies the accepted policy, cleartext CG name,
  * governance binding, and finality anchor against live chain state only.
  */
 export function createRfc64FinalizedPolicyAgentPrecommitV1(
@@ -196,7 +188,11 @@ export function createRfc64FinalizedPolicyAgentPrecommitV1(
         session,
       ),
     );
-    assertAcceptedSnapshotStillCurrentV1(options, plan, resolved.acceptedPolicy);
+    assertRfc64FinalizedPolicyAgentPrecommitSnapshotCurrentV1(
+      options,
+      plan,
+      resolved.acceptedPolicy,
+    );
   });
 }
 
@@ -270,7 +266,7 @@ function assertRosterMatchesAcceptedPolicyV1(
   }
 }
 
-function assertAcceptedSnapshotStillCurrentV1(
+export function assertRfc64FinalizedPolicyAgentPrecommitSnapshotCurrentV1(
   options: Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1,
   plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
   expected: Readonly<AcceptedRfc64CatalogAccessSnapshotV1>,

@@ -65,6 +65,7 @@ async function requestStatusWithAgent(
   configOverrides: Record<string, unknown> = {},
   requestPath = '/api/status',
   networkOverride: RequestContext['network'] = null,
+  rfc64CatalogOverride?: RequestContext['rfc64Catalog'],
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -86,6 +87,9 @@ async function requestStatusWithAgent(
         config as never,
         resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
       ),
+      ...(rfc64CatalogOverride === undefined
+        ? {}
+        : { rfc64Catalog: rfc64CatalogOverride }),
       startedAt: Date.now(),
       agent: {
         peerId: 'peer-status-test',
@@ -115,6 +119,79 @@ async function requestStatusWithAgent(
     });
   }
 }
+
+describe('/api/status RFC-64 private recovery privacy', () => {
+  it('reports only aggregate private recovery state and hides provider identities', async () => {
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/private-release-2';
+    const privateProvider = '12D3KooPrivateProviderMustNotLeak';
+    const response = await requestStatusWithAgent(
+      {
+        readRfc64PublicCatalogBootstrapStatusV1: () => ({
+          running: false,
+          pass: 1,
+          retryIntervalMs: 1_000,
+          lastPassStartedAtMs: 1,
+          lastPassCompletedAtMs: 2,
+          targets: [{
+            scope: {
+              networkId: 'otp:20430',
+              contextGraphId: privateContextGraph,
+              subGraphName: null,
+              authorAddress: '0x2222222222222222222222222222222222222222',
+              catalogEra: '0',
+            },
+            providers: [privateProvider],
+            outcome: 'known-incomplete',
+            completionReason: 'no-authorized-provider',
+            attempts: 1,
+            providerPeerId: privateProvider,
+            appliedHeadDigest: null,
+            catalogVersion: null,
+            inventoryRowCount: null,
+            lastError: `provider ${privateProvider} failed`,
+            updatedAtMs: 2,
+          }],
+        }),
+      },
+      {},
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [privateContextGraph],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [privateContextGraph],
+        accessPolicyAuthority: {
+          localAgentAddress: '0x3333333333333333333333333333333333333333',
+          peerAgentBindings: [],
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope: {
+              payload: {
+                contextGraphId: privateContextGraph,
+                accessPolicy: 1,
+                source: { kind: 'finalized-chain' },
+              },
+            },
+          }],
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.privateRecovery).toEqual([{
+      contextGraphId: privateContextGraph,
+      vmRequired: true,
+      targetCount: 1,
+      outcomeCounts: { 'known-incomplete': 1 },
+      completionReasons: ['no-authorized-provider'],
+    }]);
+    expect(response.body.rfc64PublicCatalog.bootstrap).toBeNull();
+    expect(JSON.stringify(response.body)).not.toContain(privateProvider);
+  });
+});
 
 describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => {
   let daemon: LiveDaemon;

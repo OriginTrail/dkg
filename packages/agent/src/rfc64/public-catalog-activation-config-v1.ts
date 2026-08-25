@@ -85,7 +85,7 @@ export interface Rfc64CatalogPeerAgentBindingV1 {
   readonly agentAddress: EvmAddressV1;
 }
 
-/** Manual Release-1 peer identity trust root. No registry inference is allowed. */
+/** Manual Releases 1-2 peer identity trust root. No registry inference is allowed. */
 export interface Rfc64CatalogActivationAccessPolicyAuthorityV1 {
   readonly localAgentAddress: EvmAddressV1;
   readonly peerAgentBindings: readonly Rfc64CatalogPeerAgentBindingV1[];

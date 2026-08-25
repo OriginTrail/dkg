@@ -244,6 +244,20 @@ describe('RFC-64 finalized VM placement composition', () => {
       highestFinalizedOrdinal: null,
     });
   });
+
+  it('requires every finalized private author asset to be present in the catalog', async () => {
+    const placement = await createPlacement(KA_1, ROOT_1);
+    const request = requestFor([placement]);
+
+    expect(() => composeFinalizedVmSetV1({
+      ...request,
+      finalizedContextGraph: {
+        ...request.finalizedContextGraph,
+        accessPolicy: 1,
+      },
+      requireCompleteAuthorSet: true,
+    })).toThrow(/known-incomplete: no-authorized-provider/u);
+  });
 });
 
 function requestFor(
@@ -251,6 +265,7 @@ function requestFor(
 ): ComposeFinalizedVmSetRequestV1 {
   return {
     assertedAtKav10Address: KAV10,
+    catalogAuthorAddress: AUTHOR,
     catalogLane: {
       contextGraphId: CONTEXT_GRAPH_NAME,
       subGraphName: null,
@@ -271,6 +286,7 @@ function requestFor(
     },
     inventory: inventory(),
     placements: [...placements],
+    requireCompleteAuthorSet: false,
   };
 }
 

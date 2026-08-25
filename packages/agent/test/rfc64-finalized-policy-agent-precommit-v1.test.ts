@@ -275,21 +275,22 @@ describe('RFC-64 finalized policy agent precommit', () => {
     )).rejects.toThrow(/accepted policy changed/u);
   });
 
-  it('fails closed for registered private catalogs in Release 1', async () => {
+  it('accepts a registered private catalog with the exact roster and live chain policy', async () => {
     const base = acceptedRfc64VmPolicySnapshot();
     const privateFinalized = Object.freeze({
       ...base,
       policy: Object.freeze({ ...base.policy, accessPolicy: 1 as const }),
       roster: privateOwnerSnapshot().roster,
     });
+    const live = await liveOptions({ accessPolicy: 1 });
     const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
-      ...options(),
+      ...live.options,
       acceptedPolicySnapshotForCatalogScope: () => privateFinalized,
     });
     await expect(handler(
       rfc64FinalizedVmPrecommitPlan(),
       new AbortController().signal,
-    )).rejects.toThrow(/does not activate registered private/u);
+    )).resolves.toBeUndefined();
   });
 
   it('rejects a missing CG mapping or a different live chain', async () => {
@@ -313,7 +314,6 @@ describe('RFC-64 finalized policy agent precommit', () => {
   });
 
   it.each([
-    ['non-public access', { accessPolicy: 1 }],
     ['missing governance', {
       governanceChainId: null,
       governanceContractAddress: null,

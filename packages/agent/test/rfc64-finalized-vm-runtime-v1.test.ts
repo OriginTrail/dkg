@@ -4,6 +4,7 @@ import {
   contextGraphLayerUri,
   type ContextGraphPolicyV1,
   type Digest32V1,
+  type MemberRosterV1,
 } from '@origintrail-official/dkg-core';
 import type {
   StrictCurrentFinalizedEvmReadCallV1,
@@ -62,7 +63,7 @@ const KA = new ethers.Interface([
   'function getLatestMerkleRootPublisher(uint256 id) view returns (address)',
 ]);
 
-describe('RFC-64 finalized public VM runtime', () => {
+describe('RFC-64 finalized VM runtime', () => {
   it('verifies one exact finalized view before materializing in ordinal order', async () => {
     const placement = await createRfc64FinalizedVmPlacementFixture();
     const transport = snapshotTransport();
@@ -161,6 +162,46 @@ describe('RFC-64 finalized public VM runtime', () => {
     await expect(runtime(request(placement))).rejects.toMatchObject({
       code: 'finalized-vm-runtime-materialization',
     } satisfies Partial<FinalizedVmRuntimeErrorV1>);
+  });
+
+  it('materializes a registered private graph only with its exact policy roster', async () => {
+    const placement = await createRfc64FinalizedVmPlacementFixture();
+    const transport = snapshotTransport({ accessPolicy: 1 });
+    const materialize = vi.fn<FinalizedVmMaterializerV1>(async () => receipt());
+    const runtime = createFinalizedVmRuntimeV1(runtimeConfig(transport.snapshot, materialize));
+
+    const result = await runtime(privateRequest(placement));
+
+    expect(result.composed.rows).toHaveLength(1);
+    expect(result.receipts).toHaveLength(1);
+    expect(materialize).toHaveBeenCalledOnce();
+  });
+
+  it('rejects private VM before store writes when the exact roster is absent', async () => {
+    const placement = await createRfc64FinalizedVmPlacementFixture();
+    const transport = snapshotTransport({ accessPolicy: 1 });
+    const materialize = vi.fn<FinalizedVmMaterializerV1>(async () => receipt());
+    const runtime = createFinalizedVmRuntimeV1(runtimeConfig(transport.snapshot, materialize));
+
+    await expect(runtime(request(placement, { accessPolicy: 1 }))).rejects.toMatchObject({
+      code: 'finalized-vm-runtime-request',
+      cause: expect.objectContaining({
+        message: expect.stringMatching(/exact current policy-bound roster/u),
+      }),
+    });
+    expect(materialize).not.toHaveBeenCalled();
+  });
+
+  it('reports known-incomplete when chain truth contains private author bytes not in the catalog', async () => {
+    const placement = await createRfc64FinalizedVmPlacementFixture({ kaNumber: 1n });
+    const transport = snapshotTransport({ accessPolicy: 1, kaNumbers: [1n, 2n] });
+    const materialize = vi.fn<FinalizedVmMaterializerV1>(async () => receipt());
+    const runtime = createFinalizedVmRuntimeV1(runtimeConfig(transport.snapshot, materialize));
+
+    await expect(runtime(privateRequest(placement))).rejects.toThrow(
+      /known-incomplete: no-authorized-provider/u,
+    );
+    expect(materialize).not.toHaveBeenCalled();
   });
 
   it('atomically promotes the verified catalog projection into an exact VM graph', async () => {
@@ -285,6 +326,7 @@ function request(
     : [placementOrPlacements];
   return {
     catalogLane: { contextGraphId: RFC64_VM_CONTEXT_GRAPH_NAME, subGraphName: null },
+    catalogAuthorAddress: RFC64_VM_AUTHOR,
     onChainContextGraphId: RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID,
     acceptedPolicy: {
       policy,
@@ -294,6 +336,34 @@ function request(
     placements,
     signal: new AbortController().signal,
   } as const;
+}
+
+function privateRequest(
+  placementOrPlacements:
+    | Awaited<ReturnType<typeof createRfc64FinalizedVmPlacementFixture>>
+    | readonly Awaited<ReturnType<typeof createRfc64FinalizedVmPlacementFixture>>[],
+) {
+  const base = request(placementOrPlacements, { accessPolicy: 1 });
+  const roster = Object.freeze({
+    networkId: base.acceptedPolicy.policy.networkId,
+    contextGraphId: base.acceptedPolicy.policy.contextGraphId,
+    ownershipTransitionDigest: base.acceptedPolicy.policy.ownershipTransitionDigest,
+    era: base.acceptedPolicy.policy.era,
+    version: '0',
+    previousRosterDigest: null,
+    policyDigest: base.acceptedPolicy.policyDigest,
+    administrativeDelegationDigest:
+      base.acceptedPolicy.policy.administrativeDelegationDigest,
+    members: Object.freeze([Object.freeze({
+      agentAddress: RFC64_VM_AUTHOR,
+      roles: Object.freeze(['provider'] as const),
+    })]),
+    issuedAt: '1700000000000',
+  }) satisfies MemberRosterV1;
+  return Object.freeze({
+    ...base,
+    acceptedPolicy: Object.freeze({ ...base.acceptedPolicy, roster }),
+  });
 }
 
 function publicPolicy(
@@ -345,6 +415,7 @@ function receipt(
 }
 
 function snapshotTransport(options: {
+  readonly accessPolicy?: 0 | 1;
   readonly nameHash?: string;
   readonly assertionRoot?: string;
   readonly kaNumbers?: readonly bigint[];
@@ -389,7 +460,7 @@ function snapshotTransport(options: {
     switch (selector) {
       case CG.getFunction('getContextGraph')!.selector:
         return CG.encodeFunctionResult('getContextGraph', [
-          OWNER, [], 0n, true, 1n, 0, 1, ZERO_ADDRESS, 0n,
+          OWNER, [], 0n, true, 1n, options.accessPolicy ?? 0, 1, ZERO_ADDRESS, 0n,
         ]);
       case CG.getFunction('getNameHash')!.selector:
         return CG.encodeFunctionResult('getNameHash', [options.nameHash ?? NAME_HASH]);

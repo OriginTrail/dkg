@@ -80,10 +80,9 @@ export function snapshotRfc64CatalogBootstrapConfigV1(
     if (
       policy.accessPolicy === 1
       && policy.source.kind !== 'owner-signed-unregistered'
+      && policy.source.kind !== 'finalized-chain'
     ) {
-      throw new TypeError(
-        'rfc64Catalog private Release 1 supports only owner-signed unregistered policies',
-      );
+      throw new TypeError('rfc64Catalog private policy source is unsupported');
     }
     const key = `${policy.networkId}\n${policy.contextGraphId}`;
     if (policyKeys.has(key)) {
@@ -161,7 +160,7 @@ export function snapshotRfc64CatalogBootstrapConfigV1(
       );
     if (policy.accessPolicy === 1 && completeSwmProviders?.length !== 1) {
       throw new TypeError(
-        'rfc64Catalog private Release 1 policies require exactly one completeSwmProvider',
+        'rfc64Catalog private Releases 1-2 policies require exactly one completeSwmProvider',
       );
     }
     if (policy.accessPolicy === 1) {
@@ -177,7 +176,7 @@ export function snapshotRfc64CatalogBootstrapConfigV1(
         }
         if (target.providers.length !== 1 || target.providers[0] !== completeProvider) {
           throw new TypeError(
-            'rfc64Catalog private Release 1 targets must use the one completeSwmProvider',
+            'rfc64Catalog private Releases 1-2 targets must use the one completeSwmProvider',
           );
         }
       }

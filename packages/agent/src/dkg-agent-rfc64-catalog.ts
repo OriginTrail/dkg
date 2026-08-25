@@ -82,6 +82,7 @@ import {
   type Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { createRfc64FinalizedPolicyAgentPrecommitV1 } from './rfc64/finalized-policy-agent-precommit-v1.js';
+import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
@@ -769,16 +770,49 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       resolveScopedReadCapability,
       createReconciler: (clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>) => {
         const chainConfig = this.config.chainConfig;
-        const beforeAppliedHeadCommit = createRfc64FinalizedPolicyAgentPrecommitV1({
-          acceptedPolicySnapshotForCatalogScope: (scope) =>
-            this.requireRfc64PublicCatalogServiceV1()
-              .acceptedPolicySnapshotForCatalogScope(scope),
+        const acceptedPolicySnapshotForCatalogScope = (scope: AuthorCatalogScopeV1) =>
+          this.requireRfc64PublicCatalogServiceV1()
+            .acceptedPolicySnapshotForCatalogScope(scope);
+        const finalizedPolicyPrecommit = createRfc64FinalizedPolicyAgentPrecommitV1({
+          acceptedPolicySnapshotForCatalogScope,
           rpcEndpoints: chainConfig === undefined
             ? null
             : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
           getOnChainContextGraphId: (contextGraphId, signal) =>
             this.getContextGraphOnChainId(contextGraphId, { signal }),
           getEvmChainId: () => this.chain.getEvmChainId(),
+        });
+        const finalizedVmPrecommit = createRfc64FinalizedVmAgentPrecommitV1({
+          acceptedPolicySnapshotForCatalogScope,
+          rpcEndpoints: chainConfig === undefined
+            ? null
+            : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
+          getOnChainContextGraphId: (contextGraphId, signal) =>
+            this.getContextGraphOnChainId(contextGraphId, { signal }),
+          getEvmChainId: () => this.chain.getEvmChainId(),
+          getKnowledgeAssetStorageAddress: async () => {
+            if (typeof this.chain.getDKGKnowledgeAssetsAddress !== 'function') {
+              throw new Error('RFC-64 private VM recovery requires KnowledgeAssetStorage');
+            }
+            return this.chain.getDKGKnowledgeAssetsAddress();
+          },
+          getKnowledgeAssetsLifecycleAddress: () =>
+            this.chain.getKnowledgeAssetsLifecycleAddress(),
+          store: this.store,
+        });
+        const beforeAppliedHeadCommit = Object.freeze(async (
+          plan: Parameters<typeof finalizedPolicyPrecommit>[0],
+          signal: AbortSignal,
+        ): Promise<void> => {
+          const accepted = acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
+          if (
+            accepted.policy.accessPolicy === 1
+            && accepted.policy.source.kind === 'finalized-chain'
+          ) {
+            await finalizedVmPrecommit(plan, signal);
+            return;
+          }
+          await finalizedPolicyPrecommit(plan, signal);
         });
         const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
           headTransport: clients.headTransport,

@@ -30,12 +30,17 @@ export type Rfc64PublicCatalogBootstrapOutcomeV1 =
   | 'pending'
   | 'applied'
   | 'not-found'
+  | 'known-incomplete'
   | 'failed';
+
+export type Rfc64CatalogBootstrapCompletionReasonV1 =
+  | 'no-authorized-provider';
 
 export interface Rfc64PublicCatalogBootstrapTargetStatusV1 {
   readonly scope: Readonly<Rfc64PublicCatalogBootstrapScopeV1>;
   readonly providers: readonly string[];
   readonly outcome: Rfc64PublicCatalogBootstrapOutcomeV1;
+  readonly completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
   readonly attempts: number;
   readonly providerPeerId: string | null;
   readonly appliedHeadDigest: Digest32V1 | null;
@@ -57,7 +62,9 @@ export interface Rfc64PublicCatalogBootstrapStatusV1 {
 interface MutableTargetStatusV1 {
   readonly scope: Readonly<Rfc64PublicCatalogBootstrapScopeV1>;
   readonly providers: readonly string[];
+  readonly requiresPrivateVm: boolean;
   outcome: Rfc64PublicCatalogBootstrapOutcomeV1;
+  completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
   attempts: number;
   providerPeerId: string | null;
   appliedHeadDigest: Digest32V1 | null;
@@ -168,12 +175,15 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           authorAddress: target.authorAddress,
           catalogEra: policyEnvelope.payload.era,
         }),
-        // Release 1 private recovery is deliberately single-provider. The
+        // Releases 1-2 private recovery is deliberately single-provider. The
         // graph-complete provider is the only source used for every signed
         // author catalog; configured target candidates do not widen it.
         providers: policyEnvelope.payload.accessPolicy === 1
           ? completeSwmProviders
           : target.providers,
+        requiresPrivateVm:
+          policyEnvelope.payload.accessPolicy === 1
+          && policyEnvelope.payload.source.kind === 'finalized-chain',
       }))
     ));
     const state: BootstrapStateV1 = {
@@ -181,7 +191,9 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       targets: targets.map((target) => ({
         scope: target.scope,
         providers: target.providers,
+        requiresPrivateVm: target.requiresPrivateVm,
         outcome: 'pending',
+        completionReason: null,
         attempts: 0,
         providerPeerId: null,
         appliedHeadDigest: null,
@@ -343,6 +355,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     signal: AbortSignal,
   ): Promise<void> {
     target.outcome = 'pending';
+    target.completionReason = null;
     target.attempts = 0;
     target.providerPeerId = null;
     target.appliedHeadDigest = null;
@@ -365,6 +378,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           continue;
         }
         target.outcome = 'applied';
+        target.completionReason = null;
         target.providerPeerId = providerPeerId;
         target.appliedHeadDigest = applied.currentCatalogHeadDigest;
         target.catalogVersion = applied.catalogVersion;
@@ -377,7 +391,12 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         lastError = boundedErrorV1(errorMessageV1(error));
       }
     }
-    target.outcome = lastError === null && sawNotFound ? 'not-found' : 'failed';
+    target.outcome = target.requiresPrivateVm
+      ? 'known-incomplete'
+      : lastError === null && sawNotFound ? 'not-found' : 'failed';
+    target.completionReason = target.requiresPrivateVm
+      ? 'no-authorized-provider'
+      : null;
     target.providerPeerId = null;
     target.appliedHeadDigest = null;
     target.catalogVersion = null;
@@ -423,6 +442,7 @@ function snapshotTargetStatusV1(
     }),
     providers: Object.freeze([...target.providers]),
     outcome: target.outcome,
+    completionReason: target.completionReason,
     attempts: target.attempts,
     providerPeerId: target.providerPeerId,
     appliedHeadDigest: target.appliedHeadDigest,

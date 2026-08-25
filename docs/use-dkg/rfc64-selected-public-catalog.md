@@ -121,13 +121,22 @@ deterministic harness and must exactly match the selected network.
 Its `networkId` and numeric `assertedAtChainId` are checked against the same
 effective chain identity before subscriptions, stores, or agent startup begin.
 
-### Experimental Release 1: selected private SWM
+### Experimental Releases 1-2: selected private SWM and VM
 
 `rfc64Catalog` is the additive policy-neutral form. Release 1 lets a current
 member recover SWM for one explicitly selected owner-signed, unregistered
-private CG from one pinned complete provider. It does not recover private VM
-or registered private CGs yet. A registered private policy stops activation;
-support for registered private CGs is part of Release 2.
+private CG from one pinned complete provider. Release 2 also accepts a
+registered private CG whose policy source is `finalized-chain`. For that graph,
+the receiver recovers SWM from the same pinned provider and materializes VM
+from the exact finalized chain ordinal set before it commits the catalog head.
+
+Private VM recovery fails closed. The accepted roster must bind to the exact
+policy digest. The catalog author and the content provider must be current
+members. Content requests use the private V2 scoped protocols; the public V1
+protocols do not serve private data. If chain truth lists an author asset but
+the authorized catalog cannot supply its bytes, status reports
+`known-incomplete` with reason `no-authorized-provider`. The receiver does not
+use a public or curator fallback.
 
 The bounded operator shape is:
 
@@ -169,10 +178,10 @@ binding to a current roster member with the `provider` role. The local address
 must also be a current member. The daemon rejects a missing or conflicting
 policy, roster, provider binding, network, or local membership before it starts.
 
-Release 1 does not follow roster successors automatically. When a member is
+Releases 1-2 do not follow roster successors automatically. When a member is
 removed, install the new independently verified policy/roster snapshot, remove
 obsolete peer bindings, and restart the node. This fences the removed peer from
-new Release-1 transfers. Content already received by that member cannot be
+new transfers. Content already received by that member cannot be
 revoked.
 
 `rfc64PublicCatalog` remains valid. If both blocks select the same CG, their
@@ -182,6 +191,10 @@ conflict stops activation.
 ## Verify activation
 
 Restart the daemon and inspect `GET /api/status`:
+
+The public compatibility block lists public targets only. Private provider
+identities stay out of status. The `rfc64Catalog.privateRecovery` array gives
+local aggregate counts, whether VM is required, and safe completion reasons.
 
 ```json
 {

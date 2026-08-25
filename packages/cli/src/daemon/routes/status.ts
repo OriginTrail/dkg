@@ -785,11 +785,55 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       && typeof agent.rfc64PublicCatalogStatsV1 === 'function'
         ? agent.rfc64PublicCatalogStatsV1()
         : null;
-    const rfc64PublicCatalogBootstrap =
-      rfc64PublicCatalogActivation.enabled
+    const rfc64CatalogBootstrapStatus =
+      rfc64CatalogActivation.enabled
       && typeof agent.readRfc64PublicCatalogBootstrapStatusV1 === 'function'
         ? agent.readRfc64PublicCatalogBootstrapStatusV1()
         : null;
+    const selectedPublicContextGraphs = new Set(
+      rfc64CatalogActivation.selectedPublicContextGraphs,
+    );
+    const rfc64PublicCatalogBootstrap =
+      rfc64PublicCatalogActivation.enabled && rfc64CatalogBootstrapStatus !== null
+        ? {
+            ...rfc64CatalogBootstrapStatus,
+            // Keep the compatibility surface public-only. The shared runtime
+            // status also contains private targets and provider identities.
+            targets: rfc64CatalogBootstrapStatus.targets.filter(
+              ({ scope }) => selectedPublicContextGraphs.has(scope.contextGraphId),
+            ),
+          }
+        : null;
+    const rfc64PrivateRecovery = rfc64CatalogActivation.selectedPrivateContextGraphs.map(
+      (contextGraphId) => {
+        const targets = rfc64CatalogBootstrapStatus?.targets.filter(
+          ({ scope }) => scope.contextGraphId === contextGraphId,
+        ) ?? [];
+        const outcomeCounts = Object.fromEntries(
+          [...new Set(targets.map(({ outcome }) => outcome))]
+            .sort()
+            .map((outcome) => [
+              outcome,
+              targets.filter((target) => target.outcome === outcome).length,
+            ]),
+        );
+        const completionReasons = [...new Set(targets.flatMap(
+          ({ completionReason }) => completionReason === null ? [] : [completionReason],
+        ))].sort();
+        const accepted = rfc64CatalogActivation.bootstrap?.acceptedPolicies.find(
+          ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
+        );
+        return {
+          contextGraphId,
+          vmRequired:
+            accepted?.policyEnvelope.payload.accessPolicy === 1
+            && accepted.policyEnvelope.payload.source.kind === 'finalized-chain',
+          targetCount: targets.length,
+          outcomeCounts,
+          completionReasons,
+        };
+      },
+    );
     const rfc64CompleteSwmProviders = rfc64PublicCatalogActivation.enabled
       ? (rfc64PublicCatalogActivation.bootstrap?.acceptedPublicPolicies ?? [])
         .filter((accepted) => (accepted.completeSwmProviders?.length ?? 0) > 0)
@@ -929,6 +973,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         selectedPrivateContextGraphs: rfc64CatalogActivation.selectedPrivateContextGraphs,
         privateAuthorityConfigured:
           rfc64CatalogActivation.accessPolicyAuthority !== undefined,
+        privateRecovery: rfc64PrivateRecovery,
       },
       // Product-default scheduling is deliberately separate from the signed
       // catalog authority surface above. Every explicitly requested CG is

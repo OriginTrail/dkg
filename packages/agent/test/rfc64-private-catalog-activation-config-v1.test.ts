@@ -135,7 +135,7 @@ function privateActivation(options: {
 
 const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK);
 
-describe('RFC-64 Release 1 private catalog activation', () => {
+describe('RFC-64 private catalog activation', () => {
   it('accepts one exact private policy, roster, provider, and local member', () => {
     const resolved = resolveRfc64CatalogActivationConfigV1(
       privateActivation(),
@@ -159,7 +159,7 @@ describe('RFC-64 Release 1 private catalog activation', () => {
     expect(Object.isFrozen(resolved.bootstrap?.acceptedPolicies[0]?.rosterEnvelope)).toBe(true);
   });
 
-  it('rejects registered private policies before the Release 1 runtime starts', () => {
+  it('accepts registered private policies for the Release 2 runtime', () => {
     const registeredPolicy: ContextGraphPolicyV1 = {
       ...policy(PRIVATE_CG, 1),
       governanceChainId: '20430',
@@ -176,7 +176,7 @@ describe('RFC-64 Release 1 private catalog activation', () => {
     const activation = privateActivation({
       roster: rosterEnvelope(registeredEnvelope),
     });
-    expect(() => resolveRfc64CatalogActivationConfigV1({
+    const resolved = resolveRfc64CatalogActivationConfigV1({
       ...activation,
       bootstrap: {
         ...activation.bootstrap,
@@ -185,7 +185,22 @@ describe('RFC-64 Release 1 private catalog activation', () => {
           policyEnvelope: registeredEnvelope,
         }],
       },
-    }, chainIdentity)).toThrow(/only owner-signed unregistered policies/u);
+    }, chainIdentity);
+
+    expect(resolved).toMatchObject({
+      enabled: true,
+      selectedPrivateContextGraphs: [PRIVATE_CG],
+      bootstrap: {
+        acceptedPolicies: [{
+          policyEnvelope: {
+            payload: {
+              accessPolicy: 1,
+              source: { kind: 'finalized-chain' },
+            },
+          },
+        }],
+      },
+    });
   });
 
   it('fails closed on missing or policy-mismatched private roster authority', () => {

@@ -632,7 +632,7 @@ export interface DkgConfig {
   rfc64PublicCatalog?: Rfc64PublicCatalogActivationConfig;
   /**
    * Additive, bounded RFC-64 activation for explicitly selected public or
-   * invite-only CGs. Private Release 1 selections require a manual policy,
+   * invite-only CGs. Private Releases 1-2 selections require a manual policy,
    * roster, and exact peer-to-agent authority map.
    */
   rfc64Catalog?: Rfc64CatalogActivationConfig;

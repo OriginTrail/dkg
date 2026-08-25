@@ -10,7 +10,10 @@ import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-poli
 import type {
   Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
 } from './public-catalog-native-receiver-v1.js';
-import { resolveRfc64FinalizedPolicyAgentPrecommitV1 } from './finalized-policy-agent-precommit-v1.js';
+import {
+  assertRfc64FinalizedPolicyAgentPrecommitSnapshotCurrentV1,
+  resolveRfc64FinalizedPolicyAgentPrecommitV1,
+} from './finalized-policy-agent-precommit-v1.js';
 import { createFinalizedVmRuntimeV1 } from './finalized-vm-runtime-v1.js';
 import { createFinalizedVmStoreMaterializerV1 } from './finalized-vm-store-materializer-v1.js';
 
@@ -78,6 +81,7 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
         contextGraphId: plan.catalogScope.contextGraphId,
         subGraphName: plan.catalogScope.subGraphName,
       }),
+      catalogAuthorAddress: plan.catalogScope.authorAddress,
       onChainContextGraphId: resolved.onChainContextGraphId,
       acceptedPolicy: resolved.acceptedPolicy,
       placements: Object.freeze(plan.rows.map((row) => Object.freeze({
@@ -86,5 +90,10 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
       }))),
       signal,
     });
+    assertRfc64FinalizedPolicyAgentPrecommitSnapshotCurrentV1(
+      options,
+      plan,
+      resolved.acceptedPolicy,
+    );
   });
 }

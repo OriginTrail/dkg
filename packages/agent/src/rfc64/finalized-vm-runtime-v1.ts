@@ -9,7 +9,9 @@ import {
   assertNetworkIdV1,
   assertSubGraphNameV1,
   canonicalizeContextGraphPolicyPayloadV1,
+  canonicalizeMemberRosterPayloadV1,
   parseCanonicalContextGraphPolicyPayloadV1,
+  parseCanonicalMemberRosterPayloadV1,
   type ChainIdV1,
   type ContextGraphIdV1,
   type DecimalU256V1,
@@ -19,6 +21,7 @@ import {
   type EvmAddressV1,
   type KaIdV1,
   type NetworkIdV1,
+  type MemberRosterV1,
   type SubGraphNameV1,
 } from '@origintrail-official/dkg-core';
 import {
@@ -90,6 +93,7 @@ export interface FinalizedVmRuntimeConfigV1 {
 
 export interface FinalizedVmRuntimeRequestV1 {
   readonly catalogLane: FinalizedVmCatalogLaneV1;
+  readonly catalogAuthorAddress: EvmAddressV1;
   readonly onChainContextGraphId: DecimalU256V1;
   readonly acceptedPolicy: AcceptedRfc64CatalogAccessSnapshotV1;
   readonly placements: readonly FinalizedVmPlacementEvidenceV1[];
@@ -138,6 +142,7 @@ interface RuntimeConfigSnapshotV1 {
 
 interface RuntimeRequestSnapshotV1 {
   readonly catalogLane: FinalizedVmCatalogLaneV1;
+  readonly catalogAuthorAddress: EvmAddressV1;
   readonly onChainContextGraphId: FinalizedVmChainInventoryV1['contextGraphId'];
   readonly acceptedPolicy: Readonly<ContextGraphPolicyV1>;
   readonly acceptedPolicyDigest: Digest32V1;
@@ -152,7 +157,7 @@ interface VerifiedSnapshotV1 {
 }
 
 /**
- * Verify public RFC-64 policy, name binding, chain inventory, and catalog placement at
+ * Verify RFC-64 policy, roster, name binding, chain inventory, and catalog placement at
  * one exact finalized anchor before invoking any triple-store materialization.
  */
 export function createFinalizedVmRuntimeV1(
@@ -185,10 +190,12 @@ export function createFinalizedVmRuntimeV1(
 
         const composed = composeFinalizedVmSetV1({
           assertedAtKav10Address: config.knowledgeAssetsLifecycleAddress,
+          catalogAuthorAddress: request.catalogAuthorAddress,
           catalogLane: request.catalogLane,
           finalizedContextGraph,
           inventory,
           placements: request.placements,
+          requireCompleteAuthorSet: request.acceptedPolicy.accessPolicy === 1,
         });
         return Object.freeze({
           finalizedContextGraph,
@@ -261,13 +268,17 @@ function snapshotConfig(input: FinalizedVmRuntimeConfigV1): RuntimeConfigSnapsho
 
 function snapshotRequest(input: FinalizedVmRuntimeRequestV1): RuntimeRequestSnapshotV1 {
   try {
-    if (input.acceptedPolicy.roster !== null) {
-      throw new TypeError('public finalized VM runtime forbids a private member roster');
-    }
     assertCanonicalDigest(input.acceptedPolicy.policyDigest, 'accepted policy digest');
     const policy = parseCanonicalContextGraphPolicyPayloadV1(
       canonicalizeContextGraphPolicyPayloadV1(input.acceptedPolicy.policy),
     );
+    const roster = input.acceptedPolicy.roster === null
+      ? null
+      : parseCanonicalMemberRosterPayloadV1(
+        canonicalizeMemberRosterPayloadV1(input.acceptedPolicy.roster),
+      );
+    assertAcceptedRosterV1(roster, policy, input.acceptedPolicy.policyDigest);
+    assertCanonicalEvmAddress(input.catalogAuthorAddress, 'catalogAuthorAddress');
     assertCanonicalDecimalU256(
       input.onChainContextGraphId,
       'finalized VM runtime onChainContextGraphId',
@@ -284,6 +295,7 @@ function snapshotRequest(input: FinalizedVmRuntimeRequestV1): RuntimeRequestSnap
     }
     return Object.freeze({
       catalogLane,
+      catalogAuthorAddress: input.catalogAuthorAddress,
       onChainContextGraphId: input.onChainContextGraphId,
       acceptedPolicy: policy,
       acceptedPolicyDigest: input.acceptedPolicy.policyDigest,
@@ -331,7 +343,7 @@ async function resolveFinalizedPolicyForVmRuntime(
       if (cause.code === 'finalized-policy-verifier-policy') {
         fail(
           'finalized-vm-runtime-policy',
-          'accepted public policy or cleartext name binding differs from finalized chain truth',
+          'accepted policy or cleartext name binding differs from finalized chain truth',
           cause,
         );
       }
@@ -344,6 +356,30 @@ async function resolveFinalizedPolicyForVmRuntime(
       fail('finalized-vm-runtime-request', 'finalized policy request is invalid', cause);
     }
     throw cause;
+  }
+}
+
+function assertAcceptedRosterV1(
+  roster: Readonly<MemberRosterV1> | null,
+  policy: Readonly<ContextGraphPolicyV1>,
+  policyDigest: Digest32V1,
+): void {
+  if (policy.accessPolicy === 0) {
+    if (roster !== null) throw new TypeError('public finalized VM policy forbids a member roster');
+    return;
+  }
+  if (
+    roster === null
+    || roster.networkId !== policy.networkId
+    || roster.contextGraphId !== policy.contextGraphId
+    || roster.ownershipTransitionDigest !== policy.ownershipTransitionDigest
+    || roster.era !== policy.era
+    || roster.policyDigest !== policyDigest
+    || roster.administrativeDelegationDigest !== policy.administrativeDelegationDigest
+  ) {
+    throw new TypeError(
+      'private finalized VM policy requires the exact current policy-bound roster',
+    );
   }
 }
 
