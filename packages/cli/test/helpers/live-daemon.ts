@@ -64,6 +64,8 @@ export interface StartDaemonOpts {
    * pin `DKG_MAX_INFLIGHT` instead of inheriting the developer/CI value).
    */
   env?: Record<string, string | undefined>;
+  /** Seed durable daemon state after config/wallet setup but before process start. */
+  prepareHome?: (home: string) => Promise<void>;
 }
 
 /** Boot a real edge daemon against the shared Hardhat node and wait for readiness. */
@@ -77,7 +79,12 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
   const home = await mkdtemp(join(tmpdir(), 'dkg-live-daemon-'));
   const apiPort = uniquePort(21000);
   const listenPort = uniquePort(21900);
-  const { rpcUrl, hubAddress } = getSharedContext();
+  const defaultChain = Object.prototype.hasOwnProperty.call(opts.extraConfig ?? {}, 'chain')
+    ? { type: 'mock' as const }
+    : (() => {
+        const { rpcUrl, hubAddress } = getSharedContext();
+        return { type: 'evm' as const, rpcUrl, hubAddress, chainId: 'evm:31337' };
+      })();
 
   await writeFile(
     join(home, 'config.json'),
@@ -90,7 +97,7 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
       relay: 'none',
       auth: { enabled: authEnabled },
       store: { backend: 'oxigraph-worker', options: { path: join(home, 'store.nq') } },
-      chain: { type: 'evm', rpcUrl, hubAddress, chainId: 'evm:31337' },
+      chain: defaultChain,
       ...(opts.publisherEnabled ? { publisher: { enabled: true } } : {}),
       contextGraphs: [],
       ...(opts.extraConfig ?? {}),
@@ -112,6 +119,8 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
       { mode: 0o600 },
     );
   }
+
+  await opts.prepareHome?.(home);
 
   const childEnv: Record<string, string | undefined> = {
     ...process.env,

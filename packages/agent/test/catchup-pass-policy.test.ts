@@ -6,6 +6,7 @@ import {
   resolveSwmCatchupMaxPasses,
   resolveSwmCatchupPassConfig,
   resolveSwmCatchupPassBudgetMs,
+  runSwmCatchupContinuations,
   shouldRunAnotherCatchupPass,
   type CatchupPassPolicyInput,
 } from '../src/sync/catchup-pass-policy.js';
@@ -221,6 +222,108 @@ describe('SwmCatchupPassTracker', () => {
     tracker.recordPeerRound('peer-a', undefined, true);
     expect(tracker.capablePeers()).toEqual([]);
     expect(tracker.progress()).toBe(2);
+  });
+});
+
+describe('runSwmCatchupContinuations', () => {
+  it('owns selection, pass counting and terminal reasons across independent units', async () => {
+    const complete = new SwmCatchupPassTracker();
+    const incomplete = new SwmCatchupPassTracker();
+    complete.recordPeerRound('peer-a', {
+      snapshotsResolved: 2,
+      snapshotsTotal: 2,
+      manifestComplete: true,
+    }, true);
+    incomplete.recordPeerRound('peer-b', {
+      snapshotsResolved: 1,
+      snapshotsTotal: 3,
+      manifestComplete: true,
+    }, false);
+    const stops: Array<{ key: string; reason: string; continuationPasses: number }> = [];
+    const runs: string[][] = [];
+
+    const summary = await runSwmCatchupContinuations({
+      units: [
+        { key: 'complete', tracker: complete, planeProven: () => true },
+        { key: 'incomplete', tracker: incomplete, planeProven: () => false },
+      ],
+      config: { maxPasses: 4, budgetMs: 1_000 },
+      nowMs: () => 10,
+      runPass: async (candidates) => {
+        runs.push(candidates.map(({ key }) => key));
+        for (const candidate of candidates) {
+          const started = await candidate.runStarted(async (pass) => {
+            expect(pass.progressBefore).toBe(1);
+            expect(pass.continuationPass).toBe(1);
+            incomplete.recordPeerRound('peer-b', {
+              snapshotsResolved: 3,
+              snapshotsTotal: 3,
+              manifestComplete: true,
+            }, true);
+          });
+          expect(started.started).toBe(true);
+        }
+      },
+      onStop: (stop) => stops.push(stop),
+    });
+
+    expect(runs).toEqual([['incomplete']]);
+    expect(summary.continuationPasses).toBe(1);
+    expect(stops).toEqual([
+      { key: 'complete', reason: 'plane-proven', continuationPasses: 0 },
+      { key: 'incomplete', reason: 'no-capable-peers', continuationPasses: 1 },
+    ]);
+  });
+
+  it('does not count a selected pass when the runner declines all work before I/O', async () => {
+    const tracker = new SwmCatchupPassTracker();
+    tracker.recordPeerRound('peer-a', {
+      snapshotsResolved: 1,
+      snapshotsTotal: 2,
+      manifestComplete: true,
+    }, false);
+
+    const summary = await runSwmCatchupContinuations({
+      units: [{ key: 'queued', tracker, planeProven: () => false }],
+      config: { maxPasses: 4, budgetMs: 1_000 },
+      nowMs: () => 10,
+      runPass: async () => undefined,
+    });
+
+    expect(summary.continuationPasses).toBe(0);
+    expect(tracker.continuationPasses()).toBe(0);
+  });
+
+  it('publishes budget exhaustion when admission expires before work starts', async () => {
+    const tracker = new SwmCatchupPassTracker();
+    tracker.recordPeerRound('peer-a', {
+      snapshotsResolved: 1,
+      snapshotsTotal: 2,
+      manifestComplete: true,
+    }, false);
+    const stops: Array<{ reason: string; continuationPasses: number }> = [];
+    let now = 10;
+
+    const summary = await runSwmCatchupContinuations({
+      units: [{ key: 'queued', tracker, planeProven: () => false }],
+      config: { maxPasses: 4, budgetMs: 5 },
+      nowMs: () => now,
+      runPass: async ([candidate]) => {
+        now = 15;
+        const started = await candidate!.runStarted(async () => {
+          throw new Error('expired work must not run');
+        });
+        expect(started).toEqual({ started: false, reason: 'budget-exhausted' });
+      },
+      onStop: (stop) => stops.push(stop),
+    });
+
+    expect(summary.continuationPasses).toBe(0);
+    expect(stops).toEqual([{
+      key: 'queued',
+      reason: 'budget-exhausted',
+      continuationPasses: 0,
+    }]);
   });
 });
 

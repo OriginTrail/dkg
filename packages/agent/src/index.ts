@@ -76,6 +76,15 @@ export { FinalizationHandler } from './finalization-handler.js';
 export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
+export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+export {
+  classifySharedMemoryFreshness,
+  type SelectedSharedMemorySyncResult,
+  type SharedMemoryFreshnessSummary,
+} from './sync/shared-memory-freshness.js';
+export {
+  type Rfc64SelectedSwmGraphSyncStatus,
+} from './sync/selected-swm-graph-sync-status.js';
 export {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileQueueClosedError,
@@ -148,6 +157,7 @@ export {
   syncPriorityClass,
   validateSyncResponderSnapshotLimitsConfig,
   type SyncAdmissionSource,
+  type SyncAdmissionConfig,
   type SyncContextGraphPriorityConfig,
   type SyncPriorityClass,
   type SyncResponderSnapshotLimitsConfig,
@@ -229,6 +239,8 @@ export {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
+  type SelectedVmReconcileCursorStore,
+  type SelectedVmReconcileCursorRecord,
   type ContextGraphWritePreflightProbe,
   type PeerHealth,
   type CclPublishedEvaluationRecord,
@@ -390,6 +402,17 @@ export {
   type DurableProgressClassificationOptions,
   type DurableProgressSummary,
 } from './sync/durable-progress.js';
+export {
+  DurableRecoveryCoordinator,
+  classifyDurableRecoverySlice,
+  rankDurableRecoveryPeers,
+  selectCanonicalDurableRecoveryManifest,
+  type DurableRecoveryContinuationOutcome,
+  type DurableRecoveryOwnerControl,
+  type DurableRecoveryPeerCandidate,
+  type DurableRecoveryPeerHealth,
+  type DurableRecoverySliceEvidence,
+} from './sync/durable-recovery-coordinator.js';
 // The ONE reduction for `SwmSnapshotCoverage`. Exported so the CLI catch-up
 // walk reduces across peers with the same rule the agent uses across Context
 // Graphs — two implementations is how a numerator and a denominator end up

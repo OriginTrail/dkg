@@ -33,6 +33,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
+import { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import {
   loadNetworkConfig,
   resolveRfc64PublicCatalogActivation,
@@ -62,6 +63,8 @@ const DISABLED_RFC64_PUBLIC_CATALOG: RequestContext['rfc64PublicCatalog'] = {
 async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,
   configOverrides: Record<string, unknown> = {},
+  requestPath = '/api/status',
+  networkOverride: RequestContext['network'] = null,
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -77,7 +80,7 @@ async function requestStatusWithAgent(
       publisherState: DISABLED_PUBLISHER_STATE,
       path: url.pathname,
       url,
-      network: null,
+      network: networkOverride,
       config,
       rfc64PublicCatalog: resolveRfc64PublicCatalogActivation(
         config as never,
@@ -92,6 +95,7 @@ async function requestStatusWithAgent(
           getRelayStats: () => null,
         },
         publisher: { getIdentityId: () => 0n },
+        getSyncContextGraphIds: () => [],
         ...agentOverrides,
       },
       nodeVersion: '0.0.0-test',
@@ -103,7 +107,7 @@ async function requestStatusWithAgent(
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
     const address = server.address() as AddressInfo;
-    const response = await fetch(`http://127.0.0.1:${address.port}/api/status`);
+    const response = await fetch(`http://127.0.0.1:${address.port}${requestPath}`);
     return { status: response.status, body: await response.json() };
   } finally {
     await new Promise<void>((resolve, reject) => {
@@ -194,6 +198,176 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
   });
 });
 
+describe('/api/status effective sync lifecycle switches', () => {
+  it('surfaces the configured reconciler switch', async () => {
+    const response = await requestStatusWithAgent(
+      {},
+      { syncReconcilerEnabled: false },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.syncLifecycle).toEqual({
+      syncReconcilerEnabled: false,
+    });
+  });
+
+  it('surfaces the environment override that runtime actually honors', async () => {
+    const previous = process.env.DKG_SYNC_RECONCILER_ENABLED;
+    process.env.DKG_SYNC_RECONCILER_ENABLED = 'true';
+    try {
+      const response = await requestStatusWithAgent(
+        {},
+        { syncReconcilerEnabled: false },
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body.syncLifecycle).toEqual({
+        syncReconcilerEnabled: true,
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DKG_SYNC_RECONCILER_ENABLED;
+      } else {
+        process.env.DKG_SYNC_RECONCILER_ENABLED = previous;
+      }
+    }
+  });
+});
+
+describe('daemon subscription rehydration lifecycle', () => {
+  it('honors the environment kill-switch through real startup and leaves durable rows dormant', async () => {
+    const contextGraphId = 'persisted-user-context-graph';
+    let daemon: LiveDaemon | undefined;
+
+    try {
+      daemon = await startLiveDaemon({
+        extraConfig: {
+          chain: { type: 'mock' },
+          contextGraphSubscriptionRehydrationEnabled: true,
+        },
+        env: {
+          DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED: 'false',
+        },
+        prepareHome: async (home) => {
+          const db = new DashboardDB({ dataDir: home });
+          try {
+            db.upsertContextGraphSubscription({
+              context_graph_id: contextGraphId,
+              name: 'Persisted user Context Graph',
+              subscribed: 1,
+              synced: 1,
+              shared_memory_synced: 1,
+              meta_synced: 1,
+              sync_scoped: 1,
+              updated_at: 1_700_000_000_000,
+            });
+          } finally {
+            db.close();
+          }
+        },
+      });
+
+      const response = await fetch(`${daemon.base}/api/context-graph/subscriptions`, {
+        headers: authHeaders(daemon),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        count: 0,
+        subscriptions: [],
+        rehydration: {
+          rehydrationEnabled: false,
+          persistedTotal: 1,
+          hostedActivated: 0,
+          activated: 0,
+          dormant: 1,
+          dormantIds: [contextGraphId],
+        },
+      });
+
+      // The daemon must only suppress live activation. The operator's durable
+      // intent remains byte-for-byte meaningful for a later enabled restart.
+      const db = new DashboardDB({ dataDir: daemon.home });
+      try {
+        expect(db.getContextGraphSubscription(contextGraphId)).toMatchObject({
+          context_graph_id: contextGraphId,
+          name: 'Persisted user Context Graph',
+          subscribed: 1,
+          synced: 1,
+          shared_memory_synced: 1,
+          meta_synced: 1,
+          sync_scoped: 1,
+        });
+      } finally {
+        db.close();
+      }
+    } finally {
+      await stopLiveDaemon(daemon);
+    }
+  }, 120_000);
+});
+
+describe('/api/info chain sanitization', () => {
+  it('never serializes configured RPC endpoint credentials when API auth is disabled', async () => {
+    const credentialSentinel = 'UNIT_TEST_RPC_CREDENTIAL_MUST_NOT_LEAK';
+    const response = await requestStatusWithAgent(
+      {},
+      {
+        auth: { enabled: false },
+        chain: {
+          type: 'evm',
+          rpcUrl: `https://tenant:${credentialSentinel}@primary.invalid/v1/${credentialSentinel}`,
+          rpcUrls: [`https://backup.invalid/rpc?token=${credentialSentinel}`],
+          hubAddress: `0x${'11'.repeat(20)}`,
+          chainId: 'base:84532',
+        },
+      },
+      '/api/info',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.auth).toBe(false);
+    expect(response.body.chain).toEqual({
+      chainId: 'base:84532',
+      configured: true,
+      rpcEndpointCount: 2,
+      hubConfigured: true,
+      rpcUrl: null,
+      rpcUrls: [],
+      hubAddress: `0x${'11'.repeat(20)}`,
+      rpcEndpointsRedacted: true,
+    });
+    expect(JSON.stringify(response.body)).not.toContain(credentialSentinel);
+    expect(JSON.stringify(response.body.chain)).not.toContain('://');
+  });
+
+  it('retains the legacy chain keys while making endpoint redaction explicit', async () => {
+    const response = await requestStatusWithAgent(
+      {},
+      {
+        auth: { enabled: true },
+        chain: {
+          type: 'evm',
+          rpcUrl: 'https://primary.invalid/operator-secret',
+          rpcUrls: ['https://backup.invalid/operator-secret'],
+          hubAddress: `0x${'22'.repeat(20)}`,
+          chainId: 'base:84532',
+        },
+      },
+      '/api/info',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.chain).toMatchObject({
+      rpcUrl: null,
+      rpcUrls: [],
+      hubAddress: `0x${'22'.repeat(20)}`,
+      rpcEndpointsRedacted: true,
+      rpcEndpointCount: 2,
+    });
+    expect(JSON.stringify(response.body)).not.toContain('operator-secret');
+  });
+});
+
 describe('/api/status finalization recovery health', () => {
   it('includes the exact operator-facing recovery health block', async () => {
     const finalizationRecovery = {
@@ -238,6 +412,36 @@ describe('/api/status finalization recovery health', () => {
 });
 
 describe('/api/status RFC-64 selected-public activation', () => {
+  it('reports RFC-64 selected public scheduling as the default for explicit subscriptions', async () => {
+    const response = await requestStatusWithAgent({
+      // Runtime subscribe mutates the agent scope, not the startup CLI config.
+      getSyncContextGraphIds: () => ['explicit-public-cg'],
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64SelectedPublicSync).toEqual({
+      defaultEnabled: true,
+      requestedContextGraphs: ['explicit-public-cg'],
+      catalogBackedContextGraphs: [],
+    });
+  });
+
+  it('reports mixed requested scopes without classifying a network-default graph as public', async () => {
+    const response = await requestStatusWithAgent(
+      { getSyncContextGraphIds: () => ['explicit-public-cg'] },
+      {},
+      '/api/status',
+      { defaultContextGraphs: ['private-network-default-cg', 'explicit-public-cg'] } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64SelectedPublicSync).toEqual({
+      defaultEnabled: true,
+      requestedContextGraphs: ['explicit-public-cg', 'private-network-default-cg'],
+      catalogBackedContextGraphs: [],
+    });
+  });
+
   it('reports the fail-closed disabled state without invoking catalog controls', async () => {
     const catalogStats = vi.fn(() => {
       throw new Error('disabled status must not read catalog service state');
@@ -255,6 +459,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
       enabled: false,
       selectedContextGraphs: [],
       autoPublishEnabled: false,
+      completeSwmProviders: [],
       service: null,
       bootstrap: null,
     });
@@ -283,6 +488,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
       {
         rfc64PublicCatalogStatsV1: () => service,
         readRfc64PublicCatalogBootstrapStatusV1: () => bootstrap,
+        getSyncContextGraphIds: () => ['selected-public-cg'],
       },
       {
         rfc64PublicCatalog: {
@@ -292,7 +498,10 @@ describe('/api/status RFC-64 selected-public activation', () => {
             catalogIssuerDelegationExpiresAt: '1893456000000',
           },
           bootstrap: {
-            acceptedPublicPolicies: [rfc64PublicCatalogPolicy('selected-public-cg')],
+            acceptedPublicPolicies: [{
+              ...rfc64PublicCatalogPolicy('selected-public-cg'),
+              completeSwmProviders: ['12D3KooCompleteSwm'],
+            }],
           },
         },
       },
@@ -303,8 +512,17 @@ describe('/api/status RFC-64 selected-public activation', () => {
       enabled: true,
       selectedContextGraphs: ['selected-public-cg'],
       autoPublishEnabled: true,
+      completeSwmProviders: [{
+        contextGraphId: 'selected-public-cg',
+        providers: ['12D3KooCompleteSwm'],
+      }],
       service,
       bootstrap,
+    });
+    expect(response.body.rfc64SelectedPublicSync).toEqual({
+      defaultEnabled: true,
+      requestedContextGraphs: ['selected-public-cg'],
+      catalogBackedContextGraphs: ['selected-public-cg'],
     });
   });
 
@@ -335,6 +553,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
       enabled: true,
       selectedContextGraphs: ['receiver-only-cg'],
       autoPublishEnabled: false,
+      completeSwmProviders: [],
       bootstrap,
     });
   });
@@ -365,6 +584,7 @@ describe('/api/status selected overlay details', () => {
         agent: {
           peerId: 'peer-status-test',
           multiaddrs: [],
+          getSyncContextGraphIds: () => [],
           node: {
             libp2p: { getConnections: () => [] },
             getRelayStats: () => null,
@@ -437,6 +657,7 @@ describe('/api/status selected overlay details', () => {
           agent: {
             peerId: 'peer-status-test',
             multiaddrs: [],
+            getSyncContextGraphIds: () => [],
             node: { libp2p: { getConnections: () => [] }, getRelayStats: () => null },
             publisher: { getIdentityId: () => 0n },
           },

@@ -7,6 +7,10 @@ import {
   type SyncRowListMemo,
 } from '../src/sync/responder/graph-plan.js';
 import {
+  SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+  SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+} from '../src/sync/responder/snapshot-cache.js';
+import {
   SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
   SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT,
   SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
@@ -58,6 +62,79 @@ describe('sync responder snapshot budget defaults', () => {
       maxSnapshotRows: SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
       maxSnapshotBytesEstimate: SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
     });
+  });
+
+  it('keeps hard build caps below the retained per-snapshot caps', () => {
+    // The documented ordering ("hard build caps are intentionally lower than
+    // the retained-cache defaults") is what guarantees a snapshot that passes
+    // the build check is always admissible, rather than being built and then
+    // rejected by budget.admit(). If a future bump inverts this, that failure
+    // mode returns silently — so pin it.
+    expect(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS).toBe(200_000);
+    expect(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE).toBe(96 * 1024 * 1024);
+    expect(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS)
+      .toBeLessThan(SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT);
+    expect(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE)
+      .toBeLessThan(SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT);
+  });
+
+  it('resolves memo build limits to the build caps under default budgets', () => {
+    // snapshotLoadLimits is min(BUILD_CAP, configured). Under production
+    // defaults the build cap must be the binding one, or the raise is inert.
+    const memo = createResponderSyncRowListMemo(120_000, 64, {
+      phase: 'durable_meta',
+      budget: createSyncResponderSnapshotBudget(
+        resolveSyncResponderSnapshotBudgetOptions(undefined, {}),
+      ),
+    });
+    expect(memo.snapshotLoadLimits?.maxRows).toBe(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS);
+    expect(memo.snapshotLoadLimits?.maxBytesEstimate)
+      .toBe(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE);
+  });
+
+  it('keeps a 64,001-row durable-meta graph on the memoized snapshot lane', async () => {
+    const contextGraphId = 'snapshot-cap-regression';
+    const rawRowCount = 64_001;
+    const querySources: string[] = [];
+    const store = {
+      query: vi.fn(async (_sparql: string, options?: { source?: string }) => {
+        const source = options?.source ?? 'unknown';
+        querySources.push(source);
+        if (source === 'sync.responder.readDurableMetaGraphSnapshot') {
+          return {
+            type: 'bindings' as const,
+            bindings: Array.from({ length: rawRowCount }, (_, index) => ({
+              s: `did:dkg:activity:${contextGraphId}:${index}`,
+              p: `${DKG_NS}status`,
+              o: '"confirmed"',
+            })),
+          };
+        }
+        if (source === 'sync.responder.readDurableMetaRowsPage') {
+          throw new Error('store-paged durable-meta fallback must not run');
+        }
+        throw new Error(`unexpected durable-meta query source: ${source}`);
+      }),
+    } as unknown as OxigraphStore;
+    const memo = createResponderSyncRowListMemo(120_000, 64, {
+      phase: 'durable_meta',
+      budget: createSyncResponderSnapshotBudget(
+        resolveSyncResponderSnapshotBudgetOptions(undefined, {}),
+      ),
+    });
+    const readPage = (offset: number) => readDurableMetaPage({
+      store,
+      contextGraphId,
+      registeredSubGraphNames: [],
+      offset,
+      limit: 500,
+      rowListMemo: memo,
+      rowListCacheKey: 'durable-meta:64k-regression',
+    });
+
+    await expect(readPage(0)).resolves.toHaveLength(500);
+    await expect(readPage(500)).resolves.toHaveLength(500);
+    expect(querySources).toEqual(['sync.responder.readDurableMetaGraphSnapshot']);
   });
 
   it('allows operators to override every responder snapshot budget limit', () => {
@@ -306,6 +383,31 @@ describe('sync responder snapshot cache and budget', () => {
       'Durable data sync session snapshot expired before page completion',
     );
     expect(loads).toBe(1);
+  });
+
+  it('rebuilds an expired snapshot when the same session safely retries offset zero', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const memo = createResponderSyncRowListMemo(10);
+    let loads = 0;
+    const loadRows = async () => [{
+      s: 'urn:memo:row',
+      p: `${DKG_NS}label`,
+      o: `"snapshot-${++loads}"`,
+      g: 'urn:memo:graph',
+    }];
+
+    await expect(memo.get('durable', loadRows, {
+      refreshGeneration: 'same-session',
+    })).resolves.toMatchObject([{ o: '"snapshot-1"' }]);
+
+    vi.setSystemTime(11);
+    await expect(memo.get('durable', loadRows, {
+      refreshGeneration: 'same-session',
+      refreshExpired: true,
+    })).resolves.toMatchObject([{ o: '"snapshot-2"' }]);
+    expect(loads).toBe(2);
   });
 
   it('does not retain empty durable row snapshots against the active cap', async () => {

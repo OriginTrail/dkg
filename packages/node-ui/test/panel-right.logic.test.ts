@@ -510,7 +510,7 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).not.toContain('aria-label="Uploading attachments"');
   });
 
-  it('shows the animated "Thinking…" indicator while an assistant turn is streaming with no content yet (PR5)', () => {
+  it('shows the animated "Connecting dots..." indicator while an assistant turn is streaming with no content yet (PR5)', () => {
     const markup = renderConnectedAgentsTab({
       localMessages: [
         { id: 'u', role: 'user', content: 'give me some friday ideas', ts: '10:00' },
@@ -519,7 +519,8 @@ describe('ConnectedAgentsTab rendering', () => {
       localSending: true,
     });
     expect(markup).toContain('v10-chat-thinking');
-    expect(markup).toContain('Thinking');
+    expect(markup).toContain('v10-chat-thinking-orb');
+    expect(markup).toContain('Connecting dots...');
     expect(markup).toContain('role="status"');
     // No inline caret yet — there is no text node to anchor it to.
     expect(markup).not.toContain('v10-chat-cursor');

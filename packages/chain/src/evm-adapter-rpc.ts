@@ -196,15 +196,12 @@ export function assertSuccessfulReceipt(receipt: ethers.TransactionReceipt, labe
 }
 
 export function isKnownTransactionError(err: unknown): boolean {
-  const code = errorCode(err);
   const msg = errorMessage(err).toLowerCase();
-  return code === 'NONCE_EXPIRED'
-    || msg.includes('already known')
+  return msg.includes('already known')
     || msg.includes('known transaction')
     || msg.includes('already imported')
     || msg.includes('transaction already in mempool')
     || msg.includes('already exists')
     || msg.includes('already have transaction')
-    || msg.includes('nonce too low')
     || msg.includes('duplicate transaction');
 }

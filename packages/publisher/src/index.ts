@@ -51,6 +51,8 @@ export {
   storeKnowledgeAssetOperationPublicQuads,
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
   KnowledgeAssetWorkspaceHeadCorruptError,
+  isKnowledgeAssetWorkspaceHeadCorruptError,
+  isDecodableWorkspaceOperationRows,
   type KnowledgeAssetWorkspaceHead,
   type PublishedKnowledgeAssetWorkspaceHead,
   type ResolveKnowledgeAssetWorkspaceHeadParams,
@@ -78,7 +80,7 @@ export {
   type ValidationResult,
   type ValidationOptions,
 } from './validation.js';
-export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata, normalizeGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetReceiptProvenanceV1, preserveGraphKnowledgeAssetReceiptProvenanceV1, mergeSameVersionGraphKnowledgeAssetMetadataV1, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, replaceLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControls, readConfirmedGraphKnowledgeAssetMetadataEnvelope, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateKnowledgeAssetShareMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type GraphKnowledgeAssetMetadata, type GraphKnowledgeAssetConfirmation, type GraphKnowledgeAssetConfirmationKind, type GraphKnowledgeAssetMetadataState, type GraphKnowledgeAssetReceiptProvenanceV1, type ConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataRead, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type KnowledgeAssetShareMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
+export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata, normalizeGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetReceiptProvenanceV1, preserveGraphKnowledgeAssetReceiptProvenanceV1, mergeSameVersionGraphKnowledgeAssetMetadataV1, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, replaceLocallyTrustedKnowledgeAssetControls, replaceLocallyTrustedKnowledgeAssetControlEnvelope, readLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope, readConfirmedGraphKnowledgeAssetMetadataEnvelope, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateKnowledgeAssetShareMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type GraphKnowledgeAssetMetadata, type GraphKnowledgeAssetConfirmation, type GraphKnowledgeAssetConfirmationKind, type GraphKnowledgeAssetMetadataState, type GraphKnowledgeAssetReceiptProvenanceV1, type ConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataRead, type LocallyTrustedKnowledgeAssetControlAnchor, type LocallyTrustedKnowledgeAssetControlEnvelope, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type KnowledgeAssetShareMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
 export { pruneSupersededAgentRegistryMeta, insertBoundedAgentRegistryMeta } from './agent-registry-meta-retention.js';
 export {
   DKGPublisher,
@@ -224,6 +226,7 @@ export {
   type LiftJobFinalizationMetadata,
   type LiftJobFailureMetadata,
   type LiftJobControlPlaneRefs,
+  type LiftJobAdmissionMetadata,
   type LiftJobBase,
   type LiftJobAccepted,
   type LiftJobClaimed,
@@ -252,11 +255,37 @@ export {
   isTerminalLiftJobFailure,
   isTimeoutLiftJobFailure,
 } from './lift-job.js';
+// GH#2270 — publisher RUNTIME configuration (not lift-job domain model): the
+// ONE retry-tuning validation/defaults owner, consumed by the daemon config
+// boundary so ranges and defaults cannot drift cross-package.
+export {
+  DEFAULT_RETRY_BACKOFF_BASE_MS,
+  DEFAULT_RETRY_BACKOFF_MAX_MS,
+  DEFAULT_RETRY_JITTER_RATIO,
+  resolveAsyncLiftRetryTuning,
+  resolveEffectiveAsyncLiftRetryTuning,
+  type AsyncLiftRetryTuning,
+  type AsyncLiftRetryTuningInput,
+} from './async-lift-retry-tuning.js';
+// GH#2270 — only the READ MODEL of the failed-job policy is public (never persisted; see the
+// module header). The predicates and the action vocabulary that produce it — `classifyRetryAction`,
+// `isHeldForChainProof`, `FailedJobRetryAction` — are the publisher's internal decisions: a
+// consumer reads a job's `retryState` off the publisher and the counts off `retryDetailed`, so
+// nothing outside this package re-derives either.
+export {
+  type LiftJobRetryProjection,
+  type LiftJobRetryWaitingReason,
+} from './async-lift-retry-disposition.js';
 export {
   AsyncLiftJobConflictError,
+  LiftJobPendingChainProofError,
   TripleStoreAsyncLiftPublisher,
+  type AsyncLiftAdmissionContext,
+  type AsyncLiftDetailedRetrier,
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type AsyncLiftRetryOutcome,
+  type AsyncLiftRetryStateReader,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
   type AsyncKnowledgeAssetVmPublishJobHandler,
   type AsyncKnowledgeAssetVmPublishPreflightInput,
@@ -267,6 +296,11 @@ export {
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,
+  type CanonicalUpdateEvidence,
+  type AsyncLiftChainProofLookup,
+  type AsyncLiftCreateChainProofLookup,
+  type AsyncLiftUpdateChainProofLookup,
+  type AsyncLiftChainProofResolution,
   type VmPublishIntentRecoveryPublisher,
   type VmPublishIntentIndexBackfiller,
   type VmPublishAdmissionJournalReader,
@@ -341,10 +375,14 @@ export {
 export { SharedMemoryHandler, WorkspaceHandler } from './workspace-handler.js';
 export {
   FileWorkspacePublicSnapshotStore,
+  SnapshotStorageCapacityError,
   parseWorkspacePublicSnapshotNQuads,
   serializeWorkspacePublicSnapshotQuads,
   workspacePublicQuadsDigest,
+  type FileWorkspacePublicSnapshotStoreOptions,
+  type SharedMemoryPublicSnapshotGarbageCollectionConfig,
   type SharedMemoryPublicSnapshotStorageConfig,
+  type SnapshotGarbageCollectionResult,
   type SnapshotPageIndexRecord,
   type SnapshotPageIndexStore,
   type WorkspacePublicSnapshotStore,

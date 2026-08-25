@@ -8,6 +8,10 @@ const DEFAULT_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_ENVELOPE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_PER_PEER = 32;
 const DEFAULT_MAX_PER_CONTEXT_GRAPH = 64;
+const DEFAULT_MAX_DEFERRED_ENTRIES = 1_024;
+const DEFAULT_MAX_DEFERRED_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_DEFERRED_PER_PEER = 256;
+const DEFAULT_MAX_DEFERRED_PER_CONTEXT_GRAPH = 512;
 const DEFAULT_RAW_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_TERMINAL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_TERMINAL_ENTRIES = 128;
@@ -19,6 +23,10 @@ export interface SqliteFinalizationRecoveryStoreOptions {
   maxEnvelopeBytes?: number;
   maxPerPeer?: number;
   maxPerContextGraph?: number;
+  maxDeferredEntries?: number;
+  maxDeferredBytes?: number;
+  maxDeferredPerPeer?: number;
+  maxDeferredPerContextGraph?: number;
   rawTtlMs?: number;
   terminalTtlMs?: number;
   maxTerminalEntries?: number;
@@ -32,6 +40,10 @@ export interface FinalizationRecoveryRetentionPolicy {
   maxEnvelopeBytes: number;
   maxPerPeer: number;
   maxPerContextGraph: number;
+  maxDeferredEntries: number;
+  maxDeferredBytes: number;
+  maxDeferredPerPeer: number;
+  maxDeferredPerContextGraph: number;
   rawTtlMs: number;
   terminalTtlMs: number;
   maxTerminalEntries: number;
@@ -65,6 +77,22 @@ export function resolveFinalizationRecoveryRetentionPolicy(
       options.maxPerContextGraph,
       DEFAULT_MAX_PER_CONTEXT_GRAPH,
     ),
+    maxDeferredEntries: positiveInteger(
+      options.maxDeferredEntries,
+      DEFAULT_MAX_DEFERRED_ENTRIES,
+    ),
+    maxDeferredBytes: positiveInteger(
+      options.maxDeferredBytes,
+      DEFAULT_MAX_DEFERRED_BYTES,
+    ),
+    maxDeferredPerPeer: positiveInteger(
+      options.maxDeferredPerPeer,
+      DEFAULT_MAX_DEFERRED_PER_PEER,
+    ),
+    maxDeferredPerContextGraph: positiveInteger(
+      options.maxDeferredPerContextGraph,
+      DEFAULT_MAX_DEFERRED_PER_CONTEXT_GRAPH,
+    ),
     rawTtlMs: positiveInteger(options.rawTtlMs, DEFAULT_RAW_TTL_MS),
     terminalTtlMs: positiveInteger(options.terminalTtlMs, DEFAULT_TERMINAL_TTL_MS),
     maxTerminalEntries: positiveInteger(
@@ -89,6 +117,9 @@ export function pruneFinalizationRecoveryRowsWithinTransaction(
      WHERE state IN ('RECEIVED','REORGED') AND updated_at < ?`,
   ).run(now - policy.rawTtlMs);
   database.prepare(
+    `DELETE FROM finalization_pending_v2 WHERE updated_at < ?`,
+  ).run(now - policy.rawTtlMs);
+  database.prepare(
     `DELETE FROM finalization_inbox_v1
      WHERE state IN ('SETTLED','SUPERSEDED','REJECTED','UNSUPPORTED')
        AND publisher_upgrade_pending = 0
@@ -111,6 +142,51 @@ export function pruneFinalizationRecoveryRowsWithinTransaction(
       WHERE row_number > ? OR cumulative_bytes > ?
     )
   `).run(policy.maxTerminalEntries, policy.maxTerminalBytes);
+}
+
+export function hasFinalizationRecoveryDeferredCapacity(
+  database: DatabaseSync,
+  policy: FinalizationRecoveryRetentionPolicy,
+  input: FinalizationRecoveryReceiveInput,
+): boolean {
+  const total = database.prepare(`
+    SELECT COUNT(*) AS count, COALESCE(SUM(length(raw_envelope)), 0) AS bytes
+    FROM finalization_pending_v2
+  `).get();
+  if (
+    Number(total?.count ?? 0) >= policy.maxDeferredEntries
+    || Number(total?.bytes ?? 0) + input.rawMessage.byteLength > policy.maxDeferredBytes
+  ) return false;
+  const graph = database.prepare(`
+    SELECT COUNT(*) AS count FROM finalization_pending_v2
+    WHERE context_graph_id = ?
+  `).get(input.contextGraphId);
+  if (Number(graph?.count ?? 0) >= policy.maxDeferredPerContextGraph) return false;
+  if (input.sourcePeerId) {
+    const peer = database.prepare(`
+      SELECT COUNT(*) AS count FROM finalization_pending_v2
+      WHERE source_peer_id = ?
+    `).get(input.sourcePeerId);
+    if (Number(peer?.count ?? 0) >= policy.maxDeferredPerPeer) return false;
+  }
+  return true;
+}
+
+export function readFinalizationRecoveryDeferredCapacity(
+  database: DatabaseSync,
+): { entries: number; payloadBytes: number; oldest?: number } {
+  const row = database.prepare(`
+    SELECT COUNT(*) AS count,
+           COALESCE(SUM(length(raw_envelope)), 0) AS bytes,
+           MIN(created_at) AS oldest
+    FROM finalization_pending_v2
+  `).get();
+  const oldest = typeof row?.oldest === 'number' ? row.oldest : undefined;
+  return {
+    entries: Number(row?.count ?? 0),
+    payloadBytes: Number(row?.bytes ?? 0),
+    ...(oldest === undefined ? {} : { oldest }),
+  };
 }
 
 export function hasFinalizationRecoveryCapacity(

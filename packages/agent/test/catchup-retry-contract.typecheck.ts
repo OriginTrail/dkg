@@ -11,6 +11,9 @@ import {
 // exists — re-exporting it would hand a consumer a schedule the node does not
 // follow. A stale caller must fail to resolve it, not compile against a lie.
 import { CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS } from '@origintrail-official/dkg-agent';
+// @ts-expect-error the low-level continuation executor is intentionally internal;
+// CLI orchestration consumes its existing explicit dist subpath instead.
+import { runSwmCatchupContinuations } from '@origintrail-official/dkg-agent';
 
 // `retryDelaysMs` configured the fixed `[100, 250, 500]` ladder that issue #2006
 // replaced with a wall-clock budget. It is retained as `never` rather than
@@ -70,6 +73,7 @@ export declare const pinned: [
   typeof ladderIsUninhabited,
   typeof replacementBudget,
   typeof CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS,
+  typeof runSwmCatchupContinuations,
   typeof runCatchupPlaneWithPolicy,
 ];
 

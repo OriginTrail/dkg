@@ -3,6 +3,7 @@ import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-offic
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   runDurableSync,
+  type DurableSyncCheckpointWrite,
   type DurableSyncFetchRequest,
 } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
@@ -13,7 +14,7 @@ import {
 } from '../src/sync/requester/ordered-sync.js';
 import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { markSyncTransportFailure } from '../src/sync/error-tags.js';
+import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
@@ -47,8 +48,7 @@ function pageResult(
 
 function transportError(message: string): Error {
   const err = new Error(message);
-  markSyncTransportFailure(err);
-  return err;
+  return toSyncTransportFailureError(err);
 }
 
 function deniedError(): Error & { syncDenied: boolean } {
@@ -171,7 +171,7 @@ describe('sync requester bailout', () => {
   });
 
   it('stops durable fanout after a sync page timeout', async () => {
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const fetchSyncPages = recorder(async ({
       contextGraphId,
       phase,
@@ -197,7 +197,10 @@ describe('sync requester bailout', () => {
 
     expect(summary.timedOutPhases).toBe(1);
     expect(summary.backoffWorthyFailures).toBe(0);
-    expect(setCheckpoint.calls).toContainEqual(['slow-cg:data', 500]);
+    expect(setCheckpoint.calls).toContainEqual([
+      'slow-cg:data',
+      { offset: 500, responderSessionOffset: undefined },
+    ]);
     expect(fetchSyncPages.calls.some(([request]) => (
       request.contextGraphId === 'next-cg'
     ))).toBe(false);
@@ -537,6 +540,11 @@ describe('lifecycle shared-memory fanout isolation', () => {
       syncCheckpoints: new Map(),
       workspaceOwnedEntities: new Map(),
       log: { info: noop, warn: noop, debug: noop },
+      // This fixture exercises ordinary public SWM fanout, not an RFC-64
+      // selected scope.
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      syncSharedMemoryFromPeerDetailedExecution:
+        LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
   }
 

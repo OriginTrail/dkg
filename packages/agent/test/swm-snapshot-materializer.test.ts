@@ -21,7 +21,7 @@
  *     ambiguous mix. A second round is a pure no-op, which also proves the
  *     digest survives the store round-trip (no churn).
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -37,7 +37,7 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
+import { operationIdentityKey, parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -164,14 +164,17 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
     it('is null/clean when no head exists', async () => {
       const store = new OxigraphStore();
       const { materializer } = materializerFor(store);
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: null, needsRepair: false });
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: null, needsRepair: false, shareOperationId: null });
     });
 
     it('reads a single-version head without flagging repair', async () => {
       const store = new OxigraphStore();
       await store.insert([...v1.meta]);
       const { materializer } = materializerFor(store);
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: '1', needsRepair: false });
+      // GH#2273 — the single unambiguous id is exposed so catch-up can compare
+      // it against a descriptor's id before deciding whether the head may be
+      // rewritten at all.
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: '1', needsRepair: false, shareOperationId: 'op-v1' });
     });
 
     it('returns the NEWEST version (MAX) for union-insert residue and flags repair', async () => {
@@ -182,7 +185,10 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       await store.insert([...v1.meta]);
       await store.insert([...v2.meta]);
       const { materializer } = materializerFor(store);
-      expect(await materializer.readStoredHead(descriptorFor(v2))).toEqual({ version: '2', needsRepair: true });
+      // GH#2273 — with residue on the head, ANY sampled id would be an
+      // arbitrary pick (the exact failure the field exists to prevent), so
+      // ambiguity reads as null and the decision routes through repair.
+      expect(await materializer.readStoredHead(descriptorFor(v2))).toEqual({ version: '2', needsRepair: true, shareOperationId: null });
     });
   });
 
@@ -241,7 +247,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
   });
 
   describe('end-to-end catch-up with the real materializer', () => {
-    function realHarness(store: TripleStore, served: typeof v1) {
+    function realHarness(store: TripleStore, served: typeof v1, servedMeta: Quad[] = served.meta) {
       const snapshotStore = new MemorySnapshotStore();
       const { materializer } = materializerFor(store);
       let replaceCalls = 0;
@@ -253,10 +259,10 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
           contextGraphIds: [CG],
           createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
           fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => ({
-            quads: phase === 'meta' ? [...served.meta] : [],
+            quads: phase === 'meta' ? [...servedMeta] : [],
             bytesReceived: 0,
             resumedFromOffset: 0,
-            nextOffset: phase === 'meta' ? served.meta.length : 0,
+            nextOffset: phase === 'meta' ? servedMeta.length : 0,
             checkpointKey: 'k',
             completed: true,
             timedOut: false,
@@ -349,6 +355,56 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       const again = await h.run();
       expect(again.failedPhases).toBe(0);
       expect(h.replaceCalls()).toBe(1);
+    });
+
+    it('recovers equivalent originator and storage-ACK heads and stores one current pointer', async () => {
+      // A later StorageACK can persist the exact same assertion under its own
+      // deterministic operation id while an older originator head is replayed
+      // by durable metadata sync. This is the production residue observed in
+      // the 400/400 canary run: two operation pointers, identical content and
+      // policy, different timestamps. It is recoverable, not corrupt.
+      const storageAck = share(1, 'storage-ack-equivalent', 'version-one');
+      const storageAckMeta = storageAck.meta.map((row) =>
+        row.subject === storageAck.operationSubject && row.predicate === `${DKG}publishedAt`
+          ? { ...row, object: '"1970-01-01T00:00:01.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }
+          : row);
+      const servedMeta = [
+        ...v1.meta,
+        ...storageAckMeta.filter((row) => row.subject === storageAck.operationSubject),
+        ...storageAckMeta.filter((row) =>
+          row.subject === storageAck.headSubject && row.predicate === `${DKG}shareOperationId`),
+      ];
+
+      const parsed = parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: servedMeta,
+      });
+      expect(parsed).toHaveLength(1);
+      expect(parsed[0]?.shareOperationId).toBe('storage-ack-equivalent');
+      expect(parsed[0]?.metadataQuads.filter((row) =>
+        row.subject === storageAck.headSubject && row.predicate === `${DKG}shareOperationId`))
+        .toEqual([expect.objectContaining({ object: '"storage-ack-equivalent"' })]);
+
+      const store = new OxigraphStore();
+      const h = realHarness(store, storageAck, servedMeta);
+      const summary = await h.run();
+      expect(summary.failedPhases).toBe(0);
+      expect(await distinctObjects(store, WS_META, storageAck.headSubject, `${DKG}shareOperationId`))
+        .toEqual(['"storage-ack-equivalent"']);
+    });
+
+    it('still fails closed when two head operations disagree on content', () => {
+      const conflicting = share(1, 'op-conflicting', 'different-content');
+      const poisonedMeta = [
+        ...v1.meta,
+        ...conflicting.meta.filter((row) => row.subject === conflicting.operationSubject),
+        ...conflicting.meta.filter((row) =>
+          row.subject === conflicting.headSubject && row.predicate === `${DKG}shareOperationId`),
+      ];
+      expect(() => parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: poisonedMeta,
+      })).toThrow(/ambiguous shareOperationId/);
     });
   });
 });

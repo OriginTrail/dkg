@@ -172,7 +172,15 @@ export function resolveRfc64PublicCatalogActivationConfigV1(
     });
   }
   assertRfc64PublicCatalogActivationConfigV1(activation);
-  const enabled = activation.enabled;
+  const enabledInput = activation.enabled;
+  if (enabledInput !== undefined && typeof enabledInput !== 'boolean') {
+    throw new TypeError('rfc64PublicCatalog.enabled must be a boolean');
+  }
+  // Supplying a valid selected-public manifest is itself the operator's
+  // activation decision. Keep absence and explicit `enabled: false`
+  // fail-closed, while avoiding a second switch that can silently leave an
+  // otherwise complete RFC-64 selection dormant.
+  const enabled = enabledInput ?? true;
   const bootstrapInput = activation.bootstrap;
   const autoPublishInput = activation.autoPublish;
   const deploymentProfileInput = activation.deploymentProfile;
@@ -181,9 +189,6 @@ export function resolveRfc64PublicCatalogActivationConfigV1(
       enabled: false,
       selectedContextGraphs: Object.freeze([]),
     });
-  }
-  if (enabled !== true) {
-    throw new TypeError('rfc64PublicCatalog.enabled must be a boolean');
   }
   const bootstrap = snapshotRfc64PublicCatalogBootstrapConfigV1(bootstrapInput);
   if (bootstrap === undefined || bootstrap.acceptedPublicPolicies.length === 0) {

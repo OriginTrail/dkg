@@ -77,9 +77,7 @@ function fetchPages(agent: DKGAgent, args: FetchArgs): Promise<SyncPageResult> {
     'data' satisfies SyncPhase,
     'did:dkg:context-graph:coalesced-cg',
     args.deadline ?? DEFAULT_DEADLINE,
-    undefined,
-    undefined,
-    args.signal,
+    { signal: args.signal },
   );
 }
 

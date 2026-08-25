@@ -13,6 +13,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-catalog-row-authorship.test.ts",
   "test/rfc64-finalized-vm-composer-v1.test.ts",
   "test/rfc64-finalized-vm-runtime-v1.test.ts",
+  "test/rfc64-finalized-policy-agent-precommit-v1.test.ts",
   "test/rfc64-finalized-vm-agent-precommit-v1.test.ts",
   "test/rfc64-finalized-vm-precommit-shipped-pool.test.ts",
   "test/rfc64-agent-inventory-lifecycle.test.ts",

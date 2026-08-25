@@ -317,7 +317,10 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
-import { readPrimeAgentSessions } from '../prime-agent.js';
+import {
+  primeAgentDkgSessionId,
+  readPrimeAgentSessions,
+} from '../prime-agent.js';
 
 import type { RequestContext } from './context.js';
 
@@ -342,15 +345,34 @@ function withPrimeAgentSessionCounts<T extends { id: string; metadata?: Record<s
       // the whole integrations listing.
       return integration;
     }
-    return {
-      ...integration,
-      metadata: {
-        ...(integration.metadata ?? {}),
-        sessionCount: sessions.length,
-        ...(sessions[0] ? { activeSessionId: sessions[0].sessionId } : {}),
-      },
+    const metadata: Record<string, unknown> = {
+      ...(integration.metadata ?? {}),
+      sessionCount: sessions.length,
     };
+    if (sessions[0]) {
+      metadata.activeSessionId = sessions[0].sessionId;
+      metadata.activeMemorySessionId = primeAgentDkgSessionId(sessions[0].sessionId);
+    } else {
+      // A zero-session listing must not keep advertising the connect-time
+      // session ids: node-ui pins history to activeMemorySessionId, and stale
+      // raw/memory ids would route every send into a guaranteed 409.
+      delete metadata.activeSessionId;
+      delete metadata.activeMemorySessionId;
+    }
+    return { ...integration, metadata };
   });
+}
+
+/**
+ * Single-integration responses (get / connect / refresh) need the same overlay
+ * as the listing: node-ui upserts each of them into its integrations state, so
+ * any un-overlaid response would regress the pinned session to the persisted
+ * connect-time id until the next listing poll.
+ */
+function withPrimeAgentSessionCount<T extends { id: string; metadata?: Record<string, unknown> }>(
+  integration: T,
+): T {
+  return withPrimeAgentSessionCounts([integration])[0];
 }
 
 export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void> {
@@ -399,7 +421,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     if (!id) return jsonResponse(res, 404, { error: 'Integration not found' });
     const integration = getLocalAgentIntegration(config, id);
     if (!integration) return jsonResponse(res, 404, { error: `Unknown integration: ${id}` });
-    return jsonResponse(res, 200, { integration });
+    return jsonResponse(res, 200, { integration: withPrimeAgentSessionCount(integration) });
   }
 
   // POST /api/local-agent-integrations/connect — upsert/connect an integration
@@ -415,7 +437,11 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
         ? await connectLocalAgentIntegrationFromUi(config, parsed, bridgeAuthToken, { saveConfig })
         : { integration: connectLocalAgentIntegration(config, parsed) };
       await saveConfig(config);
-      return jsonResponse(res, 200, { ok: true, integration: result.integration, notice: result.notice });
+      return jsonResponse(res, 200, {
+        ok: true,
+        integration: withPrimeAgentSessionCount(result.integration),
+        notice: result.notice,
+      });
     } catch (err: any) {
       try { await saveConfig(config); } catch { /* best effort: preserve failed attach state when available */ }
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
@@ -441,7 +467,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     try {
       const integration = await refreshLocalAgentIntegrationFromUi(config, normalizedId, bridgeAuthToken);
       await saveConfig(config);
-      return jsonResponse(res, 200, { ok: true, integration });
+      return jsonResponse(res, 200, { ok: true, integration: withPrimeAgentSessionCount(integration) });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Integration refresh failed' });
     }

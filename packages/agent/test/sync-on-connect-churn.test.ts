@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
-import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
+import {
+  runSelectedSharedMemoryRetry,
+  runSyncOnConnect,
+} from '../src/sync/on-connect/sync-on-connect.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -23,17 +26,34 @@ async function flushTimers(): Promise<void> {
   await Promise.resolve();
 }
 
-async function createUnstartedAgent(name: string): Promise<DKGAgent> {
+async function createUnstartedAgent(
+  name: string,
+  overrides: Pick<
+    DKGAgentConfig,
+    | 'syncStalenessThresholdMs'
+    | 'syncBackoffBaseMs'
+    | 'syncBackoffMaxMs'
+    | 'syncBackoffJitter'
+  > = {},
+): Promise<DKGAgent> {
   return DKGAgent.create({
     name,
     listenHost: '127.0.0.1',
     chainAdapter: new MockChainAdapter(),
+    ...overrides,
   });
+}
+
+function allowAllNetworkAdmission(agent: DKGAgent): void {
+  const coordinator = (agent as any).networkAdmissionCoordinator;
+  coordinator.isAcceptedPeer = () => true;
+  coordinator.isRejectedPeer = () => false;
+  coordinator.ensureAdmitted = async () => true;
 }
 
 const noopLog = (_ctx: OperationContext, _message: string) => {};
 
-function emptyDetailedSync(overrides: Record<string, number> = {}) {
+function emptyDetailedSync(overrides: Record<string, number | boolean> = {}) {
   return {
     insertedTriples: 0,
     insertedDataTriples: 0,
@@ -78,6 +98,104 @@ describe('sync-on-connect churn gates', () => {
     ]);
   });
 
+  it('uses the exact automatic durable scope supplied by the role policy', async () => {
+    const syncFromPeer = recorder(async () => 0);
+    const refreshMetaSyncedFlags = recorder(async () => undefined);
+
+    const outcome = await runSyncOnConnect({
+      remotePeer: PEER_A,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['selected-cg'],
+      getDurableSyncContextGraphs: () => ['selected-cg'],
+      getSharedMemorySyncContextGraphs: () => [],
+      syncFromPeer,
+      refreshMetaSyncedFlags,
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+    });
+
+    expect(outcome).toBe('synced');
+    expect(syncFromPeer.calls).toEqual([[PEER_A, ['selected-cg']]]);
+    expect([...refreshMetaSyncedFlags.calls[0][0]]).toEqual(['selected-cg']);
+  });
+
+  it('treats an empty automatic durable scope as a clean no-op', async () => {
+    const syncFromPeer = recorder(async () => 0);
+    const refreshMetaSyncedFlags = recorder(async () => undefined);
+    const discoverContextGraphsFromStore = recorder(async () => 0);
+    const syncedPeers: Array<{ peerId: string; fresh: boolean; progress?: boolean }> = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer: PEER_A,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => [],
+      getDurableSyncContextGraphs: () => [],
+      getSharedMemorySyncContextGraphs: () => [],
+      syncFromPeer,
+      refreshMetaSyncedFlags,
+      discoverContextGraphsFromStore,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+      onPeerSynced: (peerId, syncOutcome) => {
+        syncedPeers.push({ peerId, fresh: syncOutcome?.fresh ?? false, progress: syncOutcome?.progress });
+      },
+    });
+
+    expect(outcome).toBe('synced');
+    expect(syncFromPeer.calls).toEqual([]);
+    expect(refreshMetaSyncedFlags.calls).toEqual([]);
+    expect(discoverContextGraphsFromStore.calls).toEqual([[]]);
+    expect(syncedPeers).toEqual([{ peerId: PEER_A, fresh: true, progress: false }]);
+  });
+
+  it.each([
+    ['edge', ['selected-cg']],
+    ['core', [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'selected-cg']],
+  ] as const)('wires the %s role into the automatic durable scope', async (nodeRole, expectedScope) => {
+    const agent = await createUnstartedAgent(`AutomaticSystemScope-${nodeRole}`);
+    allowAllNetworkAdmission(agent);
+    (agent as any).started = true;
+    (agent as any).config.nodeRole = nodeRole;
+    (agent as any).config.syncContextGraphs = ['selected-cg'];
+    (agent as any).config.syncSharedMemoryOnConnect = false;
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    const syncFromPeerDetailed = recorder(async () => emptyDetailedSync({ completedPhases: 1 }));
+    (agent as any).syncFromPeerDetailed = syncFromPeerDetailed;
+    (agent as any).refreshMetaSyncedFlags = async () => undefined;
+    (agent as any).discoverContextGraphsFromStore = async () => 0;
+    (agent as any).planSharedMemorySyncContextGraphs = async () => ({
+      eligibleContextGraphIds: [],
+    });
+
+    expect(await (agent as any).trySyncFromPeer(PEER_A)).toBe('synced');
+    const requestedScope = syncFromPeerDetailed.calls
+      .flatMap((call) => call[1] as string[])
+      .sort();
+    expect(requestedScope).toEqual([...expectedScope].sort());
+  });
+
+  it('keeps explicit Edge catch-up available for system Context Graphs', async () => {
+    const agent = await createUnstartedAgent('ExplicitSystemGraphCatchup');
+    (agent as any).config.nodeRole = 'edge';
+    const syncFromPeerDetailed = recorder(async () => emptyDetailedSync());
+    (agent as any).syncFromPeerDetailed = syncFromPeerDetailed;
+
+    await agent.syncFromPeer(PEER_A, [
+      SYSTEM_CONTEXT_GRAPHS.AGENTS,
+      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+    ]);
+
+    expect(syncFromPeerDetailed.calls[0][1]).toEqual([
+      SYSTEM_CONTEXT_GRAPHS.AGENTS,
+      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+    ]);
+  });
+
   it('dedupes repeated reconnect scheduling across a short relay flap', async () => {
     const agent = await createUnstartedAgent('SyncReconnectFlapDedup');
     const calls: string[] = [];
@@ -96,6 +214,172 @@ describe('sync-on-connect churn gates', () => {
 
     await flushTimers();
     expect(calls).toEqual([PEER_A]);
+  });
+
+  it('retries incomplete selected SWM past generic freshness without creating a loop', async () => {
+    const agent = await createUnstartedAgent('SelectedSwmRetryFreshnessBypass');
+    const calls: string[] = [];
+    (agent as any).runSelectedSwmRetryFromPeerOnConnect = async (peerId: string) => {
+      calls.push(peerId);
+    };
+    const handleSyncError = () => undefined;
+    (agent as any).lastSuccessfulSyncAt.set(PEER_A, Date.now());
+
+    // Generic fresh-success suppression remains authoritative until the
+    // selected lane explicitly records incomplete exact coverage.
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(false);
+
+    (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+    // A normal connection-open event never inherits the catalog bootstrap's
+    // selected retry authority, even while the scheduling marker is present.
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+    )).toBe(false);
+    (agent as any).syncReconcilerBackoff.set(PEER_A, {
+      failures: 1,
+      nextRetryAt: Date.now() + 60_000,
+    });
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(false);
+    (agent as any).syncReconcilerBackoff.delete(PEER_A);
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(true);
+    // The ordinary one-minute queue cooldown still prevents retry storms.
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(false);
+    await flushTimers();
+    expect(calls).toEqual([PEER_A]);
+
+    // A later exact completion clears the marker. Even after the short queue
+    // cooldown expires, the still-fresh generic success prevents another run.
+    const completedOwner = (agent as any).selectedSwmBootstrapAdmission.beginTransfer(
+      PEER_A,
+      ['selected-cg'],
+    );
+    (agent as any).selectedSwmBootstrapAdmission.markTransferTerminal(completedOwner);
+    (agent as any).catchupOnConnectAt.set(
+      PEER_A,
+      Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
+    );
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(false);
+    await flushTimers();
+    expect(calls).toEqual([PEER_A]);
+  });
+
+  it('starts RFC-64 selected SWM cold when broad sync-on-connect is disabled', async () => {
+    const agent = await createUnstartedAgent('SelectedSwmRetryIndependentSwitch');
+    allowAllNetworkAdmission(agent);
+    (agent as any).started = true;
+    (agent as any).config.syncOnConnectEnabled = false;
+    (agent as any).config.syncSharedMemoryOnConnect = false;
+    (agent as any).config.syncContextGraphs = ['selected-cg'];
+    (agent as any).config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{ completeSwmProviders: [PEER_A] }],
+    };
+    (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-cg'];
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    (agent as any).planSharedMemorySyncContextGraphs = async () => ({
+      publicContextGraphIds: ['selected-cg'],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: ['selected-cg'],
+    });
+    const selectedSync = recorder(async () => ({
+      kind: 'selected-shared-memory' as const,
+      shared: emptyDetailedSync({
+        insertedTriples: 4,
+        insertedDataTriples: 4,
+      }),
+      selectedScopeComplete: true,
+    }));
+    const durableSync = recorder(async () => emptyDetailedSync({ completedPhases: 1 }));
+    const ordinarySharedSync = recorder(async () => emptyDetailedSync({ completedPhases: 1 }));
+    const discoverContextGraphsFromStore = recorder(async () => 0);
+    (agent as any).syncSelectedSharedMemoryFromPeerDetailed = selectedSync;
+    (agent as any).syncFromPeerDetailed = durableSync;
+    (agent as any).syncSharedMemoryFromPeerDetailed = ordinarySharedSync;
+    (agent as any).refreshMetaSyncedFlags = async () => undefined;
+    (agent as any).discoverContextGraphsFromStore = discoverContextGraphsFromStore;
+    const errors: unknown[] = [];
+    const handleSyncError = (_peerId: string, error: unknown) => {
+      errors.push(error);
+    };
+    (agent as any).lastSuccessfulSyncAt.set(PEER_A, Date.now());
+    expect((agent as any).selectedSwmBootstrapAdmission.isRetryRequired(PEER_A)).toBe(false);
+
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+    )).toBe(false);
+    expect((agent as any).queueSelectedSwmFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+    )).toBe(true);
+    expect((agent as any).selectedSwmBootstrapAdmission.isRetryRequired(PEER_A)).toBe(true);
+
+    await flushTimers();
+    expect(errors).toEqual([]);
+    expect(selectedSync.calls).toHaveLength(1);
+    expect(selectedSync.calls[0][0]).toBe(PEER_A);
+    expect(selectedSync.calls[0][1]).toEqual(['selected-cg']);
+    expect(durableSync.calls).toEqual([]);
+    expect(ordinarySharedSync.calls).toEqual([]);
+    expect(discoverContextGraphsFromStore.calls).toEqual([]);
+    expect((agent as any).lastSuccessfulSyncAt.has(PEER_A)).toBe(true);
+  });
+
+  it('clears selected SWM retry state when network admission rejects a peer', async () => {
+    const agent = await createUnstartedAgent('SelectedSwmRetryRejectedPeerCleanup');
+    (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+
+    (agent as any).clearNetworkRejectedPeerState(PEER_A);
+
+    expect((agent as any).selectedSwmBootstrapAdmission.snapshot(PEER_A)).toBeNull();
+  });
+
+  it('clears selected SWM retry state after stop drains transfer owners', async () => {
+    const agent = await DKGAgent.create({
+      name: 'SelectedSwmRetryStopCleanup',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+      (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+
+      await agent.stop();
+
+      expect((agent as any).selectedSwmBootstrapAdmission.size).toBe(0);
+    } finally {
+      if ((agent as any).started) await agent.stop().catch(() => undefined);
+    }
   });
 
   it('allows reconnect catch-up after a meaningful offline gap', async () => {
@@ -160,7 +444,39 @@ describe('sync-on-connect churn gates', () => {
     // The third argument is the bounded admission origin (issue #2006): the
     // reconciler's queue pressure must be attributable to `reconcile`, not
     // indistinguishable from sync-on-connect.
-    expect(trySyncFromPeer.calls).toEqual([[PEER_A, expect.any(Function), 'reconcile']]);
+    expect(trySyncFromPeer.calls).toEqual([[
+      PEER_A,
+      expect.any(Function),
+      'reconcile',
+    ]]);
+  });
+
+  it('uses configured staleness and backoff values in the sync lifecycle', async () => {
+    const agent = await createUnstartedAgent('ConfiguredSyncTimingConsumers', {
+      syncStalenessThresholdMs: 20_000,
+      syncBackoffBaseMs: 5_000,
+      syncBackoffMaxMs: 30_000,
+      syncBackoffJitter: 0,
+    });
+    (agent as any).started = true;
+    (agent.node as any).node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    (agent as any).lastSuccessfulSyncAt.set(PEER_A, Date.now() - 30_000);
+    const trySyncFromPeer = recorder(async () => undefined);
+    (agent as any).trySyncFromPeer = trySyncFromPeer;
+    const before = Date.now();
+
+    await (agent as any).reconcileSyncFromConnectedPeers();
+    await flushTimers();
+
+    expect(trySyncFromPeer.calls).toHaveLength(1);
+    const backoff = (agent as any).syncReconcilerBackoff.get(PEER_A);
+    expect(backoff?.failures).toBe(1);
+    expect(backoff?.nextRetryAt - before).toBeGreaterThanOrEqual(5_000);
+    expect(backoff?.nextRetryAt - before).toBeLessThan(5_100);
   });
 
   it('records backoff after a failed sync round and blocks connection-open rescheduling', async () => {
@@ -183,6 +499,112 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).catchupOnConnectAt.set(PEER_A, staleQueuedAt);
     expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
     expect((agent as any).catchupOnConnectAt.get(PEER_A)).toBe(staleQueuedAt);
+  });
+
+  it('records reconciler backoff when selected SWM is explicitly incomplete without progress', async () => {
+    const agent = await createUnstartedAgent('SelectedSwmIncompleteBackoff');
+    (agent as any).started = true;
+    (agent.node as any).node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+    (agent as any).trySelectedSwmRetryFromPeer = async (
+      _peerId: string,
+      onSyncAccounting?: (outcome: { fresh: boolean; progress?: boolean }) => void,
+    ) => runSelectedSharedMemoryRetry({
+      remotePeer: PEER_A,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      selectedSharedMemoryLane: {
+        getContextGraphIds: () => ['selected-cg'],
+        syncFromPeer: async () => ({
+          kind: 'selected-shared-memory',
+          shared: emptyDetailedSync(),
+          selectedScopeComplete: false,
+        }),
+      },
+      onPeerSynced: (_peerId, outcome) => {
+        if (outcome) onSyncAccounting?.(outcome);
+      },
+      logInfo: noopLog,
+    });
+
+    await (agent as any).attemptSelectedSwmRetryWithReconcilerAccounting(PEER_A, {
+      connected: true,
+      hasSyncProtocol: true,
+    });
+
+    expect((agent as any).lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
+    expect((agent as any).lastSyncProgressAt.has(PEER_A)).toBe(false);
+    expect((agent as any).syncReconcilerBackoff.get(PEER_A)).toMatchObject({
+      failures: 1,
+    });
+    expect((agent as any).syncReconcilerBackoff.get(PEER_A).nextRetryAt)
+      .toBeGreaterThan(Date.now());
+  });
+
+  it('records selected SWM progress without freshness and admits one bounded retry', async () => {
+    const agent = await createUnstartedAgent('SelectedSwmIncompleteProgress');
+    allowAllNetworkAdmission(agent);
+    (agent as any).started = true;
+    (agent as any).config.syncContextGraphs = ['selected-cg'];
+    (agent as any).config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{ completeSwmProviders: [PEER_A] }],
+    };
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    (agent as any).resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [PEER_A];
+    (agent as any).planSharedMemorySyncContextGraphs = async () => ({
+      publicContextGraphIds: ['selected-cg'],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: ['selected-cg'],
+    });
+    (agent as any).syncFromPeerDetailed = async () => emptyDetailedSync({ complete: true });
+    (agent as any).refreshMetaSyncedFlags = async () => undefined;
+    (agent as any).discoverContextGraphsFromStore = async () => 0;
+    (agent as any).syncSelectedSharedMemoryFromPeerDetailed = async () => ({
+      kind: 'selected-shared-memory',
+      shared: emptyDetailedSync({
+        insertedTriples: 4,
+        insertedDataTriples: 4,
+      }),
+      selectedScopeComplete: false,
+    });
+    (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+    (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-cg'];
+    (agent as any).syncReconcilerBackoff.set(PEER_A, {
+      failures: 1,
+      nextRetryAt: Date.now() + 60_000,
+    });
+
+    await (agent as any).attemptSelectedSwmRetryWithReconcilerAccounting(PEER_A, {
+      connected: true,
+      hasSyncProtocol: true,
+    });
+
+    expect((agent as any).lastSyncProgressAt.has(PEER_A)).toBe(true);
+    expect((agent as any).lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
+    expect((agent as any).syncReconcilerBackoff.has(PEER_A)).toBe(false);
+
+    const calls: string[] = [];
+    (agent as any).runSelectedSwmRetryFromPeerOnConnect = async (peerId: string) => {
+      calls.push(peerId);
+    };
+    const handleSyncError = () => undefined;
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(true);
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(false);
+    await flushTimers();
+    expect(calls).toEqual([PEER_A]);
   });
 
   it('does not let one peer backoff suppress connection-open sync for another peer', async () => {

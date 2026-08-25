@@ -35,8 +35,17 @@ export const PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS = 60 * 60_000;
 export const PRIME_AGENT_HEALTH_TIMEOUT_MS = 5_000;
 export const PRIME_AGENT_PRE_SEND_TIMEOUT_MS = 3_000;
 export const PRIME_AGENT_TRANSPORT_KIND = 'prime-agent-channel';
+export const PRIME_AGENT_DKG_SESSION_PREFIX = 'prime-agent:dkg-ui:';
+const PRIME_AGENT_CHAT_ID_RE = /^[A-Za-z0-9._:-]+$/;
+const PRIME_AGENT_CHAT_ID_MAX_LENGTH = 200;
 
 export type PrimeAgentSessionDescriptor = AdapterPrimeAgentSessionDescriptor;
+export type PrimeAgentChannelSession = PrimeAgentSessionDescriptor & {
+  /** Prime-owned id used only when targeting its loopback bridge. */
+  rawSessionId: string;
+  /** DKG-owned id used for durable chat history. */
+  memorySessionId: string;
+};
 
 export interface PrimeAgentChannelTarget {
   sessionId: string;
@@ -48,8 +57,13 @@ export interface PrimeAgentChannelTarget {
 export interface PrimeAgentChannelHealthReport {
   ok: boolean;
   sessionCount: number;
-  sessions: PrimeAgentSessionDescriptor[];
+  sessions: PrimeAgentChannelSession[];
   target?: string;
+  targetMemorySessionId?: string;
+  busy?: boolean;
+  turnState?: 'queued' | 'running';
+  clientConnected?: boolean;
+  clientDisconnectedAt?: string;
   error?: string;
 }
 
@@ -143,6 +157,11 @@ export async function probePrimeAgentChannelHealth(
   opts: { sessionsDir?: string; timeoutMs?: number } = {},
 ): Promise<PrimeAgentChannelHealthReport> {
   const sessions = readPrimeAgentSessions(opts.sessionsDir);
+  const channelSessions: PrimeAgentChannelSession[] = sessions.map((session) => ({
+    ...session,
+    rawSessionId: session.sessionId,
+    memorySessionId: primeAgentDkgSessionId(session.sessionId),
+  }));
   if (sessions.length === 0) {
     // Not an error: the adapter can be correctly installed with no session
     // running. Callers should render this as "idle", not "broken".
@@ -166,7 +185,14 @@ export async function probePrimeAgentChannelHealth(
         },
         timeout,
       );
-      const parsed = body as { ok?: boolean; sessionId?: string };
+      const parsed = body as {
+        ok?: boolean;
+        sessionId?: string;
+        busy?: boolean;
+        turnState?: string;
+        clientConnected?: boolean;
+        clientDisconnectedAt?: string;
+      };
       if (ok && parsed?.ok === true) {
         // Detect a recycled port: the descriptor claims one session, the
         // process answering claims another.
@@ -174,14 +200,35 @@ export async function probePrimeAgentChannelHealth(
           lastError = `bridge at ${target.healthUrl} reports session ${parsed.sessionId}, expected ${descriptor.sessionId}`;
           continue;
         }
-        return { ok: true, sessionCount: sessions.length, sessions, target: descriptor.sessionId };
+        return {
+          ok: true,
+          sessionCount: sessions.length,
+          sessions: channelSessions,
+          target: descriptor.sessionId,
+          targetMemorySessionId: primeAgentDkgSessionId(descriptor.sessionId),
+          ...(typeof parsed.busy === 'boolean' ? { busy: parsed.busy } : {}),
+          ...(parsed.turnState === 'queued' || parsed.turnState === 'running'
+            ? { turnState: parsed.turnState }
+            : {}),
+          ...(typeof parsed.clientConnected === 'boolean'
+            ? { clientConnected: parsed.clientConnected }
+            : {}),
+          ...(typeof parsed.clientDisconnectedAt === 'string' && parsed.clientDisconnectedAt
+            ? { clientDisconnectedAt: parsed.clientDisconnectedAt }
+            : {}),
+        };
       }
       lastError = `health check failed for session ${descriptor.sessionId}`;
     } catch (err) {
       lastError = `health check error for session ${descriptor.sessionId}: ${String(err).slice(0, 120)}`;
     }
   }
-  return { ok: false, sessionCount: sessions.length, sessions, ...(lastError ? { error: lastError } : {}) };
+  return {
+    ok: false,
+    sessionCount: sessions.length,
+    sessions: channelSessions,
+    ...(lastError ? { error: lastError } : {}),
+  };
 }
 
 /** Pre-send gate, mirroring ensureHermesBridgeAvailable. */
@@ -237,27 +284,136 @@ export interface PrimeAgentChatPayload {
   metadata?: Record<string, unknown>;
 }
 
+export type PrimeAgentTurnPersistenceState = 'stored' | 'failed' | 'pending';
+
+export interface PrimeAgentPersistTurnPayload {
+  sessionId: string;
+  userMessage: string;
+  assistantReply: string;
+  correlationId?: string;
+  turnId?: string;
+  persistenceState: PrimeAgentTurnPersistenceState;
+  failureReason?: string;
+  toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
+  metadata?: Record<string, unknown>;
+}
+
+function validatePrimeAgentChatIdentifier(value: string, field: string): string | null {
+  if (!value) return `Missing "${field}"`;
+  if (value.length > PRIME_AGENT_CHAT_ID_MAX_LENGTH) return `Invalid "${field}"`;
+  return PRIME_AGENT_CHAT_ID_RE.test(value) ? null : `Invalid "${field}"`;
+}
+
+function normalizePrimeAgentToolCall(
+  value: unknown,
+): { name: string; args: Record<string, unknown>; result: unknown } | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const name = typeof record.name === 'string' ? record.name.trim() : '';
+  if (!name || !record.args || typeof record.args !== 'object' || Array.isArray(record.args)) {
+    return null;
+  }
+  return {
+    name,
+    args: record.args as Record<string, unknown>,
+    result: record.result,
+  };
+}
+
+export function primeAgentDkgSessionId(sessionId: string): string {
+  const trimmed = sessionId.trim();
+  return trimmed.startsWith(PRIME_AGENT_DKG_SESSION_PREFIX)
+    ? trimmed
+    : `${PRIME_AGENT_DKG_SESSION_PREFIX}${trimmed}`;
+}
+
+export function primeAgentRawSessionId(sessionId: string): string {
+  const trimmed = sessionId.trim();
+  return trimmed.startsWith(PRIME_AGENT_DKG_SESSION_PREFIX)
+    ? trimmed.slice(PRIME_AGENT_DKG_SESSION_PREFIX.length)
+    : trimmed;
+}
+
 export function normalizePrimeAgentChatPayload(raw: unknown): PrimeAgentChatPayload | { error: string } {
   if (!raw || typeof raw !== 'object') return { error: 'Invalid payload' };
   const r = raw as Record<string, unknown>;
   const text = typeof r.text === 'string' ? r.text.trim() : '';
   if (!text) return { error: 'Missing "text"' };
   const correlationId = typeof r.correlationId === 'string' ? r.correlationId.trim() : '';
-  if (!correlationId) return { error: 'Missing "correlationId"' };
+  const correlationIdError = validatePrimeAgentChatIdentifier(correlationId, 'correlationId');
+  if (correlationIdError) return { error: correlationIdError };
   if (r.sessionId !== undefined && typeof r.sessionId !== 'string') {
     return { error: 'Invalid "sessionId"' };
   }
-  if (r.sessionId !== undefined && !/^[A-Za-z0-9._:-]{1,200}$/.test(r.sessionId as string)) {
-    return { error: 'Invalid "sessionId"' };
+  const sessionId = typeof r.sessionId === 'string' ? r.sessionId.trim() : undefined;
+  if (sessionId !== undefined) {
+    const sessionIdError = validatePrimeAgentChatIdentifier(sessionId, 'sessionId');
+    if (sessionIdError) return { error: sessionIdError };
   }
   return {
     text,
     correlationId,
-    ...(typeof r.sessionId === 'string' ? { sessionId: r.sessionId } : {}),
+    ...(sessionId ? { sessionId } : {}),
     ...(typeof r.contextGraphId === 'string' ? { contextGraphId: r.contextGraphId } : {}),
     ...(typeof r.identity === 'string' ? { identity: r.identity } : {}),
     ...(typeof r.persistUserMessage === 'boolean' ? { persistUserMessage: r.persistUserMessage } : {}),
     ...(r.metadata && typeof r.metadata === 'object'
+      ? { metadata: r.metadata as Record<string, unknown> }
+      : {}),
+  };
+}
+
+export function normalizePrimeAgentPersistTurnPayload(raw: unknown): PrimeAgentPersistTurnPayload | { error: string } {
+  if (!raw || typeof raw !== 'object') return { error: 'Invalid payload' };
+  const r = raw as Record<string, unknown>;
+  const sessionId = typeof r.sessionId === 'string' ? r.sessionId.trim() : '';
+  const sessionIdError = validatePrimeAgentChatIdentifier(sessionId, 'sessionId');
+  if (sessionIdError) return { error: sessionIdError };
+  const userMessage = typeof r.userMessage === 'string' ? r.userMessage : '';
+  if (!userMessage.trim()) return { error: 'Missing "userMessage"' };
+  const assistantReply = typeof r.assistantReply === 'string' ? r.assistantReply : '';
+  if (r.correlationId !== undefined && typeof r.correlationId !== 'string') {
+    return { error: 'Invalid "correlationId"' };
+  }
+  if (r.turnId !== undefined && typeof r.turnId !== 'string') {
+    return { error: 'Invalid "turnId"' };
+  }
+  const correlationId = typeof r.correlationId === 'string' ? r.correlationId.trim() : '';
+  const turnId = typeof r.turnId === 'string' ? r.turnId.trim() : '';
+  if (r.correlationId !== undefined) {
+    const correlationIdError = validatePrimeAgentChatIdentifier(correlationId, 'correlationId');
+    if (correlationIdError) return { error: correlationIdError };
+  }
+  if (r.turnId !== undefined) {
+    const turnIdError = validatePrimeAgentChatIdentifier(turnId, 'turnId');
+    if (turnIdError) return { error: turnIdError };
+  }
+  const persistenceState = r.persistenceState === undefined
+    ? 'stored'
+    : r.persistenceState === 'stored' || r.persistenceState === 'failed' || r.persistenceState === 'pending'
+      ? r.persistenceState
+      : null;
+  if (!persistenceState) return { error: 'Invalid "persistenceState"' };
+  const failureReason = typeof r.failureReason === 'string' ? r.failureReason.trim() : '';
+  if (r.toolCalls !== undefined && !Array.isArray(r.toolCalls)) {
+    return { error: 'Invalid "toolCalls"' };
+  }
+  const toolCalls = Array.isArray(r.toolCalls)
+    ? r.toolCalls.map(normalizePrimeAgentToolCall)
+    : undefined;
+  if (toolCalls?.some((entry) => entry == null)) return { error: 'Invalid "toolCalls"' };
+  return {
+    sessionId,
+    userMessage,
+    assistantReply,
+    ...(correlationId ? { correlationId } : {}),
+    ...(turnId ? { turnId } : {}),
+    persistenceState,
+    ...(failureReason ? { failureReason } : {}),
+    ...(toolCalls && toolCalls.length > 0
+      ? { toolCalls: toolCalls as NonNullable<PrimeAgentPersistTurnPayload['toolCalls']> }
+      : {}),
+    ...(r.metadata && typeof r.metadata === 'object' && !Array.isArray(r.metadata)
       ? { metadata: r.metadata as Record<string, unknown> }
       : {}),
   };

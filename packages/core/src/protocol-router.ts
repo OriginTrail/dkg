@@ -29,6 +29,9 @@ export function isRecoverableSendError(err: unknown): boolean {
     msg.includes('stream returned in closed state') ||
     msg.includes('econnreset') ||
     msg.includes('etimedout') ||
+    msg.includes('send timeout') ||
+    msg.includes('operation timed out') ||
+    msg.includes('operation was aborted due to timeout') ||
     msg.includes('econnrefused') ||
     msg.includes('epipe') ||
     msg.includes('aborted') ||

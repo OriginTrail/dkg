@@ -31,6 +31,36 @@ The Node UI defaults to:
 http://127.0.0.1:9200/ui
 ```
 
+## Boot Without Restoring Persisted Context Graph Subscriptions
+
+By default, the daemon restores durable Context Graph subscription rows as
+live gossip subscriptions and automatic sync work on every boot. To inspect or
+query an existing store without reactivating that workload, set:
+
+```json
+{
+  "contextGraphSubscriptionRehydrationEnabled": false
+}
+```
+
+For a one-off boot, the strict environment override wins over `config.json`:
+
+```bash
+DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED=false dkg start -f
+```
+
+Accepted environment values are `1`, `0`, `true`, and `false`
+(case-insensitive). Any other value fails startup so a typo cannot silently
+enable network work.
+
+Disabling rehydration does not delete subscription rows, membership records,
+or stored RDF content. The content remains locally queryable. It only prevents
+non-system persisted rows from becoming live subscriptions, gossip handlers,
+or automatic sync scope during that boot. System Context Graph startup and
+explicit subscribe/create/write operations remain unchanged. Remove the
+setting, set it to `true`, or use the environment override to restore normal
+default behavior on the next boot.
+
 ## Core Node Profile Registration
 
 The two node roles are `edge` and `core`.

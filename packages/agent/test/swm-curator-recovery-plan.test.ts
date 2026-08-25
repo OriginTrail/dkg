@@ -72,6 +72,93 @@ describe('private SWM curator recovery planning', () => {
     expect(plan.eligibleContextGraphIds).toEqual([]);
   });
 
+  it('limits automatic public SWM sweeps to an RFC-64 graph-complete provider', async () => {
+    const contextGraphId = `${ethers.Wallet.createRandom().address}/selected-public`;
+    const completeProvider = '12D3KooWCompleteSwmProvider';
+    const agent = await createAgent('CompletePublicSwmProviderPlan');
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => true;
+    internals.isPrivateContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [completeProvider];
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      '12D3KooWUnrelatedEdge',
+      [contextGraphId],
+      createOperationContext('sync'),
+    )).resolves.toMatchObject({
+      publicContextGraphIds: [],
+      eligibleContextGraphIds: [],
+    });
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      completeProvider,
+      [contextGraphId],
+      createOperationContext('sync'),
+    )).resolves.toMatchObject({
+      publicContextGraphIds: [contextGraphId],
+      eligibleContextGraphIds: [contextGraphId],
+    });
+  });
+
+  it('uses an accepted public policy as cold-start authorization for its exact complete provider', async () => {
+    const contextGraphId = `${ethers.Wallet.createRandom().address}/selected-public-cold`;
+    const ordinaryContextGraphId = `${ethers.Wallet.createRandom().address}/ordinary-public-cold`;
+    const completeProvider = '12D3KooWCompleteSwmProvider';
+    const agent = await createAgent('CompletePublicSwmColdStartPlan');
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => false;
+    internals.isPrivateContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = (candidate: string) => (
+      candidate === contextGraphId ? [completeProvider] : []
+    );
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      completeProvider,
+      [ordinaryContextGraphId, contextGraphId],
+      createOperationContext('sync'),
+      { requireCompleteProviderMatch: true },
+    )).resolves.toMatchObject({
+      publicContextGraphIds: [contextGraphId],
+      eligibleContextGraphIds: [contextGraphId],
+    });
+  });
+
+  it('rejects explicit catch-up from a non-authoritative peer when RFC-64 providers are configured', async () => {
+    const contextGraphId = `${ethers.Wallet.createRandom().address}/selected-public-fallback`;
+    const agent = await createAgent('ExplicitPublicSwmFallbackPlan');
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => true;
+    internals.isPrivateContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => ['12D3KooWCompleteSwmProvider'];
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      '12D3KooWFallbackPeer',
+      [contextGraphId],
+      createOperationContext('sync'),
+    )).resolves.toMatchObject({
+      publicContextGraphIds: [],
+      eligibleContextGraphIds: [],
+    });
+  });
+
+  it('retains ordinary public union sync when no RFC-64 complete provider is configured', async () => {
+    const contextGraphId = `${ethers.Wallet.createRandom().address}/ordinary-public-fallback`;
+    const agent = await createAgent('OrdinaryPublicSwmFallbackPlan');
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => true;
+    internals.isPrivateContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [];
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      '12D3KooWOrdinaryPeer',
+      [contextGraphId],
+      createOperationContext('sync'),
+    )).resolves.toMatchObject({
+      publicContextGraphIds: [contextGraphId],
+      eligibleContextGraphIds: [contextGraphId],
+    });
+  });
+
   it('does not treat an empty registry after a failed metadata refresh as authoritative', async () => {
     const curator = ethers.Wallet.createRandom().address.toLowerCase();
     const contextGraphId = `${curator}/refresh-failed-plan`;

@@ -749,6 +749,38 @@ describe('version-skew check (§4.7.4)', () => {
     expect(findings.find((f) => f.message.includes('Running daemon is ahead'))).toBeDefined();
   });
 
+  it('Edge: warns when PATH resolves a stale CLI even though npm-global matches the daemon', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'edge' }),
+        '/home/ubuntu/.npm-global/lib/node_modules/@origintrail-official/dkg/package.json':
+          JSON.stringify({ version: '10.0.12' }),
+      },
+      apiStatus: { version: '10.0.12' },
+    });
+    const state = await collectStateSummary(deps);
+    state.paths.npmGlobalDkg =
+      '/home/ubuntu/.npm-global/lib/node_modules/@origintrail-official/dkg';
+    state.cli.globalPath = '/usr/bin/dkg';
+    state.cli.version = '10.0.5-canary.1';
+
+    const findings = await runVersionSkewCheck(deps, state);
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      check: 'version-skew',
+      severity: 'warning',
+      subject: '/usr/bin/dkg',
+      details: {
+        cliPath: '/usr/bin/dkg',
+        cliVersion: '10.0.5-canary.1',
+        daemonVersion: '10.0.12',
+      },
+    });
+    expect(findings[0].message).toContain('CLI on PATH');
+    expect(findings[0].advisory).toContain("$(npm config get prefix)/bin");
+  });
+
   it('Core: warns on slot-vs-daemon mismatch', async () => {
     const deps = makeDeps({
       fs: {

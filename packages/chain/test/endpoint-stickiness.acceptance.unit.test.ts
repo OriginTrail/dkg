@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * Endpoint-stickiness (Mechanism B, #1340 retry residual + #1337 fail-close)
- * ACCEPTANCE suite (AC-1..AC-29). Split out of `rpc-failover-client.unit.test.ts`
+ * ACCEPTANCE suite (AC-1..AC-30). Split out of `rpc-failover-client.unit.test.ts`
  * — that file's load-bearing focus is the WRITE transport + `resolveCapMs` matrix;
  * this file owns the stickiness state-machine acceptance criteria.
  *
@@ -361,6 +361,42 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     expect(p0.broadcastTransaction.calls).toHaveLength(0); // primary NOT re-probed. (Bug: primary throws terminally.)
   });
 
+  it('AC-30: a backup that accepts a primary-signed transaction owns the next nonce populate', async () => {
+    const p0: any = { broadcastTransaction: recorder(async () => { throw retryable429(); }) };
+    const p1: any = { broadcastTransaction: recorder(async () => undefined) };
+    const populatedBy: string[] = [];
+    const signedNonces: number[] = [];
+    const pendingNonce = new Map([[p0, 0], [p1, 0]]);
+    const signer = {
+      address: '0x' + 'ab'.repeat(20),
+      connect: (provider: unknown) => ({ address: '0x' + 'ab'.repeat(20), boundTo: provider }),
+    } as any;
+    const contract = {
+      connect: (boundSigner: any) => ({
+        doWrite: {
+          populateTransaction: async () => {
+            const provider = boundSigner.boundTo;
+            populatedBy.push(provider === p0 ? 'primary' : 'backup');
+            return { to: '0xTO', data: '0x', nonce: pendingNonce.get(provider) };
+          },
+        },
+      }),
+    } as any;
+    const signPopulated = recorder(async (_boundSigner: unknown, populated: any) => {
+      signedNonces.push(populated.nonce);
+      return { signedTx: `0xS${populated.nonce}`, txHash: `0xH${populated.nonce}` };
+    });
+    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+
+    const first = await client.populateAndSign(contract, 'doWrite', [], signer, 'w');
+    await client.broadcast(first.signedTx, first.txHash, 'w');
+    pendingNonce.set(p1, 1);
+
+    await client.populateAndSign(contract, 'doWrite', [], signer, 'w');
+    expect(populatedBy).toEqual(['primary', 'backup']);
+    expect(signedNonces).toEqual([0, 1]);
+  });
+
   it('AC-10: a populateAndSign failover primes the preferred for the following read (the 4th loop establishes too)', async () => {
     const p0 = { read: recorder(async () => { throw retryable429(); }) };
     const p1 = { read: recorder(async () => 'BACKUP-READ') };
@@ -560,6 +596,33 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     // A following read prefers the backend getReceipt established.
     expect(await client.read('r', (p: any) => p.read())).toBe('B');
     expect(primary.read.calls).toHaveLength(0); // primary NOT tried — the receipt establishment carried over
+  });
+
+  it('a receipt-only preference does not prove nonce freshness for the next populate', async () => {
+    const receipt = { status: 1, hash: '0xhash' };
+    const primary: any = { getTransactionReceipt: recorder(async () => { throw retryable429(); }) };
+    const backup: any = { getTransactionReceipt: recorder(async () => receipt) };
+    const populateOrder: string[] = [];
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const contract = { connect: (signer: any) => ({
+      doWrite: {
+        populateTransaction: async () => {
+          populateOrder.push(signer.boundTo === primary ? 'primary' : 'backup');
+          return { to: '0xTO', data: '0x' };
+        },
+      },
+    }) } as any;
+    const client = makeClient(
+      [primary, backup],
+      STICKY_URLS,
+      signPopulated as SignPopulatedFn,
+      { enabled: true },
+    );
+
+    await expect(client.getReceipt('0xhash')).resolves.toBe(receipt);
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'write');
+
+    expect(populateOrder).toEqual(['primary']);
   });
 
   it('AC-18: multi-backup re-point (preferred backup degrades mid-window → next backup) keeps the cadence (round-4 🟡)', async () => {

@@ -1,10 +1,12 @@
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
+import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import type {
   DKGAgentConfig,
+  SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
@@ -31,6 +33,7 @@ import {
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
 import {
+  resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
   type ApprovalPolicy,
 } from '@origintrail-official/dkg-chain';
@@ -211,6 +214,15 @@ export interface NetworkConfig {
     chainId: string;
     receiptTimeoutMs?: number;
     /**
+     * Operator-selected mined-receipt confirmation depth; the receipt block
+     * itself counts as 1. Lower values reduce wallet wait time but increase the
+     * risk that a chain reorganization reverses an already accepted receipt.
+     * A value of 1 gives no successor-block buffer. Defaults to 1.
+     */
+    finalityConfirmations?: number;
+    /** Optional operator cap for transaction fee-per-gas fields (wei). */
+    maxFeePerGasWei?: bigint | string | number;
+    /**
      * ContextGraphNameRegistry discovery scan `eth_getLogs` block-window.
      * Defaults to the EVM adapter's 2,000-block common provider cap.
      */
@@ -342,15 +354,27 @@ export interface ChainConfig {
   minPublisherTracWei?: bigint | string | number;
   /** Overall submitted-transaction receipt deadline (default 10 minutes). */
   receiptTimeoutMs?: number;
+  /**
+   * Operator-selected canonical block confirmations required for a mined
+   * publish receipt. The receipt block itself counts as confirmation 1. Lower
+   * values reduce wallet wait time but increase the risk that a chain
+   * reorganization reverses an already accepted receipt. A value of 1 gives no
+   * successor-block buffer. Defaults to 1.
+   */
+  finalityConfirmations?: number;
+  /** Optional operator cap for transaction fee-per-gas fields (wei). */
+  maxFeePerGasWei?: bigint | string | number;
 }
 
 export type ResolvedChainConfig = Partial<
-  Omit<ChainConfig, 'approvalPolicy' | 'minPublisherNativeWei' | 'minPublisherTracWei'>
+  Omit<ChainConfig, 'approvalPolicy' | 'minPublisherNativeWei' | 'minPublisherTracWei' | 'maxFeePerGasWei'>
 > & {
   approvalPolicy?: ApprovalPolicyConfig;
   /** Normalized funding floors — always bigint past resolution. */
   minPublisherNativeWei?: bigint;
   minPublisherTracWei?: bigint;
+  /** Normalized positive fee-per-gas cap. */
+  maxFeePerGasWei?: bigint;
 };
 
 export interface LargeLiteralStorageConfig {
@@ -362,6 +386,15 @@ export interface LargeLiteralStorageConfig {
 export interface SharedMemoryPublicSnapshotStorageConfig {
   enabled?: boolean;
   directory?: string;
+  gc?: {
+    enabled?: boolean;
+    intervalMs?: number;
+    triggerFreeBytes?: number;
+    targetFreeBytes?: number;
+    hardReserveBytes?: number;
+    minAgeMs?: number;
+    staleTempAgeMs?: number;
+  };
 }
 
 /** Optional LLM config for the Node UI chatbot (OpenAI-compatible API). */
@@ -485,10 +518,10 @@ export interface GraphSetIndexConfig {
 }
 
 /**
- * Explicit selected-public RFC-64 activation. Omitted or `enabled: false`
- * leaves the catalog data plane fail-closed with no accepted policies and no
- * ordinary-publication hook. The bootstrap manifest is the selected CG set;
- * the daemon adds only those graph IDs to durable synchronization.
+ * Selected-public RFC-64 activation. An accepted bootstrap manifest activates
+ * its selected CGs by default; an omitted block or explicit `enabled: false`
+ * leaves the catalog data plane fail-closed. The daemon adds only manifest
+ * graph IDs to durable synchronization.
  */
 export type Rfc64PublicCatalogActivationConfig = Rfc64PublicCatalogActivationConfigV1;
 export type ResolvedRfc64PublicCatalogActivationConfig =
@@ -628,6 +661,13 @@ export interface DkgConfig {
    * than the default (64).
    */
   maxRehydratedContextGraphSubscriptions?: number;
+  /**
+   * Restore persisted Context Graph subscriptions into live gossip and sync
+   * state on daemon boot. Defaults to true. Set false for a preserved-store,
+   * query-only boot; rows and RDF content are not deleted. Environment override:
+   * DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED.
+   */
+  contextGraphSubscriptionRehydrationEnabled?: boolean;
   /** Out-of-line storage for large public SWM RDF literal object terms. */
   largeLiteralStorage?: LargeLiteralStorageConfig;
   /** Out-of-line storage for immutable public SWM operation snapshots. */
@@ -636,19 +676,37 @@ export interface DkgConfig {
   syncSharedMemoryOnConnect?: boolean;
   /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
   syncReconcilerEnabled?: boolean;
+  /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
+  syncReconcilerIntervalMs?: number;
+  /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
+  syncStalenessThresholdMs?: number;
+  /** Initial per-peer automatic sync retry delay. Default: 5 minutes. */
+  syncBackoffBaseMs?: number;
+  /** Maximum per-peer automatic sync retry delay. Default: 60 minutes. */
+  syncBackoffMaxMs?: number;
+  /** Fractional retry jitter from 0 through 1. Default: 0.25. */
+  syncBackoffJitter?: number;
   /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
   syncOnConnectEnabled?: boolean;
+  /**
+   * Include `agents` and `ontology` in automatic peer-connect/reconciler
+   * durable sync. Defaults true on Core and false on Edge. Explicit catch-up
+   * remains available. Env DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT wins.
+   */
+  syncSystemContextGraphsOnConnect?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
-   * Global cap for concurrent sync jobs. Defaults to 2; set 0 to disable.
+   * Global cap for concurrent sync jobs. Defaults to 10; set 0 to disable.
    * Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins.
    */
   syncGlobalMaxInflight?: number;
   /** Backwards-compatible alias for syncGlobalMaxInflight. Env DKG_SYNC_GLOBAL_LIMIT wins. */
   syncGlobalLimit?: number;
-  /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
+  /** Hard cap for queued sync jobs. Shared mode defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
+  syncAdmission?: SyncAdmissionConfig;
   /** Retained sync responder snapshot limits (rows and estimated bytes). */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
   /**
@@ -775,12 +833,47 @@ export interface DkgConfig {
      */
     provenanceEvents?: boolean;
   };
-  /** Async publisher runtime options. */
+  /**
+   * Async publisher runtime options. The retry knobs below are validated by
+   * `resolvePublisherRetryTuning()` at the config boundary: the publisher
+   * constructor THROWS on out-of-range values and it is constructed during
+   * daemon boot, so an unchecked typo would surface as a startup failure
+   * carrying a library message instead of a config error naming the key.
+   */
   publisher?: {
     enabled?: boolean;
     pollIntervalMs?: number;
     errorBackoffMs?: number;
+    /** How often to check submitted transactions for chain confirmation. Default 60000ms. */
+    recoveryIntervalMs?: number;
+    /**
+     * Retry budget per job — ONE counter shared by the publisher's automatic
+     * retries and manual reaccepts, snapshot at admission. Default 10.
+     */
     maxRetries?: number;
+    /**
+     * GH#2270 — operator kill-switch for the publisher's OWN retry lane.
+     * `false` collapses it to pre-#2270 behaviour: nothing is scheduled and
+     * nothing already scheduled is swept (jobs scheduled while it was on
+     * strand until it is turned back on). Manual `dkg publisher retry` and
+     * admission reaccept are unaffected. Default `true`.
+     */
+    autoRetryEnabled?: boolean;
+    /**
+     * GH#2270 — symmetric jitter ratio `r` applied to the retry backoff as
+     * `delay · (1 + r·(2·rand()−1))`, i.e. the fraction of the delay the
+     * jitter may add or subtract. Must satisfy `0 <= r < 1`. Default 0.2.
+     */
+    retryJitterRatio?: number;
+    /**
+     * GH#2270 — first retry delay in ms; doubles per attempt up to
+     * `retryBackoffMaxMs`. Default 5000. May be set independently: the
+     * EFFECTIVE pair (explicit value + default for the unset knob) is
+     * validated as `max >= base` at the shared resolver.
+     */
+    retryBackoffBaseMs?: number;
+    /** GH#2270 — hard ceiling on the (jittered) retry delay. Default 60000. */
+    retryBackoffMaxMs?: number;
   };
   /**
    * Async promote queue worker (WM → SWM). Unlike `publisher` which is
@@ -826,6 +919,8 @@ export interface DkgConfig {
   storageAck?: {
     handlerDeadlineMs?: number;
     sendTimeoutMs?: number;
+    /** Maximum publisher-side StorageACK collection rounds in flight. Default 1. */
+    maxConcurrentCollections?: number;
   };
   /**
    * V10 Random Sampling prover (core-only). When the node is `core`
@@ -996,6 +1091,74 @@ export {
 /** Resolve context graphs from config. */
 export function resolveContextGraphs(config: DkgConfig): string[] {
   return config.contextGraphs ?? [];
+}
+
+const CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV =
+  'DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED';
+
+/**
+ * Resolve the startup subscription-rehydration gate. The environment override
+ * wins so an operator can safely boot an existing store without rewriting its
+ * config file. Unknown values fail startup instead of silently choosing the
+ * network-active default.
+ */
+export function resolveContextGraphSubscriptionRehydrationEnabled(
+  configValue: unknown,
+  envValue: string | undefined = process.env[CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV],
+): boolean {
+  if (envValue !== undefined) {
+    const normalized = envValue.trim().toLowerCase();
+    if (normalized === '1' || normalized === 'true') return true;
+    if (normalized === '0' || normalized === 'false') return false;
+    throw new Error(
+      `${CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV} must be one of 1, 0, true, or false ` +
+      `(received ${JSON.stringify(envValue)})`,
+    );
+  }
+  if (configValue === undefined) return true;
+  if (typeof configValue !== 'boolean') {
+    throw new Error(
+      'contextGraphSubscriptionRehydrationEnabled must be a boolean ' +
+      `(received ${JSON.stringify(configValue)})`,
+    );
+  }
+  return configValue;
+}
+
+/**
+ * The GH#2270 retry knobs, validated but NOT defaulted: an unset knob stays
+ * `undefined` so the publisher library remains the single source of every
+ * default (same contract `publisher.maxRetries` has had since #1836).
+ *
+ * Validation DELEGATES to the publisher package's `resolveAsyncLiftRetryTuning`
+ * — the same resolver the `TripleStoreAsyncLiftPublisher` constructor runs — so
+ * ranges, the kill-switch's boolean-only rule, and the cross-field backoff
+ * invariant have exactly ONE owner. Because that owner exports the real
+ * defaults, a half-configured backoff pair is validated against the EFFECTIVE
+ * values instead of being rejected outright (the earlier set-together rule is
+ * gone), and an operator error names the `config.json` key.
+ */
+export type PublisherRetryTuning = AsyncLiftRetryTuning;
+
+/**
+ * The ONE definition of "the publisher runtime will start": the runner's
+ * gates and the boot-time validation gate both call this, so the set of
+ * configs that construct a publisher and the set that get validated cannot
+ * drift (truthiness, matching the pre-existing runtime behavior).
+ */
+export function isPublisherRuntimeEnabled(
+  publisher?: DkgConfig['publisher'] | null,
+): publisher is NonNullable<DkgConfig['publisher']> {
+  return Boolean(publisher?.enabled);
+}
+
+export function resolvePublisherRetryTuning(
+  publisher?: DkgConfig['publisher'] | null,
+  label = 'publisher',
+): PublisherRetryTuning {
+  // Pure label adapter: the WHOLE validation boundary, object shape
+  // included, is the publisher-owned resolver.
+  return resolveAsyncLiftRetryTuning(publisher, label);
 }
 
 /** Resolve context graphs from network config. */
@@ -1478,6 +1641,24 @@ export function resolveChainConfig(
     : net?.receiptTimeoutMs;
   if (operatorHasReceiptTimeout || receiptTimeoutMs !== undefined) {
     merged.receiptTimeoutMs = resolveReceiptTimeoutMs(receiptTimeoutMs);
+  }
+  // Presence matters: explicit null/zero must fail rather than silently
+  // falling through to the network or adapter default.
+  const operatorHasFinalityConfirmations = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'finalityConfirmations');
+  const finalityConfirmations: unknown = operatorHasFinalityConfirmations
+    ? cfg.finalityConfirmations
+    : net?.finalityConfirmations;
+  if (operatorHasFinalityConfirmations || finalityConfirmations !== undefined) {
+    merged.finalityConfirmations = resolveFinalityConfirmations(finalityConfirmations);
+  }
+  const maxFeePerGasWei = parseWeiFloor(
+    cfg?.maxFeePerGasWei ?? net?.maxFeePerGasWei,
+    'chain.maxFeePerGasWei',
+  );
+  if (maxFeePerGasWei !== undefined) {
+    if (maxFeePerGasWei === 0n) throw new Error('chain.maxFeePerGasWei must be greater than zero');
+    merged.maxFeePerGasWei = maxFeePerGasWei;
   }
   // Funding floors: local config wins, else the network overlay's per-chain
   // default (both default 0n downstream in the adapter when unset). Persisted

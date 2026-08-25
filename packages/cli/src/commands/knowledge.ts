@@ -339,11 +339,13 @@ program
   .command('subscribe <context-graph>')
   .description('Subscribe to a context graph\'s GossipSub topic')
   .option('--save', 'Also save to config so it auto-subscribes on restart')
+  .option('--repair', 'Reconcile the graph even when existing readiness says it is complete')
   .action(async (contextGraph: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
       const result = await client.subscribeToContextGraph(contextGraph, {
         syncMode: opts.save ? 'always-on' : 'on-demand',
+        forceCatchup: opts.repair === true,
       });
       console.log(`Subscribed to context graph: ${contextGraph}`);
       console.log(

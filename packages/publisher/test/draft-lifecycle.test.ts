@@ -8,6 +8,7 @@ import {
   contextGraphDataUri,
   contextGraphMetaUri,
   contextGraphLayerUri,
+  contextGraphPrivateUri,
   MemoryLayer,
   ASSERTION_SEAL_PREDICATES,
   assertionLifecycleUri,
@@ -2500,6 +2501,40 @@ describe('Working Memory Assertion Lifecycle', () => {
       const count = Number(String(preservedSwm.bindings[0]?.['c'] ?? '0').match(/\d+/)?.[0] ?? 0);
       expect(count).toBe(3);
     }
+  });
+
+  it('discard proceeds and archives the recovery seal when the SWM head is corrupt (GH#2273)', async () => {
+    // GH#2273 — the resolver fails closed on a corrupt SWM head, and the discard path
+    // resolves the head only to decide the advisory keep-the-recovery-seal boolean.
+    // Discard is a plausible operator remedy for a KA whose head is exactly in that
+    // corrupt state, so the throw must not abort it (pre-fix it did: the resolve had no
+    // catch, so this discard rejected with KA_WORKSPACE_HEAD_CORRUPT and the operator
+    // had no API-level way to clear the assertion). On corruption we cannot prove the
+    // seal does NOT match live SWM content, so the decision fails toward RETENTION: the
+    // seal is archived to the recovery subject rather than dropped.
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    // One dangling shareOperationId row with none of the other required head rows is
+    // the resolver's pre-existing "incomplete head or operation metadata" corrupt case
+    // — the cheapest corrupt-head shape to fabricate, and the catch under test treats
+    // every KnowledgeAssetWorkspaceHeadCorruptError alike.
+    await store.insert([{
+      subject: `${finalized.kaUal}#dkg-swm-head`,
+      predicate: SHARE_OPERATION_ID_PREDICATE,
+      object: '"phantom-op"',
+      graph: SWM_META_GRAPH,
+    }]);
+
+    await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
+
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(0);
+    const recoverySubject = `${contextGraphAssertionUri(CG_ID, AGENT, ASSERTION_NAME)}/_recovery_seal`;
+    const archived = await store.query(
+      `ASK { GRAPH <${contextGraphPrivateUri(CG_ID)}> { <${recoverySubject}> ?p ?o } }`,
+    );
+    expect(archived).toEqual({ type: 'boolean', value: true });
   });
 });
 
