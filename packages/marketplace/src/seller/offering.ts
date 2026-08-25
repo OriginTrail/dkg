@@ -17,10 +17,12 @@ export interface Quad { subject: string; predicate: string; object: string }
 
 export function buildOfferingQuads(ob: OfferingBinding, a: {
   providerAddress: string; apiBase: string; chainId: number;
+  ask?: { askMicroPerUnit: number; unit: string; effectiveFromCycle: number };
+  revenueWallet?: string; queryCostScheduleRef?: string; cycle?: number;
 }): { ka: string; quads: Quad[] } {
   const o = ob.offering;
   const modelId = ob.binding.kind === "llamacpp" ? ob.binding.modelId : ob.binding.model;
-  const ka = `nsm-offering-${o.id}`;
+  const ka = a.cycle ? `nsm-offering-${o.id}-c${a.cycle}` : `nsm-offering-${o.id}`;
   const OFFER = `urn:nsm:model-offering:${o.id}`;
   const q: Quad[] = [];
   const iri = (s: string, p: string, obj: string) => q.push({ subject: s, predicate: p, object: obj });
@@ -43,10 +45,18 @@ export function buildOfferingQuads(ob: OfferingBinding, a: {
   lit(OFFER, `${NSM}providerAddress`, a.providerAddress);
   lit(OFFER, `${NSM}chain`, `eip155:${a.chainId}`);
   lit(OFFER, `${NSM}apiBase`, a.apiBase);
-  lit(OFFER, `${NSM}quoteEndpoint`, "GET /terms");
-  lit(OFFER, `${NSM}tabOpenEndpoint`, "POST /tab/open");
-  lit(OFFER, `${NSM}inferEndpoint`, "POST /v1/chat/completions");
-  lit(OFFER, `${NSM}queryEndpoint`, "POST /v1/query");
+  // P5 subscription rail — the wire is enroll + serve; tab endpoints are gone
+  lit(OFFER, `${NSM}rail`, "subscription/v5");
+  lit(OFFER, `${NSM}enrollEndpoint`, "POST /marketplace/subs/enroll");
+  lit(OFFER, `${NSM}serveChatEndpoint`, "POST /marketplace/subs/serve/chat");
+  lit(OFFER, `${NSM}serveQueryEndpoint`, "POST /marketplace/subs/serve/query");
+  if (a.ask) {
+    lit(OFFER, `${NSM}askMicroPerUnit`, a.ask.askMicroPerUnit);
+    lit(OFFER, `${NSM}askUnit`, a.ask.unit);
+    lit(OFFER, `${NSM}askEffectiveFromCycle`, a.ask.effectiveFromCycle);
+  }
+  if (a.revenueWallet) lit(OFFER, `${NSM}revenueWallet`, a.revenueWallet);
+  if (a.queryCostScheduleRef) lit(OFFER, `${NSM}queryCostScheduleRef`, a.queryCostScheduleRef);
   if (ob.binding.kind === "llamacpp") {
     lit(OFFER, `${NSM}weightsDigest`, ob.binding.ggufSha256);
     lit(OFFER, `${NSM}servingSeed`, ob.binding.settings.seed);
@@ -69,6 +79,8 @@ export function buildOfferingQuads(ob: OfferingBinding, a: {
 /** Drive the node's own API to land the offering in SWM. Returns the KA name. */
 export async function publishOffering(nodeBase: string, token: string, ob: OfferingBinding, a: {
   providerAddress: string; apiBase: string; chainId: number; contextGraphId: string; subGraphName?: string;
+  ask?: { askMicroPerUnit: number; unit: string; effectiveFromCycle: number };
+  revenueWallet?: string; queryCostScheduleRef?: string; cycle?: number;
 }): Promise<{ ka: string; ual: string }> {
   const { ka, quads } = buildOfferingQuads(ob, a);
   const mk = buildModelKaQuads(modelKaFromBinding(ob));

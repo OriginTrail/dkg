@@ -271,5 +271,48 @@ try { execFileSync(process.execPath, [join(SRC, "../../..", "docs/ui-spec/mockup
 catch { probeOk = false; }
 ok("D-copy-1 zero unkeyed strings in the runthrough (copy-probe)", probeOk);
 
+// ── registry, pair CG, calibration (G10/G17/G18) ───────────────────────────
+console.log("— registry & calibration —");
+const { buildScheduleKaQuads } = await import(join(DIST, "subs/registry.js"));
+const { buildOfferingQuads } = await import(join(DIST, "seller/offering.js"));
+const { pairId, pairCgId } = await import(join(DIST, "subs/pair-cg.js"));
+const { exportCalibration } = await import(join(DIST, "subs/calibration.js"));
+
+const skq = buildScheduleKaQuads(SCHEDULE_V1);
+ok("D-reg-1 schedule KA is content-addressed and carries every term",
+   skq.urn === `urn:nsm:query-schedule:${scheduleDigest(SCHEDULE_V1)}`
+   && skq.quads.filter((q) => q.predicate.includes("per") || q.predicate.includes("base")).length >= 8);
+
+const fakeOb = { offering: { id: "qwen14b", provenanceClass: "weights-pinned",
+    perInputTokenMicroTrac: 0, perOutputTokenMicroTrac: 0, queryFlatMicroTrac: 0, perReturnedQuadMicroTrac: 0,
+    connector: { kind: "llamacpp" } },
+  binding: { kind: "llamacpp", modelId: "qwen14b", ggufSha256: "sha256:w", tokenizerBundleDigest: "sha256:t",
+    tokenizerFiles: {}, settings: { seed: 42, temperature: 0, ctx: 4096 } },
+  tokenizerBundleRef: "sha256:t" };
+const oq = buildOfferingQuads(fakeOb, { providerAddress: OKF, apiBase: "http://x", chainId: 31337,
+  ask: { askMicroPerUnit: 0.6, unit: "tokens", effectiveFromCycle: 1 },
+  revenueWallet: "0xRev", queryCostScheduleRef: skq.urn, cycle: 3 });
+const preds = oq.quads.map((q) => q.predicate);
+ok("D-reg-2 offer KA carries committed ask + revenue wallet + subs endpoints",
+   preds.some((p) => p.endsWith("askMicroPerUnit")) && preds.some((p) => p.endsWith("revenueWallet"))
+   && preds.some((p) => p.endsWith("enrollEndpoint")));
+ok("D-reg-3 offer KA carries NO tab-rail endpoints",
+   !preds.some((p) => /tabOpen|quoteEndpoint/.test(p)));
+ok("D-reg-4 ask updates get a per-cycle KA name (republish-clean)", oq.ka === "nsm-offering-qwen14b-c3");
+
+ok("D-pair-1 pair CG name is derived — both seats agree without coordination",
+   pairCgId(pairId("0xB", "0xS")) === pairCgId(pairId("0xb", "0xs"))
+   && pairCgId(pairId("0xB", "0xS")).startsWith("nsm-pair-"));
+
+const cal = exportCalibration(G, new Date("2026-08-25T13:00:00Z"));
+ok("D-cal-1 calibration export: schema + per-period volumes in native units",
+   cal.schema === "nsm-calibration/1" && cal.periods.length === 1
+   && cal.periods[0].volumes.some((v) => v.offeringId === "qwen14b" && v.consumedUnits === 1000));
+ok("D-cal-2 ceiling-hit + per-key watch-items present",
+   cal.periods[0].ceilingHits === 1 && cal.periods[0].perKey["kA"] === 1000);
+ok("D-cal-3 ask distribution + concentration + statements fields populated",
+   cal.askDistribution.length >= 2 && typeof cal.buyerConcentration.topPairShare === "number"
+   && typeof cal.statements.disputeRate === "number");
+
 console.log(`\n${pass}/${pass + fail} v5 core drills pass`);
 process.exit(fail ? 1 : 0);

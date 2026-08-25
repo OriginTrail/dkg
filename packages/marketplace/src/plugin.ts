@@ -237,11 +237,18 @@ export const plugin: RoutePlugin = {
         else {
           const { publishOffering } = await import("./seller/offering.js");
           const token = cfg.nodeToken ?? [...ctx.validTokens][0] ?? "";
+          const { scheduleDigest, SCHEDULE_V1 } = await import("./subs/query-cost.js");
+          const cyc = nextCycle(home) - 1 || 1;
+          const inForce = askInForce(home, ob.offering.id, mounted.seller.providerAddress, cyc) ?? undefined;
           out = await publishOffering(`http://127.0.0.1:${ctx.apiPortRef.value}`, token, ob, {
             providerAddress: mounted.seller.providerAddress,
             chainId: cfg.chainId ?? 8453,
             apiBase: cfg.apiBase ?? "",
             contextGraphId: parsed.contextGraphId ?? cfg.registryContextGraphId ?? "nsm-registry",
+            ask: inForce ? { askMicroPerUnit: inForce.askMicroPerUnit, unit: inForce.unit, effectiveFromCycle: inForce.effectiveFromCycle } : undefined,
+            revenueWallet: cfg.revenueWallet,
+            queryCostScheduleRef: scheduleDigest(SCHEDULE_V1),
+            cycle: cyc,
           }) as unknown as Record<string, unknown>;
           if (!out.error && typeof out.ual === "string" && parsed.offeringId) {
             ob.offeringUal = out.ual;
