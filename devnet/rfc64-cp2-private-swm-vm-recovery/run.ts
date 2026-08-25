@@ -244,9 +244,13 @@ async function execute(): Promise<void> {
       exact(semantic.projectionNQuads, PROJECTION_NQUADS, `private SWM ${index}`);
       swmRecovered += 1;
 
-      const kaNumber = FIRST_KA_NUMBER + BigInt(index);
-      const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
-      const ual = `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`;
+      const kaId = requiredString(row.kaId, `private row ${index} KA ID`);
+      const kaNumber = BigInt(kaId) & ((1n << 96n) - 1n);
+      const ordinal = Number(kaNumber - FIRST_KA_NUMBER);
+      if (!Number.isSafeInteger(ordinal) || ordinal < 0 || ordinal >= ASSET_COUNT) {
+        throw new Error(`private row ${index} has an unexpected finalized KA ordinal`);
+      }
+      const ual = requiredString(row.kaUal, `private row ${index} KA UAL`);
       const vmGraph = contextGraphLayerUri(
         CONTEXT_GRAPH_ID,
         MemoryLayer.VerifiableMemory,
@@ -269,7 +273,7 @@ async function execute(): Promise<void> {
         'batchId',
         `"${kaId}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
       );
-      metadataObject(metadata, 'materializedVersion', `"123:${index}"`);
+      metadataObject(metadata, 'materializedVersion', `"123:${ordinal}"`);
       vmRecovered += 1;
     }
 
