@@ -17,7 +17,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { isSparqlHttpResponseError } from "@origintrail-official/dkg-storage";
+import { isClientQueryError, isClientQueryFailure } from "./query-error.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -360,69 +360,6 @@ class ApiQueryCallerDisconnectedError extends Error {
 }
 
 /**
- * Upstream statuses that mean "the SPARQL the caller sent is malformed".
- *
- * Deliberately NOT every 4xx (PR #2330 review). A configured store can answer
- * 401/403 for stale daemon credentials, 404 for a misconfigured endpoint, or
- * 429 when throttling us — those are server/integration faults, and reporting
- * them as 400 would tell the caller their query is invalid and suppress the
- * retry or operator remediation that would actually fix it.
- */
-const MALFORMED_QUERY_STATUSES = new Set([400, 422]);
-
-/**
- * Classify a thrown store error using the upstream status carried as DATA.
- *
- * Returns `undefined` when the error is not a typed SPARQL HTTP response, so
- * the caller can fall back to the legacy message families below.
- */
-export function classifySparqlHttpError(err: unknown): 400 | 500 | undefined {
-  if (!isSparqlHttpResponseError(err)) return undefined;
-  return MALFORMED_QUERY_STATUSES.has(err.status) ? 400 : 500;
-}
-
-/**
- * Is this thrown message a CLIENT input error (400) rather than a server
- * fault (500)?
- *
- * Message-based, and kept only for the legacy families below that have no
- * typed carrier. Extracted from the /api/query catch block so it can be
- * regression-tested directly — GH#1758 was a silent re-regression of #889,
- * and there was no unit-level guard because the condition lived inline
- * inside a catch.
- */
-export function isClientQueryError(msg: string): boolean {
-  return (
-    
-        msg.startsWith("SPARQL rejected:") ||
-        msg.startsWith("Parse error") ||
-        // #889: oxigraph surfaces SPARQL syntax errors as
-        // `error at <line>:<col>: expected one of ...` (e.g. a missing
-        // closing brace or an incomplete triple). These are client input
-        // errors, not server faults — classify them as 400 to match the
-        // existing `SPARQL rejected:` / `must start with ...` handling
-        // instead of letting them fall through to a 500.
-        /^error at \d+:\d+:/.test(msg) ||
-        /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
-        msg.includes("was removed in V10") ||
-        msg.includes("agentAddress is required") ||
-        msg.includes("requires a contextGraphId") ||
-        msg.includes("cannot be combined with") ||
-        msg.startsWith("Scoped query violation:") ||
-        // A-1 review: DKGAgent.query throws these when the caller sends
-        // a non-string `agentAddress` / `callerAgentAddress` in the
-        // body. Classify as 400 so malformed input is a clean client
-        // error instead of a 500.
-        msg.startsWith("query: 'agentAddress' must be a string") ||
-        msg.startsWith("query: 'callerAgentAddress' must be a string") ||
-        // P-13 review: `resolveViewGraphs` validates `minTrust` now,
-        // so direct callers that forward a string / out-of-range
-        // value get a 400 instead of a 500.
-        msg.startsWith("Invalid minTrust")
-  );
-}
-
-/**
  * Own the HTTP-disconnect signal and the exact store-admission options passed
  * by `/api/query`. Exported so the route boundary can be tested without
  * replacing the real query engine with a hand-typed error stub.
@@ -762,14 +699,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       }
       tracker.fail(ctx, err);
       const msg = err?.message ?? "";
-      // #1758 — prefer the typed upstream status over message matching. A
-      // malformed query (400/422) is the caller's fault; 401/403/404/429 mean
-      // the STORE rejected us and must stay a server error.
-      const byStatus = classifySparqlHttpError(err);
-      if (byStatus === 400) {
-        return jsonResponse(res, 400, { error: msg });
-      }
-      if (byStatus === undefined && isClientQueryError(msg)) {
+      // #1758 — one classifier: a typed upstream status decides, otherwise
+      // legacy message families apply. See ./query-error.ts.
+      if (isClientQueryFailure(err)) {
         return jsonResponse(res, 400, { error: msg });
       }
       throw err;

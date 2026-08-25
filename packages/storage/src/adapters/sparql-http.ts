@@ -98,6 +98,8 @@ const MANAGED_LIST_GRAPHS_CACHE_MS = 30_000;
  * error-message assertions keep working.
  */
 export class SparqlHttpResponseError extends Error {
+  /** Stable discriminant for cross-boundary recognition. */
+  readonly code = SPARQL_HTTP_RESPONSE_ERROR_CODE;
   readonly status: number;
   readonly operation: string;
   readonly responseExcerpt: string;
@@ -111,14 +113,43 @@ export class SparqlHttpResponseError extends Error {
   }
 }
 
-/** True when `err` is a SparqlHttpResponseError, across realm boundaries. */
-export function isSparqlHttpResponseError(err: unknown): err is SparqlHttpResponseError {
+/** Stable discriminant, so the guard does not key off a mutable class name. */
+export const SPARQL_HTTP_RESPONSE_ERROR_CODE = 'SPARQL_HTTP_RESPONSE';
+
+/**
+ * The contract a cross-boundary consumer may rely on.
+ *
+ * PR #2330 review — the previous guard narrowed to the concrete class after
+ * checking only `name` and `status`, so `{ name: 'SparqlHttpResponseError',
+ * status: 400 }` satisfied it and TypeScript then permitted
+ * `err.operation.toUpperCase()` on a value with no `operation`. Narrow to the
+ * shape actually validated instead.
+ */
+export interface SparqlHttpResponseErrorLike {
+  readonly code: typeof SPARQL_HTTP_RESPONSE_ERROR_CODE;
+  readonly status: number;
+  readonly operation: string;
+  readonly responseExcerpt: string;
+  readonly message: string;
+}
+
+/**
+ * True when `err` carries the full SPARQL HTTP response contract — either as
+ * the concrete class, or structurally when `instanceof` cannot survive the
+ * boundary (workers, duplicate module instances). EVERY field the interface
+ * promises is validated.
+ */
+export function isSparqlHttpResponseError(err: unknown): err is SparqlHttpResponseErrorLike {
+  if (err instanceof SparqlHttpResponseError) return true;
+  if (typeof err !== 'object' || err === null) return false;
+  const c = err as Partial<Record<keyof SparqlHttpResponseErrorLike, unknown>>;
   return (
-    err instanceof SparqlHttpResponseError ||
-    (typeof err === 'object' &&
-      err !== null &&
-      (err as { name?: unknown }).name === 'SparqlHttpResponseError' &&
-      typeof (err as { status?: unknown }).status === 'number')
+    c.code === SPARQL_HTTP_RESPONSE_ERROR_CODE &&
+    typeof c.status === 'number' &&
+    Number.isFinite(c.status) &&
+    typeof c.operation === 'string' &&
+    typeof c.responseExcerpt === 'string' &&
+    typeof c.message === 'string'
   );
 }
 
