@@ -23,10 +23,10 @@ import {
 } from '../ci-results.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-// This SHA predates the candidate branch and is already reachable from the
-// protected default branch. Controller updates in this PR need a second,
-// post-merge pin-rotation PR before workflows may execute them.
-const TRUSTED_CI_CONTROLLER_SHA = 'c441bd6766ace67e331c0dfc6e22cb1325a6e1f6';
+// This SHA is already reachable from the protected default branch. Candidate
+// changes may update workflow wiring, but the planner and aggregate gates must
+// continue to execute only reviewed policy from this immutable controller.
+const TRUSTED_CI_CONTROLLER_SHA = '780f14aa60c39bdca788967121085c3c0d82d85c';
 const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
 
 function change(filePath, status = 'M') {
@@ -486,10 +486,15 @@ test('workflows execute the planner and aggregate gates from one immutable trust
     'the trusted controller must not point into candidate-only history',
   );
   const abiFreshnessJob = workflowJobBlock(primaryWorkflow, 'abi-freshness');
-  assert.doesNotMatch(
+  assert.match(
     abiFreshnessJob,
-    /^    if:/m,
-    'ABI freshness must have no job-level condition until the new controller is protected',
+    /^    if: needs\.changes\.outputs\.abi_freshness == 'true'$/m,
+    'ABI freshness must use the trusted planner output once the controller is protected',
+  );
+  assert.match(
+    workflowJobBlock(primaryWorkflow, 'changes'),
+    /^      abi_freshness: \$\{\{ steps\.plan\.outputs\.abi_freshness \}\}$/m,
+    'the trusted planner output must be exposed to the ABI freshness job',
   );
   assert.ok(
     primaryWorkflow.indexOf('run: node candidate/scripts/check-npm-metadata.mjs')
@@ -585,7 +590,10 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     );
   }
   assert.ok(workflow.includes("needs.changes.outputs.contracts == 'true'"));
-  assert.doesNotMatch(workflowJobBlock(workflow, 'abi-freshness'), /^    if:/m);
+  assert.match(
+    workflowJobBlock(workflow, 'abi-freshness'),
+    /^    if: needs\.changes\.outputs\.abi_freshness == 'true'$/m,
+  );
   assert.ok(
     workflow.includes(
       "if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'",
@@ -598,9 +606,10 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   );
   assert.ok(
     workflow.includes("vars.CI_DELTA_ENABLED == 'true'"),
-    'delta rollout must remain default-off until repository safeguards are active',
+    'repository administrators must retain the delta rollback switch',
   );
   assert.ok(workflow.includes("github.base_ref == 'main'"));
+  assert.ok(workflow.includes("github.base_ref == 'testnet-canary'"));
   assert.ok(workflow.includes('git -C candidate diff --name-status -z \\\n'));
   assert.ok(workflow.includes('"${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"'));
   assert.equal(workflow.includes('"${BASE_SHA}" "${HEAD_SHA}"'), false);
@@ -640,6 +649,7 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(evmWorkflow.includes('fromJSON(needs.plan.outputs.evm_matrix)'));
   assert.ok(evmWorkflow.includes("vars.CI_DELTA_ENABLED == 'true'"));
   assert.ok(evmWorkflow.includes("github.base_ref == 'main'"));
+  assert.ok(evmWorkflow.includes("github.base_ref == 'testnet-canary'"));
   assert.ok(evmWorkflow.includes('git -C candidate diff --name-status -z \\\n'));
   assert.ok(evmWorkflow.includes('"${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"'));
   assert.ok(evmWorkflow.includes('BASE_SHA="$(git -C candidate rev-parse "${MERGE_SHA}^1")"'));

@@ -83,7 +83,7 @@ The independent Solidity path gate still applies. Activate delta only after all
 safeguards below are configured:
 
 1. Create the `ci:full` label.
-2. Enable GitHub merge queue for `main`.
+2. Enable GitHub merge queue for every branch using delta selection.
 3. Require the `CI gate` and `EVM integration gate` status checks in the branch
    ruleset. Individual matrix job names should not be required because skipped
    lanes intentionally do not exist on every PR.
@@ -93,10 +93,10 @@ This ordering prevents selective CI from becoming active while GitHub can still
 merge without a full candidate run. Removing the variable (or setting it to any
 value other than `true`) is the immediate rollback switch.
 
-The initial workflow allowlist enables delta only for PRs whose base is `main`.
-Release/RC PRs continue to run full CI even when the variable is true. Add a
-release branch to that expression only after it has the same required gates and
-merge-queue protection.
+The workflow allowlist enables delta for PRs whose base is `main` or
+`testnet-canary`; both branches require the aggregate gates and have active merge
+queues. Add any future release branch to that expression only after it has the
+same protections.
 
 ## Developer workflow
 

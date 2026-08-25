@@ -11,9 +11,9 @@ name: CI
 #     or trigger the workflow manually via `workflow_dispatch`.
 on:
   push:
-    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary]
   pull_request:
-    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary]
     types: [opened, synchronize, reopened, labeled, unlabeled]
   # When merge queue is enabled, this is the pre-merge full-CI safety net.
   # It validates the exact candidate that will land, without introducing a
@@ -66,6 +66,7 @@ jobs:
       kosava_supporting: ${{ steps.plan.outputs.kosava_supporting }}
       kosava_hardhat_plugins: ${{ steps.plan.outputs.kosava_hardhat_plugins }}
       contracts: ${{ steps.plan.outputs.contracts }}
+      abi_freshness: ${{ steps.plan.outputs.abi_freshness }}
       evm_matrix: ${{ steps.plan.outputs.evm_matrix }}
       plan_json: ${{ steps.plan.outputs.plan_json }}
     steps:
@@ -86,7 +87,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
+          ref: 780f14aa60c39bdca788967121085c3c0d82d85c
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -100,9 +101,9 @@ jobs:
           MERGE_SHA: ${{ github.sha }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           SAMPLE_KEY: ${{ github.event.pull_request.head.sha || github.sha }}
-          # Initial rollout is main-only. Release/RC PRs stay full until they
-          # have equivalent required-gate + merge-queue protection.
-          DELTA_ENABLED: ${{ vars.CI_DELTA_ENABLED == 'true' && github.base_ref == 'main' }}
+          # Both active protected branches require the aggregate gates and use
+          # merge queues, so they can share the same fail-closed delta policy.
+          DELTA_ENABLED: ${{ vars.CI_DELTA_ENABLED == 'true' && (github.base_ref == 'main' || github.base_ref == 'testnet-canary') }}
         run: |
           set -euo pipefail
           CHANGES_FILE="${RUNNER_TEMP}/ci-name-status.z"
@@ -974,16 +975,15 @@ jobs:
   #
   # This job catches the only way that contract can break: a contributor
   # changes a `.sol` file and forgets to commit the regenerated ABIs.
-  # The controller changes in this PR are not trusted until they land on the
-  # protected default branch. During that first rollout phase, run this cheap
-  # gate unconditionally instead of pinning workflows to candidate history.
-  # A follow-up may rotate the immutable controller and restore path selection.
+  # The condition is emitted by the immutable trusted controller, so candidate
+  # workflow changes cannot suppress this gate for ABI-relevant changes.
   # On failure prints an explicit remediation command so the fix is one
   # copy-paste away.
   # ------------------------------------------------------------------
   abi-freshness:
     name: "Tornado: ABI freshness (committed abi/ vs hardhat compile)"
     needs: changes
+    if: needs.changes.outputs.abi_freshness == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -1431,7 +1431,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
+          ref: 780f14aa60c39bdca788967121085c3c0d82d85c
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
