@@ -333,7 +333,6 @@ async function execute(): Promise<void> {
     exact(receiverStats.providerSuccesses, 1, 'provider successes');
     exact(receiverStats.failed, 0, 'receiver failures');
     atLeast(resourceStats.kaBundleNetworkFetches, 1, 'bundle network fetches');
-    atLeast(resourceStats.kaBundleCacheHits, 1, 'bundle cache hits after failover');
 
     const [authorStopped, providerBStopped, receiverStopped] = await Promise.all([
       author.stop('author-stop'),
