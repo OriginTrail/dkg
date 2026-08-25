@@ -1,3 +1,4 @@
+import { renderStandaloneDkgNodeSkill } from './daemon/skill-template.js';
 import type { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { assertSelectableNetwork } from './config.js';
@@ -74,7 +75,8 @@ function normalizePort(value: string | number | undefined): number | undefined {
 }
 
 export function loadBundledDkgNodeSkill(): string {
-  return readFileSync(new URL('../skills/dkg-node/SKILL.md', import.meta.url), 'utf-8');
+  // GH#1125 / PR #2331 review — render, never ship the raw template.
+  return renderStandaloneDkgNodeSkill();
 }
 
 export function normalizeHermesSetupOptions(opts: HermesSetupCliOptions): NormalizedHermesSetupOptions {

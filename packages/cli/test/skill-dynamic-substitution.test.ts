@@ -4,7 +4,10 @@ import {
   buildSkillMd,
   loadSkillTemplate,
   missingSkillTokens,
-} from '../src/daemon/manifest.js';
+  renderStandaloneDkgNodeSkill,
+  unknownSkillTokens,
+} from '../src/daemon/skill-template.js';
+import { loadBundledDkgNodeSkill } from '../src/hermes-setup.js';
 
 // GH#1125 — the served skill doc shipped literal "(dynamic)" placeholders.
 //
@@ -119,5 +122,65 @@ describe('SKILL.md template token contract (GH#1125 review)', () => {
     for (const token of REQUIRED_SKILL_TOKENS) {
       expect(reworded).toContain(`{{${token}}}`);
     }
+  });
+});
+
+// PR #2331 review — SKILL.md has TWO delivery modes and only one of them has a
+// node to describe. `dkg mcp setup` / `dkg hermes setup` copy the skill into a
+// client's skill directory (mcp-setup.ts deliverSkillToClient), and those paths
+// used to write the bundled file verbatim. Once the template carried
+// `{{token}}` syntax that meant shipping internal placeholders to end users —
+// a worse artifact than the `(dynamic)` prose it replaced.
+describe('standalone skill delivery renders too (GH#1125 review)', () => {
+  it('never delivers raw template syntax', () => {
+    const delivered = renderStandaloneDkgNodeSkill();
+    expect(delivered).not.toMatch(/\{\{[a-zA-Z]+\}\}/);
+    expect(delivered).not.toContain('(dynamic)');
+  });
+
+  it('delivers readable guidance in place of live values', () => {
+    const delivered = renderStandaloneDkgNodeSkill();
+    expect(delivered).toContain('- **Node version:** _(run `dkg --version` on your node)_');
+    expect(delivered).toContain('- **Node role:** _(`core` or `edge` — run `dkg status`)_');
+  });
+
+  it('the setup delivery path goes through the renderer, not the raw file', () => {
+    // Guards the actual regression: hermes-setup/mcp-setup previously
+    // readFileSync'd the bundled SKILL.md straight into the client directory.
+    const shipped = loadBundledDkgNodeSkill();
+    expect(shipped).not.toMatch(/\{\{[a-zA-Z]+\}\}/);
+    expect(shipped).toBe(renderStandaloneDkgNodeSkill());
+  });
+
+  it('served and delivered modes differ only in the substituted values', () => {
+    const served = buildSkillMd(OPTS);
+    const delivered = renderStandaloneDkgNodeSkill();
+    expect(served).not.toBe(delivered);
+    // Same document otherwise — compare a section far from the token block.
+    expect(served.includes('## 5. Memory Model')).toBe(delivered.includes('## 5. Memory Model'));
+  });
+});
+
+// PR #2331 review — the required-token array, the substitution map and the
+// template were three independent sources of truth, so adding `{{networkId}}`
+// to SKILL.md would render it verbatim while the validator still reported a
+// clean bill of health. Required names are now DERIVED from the value map, and
+// unknown tokens are detectable.
+describe('token contract has one source of truth (GH#1125 review)', () => {
+  it('the shipped template has no missing and no unknown tokens', () => {
+    expect(missingSkillTokens()).toEqual([]);
+    expect(unknownSkillTokens()).toEqual([]);
+  });
+
+  it('detects a token the template uses but nothing supplies', () => {
+    const drifted = loadSkillTemplate().replace('{{peerId}}', '{{networkId}}');
+    expect(unknownSkillTokens(drifted)).toEqual(['networkId']);
+    expect(missingSkillTokens(drifted)).toEqual(['peerId']);
+  });
+
+  it('REQUIRED_SKILL_TOKENS is derived, not a parallel list', () => {
+    expect([...REQUIRED_SKILL_TOKENS].sort()).toEqual(
+      ['baseUrl', 'extractionPipelines', 'nodeRole', 'nodeVersion', 'peerId'],
+    );
   });
 });

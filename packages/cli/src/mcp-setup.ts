@@ -66,6 +66,7 @@
  * server reads them from `~/.dkg/config.yaml` + the daemon-written
  * `auth.token` via `loadConfig` (`packages/mcp-dkg/src/config.ts`).
  */
+import { renderStandaloneDkgNodeSkill } from './daemon/skill-template.js';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir, platform, release as osRelease } from 'node:os';
@@ -1633,7 +1634,11 @@ function skillTargetForClient(target: ClientTarget, home: string): string | null
  * source artifact byte-for-byte.
  */
 function loadBundledDkgNodeSkill(): string {
-  return readFileSync(new URL('../skills/dkg-node/SKILL.md', import.meta.url), 'utf-8');
+  // GH#1125 / PR #2331 review — render, never ship the raw template. The
+  // bundled SKILL.md carries `{{token}}` placeholders for the daemon's
+  // serve-time substitution; writing it verbatim would put that syntax in a
+  // user's skill directory.
+  return renderStandaloneDkgNodeSkill();
 }
 
 /**

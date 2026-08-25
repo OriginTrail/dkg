@@ -761,25 +761,25 @@ export function detectInstallMode(): InstallMode {
 
 // ---------------------------------------------------------------------------
 // SKILL.MD serving — Agent Skills standard (https://agentskills.io)
+//
+// Rendering moved to ./skill-template.ts (PR #2331 review): this file is a
+// broad manifest/semver/auto-update utility module and had grown past 1,000
+// lines. Re-exported so existing importers keep working.
 // ---------------------------------------------------------------------------
+export {
+  buildSkillMd,
+  loadSkillTemplate,
+  missingSkillTokens,
+  unknownSkillTokens,
+  renderSkillTemplate,
+  renderStandaloneDkgNodeSkill,
+  skillEtag,
+  REQUIRED_SKILL_TOKENS,
+  STANDALONE_SKILL_VALUES,
+  type SkillTokenValues,
+} from "./skill-template.js";
 
-let cachedSkillMd: string | null = null;
-let cachedSkillEtag: string | null = null;
 
-export function loadSkillTemplate(): string {
-  if (cachedSkillMd) return cachedSkillMd;
-  const skillPath = new URL("../../skills/dkg-node/SKILL.md", import.meta.url);
-  const content = readFileSync(skillPath, "utf-8");
-  cachedSkillMd = content;
-  return content;
-}
-
-// Second canonical agent-readable manual: the bulk-import skill that the
-// dkg-node skill cross-references for chunked writes, manifest resume,
-// HTTP 413 recovery, and (with PR #4 of the async-promote-queue series)
-// the async promote queue. Served at `/.well-known/skill-importer.md`
-// alongside `/.well-known/skill.md` so the cross-link in dkg-node/SKILL.md
-// is reachable for agents installed via setup flows (Codex PR #642 follow-up).
 let cachedImporterSkillMd: string | null = null;
 
 export function loadImporterSkillTemplate(): string {
@@ -790,78 +790,6 @@ export function loadImporterSkillTemplate(): string {
   return content;
 }
 
-export function buildSkillMd(opts: {
-  version: string;
-  baseUrl: string;
-  peerId: string;
-  nodeRole: string;
-  extractionPipelines: string[];
-}): string {
-  const template = loadSkillTemplate();
-
-  // GH#1125 — substitute NAMED tokens, one at a time.
-  //
-  // The previous implementation rebuilt a copy of the template's Markdown and
-  // swapped the whole block with a single literal `String.replace`. Two things
-  // went wrong with that, and the token form fixes both:
-  //
-  //  1. DRIFT. A literal needle fails SILENTLY when it does not match. The copy
-  //     here and the block in SKILL.md had drifted by a single reordered
-  //     sentence, so nothing was ever substituted and every agent that read
-  //     /.well-known/skill.md got `(dynamic)` placeholders. Per-token
-  //     substitution means prose and label edits in the template cannot
-  //     disable it — only renaming a token can, and that is validated below.
-  //
-  //  2. `$` INJECTION. `String.replace(needle, replacement)` interprets `$&`,
-  //     `$'`, "$`" and `$n` in the REPLACEMENT string. `baseUrl` is built from
-  //     the `X-Forwarded-Host` / `Host` request headers (routes/status.ts:641)
-  //     and this endpoint is public and unauthenticated, so those tokens were
-  //     attacker-controlled: `$&` re-inserted the placeholder block (putting
-  //     `(dynamic)` back), and each `$'` appended the ~94 KB template suffix,
-  //     giving unbounded response amplification. Passing a FUNCTION as the
-  //     replacement makes the value literal — this is the load-bearing detail,
-  //     do not turn it back into a string.
-  const values: Record<string, string> = {
-    nodeVersion: opts.version,
-    baseUrl: opts.baseUrl,
-    peerId: opts.peerId,
-    nodeRole: opts.nodeRole,
-    extractionPipelines:
-      opts.extractionPipelines.length > 0
-        ? opts.extractionPipelines.join(", ")
-        : "none (install markitdown to enable document conversion)",
-  };
-
-  let out = template;
-  for (const [token, value] of Object.entries(values)) {
-    // Function replacement: `value` is inserted verbatim, `$` and all.
-    out = out.replaceAll(`{{${token}}}`, () => value);
-  }
-  return out;
-}
-
-/** Tokens SKILL.md must carry for `buildSkillMd` to produce a complete doc. */
-export const REQUIRED_SKILL_TOKENS = Object.freeze([
-  "nodeVersion",
-  "baseUrl",
-  "peerId",
-  "nodeRole",
-  "extractionPipelines",
-]);
-
-/**
- * Validate that the template still carries every token, ONCE at load time
- * rather than warning on every request. Returns the missing token names.
- */
-export function missingSkillTokens(template: string = loadSkillTemplate()): string[] {
-  return REQUIRED_SKILL_TOKENS.filter((t) => !template.includes(`{{${t}}}`));
-}
-
-export function skillEtag(content: string): string {
-  return (
-    '"' + createHash("md5").update(content).digest("hex").slice(0, 16) + '"'
-  );
-}
 
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
