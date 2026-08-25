@@ -1,5 +1,9 @@
 import React, { useMemo, useState, useCallback, useEffect, Suspense } from 'react';
-import { executeQuery, fetchSubGraphs, type SubGraphInfo } from '../../../api.js';
+import { executeQuery, type SubGraphInfo } from '../../../api.js';
+// PR #2131 review — route through api-wrapper so the cards resolve in mock
+// mode (see SubGraphBar.tsx). `withFallback` only diverts when mock mode is
+// latched, so a real transient failure still rejects into `setFetchError`.
+import { api } from '../../../api-wrapper.js';
 import { useMemoryEntities, canonicalEntityUri, type TrustLevel, type MemoryEntity, type Triple, type LayeredTriple } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
@@ -61,7 +65,7 @@ export function SubGraphOverviewGrid({
     let cancelled = false;
     setLoading(true);
     setFetchError(null);
-    fetchSubGraphs(contextGraphId)
+    api.fetchSubGraphs(contextGraphId)
       .then(r => {
         if (!cancelled) {
           setSubGraphs(r.subGraphs ?? []);
