@@ -69,6 +69,17 @@ export type FinalizationRecoveryVerifyResult =
   | { status: 'missing' }
   | { status: 'closed' };
 
+export type FinalizationRecoveryRecoveredEvidenceCommit =
+  | {
+      evidence: VerifiedGraphScopedFinalizationEvidence;
+      receiptMoved: false;
+    }
+  | {
+      evidence: VerifiedGraphScopedFinalizationEvidence;
+      receiptMoved: true;
+      reason: string;
+    };
+
 export type FinalizationRecoverySettledPublisherUpgradeResult =
   | { status: 'recorded' | 'existing'; entry: FinalizationRecoveryEntry }
   | { status: 'conflict' | 'missing' | 'closed' };
@@ -123,6 +134,12 @@ export interface FinalizationRecoveryStore {
     key: string,
     generation: number,
     evidence: VerifiedGraphScopedFinalizationEvidence,
+  ): Promise<FinalizationRecoveryVerifyResult>;
+  /** Atomically records independently recovered evidence and any receipt move. */
+  commitRecoveredEvidence(
+    key: string,
+    generation: number,
+    commit: FinalizationRecoveryRecoveredEvidenceCommit,
   ): Promise<FinalizationRecoveryVerifyResult>;
   markReorged(key: string, generation: number, lastError: string): Promise<boolean>;
   clearSettledRetry(key: string, generation: number): Promise<void>;

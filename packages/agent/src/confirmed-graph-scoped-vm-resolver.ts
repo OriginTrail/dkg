@@ -1,6 +1,7 @@
 import { createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import {
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
+  workspacePublicQuadsDigest,
   type ConfirmedGraphKnowledgeAssetMetadataEnvelope,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
@@ -11,6 +12,7 @@ export interface ConfirmedGraphScopedVmResolutionInput {
   ual: string;
   merkleRoot: Uint8Array;
   kaId: bigint;
+  batchId?: bigint;
   subGraphName?: string;
 }
 
@@ -65,7 +67,7 @@ export async function resolveConfirmedGraphScopedVm(
   if (
     scope.ual !== input.ual
     || packedKaId !== input.kaId
-    || envelope.batchId !== input.kaId
+    || (input.batchId !== undefined && envelope.batchId !== input.batchId)
     || !equalBytes(envelope.merkleRoot, input.merkleRoot)
     || input.subGraphName !== envelope.subGraphName
   ) {
@@ -79,13 +81,12 @@ export async function resolveConfirmedGraphScopedVm(
       ? { privateMerkleRoot: envelope.privateMerkleRoot }
       : {}),
     expectedMerkleRoot: input.merkleRoot,
-    includePublicQuadsDigest: true,
     source: 'agent.finalization.resolveConfirmedGraphScopedVm',
   });
   if (content.status === 'count-mismatch') {
     return { status: 'invalid', reason: 'content-count' };
   }
-  if (content.status !== 'verified' || !content.publicQuadsDigest) {
+  if (content.status !== 'verified') {
     return { status: 'invalid', reason: 'content-merkle' };
   }
   return {
@@ -93,6 +94,6 @@ export async function resolveConfirmedGraphScopedVm(
     envelope,
     scope,
     quads: content.quads,
-    publicQuadsDigest: content.publicQuadsDigest,
+    publicQuadsDigest: workspacePublicQuadsDigest(content.quads),
   };
 }

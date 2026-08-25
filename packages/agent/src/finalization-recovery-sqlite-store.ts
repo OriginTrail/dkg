@@ -5,6 +5,7 @@ import {
 import {
   type FinalizationRecoveryEntry,
   type FinalizationRecoveryHealth,
+  type FinalizationRecoveryRecoveredEvidenceCommit,
   type FinalizationRecoveryReceiveInput,
   type FinalizationRecoveryReceiveResult,
   type FinalizationRecoverySettledPublisherUpgradeResult,
@@ -512,60 +513,131 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
     return this.mutate(() => {
       if (this.#closed) return { status: 'closed' };
+      return this.commitVerifiedEvidenceWithinTransaction(
+        key,
+        generation,
+        evidence,
+      );
+    });
+  }
+
+  commitRecoveredEvidence(
+    key: string,
+    generation: number,
+    commit: FinalizationRecoveryRecoveredEvidenceCommit,
+  ): Promise<FinalizationRecoveryVerifyResult> {
+    if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
+    return this.mutate(() => {
+      if (this.#closed) return { status: 'closed' };
+      return this.commitVerifiedEvidenceWithinTransaction(
+        key,
+        generation,
+        commit.evidence,
+        commit.receiptMoved ? commit.reason : undefined,
+      );
+    });
+  }
+
+  private commitVerifiedEvidenceWithinTransaction(
+    key: string,
+    generation: number,
+    evidence: VerifiedGraphScopedFinalizationEvidence,
+    movedReceiptReason?: string,
+  ): FinalizationRecoveryVerifyResult {
+    let outcome: FinalizationRecoveryVerifyResult = { status: 'conflict' };
+    this.transaction(() => {
       const row = this.database.prepare(
         'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
       ).get(key);
-      if (!row) return { status: 'missing' };
+      if (!row) {
+        outcome = { status: 'missing' };
+        return;
+      }
       const current = finalizationRecoveryRowToEntry(row);
-      if (current.generation !== generation) return { status: 'conflict' };
+      if (current.generation !== generation) return;
       if (current.verifiedEvidence) {
-        return sameFinalizationRecoveryEvidence(current.verifiedEvidence, evidence)
+        outcome = sameFinalizationRecoveryEvidence(current.verifiedEvidence, evidence)
           ? { status: 'existing', entry: current }
           : { status: 'conflict' };
+        return;
       }
-      if (current.state !== 'RECEIVED' && current.state !== 'REORGED') {
-        return { status: 'conflict' };
-      }
+      const receiptMoved = movedReceiptReason !== undefined;
       if (
-        current.txHash.toLowerCase() !== evidence.transactionHash.toLowerCase()
+        (current.state !== 'RECEIVED' && current.state !== 'REORGED')
+        || (receiptMoved && (current.state !== 'RECEIVED' || generation !== 0))
+        || current.txHash.toLowerCase() !== evidence.transactionHash.toLowerCase()
         || current.assertionVersion !== evidence.assertionVersion
-      ) return { status: 'conflict' };
-      this.transaction(() => {
-        this.database.prepare(`
-          UPDATE finalization_inbox_v1
-          SET state = 'VERIFIED',
-              block_number = ?,
-              block_hash = ?,
-              tx_index = ?,
-              publisher_address = ?,
-              author_address = ?,
-              verified_evidence_json = ?,
-              updated_at = ?
-          WHERE key = ? AND generation = ?
-            AND state IN ('RECEIVED','REORGED')
-            AND verified_evidence_json IS NULL
-        `).run(
-          evidence.blockNumber,
-          evidence.blockHash,
-          evidence.txIndex,
-          evidence.publisherAddress,
-          evidence.authorAddress ?? null,
-          JSON.stringify(evidence),
-          this.#policy.now(),
-          key,
-          generation,
-        );
-      });
+      ) return;
+
+      const update = receiptMoved
+        ? this.database.prepare(`
+            UPDATE finalization_inbox_v1
+            SET state = 'VERIFIED',
+                block_number = ?,
+                block_hash = ?,
+                tx_index = ?,
+                publisher_address = ?,
+                author_address = ?,
+                verified_evidence_json = ?,
+                generation = generation + 1,
+                attempt_count = 0,
+                next_attempt_at = NULL,
+                last_error = ?,
+                updated_at = ?
+            WHERE key = ? AND generation = ? AND state = 'RECEIVED'
+              AND verified_evidence_json IS NULL
+          `).run(
+            evidence.blockNumber,
+            evidence.blockHash,
+            evidence.txIndex,
+            evidence.publisherAddress,
+            evidence.authorAddress ?? null,
+            JSON.stringify(evidence),
+            movedReceiptReason,
+            this.#policy.now(),
+            key,
+            generation,
+          )
+        : this.database.prepare(`
+            UPDATE finalization_inbox_v1
+            SET state = 'VERIFIED',
+                block_number = ?,
+                block_hash = ?,
+                tx_index = ?,
+                publisher_address = ?,
+                author_address = ?,
+                verified_evidence_json = ?,
+                updated_at = ?
+            WHERE key = ? AND generation = ?
+              AND state IN ('RECEIVED','REORGED')
+              AND verified_evidence_json IS NULL
+          `).run(
+            evidence.blockNumber,
+            evidence.blockHash,
+            evidence.txIndex,
+            evidence.publisherAddress,
+            evidence.authorAddress ?? null,
+            JSON.stringify(evidence),
+            this.#policy.now(),
+            key,
+            generation,
+          );
+      if (update.changes === 0) return;
       const updated = this.database.prepare(
         'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
       ).get(key);
-      if (!updated) return { status: 'missing' };
+      if (!updated) {
+        outcome = { status: 'missing' };
+        return;
+      }
       const entry = finalizationRecoveryRowToEntry(updated);
-      return entry.verifiedEvidence
+      if (
+        entry.generation === generation + (receiptMoved ? 1 : 0)
+        && entry.verifiedEvidence
         && sameFinalizationRecoveryEvidence(entry.verifiedEvidence, evidence)
-        ? { status: 'verified', entry }
-        : { status: 'conflict' };
+      ) outcome = { status: 'verified', entry };
     });
+    return outcome;
   }
 
   markReorged(key: string, generation: number, lastError: string): Promise<boolean> {

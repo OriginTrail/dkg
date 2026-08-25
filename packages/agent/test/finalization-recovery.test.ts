@@ -882,21 +882,29 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
-  it('falls back without side effects when recovered evidence cannot be committed', async () => {
+  it('leaves no intermediate REORGED state when a moved receipt cannot be committed', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recover-commit-failed-'));
     try {
       const store = await openSqliteFinalizationRecoveryStore(directory);
       const markVerified = vi.fn(async () => ({ status: 'closed' as const }));
+      const commitRecoveredEvidence = vi.fn(async () => ({ status: 'closed' as const }));
+      const markReorged = vi.fn(store.markReorged.bind(store));
       const refusingStore = new Proxy(store, {
         get(target, property) {
           if (property === 'markVerified') return markVerified;
+          if (property === 'commitRecoveredEvidence') return commitRecoveredEvidence;
+          if (property === 'markReorged') return markReorged;
           const value = Reflect.get(target, property, target);
           return typeof value === 'function' ? value.bind(target) : value;
         },
       }) as FinalizationRecoveryStore;
       const prepare = vi.fn(recoveryMaterializer().prepare);
       const apply = vi.fn(async () => 'applied' as const);
-      const recoverVerifiedEvidence = vi.fn(async () => verifiedEvidence());
+      const recoverVerifiedEvidence = vi.fn(async () => verifiedEvidence({
+        blockNumber: 124,
+        blockHash: `0x${'ef'.repeat(32)}`,
+        txIndex: 7,
+      }));
       const replayVerified = vi.fn(async () => 'already-confirmed' as const);
       const chain = recoveryChain();
       const recovery = new FinalizationRecovery(
@@ -928,13 +936,21 @@ describe('graph-scoped finalization recovery admission', () => {
       })).resolves.toBe('none');
 
       expect(recoverVerifiedEvidence).toHaveBeenCalledOnce();
-      expect(markVerified).toHaveBeenCalledTimes(2);
+      expect(commitRecoveredEvidence).toHaveBeenCalledOnce();
+      expect(commitRecoveredEvidence).toHaveBeenCalledWith(
+        expect.any(String),
+        0,
+        expect.objectContaining({ receiptMoved: true }),
+      );
+      expect(markVerified).toHaveBeenCalledOnce();
+      expect(markReorged).not.toHaveBeenCalled();
       expect(prepare).toHaveBeenCalledOnce();
       expect(apply).not.toHaveBeenCalled();
       expect(replayVerified).not.toHaveBeenCalled();
       const [entry] = await store.list();
       expect(entry).toMatchObject({
         state: 'RECEIVED',
+        generation: 0,
         attemptCount: 1,
       });
       expect(entry?.verifiedEvidence).toBeUndefined();

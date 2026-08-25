@@ -37,6 +37,7 @@ export interface RecoverReceiptBackedGraphScopedEvidenceInput {
   merkleRoot: Uint8Array;
   publisherAddress: string;
   kaId: bigint;
+  batchId: bigint;
   onChainContextGraphId: bigint;
   subGraphName?: string;
 }
@@ -205,7 +206,7 @@ export async function recoverReceiptBackedGraphScopedEvidence(
       if (
         canonical.txHash.toLowerCase() !== transactionHash.toLowerCase()
         || canonical.kaId !== input.kaId
-        || canonical.batchId !== input.kaId
+        || canonical.batchId !== input.batchId
         || canonical.startKAId !== input.kaId
         || canonical.endKAId !== input.kaId
       ) return { status: 'unavailable', reason: 'canonical publish receipt does not match the target KA' };

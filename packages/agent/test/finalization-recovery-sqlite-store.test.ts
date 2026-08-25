@@ -138,6 +138,51 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
+  it('atomically commits recovered evidence after a canonical receipt moves', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      await store.receive(received());
+      const movedEvidence = evidence({
+        blockNumber: 124,
+        blockHash: `0x${'ef'.repeat(32)}`,
+        txIndex: 7,
+      });
+
+      await expect(store.commitRecoveredEvidence('entry-1', 0, {
+        evidence: movedEvidence,
+        receiptMoved: true,
+        reason: 'independently recovered canonical receipt moved',
+      })).resolves.toMatchObject({
+        status: 'verified',
+        entry: {
+          state: 'VERIFIED',
+          generation: 1,
+          attemptCount: 0,
+          lastError: 'independently recovered canonical receipt moved',
+          verifiedEvidence: {
+            blockNumber: 124,
+            blockHash: `0x${'ef'.repeat(32)}`,
+            txIndex: 7,
+          },
+        },
+      });
+      await expect(store.commitRecoveredEvidence('entry-1', 0, {
+        evidence: movedEvidence,
+        receiptMoved: true,
+        reason: 'stale retry',
+      })).resolves.toEqual({ status: 'conflict' });
+      await expect(store.get('entry-1')).resolves.toMatchObject({
+        state: 'VERIFIED',
+        generation: 1,
+        lastError: 'independently recovered canonical receipt moved',
+      });
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('starts SETTLED receipt retries with a fresh attempt budget', async () => {
     const directory = await temporaryDirectory();
     try {

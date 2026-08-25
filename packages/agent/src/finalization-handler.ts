@@ -483,6 +483,7 @@ export class FinalizationHandler {
         merkleRoot: ethers.getBytes(replay.merkleRoot),
         publisherAddress: evidence.publisherAddress,
         kaId: BigInt(replay.kaId),
+        batchId: candidate.batchId,
         versionBlock: evidence.blockNumber,
         ...(evidence.authorAddress ? { authorAddress: evidence.authorAddress } : {}),
         ...(evidence.subGraphName ? { subGraphName: evidence.subGraphName } : {}),
@@ -1471,6 +1472,7 @@ export class FinalizationHandler {
       ual: replay.ual,
       merkleRoot: ethers.getBytes(replay.merkleRoot),
       kaId,
+      batchId: candidate.batchId,
       ...(candidate.msg.subGraphName
         ? { subGraphName: candidate.msg.subGraphName }
         : {}),
@@ -1509,6 +1511,7 @@ export class FinalizationHandler {
       merkleRoot: envelope.merkleRoot,
       publisherAddress: candidate.msg.publisherAddress,
       kaId,
+      batchId: candidate.batchId,
       onChainContextGraphId,
       ...(envelope.subGraphName ? { subGraphName: envelope.subGraphName } : {}),
     });
@@ -1527,6 +1530,7 @@ export class FinalizationHandler {
     merkleRoot: Uint8Array;
     publisherAddress: string;
     kaId: bigint;
+    batchId?: bigint;
     versionBlock: number;
     authorAddress?: string;
     subGraphName?: string;
@@ -1546,6 +1550,7 @@ export class FinalizationHandler {
       merkleRoot,
       publisherAddress,
       kaId,
+      batchId,
       versionBlock,
       authorAddress,
       subGraphName,
@@ -1650,6 +1655,7 @@ export class FinalizationHandler {
       );
       return 'no-swm';
     }
+    const reconciliationBatchId = batchId ?? kaId;
     if (head.publicTripleCount === 0 && head.privateTripleCount === 0) {
       this.log.warn(ctx, `Chain-reconcile: empty graph-scoped content envelope for ${ual}`);
       return 'no-swm';
@@ -1687,7 +1693,7 @@ export class FinalizationHandler {
         scope,
         head,
         merkleRoot,
-        batchId: kaId,
+        batchId: reconciliationBatchId,
         expectedTxHash: trustedAssertionEvidence?.transactionHash,
         accessPolicy: access.accessPolicy,
         allowedPeers: access.allowedPeers,
@@ -1710,7 +1716,7 @@ export class FinalizationHandler {
           scope,
           head,
           merkleRoot,
-          batchId: kaId,
+          batchId: reconciliationBatchId,
           accessPolicy: 'ownerOnly',
           allowedPeers: [],
           confirmationKind: 'transaction',
@@ -1753,6 +1759,7 @@ export class FinalizationHandler {
           merkleRoot,
           publisherAddress,
           kaId,
+          batchId: reconciliationBatchId,
           onChainContextGraphId,
           subGraphName,
         });
@@ -1769,7 +1776,7 @@ export class FinalizationHandler {
             computedMerkleRoot: vmVerification.merkleRoot,
             evidence: recovery.evidence,
             privateMerkleRoot,
-            batchId: kaId,
+            batchId: reconciliationBatchId,
             preserveNewerWorkspaceLifecycle: false,
             ctx,
           });
@@ -1781,7 +1788,7 @@ export class FinalizationHandler {
           head,
           privateMerkleRoot,
           merkleRoot,
-          batchId: kaId,
+          batchId: reconciliationBatchId,
           versionBlock,
           subGraphName,
           verifiedLayer: {
@@ -1803,7 +1810,7 @@ export class FinalizationHandler {
         computedMerkleRoot: vmVerification.merkleRoot,
         evidence: trustedAssertionEvidence,
         privateMerkleRoot,
-        batchId: kaId,
+        batchId: reconciliationBatchId,
         preserveNewerWorkspaceLifecycle,
         ctx,
       });
@@ -1858,7 +1865,7 @@ export class FinalizationHandler {
         head,
         privateMerkleRoot,
         merkleRoot,
-        batchId: kaId,
+        batchId: reconciliationBatchId,
         versionBlock,
         subGraphName,
         verifiedLayer: {
@@ -1876,7 +1883,7 @@ export class FinalizationHandler {
       head,
       privateMerkleRoot,
       computedMerkleRoot: swmVerification.merkleRoot,
-      batchId: kaId,
+      batchId: reconciliationBatchId,
       authorAddress: evidenceAuthorAddress,
       confirmation: {
         kind: 'transaction',

@@ -11,7 +11,6 @@ export type ExactGraphContentVerification =
       graphUri: string;
       quads: Quad[];
       merkleRoot: Uint8Array;
-      publicQuadsDigest?: string;
     }
   | {
       status: 'count-mismatch';
@@ -41,7 +40,6 @@ export async function verifyExactGraphContent(
     privateMerkleRoot?: Uint8Array;
     expectedMerkleRoot: Uint8Array;
     expectedPublicQuadsDigest?: string;
-    includePublicQuadsDigest?: boolean;
     source: string;
   },
 ): Promise<ExactGraphContentVerification> {
@@ -66,13 +64,9 @@ export async function verifyExactGraphContent(
   if (!equalBytes(merkleRoot, input.expectedMerkleRoot)) {
     return { status: 'merkle-mismatch', graphUri: input.graphUri };
   }
-  const publicQuadsDigest = input.includePublicQuadsDigest
-    || input.expectedPublicQuadsDigest !== undefined
-    ? workspacePublicQuadsDigest(quads)
-    : undefined;
   if (
     input.expectedPublicQuadsDigest !== undefined
-    && publicQuadsDigest !== input.expectedPublicQuadsDigest
+    && workspacePublicQuadsDigest(quads) !== input.expectedPublicQuadsDigest
   ) {
     return { status: 'head-mismatch', graphUri: input.graphUri };
   }
@@ -81,7 +75,6 @@ export async function verifyExactGraphContent(
     graphUri: input.graphUri,
     quads,
     merkleRoot,
-    ...(publicQuadsDigest ? { publicQuadsDigest } : {}),
   };
 }
 

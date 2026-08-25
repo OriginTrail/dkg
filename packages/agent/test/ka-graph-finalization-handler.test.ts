@@ -27,6 +27,7 @@ import {
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
+  workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
@@ -1505,6 +1506,7 @@ describe('graph-scoped finalization handler', () => {
         rearmSettledWithTrustedPublisher:
           inbox.rearmSettledWithTrustedPublisher.bind(inbox),
         markVerified: async () => ({ status: 'closed' }),
+        commitRecoveredEvidence: async () => ({ status: 'closed' }),
         markReorged: inbox.markReorged.bind(inbox),
         clearSettledRetry: inbox.clearSettledRetry.bind(inbox),
         rejectSettled: inbox.rejectSettled.bind(inbox),
@@ -1591,6 +1593,9 @@ describe('graph-scoped finalization handler', () => {
         },
         markVerified: async () => {
           throw new Error('markVerified must not run after failed admission');
+        },
+        commitRecoveredEvidence: async () => {
+          throw new Error('commitRecoveredEvidence must not run after failed admission');
         },
         markReorged: async () => false,
         clearSettledRetry: async () => {},
@@ -3179,7 +3184,6 @@ describe('graph-scoped finalization handler', () => {
         ? { privateMerkleRoot: message.privateMerkleRoot }
         : {}),
       expectedMerkleRoot: message.kcMerkleRoot,
-      includePublicQuadsDigest: true,
       source: 'agent.test.verifyExactGraphContent',
     };
 
@@ -3201,7 +3205,7 @@ describe('graph-scoped finalization handler', () => {
     })).resolves.toMatchObject({ status: 'head-mismatch' });
     await expect(verifyExactGraphContent(store, {
       ...base,
-      expectedPublicQuadsDigest: matching.publicQuadsDigest,
+      expectedPublicQuadsDigest: workspacePublicQuadsDigest(matching.quads),
     })).resolves.toMatchObject({ status: 'verified' });
   });
 
@@ -3209,7 +3213,9 @@ describe('graph-scoped finalization handler', () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-received-vm-settle-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
     try {
-      const { message, vmGraph } = await stageGraph({ accessPolicy: 'ownerOnly' });
+      const staged = await stageGraph({ accessPolicy: 'ownerOnly' });
+      const message = { ...staged.message, batchId: 42n };
+      const { vmGraph } = staged;
       await seedAuthenticatedLocalControls(message);
       await handler.handleFinalizationMessage(
         encodeFinalizationMessage(message),
@@ -3264,6 +3270,7 @@ describe('graph-scoped finalization handler', () => {
       expect(await store.countQuads(vmGraph)).toBe(2);
       expect(await inbox.list()).toMatchObject([{
         state: 'SETTLED',
+        batchId: '42',
         generation: 1,
         verifiedEvidence: {
           transactionHash: message.txHash,

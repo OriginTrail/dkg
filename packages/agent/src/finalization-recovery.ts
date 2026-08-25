@@ -996,6 +996,41 @@ export class FinalizationRecovery<
     return undefined;
   }
 
+  private async commitRecoveredEvidence(
+    entry: FinalizationRecoveryEntry,
+    evidence: VerifiedGraphScopedFinalizationEvidence,
+    receiptMoved: boolean,
+  ): Promise<FinalizationRecoveryEntry | undefined> {
+    const store = this.getStore();
+    if (!store) return undefined;
+    try {
+      const result = await store.commitRecoveredEvidence(
+        entry.key,
+        entry.generation,
+        receiptMoved
+          ? {
+              evidence,
+              receiptMoved: true,
+              reason: 'independently recovered canonical receipt moved',
+            }
+          : { evidence, receiptMoved: false },
+      );
+      if (result.status === 'verified' || result.status === 'existing') {
+        return result.entry;
+      }
+      this.log.warn(
+        `Finalization recovery inbox refused recovered evidence for ${entry.ual}: `
+          + result.status,
+      );
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery evidence commit failed for ${entry.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return undefined;
+  }
+
   async settleEntry(
     entry: FinalizationRecoveryEntry,
     outcome: FinalizationRecoveryApplyOutcome,
@@ -1959,35 +1994,22 @@ export class FinalizationRecovery<
       return { status: 'verified', entry, evidence };
     }
 
-    let commitEntry = entry;
-    if (
+    const receiptMoved =
       entry.generation === 0
       && !VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
         evidence,
         candidate,
         entry,
-      )
-    ) {
-      const reorged = await this.markReorged(
-        entry,
-        'independently recovered canonical receipt moved',
       );
-      if (!reorged) return { status: 'unverified', entry };
-      const current = await this.getStore()?.get(entry.key);
-      if (
-        !current
-        || current.state !== 'REORGED'
-        || current.generation !== entry.generation + 1
-      ) {
-        return { status: 'invalid' };
-      }
-      commitEntry = current;
-    }
 
-    const committed = await this.recordVerified(commitEntry, evidence);
+    const committed = await this.commitRecoveredEvidence(
+      entry,
+      evidence,
+      receiptMoved,
+    );
     return committed
       ? { status: 'verified', entry: committed, evidence }
-      : { status: 'unverified', entry: commitEntry };
+      : { status: 'unverified', entry };
   }
 
   private decodeEntry(
