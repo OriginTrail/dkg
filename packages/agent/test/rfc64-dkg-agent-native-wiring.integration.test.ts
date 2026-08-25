@@ -66,6 +66,12 @@ import {
   type Rfc64CatalogActivationInputV1,
   type Rfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import {
+  Rfc64PublicCatalogNativeReceiverErrorV1,
+} from '../src/rfc64/public-catalog-native-receiver-v1.js';
+import {
+  classifyRfc64CatalogReconciliationTerminalReasonV1,
+} from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 import type {
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
@@ -2555,16 +2561,30 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       'replaceGraphAndSubject',
     ).mockRejectedValue(new Error('simulated receiver semantic-activation failure'));
 
-    await expect(cold.synchronizeRfc64PublicCatalogFromProviderV1({
-      remotePeerId: provider.peerId,
-      scope: {
-        networkId: NETWORK_ID,
-        contextGraphId: CONTEXT_GRAPH_ID,
-        subGraphName: null,
-        authorAddress: AUTHOR,
-        catalogEra: '0',
-      },
-    })).rejects.toThrow(/reconciliation failed \(catalog-native-receiver-activation\)/u);
+    const synchronizationFailure: unknown = await cold
+      .synchronizeRfc64PublicCatalogFromProviderV1({
+        remotePeerId: provider.peerId,
+        scope: {
+          networkId: NETWORK_ID,
+          contextGraphId: CONTEXT_GRAPH_ID,
+          subGraphName: null,
+          authorAddress: AUTHOR,
+          catalogEra: '0',
+        },
+      }).catch((error: unknown) => error);
+    expect(synchronizationFailure).toMatchObject({
+      name: 'Error',
+      message: 'RFC-64 current-head synchronization ended with failed',
+      cause: expect.any(Rfc64PublicCatalogNativeReceiverErrorV1),
+    });
+    const activationFailure = (synchronizationFailure as Error).cause;
+    expect(activationFailure).toMatchObject({
+      name: 'Rfc64PublicCatalogNativeReceiverErrorV1',
+      code: 'catalog-native-receiver-activation',
+    });
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(
+      activationFailure,
+    )).toBeNull();
     expect(replaceGraphAndSubject).toHaveBeenCalled();
     expect(cold.readRfc64PublicCatalogReconciliationFailureV1(
       successor.headObjectDigest,

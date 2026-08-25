@@ -1,7 +1,7 @@
 {
   "catalog": {
     "catalogVersion": "2",
-    "headObjectDigest": "0xd2eeac7565d9df98f8a6e0c2c5a4fc61c1cd6d61e8aa37a2326b79addabaa410",
+    "headObjectDigest": "0x23af307b4c1902016b243be58c8ba40f0f07d9c5875257382650ae4f940c29c2",
     "inventoryRowCount": "2",
     "policyDigest": "0xa32f08524cb69e5e4ccb6d55173a1f0f39c2a773abbde9d67553d62b7d2a74cb"
   },
@@ -12,6 +12,7 @@
     "nonmemberQueryIsEmpty": true,
     "outsiderDeniedBeforeApplication": true,
     "outsiderReceivedNoPrivateGraphs": true,
+    "ownerExitedBeforeReceiverRuntimeStarted": true,
     "productionCatalogServiceOnAllRoles": true,
     "provider2HasExactSwmAndVm": true,
     "provider2ReceivedExactHead": true,
@@ -20,12 +21,21 @@
     "restartPreservedExactSwmAndVm": true,
     "restartPreservedIdentityAndExactHead": true
   },
+  "failoverBarrier": {
+    "ownerExitCode": 0,
+    "ownerExitedAt": "2026-08-25T21:48:10.742Z",
+    "ownerExitedBeforeReceiverSpawn": true,
+    "ownerListenerClosed": true,
+    "provider2ExactHeadAfterOwnerExit": true,
+    "provider2ListenerDialable": true,
+    "receiverSpawnedAt": "2026-08-25T21:48:10.790Z"
+  },
   "failoverReceiver": {
-    "appliedHeadDigest": "0xd2eeac7565d9df98f8a6e0c2c5a4fc61c1cd6d61e8aa37a2326b79addabaa410",
+    "appliedHeadDigest": "0x23af307b4c1902016b243be58c8ba40f0f07d9c5875257382650ae4f940c29c2",
     "bootstrap": {
       "attempts": 2,
       "outcome": "applied",
-      "providerPeerId": "12D3KooWEB6nAg3hdsTyUT86cim12fJQhutbHt8FNNpSYPGCeVax"
+      "providerPeerId": "12D3KooWCCR8AUqgz74d6GwL9CTRNFMVo1FDvW3VJpUbX2REX9Bn"
     },
     "catalogVersion": "2",
     "graphCounts": [
@@ -66,11 +76,11 @@
     ]
   },
   "provider2": {
-    "appliedHeadDigest": "0xd2eeac7565d9df98f8a6e0c2c5a4fc61c1cd6d61e8aa37a2326b79addabaa410",
+    "appliedHeadDigest": "0x23af307b4c1902016b243be58c8ba40f0f07d9c5875257382650ae4f940c29c2",
     "bootstrap": {
       "attempts": 2,
       "outcome": "applied",
-      "providerPeerId": "12D3KooWH2rxoYcg6Kz5uLxxr95XXRwrzFkHjKZBng5eoYBn5MBg"
+      "providerPeerId": "12D3KooWADND29A6UuWeTnTxrrb8KjWnTkpv6FTA4JSYc5DgFUdy"
     },
     "catalogVersion": "2",
     "graphCounts": [
@@ -93,7 +103,7 @@
     "rpcCalls": 16
   },
   "restartedReceiver": {
-    "appliedHeadDigest": "0xd2eeac7565d9df98f8a6e0c2c5a4fc61c1cd6d61e8aa37a2326b79addabaa410",
+    "appliedHeadDigest": "0x23af307b4c1902016b243be58c8ba40f0f07d9c5875257382650ae4f940c29c2",
     "catalogVersion": "2",
     "graphCounts": [
       {
@@ -120,22 +130,22 @@
     "authorizedProviderReceiver": {
       "agentAddress": "0x601950f264f449538af2c6342349f5dd3630f8b1",
       "agentClass": "DKGAgent",
-      "peerId": "12D3KooWEB6nAg3hdsTyUT86cim12fJQhutbHt8FNNpSYPGCeVax"
+      "peerId": "12D3KooWCCR8AUqgz74d6GwL9CTRNFMVo1FDvW3VJpUbX2REX9Bn"
     },
     "authorizedReceiver": {
       "agentAddress": "0xdb2430b4e9ac14be6554d3942822be74811a1af9",
       "agentClass": "DKGAgent",
-      "peerId": "12D3KooWERkXB5LYcFYXrtoKVDAUCLqCaw47MqUwPEJvK6zmPXCU"
+      "peerId": "12D3KooWDRCao22PMvPz5nyWaBzBCEMdxZrfAXExNuESKovifrBe"
     },
     "ownerProvider": {
       "agentAddress": "0x1c5e6f6f6c7866ef146b0c0220d857d12a9058f0",
       "agentClass": "DKGAgent",
-      "peerId": "12D3KooWH2rxoYcg6Kz5uLxxr95XXRwrzFkHjKZBng5eoYBn5MBg"
+      "peerId": "12D3KooWADND29A6UuWeTnTxrrb8KjWnTkpv6FTA4JSYc5DgFUdy"
     },
     "unauthorizedNode": {
       "agentAddress": "0x5c0fe4435ba32d64fb96ed1c37e6fc1f72641d22",
       "agentClass": "DKGAgent",
-      "peerId": "12D3KooWCGWFxLm5Z98bmyQrzKT2AyXsipDWmjha359zXer8cyiN"
+      "peerId": "12D3KooW9pqrjbWDBeBSeD87KN8AfGG88kS6TZ6h4mkXWZt5SwbU"
     }
   }
 }

@@ -16,8 +16,9 @@ The test publishes two catalog assets before receivers start. It then proves:
 
 - the first receiver gets the exact signed private catalog, SWM, and finalized
   VM from the owner;
-- the owner stops, and the cold receiver gets the same exact state from the
-  second provider;
+- the owner process exits and its listener closes before the cold receiver
+  starts; the second provider stays dialable with the exact head, and the cold
+  receiver gets the same exact state only from that provider;
 - the node outside the roster cannot discover or pull the catalog and receives
   no private graph data;
 - a nonmember query on an authorized node returns no VM rows;
@@ -50,4 +51,3 @@ and finalized VM materialization paths. It does not start Hardhat through
 needs a supported private catalog authoring command and a two-stage manifest
 generator because the private activation manifest depends on the final peer
 identities and chain anchor.
-

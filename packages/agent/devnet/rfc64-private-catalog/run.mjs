@@ -2,6 +2,7 @@
 
 import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -17,10 +18,13 @@ const ROLES = Object.freeze(['owner', 'provider2', 'receiver', 'outsider']);
 const RUN_TIMEOUT_MS = 90_000;
 
 let requestSequence = 0;
+let lifecycleSequence = 0;
 
 class AgentChild {
   constructor(role, dataDir, manifestPath, mode = 'run') {
     this.role = role;
+    this.spawnSequence = ++lifecycleSequence;
+    this.spawnedAt = new Date().toISOString();
     this.events = [];
     this.waiters = [];
     this.exited = false;
@@ -64,20 +68,27 @@ class AgentChild {
       }
     });
     this.exit = new Promise((resolve) => {
-      this.proc.once('error', (error) => {
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
         this.exited = true;
+        this.exitSequence = ++lifecycleSequence;
+        this.exitedAt = new Date().toISOString();
+        resolve({ ...result, exitedAt: this.exitedAt });
+      };
+      this.proc.once('error', (error) => {
         for (const waiter of this.waiters.splice(0)) waiter.reject(error);
-        resolve({ code: null, signal: null, error });
+        finish({ code: null, signal: null, error });
       });
       this.proc.once('exit', (code, signal) => {
-        this.exited = true;
         if (code !== 0 && signal !== 'SIGTERM') {
           const error = new Error(`${role}: process exited with ${code ?? signal}`);
           for (const waiter of this.waiters.splice(0)) waiter.reject(error);
-          resolve({ code, signal, error });
+          finish({ code, signal, error });
           return;
         }
-        resolve({ code, signal, error: null });
+        finish({ code, signal, error: null });
       });
     });
   }
@@ -110,13 +121,20 @@ class AgentChild {
   }
 
   async stop() {
-    if (this.exited) return;
+    if (this.exited) return this.exit;
     try {
       await this.request({ cmd: 'stop' }, 'stopping', 5_000);
-      await Promise.race([this.exit, delay(5_000)]);
-    } finally {
-      if (!this.exited) this.proc.kill('SIGTERM');
+    } catch (error) {
+      if (!this.exited) throw error;
     }
+    let result = await waitForExit(this.exit, 10_000);
+    if (result === null) {
+      this.proc.kill('SIGTERM');
+      result = await waitForExit(this.exit, 5_000);
+    }
+    if (result === null) throw new Error(`${this.role}: process did not exit after stop`);
+    if (result.error !== null) throw result.error;
+    return result;
   }
 }
 
@@ -155,8 +173,26 @@ async function main() {
       expectedHeadDigest: published.headObjectDigest,
     }, 'inspection');
 
-    await owner.stop();
+    const ownerExit = await owner.stop();
     active.delete(owner);
+    const ownerListenerClosed = await waitForTcpListenerClosed(owner.ready.multiaddr);
+    if (!ownerListenerClosed) {
+      throw new Error('owner: listener remained dialable after process exit');
+    }
+    const provider2ListenerDialable = await tcpListenerIsDialable(provider2.ready.multiaddr);
+    if (!provider2ListenerDialable) {
+      throw new Error('provider2: listener is not dialable after owner exit');
+    }
+    const provider2StateAfterOwnerExit = await provider2.request({
+      cmd: 'inspect',
+      expectedHeadDigest: published.headObjectDigest,
+    }, 'inspection');
+    if (
+      provider2StateAfterOwnerExit.exactExpectedHead !== true
+      || !exactMemoryCounts(provider2StateAfterOwnerExit)
+    ) {
+      throw new Error('provider2: exact head, SWM, or VM changed after owner exit');
+    }
 
     const receiver = await startRole('receiver', dataDirs, manifestPath, peerIds, active);
     await connectBothWays(provider2, receiver);
@@ -219,6 +255,11 @@ async function main() {
       receiverUsedProvider2AfterOwnerStopped:
         receiverBootstrap.appliedHeadDigest === published.headObjectDigest
         && receiverBootstrap.providerPeerId === peerIds.provider2,
+      ownerExitedBeforeReceiverRuntimeStarted:
+        ownerExit.error === null
+        && ownerListenerClosed
+        && provider2ListenerDialable
+        && owner.exitSequence < receiver.spawnSequence,
       receiverHasExactSwmAndVm: exactMemoryCounts(receiverState),
       finalizedChainPathExecuted:
         provider2State.rpcCalls > 0 && receiverState.rpcCalls > 0,
@@ -255,6 +296,16 @@ async function main() {
         inventoryRowCount: published.inventoryRowCount,
       },
       provider2: safeState(provider2State, provider2Bootstrap),
+      failoverBarrier: {
+        ownerExitCode: ownerExit.code,
+        ownerExitedAt: ownerExit.exitedAt,
+        ownerExitedBeforeReceiverSpawn: owner.exitSequence < receiver.spawnSequence,
+        ownerListenerClosed,
+        provider2ExactHeadAfterOwnerExit:
+          provider2StateAfterOwnerExit.exactExpectedHead === true,
+        provider2ListenerDialable,
+        receiverSpawnedAt: receiver.spawnedAt,
+      },
       failoverReceiver: safeState(receiverState, receiverBootstrap),
       outsider: {
         denied: outsiderDenial.denied,
@@ -350,6 +401,40 @@ function sortKeys(value) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForExit(exit, timeoutMs) {
+  return Promise.race([exit, delay(timeoutMs).then(() => null)]);
+}
+
+async function waitForTcpListenerClosed(multiaddr, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await tcpListenerIsDialable(multiaddr))) return true;
+    await delay(50);
+  }
+  return false;
+}
+
+async function tcpListenerIsDialable(multiaddr) {
+  const endpoint = parseTcpMultiaddr(multiaddr);
+  return new Promise((resolve) => {
+    const socket = createConnection(endpoint);
+    const finish = (dialable) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(dialable);
+    };
+    socket.setTimeout(1_000, () => finish(false));
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+  });
+}
+
+function parseTcpMultiaddr(value) {
+  const match = /^\/ip4\/([^/]+)\/tcp\/(\d+)(?:\/|$)/u.exec(value);
+  if (match === null) throw new Error(`unsupported local TCP multiaddr: ${value}`);
+  return { host: match[1], port: Number(match[2]) };
 }
 
 main().catch(async (error) => {
