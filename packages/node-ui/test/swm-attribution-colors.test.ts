@@ -51,10 +51,35 @@ describe('buildAgentColorMap (GH#1128)', () => {
     expect(buildAgentColorMap([COLLIDING[0]!, COLLIDING[0]!, COLLIDING[1]!]).size).toBe(2);
   });
 
-  it('past the palette size, degrades to reuse without crowding onto one colour', () => {
-    const map = buildAgentColorMap(many(20));
-    expect(map.size).toBe(20);
-    expect(new Set(map.values()).size).toBeGreaterThan(1);
+  it('consumes every palette slot before any reuse begins', () => {
+    // PR #2333 review — the previous implementation gated probing on the TOTAL
+    // set size, so a ninth agent flipped the whole collection back to raw
+    // hashing and collapsed the five colliding fixtures onto one colour again.
+    // Degradation must be local to the agents that actually overflow.
+    const overflow = (n: number) =>
+      Array.from({ length: n }, (_, i) => `did:dkg:agent:0x${i.toString(16).padStart(40, 'f')}`);
+
+    for (const extra of [0, 1, 2, 5, 20]) {
+      const agents = COLLIDING.concat(overflow(extra));
+      const map = buildAgentColorMap(agents);
+      expect(map.size).toBe(agents.length);
+      // All 8 slots in use as soon as there are at least 8 agents.
+      const expectedDistinct = Math.min(agents.length, 8);
+      expect(new Set(map.values()).size).toBe(expectedDistinct);
+      // And the originally-colliding five stay distinct at every size.
+      expect(new Set(COLLIDING.map((a) => map.get(a))).size).toBe(COLLIDING.length);
+    }
+  });
+
+  it('crossing the palette boundary does not recolour the agents below it', () => {
+    const eight = COLLIDING.concat(
+      Array.from({ length: 3 }, (_, i) => `did:dkg:agent:0x${i.toString(16).padStart(40, 'f')}`),
+    );
+    const before = buildAgentColorMap(eight);
+    const after = buildAgentColorMap(eight.concat('did:dkg:agent:0x' + 'e'.repeat(40)));
+    expect(new Set(after.values()).size).toBe(8);
+    expect(new Set(COLLIDING.map((a) => after.get(a))).size).toBe(COLLIDING.length);
+    expect(before.size).toBe(8);
   });
 
   it('returns an empty map for no agents', () => {
