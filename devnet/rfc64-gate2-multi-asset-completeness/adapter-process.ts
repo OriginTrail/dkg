@@ -1227,9 +1227,22 @@ lines.on('line', (line) => {
   commandTail = commandTail.then(() => handle(command)).catch((error) => {
     emit({
       event: 'error',
-      message: error instanceof Error ? error.message : String(error),
+      message: boundedErrorChainMessage(error),
       requestId: command.requestId,
     });
   });
 });
 lines.once('close', () => { void stop(0); });
+
+function boundedErrorChainMessage(error: unknown): string {
+  const messages: string[] = [];
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current !== undefined && current !== null && messages.length < 4) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    messages.push(current instanceof Error ? current.message : String(current));
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return messages.join(' <- ').slice(0, 4_096);
+}
