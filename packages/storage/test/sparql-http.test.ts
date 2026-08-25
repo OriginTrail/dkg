@@ -1199,7 +1199,48 @@ describe('SparqlHttpStore (test server)', () => {
     for (const attempt of attempts) {
       const before = failedStore.getWriteGen('');
       await expect(attempt()).rejects.toThrow();
-      expect(failedStore.getWriteGen('')).toBeGreaterThan(before);
+      const after = failedStore.getWriteGen('');
+      expect(after).toBeGreaterThan(before);
+      expect(failedStore.getWriteGen('')).toBeGreaterThan(after);
+    }
+  });
+
+  it('advances generation at both dispatch and successful remote settlement', async () => {
+    const originalFetch = globalThis.fetch;
+    let releaseResponse!: () => void;
+    let markDispatched!: () => void;
+    const dispatched = new Promise<void>((resolve) => { markDispatched = resolve; });
+    const response = new Promise<Response>((resolve) => {
+      releaseResponse = () => resolve(new Response('', { status: 200 }));
+    });
+    globalThis.fetch = (async () => {
+      markDispatched();
+      return response;
+    }) as typeof fetch;
+    try {
+      const pendingStore = new SparqlHttpStore({
+        queryEndpoint: 'http://pending.test/query',
+        updateEndpoint: 'http://pending.test/update',
+        atomicUpdates: true,
+      });
+      const graph = 'http://ex.org/pending-commit';
+      const replacement = [{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"new"',
+        graph,
+      }];
+      const before = pendingStore.getWriteGen('');
+      const replacing = pendingStore.replaceSubject(graph, replacement[0].subject, replacement);
+      await dispatched;
+      const whilePending = pendingStore.getWriteGen('');
+      expect(whilePending).toBeGreaterThan(before);
+
+      releaseResponse();
+      await replacing;
+      expect(pendingStore.getWriteGen('')).toBeGreaterThan(whilePending);
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 

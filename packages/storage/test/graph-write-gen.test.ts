@@ -64,6 +64,19 @@ describe('GraphWriteGenTracker', () => {
     expect(tracker.getWriteGen('')).toBeGreaterThan(afterScoped);
   });
 
+  it('never stabilizes affected generations after an indeterminate remote write', () => {
+    const tracker = new GraphWriteGenTracker();
+    tracker.recordIndeterminateGraphWrites([SWM_GRAPH]);
+
+    const firstScoped = tracker.getWriteGen(CG_PREFIX);
+    expect(tracker.getWriteGen(CG_PREFIX)).toBeGreaterThan(firstScoped);
+    const firstGlobal = tracker.getWriteGen('');
+    expect(tracker.getWriteGen('')).toBeGreaterThan(firstGlobal);
+
+    const unrelated = tracker.getWriteGen('did:dkg:context-graph:unrelated/');
+    expect(tracker.getWriteGen('did:dkg:context-graph:unrelated/')).toBe(unrelated);
+  });
+
   it('folds LRU-evicted graphs into the global floor (eviction can only force rescans)', () => {
     const tracker = new GraphWriteGenTracker();
     tracker.recordGraphWrites([SWM_GRAPH]);

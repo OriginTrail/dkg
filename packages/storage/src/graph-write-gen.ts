@@ -43,6 +43,13 @@ export class GraphWriteGenTracker implements GraphWriteGenSource {
   private globalFloor = 0;
   /** graph URI → last write generation; Map insertion order = LRU recency. */
   private readonly byGraph = new Map<string, number>();
+  /**
+   * Remote writes whose outcome could not be observed. Their scopes remain
+   * unstable for this process lifetime: a timeout can return before the server
+   * has actually settled, so no later cache observation can prove quiescence.
+   */
+  private readonly indeterminateGraphs = new Set<string>();
+  private indeterminateGlobal = false;
 
   /** Record a write scoped to known graph URIs (`''` = the default graph). */
   recordGraphWrites(graphs: Iterable<string>): void {
@@ -65,7 +72,37 @@ export class GraphWriteGenTracker implements GraphWriteGenSource {
     this.globalFloor = ++this.counter;
   }
 
+  /**
+   * Record a remotely dispatched write whose final state is unknown. Reads of
+   * an affected generation never stabilize, deliberately disabling generation-
+   * keyed memoization until restart rather than certifying a stale snapshot.
+   */
+  recordIndeterminateGraphWrites(graphs: Iterable<string>): void {
+    const affected = [...new Set(graphs)];
+    if (affected.length === 0) return;
+    this.recordGraphWrites(affected);
+    if (this.indeterminateGlobal) return;
+    for (const graph of affected) this.indeterminateGraphs.add(graph);
+    if (this.indeterminateGraphs.size > MAX_TRACKED_GRAPHS) {
+      this.indeterminateGraphs.clear();
+      this.indeterminateGlobal = true;
+    }
+  }
+
   getWriteGen(graphPrefix: string): number {
+    let indeterminate = this.indeterminateGlobal
+      || (graphPrefix === '' && this.indeterminateGraphs.size > 0);
+    if (!indeterminate) {
+      for (const graph of this.indeterminateGraphs) {
+        if (graph.startsWith(graphPrefix)) {
+          indeterminate = true;
+          break;
+        }
+      }
+    }
+    if (indeterminate) {
+      return ++this.counter;
+    }
     // Every graph URI starts with the empty prefix, so the tracker counter is
     // the exact answer without scanning the bounded per-graph LRU. Responder
     // graph-list caches use this global generation on every page/session.

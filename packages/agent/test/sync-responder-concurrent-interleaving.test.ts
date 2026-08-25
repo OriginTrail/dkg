@@ -1483,7 +1483,7 @@ describe('sync responder pagination interleaving', () => {
     expect(calls).toBe(2);
   });
 
-  it('reuses the sorted graph list across session refreshes until the store mutates', async () => {
+  it('does not retain a graph list read while a remote mutation is pending', async () => {
     let generation = 0;
     let calls = 0;
     let graphs = ['urn:graph:b', 'urn:graph:a', 'urn:graph:b'];
@@ -1509,13 +1509,24 @@ describe('sync responder pagination interleaving', () => {
     })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
     expect(calls).toBe(1);
 
+    // Dispatch: the endpoint has not committed yet, so a refresh can still
+    // observe and memoize the old graph set at this intermediate generation.
     generation++;
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'pending-mutation',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(2);
+
+    // Settlement must advance again so the next session cannot reuse the
+    // graph list that was read while the mutation was in flight.
     graphs = ['urn:graph:c', 'urn:graph:a'];
+    generation++;
     await expect(memo.get({
       refresh: true,
       refreshGeneration: 'session-3',
     })).resolves.toEqual(['urn:graph:a', 'urn:graph:c']);
-    expect(calls).toBe(2);
+    expect(calls).toBe(3);
   });
 
   it('retains the TTL backstop for writers outside the tracked store process', async () => {

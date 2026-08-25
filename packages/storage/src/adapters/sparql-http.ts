@@ -549,20 +549,13 @@ export class SparqlHttpStore implements TripleStore {
     const execute = async (update: string, source: string): Promise<void> => {
       await this.postUpdate(update, { ...options, source }, 'replaceGraph');
     };
-    // Advance before dispatch: a timeout/lost response can reject after the
-    // endpoint committed. Consumers must fail open and refresh graph lists in
-    // that indeterminate state, even though this method rethrows.
-    this.writeGen.recordGraphWrites([graphUri]);
-    try {
-      await execute(plan.update, options?.source ?? 'sparql-http.replaceGraph');
-    } catch (error) {
-      if (plan.cleanup) {
-        await execute(plan.cleanup, 'sparql-http.replaceGraph.cleanup').catch(() => undefined);
-      }
-      this.invalidateListGraphsCache();
-      throw error;
-    }
-    this.invalidateListGraphsCache();
+    await this.runRemoteGraphMutation({
+      graphs: [graphUri],
+      mutate: () => execute(plan.update, options?.source ?? 'sparql-http.replaceGraph'),
+      cleanup: plan.cleanup
+        ? () => execute(plan.cleanup!, 'sparql-http.replaceGraph.cleanup')
+        : undefined,
+    });
   }
 
   async replaceGraphAndSubject(
@@ -593,16 +586,17 @@ export class SparqlHttpStore implements TripleStore {
     const execute = async (update: string, source: string): Promise<void> => {
       await this.postUpdate(update, { ...options, source }, 'replaceGraphAndSubject');
     };
-    // A rejected remote request may already have committed both mutations.
-    this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
-    try {
-      await execute(plan.update, options?.source ?? 'sparql-http.replaceGraphAndSubject');
-    } catch (error) {
-      await execute(plan.cleanup, 'sparql-http.replaceGraphAndSubject.cleanup').catch(() => undefined);
-      this.invalidateListGraphsCache();
-      throw error;
-    }
-    this.invalidateListGraphsCache();
+    await this.runRemoteGraphMutation({
+      graphs: [graphUri, metaGraphUri],
+      mutate: () => execute(
+        plan.update,
+        options?.source ?? 'sparql-http.replaceGraphAndSubject',
+      ),
+      cleanup: () => execute(
+        plan.cleanup,
+        'sparql-http.replaceGraphAndSubject.cleanup',
+      ),
+    });
   }
 
   async replaceSubject(
@@ -622,24 +616,40 @@ export class SparqlHttpStore implements TripleStore {
       label: 'SparqlHttpStore.replaceSubject',
     });
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
-    // Record the possible write before the request so lost responses cannot
-    // leave generation-backed graph enumeration caches looking current.
-    this.writeGen.recordGraphWrites([graphUri]);
-    try {
-      await this.postUpdate(
+    await this.runRemoteGraphMutation({
+      graphs: [graphUri],
+      mutate: () => this.postUpdate(
         update,
         { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
         'replaceSubject',
-      );
+      ),
+    });
+  }
+
+  /**
+   * One lifecycle for every remotely atomic graph mutation. The dispatch bump
+   * invalidates snapshots taken before the request; the settlement bump makes
+   * a snapshot read while the request was pending stale after a successful
+   * commit. A rejected request is indeterminate and therefore leaves its graph
+   * scopes permanently unstable for generation-keyed caches in this process.
+   */
+  private async runRemoteGraphMutation(opts: {
+    graphs: readonly string[];
+    mutate: () => Promise<void>;
+    cleanup?: () => Promise<void>;
+  }): Promise<void> {
+    const graphs = [...new Set(opts.graphs)];
+    this.writeGen.recordGraphWrites(graphs);
+    this.invalidateListGraphsCache();
+    try {
+      await opts.mutate();
     } catch (error) {
-      // Indeterminate remote failure: a timeout / lost response can occur AFTER
-      // the endpoint committed the DELETE/INSERT (which may have added the graph's
-      // first row or removed its last). Invalidate the graph-list cache before
-      // rethrowing so a direct managed caller never serves stale membership —
-      // mirrors replaceGraph / replaceGraphAndSubject.
+      await opts.cleanup?.().catch(() => undefined);
+      this.writeGen.recordIndeterminateGraphWrites(graphs);
       this.invalidateListGraphsCache();
       throw error;
     }
+    this.writeGen.recordGraphWrites(graphs);
     this.invalidateListGraphsCache();
   }
 
