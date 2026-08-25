@@ -21,6 +21,7 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10,
   computePrivateRootV10,
+  generateAssertionCreatedMetadata,
   generateGraphKnowledgeAssetMetadata,
   replaceLocallyTrustedKnowledgeAssetControls,
   resolveKnowledgeAssetWorkspaceHead,
@@ -3043,7 +3044,7 @@ describe('graph-scoped finalization handler', () => {
       return true;
     };
 
-    await expect(handler.handleChainReconciledKC({
+    await expect(handler.handleExactChainReconciledKC({
       contextGraphId: CG,
       onChainCgId: '42',
       ual: UAL,
@@ -3078,7 +3079,7 @@ describe('graph-scoped finalization handler', () => {
     };
     internals.verifyChainCgBinding = async () => true;
 
-    await expect(handler.handleChainReconciledKC({
+    await expect(handler.handleExactChainReconciledKC({
       contextGraphId: CG,
       onChainCgId: '42',
       ual: UAL,
@@ -3129,6 +3130,67 @@ describe('graph-scoped finalization handler', () => {
       versionBlock: 126,
       authorAddress: AUTHOR,
     }, createOperationContext('system'))).resolves.toBe('no-swm');
+  });
+
+  it('recognizes an exact confirmed VM copy when the mutable workspace head is corrupt', async () => {
+    const { message, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    await store.insert([{
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: '"storage-ack-equivalent"',
+    }]);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).rejects.toThrow(/head carries 2 shareOperationId values/);
+
+    const internals = handler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    await expect(handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 124,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system')))
+      .resolves.toBe('already-confirmed');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
+  it('promotes named-subgraph SWM when the exact caller omits the namespace', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph(undefined, 'named-scope');
+    await store.insert(generateAssertionCreatedMetadata({
+      contextGraphId: CG,
+      agentAddress: AUTHOR,
+      assertionName: 'named-asset',
+      subGraphName: 'named-scope',
+      timestamp: new Date(),
+      kaNumber: 7,
+      reservedUal: UAL,
+    }, { provenanceEvents: false }));
+    const publicHandler = makePublicReconcileHandler(message, {
+      getLatestMerkleRootAuthor: async () => AUTHOR,
+    });
+
+    await expect(publicHandler.handleExactChainReconciledKC(
+      graphReconcileInput(message),
+      createOperationContext('system'),
+    )).resolves.toBe('promoted');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(2);
   });
 
   it('advances sweep ordering without rewriting an exact VM graph', async () => {
