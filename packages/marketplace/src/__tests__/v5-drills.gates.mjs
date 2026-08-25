@@ -132,5 +132,70 @@ const aborted = unitsForOutcome(heavy, { kind: "aborted", reason: "scan-budget" 
 ok("D-q-6 delivery adds per-returned-result weight", delivered.total === delivered.admission + deliveryUnits(200));
 ok("D-q-7 guard-aborted query keeps ONLY its admission cost", aborted.delivery === 0 && aborted.total === aborted.admission && aborted.total > 0);
 
+// ── checkpoints: cadence, divergence narrowing, freshness (G16) ────────────
+console.log("— checkpoints —");
+const { DEFAULT_CADENCE, jitteredThresholds, noteBillableCall, emitCheckpoint, checkpointChain,
+        verifyPeerCheckpoint, lastAgreedSeq, freshness, chainRoot } = await import(join(DIST, "subs/checkpoint.js"));
+const { mkdtempSync: mkT } = await import("node:fs");
+const B = mkT(join((await import("node:os")).tmpdir(), "v5b-"));   // buyer seat
+const S = mkT(join((await import("node:os")).tmpdir(), "v5s-"));   // seller seat
+const PAIR = "0xbuyer~0xseller", PERIOD = "p-test", P0 = "2026-08-25T12:00:00.000Z";
+
+const th = jitteredThresholds(PAIR, DEFAULT_CADENCE);
+ok("D-ck-1 jitter is deterministic per pair and within ±20%",
+   th.calls === jitteredThresholds(PAIR, DEFAULT_CADENCE).calls
+   && th.calls >= 80 && th.calls <= 120 && th.activeMs >= 12*60000 && th.activeMs <= 18*60000);
+
+// both seats log identical calls; cadence fires on the jittered call count
+const compressed = { everyCalls: 5, everyActiveMs: 60_000, jitterPct: 0.2 };
+const cth = jitteredThresholds(PAIR, compressed);
+let fired = 0;
+for (let i = 0; i < cth.calls; i++) {
+  for (const seat of [B, S]) appendCallLog(seat, { callId: `q${i}`, at: P0, pair: PAIR, offeringId: "qwen14b", unit: "tokens", units: 10, phase: "delivery", requestDigest: `sha256:${i}`, responseDigest: `sha256:x${i}` });
+  if (noteBillableCall(B, PAIR, new Date(P0), compressed)) fired++;
+}
+ok("D-ck-2 cadence fires exactly once at the jittered call threshold (compressed-period scaling)", fired === 1);
+
+const cpB = emitCheckpoint(B, { pair: PAIR, periodId: PERIOD, periodStartAt: P0, now: new Date(P0) });
+const vS = verifyPeerCheckpoint(S, cpB, { periodStartAt: P0 });
+ok("D-ck-3 identical logs → checkpoints agree; agreement recorded", vS.kind === "agree" && lastAgreedSeq(S, PAIR) === 1);
+ok("D-ck-4 freshness line feed: agree ✓ with a checked-ago age", freshness(S, PAIR, new Date("2026-08-25T12:04:00Z")).agree === true);
+
+// seller inflates: 90 extra units logged only on the seller seat
+appendCallLog(S, { callId: "inflate", at: P0, pair: PAIR, offeringId: "qwen14b", unit: "tokens", units: 90, phase: "delivery", requestDigest: "sha256:inf", responseDigest: "sha256:infx" });
+const cpS = emitCheckpoint(S, { pair: PAIR, periodId: PERIOD, periodStartAt: P0, now: new Date(P0) });
+const vB = verifyPeerCheckpoint(B, cpS, { periodStartAt: P0 });
+ok("D-ck-5 divergence flagged within ONE checkpoint interval, scope = that interval",
+   vB.kind === "diverged" && vB.offerings.includes("qwen14b") && vB.interval.fromSeq === lastAgreedSeq(B, PAIR) + 1);
+
+// ── statements + dispute + I6 (G8) ─────────────────────────────────────────
+console.log("— statements & dispute —");
+const { seatTotals, buildStatement, statementDigest, saveStatement, checkI6, recountInterval, resolveStatement } = await import(join(DIST, "subs/statement.js"));
+const stClean = buildStatement({ home: B, pair: PAIR, periodId: PERIOD, periodStartAt: P0,
+  ours: seatTotals(B, PAIR, P0), theirs: seatTotals(B, PAIR, P0) });
+ok("D-st-1 identical counts → agreed statement referencing the checkpoint chain root",
+   stClean.resolution === "agreed" && stClean.checkpointChainRoot === chainRoot(B, PAIR));
+const stBad = buildStatement({ home: B, pair: PAIR, periodId: PERIOD, periodStartAt: P0,
+  ours: seatTotals(B, PAIR, P0), theirs: seatTotals(S, PAIR, P0) });
+ok("D-st-2 inflated seller count → reconciliation fails (disputed)", stBad.resolution === "disputed");
+const sellerLog = (await import(join(DIST, "subs/journal.js"))).readCallLog(S, PAIR);
+const finding = recountInterval(B, { pair: PAIR, periodStartAt: P0, offeringId: "qwen14b",
+  theirClaim: seatTotals(S, PAIR, P0).totals["qwen14b"], theirCalls: sellerLog });
+ok("D-st-3 per-call recount confirms our count and names the discrepant call",
+   finding.verdict === "our-count-confirmed" && finding.discrepantCalls.includes("inflate"));
+const stResolved = resolveStatement(stBad, [finding]);
+ok("D-st-4 resolution recorded IN the statement, digest changes with it",
+   stResolved.resolution === "resolved" && statementDigest(stResolved) !== statementDigest(stBad));
+saveStatement(B, stResolved);
+
+// I6 cadence cost audit
+ok("D-i6-1 clean path: exactly one statement KA per pair per period",
+   checkI6([{ pair: PAIR, periodId: PERIOD, kind: "statement" }], [{ pair: PAIR, periodId: PERIOD }]).ok);
+ok("D-i6-2 a checkpoint reaching VM fails the audit",
+   !checkI6([{ pair: PAIR, periodId: PERIOD, kind: "statement" }, { pair: PAIR, periodId: PERIOD, kind: "checkpoint" }], [{ pair: PAIR, periodId: PERIOD }]).ok);
+ok("D-i6-3 interim publish on a CLEAN period fails; on a divergent one it is allowed",
+   !checkI6([{ pair: PAIR, periodId: PERIOD, kind: "statement" }, { pair: PAIR, periodId: PERIOD, kind: "interim-dispute" }], [{ pair: PAIR, periodId: PERIOD }]).ok
+   && checkI6([{ pair: PAIR, periodId: PERIOD, kind: "statement" }, { pair: PAIR, periodId: PERIOD, kind: "interim-dispute" }], []).ok);
+
 console.log(`\n${pass}/${pass + fail} v5 core drills pass`);
 process.exit(fail ? 1 : 0);
