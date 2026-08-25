@@ -59,4 +59,23 @@ describe('RFC-64 public catalog terminal failure registry v1', () => {
     expect(registry.size).toBe(0);
     expect(registry.read(digest(1))).toBeNull();
   });
+
+  it('retains one stable typed cause code without retaining cause text', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const cause = Object.assign(new Error('private asset details stay local'), {
+      code: 'finalized-vm-composition-incomplete',
+    });
+    registry.record(digest(1), new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-activation',
+      'precommit failed',
+      { cause },
+    ));
+
+    expect(registry.read(digest(1))).toEqual({
+      catalogHeadDigest: digest(1),
+      errorName: 'Rfc64PublicCatalogNativeReceiverErrorV1',
+      errorCode: 'catalog-native-receiver-activation',
+      causeCode: 'finalized-vm-composition-incomplete',
+    });
+  });
 });

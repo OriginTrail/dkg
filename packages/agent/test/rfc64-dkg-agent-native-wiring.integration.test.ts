@@ -2571,6 +2571,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       }
     });
     const receiverChain = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
+    const privateVmDependencyLookup = vi.spyOn(
+      receiverChain,
+      'getDKGKnowledgeAssetsAddress',
+    ).mockRejectedValue(new Error('public SWM must not require private VM dependencies'));
     await receiverChain.createOnChainContextGraph({
       accessPolicy: 0,
       publishPolicy: 1,
@@ -2648,6 +2652,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
       published.currentCatalogHeadDigest,
     )).toBeNull();
+    expect(privateVmDependencyLookup).not.toHaveBeenCalled();
     expect(receiver.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,

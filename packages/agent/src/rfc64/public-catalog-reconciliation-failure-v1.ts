@@ -7,6 +7,8 @@ export interface Rfc64PublicCatalogReconciliationFailureV1 {
   readonly catalogHeadDigest: Digest32V1;
   readonly errorName: string;
   readonly errorCode: string | null;
+  /** Stable immediate/deep cause code when a typed receiver wrapper retained it. */
+  readonly causeCode?: string;
 }
 
 /** Hard process-memory bound for distinct terminal receiver failures. */
@@ -36,10 +38,12 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
         this.#failures.delete(oldestCatalogHeadDigest);
       }
     }
+    const causeCode = stableCauseCodeV1(error);
     this.#failures.set(catalogHeadDigest, Object.freeze({
       catalogHeadDigest,
       errorName: stableErrorNameV1(error),
       errorCode: stableErrorCodeV1(error),
+      ...(causeCode === null ? {} : { causeCode }),
     }));
   }
 
@@ -79,6 +83,27 @@ function stableErrorCodeV1(error: unknown): string | null {
     return null;
   }
   return stableErrorTokenV1(candidate);
+}
+
+function stableCauseCodeV1(error: unknown): string | null {
+  let current = readCauseV1(error);
+  for (let depth = 0; current !== null && depth < 8; depth += 1) {
+    const code = stableErrorCodeV1(current);
+    if (code !== null) return code;
+    current = readCauseV1(current);
+  }
+  return null;
+}
+
+function readCauseV1(error: unknown): unknown | null {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    return null;
+  }
+  try {
+    return (error as { readonly cause?: unknown }).cause ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function stableErrorTokenV1(value: unknown): string | null {

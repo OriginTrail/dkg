@@ -86,6 +86,7 @@ export type FinalizedVmCompositionErrorCodeV1 =
   | 'finalized-vm-composition-input'
   | 'finalized-vm-composition-inventory'
   | 'finalized-vm-composition-placement'
+  | 'finalized-vm-composition-incomplete'
   | 'finalized-vm-composition-mismatch'
   | 'finalized-vm-composition-duplicate';
 
@@ -238,7 +239,7 @@ export function composeFinalizedVmSetV1(
         && candidate.authorAddress === catalogAuthorAddress
       ) {
         fail(
-          'finalized-vm-composition-mismatch',
+          'finalized-vm-composition-incomplete',
           `known-incomplete: no-authorized-provider for finalized KA ${candidate.kaId}`,
         );
       }

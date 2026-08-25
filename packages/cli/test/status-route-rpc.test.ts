@@ -125,6 +125,8 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     const privateContextGraph =
       '0x1111111111111111111111111111111111111111/private-release-2';
     const privateProvider = '12D3KooPrivateProviderMustNotLeak';
+    const publicContextGraph = 'public-compatibility-surface';
+    const publicProvider = '12D3KooPublicProviderMayAppear';
     const response = await requestStatusWithAgent(
       {
         readRfc64PublicCatalogBootstrapStatusV1: () => ({
@@ -151,23 +153,48 @@ describe('/api/status RFC-64 private recovery privacy', () => {
             inventoryRowCount: null,
             lastError: `provider ${privateProvider} failed`,
             updatedAtMs: 2,
+          }, {
+            scope: {
+              networkId: 'otp:20430',
+              contextGraphId: publicContextGraph,
+              subGraphName: null,
+              authorAddress: '0x4444444444444444444444444444444444444444',
+              catalogEra: '0',
+            },
+            providers: [publicProvider],
+            outcome: 'applied',
+            completionReason: null,
+            attempts: 1,
+            providerPeerId: publicProvider,
+            appliedHeadDigest: `0x${'55'.repeat(32)}`,
+            catalogVersion: '1',
+            inventoryRowCount: '1',
+            lastError: null,
+            updatedAtMs: 2,
           }],
         }),
       },
-      {},
+      {
+        rfc64PublicCatalog: {
+          enabled: true,
+          bootstrap: {
+            acceptedPublicPolicies: [rfc64PublicCatalogPolicy(publicContextGraph)],
+          },
+        },
+      },
       '/api/status',
       null,
       {
         enabled: true,
-        selectedContextGraphs: [privateContextGraph],
-        selectedPublicContextGraphs: [],
+        selectedContextGraphs: [publicContextGraph, privateContextGraph],
+        selectedPublicContextGraphs: [publicContextGraph],
         selectedPrivateContextGraphs: [privateContextGraph],
         accessPolicyAuthority: {
           localAgentAddress: '0x3333333333333333333333333333333333333333',
           peerAgentBindings: [],
         },
         bootstrap: {
-          acceptedPolicies: [{
+          acceptedPolicies: [rfc64PublicCatalogPolicy(publicContextGraph), {
             policyEnvelope: {
               payload: {
                 contextGraphId: privateContextGraph,
@@ -188,7 +215,13 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       outcomeCounts: { 'known-incomplete': 1 },
       completionReasons: ['no-authorized-provider'],
     }]);
-    expect(response.body.rfc64PublicCatalog.bootstrap).toBeNull();
+    expect(response.body.rfc64PublicCatalog.bootstrap.targets).toHaveLength(1);
+    expect(response.body.rfc64PublicCatalog.bootstrap.targets[0]).toMatchObject({
+      scope: { contextGraphId: publicContextGraph },
+      providers: [publicProvider],
+      providerPeerId: publicProvider,
+    });
+    expect(JSON.stringify(response.body)).toContain(publicProvider);
     expect(JSON.stringify(response.body)).not.toContain(privateProvider);
   });
 });

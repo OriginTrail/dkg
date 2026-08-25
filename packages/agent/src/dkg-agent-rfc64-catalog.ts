@@ -704,6 +704,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         catalogHeadDigest: failure.catalogHeadDigest,
         errorName: failure.errorName,
         errorCode: failure.errorCode,
+        ...(failure.causeCode === undefined ? {} : { causeCode: failure.causeCode }),
       });
   }
 
@@ -805,7 +806,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           signal: AbortSignal,
         ): Promise<void> => {
           const accepted = acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
-          if (accepted.policy.source.kind === 'finalized-chain') {
+          if (
+            accepted.policy.accessPolicy === 1
+            && accepted.policy.source.kind === 'finalized-chain'
+          ) {
             await finalizedVmPrecommit(plan, signal);
             return;
           }

@@ -305,8 +305,6 @@ async function execute(): Promise<void> {
       chainExpectedAssets: ASSET_COUNT,
       swm: { expected: ASSET_COUNT, recovered: swmRecovered },
       vm: { expected: ASSET_COUNT, recovered: vmRecovered },
-      deniedUnboundPeer: true,
-      noPublicOrCuratorFallback: true,
       processBoundary: {
         authorExitCode: authorStopped.exit.code,
         receiverExitCode: receiverStopped.exit.code,

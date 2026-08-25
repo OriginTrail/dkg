@@ -24,6 +24,7 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 const MAX_STATUS_ERROR_BYTES_V1 = 1024;
 const MAX_CONCURRENT_TARGETS_V1 = 4;
 const COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1 = 10_000;
+const PRIVATE_VM_INCOMPLETE_ERROR_CODE_V1 = 'finalized-vm-composition-incomplete';
 const UTF8 = new TextEncoder();
 
 export type Rfc64PublicCatalogBootstrapOutcomeV1 =
@@ -57,6 +58,23 @@ export interface Rfc64PublicCatalogBootstrapStatusV1 {
   readonly lastPassStartedAtMs: number | null;
   readonly lastPassCompletedAtMs: number | null;
   readonly targets: readonly Rfc64PublicCatalogBootstrapTargetStatusV1[];
+}
+
+export function classifyRfc64CatalogBootstrapFailureV1(
+  requiresPrivateVm: boolean,
+  error: unknown | null,
+): Readonly<{
+  outcome: Extract<Rfc64PublicCatalogBootstrapOutcomeV1, 'not-found' | 'known-incomplete' | 'failed'>;
+  completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
+}> {
+  const knownIncomplete = requiresPrivateVm
+    && hasErrorCodeV1(error, PRIVATE_VM_INCOMPLETE_ERROR_CODE_V1);
+  return Object.freeze({
+    outcome: knownIncomplete
+      ? 'known-incomplete'
+      : error === null ? 'not-found' : 'failed',
+    completionReason: knownIncomplete ? 'no-authorized-provider' : null,
+  });
 }
 
 interface MutableTargetStatusV1 {
@@ -364,6 +382,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     target.lastError = null;
     let sawNotFound = false;
     let lastError: string | null = null;
+    let terminalError: unknown | null = null;
     for (const providerPeerId of target.providers) {
       if (signal.aborted) return;
       target.attempts += 1;
@@ -388,15 +407,25 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         return;
       } catch (error) {
         if (signal.aborted) return;
+        const classification = classifyRfc64CatalogBootstrapFailureV1(
+          target.requiresPrivateVm,
+          error,
+        );
+        if (
+          terminalError === null
+          || classification.outcome === 'known-incomplete'
+        ) terminalError = error;
         lastError = boundedErrorV1(errorMessageV1(error));
       }
     }
-    target.outcome = target.requiresPrivateVm
-      ? 'known-incomplete'
-      : lastError === null && sawNotFound ? 'not-found' : 'failed';
-    target.completionReason = target.requiresPrivateVm
-      ? 'no-authorized-provider'
-      : null;
+    const classification = classifyRfc64CatalogBootstrapFailureV1(
+      target.requiresPrivateVm,
+      terminalError,
+    );
+    target.outcome = classification.outcome === 'not-found' && !sawNotFound
+      ? 'failed'
+      : classification.outcome;
+    target.completionReason = classification.completionReason;
     target.providerPeerId = null;
     target.appliedHeadDigest = null;
     target.catalogVersion = null;
@@ -418,6 +447,17 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         ? {}
         : { retryIntervalMs: legacy.retryIntervalMs }),
     });
+  }
+}
+
+function hasErrorCodeV1(error: unknown, expected: string): boolean {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    return false;
+  }
+  try {
+    return (error as { readonly code?: unknown }).code === expected;
+  } catch {
+    return false;
   }
 }
 

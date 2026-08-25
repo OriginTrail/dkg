@@ -19,6 +19,13 @@ import type {
   Rfc64PublicCatalogCurrentHeadScopeV1,
 } from './rfc64/public-catalog-current-head-discovery-v1.js';
 
+export class Rfc64CatalogSynchronizationErrorV1 extends Error {
+  constructor(readonly code: string | null) {
+    super(`RFC-64 current catalog head reconciliation failed (${code ?? 'unknown'})`);
+    this.name = 'Rfc64CatalogSynchronizationErrorV1';
+  }
+}
+
 /** Explicit provider + independently accepted public-root scope for a cold pull. */
 export interface SynchronizeRfc64PublicCatalogFromProviderParamsV1 {
   readonly remotePeerId: string;
@@ -74,10 +81,13 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
       const failure = this.readRfc64PublicCatalogReconciliationFailureV1(
         synchronized.announcement.catalogHeadObjectDigest,
       );
+      if (failure !== null) {
+        throw new Rfc64CatalogSynchronizationErrorV1(
+          failure.causeCode ?? failure.errorCode,
+        );
+      }
       throw new Error(
-        failure === null
-          ? 'RFC-64 current public catalog head did not reach its durable applied postcondition'
-          : `RFC-64 current public catalog head reconciliation failed (${failure.errorCode ?? failure.errorName})`,
+        'RFC-64 current public catalog head did not reach its durable applied postcondition',
       );
     }
     return Object.freeze({
