@@ -67,6 +67,7 @@
       "packages/publisher/test/draft-lifecycle.test.ts": 1
     },
     "eslint(no-unsafe-optional-chaining)": {
+      "packages/agent/test/rfc64-public-catalog-receiver-v1.test.ts": 1,
       "packages/cli/test/promote-async-routes.test.ts": 2,
       "packages/cli/test/publish-async-get-benchmark.test.ts": 2,
       "packages/cli/test/query-route-lifecycle.test.ts": 1,
