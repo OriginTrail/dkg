@@ -562,6 +562,9 @@ async function handleFetchContextGraphAssetsRoute(
   } catch {
     return jsonResponse(res, 400, { error: 'Invalid JSON body' });
   }
+  if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') {
+    return jsonResponse(res, 400, { error: 'JSON body must be an object' });
+  }
   const contextGraphId = parsed.contextGraphId ?? parsed.id;
   if (typeof contextGraphId !== 'string' || contextGraphId.length === 0) {
     return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });

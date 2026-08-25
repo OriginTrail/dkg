@@ -16,12 +16,14 @@ import {
   DKG_ROOT_ENTITY_LEGACY,
   ENTITY_PRED_ALT,
   getMetrics,
+  sparqlString,
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
   asGraphWriteGenSource,
+  resolveGraphScopedOrLegacyMetadata,
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
   StoreSchedulerBusyError,
@@ -365,7 +367,7 @@ interface DecodedFinalizationEnvelope {
   graphAdmission?: GraphScopedFinalizationAdmission;
 }
 
-interface ChainReconciledKCInput {
+export interface ChainReconciledKCInput {
   contextGraphId: string;
   onChainCgId: string;
   ual: string;
@@ -378,13 +380,19 @@ interface ChainReconciledKCInput {
   trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
 }
 
-interface ChainReconciledKCOptions {
-  /**
-   * Exact RFC64 fetch already names the one KA it is allowed to inspect.
-   * Keep that path O(1): do not fall back to the legacy all-workspace scan
-   * when the exact graph-scoped state is absent.
-   */
-  allowLegacyScan?: boolean;
+export type ChainReconciledKCOutcome =
+  | 'promoted'
+  | 'already-confirmed'
+  | 'no-swm'
+  | 'unverified'
+  | 'receipt-revalidation-pending'
+  | 'stale-target'
+  | 'verified-vm-metadata-pending';
+
+interface ExactChainReconcileDecision {
+  outcome: ChainReconciledKCOutcome;
+  legacyEligible: boolean;
+  input: ChainReconciledKCInput;
 }
 
 type VerifiedGraphScopedConfirmation =
@@ -2985,79 +2993,122 @@ export class FinalizationHandler {
   }
 
   /**
-   * Phase B — chain-driven VM reconciliation entry point.
-   *
-   * Promotes a chain-registered KC into VM WITHOUT a gossip FinalizationMessage.
-   * The caller (the agent reconciler) has already established, from chain reads,
-   * that this KC is registered to the CG and resolved its `merkleRoot` +
-   * `publisherAddress` by kaId; it has also ensured the matching SWM snapshot is
-   * present locally (fetching from the publisher/cores first if needed).
-   *
-   * Verification differs from the gossip path because the trigger here is
-   * already chain truth, not an untrusted peer message:
-   *   - `merkleRoot` + `publisherAddress` are DIRECT chain reads keyed by kaId
-   *     (`getLatestMerkleRoot` / `getLatestMerkleRootPublisher`), so they need
-   *     no re-scan of `KCCreated` events (that re-scan exists to defend the
-   *     gossip wire, which we don't have).
-   *   - the CG binding is confirmed by a direct `getKAContextGraphId(kaId)` read
-   *     against the caller's `onChainCgId` — chain truth, no event scan, no
-   *     `txHash`/block needed (the sweep path has neither).
-   *   - integrity is the same flat-KC root recompute the gossip path verifies
-   *     against: we find the local SWM operation whose recomputed root equals
-   *     the chain `merkleRoot`.
-   *
-   * `getLatestMerkleRoot(kaId)` always returns the KA's LATEST state (after any
-   * update), so the reconcile is "as of now" — we stamp the materialization
-   * version with the current chain head block. A later real update (higher
-   * block) supersedes correctly; a stale gossip for the original publish (lower
-   * block) is correctly skipped. We do NOT re-broadcast on the finalization
-   * topic — the chain has spoken.
-   *
-   * Returns:
-   *   - `'promoted'`        — SWM snapshot verified + promoted to VM.
-   *   - `'already-confirmed'` — VM already had it (idempotent; cursor may advance).
-   *   - `'no-swm'`          — no local SWM snapshot matches the published
-   *                            merkleRoot (caller leaves the cursor; sweep retries).
-   *   - `'unverified'`      — chain couldn't confirm the CG binding (RPC lag /
-   *                            reorg / no chain wired); caller leaves cursor.
-   *   - `'receipt-revalidation-pending'` — durable SETTLED receipt retry is
-   *                            in backoff; caller leaves cursor.
-   *   - `'stale-target'`    — a newer update is already materialised.
+   * Resolve the exact graph namespace from canonical graph-scoped metadata.
+   * A named assertion stores its namespace in the root metadata graph, so this
+   * stays exact and does not enumerate workspace operations or subgraphs.
    */
-  async handleChainReconciledKC(
+  private async resolveExactChainReconcileInput(
     input: ChainReconciledKCInput,
     ctx: OperationContext,
-    options: ChainReconciledKCOptions = {},
-  ): Promise<
-    | 'promoted'
-    | 'already-confirmed'
-    | 'no-swm'
-    | 'unverified'
-    | 'receipt-revalidation-pending'
-    | 'stale-target'
-    | 'verified-vm-metadata-pending'
-  > {
+  ): Promise<ChainReconciledKCInput | null> {
+    if (input.subGraphName !== undefined) return input;
+    try {
+      const rootMetaGraph = contextGraphMetaUri(input.contextGraphId);
+      const lifecycleRows = await this.store.query(
+        `SELECT ?lifecycle ?subGraphName WHERE { GRAPH <${assertSafeIri(rootMetaGraph)}> {
+          ?lifecycle <${DKG_NS}reservedUal> ${sparqlString(input.ual)} .
+          OPTIONAL { ?lifecycle <${DKG_NS}subGraphName> ?subGraphName }
+        } }`,
+        { source: 'agent.finalization.resolveExactLifecycleNamespace' },
+      );
+      if (lifecycleRows.type !== 'bindings') {
+        this.log.warn(ctx, `Chain-reconcile: lifecycle metadata query for ${input.ual} returned no bindings`);
+        return null;
+      }
+      if (lifecycleRows.bindings.length > 0) {
+        const lifecycleSubjects = new Set(
+          lifecycleRows.bindings
+            .map((binding) => stripOptionalLiteral(binding['lifecycle'])?.trim())
+            .filter((value): value is string => Boolean(value)),
+        );
+        const subGraphNames = new Set(
+          lifecycleRows.bindings
+            .map((binding) => stripOptionalLiteral(binding['subGraphName'])?.trim())
+            .filter((value): value is string => Boolean(value)),
+        );
+        if (lifecycleSubjects.size !== 1 || subGraphNames.size > 1) {
+          this.log.warn(ctx, `Chain-reconcile: lifecycle metadata for ${input.ual} is ambiguous`);
+          return null;
+        }
+        const [subGraphName] = subGraphNames;
+        if (subGraphName !== undefined) {
+          const validation = validateSubGraphName(subGraphName);
+          if (!validation.valid) {
+            this.log.warn(
+              ctx,
+              `Chain-reconcile: lifecycle metadata for ${input.ual} has an invalid sub-graph name`,
+            );
+            return null;
+          }
+          return { ...input, subGraphName };
+        }
+        return input;
+      }
+
+      const resolved = await resolveGraphScopedOrLegacyMetadata(
+        this.store,
+        input.ual,
+        async () => null,
+        { source: 'agent.finalization.resolveExactNamespace' },
+      );
+      if (resolved.kind !== 'graph') return input;
+      if (resolved.metadata.contextGraphId !== input.contextGraphId) {
+        this.log.warn(
+          ctx,
+          `Chain-reconcile: graph-scoped metadata for ${input.ual} belongs to a different Context Graph`,
+        );
+        return null;
+      }
+      return resolved.metadata.subGraphName === undefined
+        ? input
+        : { ...input, subGraphName: resolved.metadata.subGraphName };
+    } catch (error) {
+      this.log.warn(
+        ctx,
+        `Chain-reconcile: exact metadata for ${input.ual} is invalid: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Constant-time exact graph-scoped reconciliation. This method never enters
+   * the legacy workspace-operation scan.
+   */
+  private async reconcileExactChainRegisteredKC(
+    rawInput: ChainReconciledKCInput,
+    ctx: OperationContext,
+  ): Promise<ExactChainReconcileDecision> {
+    const resolvedInput = await this.resolveExactChainReconcileInput(rawInput, ctx);
+    if (!resolvedInput) {
+      return { outcome: 'no-swm', legacyEligible: false, input: rawInput };
+    }
+    const input = resolvedInput;
     const {
       contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
       kaId, versionBlock, authorAddress, subGraphName, trustedAssertionEvidence,
     } = input;
-
     const ctxGraphId = onChainCgId.length > 0 ? onChainCgId : undefined;
     const targetMetaGraph = ctxGraphId
       ? contextGraphMetaUri(contextGraphId, ctxGraphId)
       : `did:dkg:context-graph:${contextGraphId}/_meta`;
 
-    // Confirm the CG binding from chain truth (defends against a caller passing
-    // a kaId that isn't actually registered to this CG, and against RPC lag /
-    // reorg where the binding hasn't landed yet).
     if (!(await this.verifyChainCgBinding(kaId, onChainCgId, ctx))) {
-      this.log.info(ctx, `Chain-reconcile: chain CG binding for ${ual} (ka=${kaId}) not confirmed against cg ${onChainCgId}; deferring to sweep retry`);
-      return 'unverified';
+      this.log.info(
+        ctx,
+        `Chain-reconcile: chain CG binding for ${ual} (ka=${kaId}) not confirmed against cg ${onChainCgId}; deferring to sweep retry`,
+      );
+      return { outcome: 'unverified', legacyEligible: false, input };
     }
 
     const journalReplay = await this.replayMatchingRecoveryEntries(input, ctx);
-    if (journalReplay === 'recovered') return 'already-confirmed';
-    if (journalReplay === 'retry-pending') return 'receipt-revalidation-pending';
+    if (journalReplay === 'recovered') {
+      return { outcome: 'already-confirmed', legacyEligible: false, input };
+    }
+    if (journalReplay === 'retry-pending') {
+      return { outcome: 'receipt-revalidation-pending', legacyEligible: false, input };
+    }
     if (journalReplay === 'invalidated') {
       this.log.info(
         ctx,
@@ -3066,10 +3117,6 @@ export class FinalizationHandler {
       );
     }
 
-    // V2 recovery is O(1) in the number of prior workspace operations: the
-    // durable per-KA head names one exact assertion graph and carries its
-    // constant-size commitment envelope. Only when no V2 head exists do we
-    // enter the legacy root-operation scan below.
     const graphScopedOutcome = await this.reconcileGraphScopedKC({
       contextGraphId,
       onChainCgId,
@@ -3082,41 +3129,61 @@ export class FinalizationHandler {
       subGraphName,
       trustedAssertionEvidence,
     }, ctx);
-    if (graphScopedOutcome !== undefined) return graphScopedOutcome;
+    if (graphScopedOutcome !== undefined) {
+      return { outcome: graphScopedOutcome, legacyEligible: false, input };
+    }
     if (await this.hasGraphScopedMetadata(contextGraphId, ual)) {
       this.log.info(
         ctx,
         `Chain-reconcile: graph-scoped metadata exists for ${ual} but its durable workspace head is missing`,
       );
-      return 'no-swm';
+      return { outcome: 'no-swm', legacyEligible: false, input };
     }
     if (await this.isAlreadyConfirmed(
       ual,
       targetMetaGraph,
       `did:dkg:context-graph:${contextGraphId}/_meta`,
     )) {
-      // No V2 workspace head or graph-scoped metadata exists. Preserve the
-      // legacy read-both shortcut only after the exact V2 recovery path had the
-      // opportunity to verify and repair a consumed-SWM publish.
       this.log.info(ctx, `Chain-reconcile: legacy ${ual} already confirmed in VM, skipping`);
-      return 'already-confirmed';
+      return { outcome: 'already-confirmed', legacyEligible: false, input };
     }
 
-    if (options.allowLegacyScan === false) {
-      this.log.info(
-        ctx,
-        `Chain-reconcile: exact graph-scoped state is absent for ${ual}; legacy workspace scan disabled`,
-      );
-      return 'no-swm';
-    }
+    this.log.info(
+      ctx,
+      `Chain-reconcile: exact graph-scoped state is absent for ${ual}; legacy scan is not part of the exact operation`,
+    );
+    return { outcome: 'no-swm', legacyEligible: true, input };
+  }
 
-    // Recover the published roots from the local SWM snapshot. The gossip path
-    // gets `rootEntities` from the wire; here there is no wire, and SWM meta
-    // (created at share-time, before publish) carries no merkle root — so we
-    // identify the matching WorkspaceOperation by RECOMPUTING each candidate's
-    // KC root and comparing to the chain root. This is the same flat-KC root
-    // the gossip path verifies against, so a match is an authoritative
-    // merkle verification.
+  /**
+   * Reconcile only the exact graph-scoped state named by one UAL. This is the
+   * operation used by exact RFC64 fetch.
+   */
+  async handleExactChainReconciledKC(
+    input: ChainReconciledKCInput,
+    ctx: OperationContext,
+  ): Promise<ChainReconciledKCOutcome> {
+    return (await this.reconcileExactChainRegisteredKC(input, ctx)).outcome;
+  }
+
+  /**
+   * Normal chain reconciliation composes the exact operation with the legacy
+   * workspace scan. The scan remains available only through this ordinary path.
+   */
+  async handleChainReconciledKC(
+    rawInput: ChainReconciledKCInput,
+    ctx: OperationContext,
+  ): Promise<ChainReconciledKCOutcome> {
+    const exact = await this.reconcileExactChainRegisteredKC(rawInput, ctx);
+    if (!exact.legacyEligible) return exact.outcome;
+    const {
+      contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
+      kaId, versionBlock, authorAddress, subGraphName,
+    } = exact.input;
+    const ctxGraphId = onChainCgId.length > 0 ? onChainCgId : undefined;
+
+    // Recover the published roots from the legacy local SWM snapshot. This is
+    // the only operation that may scan historical workspace operations.
     const snapshot = await this.findSwmSnapshotForMerkleRoot(
       contextGraphId,
       merkleRoot,
@@ -3124,28 +3191,24 @@ export class FinalizationHandler {
       onChainCgId,
     );
     if (!snapshot) {
-      this.log.info(ctx, `Chain-reconcile: no local SWM snapshot matches the published merkleRoot for ${ual}; deferring to sweep retry`);
+      this.log.info(
+        ctx,
+        `Chain-reconcile: no local SWM snapshot matches the published merkleRoot for ${ual}; deferring to sweep retry`,
+      );
       return 'no-swm';
     }
     const { rootEntities, sharedMemoryQuads } = snapshot;
-    // The snapshot may have been found in a sub-graph the caller didn't know
-    // about; promote into THAT namespace so the data lands in the right graph.
     const resolvedSubGraphName = snapshot.subGraphName ?? subGraphName;
-
     const finalizationVersion: MaterializedVersion = { blockNumber: versionBlock, txIndex: 0 };
-    // Same-graph publishes dual-write the root `<cg>` label copy so label-scoped
-    // reads (`agent.query(<cg label>)`) resolve. The gossip path learns this
-    // from `keepRootCopyOnLabel` on the wire; the chain-driven path has no wire,
-    // so the publisher persists the same decision into SWM workspace meta (which
-    // replicates to subscribers alongside `privateMerkleRoot`). Recover it here
-    // and mirror the gossip dual-write decision, so a subscriber that missed the
-    // broadcast and recovers via the sweep still gets the root-label copy.
-    // Absent (legacy publish, no persisted signal) → false: stay per-cgId only,
-    // so a remap publish's deliberately-dropped root copy is never re-added.
     const keepRootCopyOnLabel = await this.getKeepRootCopySignal(
-      contextGraphId, rootEntities, resolvedSubGraphName,
+      contextGraphId,
+      rootEntities,
+      resolvedSubGraphName,
     );
     const isDualWrite = keepRootCopyOnLabel === true && !!ctxGraphId && !resolvedSubGraphName;
+    const targetMetaGraph = ctxGraphId
+      ? contextGraphMetaUri(contextGraphId, ctxGraphId)
+      : `did:dkg:context-graph:${contextGraphId}/_meta`;
     const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
 
     const outcome = await this.applyVerifiedFinalization({
@@ -3173,16 +3236,13 @@ export class FinalizationHandler {
       this.log.info(ctx, `Chain-reconcile: a newer update is already materialised for ${ual}, skipping`);
       return 'stale-target';
     }
-    this.log.info(ctx, `Chain-reconcile: promoted SWM snapshot to VM for ${ual} (ka=${kaId}, cg=${onChainCgId})`);
+    this.log.info(
+      ctx,
+      `Chain-reconcile: promoted SWM snapshot to VM for ${ual} (ka=${kaId}, cg=${onChainCgId})`,
+    );
     return 'promoted';
   }
 
-  /**
-   * Confirm — from chain truth — that `kaId` is registered to `onChainCgId`,
-   * via the direct `getKAContextGraphId(kaId)` storage read. Returns `false`
-   * when no chain is wired, the read is unavailable, the binding doesn't match,
-   * or the read throws (RPC lag) — all "can't confirm yet, retry later" cases.
-   */
   private async verifyChainCgBinding(kaId: bigint, onChainCgId: string, ctx: OperationContext): Promise<boolean> {
     if (!this.chain || this.chain.chainId === 'none' || typeof this.chain.getKAContextGraphId !== 'function') {
       return false;

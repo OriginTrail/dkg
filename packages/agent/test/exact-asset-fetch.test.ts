@@ -4,6 +4,8 @@ import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
 import {
   ContextGraphAssetFetchConflictError,
   ContextGraphAssetFetchValidationError,
+} from '../src/sync/exact-asset-fetch.js';
+import {
   VmReconcileQueueClosedError,
 } from '../src/vm-reconcile-service.js';
 
@@ -44,7 +46,6 @@ function createFetchHost(options: {
   const inspect = vi.fn(async (
     input: { ual: string },
     _ctx?: unknown,
-    _options?: { allowLegacyScan?: boolean },
   ) => {
     if (materialize.delete(input.ual)) {
       present.add(input.ual);
@@ -70,13 +71,17 @@ function createFetchHost(options: {
     subscribedContextGraphs: new Map([[CONTEXT_GRAPH, subscription]]),
     chain: {
       chainId: 'base:8453',
-      getBlockNumber: async () => 100,
       getKAContextGraphId: async () => options.boundContextGraphId ?? BigInt(ON_CHAIN_ID),
-      getLatestMerkleRoot: async () => new Uint8Array(32).fill(7),
-      getLatestMerkleRootPublisher: async () => '0x00000000000000000000000000000000000000b1',
+      readKnowledgeAssetVersionSnapshot: async () => ({
+        latestRoot: `0x${'07'.repeat(32)}`,
+        rootCount: 1n,
+        latestAuthor: '0x00000000000000000000000000000000000000a1',
+        latestPublisher: '0x00000000000000000000000000000000000000b1',
+        blockNumber: 100,
+      }),
     },
     requireLocalCgMatchesOnChainSlot: async () => true,
-    getOrCreateFinalizationHandler: () => ({ handleChainReconciledKC: inspect }),
+    getOrCreateFinalizationHandler: () => ({ handleExactChainReconciledKC: inspect }),
     resolveCuratorPeerIdsForCg: async () => ({ peerIds: options.noPeers ? [] : [PEER] }),
     preferredSyncPeers: new Map<string, string>(),
     peerId: '12D3KooWExactFetchLocal',
@@ -98,9 +103,17 @@ function createFetchHost(options: {
 describe('exact Context Graph asset fetch', () => {
   it('fetches up to ten named assets without using the background reconciler', async () => {
     const { host, exactFetch, inspect, flush, subscription } = createFetchHost({ present: [UALS[0]] });
+    const scalarRoot = vi.fn(async () => new Uint8Array(32).fill(0xff));
+    const scalarPublisher = vi.fn(async () => '0x00000000000000000000000000000000000000ff');
+    const scalarBlock = vi.fn(async () => 999);
     Object.assign(host, {
       config: { syncReconcilerEnabled: false },
       vmReconcileEnabled: () => false,
+    });
+    Object.assign(host.chain, {
+      getLatestMerkleRoot: scalarRoot,
+      getLatestMerkleRootPublisher: scalarPublisher,
+      getBlockNumber: scalarBlock,
     });
 
     const result = await SwmHostModeMethods.prototype.fetchContextGraphAssets.call(
@@ -129,7 +142,15 @@ describe('exact Context Graph asset fetch', () => {
       expect.objectContaining({ isCurrent: expect.any(Function) }),
     );
     expect(inspect).toHaveBeenCalledTimes(3);
-    expect(inspect.mock.calls.every((call) => call[2]?.allowLegacyScan === false)).toBe(true);
+    expect(inspect.mock.calls[0]?.[0]).toMatchObject({
+      merkleRoot: new Uint8Array(32).fill(7),
+      authorAddress: '0x00000000000000000000000000000000000000a1',
+      publisherAddress: '0x00000000000000000000000000000000000000b1',
+      versionBlock: 100,
+    });
+    expect(scalarRoot).not.toHaveBeenCalled();
+    expect(scalarPublisher).not.toHaveBeenCalled();
+    expect(scalarBlock).not.toHaveBeenCalled();
     expect(flush).toHaveBeenCalledTimes(1);
     expect(subscription.lastReconciledOrdinal).toBe(77);
   });
@@ -225,5 +246,44 @@ describe('exact Context Graph asset fetch', () => {
       CONTEXT_GRAPH,
       [UALS[0]],
     )).rejects.toBeInstanceOf(VmReconcileQueueClosedError);
+  });
+
+  it('retires an in-flight physical fetch on shutdown without later inspection or flush', async () => {
+    const { host, inspect, flush } = createFetchHost();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const physicalFetch = vi.fn(async () => {
+      await gate;
+      return {
+        result: {
+          fetchedDataTriples: 0,
+          fetchedMetaTriples: 0,
+          insertedTriples: 0,
+          failedPeers: 0,
+          failedPhases: 0,
+          deferredBackpressure: 0,
+        },
+        disposition: 'incomplete',
+      };
+    });
+    host.syncExactKnowledgeAssetsFromPeerDetailed = physicalFetch;
+
+    const running = SwmHostModeMethods.prototype.fetchContextGraphAssets.call(
+      host as never,
+      CONTEXT_GRAPH,
+      UALS,
+      { peerIds: [PEER] },
+    );
+    await vi.waitFor(() => expect(physicalFetch).toHaveBeenCalledTimes(1));
+    expect(host.vmReconcilePhysicalRuns.size).toBe(1);
+    const inspectionsBeforeShutdown = inspect.mock.calls.length;
+
+    host.vmReconcileLifecycleController.abort();
+    await expect(running).rejects.toBeInstanceOf(VmReconcileQueueClosedError);
+    release();
+    await vi.waitFor(() => expect(host.vmReconcilePhysicalRuns.size).toBe(0));
+
+    expect(inspect).toHaveBeenCalledTimes(inspectionsBeforeShutdown);
+    expect(flush).not.toHaveBeenCalled();
   });
 });

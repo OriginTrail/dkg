@@ -36,7 +36,6 @@ import {
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   Logger, createOperationContext, getMetrics, sparqlString, isSafeIri, assertSafeIri,
-  parseDeterministicKnowledgeAssetUal,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   LEGACY_TRUST_LEVEL_PREDICATE,
@@ -153,7 +152,6 @@ import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, pri
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
   buildReconciledKnowledgeAssetUal,
-  packKnowledgeAssetIdFromIdentity,
 } from './ka-identity.js';
 import {
   createCGMemberEnumerator,
@@ -248,14 +246,9 @@ import {
   type OrdinalRecoveryTarget,
 } from './chain-reconciler.js';
 import {
-  ContextGraphAssetFetchConflictError,
-  ContextGraphAssetFetchValidationError,
   ContextGraphOnChainIdUnresolvedError,
-  MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
   VmReconcileUnavailableError,
   VmReconcileQueueClosedError,
-  type ContextGraphAssetFetchItemResult,
-  type ContextGraphAssetFetchResult,
   type ContextGraphReconcileResult,
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
@@ -270,11 +263,14 @@ import {
   type VmRecoveryProviderAttempt,
   type VmRecoveryUalDisposition,
 } from './vm-recovery-provider-policy.js';
+import { encodeExactAssetUals, MAX_EXACT_SYNC_ASSETS } from './sync/exact-assets.js';
 import {
-  encodeExactAssetUals,
-  MAX_EXACT_SYNC_ASSETS,
-  requireExactAssetUals,
-} from './sync/exact-assets.js';
+  MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+  ExactAssetFetchLifecycleClosedError,
+  runExactAssetFetch,
+  type ContextGraphAssetFetchResult,
+  type ExactAssetFetchEvidence,
+} from './sync/exact-asset-fetch.js';
 
 function rsHealStoreOptions(operation: string, signal?: AbortSignal): QueryOptions {
   return {
@@ -3189,59 +3185,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
       throw new VmReconcileQueueClosedError();
     }
 
-    let uals: string[];
-    try {
-      uals = requireExactAssetUals(requestedUals);
-    } catch (error) {
-      throw new ContextGraphAssetFetchValidationError(
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-
-    let requestedPeerIds: string[] | undefined;
-    if (options.peerIds !== undefined) {
-      if (!Array.isArray(options.peerIds) || options.peerIds.length === 0) {
-        throw new ContextGraphAssetFetchValidationError(
-          'peerIds must contain at least one peer when provided',
-        );
-      }
-      if (options.peerIds.length > MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS) {
-        throw new ContextGraphAssetFetchValidationError(
-          `Exact asset fetch accepts at most ${MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS} peerIds`,
-        );
-      }
-      requestedPeerIds = [];
-      const seenPeerIds = new Set<string>();
-      for (const rawPeerId of options.peerIds) {
-        if (typeof rawPeerId !== 'string' || rawPeerId.trim().length === 0) {
-          throw new ContextGraphAssetFetchValidationError(
-            'Every peerIds entry must be a non-empty string',
-          );
-        }
-        const peerId = rawPeerId.trim();
-        if (!seenPeerIds.has(peerId)) {
-          seenPeerIds.add(peerId);
-          requestedPeerIds.push(peerId);
-        }
-      }
-    }
-
     const subscription = this.subscribedContextGraphs.get(localCgId);
     if (!subscription?.subscribed && !subscription?.coreHosted) {
       throw new ContextGraphNotFoundError(localCgId);
     }
     if (
       typeof this.chain.getKAContextGraphId !== 'function'
-      || typeof this.chain.getLatestMerkleRoot !== 'function'
-      || typeof this.chain.getLatestMerkleRootPublisher !== 'function'
-      || typeof this.chain.getBlockNumber !== 'function'
+      || typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function'
     ) {
       throw new VmReconcileUnavailableError();
     }
     const getKAContextGraphId = this.chain.getKAContextGraphId.bind(this.chain);
-    const getLatestMerkleRoot = this.chain.getLatestMerkleRoot.bind(this.chain);
-    const getLatestMerkleRootPublisher = this.chain.getLatestMerkleRootPublisher.bind(this.chain);
-    const getBlockNumber = this.chain.getBlockNumber.bind(this.chain);
+    const readKnowledgeAssetVersionSnapshot =
+      this.chain.readKnowledgeAssetVersionSnapshot.bind(this.chain);
 
     const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
     const signal = this.vmReconcileLifecycleController?.signal;
@@ -3256,103 +3212,31 @@ export class SwmHostModeMethods extends DKGAgentBase {
     };
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
 
-    const physicalRun = (async (): Promise<ContextGraphAssetFetchResult> => {
-      const ctx = createOperationContext('system');
-      const bindingProofs = new Map<string, Promise<boolean>>();
-      const evidence: Array<{
-        ual: string;
-        kaId: bigint;
-        onChainCgId: string;
-        merkleRoot: Uint8Array;
-        publisherAddress: string;
-        versionBlock: number;
-      }> = [];
-      const rawHeadBlock = await getBlockNumber();
-      const versionBlock = Number(rawHeadBlock ?? 0);
-      if (!Number.isSafeInteger(versionBlock) || versionBlock < 0) {
-        throw new ContextGraphAssetFetchConflictError(
-          `Chain returned an invalid head block for Context Graph "${localCgId}"`,
-        );
-      }
-
-      let expectedOnChainId: string | undefined;
-      for (const ual of uals) {
+    const ctx = createOperationContext('system');
+    const finalizer = this.getOrCreateFinalizationHandler();
+    const physicalRun = runExactAssetFetch({
+      contextGraphId: localCgId,
+      requestedUals,
+      ...(options.peerIds === undefined ? {} : { peerIds: options.peerIds }),
+      ...(subscription.onChainId ? { expectedOnChainId: subscription.onChainId } : {}),
+    }, {
+      chainId: this.chain.chainId,
+      signal,
+      isCurrent,
+      getKAContextGraphId: (kaId, readSignal) =>
+        getKAContextGraphId(kaId, { signal: readSignal }),
+      readKnowledgeAssetVersionSnapshot: (kaId, readSignal) =>
+        readKnowledgeAssetVersionSnapshot(kaId, { signal: readSignal }),
+      verifyLocalContextGraph: (onChainCgId) =>
+        this.requireLocalCgMatchesOnChainSlot(
+          localCgId,
+          onChainCgId,
+          ctx,
+          { signal },
+        ),
+      inspectLocal: async (item: ExactAssetFetchEvidence) => {
         if (!isCurrent()) throw new VmReconcileQueueClosedError();
-        const identity = parseDeterministicKnowledgeAssetUal(ual);
-        if (identity.chainId !== this.chain.chainId) {
-          throw new ContextGraphAssetFetchConflictError(
-            `Knowledge Asset ${ual} belongs to network ${identity.chainId}, not ${this.chain.chainId}`,
-          );
-        }
-        const kaId = packKnowledgeAssetIdFromIdentity({
-          agentAddress: identity.agentAddress,
-          kaNumber: identity.kaNumber,
-        });
-        const boundOnChainId = (await getKAContextGraphId(kaId, { signal })).toString();
-        if (boundOnChainId === '0') {
-          throw new ContextGraphAssetFetchConflictError(
-            `Knowledge Asset ${ual} is not registered to a Context Graph`,
-          );
-        }
-        if (expectedOnChainId !== undefined && expectedOnChainId !== boundOnChainId) {
-          throw new ContextGraphAssetFetchConflictError(
-            'All requested Knowledge Assets must belong to the same on-chain Context Graph',
-          );
-        }
-        expectedOnChainId = boundOnChainId;
-        if (subscription.onChainId && subscription.onChainId !== boundOnChainId) {
-          throw new ContextGraphAssetFetchConflictError(
-            `Knowledge Asset ${ual} belongs to on-chain Context Graph ${boundOnChainId}, `
-              + `not the node's bound Context Graph ${subscription.onChainId}`,
-          );
-        }
-        let bindingProof = bindingProofs.get(boundOnChainId);
-        if (!bindingProof) {
-          bindingProof = this.requireLocalCgMatchesOnChainSlot(
-            localCgId,
-            boundOnChainId,
-            ctx,
-            { signal },
-          );
-          bindingProofs.set(boundOnChainId, bindingProof);
-        }
-        if (!(await bindingProof)) {
-          throw new ContextGraphAssetFetchConflictError(
-            `Local Context Graph "${localCgId}" does not match on-chain Context Graph ${boundOnChainId}`,
-          );
-        }
-        const merkleRoot = await getLatestMerkleRoot(kaId, { signal });
-        if (merkleRoot.length !== 32) {
-          throw new ContextGraphAssetFetchConflictError(
-            `Knowledge Asset ${ual} has an invalid latest Merkle root`,
-          );
-        }
-        const publisherAddress = await getLatestMerkleRootPublisher(kaId, { signal });
-        if (typeof publisherAddress !== 'string' || publisherAddress.length === 0) {
-          throw new ContextGraphAssetFetchConflictError(
-            `Knowledge Asset ${ual} has no latest publisher on-chain`,
-          );
-        }
-        evidence.push({
-          ual,
-          kaId,
-          onChainCgId: boundOnChainId,
-          merkleRoot,
-          publisherAddress,
-          versionBlock,
-        });
-      }
-      if (!expectedOnChainId) {
-        throw new ContextGraphAssetFetchValidationError('No Knowledge Asset UALs were provided');
-      }
-
-      const finalizer = this.getOrCreateFinalizationHandler();
-      const itemResults = new Map<string, ContextGraphAssetFetchItemResult>();
-      const inspectExactLocalState = async (
-        item: typeof evidence[number],
-      ): Promise<'present' | 'materialized' | 'missing'> => {
-        if (!isCurrent()) throw new VmReconcileQueueClosedError();
-        const outcome = await finalizer.handleChainReconciledKC({
+        const outcome = await finalizer.handleExactChainReconciledKC({
           contextGraphId: localCgId,
           onChainCgId: item.onChainCgId,
           ual: item.ual,
@@ -3360,34 +3244,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
           publisherAddress: item.publisherAddress,
           kaId: item.kaId,
           versionBlock: item.versionBlock,
-        }, ctx, { allowLegacyScan: false });
+          authorAddress: item.authorAddress,
+        }, ctx);
         if (outcome === 'promoted') return 'materialized';
         if (outcome === 'already-confirmed' || outcome === 'stale-target') return 'present';
         return 'missing';
-      };
-
-      let remaining = new Map<string, typeof evidence[number]>();
-      for (const item of evidence) {
-        const state = await inspectExactLocalState(item);
-        if (state === 'present') {
-          itemResults.set(item.ual, {
-            ual: item.ual,
-            kaId: item.kaId.toString(),
-            status: 'already-present',
-          });
-        } else if (state === 'materialized') {
-          itemResults.set(item.ual, {
-            ual: item.ual,
-            kaId: item.kaId.toString(),
-            status: 'materialized',
-          });
-        } else {
-          remaining.set(item.ual, item);
-        }
-      }
-
-      let candidatePeerIds: string[] = requestedPeerIds ?? [];
-      if (remaining.size > 0 && candidatePeerIds.length === 0) {
+      },
+      resolvePeerIds: async () => {
         const curatorResolution = await this.resolveCuratorPeerIdsForCg(localCgId, {
           maxPeerIds: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
           signal,
@@ -3396,100 +3259,49 @@ export class SwmHostModeMethods extends DKGAgentBase {
         if (!isCurrent()) throw new VmReconcileQueueClosedError();
         const connectedPeerIds = this.node?.libp2p?.getConnections?.()
           ?.map((connection) => connection.remotePeer.toString()) ?? [];
-        candidatePeerIds = [...new Set([
+        return [...new Set([
           ...curatorResolution.peerIds,
           this.preferredSyncPeers.get(localCgId),
           ...connectedPeerIds,
-        ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))]
-          .slice(0, MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS);
-      }
-
-      let peerAttempts = 0;
-      for (const peerId of candidatePeerIds) {
-        if (remaining.size === 0) break;
+        ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))];
+      },
+      preparePeer: async (peerId) => {
+        await this.ensurePeerConnected(peerId, { signal });
         if (!isCurrent()) throw new VmReconcileQueueClosedError();
-        try {
-          await this.ensurePeerConnected(peerId, { signal });
-          if (!isCurrent()) throw new VmReconcileQueueClosedError();
-          const remotePeer = this.node.libp2p.getConnections()
-            .find((connection) => connection.remotePeer.toString() === peerId)
-            ?.remotePeer;
-          if (!remotePeer || !(await this.waitForSyncProtocol(remotePeer, signal))) continue;
-          if (!(await this.ensurePeerAdmittedForRecovery(
-            peerId,
-            ctx,
-            'Exact asset fetch peer',
-            signal,
-          ))) continue;
-          peerAttempts += 1;
-          await this.syncExactKnowledgeAssetsFromPeerDetailed(
-            peerId,
-            localCgId,
-            [...remaining.keys()],
-            { signal, isCurrent },
-          );
-        } catch (error) {
-          if (!isCurrent()) throw new VmReconcileQueueClosedError();
-          this.log.info(
-            ctx,
-            `Exact asset fetch for "${localCgId}" from ${peerId.slice(-8)} failed: `
-              + `${error instanceof Error ? error.message : String(error)}`,
-          );
-          continue;
-        }
-
-        const nextRemaining = new Map<string, typeof evidence[number]>();
-        for (const item of remaining.values()) {
-          const state = await inspectExactLocalState(item);
-          if (state === 'present' || state === 'materialized') {
-            itemResults.set(item.ual, {
-              ual: item.ual,
-              kaId: item.kaId.toString(),
-              status: 'fetched',
-            });
-          } else {
-            nextRemaining.set(item.ual, item);
-          }
-        }
-        remaining = nextRemaining;
-      }
-
-      for (const item of remaining.values()) {
-        itemResults.set(item.ual, {
-          ual: item.ual,
-          kaId: item.kaId.toString(),
-          status: 'unresolved',
-        });
-      }
-      const items = uals.map((ual) => itemResults.get(ual)!);
-      const alreadyPresentAssets = items.filter((item) => item.status === 'already-present').length;
-      const materializedAssets = items.filter((item) => item.status === 'materialized').length;
-      const fetchedAssets = items.filter((item) => item.status === 'fetched').length;
-      const unresolvedAssets = items.filter((item) => item.status === 'unresolved').length;
-      if (materializedAssets + fetchedAssets > 0) {
+        const remotePeer = this.node.libp2p.getConnections()
+          .find((connection) => connection.remotePeer.toString() === peerId)
+          ?.remotePeer;
+        if (!remotePeer || !(await this.waitForSyncProtocol(remotePeer, signal))) return false;
+        return this.ensurePeerAdmittedForRecovery(
+          peerId,
+          ctx,
+          'Exact asset fetch peer',
+          signal,
+        );
+      },
+      fetchFromPeer: async (peerId, uals) => {
+        await this.syncExactKnowledgeAssetsFromPeerDetailed(
+          peerId,
+          localCgId,
+          [...uals],
+          { signal, isCurrent },
+        );
+      },
+      flush: async () => {
         await this.store.flush?.({
           priority: 'background',
           source: 'agent.exactAssetFetch.flush',
         });
+      },
+      log: (message) => this.log.info(ctx, message),
+    }).catch((error) => {
+      if (error instanceof VmReconcileQueueClosedError
+        || error instanceof ExactAssetFetchLifecycleClosedError) {
+        throw new VmReconcileQueueClosedError();
       }
-      return {
-        contextGraphId: localCgId,
-        onChainId: expectedOnChainId,
-        status: unresolvedAssets > 0
-          ? 'partial'
-          : materializedAssets + fetchedAssets > 0
-            ? 'complete'
-            : 'current',
-        requestedAssets: items.length,
-        alreadyPresentAssets,
-        materializedAssets,
-        fetchedAssets,
-        unresolvedAssets,
-        networkAttempted: peerAttempts > 0,
-        peerAttempts,
-        items,
-      };
-    })();
+      throw error;
+    });
+
     this.vmReconcilePhysicalRuns.add(physicalRun);
     void physicalRun.finally(() => {
       this.vmReconcilePhysicalRuns.delete(physicalRun);

@@ -24,7 +24,7 @@ describe('context graph targeted reconcile route', () => {
 
   async function request(
     reconcile: (contextGraphId: string, source: string) => Promise<unknown>,
-    body: Record<string, unknown> | string,
+    body: Record<string, unknown> | string | null,
     options: {
       authEnabled?: boolean;
       requestToken?: string;
@@ -266,6 +266,20 @@ describe('context graph targeted reconcile route', () => {
 
     expect(result.status).toBe(403);
     expect(result.body.error).toContain('node-level admin token');
+    expect(called).toBe(false);
+  });
+
+  it('rejects a null exact-fetch body without invoking the agent', async () => {
+    let called = false;
+    const result = await request(async () => undefined, null, {
+      path: '/api/context-graph/fetch-assets',
+      fetchAssets: async () => {
+        called = true;
+      },
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body.error).toBe('JSON body must be an object');
     expect(called).toBe(false);
   });
 

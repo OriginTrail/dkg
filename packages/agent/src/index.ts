@@ -86,22 +86,30 @@ export {
   type Rfc64SelectedSwmGraphSyncStatus,
 } from './sync/selected-swm-graph-sync-status.js';
 export {
-  ContextGraphAssetFetchConflictError,
-  ContextGraphAssetFetchValidationError,
   ContextGraphOnChainIdUnresolvedError,
-  MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
   VmReconcileShutdownTimeoutError,
   VM_RECONCILE_SHUTDOWN_TIMEOUT_ERROR_CODE,
   VmReconcileUnavailableError,
-  type ContextGraphAssetFetchItemResult,
-  type ContextGraphAssetFetchItemStatus,
-  type ContextGraphAssetFetchResult,
   type ContextGraphReconcileResult,
   type ContextGraphReconcileStatus,
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
+export {
+  ContextGraphAssetFetchConflictError,
+  ContextGraphAssetFetchValidationError,
+  ExactAssetFetchLifecycleClosedError,
+  MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+  runExactAssetFetch,
+  type ContextGraphAssetFetchItemResult,
+  type ContextGraphAssetFetchItemStatus,
+  type ContextGraphAssetFetchResult,
+  type ExactAssetChainSnapshot,
+  type ExactAssetFetchDependencies,
+  type ExactAssetFetchEvidence,
+  type ExactAssetLocalState,
+} from './sync/exact-asset-fetch.js';
 export {
   ContextGraphMembershipPersistQueueClosedError,
   ContextGraphMembershipPersistQueueFullError,

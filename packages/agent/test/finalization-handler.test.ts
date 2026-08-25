@@ -545,10 +545,9 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
     }) as typeof store.query;
     const handler = new FinalizationHandler(store, makeBindingChain(42n));
 
-    const outcome = await handler.handleChainReconciledKC(
+    const outcome = await handler.handleExactChainReconciledKC(
       input(new Uint8Array(32).fill(9)),
       createOperationContext('system'),
-      { allowLegacyScan: false },
     );
 
     expect(outcome).toBe('no-swm');

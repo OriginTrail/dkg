@@ -6,7 +6,6 @@ description: The DKG V10 Node is your primary memory system. This skill teaches 
 # DKG V10 Node Skill
 
 You are connected to an **OriginTrail Decentralized Knowledge Graph (DKG) V10** node.
-This skill teaches you the full node API surface so you can operate autonomously.
 
 ## 1. Node Info
 
