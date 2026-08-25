@@ -60,23 +60,81 @@ const MIN_SALT_BYTES = 16;
 
 /**
  * Upper bounds, the counterpart to the minimums above. The minimums stop a
- * keystore from advertising a cost so low that the KDF is cheap to attack; the
- * maximums stop one from advertising a cost so high that simply loading the
- * file exhausts the process before any passphrase is checked. scrypt's working
- * set is 128 * N * r bytes: this CLI writes N=2^18, r=8, i.e. exactly 256 MiB,
- * so the ceiling is set one doubling above that to leave room for keystores
- * written by other tools at a higher cost, while still bounding the allocation.
+ * keystore advertising a cost cheap enough to attack; the maximums stop one
+ * advertising a cost too expensive to service, which would let a file exhaust
+ * the process before any passphrase is checked.
+ *
+ * ONE policy governs both what we accept and what we execute. Splitting those
+ * apart is what made the previous revision wrong in both directions:
+ *
+ *  - `deriveKey` passed a hardcoded `maxmem` of 256 MiB while this CLI writes
+ *    N=2^18, r=8 — a working set of *exactly* 256 MiB. OpenSSL's check is
+ *    `workingSet + overhead <= maxmem`, so the CLI's own production parameters
+ *    were rejected with `ERR_CRYPTO_INVALID_SCRYPT_PARAMS` ("memory limit
+ *    exceeded"). The test suite never caught it because it lowers N to 2^15.
+ *  - An acceptance ceiling above the execution budget would admit parameters
+ *    that then fail inside OpenSSL rather than at our own diagnosable boundary.
+ *
+ * So: `MAX_SCRYPT_WORKING_SET_BYTES` is the largest working set we accept, and
+ * the execution budget is derived from it with an allowance for OpenSSL's own
+ * overhead (measured at ~0.3% of the working set; 8 MiB is generous at the
+ * ceiling). Everything that needs a limit reads one of these two.
  */
-const MAX_SCRYPT_MEMORY_BYTES = 512 * 1024 * 1024;
+const MAX_SCRYPT_WORKING_SET_BYTES = 512 * 1024 * 1024;
+const SCRYPT_OVERHEAD_ALLOWANCE_BYTES = 8 * 1024 * 1024;
+const SCRYPT_EXECUTION_MAXMEM_BYTES =
+  MAX_SCRYPT_WORKING_SET_BYTES + SCRYPT_OVERHEAD_ALLOWANCE_BYTES;
 const MAX_SCRYPT_P = 16;
+
+/** scrypt's working set, the quantity both the ceiling and OpenSSL bound. */
+function scryptWorkingSetBytes(n: number, r: number): number {
+  return 128 * n * r;
+}
 
 /** scrypt requires N to be a power of two; a non-power-of-two throws deep in OpenSSL. */
 function isPowerOfTwo(value: number): boolean {
   return Number.isSafeInteger(value) && value > 0 && (value & (value - 1)) === 0;
 }
 
+/**
+ * Sole owner of the upper-bound policy. Throws a diagnosable error for any
+ * parameter set we will not service, so nothing reaches OpenSSL that could only
+ * fail there. Lower bounds stay inline in `decryptKeystore` alongside their
+ * existing "weak keystore" wording.
+ */
+function assertScryptCostWithinLimits(n: number, r: number, p: number): void {
+  if (!isPowerOfTwo(n)) {
+    throw new Error(
+      `Refusing to load keystore: scrypt N must be a power of two (got n=${n}).`,
+    );
+  }
+  const workingSetBytes = scryptWorkingSetBytes(n, r);
+  if (!Number.isSafeInteger(workingSetBytes) || workingSetBytes > MAX_SCRYPT_WORKING_SET_BYTES) {
+    throw new Error(
+      `Refusing to load keystore: KDF memory cost above maximum (n=${n}, r=${r} implies ${workingSetBytes} bytes > ${MAX_SCRYPT_WORKING_SET_BYTES}). scrypt memory cost too high.`,
+    );
+  }
+  if (p > MAX_SCRYPT_P) {
+    throw new Error(
+      `Refusing to load keystore: KDF parameters above maximum (p=${p} > ${MAX_SCRYPT_P}). scrypt p too high.`,
+    );
+  }
+}
+
 /** @internal Allow tests to use lighter scrypt params to avoid memory limits */
 export function _setScryptN(n: number) { SCRYPT_N = n; }
+
+/** @internal Exposes the KDF cost policy so tests can pin it without deriving. */
+export function _scryptCostPolicy() {
+  return {
+    maxWorkingSetBytes: MAX_SCRYPT_WORKING_SET_BYTES,
+    executionMaxmemBytes: SCRYPT_EXECUTION_MAXMEM_BYTES,
+    maxP: MAX_SCRYPT_P,
+    productionWorkingSetBytes: scryptWorkingSetBytes(2 ** 18, SCRYPT_R),
+    workingSetBytes: scryptWorkingSetBytes,
+    assertWithinLimits: assertScryptCostWithinLimits,
+  };
+}
 
 function deriveKey(
   passphrase: string,
@@ -87,7 +145,7 @@ function deriveKey(
     N: params?.N ?? SCRYPT_N,
     r: params?.r ?? SCRYPT_R,
     p: params?.p ?? SCRYPT_P,
-    maxmem: 256 * 1024 * 1024,
+    maxmem: SCRYPT_EXECUTION_MAXMEM_BYTES,
   });
 }
 
@@ -162,26 +220,10 @@ export async function decryptKeystore(
       `Refusing to load weak keystore: KDF parameters below minimum (p=${kdfparams.p} < ${MIN_SCRYPT_P}). scrypt p too low.`,
     );
   }
-  // Counterpart to the minimums above: reject parameters whose declared cost is
-  // too high to service. `n` must also be a power of two — scrypt requires it,
-  // and a non-power-of-two otherwise fails deep inside OpenSSL with an opaque
-  // error rather than a diagnosable one here.
-  if (!isPowerOfTwo(kdfparams.n)) {
-    throw new Error(
-      `Refusing to load keystore: scrypt N must be a power of two (got n=${kdfparams.n}).`,
-    );
-  }
-  const estimatedMemoryBytes = 128 * kdfparams.n * kdfparams.r;
-  if (!Number.isSafeInteger(estimatedMemoryBytes) || estimatedMemoryBytes > MAX_SCRYPT_MEMORY_BYTES) {
-    throw new Error(
-      `Refusing to load keystore: KDF memory cost above maximum (n=${kdfparams.n}, r=${kdfparams.r} implies ${estimatedMemoryBytes} bytes > ${MAX_SCRYPT_MEMORY_BYTES}). scrypt memory cost too high.`,
-    );
-  }
-  if (kdfparams.p > MAX_SCRYPT_P) {
-    throw new Error(
-      `Refusing to load keystore: KDF parameters above maximum (p=${kdfparams.p} > ${MAX_SCRYPT_P}). scrypt p too high.`,
-    );
-  }
+  // Counterpart to the minimums above. Single policy owner — see
+  // `assertScryptCostWithinLimits`; nothing that could only fail inside OpenSSL
+  // is allowed past this point.
+  assertScryptCostWithinLimits(kdfparams.n, kdfparams.r, kdfparams.p);
   if (kdfparams.dklen !== REQUIRED_DKLEN) {
     throw new Error(
       `Refusing to load weak keystore: dklen must be ${REQUIRED_DKLEN} for AES-256-GCM (got ${kdfparams.dklen}). invalid dklen.`,

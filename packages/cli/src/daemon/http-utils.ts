@@ -1928,28 +1928,19 @@ export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: st
   return isLoopbackClientIp(ip) && isLoopbackRateLimitExemptPath(pathname);
 }
 
+/**
+ * Boolean adapter over the single context-graph ID policy in
+ * `@origintrail-official/dkg-core`. This deliberately holds no rules of its own:
+ * it previously carried a second copy (length limit, character whitelist and the
+ * segment-aware traversal check described in CLI-16), which drifted from the
+ * core validator — core was missing the segment check while 26 route call sites
+ * reached it via `validateRequiredContextGraphId`. Keeping the boolean shape for
+ * existing callers, but `validateContextGraphId` now owns the policy, so a
+ * future change to the character set or the length cap has exactly one home.
+ */
 export function isValidContextGraphId(id: string): boolean {
-  if (!id || typeof id !== "string") return false;
-  if (id.length > 256) return false;
-  // CLI-16 (
-  // reject path-traversal patterns where it actually matters — i.e.
-  // segments that the OS / URL resolver will interpret as the
-  // parent / current directory. The character whitelist below
-  // allows `.` and `/` because URNs / DIDs / URLs legitimately
-  // contain version markers like `v1..2`, schema fragments like
-  // `https://example.com/a..b`, etc.
-  //
-  // The earlier blanket `id.includes('..')` check broke those
-  // legitimate identifiers without adding any defence-in-depth: a
-  // segment-aware check is both stricter (still rejects every real
-  // traversal) and tighter (does not produce false-positive 4xx
-  // for valid context-graph IDs that happen to contain `..` inside
-  // a single segment).
-  for (const seg of id.split("/")) {
-    if (seg === "." || seg === "..") return false;
-  }
-  // Allow URNs, DIDs, simple slug-like identifiers, and URIs
-  return /^[\w:/.@\-]+$/.test(id);
+  if (typeof id !== "string") return false;
+  return validateContextGraphId(id).valid;
 }
 
 /**

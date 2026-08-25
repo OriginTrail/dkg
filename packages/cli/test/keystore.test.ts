@@ -4,6 +4,7 @@ import {
   decryptKeystore,
   isEncryptedKeystore,
   _setScryptN,
+  _scryptCostPolicy,
   type EncryptedKeystore,
 } from '../src/keystore.js';
 
@@ -113,15 +114,46 @@ describe('decryptKeystore error handling', () => {
     );
   });
 
-  it('rejects keystore declaring a KDF memory cost above the ceiling', async () => {
-    // The existing minimums stop a file advertising a cost cheap enough to
-    // attack. This is the other end: scrypt's working set is 128 * N * r, so
-    // N=2**30 with r=8 asks the loader for ~1 TiB before the passphrase is ever
-    // checked. Rejected up-front with a diagnosable error instead.
+  it('rejects a KDF memory cost immediately above the declared ceiling', async () => {
+    // Boundary, not a wild value: n/r chosen so the working set is exactly one
+    // scrypt block over MAX_WORKING_SET. A ceiling raised or lowered by any
+    // amount fails this pair, which a 2**30 smoke test would not.
+    const { maxWorkingSetBytes, workingSetBytes } = _scryptCostPolicy();
+    const overN = (maxWorkingSetBytes / (128 * 8)) * 2; // r=8 => 2x ceiling
+    expect(workingSetBytes(overN, 8)).toBeGreaterThan(maxWorkingSetBytes);
     const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
-    ks.crypto.kdfparams.n = 2 ** 30;
+    ks.crypto.kdfparams.n = overN;
+    ks.crypto.kdfparams.r = 8;
     await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(
       /memory cost too high/,
+    );
+  });
+
+  it('accepts a KDF memory cost exactly at the declared ceiling', async () => {
+    // Proves the ceiling is inclusive without allocating it: dklen is validated
+    // after the cost policy, so an invalid dklen stops execution before scrypt.
+    // The error text discriminates — a memory rejection would name the cost.
+    const { maxWorkingSetBytes, workingSetBytes } = _scryptCostPolicy();
+    const atN = maxWorkingSetBytes / (128 * 8);
+    expect(workingSetBytes(atN, 8)).toBe(maxWorkingSetBytes);
+    const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
+    ks.crypto.kdfparams.n = atN;
+    ks.crypto.kdfparams.r = 8;
+    ks.crypto.kdfparams.dklen = 16;
+    await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(/dklen/);
+  });
+
+  it('accepts p at the ceiling and rejects p one above it', async () => {
+    const { maxP } = _scryptCostPolicy();
+    const atCeiling = await encryptKeystore(TEST_KEY, PASSPHRASE);
+    atCeiling.crypto.kdfparams.p = maxP;
+    atCeiling.crypto.kdfparams.dklen = 16;
+    await expect(decryptKeystore(atCeiling, PASSPHRASE)).rejects.toThrow(/dklen/);
+
+    const overCeiling = await encryptKeystore(TEST_KEY, PASSPHRASE);
+    overCeiling.crypto.kdfparams.p = maxP + 1;
+    await expect(decryptKeystore(overCeiling, PASSPHRASE)).rejects.toThrow(
+      /p too high/,
     );
   });
 
@@ -135,19 +167,38 @@ describe('decryptKeystore error handling', () => {
     );
   });
 
-  it('rejects keystore declaring a parallelism factor above the ceiling', async () => {
-    const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
-    ks.crypto.kdfparams.p = 1024;
-    await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(
-      /p too high/,
-    );
+  it('budgets enough memory for the CLI production parameters to actually derive', async () => {
+    // The regression this pins is a shipped one: `deriveKey` passed a hardcoded
+    // maxmem of 256 MiB while production N=2**18, r=8 needs a working set of
+    // exactly 256 MiB, and OpenSSL bounds `workingSet + overhead <= maxmem`.
+    // Production keystores therefore failed with ERR_CRYPTO_INVALID_SCRYPT_PARAMS.
+    // The suite lowers N to 2**15, so no round-trip test could ever catch it —
+    // this asserts the policy arithmetic instead, which is where the bug lived.
+    const { executionMaxmemBytes, productionWorkingSetBytes, maxWorkingSetBytes, assertWithinLimits } =
+      _scryptCostPolicy();
+    expect(productionWorkingSetBytes).toBe(128 * (2 ** 18) * 8);
+    expect(productionWorkingSetBytes).toBeLessThanOrEqual(maxWorkingSetBytes);
+    // Strictly greater: equality is exactly what OpenSSL rejects.
+    expect(executionMaxmemBytes).toBeGreaterThan(productionWorkingSetBytes);
+    expect(executionMaxmemBytes).toBeGreaterThan(maxWorkingSetBytes);
+    // And production parameters must pass the acceptance policy unchanged.
+    expect(() => assertWithinLimits(2 ** 18, 8, 1)).not.toThrow();
   });
 
-  it('still accepts the parameters this CLI itself writes', async () => {
-    // Guards the ceiling against being set below our own defaults: the CLI
-    // writes N=2**18, r=8, which is exactly 256 MiB of working set.
-    const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
-    await expect(decryptKeystore(ks, PASSPHRASE)).resolves.toBeDefined();
+  it('round-trips a keystore at the CLI production parameters', async () => {
+    // Must go through encryptKeystore/decryptKeystore — i.e. through deriveKey —
+    // or it proves nothing. A direct scryptSync call using the policy constant
+    // passes even when deriveKey ignores that constant, which is precisely the
+    // divergence that shipped. Allocates the real 256 MiB production working
+    // set once; the suite otherwise runs at N=2**15 to stay parallel-safe.
+    _setScryptN(2 ** 18);
+    try {
+      const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
+      expect(ks.crypto.kdfparams.n).toBe(2 ** 18);
+      expect(await decryptKeystore(ks, PASSPHRASE)).toBe(TEST_KEY);
+    } finally {
+      _setScryptN(2 ** 15);
+    }
   });
 });
 
