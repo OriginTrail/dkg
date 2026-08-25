@@ -47,6 +47,7 @@ import {
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'11'.repeat(32)}`);
 const CATALOG_WALLET = new ethers.Wallet(`0x${'22'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
+const OTHER_AUTHOR = `0x${'aa'.repeat(20)}` as EvmAddressV1;
 const CATALOG_ISSUER = CATALOG_WALLET.address.toLowerCase() as EvmAddressV1;
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
 const CHAIN_ID = '20430' as const;
@@ -197,6 +198,14 @@ describe('RFC-64 finalized VM placement composition', () => {
       ...base,
       assertedAtKav10Address: `0x${'ab'.repeat(20)}`,
     } as never), 'finalized-vm-composition-mismatch');
+  });
+
+  it('rejects a valid placement when the selected catalog author is different', async () => {
+    const placement = await createPlacement(KA_2, ROOT_2);
+    expectCode(() => composeFinalizedVmSetV1({
+      ...requestFor([placement]),
+      catalogAuthorAddress: OTHER_AUTHOR,
+    }), 'finalized-vm-composition-mismatch');
   });
 
   it('rejects placements absent from the finalized inventory and malformed unplaced rows', async () => {

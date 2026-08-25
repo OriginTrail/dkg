@@ -15,6 +15,7 @@ import {
   resolveRfc64FinalizedPolicyAgentPrecommitV1,
 } from './finalized-policy-agent-precommit-v1.js';
 import { createFinalizedVmRuntimeV1 } from './finalized-vm-runtime-v1.js';
+import { FinalizedVmCompositionErrorV1 } from './finalized-vm-composer-v1.js';
 import { createFinalizedVmStoreMaterializerV1 } from './finalized-vm-store-materializer-v1.js';
 
 export interface Rfc64FinalizedVmAgentPrecommitOptionsV1 {
@@ -38,6 +39,12 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
   options: Rfc64FinalizedVmAgentPrecommitOptionsV1,
 ): Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
   return Object.freeze(async (plan, signal): Promise<void> => {
+    if (plan.catalogScope.subGraphName !== null) {
+      throw new FinalizedVmCompositionErrorV1(
+        'finalized-vm-composition-input',
+        'Release 2 private finalized VM recovery supports the root catalog only',
+      );
+    }
     const resolved = await resolveRfc64FinalizedPolicyAgentPrecommitV1(
       options,
       plan,

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createRfc64FinalizedVmAgentPrecommitV1 } from '../src/rfc64/finalized-vm-agent-precommit-v1.js';
+import { FinalizedVmCompositionErrorV1 } from '../src/rfc64/finalized-vm-composer-v1.js';
 import {
   RFC64_VM_CHAIN_ID,
   RFC64_VM_CONTEXT_GRAPH_NAME,
@@ -14,6 +15,27 @@ import {
 
 
 describe('RFC-64 finalized VM agent precommit', () => {
+  it('rejects named-subgraph recovery before chain resolution in Release 2', async () => {
+    const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
+    const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
+    const handler = createRfc64FinalizedVmAgentPrecommitV1({
+      ...baseOptions(),
+      getOnChainContextGraphId,
+      getEvmChainId,
+    });
+    const namedPlan = {
+      ...plan(),
+      catalogScope: { ...plan().catalogScope, subGraphName: 'private-lane' },
+    } as never;
+
+    await expect(handler(namedPlan, new AbortController().signal)).rejects.toMatchObject({
+      name: 'FinalizedVmCompositionErrorV1',
+      code: 'finalized-vm-composition-input',
+    } satisfies Partial<FinalizedVmCompositionErrorV1>);
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
+    expect(getEvmChainId).not.toHaveBeenCalled();
+  });
+
   it('rejects when the cleartext catalog lane has no numeric on-chain binding', async () => {
     const getOnChainContextGraphId = vi.fn(async () => null);
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
@@ -87,6 +109,5 @@ describe('RFC-64 finalized VM agent precommit', () => {
     ).rejects.toThrow('knowledge assets lifecycle address must be a lowercase 20-byte');
   });
 });
-
 
 

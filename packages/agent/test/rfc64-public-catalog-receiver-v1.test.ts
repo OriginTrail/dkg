@@ -245,6 +245,23 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(receiver.stats()).toMatchObject({ failed: 1, applied: 0 });
   });
 
+  it('starts a new semantic attempt only after the prior same-head task is terminal', async () => {
+    const onAttemptStart = vi.fn();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => { throw new Error('terminal'); }),
+      { maxAttempts: 1, retryBackoffMs: 0, onAttemptStart },
+    );
+    const head = announcement();
+    receiver.schedule(head, 'peerA');
+    receiver.schedule(head, 'peerB');
+    await receiver.whenIdle();
+    expect(onAttemptStart).toHaveBeenCalledTimes(1);
+
+    receiver.schedule(head, 'peerA');
+    await receiver.whenIdle();
+    expect(onAttemptStart).toHaveBeenCalledTimes(2);
+  });
+
   it('serializes different heads in one catalog scope', async () => {
     const firstGate = deferred<Rfc64PublicCatalogReconcileResultV1>();
     let active = 0;

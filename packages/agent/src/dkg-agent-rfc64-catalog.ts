@@ -88,8 +88,9 @@ import {
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
-import type {
-  Rfc64PublicCatalogReconciliationFailureV1,
+import {
+  classifyRfc64CatalogReconciliationTerminalReasonV1,
+  type Rfc64PublicCatalogReconciliationFailureV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import {
   Rfc64PublicCatalogSuccessorProducerV1,
@@ -299,10 +300,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       receiver: {
+        onAttemptStart: (announcement) => {
+          this.rfc64PublicCatalogReconciliationFailuresV1.beginAttempt(
+            announcement.catalogHeadObjectDigest,
+          );
+        },
         onError: (announcement, error) => {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
             announcement.catalogHeadObjectDigest,
             error,
+            classifyRfc64CatalogReconciliationTerminalReasonV1(error),
           );
         },
       },

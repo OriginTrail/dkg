@@ -2,9 +2,11 @@ import type { Digest32V1 } from '@origintrail-official/dkg-core';
 import { describe, expect, it } from 'vitest';
 
 import { Rfc64PublicCatalogNativeReceiverErrorV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
+import { FinalizedVmCompositionErrorV1 } from '../src/rfc64/finalized-vm-composer-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
   Rfc64PublicCatalogReconciliationFailureRegistryV1,
+  classifyRfc64CatalogReconciliationTerminalReasonV1,
 } from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 
 function digest(index: number): Digest32V1 {
@@ -77,5 +79,44 @@ describe('RFC-64 public catalog terminal failure registry v1', () => {
       errorCode: 'catalog-native-receiver-activation',
       causeCode: 'finalized-vm-composition-incomplete',
     });
+  });
+
+  it('keeps immutable diagnostics separate from the current retry result', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const head = digest(1);
+    registry.beginAttempt(head);
+    registry.record(head, Object.assign(new Error('first'), { code: 'first-code' }));
+    expect(registry.readCurrentAttempt(head)).toMatchObject({ errorCode: 'first-code' });
+
+    registry.beginAttempt(head);
+    expect(registry.readCurrentAttempt(head)).toBeNull();
+    registry.record(head, Object.assign(new Error('second'), { code: 'second-code' }));
+
+    expect(registry.read(head)).toMatchObject({ errorCode: 'first-code' });
+    expect(registry.readCurrentAttempt(head)).toMatchObject({
+      terminalReason: null,
+      errorCode: 'second-code',
+    });
+  });
+
+  it('translates only the exact typed private VM incomplete failure', () => {
+    const incomplete = new FinalizedVmCompositionErrorV1(
+      'finalized-vm-composition-incomplete',
+      'private details are not part of the semantic result',
+    );
+    const wrapped = new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-activation',
+      'precommit failed',
+      { cause: incomplete },
+    );
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(wrapped))
+      .toBe('no-authorized-provider');
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(
+      new Rfc64PublicCatalogNativeReceiverErrorV1(
+        'catalog-native-receiver-activation',
+        'ordinary failure',
+        { cause: new Error('RPC unavailable') },
+      ),
+    )).toBeNull();
   });
 });

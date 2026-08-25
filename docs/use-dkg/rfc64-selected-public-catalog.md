@@ -138,6 +138,11 @@ the authorized catalog cannot supply its bytes, status reports
 `known-incomplete` with reason `no-authorized-provider`. The receiver does not
 use a public or curator fallback.
 
+Release 2 private VM recovery supports only the root catalog
+(`subGraphName: null`). A private named-subgraph catalog is rejected before any
+chain read or store change. Named-subgraph VM recovery needs an authoritative
+chain-to-catalog lane map and is not inferred from the asset author.
+
 The bounded operator shape is:
 
 ```json
