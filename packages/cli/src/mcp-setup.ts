@@ -491,7 +491,7 @@ function detectContext(
     : { context: 'installed', monorepoRoot: null };
 }
 
-interface ClientTarget {
+export interface ClientTarget {
   name: string;
   configPath: string;
   /** Pretty path for display, with `~` substituted back in. */
@@ -1010,6 +1010,109 @@ function readConfigBody(target: ClientTarget): Record<string, unknown> {
     default:
       throw new Error(`Unknown client config format: ${String(format)}`);
   }
+}
+
+/** The launch shape of one registered MCP server, as the client stores it. */
+export interface RegisteredMcpServer {
+  command: string;
+  /**
+   * The declared launch arguments. `[]` means the key was absent — a legitimate
+   * args-less server. `null` means the key was PRESENT but is not a string
+   * array, which is not a launch block we can compare. The distinction matters:
+   * quietly dropping a non-string element would rewrite `args: [123]` into `[]`
+   * and let it match an args-less registry entry, manufacturing an install.
+   */
+  args: string[] | null;
+  /** String-valued env entries only; non-string values are not represented. */
+  env?: Record<string, string>;
+}
+
+/**
+ * Outcome of inspecting one client config for registered MCP servers.
+ * `ok: false` is "we could not look", never "we looked and found nothing".
+ *
+ * Carries the blocks rather than only their names. A server registered under a
+ * slug is evidence that THAT integration is installed only if it also launches
+ * what the registry entry says it should — the name alone cannot tell a real
+ * installation apart from an unrelated server that happens to share it.
+ */
+export type ServerKeyProbe =
+  | { ok: true; servers: Record<string, RegisteredMcpServer> }
+  | { ok: false; reason: string };
+
+/**
+ * Names of every MCP server registered in a client's config, whatever container
+ * that client uses (`mcpServers`, `servers`, `mcp_servers`) and whatever format
+ * it is written in (JSON, TOML).
+ *
+ * `dkg mcp setup` cares about one fixed leaf (`…dkg`); integration detection
+ * needs the sibling keys instead, because an installed integration registers
+ * itself under its own slug. Exposed here so `dkg integration list` reads the
+ * same client targets and container paths that `dkg mcp setup` writes, rather
+ * than maintaining a second, narrower list that silently misses clients.
+ *
+ * Absence of evidence is not evidence of absence, so the two are returned as
+ * different values rather than both as []. `ok: false` means we could not look
+ * — the file is present but unreadable, unparseable, or malformed at the
+ * container we needed. A caller that reports install state must not render
+ * that as "not installed": it would tell a user an integration is missing when
+ * the truth is that their config could not be read.
+ */
+export function readRegisteredServerKeys(target: ClientTarget): ServerKeyProbe {
+  let body: Record<string, unknown>;
+  try {
+    body = readConfigBody(target);
+  } catch (err) {
+    // A config that does not exist IS a real answer: this client has
+    // registered nothing. Anything else means the file is there and we failed.
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { ok: true, servers: {} };
+    return { ok: false, reason: `could not read ${target.displayPath}` };
+  }
+  const { head } = splitEntryPath(target.entryPath);
+  let cursor: unknown = body;
+  for (const segment of head) {
+    if (cursor === null || typeof cursor !== 'object') return { ok: true, servers: {} };
+    cursor = (cursor as Record<string, unknown>)[segment];
+  }
+  // Missing container: readable config, nothing registered.
+  if (cursor === undefined) return { ok: true, servers: {} };
+  // Present but not a KEYED object: malformed exactly where we needed to read.
+  // An array counts — `typeof [] === 'object'`, so without the explicit check it
+  // fell through to Object.entries([]) and reported "readable, nothing
+  // registered": a confident claim about a container we cannot interpret. The
+  // entry-level filter below already rejected arrays; the container needed the
+  // same treatment.
+  if (cursor === null || typeof cursor !== 'object' || Array.isArray(cursor)) {
+    return { ok: false, reason: `malformed server container in ${target.displayPath}` };
+  }
+  // Only entries that could actually launch count as registrations. `classify`
+  // above already treats `{ dkg: null }` as not-registered (deliberately —
+  // pre-F7 it read as `stale` and claimed there was a value to refresh). A
+  // value that is null, scalar, an array, or an object carrying no `command`
+  // is the same non-registration: nothing there can start. Counting one would
+  // be a false positive, the opposite failure from the unreadable-config case.
+  const servers: Record<string, RegisteredMcpServer> = {};
+  for (const [name, value] of Object.entries(cursor as Record<string, unknown>)) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
+    const block = value as Record<string, unknown>;
+    if (typeof block.command !== 'string') continue;
+    const env: Record<string, string> = {};
+    if (block.env !== null && typeof block.env === 'object' && !Array.isArray(block.env)) {
+      for (const [k, val] of Object.entries(block.env as Record<string, unknown>)) {
+        if (typeof val === 'string') env[k] = val;
+      }
+    }
+    let args: string[] | null;
+    if (block.args === undefined) {
+      args = []; // absent: a legitimate args-less server
+    } else if (Array.isArray(block.args) && block.args.every((a) => typeof a === 'string')) {
+      args = block.args as string[];
+    } else {
+      args = null; // present but not a string array — not comparable
+    }
+    servers[name] = { command: block.command, args, env };
+  }
+  return { ok: true, servers };
 }
 
 function serialiseTomlEntryOnly(

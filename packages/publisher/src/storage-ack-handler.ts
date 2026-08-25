@@ -7,6 +7,7 @@ import {
   type Quad,
   type QueryOptions,
   type StorePressureSnapshot,
+  invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
 import type {
   EventBus,
@@ -53,7 +54,7 @@ import { replaceCatalogQuads } from './catalog-persistence.js';
 import { generateKnowledgeAssetShareMetadata } from './metadata.js';
 import { storeKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
-import { validateKnowledgeAssetPublishRequest } from './validation.js';
+import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
@@ -924,6 +925,15 @@ export class StorageACKHandler {
             { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
           );
         }
+        // #2079: a REPLACE, not a drop — invisible to the catch-up lane's count
+        // gate, so the witness must be dropped explicitly. The head write and
+        // two other store calls follow, any of which can throw and leave content
+        // ahead of the head.
+        await invalidateSwmMaterializationWitness(
+          this.store,
+          swmGraphUri,
+          ackStoreOptions('storage-ack.persistGraphScoped.witnessInvalidate', signal),
+        ).catch(() => {});
       }
       await this.store.deleteByPattern(
         { graph: metaGraph, subject: operationSubject },
@@ -933,6 +943,10 @@ export class StorageACKHandler {
         metadata,
         ackStoreOptions('storage-ack.persistGraphScoped.insertOperationMeta', signal),
       );
+      // The current-head pointer is a delete/insert pair. Once that commit tail
+      // starts it must finish (including flush), even if the ACK deadline has
+      // already returned a decline; aborting between the two loses the last
+      // complete pointer. It remains isolated in the reserved ACK lane.
       await storeKnowledgeAssetWorkspaceHead({
         store: this.store,
         graphManager: this.graphManager,
@@ -941,9 +955,10 @@ export class StorageACKHandler {
         assertionVersion: graphPublish.scope.assertionVersion,
         shareOperationId: operationId,
         subGraphName: graphPublish.subGraphName,
+        queryOptions: ackStoreOptions('storage-ack.persistGraphScoped.workspaceHead'),
       });
       await this.store.flush?.(
-        ackStoreOptions('storage-ack.persistGraphScoped.flush', signal),
+        ackStoreOptions('storage-ack.persistGraphScoped.flush'),
       );
     }, signal);
     return result.ok ? { ok: true } : result;
@@ -2002,7 +2017,7 @@ export class StorageACKHandler {
             `intent=${graphUpdate.publicTripleCount}, local=${publicQuads.length}`,
         );
       }
-      const validation = validateKnowledgeAssetPublishRequest(
+      const validation = validateCanonicalGraphScopedKnowledgeAssetPayload(
         inlineByteLength === undefined
           ? publicQuads.map((quad) => ({ ...quad, graph: swmGraphUri }))
           : publicQuads,

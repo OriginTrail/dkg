@@ -29,7 +29,9 @@ import {
   type SendOptions,
   type SignedControlEnvelopeV1,
   type AuthorCatalogScopeV1,
+  type ContextGraphIdV1,
   type Digest32V1,
+  type NetworkIdV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import {
@@ -47,12 +49,17 @@ import type {
   StageVerifiedControlObjectsResultV1,
 } from './control-object-store-v1.js';
 import {
-  Rfc64AcceptedOpenCatalogPolicyRegistryV1,
   buildOpenOwnerContextGraphPolicyV1,
   computeOpenContextGraphPolicyDigestV1,
   type AcceptedOpenCatalogPolicyV1,
   type BuildOpenOwnerContextGraphPolicyInputV1,
 } from './open-catalog-policy-v1.js';
+import {
+  Rfc64CatalogAccessPolicyRegistryV1,
+  type AcceptRfc64CatalogAccessSnapshotInputV1,
+  type AcceptedRfc64CatalogAccessSnapshotV1,
+  type Rfc64CatalogAccessPolicyRegistryOptionsV1,
+} from './catalog-access-policy-v1.js';
 import {
   Rfc64PublicCatalogReceiverV1,
   type Rfc64PublicCatalogReceiverReconcilerV1,
@@ -60,18 +67,26 @@ import {
   type Rfc64PublicCatalogReceiverStatsV1,
 } from './public-catalog-receiver-v1.js';
 import {
+  RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+  Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1,
+  type Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
+  type Rfc64PublicCatalogCurrentHeadAuthorizationV1,
+  type Rfc64PublicCatalogCurrentHeadQueryV1,
+  type Rfc64PublicCatalogCurrentHeadScopeV1,
+} from './public-catalog-current-head-discovery-v1.js';
+import {
   Rfc64PublicCatalogNativeTransportV1,
-  type Rfc64PublicCatalogNativeAuthorizationInputV1,
-  type Rfc64PublicCatalogNativeAuthorizationV1,
   type Rfc64PublicCatalogNativeTransportOptionsV1,
 } from './public-catalog-native-transport-v1.js';
 import {
   produceDirectAuthorCatalogIssuerDelegationV1,
 } from './public-catalog-issuer-delegation-v1.js';
 import {
-  deriveRfc64PublicOpenCatalogScopeV1,
-  type Rfc64PublicOpenCatalogTrustedScopeResolverV1,
+  type Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1,
 } from './public-catalog-native-reconciler-v1.js';
+import {
+  deriveRfc64PublicRootCatalogScopeV1,
+} from './public-open-catalog-scope-v1.js';
 import type {
   Rfc64PublicCatalogIssuerAuthorizationV1,
 } from './public-catalog-successor-producer-v1.js';
@@ -80,22 +95,29 @@ import {
   Rfc64PublicCatalogTransportV1,
   encodeRfc64PublicCatalogHeadAnnouncementV1,
   parseRfc64PublicCatalogHeadAnnouncementV1,
+  type FetchedRfc64PublicCatalogHeadV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from './public-catalog-transport-v1.js';
+import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './catalog-peers-v1.js';
+
+export {
+  RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
+  snapshotRfc64PublicCatalogAnnouncementPeersV1,
+} from './catalog-peers-v1.js';
 
 /** Default per-peer announce/fetch deadline (ms). */
 const DEFAULT_TRANSPORT_TIMEOUT_MS = 10_000;
-/** Hard fan-out bound for one explicit best-effort announcement call. */
-export const RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 = 64;
-const RFC64_PUBLIC_CATALOG_PEER_ID_MAX_BYTES_V1 = 256;
-const UTF8 = new TextEncoder();
 
 export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly router: ProtocolRouter;
   readonly controlObjects: Rfc64ControlObjectOperationsV1;
+  /** Omit for an explicit open-only service; required before accepting private policy. */
+  readonly accessPolicyAuthority?: Rfc64CatalogAccessPolicyRegistryOptionsV1;
   readonly receiver?: Rfc64PublicCatalogReceiverOptionsV1;
   /** Full production native content/reconciliation path. Omission is diagnostic-only. */
   readonly native?: Rfc64PublicCatalogServiceNativeOptionsV1;
+  /** Optional Gate-3 pull-discovery capability; no automatic lifecycle trigger. */
+  readonly currentHeadDiscovery?: Rfc64PublicCatalogServiceCurrentHeadDiscoveryOptionsV1;
   /** Per-peer announce/fetch timeout (ms). */
   readonly transportTimeoutMs?: number;
   /**
@@ -124,7 +146,7 @@ export type Rfc64PublicCatalogContentFetchClientV1 = Pick<
 export interface Rfc64PublicCatalogReconcilerClientsV1 {
   readonly headTransport: Rfc64PublicCatalogHeadFetchClientV1;
   readonly contentTransport: Rfc64PublicCatalogContentFetchClientV1;
-  readonly resolveTrustedCatalogScope: Rfc64PublicOpenCatalogTrustedScopeResolverV1;
+  readonly resolveTrustedCatalogScope: Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1;
   readonly transportTimeoutMs: number;
 }
 
@@ -138,19 +160,33 @@ export interface Rfc64PublicCatalogServiceNativeOptionsV1 extends Pick<
   ) => Rfc64PublicCatalogReceiverReconcilerV1;
 }
 
-export interface PublishOpenAuthorCatalogGenesisInputV1 {
+export interface Rfc64PublicCatalogServiceCurrentHeadDiscoveryOptionsV1 {
+  /**
+   * Resolve the durable semantically applied head for one locally trusted
+   * public-root scope. Staged-only and candidate heads must not be returned.
+   */
+  readonly readCurrentAppliedCatalogHeadDigest: (
+    trustedScope: Readonly<AuthorCatalogScopeV1>,
+  ) => Promise<Digest32V1 | null>;
+}
+
+export interface PublishAuthorCatalogGenesisInputV1 {
   readonly scope: AuthorCatalogScopeV1;
   readonly signer: Rfc64AuthorCatalogEip191SignerV1;
   readonly issuedAt: TimestampMsV1;
   readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
-  /** The accepted open policy for the CG; its digest stamps the announcement. */
-  readonly policy: AcceptedOpenCatalogPolicyV1;
   /** Peers to announce availability to. Announcements are best-effort hints. */
   readonly peers: readonly string[];
 }
 
-export interface PublishOpenAuthorCatalogGenesisResultV1 {
+export interface PublishOpenAuthorCatalogGenesisInputV1
+  extends PublishAuthorCatalogGenesisInputV1 {
+  /** The accepted open policy for the CG; its digest stamps the announcement. */
+  readonly policy: AcceptedOpenCatalogPolicyV1;
+}
+
+export interface PublishAuthorCatalogGenesisResultV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
   readonly headObjectDigest: Digest32V1;
   readonly signatureVariantDigest: Digest32V1;
@@ -163,6 +199,9 @@ export interface PublishOpenAuthorCatalogGenesisResultV1 {
   /** Peers whose announcement failed (best-effort; correctness comes from pull). */
   readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
 }
+
+export type PublishOpenAuthorCatalogGenesisResultV1 =
+  PublishAuthorCatalogGenesisResultV1;
 
 export interface AnnounceRfc64PublicCatalogHeadInputV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
@@ -179,6 +218,26 @@ export interface AnnounceRfc64PublicCatalogHeadResultV1 {
   readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
 }
 
+export interface DiscoverRfc64PublicCatalogCurrentHeadInputV1 {
+  readonly remotePeerId: string;
+  readonly scope: Rfc64PublicCatalogCurrentHeadScopeV1;
+  readonly signal?: AbortSignal;
+}
+
+/** Verified discovery result. Returning it never stages or activates the head. */
+export interface DiscoveredRfc64PublicCatalogCurrentHeadV1 {
+  readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  readonly head: FetchedRfc64PublicCatalogHeadV1;
+}
+
+/**
+ * A current head that was authenticated through discovery and handed to the
+ * receiver scheduler. The receiver remains the only owner of semantic
+ * activation and the durable applied-head commit.
+ */
+export type SynchronizedRfc64PublicCatalogCurrentHeadV1 =
+  DiscoveredRfc64PublicCatalogCurrentHeadV1;
+
 export interface Rfc64PublicCatalogServiceStatsV1 {
   readonly started: boolean;
   readonly acceptedPolicies: number;
@@ -190,9 +249,11 @@ export class Rfc64PublicCatalogServiceV1 {
   readonly #verifyIssuerSignature: (
     envelope: SignedControlEnvelopeV1,
   ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
-  readonly #policies = new Rfc64AcceptedOpenCatalogPolicyRegistryV1();
+  readonly #policies: Rfc64CatalogAccessPolicyRegistryV1;
   readonly #receiver: Rfc64PublicCatalogReceiverV1;
   readonly #transport: Rfc64PublicCatalogTransportV1;
+  readonly #currentHeadDiscoveryTransport:
+    Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 | undefined;
   readonly #nativeTransport: Rfc64PublicCatalogNativeTransportV1 | undefined;
   readonly #transportTimeoutMs: number;
   #started = false;
@@ -200,13 +261,14 @@ export class Rfc64PublicCatalogServiceV1 {
 
   constructor(options: Rfc64PublicCatalogServiceOptionsV1) {
     this.#controlObjects = options.controlObjects;
+    this.#policies = new Rfc64CatalogAccessPolicyRegistryV1(options.accessPolicyAuthority);
     this.#verifyIssuerSignature =
       options.verifyIssuerSignature ?? verifyControlEnvelopeIssuerSignatureV1;
     this.#transportTimeoutMs = options.transportTimeoutMs ?? DEFAULT_TRANSPORT_TIMEOUT_MS;
 
     this.#transport = new Rfc64PublicCatalogTransportV1(options.router, {
       controlObjects: this.#controlObjects,
-      authorizeOpenCatalogOperation: this.#policies.authorize,
+      authorizeCatalogOperation: this.#policies.authorize,
       verifyIssuerSignature: this.#verifyIssuerSignature,
       // Non-blocking: schedule() enqueues synchronously so the transport's ACK
       // path (which awaits this callback) is never stalled on a fetch.
@@ -215,12 +277,23 @@ export class Rfc64PublicCatalogServiceV1 {
       },
     });
 
+    this.#currentHeadDiscoveryTransport = options.currentHeadDiscovery === undefined
+      ? undefined
+      : new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(options.router, {
+        controlObjects: this.#controlObjects,
+        readCurrentAppliedCatalogHeadDigest:
+          options.currentHeadDiscovery.readCurrentAppliedCatalogHeadDigest,
+        authorizeCatalogOperation: (input) =>
+          this.#authorizeCurrentHeadDiscovery(input),
+        verifyIssuerSignature: this.#verifyIssuerSignature,
+      });
+
     this.#nativeTransport = options.native === undefined
       ? undefined
       : new Rfc64PublicCatalogNativeTransportV1(options.router, {
         readCatalogObjectByDigest: options.native.readCatalogObjectByDigest,
         readKaBundleByDigest: options.native.readKaBundleByDigest,
-        authorizeOpenCatalogOperation: (input) => this.#authorizeNativeOperation(input),
+        authorizeCatalogOperation: this.#policies.authorize,
         verifyIssuerSignature: this.#verifyIssuerSignature,
       });
     const reconciler = options.native === undefined
@@ -257,10 +330,50 @@ export class Rfc64PublicCatalogServiceV1 {
   acceptOpenPolicy(
     input: BuildOpenOwnerContextGraphPolicyInputV1,
   ): AcceptedOpenCatalogPolicyV1 {
-    return this.#policies.accept(buildOpenOwnerContextGraphPolicyV1(input));
+    const policy = buildOpenOwnerContextGraphPolicyV1(input);
+    const accepted = this.acceptPolicySnapshot({
+      policy,
+      policyDigest: computeOpenContextGraphPolicyDigestV1(policy),
+    });
+    return Object.freeze({ policy: accepted.policy, policyDigest: accepted.policyDigest });
   }
 
-  /** Resolve the locally accepted open-policy digest for one exact catalog scope. */
+  /**
+   * Accept one policy/optional-roster snapshot that already crossed the
+   * administrative/finality authority boundary. All four access/publish cells
+   * are retained; a roster is required exactly when accessPolicy is private.
+   */
+  acceptPolicySnapshot(
+    input: AcceptRfc64CatalogAccessSnapshotInputV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    return this.#policies.acceptCurrent(input);
+  }
+
+  acceptedPolicySnapshot(
+    networkId: NetworkIdV1,
+    contextGraphId: ContextGraphIdV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 | null {
+    return this.#policies.lookup(networkId, contextGraphId);
+  }
+
+  /** Resolve the locally accepted policy digest for one exact catalog scope. */
+  acceptedPolicyDigestForCatalogScope(scopeInput: AuthorCatalogScopeV1): Digest32V1 {
+    return this.acceptedPolicySnapshotForCatalogScope(scopeInput).policyDigest;
+  }
+
+  acceptedPolicySnapshotForCatalogScope(
+    scopeInput: AuthorCatalogScopeV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    const scope = snapshotCatalogScope(scopeInput);
+    const held = this.#policies.lookup(scope.networkId, scope.contextGraphId);
+    if (held === null) {
+      throw new Error('RFC-64 catalog scope has no locally accepted policy snapshot');
+    }
+    assertAcceptedPolicyMatchesCatalogScope(this.#policies, held, scope);
+    return held;
+  }
+
+  /** Compatibility alias for the original public/open authoring surface. */
   acceptedOpenPolicyDigestForCatalogScope(scopeInput: AuthorCatalogScopeV1): Digest32V1 {
     const scope = snapshotCatalogScope(scopeInput);
     const held = this.#policies.lookup(scope.networkId, scope.contextGraphId);
@@ -276,11 +389,13 @@ export class Rfc64PublicCatalogServiceV1 {
     if (this.#started) return;
     this.#nativeTransport?.start();
     try {
+      this.#currentHeadDiscoveryTransport?.start();
       // Register the announcement protocol last so no callback can schedule
-      // reconciliation before the content-fetch protocols are live.
+      // reconciliation before content-fetch and pull-discovery are live.
       this.#transport.start();
       this.#started = true;
     } catch (cause) {
+      this.#currentHeadDiscoveryTransport?.stop();
       this.#nativeTransport?.stop();
       throw cause;
     }
@@ -297,6 +412,7 @@ export class Rfc64PublicCatalogServiceV1 {
       await this.#receiver.close();
     } finally {
       this.#transport.stop();
+      this.#currentHeadDiscoveryTransport?.stop();
       this.#nativeTransport?.stop();
     }
   }
@@ -310,6 +426,33 @@ export class Rfc64PublicCatalogServiceV1 {
   async publishOpenAuthorCatalogGenesis(
     input: PublishOpenAuthorCatalogGenesisInputV1,
   ): Promise<PublishOpenAuthorCatalogGenesisResultV1> {
+    const scope = snapshotCatalogScope(input.scope);
+    const heldPolicy = this.#policies.lookup(scope.networkId, scope.contextGraphId);
+    assertOpenPolicyMatchesCatalogScope(input.policy, heldPolicy, scope);
+    const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
+    return this.#publishAuthorCatalogGenesis(input, heldPolicy!, peers);
+  }
+
+  /** Author path for any already-accepted RFC-64 catalog access-policy cell. */
+  async publishAuthorCatalogGenesis(
+    input: PublishAuthorCatalogGenesisInputV1,
+  ): Promise<PublishAuthorCatalogGenesisResultV1> {
+    const scope = snapshotCatalogScope(input.scope);
+    const heldPolicy = this.#policies.lookup(scope.networkId, scope.contextGraphId);
+    if (heldPolicy === null) {
+      throw new Error('RFC-64 catalog scope has no locally accepted policy snapshot');
+    }
+    assertAcceptedPolicyMatchesCatalogScope(this.#policies, heldPolicy, scope);
+    const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
+    assertSupportedCatalogFanout(heldPolicy, peers);
+    return this.#publishAuthorCatalogGenesis(input, heldPolicy, peers);
+  }
+
+  async #publishAuthorCatalogGenesis(
+    input: PublishAuthorCatalogGenesisInputV1,
+    heldPolicy: AcceptedRfc64CatalogAccessSnapshotV1,
+    peers: readonly string[],
+  ): Promise<PublishAuthorCatalogGenesisResultV1> {
     this.#requireStarted();
     const scope = snapshotCatalogScope(input.scope);
     const signer = Object.freeze({
@@ -319,10 +462,8 @@ export class Rfc64PublicCatalogServiceV1 {
     const issuedAt = input.issuedAt;
     const effectiveAt = input.catalogIssuerDelegationEffectiveAt;
     const expiresAt = input.catalogIssuerDelegationExpiresAt;
-    const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
-    const heldPolicy = this.#policies.lookup(scope.networkId, scope.contextGraphId);
-    assertOpenPolicyMatchesCatalogScope(input.policy, heldPolicy, scope);
-    const policyDigest = heldPolicy!.policyDigest;
+    assertAcceptedPolicyMatchesCatalogScope(this.#policies, heldPolicy, scope);
+    const policyDigest = heldPolicy.policyDigest;
     const delegation = await produceDirectAuthorCatalogIssuerDelegationV1({
       scope,
       signer,
@@ -406,8 +547,100 @@ export class Rfc64PublicCatalogServiceV1 {
       encodeRfc64PublicCatalogHeadAnnouncementV1(input.announcement),
     );
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
-    this.#assertAcceptedOpenAnnouncement(announcement);
+    const heldPolicy = this.#assertAcceptedCatalogAnnouncement(announcement);
+    assertSupportedCatalogFanout(heldPolicy, peers);
     return this.#announceCatalogHeadSnapshot(announcement, peers);
+  }
+
+  /**
+   * Pull and authenticate one provider's semantically current public-root head.
+   * The discovery response is treated as a hint: this method exact-fetches the
+   * named signed head, re-verifies it, and binds it to local accepted policy
+   * before returning. It intentionally does not stage, schedule, or activate.
+   */
+  async discoverCurrentCatalogHead(
+    input: DiscoverRfc64PublicCatalogCurrentHeadInputV1,
+  ): Promise<DiscoveredRfc64PublicCatalogCurrentHeadV1 | null> {
+    this.#requireStarted();
+    const discovery = this.#currentHeadDiscoveryTransport;
+    if (discovery === undefined) {
+      throw new Error('RFC-64 current-head discovery is not configured');
+    }
+    // Detach caller-owned fields before the first await. In particular, the
+    // same immutable peer-id primitive must drive both the hint query and its
+    // exact-head fetch; a mutable object or switching accessor must not rebind
+    // those two halves to different providers.
+    const remotePeerId = input.remotePeerId;
+    const signal = input.signal;
+    const trustedScope = this.#resolveTrustedCurrentHeadScope(input.scope);
+    const held = this.#policies.lookup(trustedScope.networkId, trustedScope.contextGraphId)!;
+    const query: Rfc64PublicCatalogCurrentHeadQueryV1 = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+      networkId: trustedScope.networkId,
+      contextGraphId: trustedScope.contextGraphId,
+      subGraphName: trustedScope.subGraphName,
+      authorAddress: trustedScope.authorAddress,
+      catalogEra: trustedScope.era,
+      policyDigest: held.policyDigest,
+    });
+    const announcement = await discovery.discoverCurrentCatalogHead(
+      remotePeerId,
+      query,
+      this.#sendOptions(signal),
+    );
+    if (announcement === null) return null;
+    this.#assertAcceptedCatalogAnnouncement(announcement);
+    const currentTrustedScope = this.#resolveTrustedCatalogScope(announcement);
+    const head = await this.#transport.fetchCatalogHead(
+      remotePeerId,
+      announcement,
+      this.#sendOptions(signal),
+    );
+    if (head === null) {
+      throw new Error('RFC-64 discovered current head is no longer available by exact digest');
+    }
+    try {
+      assertAuthorCatalogHeadScopeBindingV1(head.envelope.payload, currentTrustedScope);
+    } catch (cause) {
+      throw new Error(
+        'RFC-64 discovered head differs from the accepted public policy scope',
+        { cause },
+      );
+    }
+    return Object.freeze({ announcement, head });
+  }
+
+  /**
+   * Discover one provider's current public-root head, enqueue that exact
+   * authenticated head through the ordinary receiver, and wait for all
+   * scheduled reconciliation work to drain. A caller must still inspect the
+   * durable applied-head record: receiver failures are reported through its
+   * bounded diagnostic channel rather than thrown from the scheduler.
+   *
+   * Once discovery has completed, reconciliation is deliberately durable work
+   * owned by the receiver lifecycle. Aborting the caller's signal after that
+   * boundary does not cancel a semantic transition already accepted by the
+   * scheduler; service close remains the cancellation authority.
+   */
+  async synchronizeCurrentCatalogHead(
+    input: DiscoverRfc64PublicCatalogCurrentHeadInputV1,
+  ): Promise<SynchronizedRfc64PublicCatalogCurrentHeadV1 | null> {
+    // Snapshot caller-owned values before discovery's first await so a Proxy or
+    // switching accessor cannot redirect the later scheduled fetch to another
+    // provider.
+    const remotePeerId = input.remotePeerId;
+    const scope = input.scope;
+    const signal = input.signal;
+    const discovered = await this.discoverCurrentCatalogHead({
+      remotePeerId,
+      scope,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (discovered === null) return null;
+    if (signal?.aborted) throw signal.reason;
+    this.#receiver.schedule(discovered.announcement, remotePeerId);
+    await this.#receiver.whenIdle();
+    return discovered;
   }
 
   /** Idle-await the receiver (tests / graceful shutdown coordination). */
@@ -453,30 +686,42 @@ export class Rfc64PublicCatalogServiceV1 {
     });
   }
 
-  #assertAcceptedOpenAnnouncement(
+  #assertAcceptedCatalogAnnouncement(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-  ): void {
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
     const held = this.#policies.lookup(announcement.networkId, announcement.contextGraphId);
     if (
       held === null
-      || held.policy.accessPolicy !== 0
       || held.policyDigest !== announcement.policyDigest
-      || held.policy.source.kind !== 'owner-signed-unregistered'
-      || held.policy.source.ownerAddress !== announcement.authorAddress
+      || !this.#policies.isSwmAuthorAuthorized({
+        networkId: announcement.networkId,
+        contextGraphId: announcement.contextGraphId,
+        policyDigest: announcement.policyDigest,
+        authorAddress: announcement.authorAddress,
+      })
     ) {
       throw new Error(
-        'RFC-64 catalog announcement is not bound to the locally accepted open policy',
+        'RFC-64 catalog announcement is not bound to the locally accepted policy snapshot',
       );
     }
+    return held;
   }
-  async #authorizeNativeOperation(
-    input: Rfc64PublicCatalogNativeAuthorizationInputV1,
-  ): Promise<Rfc64PublicCatalogNativeAuthorizationV1 | null> {
+
+  async #authorizeCurrentHeadDiscovery(
+    input: Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
+  ): Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null> {
+    let trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
+    try {
+      trustedCatalogScope = this.#resolveTrustedCurrentHeadScope(input);
+    } catch {
+      return null;
+    }
     const record = this.#policies.lookup(input.networkId, input.contextGraphId);
     if (record === null || record.policy.accessPolicy !== 0) return null;
     return Object.freeze({
       accessPolicy: 0,
       policyDigest: record.policyDigest,
+      trustedCatalogScope,
     });
   }
 
@@ -484,14 +729,48 @@ export class Rfc64PublicCatalogServiceV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ): Readonly<AuthorCatalogScopeV1> {
     const record = this.#policies.lookup(announcement.networkId, announcement.contextGraphId);
-    if (
-      record === null
-      || record.policyDigest !== announcement.policyDigest
-      || record.policy.accessPolicy !== 0
-    ) {
-      throw new Error('RFC-64 announcement has no matching accepted open policy generation');
+    if (record === null || record.policyDigest !== announcement.policyDigest) {
+      throw new Error('RFC-64 announcement has no matching accepted policy generation');
     }
-    return deriveRfc64PublicOpenCatalogScopeV1(announcement, record.policy);
+    this.#assertAcceptedCatalogAnnouncement(announcement);
+    return Object.freeze({
+      networkId: record.policy.networkId,
+      contextGraphId: record.policy.contextGraphId,
+      governanceChainId: record.policy.governanceChainId,
+      governanceContractAddress: record.policy.governanceContractAddress,
+      ownershipTransitionDigest: record.policy.ownershipTransitionDigest,
+      subGraphName: announcement.subGraphName,
+      authorAddress: announcement.authorAddress,
+      era: announcement.catalogEra,
+      bucketCount: '1',
+    }) as Readonly<AuthorCatalogScopeV1>;
+  }
+
+  #resolveTrustedCurrentHeadScope(
+    input: Rfc64PublicCatalogCurrentHeadScopeV1,
+  ): Readonly<AuthorCatalogScopeV1> {
+    const record = this.#policies.lookup(input.networkId, input.contextGraphId);
+    if (record === null) {
+      throw new Error(
+        'RFC-64 current-head query is not bound to the accepted public root policy',
+      );
+    }
+    try {
+      if (!this.#policies.isSwmAuthorAuthorized({
+        networkId: input.networkId,
+        contextGraphId: input.contextGraphId,
+        policyDigest: record.policyDigest,
+        authorAddress: input.authorAddress,
+      })) {
+        throw new Error('catalog author is not authorized by the accepted policy');
+      }
+      return deriveRfc64PublicRootCatalogScopeV1(input, record.policy);
+    } catch (cause) {
+      throw new Error(
+        'RFC-64 current-head query is not bound to the accepted public root policy',
+        { cause },
+      );
+    }
   }
 
   async #stageHeadOnly(
@@ -515,7 +794,7 @@ export class Rfc64PublicCatalogServiceV1 {
       );
     } catch (cause) {
       throw new Error(
-        'RFC-64 fetched head differs from the accepted public/open policy scope',
+        'RFC-64 fetched head differs from the accepted public policy scope',
         { cause },
       );
     }
@@ -531,38 +810,15 @@ export class Rfc64PublicCatalogServiceV1 {
   }
 }
 
-export function snapshotRfc64PublicCatalogAnnouncementPeersV1(
-  input: readonly string[],
-): readonly string[] {
-  if (!Array.isArray(input)) {
-    throw new TypeError('RFC-64 catalog announcement peers must be an array');
-  }
-  if (input.length > RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) {
-    throw new RangeError(
-      `RFC-64 catalog announcement accepts at most `
-      + `${RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1} peers`,
+function assertSupportedCatalogFanout(
+  heldPolicy: AcceptedRfc64CatalogAccessSnapshotV1,
+  peers: readonly string[],
+): void {
+  if (heldPolicy.policy.accessPolicy === 1 && peers.length > 0) {
+    throw new Error(
+      'RFC-64 private catalog peer fan-out requires scope-bound private content transport',
     );
   }
-  const seen = new Set<string>();
-  const peers: string[] = [];
-  for (let index = 0; index < input.length; index += 1) {
-    const peerId = input[index];
-    const byteLength = typeof peerId === 'string' ? UTF8.encode(peerId).byteLength : 0;
-    if (
-      typeof peerId !== 'string'
-      || byteLength === 0
-      || byteLength > RFC64_PUBLIC_CATALOG_PEER_ID_MAX_BYTES_V1
-      || peerId.trim() !== peerId
-    ) {
-      throw new TypeError(`RFC-64 catalog announcement peer ${index} is invalid`);
-    }
-    if (seen.has(peerId)) {
-      throw new TypeError(`RFC-64 catalog announcement peer ${index} is duplicated`);
-    }
-    seen.add(peerId);
-    peers.push(peerId);
-  }
-  return Object.freeze(peers);
 }
 
 function snapshotCatalogScope(input: AuthorCatalogScopeV1): Readonly<AuthorCatalogScopeV1> {
@@ -602,6 +858,31 @@ function assertOpenPolicyMatchesCatalogScope(
   ) {
     throw new Error(
       'RFC-64 open policy is not bound to the exact catalog network, CG, governance scope, era, and author',
+    );
+  }
+}
+
+function assertAcceptedPolicyMatchesCatalogScope(
+  registry: Rfc64CatalogAccessPolicyRegistryV1,
+  held: AcceptedRfc64CatalogAccessSnapshotV1,
+  scope: AuthorCatalogScopeV1,
+): void {
+  const policy = held.policy;
+  if (
+    policy.networkId !== scope.networkId
+    || policy.contextGraphId !== scope.contextGraphId
+    || policy.governanceChainId !== scope.governanceChainId
+    || policy.governanceContractAddress !== scope.governanceContractAddress
+    || policy.ownershipTransitionDigest !== scope.ownershipTransitionDigest
+    || !registry.isSwmAuthorAuthorized({
+      networkId: scope.networkId,
+      contextGraphId: scope.contextGraphId,
+      policyDigest: held.policyDigest,
+      authorAddress: scope.authorAddress,
+    })
+  ) {
+    throw new Error(
+      'RFC-64 policy snapshot is not bound to the exact catalog network, CG, governance scope, and author',
     );
   }
 }

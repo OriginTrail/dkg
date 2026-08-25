@@ -1,4 +1,5 @@
 import type { AsyncLiftPublisher } from './async-lift-publisher.js';
+import { assertNodeTimerDelayMs } from '@origintrail-official/dkg-core';
 
 export interface AsyncLiftRunnerConfig {
   readonly publisher: AsyncLiftPublisher;
@@ -6,6 +7,8 @@ export interface AsyncLiftRunnerConfig {
   readonly pollIntervalMs?: number;
   readonly errorBackoffMs?: number;
   readonly recoveryIntervalMs?: number;
+  /** Start recovery, but do not claim accepted jobs until an operator restarts unpaused. */
+  readonly startPaused?: boolean;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly onError?: (error: unknown) => void | Promise<void>;
   readonly hasIncludedRecoveryResolver?: boolean;
@@ -22,11 +25,14 @@ export class AsyncLiftRunner {
   private running?: Promise<void>;
   private lastRecoveryAt = 0;
   private lastRecoveryAttemptAt = 0;
+  private recoveryInFlight?: Promise<void>;
+  private recoveryTimer?: ReturnType<typeof setTimeout>;
 
   constructor(private readonly config: AsyncLiftRunnerConfig) {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.errorBackoffMs = config.errorBackoffMs ?? 1000;
     this.recoveryIntervalMs = config.recoveryIntervalMs ?? 60_000;
+    assertNodeTimerDelayMs(this.recoveryIntervalMs, 'AsyncLiftRunner recoveryIntervalMs');
     this.sleep = config.sleep ?? defaultSleep;
     this.onError = config.onError;
   }
@@ -41,6 +47,9 @@ export class AsyncLiftRunner {
 
     this.stopped = false;
     try {
+      if (this.config.startPaused === true) {
+        await this.config.publisher.pause();
+      }
       await this.config.publisher.recover();
       this.lastRecoveryAt = Date.now();
       if (!this.config.hasIncludedRecoveryResolver) {
@@ -55,19 +64,27 @@ export class AsyncLiftRunner {
     }
 
     this.started = true;
-    this.running = this.loop();
+    this.scheduleTransactionReconciliation();
+    this.running = Promise.all(
+      this.config.walletIds.map((walletId) => this.walletLoop(walletId)),
+    ).then(() => undefined);
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = undefined;
+    }
     await this.running;
+    await this.recoveryInFlight;
+    await this.config.publisher.drainDetachedExecutions?.();
   }
 
-  private async loop(): Promise<void> {
+  private async walletLoop(walletId: string): Promise<void> {
     while (!this.stopped) {
       try {
-        await this.maybeRunRecovery();
-        const processed = await this.runCycle();
+        const processed = await this.config.publisher.processNext(walletId);
         if (!processed && !this.stopped) {
           await this.sleep(this.pollIntervalMs);
         }
@@ -84,37 +101,42 @@ export class AsyncLiftRunner {
     }
   }
 
-  private async maybeRunRecovery(): Promise<void> {
+  private scheduleTransactionReconciliation(): void {
+    if (this.stopped || this.recoveryTimer || this.recoveryInFlight) return;
     const now = Date.now();
-    if (now - this.lastRecoveryAt < this.recoveryIntervalMs) return;
-    // Throttle attempts at errorBackoffMs to avoid hammering during outages,
-    // but allow the full interval between *successful* recoveries.
-    if (now - this.lastRecoveryAttemptAt < this.errorBackoffMs) return;
-    this.lastRecoveryAttemptAt = now;
-    await this.config.publisher.recover();
-    this.lastRecoveryAt = now;
+    const nextAt = Math.max(
+      this.lastRecoveryAt + this.recoveryIntervalMs,
+      this.lastRecoveryAttemptAt + this.errorBackoffMs,
+    );
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      this.startTransactionReconciliation();
+    }, Math.max(1, nextAt - now));
   }
 
-  private async runCycle(): Promise<boolean> {
-    if (this.stopped) return false;
-
-    // Each configured wallet owns an independent nonce stream and is already
-    // protected by the publisher's wallet-scoped claim. Run one job per
-    // wallet concurrently so adding publisher wallets actually increases
-    // throughput. Wait for every wallet attempt to settle before propagating
-    // an error; otherwise a fast rejection could start the next cycle while a
-    // slower wallet from this cycle is still publishing.
-    const outcomes = await Promise.allSettled(
-      this.config.walletIds.map((walletId) => this.config.publisher.processNext(walletId)),
-    );
-    const failure = outcomes.find(
-      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
-    );
-    if (failure) {
-      throw failure.reason;
-    }
-    return outcomes.some((outcome) => outcome.status === 'fulfilled' && Boolean(outcome.value));
+  private startTransactionReconciliation(): void {
+    if (this.stopped || this.recoveryInFlight) return;
+    this.lastRecoveryAttemptAt = Date.now();
+    const recovery = (this.config.publisher.reconcileTransactions?.() ?? this.config.publisher.recover())
+      .then(() => {
+        this.lastRecoveryAt = Date.now();
+      })
+      .catch(async (error) => {
+        try {
+          await this.onError?.(error);
+        } catch {
+          // Error reporting must not stop transaction reconciliation.
+        }
+      })
+      .finally(() => {
+        if (this.recoveryInFlight === recovery) {
+          this.recoveryInFlight = undefined;
+        }
+        this.scheduleTransactionReconciliation();
+      });
+    this.recoveryInFlight = recovery;
   }
+
 }
 
 function defaultSleep(ms: number): Promise<void> {

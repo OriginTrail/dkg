@@ -31,7 +31,12 @@ import {
 import { OversizeTombstoneLog } from '../src/sync/oversize-tombstones.js';
 import { runOversizeSweep } from '../src/sync/oversize-sweep.js';
 import { isSyncPermanentRejection, isSyncBackoffWorthyError } from '../src/sync/error-tags.js';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import {
+  runDurableSync,
+  type DurableSyncFetchRequest,
+  type DurableSyncStoreInsertRequest,
+} from '../src/sync/requester/durable-sync.js';
+import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
 const CG = 'did:dkg:context-graph:agents';
@@ -221,6 +226,22 @@ describe('error-tags: permanent-rejection classification', () => {
   });
 });
 
+describe('error-tags: retry classification', () => {
+  it('treats typed exhausted chain RPC reads as backoff-worthy', () => {
+    const error = Object.assign(new Error(
+      'cgStorage.kaToContextGraph read failed on all configured RPC endpoints: '
+      + 'RPC #3 timed out after 4000ms',
+    ), { code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(isSyncBackoffWorthyError(error)).toBe(true);
+    expect(isSyncPermanentRejection(error)).toBe(false);
+  });
+
+  it('does not infer chain transport failure from message text alone', () => {
+    const error = new Error('read failed on all configured RPC endpoints');
+    expect(isSyncBackoffWorthyError(error)).toBe(false);
+  });
+});
+
 describe('runDurableSync — the poison-page retry-loop regression', () => {
   const bad = quad(lit(120_000)); // the incident shape: a ~118KB agents-graph literal
   const goodA = quad(lit(10), DATA_GRAPH, 'http://ex.org/a');
@@ -245,8 +266,10 @@ describe('runDurableSync — the poison-page retry-loop regression', () => {
         ctx: createOperationContext('sync'),
         remotePeerId: 'peerR',
         contextGraphIds: ['agents'],
-        createContextGraphSyncDeadline: () => Date.now() + 10_000,
-        fetchSyncPages: async (_c: unknown, _p: string, _cg: string, _swm: boolean, phase: 'data' | 'meta') => page(phase),
+        durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+        fetchSyncPages: async ({
+          phase,
+        }: DurableSyncFetchRequest) => page(phase),
         processDurableBatchInWorker: async (dataQuads: Quad[], metaQuads: Quad[]) => ({
           verifiedData: dataQuads,
           verifiedMeta: metaQuads,
@@ -257,7 +280,7 @@ describe('runDurableSync — the poison-page retry-loop regression', () => {
           metaOnlyResponses: 0,
           dataRejectedMissingMeta: 0,
         }),
-        storeInsert,
+        storeInsert: async ({ quads }: DurableSyncStoreInsertRequest) => storeInsert(quads),
         deleteCheckpoint: (key: string) => { deletedCheckpoints.push(key); },
         setCheckpoint: (key: string, offset: number) => { setCheckpoints.push({ key, offset }); },
         logInfo: () => {},

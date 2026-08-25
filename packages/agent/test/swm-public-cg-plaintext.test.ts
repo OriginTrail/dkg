@@ -152,6 +152,46 @@ const isPublic = (a: any, cgId = '0xCURATOR/experimental-music') =>
   (DKGAgent.prototype as any).isContextGraphPublicOnChain.call(a, cgId);
 
 describe('DKGAgent.isContextGraphPublicOnChain', () => {
+  it('preserves the legacy strict binding option while retryable strict reads propagate transport errors', async () => {
+    const cgId = '0xCURATOR/experimental-music';
+    const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0 });
+    const legacyBinding = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
+    const retryableStrictBinding = (DKGAgent.prototype as any).requireLocalCgMatchesOnChainSlot;
+
+    await expect(legacyBinding.call(agentLike, cgId, 'not-a-slot')).resolves.toBe(true);
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      'not-a-slot',
+      undefined,
+      { requireCommittedNameHash: true },
+    )).resolves.toBe(false);
+
+    delete agentLike.chain.getContextGraphNameHash;
+    await expect(legacyBinding.call(agentLike, cgId, '5')).resolves.toBe(true);
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      '5',
+      undefined,
+      { requireCommittedNameHash: true },
+    )).resolves.toBe(false);
+
+    const transportError = Object.assign(new Error('name-hash RPC unavailable'), {
+      code: 'RPC_ENDPOINTS_EXHAUSTED',
+    });
+    agentLike.chain.getContextGraphNameHash = async () => { throw transportError; };
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      '5',
+      undefined,
+      { requireCommittedNameHash: true },
+    )).resolves.toBe(false);
+    await expect(retryableStrictBinding.call(agentLike, cgId, '5'))
+      .rejects.toBe(transportError);
+  });
+
   it('returns true for a LIVE CG whose on-chain access policy is public (0)', async () => {
     const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0 });
     await expect(isPublic(agentLike)).resolves.toBe(true);
@@ -272,6 +312,38 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0, onChainNameHash: committed });
     await expect(isPublic(agentLike, hexCleartext)).resolves.toBe(true);
     expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([5n]);
+  });
+
+  it('keeps a hash-shaped cleartext subscription bound to keccak(utf8(id)), not its raw reverse-index key', async () => {
+    const hexCleartext = '0x' + 'bc'.repeat(32);
+    const committed = ethers.keccak256(ethers.toUtf8Bytes(hexCleartext)).toLowerCase();
+    const matching = makeAgentLike({
+      onChainId: '5',
+      accessPolicy: 0,
+      onChainNameHash: committed,
+    });
+    matching.subscribedContextGraphs.set(hexCleartext, {
+      subscribed: true,
+      synced: false,
+    });
+    // setContextGraphSubscription maintains this general reverse lookup for
+    // every subscription. It is routing metadata, not proof that the local id
+    // is host-only/wire-keyed.
+    matching.wireIdToLocalCgId.set(hexCleartext, hexCleartext);
+    await expect(isPublic(matching, hexCleartext)).resolves.toBe(true);
+
+    const rawOnly = makeAgentLike({
+      onChainId: '5',
+      accessPolicy: 0,
+      onChainNameHash: hexCleartext,
+    });
+    rawOnly.subscribedContextGraphs.set(hexCleartext, {
+      subscribed: true,
+      synced: false,
+    });
+    rawOnly.wireIdToLocalCgId.set(hexCleartext, hexCleartext);
+    await expect(isPublic(rawOnly, hexCleartext)).resolves.toBe(false);
+    expect((rawOnly.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
   });
 
   it('fails closed when the name-hash getter is PRESENT but REJECTS — identity unverifiable (#884 review GZ8L_)', async () => {

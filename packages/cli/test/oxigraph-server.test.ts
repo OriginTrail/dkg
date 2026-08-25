@@ -18,15 +18,17 @@
  * production code path; only the supervised binary's identity differs, and
  * the binary's own behaviour is real, not emitted by the test.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
 import { createServer, type Server } from 'node:net';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { SparqlHttpStore } from '@origintrail-official/dkg-storage';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';
+import { OXIGRAPH_VERSION } from '../src/daemon/oxigraph-binary.js';
 import {
   childOwnsListenPort,
   findListenOwnerPid,
@@ -69,6 +71,21 @@ async function portAnswers(port: number): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function executableVersion(binaryPath: string): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(binaryPath, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(`Oxigraph --version exited ${code}: ${stderr.trim()}`));
+    });
+  });
 }
 
 beforeAll(async () => {
@@ -336,8 +353,208 @@ describe('startOxigraphServer (real child processes)', () => {
       }
       expect(pid2, 'supervisor never respawned the crashed child').toBeGreaterThan(0);
       expect(pid2).not.toBe(pid1);
+      for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i++) await sleep(20);
+      expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
     } finally {
       await handle.stop();
+    }
+  });
+
+  it('restarts the child on an explicit recovery request and coalesces duplicates', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    const handle = await startOxigraphServer(startOpts(port, { log: (line: string) => logs.push(line) }));
+    try {
+      const pid1 = await fetchPid(port);
+      expect(handle.requestRestart('query exceeded the managed SPARQL client deadline')).toBe(true);
+      expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+      expect(handle.requestRestart('duplicate timeout')).toBe(false);
+
+      let pid2 = 0;
+      for (let i = 0; i < 100; i++) {
+        await sleep(100);
+        try {
+          pid2 = await fetchPid(port);
+          if (pid2 && pid2 !== pid1) break;
+        } catch {
+          /* recovery is still in progress */
+        }
+      }
+      expect(pid2, 'supervisor never recovered the explicitly restarted child').toBeGreaterThan(0);
+      expect(pid2).not.toBe(pid1);
+      for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i++) await sleep(20);
+      expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
+      expect(logs.some((line) => line.includes('server terminated for recovery'))).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('cancels recovery without signalling when listener ownership changes', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    let reportChangedOwner = false;
+    const killProcess = vi.fn(() => true) as unknown as typeof process.kill;
+    const originalFetch = globalThis.fetch;
+    const handle = await startOxigraphServer(startOpts(port, {
+      log: (line: string) => logs.push(line),
+      io: {
+        killProcess,
+        findListenOwnerPid: async (child, listenerPort, host, ownership) => {
+          const actual = await findListenOwnerPid(child, listenerPort, host, ownership);
+          return reportChangedOwner && actual !== null ? actual + 100_000 : actual;
+        },
+      },
+    }));
+    try {
+      const pid = await fetchPid(port);
+      let rejectUpdate!: (error: unknown) => void;
+      let markUpdateStarted!: () => void;
+      const updateStarted = new Promise<void>((resolve) => { markUpdateStarted = resolve; });
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(init?.body ?? '').startsWith('INSERT')) {
+          markUpdateStarted();
+          return await new Promise<Response>((_resolve, reject) => { rejectUpdate = reject; });
+        }
+        return await originalFetch(input, init);
+      }) as typeof fetch;
+      const store = new SparqlHttpStore({
+        queryEndpoint: `http://127.0.0.1:${port}/query`,
+        updateEndpoint: `http://127.0.0.1:${port}/update`,
+        managedOxigraph: true,
+        timeout: 5_000,
+        getRecoveryState: () => handle.getRecoveryState(),
+      });
+      const updateFailure = store.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/g',
+      }]).catch((error) => error);
+      await updateStarted;
+      reportChangedOwner = true;
+      expect(handle.requestRestart('ownership-negative-path')).toBe(true);
+
+      for (let i = 0; i < 50 && !logs.some((line) => line.includes('ownership changed')); i++) {
+        await sleep(20);
+      }
+
+      expect(killProcess).not.toHaveBeenCalled();
+      expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+      const definitiveError = new Error('definitive backend failure after cancelled restart');
+      rejectUpdate(definitiveError);
+      expect(await updateFailure).toBe(definitiveError);
+      expect(await fetchPid(port)).toBe(pid);
+      expect(await portAnswers(port)).toBe(true);
+      expect(logs.some((line) => line.includes('ownership changed'))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await handle.stop();
+    }
+  });
+
+  it.each(['throws', 'returns false'] as const)(
+    'rolls back a restart whose SIGKILL %s and accepts a later request',
+    async (failureMode) => {
+      const port = await freePort();
+      const logs: string[] = [];
+      let signalAttempts = 0;
+      const killProcess = vi.fn(() => {
+        signalAttempts += 1;
+        if (failureMode === 'returns false') return false;
+        const error = new Error('operation not permitted') as NodeJS.ErrnoException;
+        error.code = 'EPERM';
+        throw error;
+      }) as unknown as typeof process.kill;
+      const handle = await startOxigraphServer(startOpts(port, {
+        log: (line: string) => logs.push(line),
+        io: { killProcess },
+      }));
+      try {
+        const pid = await fetchPid(port);
+        expect(handle.requestRestart(`signal failure: ${failureMode}`)).toBe(true);
+        for (let i = 0; i < 50 && signalAttempts < 1; i++) await sleep(20);
+
+        expect(signalAttempts).toBe(1);
+        expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+        expect(await fetchPid(port)).toBe(pid);
+        expect(await portAnswers(port)).toBe(true);
+
+        // Rollback must restore ready, not strand the supervisor in a request
+        // phase that rejects every future recovery attempt.
+        expect(handle.requestRestart(`second signal failure: ${failureMode}`)).toBe(true);
+        for (let i = 0; i < 50 && signalAttempts < 2; i++) await sleep(20);
+        expect(signalAttempts).toBe(2);
+        expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+        expect(logs.filter((line) => line.includes('could not signal')).length).toBe(2);
+      } finally {
+        await handle.stop();
+      }
+    },
+  );
+
+  it('targets the verified Oxigraph listener when a systemd-style wrapper owns the child', async () => {
+    const port = await freePort();
+    const wrapperPids: number[] = [];
+    const recoverySignals: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    const wrapperProgram = `
+      const { spawn } = require('node:child_process');
+      const [command, ...args] = process.argv.slice(1);
+      const child = spawn(command, args, { stdio: 'inherit' });
+      process.on('SIGTERM', () => child.kill('SIGTERM'));
+      child.once('exit', (code, signal) => process.exit(signal === 'SIGKILL' ? 137 : (code ?? 1)));
+    `;
+    const injectedSpawn = ((_command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      const binaryIndex = args.indexOf(standin);
+      const wrapper = spawn(
+        process.execPath,
+        ['-e', wrapperProgram, standin, ...args.slice(binaryIndex + 1)],
+        options,
+      );
+      if (wrapper.pid !== undefined) wrapperPids.push(wrapper.pid);
+      return wrapper;
+    }) as typeof spawn;
+    const killProcess = ((pid: number, signal?: NodeJS.Signals | number) => {
+      recoverySignals.push({ pid, signal: signal ?? 'SIGTERM' });
+      return process.kill(pid, signal);
+    }) as typeof process.kill;
+    const handle = await startOxigraphServer(startOpts(port, {
+      memoryLimits: { maxMiB: 256 },
+      platform: 'linux',
+      io: {
+        spawn: injectedSpawn,
+        killProcess,
+        findListenOwnerPid: async () => await fetchPid(port),
+      },
+    }));
+    try {
+      const pid1 = await fetchPid(port);
+      expect(handle.requestRestart('client deadline fallback')).toBe(true);
+
+      let pid2 = 0;
+      for (let i = 0; i < 100; i++) {
+        await sleep(100);
+        try {
+          pid2 = await fetchPid(port);
+          if (pid2 && pid2 !== pid1) break;
+        } catch {
+          /* recovery is still in progress */
+        }
+      }
+      expect(pid2, 'supervisor did not replace the scoped listener').toBeGreaterThan(0);
+      expect(pid2).not.toBe(pid1);
+      expect(wrapperPids[0]).toBeGreaterThan(0);
+      expect(pid1).not.toBe(wrapperPids[0]);
+      expect(recoverySignals).toContainEqual({ pid: pid1, signal: 'SIGKILL' });
+      expect(recoverySignals.some((entry) => entry.pid === wrapperPids[0])).toBe(false);
+    } finally {
+      await handle.stop();
+      // Failure-path cleanup if a regression orphaned the listener behind its wrapper.
+      try {
+        process.kill(await fetchPid(port), 'SIGKILL');
+      } catch {
+        /* port is already free */
+      }
     }
   });
 
@@ -346,12 +563,86 @@ describe('startOxigraphServer (real child processes)', () => {
     const handle = await startOxigraphServer(startOpts(port));
     expect(await portAnswers(port)).toBe(true);
     await handle.stop();
+    expect(handle.getRecoveryState().recovering).toBe(true);
+    expect(handle.requestRestart('after-stop')).toBe(false);
     // Wait well past restartBackoffMaxMs: a buggy supervisor would have
     // respawned by now and the probe would answer.
     await sleep(600);
     expect(await portAnswers(port)).toBe(false);
   });
 });
+
+const nativeOxigraphTestBinary = process.env.DKG_OXIGRAPH_TEST_BINARY;
+
+describe.skipIf(!nativeOxigraphTestBinary)(
+  'managed response completeness (pinned real Oxigraph executable)',
+  () => {
+    it('rejects native-deadline SELECT and CONSTRUCT streams instead of returning partial data', async () => {
+      const binaryPath = nativeOxigraphTestBinary!;
+      expect(await executableVersion(binaryPath)).toBe(`oxigraph ${OXIGRAPH_VERSION}`);
+
+      const location = await mkdtemp(join(tmpdir(), 'oxi-native-timeout-'));
+      const port = await freePort();
+      const handle = await startOxigraphServer({
+        binaryPath,
+        location,
+        port,
+        queryTimeoutS: 1,
+        readyTimeoutMs: 10_000,
+        readyIntervalMs: 50,
+        stopGraceMs: 2_000,
+        restartBackoffBaseMs: 100,
+        restartBackoffMaxMs: 200,
+        log: () => {},
+      });
+      const endpoint = `http://127.0.0.1:${port}`;
+      const store = new SparqlHttpStore({
+        queryEndpoint: `${endpoint}/query`,
+        updateEndpoint: `${endpoint}/update`,
+        managedByDkg: true,
+        managedOxigraph: true,
+        timeout: 10_000,
+      });
+
+      try {
+        await store.insert(Array.from({ length: 100 }, (_, index) => ({
+          subject: `urn:s${index}`,
+          predicate: 'urn:p',
+          object: `"${index}"`,
+          graph: '',
+        })));
+        const expensivePattern = `
+          ?a <urn:p> ?x .
+          ?b <urn:p> ?y .
+          ?c <urn:p> ?z .
+          ?d <urn:p> ?w .
+          FILTER(SHA512(CONCAT(STR(?a), STR(?b), STR(?c), STR(?d))) != "")
+        `;
+
+        await expect(store.query(
+          `SELECT (COUNT(*) AS ?count) WHERE { ${expensivePattern} }`,
+        )).rejects.toMatchObject({
+          code: 'STORE_OPERATION_TIMEOUT',
+          backend: 'oxigraph-server',
+          operation: 'query',
+          outcome: 'indeterminate',
+        });
+        await expect(store.query(
+          `CONSTRUCT { ?a <urn:joined> ?b } WHERE { ${expensivePattern} }`,
+        )).rejects.toMatchObject({
+          code: 'STORE_OPERATION_TIMEOUT',
+          backend: 'oxigraph-server',
+          operation: 'construct',
+          outcome: 'indeterminate',
+        });
+      } finally {
+        await store.close();
+        await handle.stop();
+        await rm(location, { recursive: true, force: true });
+      }
+    }, 30_000);
+  },
+);
 
 describe('startOxigraphServer OOM classification in the restart log', () => {
   // The cgroup OOM readers are the one piece that can't be exercised against a

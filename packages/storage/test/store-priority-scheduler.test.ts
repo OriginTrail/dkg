@@ -1,13 +1,82 @@
 import { describe, expect, it, vi } from 'vitest';
+import { availableParallelism } from 'node:os';
 import {
   StorePriorityScheduler,
   StoreSchedulerBusyError,
 } from '../src/store-priority-scheduler.js';
 import type { StoreWorkPriority } from '../src/triple-store.js';
 
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return {
+    ...actual,
+    availableParallelism: vi.fn(() => 4),
+  };
+});
+
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+const mockedAvailableParallelism = vi.mocked(availableParallelism);
 
 describe('StorePriorityScheduler', () => {
+  it('caps only oversized process settings while preserving lower values and constructor overrides', () => {
+    const previous = process.env.DKG_STORE_MAX_CONCURRENT;
+    mockedAvailableParallelism.mockReturnValue(4);
+    try {
+      process.env.DKG_STORE_MAX_CONCURRENT = '2';
+      expect(new StorePriorityScheduler().snapshot.maxConcurrent).toBe(2);
+
+      process.env.DKG_STORE_MAX_CONCURRENT = '1000000';
+      expect(new StorePriorityScheduler().snapshot.maxConcurrent).toBe(4);
+
+      expect(new StorePriorityScheduler({ maxConcurrent: 5 }).snapshot.maxConcurrent).toBe(5);
+    } finally {
+      mockedAvailableParallelism.mockReturnValue(4);
+      if (previous === undefined) delete process.env.DKG_STORE_MAX_CONCURRENT;
+      else process.env.DKG_STORE_MAX_CONCURRENT = previous;
+    }
+  });
+
+  it('preserves default ACK admission when the runtime reports one logical CPU', async () => {
+    const previousMaxConcurrent = process.env.DKG_STORE_MAX_CONCURRENT;
+    const previousAckReservedSlots = process.env.DKG_STORE_ACK_RESERVED_SLOTS;
+    let releaseNormal: (() => void) | undefined;
+    let normal: Promise<string> | undefined;
+    mockedAvailableParallelism.mockReturnValue(1);
+    delete process.env.DKG_STORE_MAX_CONCURRENT;
+    delete process.env.DKG_STORE_ACK_RESERVED_SLOTS;
+    try {
+      const scheduler = new StorePriorityScheduler({
+        healthReservedSlots: 0,
+        queueWaitTimeoutMs: 20,
+      });
+      expect(scheduler.snapshot).toMatchObject({
+        maxConcurrent: 2,
+        ackReservedSlots: 1,
+      });
+
+      normal = scheduler.run('normal', 'query.long-running', async () => {
+        await new Promise<void>((resolve) => {
+          releaseNormal = resolve;
+        });
+        return 'normal';
+      });
+      expect(scheduler.snapshot.normalInflight).toBe(1);
+
+      await expect(
+        scheduler.run('ack', 'storage-ack.persist', async () => 'ack'),
+      ).resolves.toBe('ack');
+      expect(scheduler.snapshot.ackQueued).toBe(0);
+    } finally {
+      releaseNormal?.();
+      await normal;
+      mockedAvailableParallelism.mockReturnValue(4);
+      if (previousMaxConcurrent === undefined) delete process.env.DKG_STORE_MAX_CONCURRENT;
+      else process.env.DKG_STORE_MAX_CONCURRENT = previousMaxConcurrent;
+      if (previousAckReservedSlots === undefined) delete process.env.DKG_STORE_ACK_RESERVED_SLOTS;
+      else process.env.DKG_STORE_ACK_RESERVED_SLOTS = previousAckReservedSlots;
+    }
+  });
+
   for (const priority of ['ack', 'health', 'normal', 'background'] as const satisfies readonly StoreWorkPriority[]) {
     it(`bounds the ${priority} queue and returns a typed retryable rejection`, async () => {
       const scheduler = new StorePriorityScheduler({
@@ -648,5 +717,63 @@ describe('StorePriorityScheduler', () => {
       'background-2',
       'normal',
     ]);
+  });
+
+  it('exposes generic pressure diagnostics without changing lane admission', async () => {
+    let now = 1_000;
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 1,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+      backgroundReservedSlots: 0,
+      queueLimits: { ack: 1, health: 1, normal: 1, background: 1 },
+      queueWaitTimeoutMs: 10_000,
+      now: () => now,
+    });
+    let release!: () => void;
+    const blocker = scheduler.run('normal', 'blazegraph.query', async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+    const queued = scheduler.run('normal', 'swm.atomicReplace', async () => undefined);
+
+    now += 6_000;
+    expect(scheduler.getBackpressureSnapshot()).toMatchObject({
+      scheduler: 'store',
+      state: 'saturated',
+      totals: {
+        queued: 1,
+        queueLimit: 4,
+        inflight: 1,
+        inflightLimit: 1,
+        oldestQueuedAgeMs: 6_000,
+      },
+      lanes: expect.arrayContaining([
+        expect.objectContaining({
+          lane: 'normal',
+          queued: 1,
+          inflight: 1,
+          queueLimit: 1,
+          queuedOperations: [{
+            operation: 'swm.atomicReplace',
+            count: 1,
+            oldestAgeMs: 6_000,
+          }],
+          activeOperations: [{
+            operation: 'blazegraph.query',
+            count: 1,
+            oldestAgeMs: 6_000,
+          }],
+        }),
+      ]),
+    });
+
+    release();
+    await Promise.all([blocker, queued]);
+    expect(scheduler.getBackpressureSnapshot()).toMatchObject({
+      state: 'healthy',
+      totals: { queued: 0, inflight: 0 },
+    });
   });
 });

@@ -42,6 +42,30 @@ function reconciler(
   return { isHeadApplied, reconcileHead };
 }
 
+/** Small deterministic script for multi-provider scheduler scenarios. */
+function scriptedReconciler(peerIds: readonly string[]) {
+  const steps = peerIds.map((peerId) => ({
+    peerId,
+    started: deferred<void>(),
+    result: deferred<Rfc64PublicCatalogReconcileResultV1>(),
+  }));
+  const peers: string[] = [];
+  let cursor = 0;
+  return {
+    peers,
+    steps,
+    reconciler: reconciler(async (peerId) => {
+      const step = steps[cursor];
+      cursor += 1;
+      if (step === undefined) throw new Error(`Unexpected reconcile call for ${peerId}`);
+      expect(peerId).toBe(step.peerId);
+      peers.push(peerId);
+      step.started.resolve();
+      return step.result.promise;
+    }),
+  };
+}
+
 describe('RFC-64 public catalog receiver scheduler v1', () => {
   it('reconciles and reports one durably applied inventory head', async () => {
     const appliedPeers: string[] = [];
@@ -133,34 +157,27 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
   });
 
   it('retries a provider when a new hint supersedes its in-flight not-found observation', async () => {
-    const firstProviderResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
-    const alternateProviderStarted = deferred<void>();
-    const alternateProviderResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
-    const peers: string[] = [];
-    let peerAAttempts = 0;
-    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
-      peers.push(peerId);
-      if (peerId === 'peerA') {
-        peerAAttempts += 1;
-        if (peerAAttempts === 1) return firstProviderResult.promise;
-        return 'applied';
-      }
-      alternateProviderStarted.resolve();
-      return alternateProviderResult.promise;
-    }), { maxAttempts: 3, retryBackoffMs: 0 });
+    const script = scriptedReconciler(['peerA', 'peerB', 'peerA']);
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      script.reconciler,
+      { maxAttempts: 3, retryBackoffMs: 0 },
+    );
 
     receiver.schedule(announcement(), 'peerA');
     receiver.schedule(announcement(), 'peerB');
-    firstProviderResult.resolve('not-found');
-    await alternateProviderStarted.promise;
+    await script.steps[0]!.started.promise;
+    script.steps[0]!.result.resolve('not-found');
+    await script.steps[1]!.started.promise;
 
     // peerA has made the content available since its first fetch. The exact
     // repeated hint must revive it without creating duplicate semantic work.
     receiver.schedule(announcement(), 'peerA');
-    alternateProviderResult.resolve('not-found');
+    script.steps[1]!.result.resolve('not-found');
+    await script.steps[2]!.started.promise;
+    script.steps[2]!.result.resolve('applied');
     await receiver.whenIdle();
 
-    expect(peers).toEqual(['peerA', 'peerB', 'peerA']);
+    expect(script.peers).toEqual(['peerA', 'peerB', 'peerA']);
     expect(receiver.stats()).toMatchObject({
       scheduled: 3,
       dedupedInFlight: 2,

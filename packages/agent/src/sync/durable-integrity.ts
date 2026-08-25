@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -13,6 +14,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { appendInPlace } from './append-in-place.js';
+import { isIriMetaSubject } from './iri-term.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const MERKLE_ROOT = `${DKG_NS}merkleRoot`;
@@ -102,8 +104,19 @@ export interface DurableIntegritySelection {
   dataIndexes: number[];
   metaIndexes: number[];
   rejected: number;
-  /** Unauthenticated cursor/routing rows deliberately consumed but not persisted. */
+  /** Unauthenticated cursor/routing rows deliberately consumed but not persisted (diagnostic). */
   droppedSyncControlTriples: number;
+  /** Non-IRI (blank-node/literal) `_meta` subject rows dropped at peer ingest (#1921) (diagnostic). */
+  droppedNonIriSubjectTriples: number;
+  /**
+   * Reason-agnostic aggregate of `_meta` rows deliberately consumed but NOT
+   * persisted (= droppedSyncControlTriples + droppedNonIriSubjectTriples). Owned
+   * here by the verifier that classifies the drops (#1921): the worker transports
+   * it and the requester uses it as the single meta-checkpoint-advance signal, so
+   * checkpoint policy never has to enumerate verifier discard reasons. The two
+   * per-reason fields above stay as diagnostics.
+   */
+  consumedUnpersistedMetaTriples: number;
   /** Verified V2 assets whose exact public assertion graph is intentionally empty. */
   verifiedZeroPublicAssets: number;
   /** Exact assertion graphs whose V2 descriptors and fetched payload verified. */
@@ -127,8 +140,10 @@ export interface BoundedGraphScopedDurableBatch {
   dataQuads: Quad[];
   /** Exact graphs whose descriptors are in scope for this verification round. */
   changedDataGraphs: string[];
-  /** Absolute responder row offset at the last complete graph boundary. */
+  /** Absolute verified manifest offset at the last complete graph boundary. */
   safeNextOffset: number;
+  /** Raw immutable responder-session cursor at that verified boundary. */
+  safeRawNextOffset: number;
   /** Number of positive-size assertion graphs completed in this round. */
   completedGraphCount: number;
   /** Total public rows declared by the verified graph-scoped manifest. */
@@ -146,32 +161,43 @@ function compareUnicodeCodePoints(leftValue: string, rightValue: string): number
   return left.length - right.length;
 }
 
-/**
- * Project an incomplete/resumed full snapshot onto a safe V2 graph prefix.
- *
- * This mirrors the responder's `buildExactGraphPagePlan` ordering. The raw
- * offset must start on a manifest boundary and the received rows must be a
- * contiguous prefix of the remaining exact graphs. Any ambiguity fails closed
- * by returning `null`, so callers cannot advance a cursor on attacker-shaped
- * metadata or a mixed legacy/V2 snapshot.
- */
-export function planBoundedGraphScopedDurableBatch(
+function digestGraphScopedMetadataRows(rows: readonly Quad[]): string {
+  const hash = createHash('sha256');
+  const encoder = new TextEncoder();
+  const append = (value: string): void => {
+    const bytes = encoder.encode(value);
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32BE(bytes.byteLength);
+    hash.update(length);
+    hash.update(bytes);
+  };
+  const canonical = [...rows].sort((left, right) => (
+    compareUnicodeCodePoints(left.subject, right.subject)
+    || compareUnicodeCodePoints(left.predicate, right.predicate)
+    || compareUnicodeCodePoints(left.object, right.object)
+    || compareUnicodeCodePoints(left.graph, right.graph)
+  ));
+  append('origintrail.dkg.durable-graph-metadata');
+  append('1');
+  append(String(canonical.length));
+  for (const row of canonical) {
+    append(row.subject);
+    append(row.predicate);
+    append(row.object);
+    append(row.graph);
+  }
+  return hash.digest('hex');
+}
+
+function readOrderedGraphScopedDescriptors(
   dataQuads: readonly Quad[],
   metaQuads: readonly Quad[],
-  resumedFromOffset: number,
-  rawNextOffset: number,
-  phaseCompleted: boolean,
-): BoundedGraphScopedDurableBatch | null {
-  if (
-    !Number.isSafeInteger(resumedFromOffset)
-    || resumedFromOffset < 0
-    || !Number.isSafeInteger(rawNextOffset)
-    || rawNextOffset < resumedFromOffset
-    || rawNextOffset - resumedFromOffset !== dataQuads.length
-    || metaQuads.length === 0
-  ) return null;
-
-  const metadata = indexIntegrityMetadata(dataQuads, metaQuads);
+): GraphScopedDescriptor[] | null {
+  // #1921 — verification must never see non-IRI `_meta` subjects: a peer's
+  // `_:bad dkg:partOf "<valid-ual>"` row would otherwise be scanned by
+  // readIntegrityMetadata and falsely invalidate that valid graph-scoped UAL.
+  const iriMetaQuads = metaQuads.filter((quad) => isIriMetaSubject(quad.subject));
+  const metadata = indexIntegrityMetadata(dataQuads, iriMetaQuads);
   const parsed = readIntegrityMetadata(metadata, false);
   if (
     parsed.fatalUnscopedFailure
@@ -186,7 +212,237 @@ export function planBoundedGraphScopedDurableBatch(
   const descriptorByGraph = new Map(
     descriptors.map((descriptor) => [descriptor.assertionGraph, descriptor] as const),
   );
-  if (descriptorByGraph.size !== descriptors.length) return null;
+  return descriptorByGraph.size === descriptors.length ? descriptors : null;
+}
+
+export const DURABLE_MANIFEST_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest';
+export const DURABLE_MANIFEST_DIGEST_VERSION = 2;
+export const DURABLE_MANIFEST_PREFIX_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest-prefix';
+
+export interface GraphScopedDurableManifestPlan {
+  readonly contextGraphId: string;
+  readonly manifestDigest: `sha256:${string}`;
+  readonly descriptors: readonly GraphScopedDescriptor[];
+  readonly manifestRowCount: number;
+}
+
+export interface GraphScopedDurableManifestPrefix {
+  readonly offset: number;
+  readonly descriptorCount: number;
+  readonly prefixDigest: `sha256:${string}`;
+}
+
+/**
+ * Encode the exact graph-scoped DATA plan without depending on RDF row order.
+ *
+ * Every scalar is length-prefixed independently. This makes embedded
+ * separators and empty optional values unambiguous while the explicit domain
+ * and version prevent the bytes from being reused as another protocol hash.
+ */
+export function encodeGraphScopedDurableManifest(
+  contextGraphId: string,
+  descriptors: readonly GraphScopedDescriptor[],
+  domain = DURABLE_MANIFEST_DIGEST_DOMAIN,
+  version = DURABLE_MANIFEST_DIGEST_VERSION,
+): Uint8Array {
+  const encoder = new TextEncoder();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  const append = (value: string): void => {
+    const bytes = encoder.encode(value);
+    const length = new Uint8Array(4);
+    new DataView(length.buffer).setUint32(0, bytes.byteLength, false);
+    chunks.push(length, bytes);
+    byteLength += length.byteLength + bytes.byteLength;
+  };
+
+  append(domain);
+  append(String(version));
+  append(contextGraphId);
+  append(String(descriptors.length));
+  for (const descriptor of descriptors) {
+    append(descriptor.ual);
+    append(descriptor.contentScopeVersion);
+    append(descriptor.assertionVersion);
+    append(descriptor.contextGraphId);
+    append(descriptor.subGraphName ?? '');
+    append(descriptor.assertionGraph);
+    append(String(descriptor.publicTripleCount));
+    append(descriptor.claimedRootHex);
+    append(String(descriptor.privateTripleCount));
+    append(descriptor.privateRootHex ?? '');
+    append(descriptor.metadataDigestHex);
+  }
+
+  const encoded = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    encoded.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return encoded;
+}
+
+/**
+ * Parse, validate, order and bind the complete V2 manifest that defines a
+ * rootless durable DATA plan. `null` means the metadata is incomplete,
+ * malformed, mixed legacy/V2, or belongs to another Context Graph and cannot
+ * authorize a nonzero continuation.
+ */
+export function createGraphScopedDurableManifestPlan(
+  metaQuads: readonly Quad[],
+  contextGraphId: string,
+): GraphScopedDurableManifestPlan | null {
+  const descriptors = readOrderedGraphScopedDescriptors([], metaQuads);
+  if (
+    !descriptors
+    || descriptors.some((descriptor) => descriptor.contextGraphId !== contextGraphId)
+  ) return null;
+
+  let manifestRowCount = 0;
+  for (const descriptor of descriptors) {
+    manifestRowCount += descriptor.publicTripleCount;
+    if (!Number.isSafeInteger(manifestRowCount)) return null;
+  }
+  const canonical = encodeGraphScopedDurableManifest(contextGraphId, descriptors);
+  const manifestDigest = `sha256:${createHash('sha256').update(canonical).digest('hex')}` as const;
+  return {
+    contextGraphId,
+    manifestDigest,
+    descriptors,
+    manifestRowCount,
+  };
+}
+
+/**
+ * Bind one verified DATA checkpoint boundary to the canonical descriptor
+ * prefix that gives that offset meaning.
+ *
+ * Zero-width descriptors immediately following a positive-width graph are
+ * included at that boundary. This makes inserting/removing a private-only or
+ * empty asset before the next DATA row observable even though the numeric
+ * offset does not move.
+ */
+export function graphScopedDurableManifestPrefixAtOffset(
+  manifest: GraphScopedDurableManifestPlan,
+  offset: number,
+): GraphScopedDurableManifestPrefix | null {
+  if (!Number.isSafeInteger(offset) || offset < 0) return null;
+
+  let rowCount = 0;
+  let descriptorCount = 0;
+  if (offset === 0) {
+    while (
+      descriptorCount < manifest.descriptors.length
+      && manifest.descriptors[descriptorCount]!.publicTripleCount === 0
+    ) {
+      descriptorCount += 1;
+    }
+  }
+  for (const descriptor of manifest.descriptors) {
+    if (offset === 0) break;
+    const nextRowCount = rowCount + descriptor.publicTripleCount;
+    if (!Number.isSafeInteger(nextRowCount)) return null;
+    if (nextRowCount > offset) return null;
+    rowCount = nextRowCount;
+    descriptorCount += 1;
+
+    if (rowCount === offset) {
+      while (
+        descriptorCount < manifest.descriptors.length
+        && manifest.descriptors[descriptorCount]!.publicTripleCount === 0
+      ) {
+        descriptorCount += 1;
+      }
+      break;
+    }
+  }
+
+  if (rowCount !== offset) return null;
+  const canonical = encodeGraphScopedDurableManifest(
+    manifest.contextGraphId,
+    manifest.descriptors.slice(0, descriptorCount),
+    DURABLE_MANIFEST_PREFIX_DIGEST_DOMAIN,
+    DURABLE_MANIFEST_DIGEST_VERSION,
+  );
+  return {
+    offset,
+    descriptorCount,
+    prefixDigest: `sha256:${createHash('sha256').update(canonical).digest('hex')}`,
+  };
+}
+
+/**
+ * Check whether a persisted OFFSET is an exact graph boundary in the current
+ * rootless manifest. Callers must construct and validate the plan once at the
+ * completed META boundary; raw metadata is deliberately not a second mode.
+ */
+export function isGraphScopedDurableManifestBoundary(
+  manifest: GraphScopedDurableManifestPlan,
+  offset: number,
+): boolean {
+  if (!Number.isSafeInteger(offset) || offset < 0) return false;
+  if (offset === 0) return true;
+
+  let boundary = 0;
+  for (const descriptor of manifest.descriptors) {
+    boundary += descriptor.publicTripleCount;
+    if (!Number.isSafeInteger(boundary)) return false;
+    if (offset === boundary) return true;
+    if (offset < boundary) return false;
+  }
+  return false;
+}
+
+/**
+ * Project an incomplete/resumed full snapshot onto a safe V2 graph prefix.
+ *
+ * This mirrors the responder's `buildExactGraphPagePlan` ordering. The raw
+ * offset must start on a manifest boundary. The checkpointed projection must
+ * be a contiguous prefix of the remaining exact graphs, but an interrupted
+ * partitioned fetch may also contain rows beyond its first incomplete graph;
+ * those non-contiguous tail rows are discarded for replay. Ownership or resume
+ * ambiguity still fails closed by returning `null`, so callers cannot advance
+ * a cursor on attacker-shaped metadata or a mixed legacy/V2 snapshot.
+ */
+export function planBoundedGraphScopedDurableBatch(
+  dataQuads: readonly Quad[],
+  manifest: GraphScopedDurableManifestPlan,
+  resumedFromOffset: number,
+  rawNextOffset: number,
+  phaseCompleted: boolean,
+  rawResumedFromOffset = resumedFromOffset,
+  quadRawOffsets?: readonly number[],
+): BoundedGraphScopedDurableBatch | null {
+  if (
+    !Number.isSafeInteger(resumedFromOffset)
+    || resumedFromOffset < 0
+    || !Number.isSafeInteger(rawNextOffset)
+    || !Number.isSafeInteger(rawResumedFromOffset)
+    || rawResumedFromOffset < 0
+    || rawNextOffset < rawResumedFromOffset
+  ) return null;
+
+  const effectiveRawOffsets = quadRawOffsets === undefined
+    ? rawNextOffset - rawResumedFromOffset === dataQuads.length
+      ? dataQuads.map((_, index) => rawResumedFromOffset + index)
+      : null
+    : [...quadRawOffsets];
+  if (
+    effectiveRawOffsets === null
+    || effectiveRawOffsets.length !== dataQuads.length
+    || effectiveRawOffsets.some(
+      (offset, index) => !Number.isSafeInteger(offset)
+        || offset < rawResumedFromOffset
+        || offset >= rawNextOffset
+        || (index > 0 && offset <= effectiveRawOffsets[index - 1]!),
+    )
+  ) return null;
+
+  const descriptors = manifest.descriptors;
+  const descriptorByGraph = new Map(
+    descriptors.map((descriptor) => [descriptor.assertionGraph, descriptor] as const),
+  );
 
   const observedCounts = new Map<string, number>();
   for (const quad of dataQuads) {
@@ -228,7 +484,14 @@ export function planBoundedGraphScopedDurableBatch(
 
     const observed = observedCounts.get(descriptor.assertionGraph) ?? 0;
     if (stoppedAtIncompleteGraph) {
-      if (observed !== 0) return null;
+      // The responder can fetch exact graphs through independent partitions.
+      // An interrupted round may therefore contain rows for later graphs even
+      // though an earlier graph is short. Those rows are not part of the
+      // contiguous checkpointable prefix, but their presence does not make the
+      // already-complete leading graphs ambiguous: graph-scoped metadata still
+      // gives every row an exact owner and the verifier authenticates each
+      // selected graph before storage. Drop the non-contiguous tail and replay
+      // it from the first incomplete boundary on the next round.
       continue;
     }
     if (observed === expected) {
@@ -261,22 +524,43 @@ export function planBoundedGraphScopedDurableBatch(
 
   const boundedData = dataQuads.filter((quad) => completeGraphs.has(quad.graph));
   if (boundedData.length !== safeNextOffset - resumedFromOffset) return null;
+  const boundedRawOffsets = effectiveRawOffsets.filter(
+    (_, index) => completeGraphs.has(dataQuads[index]!.graph),
+  );
+  let safeRawNextOffset = boundedRawOffsets.length > 0
+    ? boundedRawOffsets[boundedRawOffsets.length - 1]! + 1
+    : rawResumedFromOffset;
+  if (phaseCompleted && safeNextOffset === manifestOffset) {
+    // A terminal empty response proves every trailing raw row was either
+    // consumed or filtered, so the immutable responder cursor is at EOF.
+    safeRawNextOffset = rawNextOffset;
+  }
+  if (safeRawNextOffset > rawNextOffset) return null;
 
   return {
     dataQuads: boundedData,
     changedDataGraphs: [...completeGraphs],
     safeNextOffset,
+    safeRawNextOffset,
     completedGraphCount,
     manifestRowCount: manifestOffset,
   };
 }
 
-interface GraphScopedDescriptor {
+export interface GraphScopedDescriptor {
   ual: string;
+  contentScopeVersion: string;
+  assertionVersion: string;
+  contextGraphId: string;
+  subGraphName?: string;
   assertionGraph: string;
   publicTripleCount: number;
+  privateTripleCount: number;
   privateRoot?: Uint8Array;
+  privateRootHex?: string;
   claimedRootHex: string;
+  /** Canonical digest of every metadata row that will drive materialization. */
+  metadataDigestHex: string;
 }
 
 interface IntegrityMetadataIndex {
@@ -365,6 +649,8 @@ export function selectVerifiedDurableSyncQuads(
         metaIndexes: [],
         rejected: 1,
         droppedSyncControlTriples: 0,
+        droppedNonIriSubjectTriples: 0,
+        consumedUnpersistedMetaTriples: 0,
         verifiedZeroPublicAssets: 0,
         verifiedGraphScopedDataGraphs: [],
         logs,
@@ -375,13 +661,25 @@ export function selectVerifiedDurableSyncQuads(
       metaIndexes: [],
       rejected: 0,
       droppedSyncControlTriples: 0,
+      droppedNonIriSubjectTriples: 0,
+      consumedUnpersistedMetaTriples: 0,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
       logs,
     };
   }
 
-  const metadata = indexIntegrityMetadata(dataQuads, metaQuads);
+  // #1921 — sanitize the verification inputs ONCE at this boundary so a non-IRI
+  // `_meta` subject can neither authenticate data (it never becomes a candidate)
+  // NOR poison verification (the readIntegrityMetadata PART_OF scan and
+  // verifyLegacyCandidates' raw scan never see it, so a `_:bad dkg:partOf
+  // "<valid-ual>"` row cannot falsely invalidate a valid batch). Admission below
+  // deliberately runs on the ORIGINAL metaQuads: the selectors still drop+count
+  // non-IRI rows (persist-drop + meta-cursor advance) and index into the
+  // original array. The verification outcome is subject-keyed, so no positional
+  // remap is needed across the sanitized/original split.
+  const iriMetaQuads = metaQuads.filter((quad) => isIriMetaSubject(quad.subject));
+  const metadata = indexIntegrityMetadata(dataQuads, iriMetaQuads);
   if (metadata.merkleSubjects.size === 0 && metadata.markerSubjects.size === 0) {
     if (!acceptUnverified && dataQuads.length > 0) {
       logs.push({
@@ -393,6 +691,8 @@ export function selectVerifiedDurableSyncQuads(
         metaIndexes: [],
         rejected: 1,
         droppedSyncControlTriples: 0,
+        droppedNonIriSubjectTriples: 0,
+        consumedUnpersistedMetaTriples: 0,
         verifiedZeroPublicAssets: 0,
         verifiedGraphScopedDataGraphs: [],
         logs,
@@ -406,11 +706,14 @@ export function selectVerifiedDurableSyncQuads(
       new Set(),
     );
     logDroppedSyncControls(logs, selectedMetadata.droppedControls);
+    logDroppedNonIriMetaSubjects(logs, selectedMetadata.droppedNonIriSubjectTriples);
     return {
       dataIndexes: allIndexes(dataQuads),
       metaIndexes: selectedMetadata.indexes,
       rejected: 0,
       droppedSyncControlTriples: selectedMetadata.droppedControls,
+      droppedNonIriSubjectTriples: selectedMetadata.droppedNonIriSubjectTriples,
+      consumedUnpersistedMetaTriples: selectedMetadata.droppedControls + selectedMetadata.droppedNonIriSubjectTriples,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
       logs,
@@ -427,7 +730,7 @@ export function selectVerifiedDurableSyncQuads(
   );
   const legacy = verifyLegacyCandidates(
     dataQuads,
-    metaQuads,
+    iriMetaQuads,
     metadata,
     parsed.candidates,
     acceptUnverified,
@@ -483,6 +786,16 @@ function indexIntegrityMetadata(
 
   const merkleSubjects = new Set<string>();
   const markerSubjects = new Set<string>();
+  // #1921 PRECONDITION: callers MUST pass IRI-sanitized `_meta` quads. Both
+  // current callers do — selectVerifiedDurableSyncQuads and
+  // planBoundedGraphScopedDurableBatch filter non-IRI subjects at their boundary
+  // before indexing — and any NEW caller MUST too. This function no longer
+  // filters internally, so a non-IRI subject reaching here would re-enter
+  // candidacy AND the metaBySubject-based verification scans
+  // (readIntegrityMetadata's PART_OF scan, parseGraphScopedDescriptor), letting a
+  // peer's blank-node/literal subject authenticate data OR poison a valid batch.
+  // Admission (the selectors) deliberately runs on the ORIGINAL metaQuads and is
+  // where non-IRI rows are dropped + counted.
   for (const quad of metaQuads) {
     if (quad.predicate === MERKLE_ROOT) {
       merkleSubjects.add(quad.subject);
@@ -1019,11 +1332,14 @@ function selectVerifiedQuads(
       outcome.kaToKc,
     );
     logDroppedSyncControls(logs, selectedMetadata.droppedControls);
+    logDroppedNonIriMetaSubjects(logs, selectedMetadata.droppedNonIriSubjectTriples);
     return {
       dataIndexes: allIndexes(dataQuads),
       metaIndexes: selectedMetadata.indexes,
       rejected: 0,
       droppedSyncControlTriples: selectedMetadata.droppedControls,
+      droppedNonIriSubjectTriples: selectedMetadata.droppedNonIriSubjectTriples,
+      consumedUnpersistedMetaTriples: selectedMetadata.droppedControls + selectedMetadata.droppedNonIriSubjectTriples,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       verifiedGraphScopedDataGraphs,
       logs,
@@ -1035,6 +1351,8 @@ function selectVerifiedQuads(
       metaIndexes: [],
       rejected,
       droppedSyncControlTriples: 0,
+      droppedNonIriSubjectTriples: 0,
+      consumedUnpersistedMetaTriples: 0,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       // Keep this list aligned with the selected data + metadata indexes.
       // A fatal batch deliberately selects neither. Returning the names of
@@ -1054,12 +1372,15 @@ function selectVerifiedQuads(
     outcome.authenticatedMetadataUals,
   );
   logDroppedSyncControls(logs, selectedMetadata.droppedControls);
+  logDroppedNonIriMetaSubjects(logs, selectedMetadata.droppedNonIriSubjectTriples);
 
   return {
     dataIndexes,
     metaIndexes: selectedMetadata.indexes,
     rejected,
     droppedSyncControlTriples: selectedMetadata.droppedControls,
+    droppedNonIriSubjectTriples: selectedMetadata.droppedNonIriSubjectTriples,
+    consumedUnpersistedMetaTriples: selectedMetadata.droppedControls + selectedMetadata.droppedNonIriSubjectTriples,
     verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
     verifiedGraphScopedDataGraphs,
     logs,
@@ -1072,11 +1393,23 @@ function selectAdmittedMetadataIndexes(
   admittedMetadataUals: ReadonlySet<string>,
   kaToKc: ReadonlyMap<string, string>,
   authenticatedMetadataUals: ReadonlySet<string>,
-): { indexes: number[]; droppedControls: number } {
+): { indexes: number[]; droppedControls: number; droppedNonIriSubjectTriples: number } {
   const indexes: number[] = [];
   let droppedControls = 0;
+  let droppedNonIriSubjectTriples = 0;
   for (let index = 0; index < metaQuads.length; index++) {
     const quad = metaQuads[index]!;
+    // #1921 — admission runs on the ORIGINAL metaQuads (verification already ran
+    // on the IRI-sanitized set at the boundary). A non-IRI descriptive row would
+    // otherwise reach the descriptive fall-through below and be persisted, so
+    // drop + count it here — that keeps it out of the store AND feeds the
+    // meta-cursor consumed-row count (checkpoint advance). It could not reach the
+    // merkle/marker branch regardless: the boundary sanitize keeps non-IRI
+    // subjects out of `merkleSubjects`/`markerSubjects`.
+    if (!isIriMetaSubject(quad.subject)) {
+      droppedNonIriSubjectTriples += 1;
+      continue;
+    }
     if (
       metadata.merkleSubjects.has(quad.subject)
       || metadata.markerSubjects.has(quad.subject)
@@ -1130,7 +1463,7 @@ function selectAdmittedMetadataIndexes(
     }
     indexes.push(index);
   }
-  return { indexes, droppedControls };
+  return { indexes, droppedControls, droppedNonIriSubjectTriples };
 }
 
 function selectSystemOverrideMetadataIndexes(
@@ -1138,11 +1471,20 @@ function selectSystemOverrideMetadataIndexes(
   metadata: IntegrityMetadataIndex,
   authenticatedMetadataUals: ReadonlySet<string>,
   kaToKc: ReadonlyMap<string, string>,
-): { indexes: number[]; droppedControls: number } {
+): { indexes: number[]; droppedControls: number; droppedNonIriSubjectTriples: number } {
   const indexes: number[] = [];
   let droppedControls = 0;
+  let droppedNonIriSubjectTriples = 0;
   for (let index = 0; index < metaQuads.length; index++) {
     const quad = metaQuads[index]!;
+    // #1921 — reject a non-IRI durable `_meta` subject at ingest. This terminal
+    // system-CG selector admits every non-control row, so without this guard a
+    // blank-node subject bearing ANY descriptive or integrity predicate
+    // (e.g. `dkg:merkleRoot`) would be persisted and later served back.
+    if (!isIriMetaSubject(quad.subject)) {
+      droppedNonIriSubjectTriples += 1;
+      continue;
+    }
     if (
       DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)
       && !isGraphSealDescriptiveVersion(quad, metadata)
@@ -1158,7 +1500,7 @@ function selectSystemOverrideMetadataIndexes(
     }
     indexes.push(index);
   }
-  return { indexes, droppedControls };
+  return { indexes, droppedControls, droppedNonIriSubjectTriples };
 }
 
 /**
@@ -1247,6 +1589,17 @@ function logDroppedSyncControls(
   });
 }
 
+function logDroppedNonIriMetaSubjects(
+  logs: DurableIntegrityLogEntry[],
+  dropped: number,
+): void {
+  if (dropped === 0) return;
+  logs.push({
+    level: 'warn',
+    message: `Dropped ${dropped} non-IRI durable _meta subject triple(s) from peer ingest (#1921)`,
+  });
+}
+
 function isDetachedLegacyProjectionGraph(graph: string): boolean {
   if (!graph.startsWith('did:dkg:context-graph:')) return false;
   return graph.endsWith('/_catalog')
@@ -1290,6 +1643,10 @@ function parseGraphScopedDescriptor(ual: string, rows: readonly Quad[]): GraphSc
 
   const metadataUal = requireSingle(KA_UAL, 'kaUal');
   if (metadataUal !== ual) throw new Error(`kaUal mismatch: found ${metadataUal}`);
+  const contentScopeVersion = parseInteger(
+    requireSingle(CONTENT_SCOPE_VERSION, 'contentScopeVersion'),
+    'contentScopeVersion',
+  );
   const assertionVersion = parseInteger(
     requireSingle(ASSERTION_VERSION, 'assertionVersion'),
     'assertionVersion',
@@ -1350,15 +1707,27 @@ function parseGraphScopedDescriptor(ual: string, rows: readonly Quad[]): GraphSc
   if (privateTripleCount === 0 && privateRootValues.length > 0) {
     throw new Error('privateMerkleRoot present without private content');
   }
+  const privateRootHex = privateRootValues[0]
+    ? normalizeHex32(privateRootValues[0], 'privateMerkleRoot')
+    : undefined;
 
   return {
     ual,
+    contentScopeVersion: contentScopeVersion.toString(),
+    assertionVersion: assertionVersion.toString(),
+    contextGraphId,
+    ...(subGraphName === undefined ? {} : { subGraphName }),
     assertionGraph,
     publicTripleCount,
-    privateRoot: privateRootValues[0]
-      ? hexToBytes(normalizeHex32(privateRootValues[0], 'privateMerkleRoot'))
-      : undefined,
+    privateTripleCount,
+    ...(privateRootHex
+      ? {
+          privateRoot: hexToBytes(privateRootHex),
+          privateRootHex,
+        }
+      : {}),
     claimedRootHex: normalizeHex32(requireSingle(MERKLE_ROOT, 'merkleRoot'), 'merkleRoot'),
+    metadataDigestHex: digestGraphScopedMetadataRows(rows),
   };
 }
 

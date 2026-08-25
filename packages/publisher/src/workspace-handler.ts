@@ -1,5 +1,9 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import { GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  invalidateSwmMaterializationWitness,
+  tryReplaceGraphAtomically,
+} from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, contextGraphDataUri, contextGraphMetaUri, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetAgentAddressesEqual, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
@@ -25,17 +29,22 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
-import { validateKnowledgeAssetPublishRequest } from './validation.js';
-import { withKeyedLocks } from './keyed-lock.js';
-import { generateSubGraphRegistration } from './metadata.js';
+import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
+import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
+import {
+  generateSubGraphRegistration,
+  replaceLocallyTrustedKnowledgeAssetControlEnvelope,
+} from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import {
-  resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
+  tryResolveKnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
+import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
+import { computeFlatKCRootV10 } from './merkle.js';
 
 interface WorkspaceGossipDecodeResult {
   request?: WorkspacePublishRequestMsg;
@@ -286,6 +295,27 @@ export class SharedMemoryHandler {
   private readonly contextGraphMetaOracle?: (
     contextGraphId: string,
   ) => Promise<ContextGraphMetaOracleRecord | null>;
+  /**
+   * LIVE on-chain proof that a CG's access policy is public (`0`).
+   *
+   * The SWM encryption requirement must be decided from the SAME authority on
+   * both sides of the wire. The SENDER decides with this predicate
+   * (`resolveWorkspaceRecipientsGated` -> `isContextGraphPublicOnChain`) and
+   * sends PLAINTEXT for a public CG regardless of any agent gate, because on a
+   * public CG the allowlist governs PUBLISH AUTHORITY, not READ ACCESS — there
+   * is nothing to keep confidential. Without the same predicate here, the
+   * receiver decided from local `allowedAgent`/`participantAgent` triples alone
+   * and permanently dropped those plaintext writes, which silently broke every
+   * member->curator SWM share on a public/curated CG.
+   *
+   * Returns true ONLY on a live public proof. Absent oracle, `false`, or a
+   * throw all mean "not proven public" and keep the encryption requirement —
+   * the same fail-closed discipline the sender uses, so a stale mapping or an
+   * RPC flake can never become a plaintext-acceptance hole.
+   */
+  private readonly publicAccessPolicyOnChainOracle?: (
+    contextGraphId: string,
+  ) => Promise<boolean>;
   private readonly markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   /**
    * OT-RFC-38 / LU-6 Phase B — chain-backed fallback for the agent
@@ -406,6 +436,16 @@ export class SharedMemoryHandler {
       contextGraphMetaOracle?: (
         contextGraphId: string,
       ) => Promise<ContextGraphMetaOracleRecord | null>;
+      /**
+       * Live on-chain public-access proof, mirroring the sender's
+       * `isContextGraphPublicOnChain`. Optional; when omitted the receiver
+       * keeps the pre-existing (fail-closed) behaviour and requires
+       * encryption for every agent-gated CG.
+       * See {@link SharedMemoryHandler#publicAccessPolicyOnChainOracle}.
+       */
+      publicAccessPolicyOnChainOracle?: (
+        contextGraphId: string,
+      ) => Promise<boolean>;
       markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
       /**
        * OT-RFC-38 / LU-6 Phase B chain-backed agent-allowlist
@@ -464,6 +504,7 @@ export class SharedMemoryHandler {
     this.writeLocks = options?.writeLocks ?? new Map();
     this.localAgentAddresses = options?.localAgentAddresses;
     this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
+    this.publicAccessPolicyOnChainOracle = options?.publicAccessPolicyOnChainOracle;
     this.markContextGraphMetaDirtyFromQuads = options?.markContextGraphMetaDirtyFromQuads;
     this.chainAgentGateOracle = options?.chainAgentGateOracle;
     this.beaconCuratorOracle = options?.beaconCuratorOracle;
@@ -925,11 +966,19 @@ export class SharedMemoryHandler {
     // try, `withWriteLocks` returns false for TWO distinct
     // reasons — validation rejection (deterministic, payload
     // can never apply) and CAS-not-met (TRANSIENT when SWM
-    // writes arrive out of order). Hoisted here so the closure
-    // can signal which branch fired; the post-closure code
-    // maps `cas` → retryable and `validation` → permanent.
-    let withWriteLocksRejection: 'validation' | 'cas' | undefined;
-    let validationRejectionReason: string | undefined;
+    // writes arrive out of order). The locked closure RETURNS its
+    // decision as data — applied, or rejected with a kind — so the
+    // impossible state "returned false with no rejection kind" is
+    // unrepresentable, and the kind -> retryability policy is one
+    // switch after the lock.
+    type SwmWriteDecision =
+      | { readonly applied: true }
+      | { readonly applied: false; readonly kind: 'validation' | 'cas' | 'corrupt-head'; readonly reason?: string };
+    const swmWriteApplied: SwmWriteDecision = { applied: true };
+    const rejectWithinLocks = (
+      kind: 'validation' | 'cas' | 'corrupt-head',
+      reason?: string,
+    ): SwmWriteDecision => ({ applied: false, kind, ...(reason === undefined ? {} : { reason }) });
     let verifiedLifecycleFields: SharedMemoryLifecycleFields | undefined;
     try {
       const { envelope, signedPayload } = decoded;
@@ -1018,7 +1067,22 @@ export class SharedMemoryHandler {
         }
       }
 
-      const requiresEncryptedPayload = hasPrivateAccessPolicy || agentGateAddresses !== null;
+      // Policy rationale lives in `workspace-encryption-policy.ts` (the
+      // must-vs-may split and its fail-closed discipline). Local sequencing
+      // note only: the probe is LAZY — evaluated solely when the CG is
+      // agent-gated, because the policy consumes provenPublicOnChain
+      // exclusively behind `isAgentGated` and awaiting the chain RPC
+      // unconditionally put ~30ms on the hot path of EVERY SWM gossip receive
+      // (measured devnet regression: receive-apply 3ms -> 33ms flipped the
+      // public-CG sync gate red). Keep this evaluation order.
+      const { requiresEncryptedPayload, supportsEncryptedPayload } =
+        resolveWorkspaceEncryptionRequirement({
+          hasPrivateAccessPolicy,
+          agentGateAddresses,
+          provenPublicOnChain: agentGateAddresses !== null
+            ? await this.isContextGraphProvenPublicOnChain(contextGraphId, ctx)
+            : false,
+        });
       if (requiresEncryptedPayload && !decoded.encryptedPayload && !decoded.senderKeyMessage) {
         const reason = `Sender Key encrypted workspace payload required for private or agent-gated context graph "${contextGraphId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
@@ -1026,7 +1090,7 @@ export class SharedMemoryHandler {
       }
 
       if (decoded.senderKeyMessage) {
-        if (!requiresEncryptedPayload) {
+        if (!supportsEncryptedPayload) {
           const reason = `Sender Key payload is only supported for private or agent-gated context graph "${contextGraphId}"`;
           this.log.warn(ctx, `SWM write rejected: ${reason}`);
           return { applied: false, reason, retryable: false };
@@ -1059,7 +1123,10 @@ export class SharedMemoryHandler {
           return { applied: false, reason, retryable: false };
         }
       } else if (decoded.encryptedPayload) {
-        if (!requiresEncryptedPayload) {
+        // Same must-vs-may split as the Sender-Key branch above: acceptance is
+        // governed by whether the CG is gated at all, not by whether the local
+        // chain probe currently proves it public.
+        if (!supportsEncryptedPayload) {
           const reason = `encrypted workspace payload is only supported for private or agent-gated context graph "${contextGraphId}"`;
           this.log.warn(ctx, `SWM write rejected: ${reason}`);
           return { applied: false, reason, retryable: false };
@@ -1304,18 +1371,17 @@ export class SharedMemoryHandler {
         contentScope,
         subGraphName,
       );
-      const lockNamespace = subGraphName
-        ? `${contextGraphId}\0${subGraphName}`
-        : contextGraphId;
       // All assertion versions currently replace the same exact per-KA layer
       // graph. Lock by UAL, not subject and not version, so concurrent version
-      // deliveries cannot interleave a DROP/INSERT pair.
-      const lockKeys = [`${lockNamespace}\0ka\0${contentScope.ual}`];
+      // deliveries cannot interleave a DROP/INSERT pair. The key is derived by
+      // the SHARED helper so the public catch-up materializer serializes on the
+      // identical string — see swmKaWriteLockKey for why drift here is silent.
+      const lockKeys = [swmKaWriteLockKey(contextGraphId, subGraphName, contentScope.ual)];
 
       onPhase?.('store', 'start');
-      const applied = await this.withWriteLocks(lockKeys, async (): Promise<boolean> => {
+      const decision = await this.withWriteLocks(lockKeys, async (): Promise<SwmWriteDecision> => {
         onPhase?.('validate', 'start');
-        const validation = validateKnowledgeAssetPublishRequest(
+        const validation = validateCanonicalGraphScopedKnowledgeAssetPayload(
           quads,
           expectedWireGraph,
           publicTripleCount ?? 0,
@@ -1331,9 +1397,7 @@ export class SharedMemoryHandler {
             reason,
             validationErrorCount: validation.errors.length,
           }, 'warn');
-          withWriteLocksRejection = 'validation';
-          validationRejectionReason = reason;
-          return false;
+          return rejectWithinLocks('validation', reason);
         }
         this.logSwmLifecycleEvent(ctx, 'swm_validation_passed', {
           ...verifiedFields,
@@ -1347,25 +1411,64 @@ export class SharedMemoryHandler {
         const publicDigest = workspacePublicQuadsDigest(
           normalized.map((quad) => ({ ...quad, graph: '' })),
         );
+        const operationTimestamp = new Date(Number(timestampMs));
+        if (Number.isNaN(operationTimestamp.getTime())) {
+          const reason = `invalid timestampMs ${String(timestampMs)}`;
+          this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+          return rejectWithinLocks('validation', reason);
+        }
+        const persistLocallyTrustedControls = async (): Promise<void> => {
+          const merkleRoot = computeFlatKCRootV10(
+            normalized.map((quad) => ({ ...quad, graph: '' })),
+            privateMerkleRoot?.length ? [privateMerkleRoot] : [],
+          );
+          await replaceLocallyTrustedKnowledgeAssetControlEnvelope(
+            this.store,
+            contentScope.ual,
+            {
+              assertionVersion: contentScope.assertionVersion,
+              merkleRoot,
+            },
+            {
+              publisherPeerId,
+              accessPolicy: graphAccessPolicy,
+              allowedPeers: graphAllowedPeers,
+            },
+          );
+        };
         const incomingPrivateRootHex = privateMerkleRoot?.length
           ? ethers.hexlify(privateMerkleRoot).toLowerCase()
           : undefined;
-        const currentHead = await resolveKnowledgeAssetWorkspaceHead({
+        // GH#2273 — the resolver fails closed on a multi-valued head (catch-up union
+        // residue). The monotonicity gate cannot read such a head, so NOTHING is written
+        // (fail closed), and this path deliberately forgoes its own delete-then-insert
+        // head rewrite, which would otherwise adopt whatever the inbound share claims
+        // over a head we cannot even read. The rejection is TRANSIENT ('corrupt-head'
+        // channel below): the corruption is local state the sync lane's
+        // identity-preserving repair heals, so the sender's budget-bounded outbox must
+        // keep the payload queued — a permanent drop would lose a valid newer share
+        // that becomes applicable the moment the head converges.
+        const headResolution = await tryResolveKnowledgeAssetWorkspaceHead({
           store: this.store,
           graphManager: this.graphManager,
           contextGraphId,
           kaUal: contentScope.ual,
           subGraphName,
         });
+        if (headResolution.status === 'corrupt') {
+          const reason = `CORRUPT_SWM_HEAD: ${headResolution.error.message}`;
+          this.log.warn(ctx, `SWM share deferred: ${reason}`);
+          return rejectWithinLocks('corrupt-head', reason);
+        }
+        const currentHead = headResolution.status === 'resolved' ? headResolution.head : undefined;
         if (currentHead) {
           const incomingVersion = BigInt(contentScope.assertionVersion);
           const currentVersion = BigInt(currentHead.assertionVersion);
           if (incomingVersion < currentVersion) {
-            validationRejectionReason =
+            const reason =
               `STALE_KA_ASSERTION_VERSION: incoming=${incomingVersion}, current=${currentVersion}`;
-            this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-            withWriteLocksRejection = 'validation';
-            return false;
+            this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+            return rejectWithinLocks('validation', reason);
           }
           if (incomingVersion === currentVersion) {
             const sameAssertion =
@@ -1381,23 +1484,23 @@ export class SharedMemoryHandler {
               currentHead.allowedPeers.slice().sort().join('\u0000') === graphAllowedPeers.join('\u0000');
             if (sameAssertion) {
               // Exact replay: acknowledge idempotently without churning the
-              // graph or immutable operation snapshot.
-              return true;
+              // graph or immutable operation snapshot. Refresh the local-only
+              // controls too, so a retry completes a prior head/sidecar tear.
+              await persistLocallyTrustedControls();
+              return swmWriteApplied;
             }
-            validationRejectionReason =
+            const reason =
               `CONFLICTING_KA_ASSERTION_VERSION: ${contentScope.ual} version ${incomingVersion} ` +
               'is already bound to a different operation or content digest';
-            this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-            withWriteLocksRejection = 'validation';
-            return false;
+            this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+            return rejectWithinLocks('validation', reason);
           }
           if (currentHead.publisherPeerId !== publisherPeerId) {
-            validationRejectionReason =
+            const reason =
               `KA_PUBLISHER_MISMATCH: ${contentScope.ual} is owned in SWM by ` +
               `${currentHead.publisherPeerId}, not ${publisherPeerId}`;
-            this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-            withWriteLocksRejection = 'validation';
-            return false;
+            this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+            return rejectWithinLocks('validation', reason);
           }
         }
 
@@ -1410,17 +1513,8 @@ export class SharedMemoryHandler {
             // replays missed writes on reconnect, converging replicas eventually.
             // Accepting stale-CAS writes would silently corrupt local state.
             this.log.info(ctx, `Skipping SWM write ${shareOperationId} — remote CAS conditions not met`);
-            withWriteLocksRejection = 'cas';
-            return false;
+            return rejectWithinLocks('cas');
           }
-        }
-
-        const operationTimestamp = new Date(Number(timestampMs));
-        if (Number.isNaN(operationTimestamp.getTime())) {
-          validationRejectionReason = `invalid timestampMs ${String(timestampMs)}`;
-          this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-          withWriteLocksRejection = 'validation';
-          return false;
         }
 
         const replacedAtomically = await tryReplaceGraphAtomically(
@@ -1435,6 +1529,28 @@ export class SharedMemoryHandler {
             { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
           );
         }
+        // #2079: this graph's content just changed, so the catch-up lane's
+        // materialization witness for it now describes bytes that are gone.
+        //
+        // This is the ONLY replace path outside the materializer holding a lock
+        // the witness module can see — the key above is deliberately the same
+        // `swmKaWriteLockKey` string — and the count gate cannot cover it,
+        // because a replace leaves the count matching.
+        //
+        // Ordinarily a successful apply also advances the head, so catch-up
+        // skips an older descriptor before the witness is consulted at all.
+        // The case this closes is a TORN apply: the replace above succeeds and
+        // the snapshot-file or head write then throws, leaving content=v2,
+        // head=v1 and a witness for v1's digest. A peer re-offering v1 would
+        // pass the head guard, pass the count gate, and HIT the witness —
+        // reported materialized while the store holds v2. Pre-#2079 the
+        // read-back returned false there and the graph was repaired.
+        //
+        // Best-effort: failing to drop a memo must never fail an apply that has
+        // already committed.
+        await invalidateSwmMaterializationWitness(this.store, swmGraph, {
+          source: 'publisher.swm.graphScopedReplace.witnessInvalidate',
+        }).catch(() => {});
         // The gossip envelope carries the verified author address
         // (`verifyAgentEnvelope` above already cryptographically bound
         // it to `recovered`); use it for SWM `prov:wasAttributedTo` so
@@ -1476,12 +1592,17 @@ export class SharedMemoryHandler {
           shareOperationId,
           subGraphName,
         });
+        // The transport/envelope checks above authenticate these mutable
+        // controls. Persist them outside sync-visible metadata, anchored to
+        // this assertion's locally recomputed root, only after the durable SWM
+        // head has committed. Receipt recovery must fail closed without them.
+        await persistLocallyTrustedControls();
 
-        return true;
+        return swmWriteApplied;
       });
 
       onPhase?.('store', 'end');
-      if (applied) {
+      if (decision.applied) {
         // PR-A R1: only record the observation after the apply actually
         // succeeded — passing allowlist + sub-graph validation + CAS +
         // the durable store insert. Recording earlier would let
@@ -1506,28 +1627,46 @@ export class SharedMemoryHandler {
         });
         return appliedSharedMemoryOutcome(verifiedFields, quads.length);
       }
-      // `applied === false` from the withWriteLocks closure. PR-C
-      // codex R4: validation rejection is deterministic (retry
-      // produces the same outcome), but CAS-not-met is
-      // TRANSIENT — the missed write upstream might still arrive
-      // via gossip and bring local state up to where the CAS
-      // condition would pass. Keep retrying so the sender's
-      // outbox doesn't drop a payload that would apply after
-      // out-of-order delivery converges.
-      if (withWriteLocksRejection === 'cas') {
-        return rejectedSharedMemoryOutcome(
-          verifiedFields,
-          'CAS pre-conditions not met against current SWM state (transient: may apply after upstream writes converge)',
-          true,
-          true,
-        );
+      // Rejected by the locked closure. The kind -> outcome policy lives
+      // HERE, in one switch adjacent to the channel docs: 'validation' is
+      // deterministic (retry produces the same outcome, so permanent); 'cas'
+      // is TRANSIENT (PR-C codex R4 — the missed upstream write might still
+      // arrive and make the condition pass); 'corrupt-head' is TRANSIENT for
+      // the same convergent-local-state reason (GH#2273 — sync repair
+      // collapses the multi-valued head, and the sender's budget-bounded
+      // outbox must keep the payload queued rather than record a terminal
+      // drop of a share that will apply once the head heals).
+      const rejectionKind = decision.kind;
+      switch (rejectionKind) {
+        case 'corrupt-head':
+          return rejectedSharedMemoryOutcome(
+            verifiedFields,
+            `${decision.reason ?? 'CORRUPT_SWM_HEAD'} (transient: may apply after sync repair converges the head)`,
+            true,
+            true,
+          );
+        case 'cas':
+          return rejectedSharedMemoryOutcome(
+            verifiedFields,
+            'CAS pre-conditions not met against current SWM state (transient: may apply after upstream writes converge)',
+            true,
+            true,
+          );
+        case 'validation':
+          return rejectedSharedMemoryOutcome(
+            verifiedFields,
+            decision.reason ?? 'validation rejected graph-scoped KA payload (permanent)',
+            false,
+            true,
+          );
+        default: {
+          // Compile-time exhaustiveness: a future SwmWriteDecision kind fails
+          // HERE instead of silently inheriting the permanent validation
+          // policy.
+          const unreachable: never = rejectionKind;
+          return unreachable;
+        }
       }
-      return rejectedSharedMemoryOutcome(
-        verifiedFields,
-        validationRejectionReason ?? 'validation rejected graph-scoped KA payload (permanent)',
-        false,
-        true,
-      );
     } catch (err) {
       // PR-C codex R3: classify the catch path as `retryable: true`.
       // The dominant production case here is `workspaceSenderKeyDecryptor`
@@ -2066,6 +2205,35 @@ export class SharedMemoryHandler {
       }
     }
     return null;
+  }
+
+  /**
+   * True only on a LIVE on-chain proof that this CG's access policy is public.
+   *
+   * Fail-closed by construction: no oracle, a `false` answer, or a throw all
+   * yield `false` ("not proven public"), which keeps the encryption
+   * requirement. This mirrors the sender's `isContextGraphPublicOnChain` so the
+   * two sides of the wire cannot disagree about whether plaintext SWM is
+   * acceptable. A throw is logged rather than swallowed silently — a
+   * persistently failing probe means agent-gated public CGs keep rejecting
+   * plaintext, which is safe but worth diagnosing.
+   */
+  private async isContextGraphProvenPublicOnChain(
+    contextGraphId: string,
+    ctx: OperationContext,
+  ): Promise<boolean> {
+    if (!this.publicAccessPolicyOnChainOracle) return false;
+    try {
+      return await this.publicAccessPolicyOnChainOracle(contextGraphId);
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `public-access on-chain probe failed for "${contextGraphId}" — treating as NOT public `
+        + `(fail-closed: agent-gated SWM keeps requiring encryption): `
+        + `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
   }
 
   private async contextGraphHasPrivateAccessPolicy(contextGraphId: string): Promise<boolean> {

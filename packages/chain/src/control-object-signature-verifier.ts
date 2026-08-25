@@ -14,20 +14,53 @@ import {
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
+import {
+  type CurrentFinalizedEvmCallRequestV1,
+  type CurrentFinalizedEvmCallResultV1,
+  type CurrentFinalizedEvmCallV1,
+} from './current-finalized-evm-call-model.js';
+import {
+  CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
+  CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
+  CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1,
+  CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
+  CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
+  CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1,
+  CurrentFinalizedEvmCallErrorV1,
+  type CurrentFinalizedEvmCallErrorCodeV1,
+} from './current-finalized-evm-read-profile.js';
+
+export {
+  CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1,
+  CurrentFinalizedEvmCallErrorV1,
+  type CurrentFinalizedEvmCallErrorCodeV1,
+} from './current-finalized-evm-read-profile.js';
+export {
+  type CurrentFinalizedEvmCallRequestV1,
+  type CurrentFinalizedEvmCallResultV1,
+  type CurrentFinalizedEvmCallV1,
+} from './current-finalized-evm-call-model.js';
+
 export const EIP1271_MAGIC_VALUE_V1 = '0x1626ba7e' as const;
 export const EIP1271_CANONICAL_ABI_RETURN_V1 =
   `0x${EIP1271_MAGIC_VALUE_V1.slice(2)}${'00'.repeat(28)}` as const;
-export const CONTROL_EIP1271_GAS_LIMIT_V1 = 1_000_000n;
+export const CONTROL_EIP1271_GAS_LIMIT_V1 = CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1;
 export const CONTROL_EIP1271_MAX_RETURN_BYTES_V1 = 32;
-export const CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1 = 64 * 1024;
-export const CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1 = 4_000;
-export const CONTROL_EIP1271_MAX_ATTEMPTS_V1 = 2;
-export const CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1 = 10_000;
-export const CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1 = 4;
+export const CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1 =
+  CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1;
+export const CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1 =
+  CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1;
+export const CONTROL_EIP1271_MAX_ATTEMPTS_V1 = CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1;
+export const CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1 =
+  CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1;
+export const CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1 =
+  CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1;
 export const CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1 =
-  'distinct-configured-endpoints-no-same-endpoint-retry' as const;
-export const CONTROL_EIP1271_CALL_FROM_V1 =
-  '0x0000000000000000000000000000000000000000' as const;
+  CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1;
+export const CONTROL_EIP1271_CALL_FROM_V1 = CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1;
 
 const SECP256K1_N = BigInt(
   '0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141',
@@ -39,74 +72,6 @@ const EIP1271_INTERFACE = new ethers.Interface([
   'function isValidSignature(bytes32,bytes) view returns (bytes4)',
 ]);
 declare const VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURE_BRAND_V1: unique symbol;
-
-export const CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1 = Object.freeze([
-  'unsupported-chain',
-  'chain-mismatch',
-  'finalized-state-unavailable',
-  'rpc-unavailable',
-  'rpc-timeout',
-  'concurrency-saturated',
-  'resource-limit',
-  'revert',
-  'no-code',
-  'malformed-return',
-] as const);
-
-export type CurrentFinalizedEvmCallErrorCodeV1 =
-  (typeof CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1)[number];
-
-/** Closed failure vocabulary implemented by the finalized-state RPC gateway. */
-export class CurrentFinalizedEvmCallErrorV1 extends Error {
-  readonly code: CurrentFinalizedEvmCallErrorCodeV1;
-
-  constructor(
-    code: CurrentFinalizedEvmCallErrorCodeV1,
-    message: string,
-    options: { readonly cause?: unknown } = {},
-  ) {
-    if (!CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1.includes(code)) {
-      throw new TypeError(`Unsupported current-finalized EVM call error code: ${String(code)}`);
-    }
-    super(message, options.cause === undefined ? undefined : { cause: options.cause });
-    this.name = 'CurrentFinalizedEvmCallErrorV1';
-    this.code = code;
-    Object.freeze(this);
-  }
-}
-
-export interface CurrentFinalizedEvmCallRequestV1 {
-  readonly chainId: ChainIdV1;
-  readonly to: EvmAddressV1;
-  readonly from: typeof CONTROL_EIP1271_CALL_FROM_V1;
-  readonly data: string;
-  readonly gasLimit: bigint;
-  readonly maxReturnBytes: number;
-  readonly maxRpcResponseBytes: number;
-  readonly attemptTimeoutMs: number;
-  readonly maxAttempts: number;
-  readonly endpointAttemptPolicy: typeof CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1;
-  readonly maxConcurrentCallsPerChain: number;
-  readonly totalDeadlineMs: number;
-  readonly ccipReadEnabled: false;
-  readonly signal: AbortSignal;
-}
-
-export interface CurrentFinalizedEvmCallResultV1 {
-  readonly chainId: ChainIdV1;
-  readonly blockNumber: BlockNumberV1;
-  readonly blockHash: Digest32V1;
-  readonly returnData: string;
-}
-
-/**
- * Trusted local adapter boundary. Implementations select the receiver's current
- * finalized block and execute the exact request at that block; peer data never
- * supplies an RPC URL or block selector.
- */
-export interface CurrentFinalizedEvmCallV1 {
-  (request: CurrentFinalizedEvmCallRequestV1): Promise<CurrentFinalizedEvmCallResultV1>;
-}
 
 export const CONTROL_SIGNATURE_VERIFICATION_ERROR_CODES_V1 = Object.freeze([
   'CONTROL_SIGNATURE_ENVELOPE_INVALID',
@@ -206,14 +171,7 @@ export async function verifyControlEnvelopeIssuerSignatureV1(
   const issuer = envelope.issuer as EvmAddressV1;
 
   if (envelope.signatureSuite === 'eip191-personal-sign-digest-v1') {
-    verifyCanonicalEip191(envelope);
-    return mintVerifiedControlEnvelopeIssuerSignatureV1({
-      objectDigest,
-      signatureVariantDigest,
-      issuer,
-      signatureSuite: envelope.signatureSuite,
-      verificationEvidence: Object.freeze({ kind: 'eip191' as const }),
-    });
+    return verifyCanonicalEip191EnvelopeV1(envelope);
   }
 
   const call = options.callEvmAtCurrentFinalized;
@@ -323,6 +281,26 @@ export async function verifyControlEnvelopeIssuerSignatureV1(
   }
 }
 
+/**
+ * Synchronous verifier for the EOA-only signature suite. This lets synchronous
+ * durable boundaries consume the same unforgeable capability as the generic
+ * verifier without admitting contract-wallet signatures without a finalized
+ * chain read.
+ */
+export function verifyEip191ControlEnvelopeIssuerSignatureV1(
+  input: SignedControlEnvelopeV1,
+): VerifiedControlEnvelopeIssuerSignatureV1 {
+  const envelope = snapshotEnvelope(input);
+  if (envelope.signatureSuite !== 'eip191-personal-sign-digest-v1') {
+    fail(
+      'CONTROL_SIGNATURE_CHAIN_UNSUPPORTED',
+      'unsupported',
+      'Synchronous control-envelope verification supports only EIP-191 signatures',
+    );
+  }
+  return verifyCanonicalEip191EnvelopeV1(envelope);
+}
+
 /** Reject lookalikes, casts, clones, and serialized copies of verification tokens. */
 export function assertVerifiedControlEnvelopeIssuerSignatureV1(
   value: unknown,
@@ -357,6 +335,23 @@ function mintVerifiedControlEnvelopeIssuerSignatureV1(
   ) as VerifiedControlEnvelopeIssuerSignatureV1;
   VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURES_V1.set(capability as object, immutable);
   return capability;
+}
+
+function verifyCanonicalEip191EnvelopeV1(
+  envelope: SignedControlEnvelopeV1 & {
+    readonly signatureSuite: 'eip191-personal-sign-digest-v1';
+  },
+): VerifiedControlEnvelopeIssuerSignatureV1 {
+  verifyCanonicalEip191(envelope);
+  return mintVerifiedControlEnvelopeIssuerSignatureV1({
+    objectDigest: asDigest32(envelope.objectDigest),
+    signatureVariantDigest: asDigest32(
+      computeControlSignatureVariantDigestHex(envelope.objectDigest, envelope.signature),
+    ),
+    issuer: envelope.issuer as EvmAddressV1,
+    signatureSuite: envelope.signatureSuite,
+    verificationEvidence: Object.freeze({ kind: 'eip191' as const }),
+  });
 }
 
 function snapshotEnvelope(input: SignedControlEnvelopeV1): SignedControlEnvelopeV1 {

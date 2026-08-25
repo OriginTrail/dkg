@@ -49,6 +49,12 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
   }
 }
 
+/**
+ * Structured error from the local-agent chat/health endpoints. On a bridge
+ * idle-timeout (504) the daemon forwards any partial turn output as `text`
+ * (flagged by `timedOut`), so panel code can choose to render the partial
+ * reply alongside the timeout instead of dropping what the agent already said.
+ */
 export class LocalAgentApiError extends Error {
   status?: number;
   code?: string;
@@ -60,6 +66,9 @@ export class LocalAgentApiError extends Error {
   route?: string;
   integrationId?: string;
   retryable?: boolean;
+  /** Partial turn output preserved across a bridge timeout. */
+  text?: string;
+  timedOut?: boolean;
 
   constructor(message: string, metadata: Partial<LocalAgentApiError> = {}) {
     super(message);
@@ -886,6 +895,12 @@ export const knowledgeAssetPullFrom = (
 
 export interface AtomicShareOptions {
   subGraphName?: string;
+  /**
+   * Require a private context graph's curator to apply the complete KA before
+   * the UI reports that it reached Shared Working Memory. Defaults to true for
+   * interactive UI shares; public context graphs ignore the gate.
+   */
+  awaitCuratorAck?: boolean;
 }
 
 type LegacyAtomicShareOptions = AtomicShareOptions & {
@@ -920,7 +935,16 @@ function normalizeAtomicShareOptions(raw: AtomicShareOptions): AtomicShareOption
   if (opts.skipSeal !== undefined && opts.skipSeal !== false) {
     throw new TypeError('skipSeal must be false or omitted');
   }
-  return opts.subGraphName ? { subGraphName: opts.subGraphName } : {};
+  if (opts.awaitCuratorAck !== undefined && typeof opts.awaitCuratorAck !== 'boolean') {
+    throw new TypeError('awaitCuratorAck must be a boolean when supplied');
+  }
+  return {
+    ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+    // The synchronous UI flow must not turn a local-only SWM commit into a
+    // success toast. For private CGs this waits for the curator's applied ACK;
+    // for public CGs the daemon treats the flag as a no-op.
+    awaitCuratorAck: opts.awaitCuratorAck ?? true,
+  };
 }
 
 /** Atomically seal and share the complete WM Knowledge Asset to SWM. */
@@ -935,6 +959,7 @@ export const knowledgeAssetShare = (
     {
       contextGraphId: normalizeContextGraphId(contextGraphId),
       ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+      awaitCuratorAck: opts.awaitCuratorAck,
     },
   );
 };
@@ -1437,11 +1462,14 @@ export const promoteAssertion = (
       code: 'KA_ATOMIC_SHARE_REQUIRED',
     });
   }
-  const subGraphName =
+  const options: AtomicShareOptions =
     optionsOrLegacyEntities === undefined || typeof optionsOrLegacyEntities === 'string'
-      ? legacySubGraphName
-      : optionsOrLegacyEntities.subGraphName ?? legacySubGraphName;
-  return knowledgeAssetShare(contextGraphId, assertionName, { subGraphName });
+      ? { subGraphName: legacySubGraphName }
+      : {
+          ...optionsOrLegacyEntities,
+          subGraphName: optionsOrLegacyEntities.subGraphName ?? legacySubGraphName,
+        };
+  return knowledgeAssetShare(contextGraphId, assertionName, options);
 };
 
 // Issue #864 — central UI translator for `promoteAssertion` outcomes so
@@ -1761,6 +1789,8 @@ interface LocalAgentChatRequestOptions {
   signal?: AbortSignal;
   identity?: string;
   sessionId?: string;
+  /** One daemon-owned raw/memory pairing for an explicitly selected session. */
+  liveSession?: LocalAgentLiveSession;
   profile?: string;
   persistUserMessage?: string;
   attachments?: LocalAgentChatAttachmentRef[];
@@ -1858,6 +1888,19 @@ export interface LocalAgentHealthResponse {
     error?: string;
   };
   status?: string;
+  sessionCount?: number;
+  sessions?: Array<{
+    sessionId: string;
+    rawSessionId?: string;
+    memorySessionId?: string;
+    startedAt?: string;
+    sessionName?: string;
+  }>;
+  targetMemorySessionId?: string;
+  busy?: boolean;
+  turnState?: 'queued' | 'running';
+  clientConnected?: boolean;
+  clientDisconnectedAt?: string;
   bridge?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
   gateway?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
 }
@@ -1966,6 +2009,14 @@ export async function streamOpenClawLocalChat(
     buffer += decoder.decode(value, { stream: true });
     processLines(false);
     if (streamError) break;
+    // `final` ends the TURN; upstream EOF is a TRANSPORT event and the two need
+    // not coincide. A bridge that holds its socket open for reuse would
+    // otherwise keep the composer spinning long after the answer arrived, so
+    // stop reading as soon as the terminal frame lands.
+    if (finalPayload) {
+      void reader.cancel().catch(() => {});
+      return finalPayload;
+    }
   }
   buffer += decoder.decode();
   processLines(true);
@@ -2000,13 +2051,19 @@ export async function sendHermesLocalChat(
   return res.json();
 }
 
-export async function streamHermesLocalChat(
+/**
+ * SSE client for the `delta`/`final` frame dialect. Hermes defined it and the
+ * Prime Agent bridge speaks the same one, so both channels share this reader —
+ * a second copy would be a second place for the partial-frame handling to drift.
+ */
+async function streamDeltaFrameLocalChat(
+  url: string,
   text: string,
   opts: LocalAgentChatRequestOptions & {
     onEvent?: (event: OpenClawStreamEvent) => void;
   } = {},
 ): Promise<LocalAgentChatResponse> {
-  const res = await fetch('/api/hermes-channel/stream', {
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -2087,6 +2144,14 @@ export async function streamHermesLocalChat(
     buffer += decoder.decode(value, { stream: true });
     processLines(false);
     if (streamError) break;
+    // `final` ends the TURN; upstream EOF is a TRANSPORT event and the two need
+    // not coincide. A bridge that holds its socket open for reuse would
+    // otherwise keep the composer spinning long after the answer arrived, so
+    // stop reading as soon as the terminal frame lands.
+    if (finalPayload) {
+      void reader.cancel().catch(() => {});
+      return finalPayload;
+    }
   }
   buffer += decoder.decode();
   processLines(true);
@@ -2096,8 +2161,46 @@ export async function streamHermesLocalChat(
   return finalPayload;
 }
 
+export const streamHermesLocalChat = (
+  text: string,
+  opts: LocalAgentChatRequestOptions & { onEvent?: (event: OpenClawStreamEvent) => void } = {},
+): Promise<LocalAgentChatResponse> =>
+  streamDeltaFrameLocalChat('/api/hermes-channel/stream', text, opts);
+
 export const fetchHermesLocalHealth = () =>
   get<LocalAgentHealthResponse>('/api/hermes-channel/health');
+
+export async function sendPrimeAgentLocalChat(
+  text: string,
+  opts?: LocalAgentChatRequestOptions,
+): Promise<LocalAgentChatResponse> {
+  const res = await fetch('/api/prime-agent-channel/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
+    signal: opts?.signal,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
+  }
+  return res.json();
+}
+
+export const streamPrimeAgentLocalChat = (
+  text: string,
+  opts: LocalAgentChatRequestOptions & { onEvent?: (event: OpenClawStreamEvent) => void } = {},
+): Promise<LocalAgentChatResponse> =>
+  streamDeltaFrameLocalChat('/api/prime-agent-channel/stream', text, opts);
+
+/**
+ * The Prime Agent channel reports `ok: false` with `sessionCount: 0` when the
+ * adapter is installed but no session is running. That is idle, not broken, so
+ * the session fields are surfaced alongside the standard health shape and the
+ * caller decides how to render it.
+ */
+export const fetchPrimeAgentLocalHealth = () =>
+  get<LocalAgentHealthResponse>('/api/prime-agent-channel/health');
 
 function formatLocalAgentError(body: unknown, fallback: string): string {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return fallback;
@@ -2131,6 +2234,10 @@ function buildLocalAgentApiError(body: unknown, fallback: string, status?: numbe
     const value = record[key];
     return typeof value === 'boolean' ? value : undefined;
   };
+  // Partial turn output is payload, not metadata: forwarded untrimmed so a
+  // rendered partial reply is exactly what the agent produced before the
+  // cutoff.
+  const text = typeof record.text === 'string' && record.text.trim() ? record.text : undefined;
   return new LocalAgentApiError(message, {
     status,
     code: stringField('code'),
@@ -2142,6 +2249,8 @@ function buildLocalAgentApiError(body: unknown, fallback: string, status?: numbe
     route: stringField('route'),
     integrationId: stringField('integrationId'),
     retryable: booleanField('retryable'),
+    text,
+    timedOut: booleanField('timedOut'),
   });
 }
 
@@ -2210,6 +2319,27 @@ export interface LocalAgentIntegration {
   error?: string;
   target?: LocalAgentChannelTarget;
   source: 'live' | 'planned';
+  /**
+   * Number of live agent sessions backing this integration, when the agent has
+   * more than one. Prime Agent publishes a bridge per session, so 0 is a normal
+   * idle state rather than a fault; Hermes and OpenClaw leave this undefined.
+   */
+  sessionCount?: number;
+  /** Which session the node is currently routing to, when several are live. */
+  activeSessionId?: string;
+  /** The selected Prime session currently owns an agent turn. */
+  busy?: boolean;
+  /** Live Prime sessions available for an explicit UI routing choice. */
+  liveSessions?: LocalAgentLiveSession[];
+}
+
+export interface LocalAgentLiveSession {
+  /** DKG memory-session id used for history and UI selection. */
+  sessionId: string;
+  /** Prime-owned id sent to the bridge route. */
+  rawSessionId: string;
+  startedAt?: string;
+  sessionName?: string;
 }
 
 export interface LocalAgentConnectResult {
@@ -2236,20 +2366,14 @@ interface LocalAgentSurface {
     integrationId: string;
     record?: LocalAgentIntegrationRecord;
     health?: LocalAgentHealthResponse | null;
-  }) => string;
+  }) => string | undefined;
   resolveChatContext?: (args: {
     integrationId: string;
     sessionId?: string;
+    liveSession?: LocalAgentLiveSession;
     profile?: string;
   }) => Record<string, unknown>;
-  fetchHealth?: () => Promise<{
-    ok: boolean;
-    target?: LocalAgentChannelTarget;
-    error?: string;
-    profile?: string;
-    memory?: LocalAgentHealthResponse['memory'];
-    status?: string;
-  }>;
+  fetchHealth?: () => Promise<LocalAgentHealthResponse>;
   streamChat?: typeof streamOpenClawLocalChat;
 }
 
@@ -2278,6 +2402,22 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
     }),
     fetchHealth: fetchHermesLocalHealth,
     streamChat: streamHermesLocalChat,
+  },
+  'prime-agent': {
+    connectSupported: true,
+    chatSupported: true,
+    // The daemon owns Prime's raw-vs-memory session contract. The UI consumes
+    // its explicit fields and never reconstructs or strips the memory prefix.
+    defaultSessionId: ({ record, health }) => buildPrimeAgentDefaultSessionId(record, health),
+    resolveChatContext: ({ sessionId, liveSession }) => {
+      if (!liveSession) return {};
+      if (sessionId && liveSession.sessionId !== sessionId) {
+        throw new Error('Prime Agent live session does not match the selected conversation');
+      }
+      return { sessionId: liveSession.rawSessionId };
+    },
+    fetchHealth: fetchPrimeAgentLocalHealth,
+    streamChat: streamPrimeAgentLocalChat,
   },
 };
 
@@ -2412,6 +2552,16 @@ function buildHermesTransportSessionSegment(record?: LocalAgentIntegrationRecord
   return parts.length ? `transport-${stableSessionHash(parts.join('|'))}` : null;
 }
 
+function buildPrimeAgentDefaultSessionId(
+  record?: LocalAgentIntegrationRecord,
+  health?: LocalAgentHealthResponse | null,
+): string | undefined {
+  return firstTrimmedString(
+    record?.metadata?.activeMemorySessionId,
+    health?.sessions?.[0]?.memorySessionId,
+  ) ?? undefined;
+}
+
 function localAgentMemoryLabel(memory: LocalAgentHealthResponse['memory']): string | null {
   if (!memory) return null;
   if (typeof memory === 'string') return memory;
@@ -2525,8 +2675,25 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   );
   const hermesRuntimeDetail = hermesDetail(record, health);
   const defaultSessionId = surface?.defaultSessionId?.({ integrationId: id, record, health });
+  const primeTurnDetached = id === 'prime-agent'
+    && health?.busy === true
+    && health.clientConnected === false;
+  const liveSessions = id === 'prime-agent' && Array.isArray(health?.sessions)
+    ? health.sessions
+        .filter((session) => (
+          typeof session?.rawSessionId === 'string'
+          && session.rawSessionId.trim()
+          && typeof session.memorySessionId === 'string'
+          && session.memorySessionId.trim()
+        ))
+        .map((session) => ({
+          ...session,
+          sessionId: session.memorySessionId!.trim(),
+          rawSessionId: session.rawSessionId!.trim(),
+        }))
+    : undefined;
   const profile = id === 'hermes'
-    ? firstTrimmedString(health?.profile, record.metadata?.profileName, record.metadata?.profile)
+    ? firstTrimmedString(health?.profile, record.metadata?.profileName, record.metadata?.profile) ?? undefined
     : undefined;
 
   let status: LocalAgentIntegrationStatus;
@@ -2546,8 +2713,12 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
       ?? `${record.name} is registered and still starting up.`;
   } else if (bridgeOnline) {
     status = 'chat_ready';
-    statusLabel = 'Chat ready';
-    detail = `${record.name} is connected to this node and ready for chat.`;
+    statusLabel = primeTurnDetached ? 'Still working' : health?.busy ? 'Working' : 'Chat ready';
+    detail = primeTurnDetached
+      ? `${record.name} is still working after the browser stream disconnected. Wait for it to finish before sending another message.`
+      : health?.busy
+        ? `${record.name} is working on the current turn.`
+        : `${record.name} is connected to this node and ready for chat.`;
   } else if (persistentChat) {
     status = 'bridge_offline';
     statusLabel = 'Bridge offline';
@@ -2604,6 +2775,17 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     error: chatReady ? undefined : (health?.error ?? record.runtime?.lastError ?? undefined),
     target: health?.target,
     source: configured || surface ? 'live' : 'planned',
+    // Multi-session agents (Prime Agent) report how many live sessions back the
+    // integration; single-session agents leave these undefined so the UI can
+    // tell "not applicable" apart from "zero sessions".
+    ...(typeof record.metadata?.sessionCount === 'number'
+      ? { sessionCount: record.metadata.sessionCount as number }
+      : {}),
+    ...(typeof record.metadata?.activeSessionId === 'string'
+      ? { activeSessionId: record.metadata.activeSessionId as string }
+      : {}),
+    ...(liveSessions?.length ? { liveSessions } : {}),
+    ...(typeof health?.busy === 'boolean' ? { busy: health.busy } : {}),
   } satisfies LocalAgentIntegration;
 }
 
@@ -2708,6 +2890,7 @@ export async function refreshLocalAgentIntegration(id: string): Promise<LocalAge
 export async function fetchLocalAgentHealth(id: string) {
   if (id === 'openclaw') return fetchOpenClawLocalHealth();
   if (id === 'hermes') return fetchHermesLocalHealth();
+  if (id === 'prime-agent') return fetchPrimeAgentLocalHealth();
   throw new Error(`${id} local health is not available yet.`);
 }
 
@@ -2759,15 +2942,36 @@ export async function streamLocalAgentChat(
   const normalizedId = id.trim().toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[normalizedId];
   if (surface?.streamChat) {
-    const { sessionId, profile, ...transportOpts } = opts;
-    return surface.streamChat(text, {
+    const { sessionId, liveSession, profile, ...transportOpts } = opts;
+    const chatOptions = (
+      resolvedSessionId?: string,
+      resolvedLiveSession?: LocalAgentLiveSession,
+    ) => ({
       ...transportOpts,
       ...surface.resolveChatContext?.({
         integrationId: normalizedId,
-        sessionId,
+        sessionId: resolvedSessionId,
+        liveSession: resolvedLiveSession,
         profile,
       }),
     });
+    try {
+      return await surface.streamChat(text, chatOptions(sessionId, liveSession));
+    } catch (err) {
+      // A Prime session id is an automatic live-session pin, not a durable
+      // user-owned conversation id. If Prime restarted after the panel pinned
+      // it, an explicit miss is guaranteed to have executed nothing; retry
+      // once without the stale id so the daemon can elect the current head.
+      if (
+        normalizedId === 'prime-agent'
+        && liveSession
+        && err instanceof LocalAgentApiError
+        && err.code === 'PRIME_AGENT_NO_SESSION'
+      ) {
+        return surface.streamChat(text, chatOptions());
+      }
+      throw err;
+    }
   }
   throw new Error(`${id} local chat is not available yet.`);
 }
@@ -2842,8 +3046,18 @@ export const shutdownNode = () =>
   post<{ ok: boolean }>('/api/shutdown', {});
 
 // --- Integrations ---
-export const subscribeToContextGraph = (contextGraphId: string) =>
-  post<{ subscribed: string; catchup?: { status: string; jobId: string } }>('/api/subscribe', { contextGraphId });
+export const subscribeToContextGraph = (
+  contextGraphId: string,
+  options?: { syncMode?: 'on-demand' | 'always-on' },
+) =>
+  post<{
+    subscribed: string;
+    syncMode: 'on-demand' | 'always-on';
+    catchup?: { status: string; jobId: string };
+  }>('/api/subscribe', {
+    contextGraphId,
+    syncMode: options?.syncMode ?? 'on-demand',
+  });
 
 // --- Notifications (scoped pane wire contract — implementation-plan §3) ---
 //

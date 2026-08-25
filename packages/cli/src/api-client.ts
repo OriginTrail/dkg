@@ -2,8 +2,16 @@ import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
   ContextGraphReconcileResult,
+  ContextGraphSyncMode,
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
+import type {
+  AsyncLiftRetryOutcome,
+  AsyncPreparedPublishPayload,
+  JournalReadResult,
+  LiftJob,
+  LiftJobRetryProjection,
+} from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -12,6 +20,10 @@ import {
 } from './finalized-publish-options.js';
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import type {
+  CatchupStatusResponse,
+  CatchupStatusWireResponse,
+} from './catchup-status.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -156,6 +168,12 @@ export interface KnowledgeAssetPublishAsyncResponse {
   privateTripleCount?: number;
   sealMerkleRoot?: string;
   intentKey?: string;
+  /**
+   * GH#1786 — the RESOLVED author this job will publish. Lets a caller verify which
+   * author was selected before the job runs, and detect a daemon that ignored a
+   * supplied `selectedAuthorAgentAddress` (older daemons omit it).
+   */
+  agentAddress?: string;
 }
 
 export type KnowledgeAssetShareJobState =
@@ -325,6 +343,17 @@ export interface DaemonStatusResponse {
   relayConnected: boolean;
   multiaddrs: string[];
   relay: RelayStatusResponse;
+  /**
+   * RFC-64 scheduling input for explicitly requested Context Graphs. The
+   * requested scope is not a public classification; runtime classification
+   * still chooses the public or private synchronization lane.
+   */
+  rfc64SelectedPublicSync?: {
+    defaultEnabled: boolean;
+    /** Requested scheduling scope; runtime classification still chooses the lane. */
+    requestedContextGraphs: string[];
+    catalogBackedContextGraphs: string[];
+  };
   chain?: {
     chainId: string | null;
     configured: boolean;
@@ -419,6 +448,24 @@ function requireDaemonStatusResponse(value: unknown, expectedName?: string): Dae
     );
   }
   return value;
+}
+
+/**
+ * GH#1786 — the author-selection coordinate shared by every public publish entry point.
+ * Declared ONCE and reused, so `selectedAuthorAgentAddress` cannot drift between the two
+ * lanes and the older `publishFromFinalizedAssertion` wrapper: the invariant is structural
+ * rather than asserted after the fact.
+ */
+export interface KnowledgeAssetPublishAuthorSelection {
+  subGraphName?: string;
+  /**
+   * The resident author to publish, for retrying an `AMBIGUOUS_ASSERTION_AUTHOR` 409.
+   * Serialized at the TOP level of the body (never inside `options`, where
+   * `parseHttpFinalizedPublishOptions` would silently ignore it and publish a different
+   * author). Sent on PRESENCE, not truthiness, so a malformed value reaches the daemon's
+   * 400 instead of being dropped client-side.
+   */
+  selectedAuthorAgentAddress?: string;
 }
 
 export class ApiClient {
@@ -797,17 +844,33 @@ export class ApiClient {
     return this.post(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}/recover`, {});
   }
 
+  // #1837 — atomic by-exact-jobId TERMINAL record removal (idempotent). Distinct from
+  // knowledgeAssetCancelShareJob (DELETE = queued cancellation that retains the row).
+  // cleared / already_absent resolve normally (200); rejected throws via post().
+  async knowledgeAssetClearShareJob(jobId: string): Promise<{ outcome: 'cleared' | 'already_absent'; jobId: string }> {
+    return this.post(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}/clear`, {});
+  }
+
   /** Publish to VM (mint or update on chain; git push origin main). */
   async knowledgeAssetPublish(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
+    options?: KnowledgeAssetPublishAuthorSelection
+      & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishResponse> {
-    const { subGraphName, ...finalizedOptions } = options ?? {};
+    // GH#1786 — `selectedAuthorAgentAddress` is destructured out alongside
+    // `subGraphName` for two reasons: the daemon reads it at the TOP level of the
+    // body, and `finalizedPublishOptionsPayload` throws on any key outside its
+    // allowlist, so leaving it in would break every publish that supplies it.
+    const { subGraphName, selectedAuthorAgentAddress, ...finalizedOptions } = options ?? {};
     const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
       contextGraphId,
       ...(subGraphName ? { subGraphName } : {}),
+      // Presence, NOT truthiness: an explicitly empty/malformed selector must reach
+      // the daemon so it is rejected 400, rather than being silently omitted here and
+      // letting normal author resolution publish a different author.
+      ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }
@@ -815,13 +878,18 @@ export class ApiClient {
   async knowledgeAssetPublishAsync(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
+    options?: KnowledgeAssetPublishAuthorSelection
+      & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishAsyncResponse> {
-    const { subGraphName, ...finalizedOptions } = options ?? {};
+    const { subGraphName, selectedAuthorAgentAddress, ...finalizedOptions } = options ?? {};
     const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
       contextGraphId,
       ...(subGraphName ? { subGraphName } : {}),
+      // Presence, NOT truthiness: an explicitly empty/malformed selector must reach
+      // the daemon so it is rejected 400, rather than being silently omitted here and
+      // letting normal author resolution publish a different author.
+      ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }
@@ -927,8 +995,10 @@ export class ApiClient {
   async publishFromFinalizedAssertion(
     contextGraphId: string,
     assertionName: string,
-    options?: {
-      subGraphName?: string;
+    // The selector comes from the SHARED contract — a typed SDK caller holding only this
+    // older wrapper must be able to pass the field the 409 tells it to retry with. The
+    // finalized-option subset stays deliberately narrower than the standalone lanes'.
+    options?: KnowledgeAssetPublishAuthorSelection & {
       clearAfter?: boolean;
       publishEpochs?: number;
       publisherNodeIdentityIdOverride?: bigint;
@@ -1211,12 +1281,67 @@ export class ApiClient {
     return this.get(`/api/publisher/jobs${qs}`);
   }
 
-  async publisherJob(jobId: string): Promise<{ job: any }> {
+  // GH#2270 — `retryState` is the daemon's DERIVED answer to "will this node retry this
+  // job by itself?", served beside the untouched `job`. `job` and `payload` carry the
+  // publisher's own exported types rather than `any`: these two routes serialize the queue's
+  // persisted job and prepared-payload shapes verbatim, so a drift there should break the
+  // build here instead of surfacing as an undefined field at runtime.
+  async publisherJob(jobId: string): Promise<{ job: LiftJob; retryState: LiftJobRetryProjection }> {
     return this.get(`/api/publisher/job?id=${encodeURIComponent(jobId)}`);
   }
 
-  async publisherJobPayload(jobId: string): Promise<{ job: any; payload: any }> {
+  async publisherJobPayload(
+    jobId: string,
+  ): Promise<{
+    // Named lifecycle publish jobs have no raw prepared payload; the route serves null there.
+    job: LiftJob;
+    payload: AsyncPreparedPublishPayload | null;
+    retryState: LiftJobRetryProjection;
+  }> {
     return this.get(`/api/publisher/job-payload?id=${encodeURIComponent(jobId)}`);
+  }
+
+  // #1828 — durable-admission recovery: look a VM-publish job up by the lifecycle
+  // facts the client retains (contextGraphId + name required). Read-only.
+  async publisherJobByIntent(facts: {
+    contextGraphId: string;
+    name: string;
+    subGraphName?: string;
+    agentAddress?: string;
+    intentKey?: string;
+  }): Promise<{
+    result: 'none' | 'active' | 'superseded' | 'conflict';
+    job?: any;
+    superseded?: any[];
+    jobs?: any[];
+    exactIntentMatch?: boolean;
+  }> {
+    const qs = new URLSearchParams({ contextGraphId: facts.contextGraphId, name: facts.name });
+    if (facts.subGraphName !== undefined) qs.set('subGraphName', facts.subGraphName);
+    if (facts.agentAddress !== undefined) qs.set('agentAddress', facts.agentAddress);
+    if (facts.intentKey !== undefined) qs.set('intentKey', facts.intentKey);
+    return this.get(`/api/publisher/job-by-intent?${qs.toString()}`);
+  }
+
+  // #1829 — read-only append-only journal. By jobId, or facts-pure by lifecycle
+  // identity. txHashes are ATTEMPTED submissions — verify against chain, never treat
+  // as sent.
+  async publisherJournal(query: {
+    jobId?: string;
+    contextGraphId?: string;
+    name?: string;
+    subGraphName?: string;
+    agentAddress?: string;
+    intentKey?: string;
+  }): Promise<JournalReadResult> {
+    const qs = new URLSearchParams();
+    if (query.jobId !== undefined) qs.set('jobId', query.jobId);
+    if (query.contextGraphId !== undefined) qs.set('contextGraphId', query.contextGraphId);
+    if (query.name !== undefined) qs.set('name', query.name);
+    if (query.subGraphName !== undefined) qs.set('subGraphName', query.subGraphName);
+    if (query.agentAddress !== undefined) qs.set('agentAddress', query.agentAddress);
+    if (query.intentKey !== undefined) qs.set('intentKey', query.intentKey);
+    return this.get(`/api/publisher/journal?${qs.toString()}`);
   }
 
   async publisherStats(): Promise<Record<string, number>> {
@@ -1227,12 +1352,33 @@ export class ApiClient {
     return this.post('/api/publisher/cancel', { jobId });
   }
 
-  async publisherRetry(status: 'failed' = 'failed'): Promise<{ retried: number }> {
+  // GH#2270 — `retried` keeps its pre-#2270 meaning; the other two counts explain the
+  // failed jobs the pass left alone (see AsyncLiftRetryOutcome).
+  async publisherRetry(status: 'failed' = 'failed'): Promise<AsyncLiftRetryOutcome> {
     return this.post('/api/publisher/retry', { status });
   }
 
   async publisherClear(status: 'failed' | 'finalized'): Promise<{ cleared: number; status: 'failed' | 'finalized' }> {
     return this.post('/api/publisher/clear', { status });
+  }
+
+  // #1837 — atomic by-exact-jobId TERMINAL clear (distinct from publisherCancel and the
+  // status-scoped publisherClear). cleared / already_absent resolve normally (200);
+  // rejected (nonterminal/unknown → 409, malformed → 400) throws via the post() helper
+  // carrying { outcome:'rejected', reason } in the response body.
+  //
+  // GH#2270 follow-up (🔴 3824098486) — `allowPendingTransaction` opts in to clearing a job whose
+  // transaction may still land, which is the ONLY way to remove a held record that recovery has no
+  // automatic exit for. It defaults to false, so an ordinary clear is unchanged, and the daemon
+  // grants it only to a caller that owns the job.
+  async publisherClearJob(
+    jobId: string,
+    options: { allowPendingTransaction?: boolean } = {},
+  ): Promise<{ outcome: 'cleared' | 'already_absent'; jobId: string }> {
+    return this.post('/api/publisher/clear-job', {
+      jobId,
+      ...(options.allowPendingTransaction === true ? { allowPendingTransaction: true } : {}),
+    });
   }
 
   // ------------------------- EPCIS -------------------------------------
@@ -1390,8 +1536,14 @@ export class ApiClient {
     return this.post('/api/query-remote', { peerId, ...request });
   }
 
-  async subscribeToContextGraph(contextGraphId: string, options?: { includeSharedMemory?: boolean }): Promise<{
+  async subscribeToContextGraph(contextGraphId: string, options?: {
+    includeSharedMemory?: boolean;
+    syncMode?: ContextGraphSyncMode;
+    /** Reconcile even when persisted readiness already says this graph is complete. */
+    forceCatchup?: boolean;
+  }): Promise<{
     subscribed: string;
+    syncMode: ContextGraphSyncMode;
     catchup?:
       | {
         connectedPeers: number;
@@ -1401,6 +1553,8 @@ export class ApiClient {
         peersTried: number;
         peersResponded: number;
         peersSucceeded: number;
+        /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
+        peersNotAttempted?: number;
         deferredBackpressure: number;
         dataSynced: number;
         sharedMemorySynced: number;
@@ -1451,7 +1605,12 @@ export class ApiClient {
         jobId: string;
       };
   }> {
-    return this.post('/api/context-graph/subscribe', { contextGraphId, includeWorkspace: options?.includeSharedMemory });
+    return this.post('/api/context-graph/subscribe', {
+      contextGraphId,
+      includeWorkspace: options?.includeSharedMemory,
+      syncMode: options?.syncMode ?? 'always-on',
+      forceCatchup: options?.forceCatchup,
+    });
   }
 
   /**
@@ -1465,6 +1624,7 @@ export class ApiClient {
   /** @deprecated Use subscribeToContextGraph */
   async subscribe(contextGraphId: string, options?: { includeWorkspace?: boolean }): Promise<{
     subscribed: string;
+    syncMode: ContextGraphSyncMode;
     catchup?:
       | {
         connectedPeers: number;
@@ -1474,6 +1634,8 @@ export class ApiClient {
         peersTried: number;
         peersResponded: number;
         peersSucceeded: number;
+        /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
+        peersNotAttempted?: number;
         deferredBackpressure: number;
         dataSynced: number;
         sharedMemorySynced: number;
@@ -1524,72 +1686,24 @@ export class ApiClient {
         jobId: string;
       };
   }> {
-    return this.subscribeToContextGraph(contextGraphId, { includeSharedMemory: options?.includeWorkspace });
+    return this.subscribeToContextGraph(contextGraphId, {
+      includeSharedMemory: options?.includeWorkspace,
+      syncMode: 'always-on',
+    });
   }
 
-  async catchupStatus(contextGraphId: string): Promise<{
-    jobId: string;
-    contextGraphId: string;
-    includeWorkspace: boolean;
-    status: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'failed' | 'unreachable';
-    queuedAt: number;
-    startedAt?: number;
-    finishedAt?: number;
-    result?: {
-      connectedPeers: number;
-      totalPeers?: number;
-      selectedPeers?: number;
-      syncCapablePeers: number;
-      peersTried: number;
-      peersResponded: number;
-      peersSucceeded: number;
-      deferredBackpressure: number;
-      dataSynced: number;
-      sharedMemorySynced: number;
-      denied: boolean;
-      deniedPeers: number;
-      diagnostics?: {
-        noProtocolPeers: number;
-        durable: {
-          fetchedMetaTriples: number;
-          fetchedDataTriples: number;
-          insertedMetaTriples: number;
-          insertedDataTriples: number;
-          bytesReceived: number;
-          resumedPhases: number;
-          timedOutPhases: number;
-          completedPhases: number;
-          checkpointAdvances: number;
-          emptyResponses: number;
-          metaOnlyResponses: number;
-          verifiedPrivateOnlyResponses?: number;
-          dataRejectedMissingMeta: number;
-          rejectedKcs: number;
-          failedPeers: number;
-          failedPhases: number;
-          deferredBackpressure: number;
-        };
-        sharedMemory: {
-          fetchedMetaTriples: number;
-          fetchedDataTriples: number;
-          insertedMetaTriples: number;
-          insertedDataTriples: number;
-          bytesReceived: number;
-          resumedPhases: number;
-          timedOutPhases: number;
-          completedPhases: number;
-          checkpointAdvances: number;
-          emptyResponses: number;
-          droppedDataTriples: number;
-          failedPeers: number;
-          failedPhases: number;
-          deferredBackpressure: number;
-        };
-      };
+  async catchupStatus(contextGraphId: string): Promise<CatchupStatusResponse> {
+    const raw = await this.get<CatchupStatusWireResponse>(
+      `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`,
+    );
+    const normalized: CatchupStatusResponse = {
+      ...raw,
+      /** Normalize the pre-alias workspace flag at the API boundary. */
+      includeSharedMemory: raw.includeSharedMemory ?? raw.includeWorkspace,
+      /** Normalize pre-field daemon responses at the API boundary. */
+      jobStatus: raw.jobStatus ?? raw.status,
     };
-    error?: string;
-  }> {
-    return this.get(`/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
+    return normalized;
   }
 
   async connect(multiaddr: string): Promise<{ connected: boolean }> {

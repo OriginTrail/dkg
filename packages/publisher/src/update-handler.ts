@@ -24,7 +24,7 @@ import {
 import { decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { skolemizeByEntity } from './auto-partition.js';
-import { validateKnowledgeAssetPublishRequest } from './validation.js';
+import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import {
   promoteUpdatedKaToPerCgId,
@@ -616,7 +616,7 @@ export class UpdateHandler {
       graphUpdate.subGraphName,
     );
     const metaGraph = contextGraphMetaUri(request.contextGraphId);
-    const validation = validateKnowledgeAssetPublishRequest(
+    const validation = validateCanonicalGraphScopedKnowledgeAssetPayload(
       parsed,
       vmGraph,
       graphUpdate.publicTripleCount,
@@ -705,8 +705,10 @@ export class UpdateHandler {
           : {}),
         assertionGraph: vmGraph,
       },
-      'confirmed',
-      provenance,
+      {
+        status: 'confirmed',
+        confirmation: { kind: 'transaction', provenance },
+      },
     );
 
     const outcome = await withMaterializationLock(

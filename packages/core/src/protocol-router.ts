@@ -29,6 +29,9 @@ export function isRecoverableSendError(err: unknown): boolean {
     msg.includes('stream returned in closed state') ||
     msg.includes('econnreset') ||
     msg.includes('etimedout') ||
+    msg.includes('send timeout') ||
+    msg.includes('operation timed out') ||
+    msg.includes('operation was aborted due to timeout') ||
     msg.includes('econnrefused') ||
     msg.includes('epipe') ||
     msg.includes('aborted') ||
@@ -638,7 +641,37 @@ export class ProtocolRouter {
     // is exhausted.
     const overlay = this.pooledByLogical.get(protocolId);
     const memoizedVariant = this.peerWireVariantFor(peerIdStr, protocolId);
-    if (overlay && memoizedVariant !== 'one-shot') {
+    // Relay-only gate for the pooled wire. The pooled variant
+    // multiplexes every request for a peer onto ONE long-lived
+    // substream; over a circuit-relay connection that substream's
+    // life is bounded by the relay's reservation churn (~300 s), and
+    // one request timeout aborts the shared stream — rejecting every
+    // in-flight and queued request at once. Observed on a 10.0.12
+    // Base-mainnet edge node (2026-08-06): sync to a NAT-only peer
+    // reachable exclusively via circuit relays died 4/4 with "pooled
+    // stream reset: request aborted/timeout" while one-shot streams
+    // to the same peer succeeded immediately. So: use the pool only
+    // when the peer has at least one DIRECT connection. Re-evaluated
+    // per send — a later direct connection (e.g. DCUtR upgrade)
+    // re-enables the pool with no memo to clear, and a pool stream
+    // already held for a now-relay-only peer is retired once
+    // quiescent instead of being reused. Cold peers (no connections
+    // at all) keep the pooled path: there is no relayed connection
+    // to observe yet and the pool's own dial may come up direct.
+    // Requester-side selection only — responders that don't
+    // advertise the pooled wire already fall back via
+    // multistream-select.
+    let usePooledWire = overlay !== undefined && memoizedVariant !== 'one-shot';
+    if (usePooledWire && overlay && this.peerHasOnlyRelayedConnections(peerIdStr)) {
+      usePooledWire = false;
+      // Fire-and-forget: retiring the held stream must not delay or
+      // fail this send; if the stream is still busy the retire is a
+      // no-op and a later send's pass lands it once drained.
+      overlay.pool
+        .closePeerIfIdle(peerIdStr, 'relay-only peer: pooled wire bypassed')
+        .catch(() => undefined);
+    }
+    if (overlay && usePooledWire) {
       try {
         const remainingForPool = Math.max(0, timeoutMs - (Date.now() - overallStartedAt));
         const response = await overlay.pool.send(peerIdStr, data, {
@@ -1024,6 +1057,80 @@ export class ProtocolRouter {
     }
     throw lastErr;
   }
+
+  /**
+   * True when the peer currently has at least one OPEN connection and
+   * every one of them rides a circuit relay. Three shapes:
+   *
+   *   * a direct connection is present → false (pooling is safe);
+   *   * open connections exist, all relayed → true;
+   *   * no open connections at all → false — nothing observed yet, so
+   *     the caller keeps its existing behavior rather than penalizing
+   *     a cold peer for connections it doesn't have.
+   *
+   * Walks the RAW connection table and filters by `remotePeer`
+   * ourselves — same Window D rationale as the one-shot fast path
+   * (libp2p's peerId-keyed lookup can return `[]` while the raw walk
+   * shows live matching connections). Matching is by peerId string:
+   * the router, the pool, and libp2p's `PeerId.toString()` all use
+   * the same canonical text form as the peer key.
+   */
+  private peerHasOnlyRelayedConnections(peerIdStr: string): boolean {
+    let all: ReadonlyArray<ObservedConnection>;
+    try {
+      all = this.node.libp2p.getConnections() as ReadonlyArray<ObservedConnection>;
+    } catch {
+      return false;
+    }
+    let sawOpenRelayed = false;
+    for (const conn of all) {
+      let matches = false;
+      try {
+        matches = conn.remotePeer?.toString() === peerIdStr;
+      } catch {
+        matches = false;
+      }
+      if (!matches) continue;
+      if (conn.status && conn.status !== 'open') continue;
+      if (!isRelayedConnection(conn)) return false;
+      sawOpenRelayed = true;
+    }
+    return sawOpenRelayed;
+  }
+}
+
+/**
+ * Structural subset of a libp2p `Connection` used for transport-path
+ * classification. Kept minimal (and every access defensive) for the
+ * same reason as {@link ReusableConnection}: unit tests pass fakes
+ * without re-exporting libp2p internals.
+ */
+interface ObservedConnection {
+  status?: string;
+  limits?: unknown;
+  remotePeer?: { toString: () => string };
+  remoteAddr?: { toString: () => string };
+}
+
+/**
+ * True when the connection reaches the peer via a circuit relay.
+ * `remoteAddr` containing the `/p2p-circuit` component is the
+ * authoritative signal — a direct connection's remote address never
+ * carries it. Fall back to libp2p's limited-connection marker when
+ * the address is unavailable (limited ⇒ circuit-relay-v2 in our
+ * transport set); absent both signals, classify as direct so the
+ * caller defaults to the status quo.
+ */
+function isRelayedConnection(conn: ObservedConnection): boolean {
+  try {
+    const addr = conn.remoteAddr?.toString();
+    if (typeof addr === 'string' && addr.length > 0) {
+      return addr.includes('/p2p-circuit');
+    }
+  } catch {
+    // fall through to the limits marker
+  }
+  return Boolean(conn.limits);
 }
 
 /**

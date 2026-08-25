@@ -48,9 +48,24 @@ export const MEMBER_ROSTER_ROLES_V1 = Object.freeze([
   'ingress-host',
   'provider',
 ] as const);
+export const CONTEXT_GRAPH_ACCESS_POLICY_VALUES_V1 = Object.freeze([0, 1] as const);
+export const CONTEXT_GRAPH_PUBLISH_POLICY_VALUES_V1 = Object.freeze([0, 1] as const);
 
-export type ContextGraphAccessPolicyV1 = 0 | 1;
-export type ContextGraphPublishPolicyV1 = 0 | 1;
+export type ContextGraphAccessPolicyV1 =
+  (typeof CONTEXT_GRAPH_ACCESS_POLICY_VALUES_V1)[number];
+export type ContextGraphPublishPolicyV1 =
+  (typeof CONTEXT_GRAPH_PUBLISH_POLICY_VALUES_V1)[number];
+export type ContextGraphPublishDomainV1 =
+  | {
+      readonly publishPolicy: 1;
+      readonly publishAuthority: null;
+      readonly publishAuthorityAccountId: DecimalU256V1 & '0';
+    }
+  | {
+      readonly publishPolicy: 0;
+      readonly publishAuthority: EvmAddressV1;
+      readonly publishAuthorityAccountId: DecimalU256V1;
+    };
 export type MemberRosterRoleV1 = (typeof MEMBER_ROSTER_ROLES_V1)[number];
 
 export interface FinalizedChainPolicySourceV1 {
@@ -153,6 +168,73 @@ export function assertContextGraphPolicyV1(
   value: unknown,
 ): asserts value is ContextGraphPolicyV1 {
   validateContextGraphPolicySnapshotV1(value);
+}
+
+export function assertContextGraphAccessPolicyV1(
+  value: unknown,
+  label = 'accessPolicy',
+): asserts value is ContextGraphAccessPolicyV1 {
+  assertPolicyEnum(value, label, CONTEXT_GRAPH_ACCESS_POLICY_VALUES_V1);
+}
+
+export function assertContextGraphPublishPolicyV1(
+  value: unknown,
+  label = 'publishPolicy',
+): asserts value is ContextGraphPublishPolicyV1 {
+  assertPolicyEnum(value, label, CONTEXT_GRAPH_PUBLISH_POLICY_VALUES_V1);
+}
+
+/**
+ * Validate the complete normalized contribution-policy tuple.
+ *
+ * Chain adapters normalize the EVM zero-address sentinel to null before
+ * crossing this boundary. Keeping the tuple invariant here gives every
+ * producer of ContextGraphPolicyV1 the same fail-closed domain check without
+ * making core aware of a storage-specific sentinel representation.
+ */
+export function snapshotContextGraphPublishDomainV1(
+  publishPolicy: unknown,
+  publishAuthority: unknown,
+  publishAuthorityAccountId: unknown,
+): ContextGraphPublishDomainV1 {
+  assertContextGraphPublishPolicyV1(publishPolicy);
+  const authority = publishAuthority === null
+    ? null
+    : scalar(() => {
+        assertCanonicalEvmAddress(publishAuthority, 'publishAuthority');
+        return publishAuthority;
+      });
+  const authorityAccountId = scalar(() => {
+    assertCanonicalDecimalU256(publishAuthorityAccountId, 'publishAuthorityAccountId');
+    return publishAuthorityAccountId;
+  });
+  if (publishPolicy === 1) {
+    if (authority !== null || !isCanonicalZeroDecimalU256(authorityAccountId)) {
+      fail(
+        'cg-policy-publish-domain',
+        'open contribution requires null publishAuthority and account ID zero',
+      );
+    }
+    return Object.freeze({
+      publishPolicy,
+      publishAuthority: null,
+      publishAuthorityAccountId: authorityAccountId,
+    });
+  }
+  if (authority === null) {
+    fail('cg-policy-publish-domain', 'curated contribution requires publishAuthority');
+  }
+  return Object.freeze({
+    publishPolicy,
+    publishAuthority: authority,
+    publishAuthorityAccountId: authorityAccountId,
+  });
+}
+
+function isCanonicalZeroDecimalU256(
+  value: DecimalU256V1,
+): value is DecimalU256V1 & '0' {
+  return value === '0';
 }
 
 export function canonicalizeContextGraphPolicyPayloadV1(
@@ -411,25 +493,12 @@ function assertContextGraphPolicyStructureV1(
   u64(value.era, 'era');
   u64(value.version, 'version');
   optionalDigest(value.previousPolicyDigest, 'previousPolicyDigest');
-  assertPolicyEnum(value.accessPolicy, 'accessPolicy');
-  assertPolicyEnum(value.publishPolicy, 'publishPolicy');
-  if (value.publishAuthority !== null) {
-    scalar(() => assertCanonicalEvmAddress(value.publishAuthority, 'publishAuthority'));
-  }
-  scalar(() => assertCanonicalDecimalU256(
+  assertContextGraphAccessPolicyV1(value.accessPolicy);
+  snapshotContextGraphPublishDomainV1(
+    value.publishPolicy,
+    value.publishAuthority,
     value.publishAuthorityAccountId,
-    'publishAuthorityAccountId',
-  ));
-  if (value.publishPolicy === 1) {
-    if (value.publishAuthority !== null || value.publishAuthorityAccountId !== '0') {
-      fail(
-        'cg-policy-publish-domain',
-        'open contribution requires null publishAuthority and account ID zero',
-      );
-    }
-  } else if (value.publishAuthority === null) {
-    fail('cg-policy-publish-domain', 'curated contribution requires publishAuthority');
-  }
+  );
   if (value.projectionId !== CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1) {
     fail('cg-policy-scalar', 'projectionId must be cg-shared-v1');
   }
@@ -693,8 +762,14 @@ function assertGovernancePair(chainId: unknown, contractAddress: unknown): void 
   }
 }
 
-function assertPolicyEnum(value: unknown, label: string): asserts value is 0 | 1 {
-  if (value !== 0 && value !== 1) fail('cg-policy-scalar', `${label} must be JSON number 0 or 1`);
+function assertPolicyEnum<Values extends readonly number[]>(
+  value: unknown,
+  label: string,
+  allowed: Values,
+): asserts value is Values[number] {
+  if (typeof value !== 'number' || !(allowed as readonly number[]).includes(value)) {
+    fail('cg-policy-scalar', `${label} must be JSON number ${allowed.join(' or ')}`);
+  }
 }
 
 function optionalDigest(value: unknown, label: string): void {
@@ -709,9 +784,9 @@ function u64(value: unknown, label: string): bigint {
   }
 }
 
-function scalar(operation: () => void): void {
+function scalar<T>(operation: () => T): T {
   try {
-    operation();
+    return operation();
   } catch (cause) {
     fail('cg-policy-scalar', 'policy/roster scalar is not canonical', cause);
   }

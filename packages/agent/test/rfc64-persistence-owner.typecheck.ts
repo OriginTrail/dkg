@@ -17,6 +17,10 @@ await persistence.kaBundles.close();
 persistence.inventory.controlObjectStoreOwnership;
 // @ts-expect-error startup purge authority is not a shared inventory operation
 persistence.inventory.purgeNextStartupStaleCandidateBatch();
+// @ts-expect-error SWM mutation authority is not part of the candidate inventory view
+persistence.inventory.compareAndSwapSwmAuthorInventoryV1({});
+// @ts-expect-error SWM inventory lifecycle belongs exclusively to persistence
+persistence.swmAuthorInventory.close();
 
 // @ts-expect-error public inventory foundations do not expose sibling-resource authority
 ownedInventory.controlObjectStoreOwnership;

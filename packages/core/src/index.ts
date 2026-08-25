@@ -14,6 +14,7 @@ export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
 export * from './sync-control-object.js';
+export * from './sync-checkpoint-state.js';
 export * from './cg-policy-objects.js';
 export * from './administrative-authority-objects.js';
 export * from './author-catalog-authority-objects.js';
@@ -24,6 +25,7 @@ export {
   assertCanonicalDecimalU64,
   assertCanonicalDecimalU256,
   assertCanonicalDigest,
+  assertCanonicalEvmAddress,
   assertCanonicalHexBytes,
   assertCanonicalKaId,
   assertCanonicalTimestampMs,
@@ -52,10 +54,23 @@ export * from './ka-bundle-v1.js';
 export * from './ka-chunk-tree.js';
 export * from './ka-chunk-proof.js';
 export * from './cg-shared-projection.js';
+export {
+  FinalizedVmSetAccumulatorV1,
+  FinalizedVmSetV1Error,
+  computeFinalizedVmSetEvidenceV1,
+  computeFinalizedVmSetLeafDigestV1,
+  type FinalizedVmLaneV1,
+  type FinalizedVmSetEvidenceV1,
+  type FinalizedVmSetRowV1,
+  type FinalizedVmSetScopeV1,
+  type FinalizedVmSetV1ErrorCode,
+} from './finalized-vm-set-v1.js';
 export * from './author-catalog-codec.js';
 export * from './author-catalog-objects.js';
 export * from './author-catalog-directory.js';
+export * from './swm-author-inventory-v1.js';
 export * from './event-bus.js';
+export * from './backpressure-observability.js';
 export {
   Logger,
   createOperationContext,
@@ -307,7 +322,14 @@ export {
   hasErrorCode,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER,
+  AMBIGUOUS_ASSERTION_AUTHOR_CODE,
+  ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
+  PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
   messageIndicatesNoFundedPublisherWallet,
+  messageIndicatesPublishAuthorNotCustodial,
+  formatPublishAuthorNotCustodialMessage,
 } from './errors.js';
 export {
   dkgHomeDir,
@@ -349,6 +371,7 @@ export {
   MAX_SEAL_TRIPLE_COUNT_V1,
   CanonicalGraphScopedAuthorSealError,
   assertCanonicalGraphScopedAuthorSealV1,
+  canonicalGraphScopedAuthorSealFromAssertionSealV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   parseCanonicalGraphScopedAuthorSealV1,
@@ -364,7 +387,6 @@ export {
   type PositiveDecimalU64V1,
   type SealTripleCountV1,
   type CanonicalIsoUtcMillisV1,
-  type CanonicalDeterministicUalV1,
   type CanonicalGraphScopedAuthorSealV1,
   type CanonicalGraphScopedAuthorSealCoordinateV1,
   type CanonicalGraphScopedAuthorSealRowV1,
@@ -377,3 +399,10 @@ export {
 } from './canonical-graph-scoped-author-seal.js';
 export * from './catalog-seal-binding.js';
 export * from './transferred-catalog-bundle.js';
+export * from './vm-update-convergence.js';
+export * from './ka-ual-identity.js';
+export {
+  MAX_NODE_TIMER_DELAY_MS,
+  assertNodeTimerDelayMs,
+  resolveNodeTimerDelayMs,
+} from './node-timer.js';

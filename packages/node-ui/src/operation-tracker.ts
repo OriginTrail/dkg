@@ -54,11 +54,23 @@ export class OperationTracker {
   }
 
   fail(ctx: OperationContext, err: unknown): void {
+    this.finish(ctx, 'error', err);
+  }
+
+  cancel(ctx: OperationContext, reason: unknown): void {
+    this.finish(ctx, 'cancelled', reason);
+  }
+
+  private finish(
+    ctx: OperationContext,
+    status: 'error' | 'cancelled',
+    reason: unknown,
+  ): void {
     if (!this.db) return;
     const now = Date.now();
     const startedAt = this.starts.get(ctx.operationId);
     this.starts.delete(ctx.operationId);
-    const message = err instanceof Error ? err.message : String(err);
+    const message = reason instanceof Error ? reason.message : String(reason);
     try {
       const prefix = ctx.operationId + ':';
       const activeKeys = [...this.phaseStarts.keys()].filter(k => k.startsWith(prefix));
@@ -66,17 +78,19 @@ export class OperationTracker {
         const phase = key.slice(prefix.length);
         const phaseStartedAt = this.phaseStarts.get(key);
         this.phaseStarts.delete(key);
-        this.db.failPhase({
+        this.db.finishPhase({
           operation_id: ctx.operationId,
           phase,
           duration_ms: phaseStartedAt ? now - phaseStartedAt : 0,
           error_message: message,
+          status,
         });
       }
-      this.db.failOperation({
+      this.db.finishOperation({
         operation_id: ctx.operationId,
         duration_ms: startedAt ? now - startedAt : 0,
         error_message: message,
+        status,
       });
     } catch {
       // Must never break the node

@@ -47,6 +47,23 @@ dkg ka publish-async notes -c my-project
 dkg query my-project -q "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
 ```
 
+## Node UI metrics collection
+
+Operators can disable local dashboard snapshots independently from
+OpenTelemetry metric export; see the
+[Node UI metrics operator guide](../../docs/use-dkg/node-ui-metrics.md).
+
+## API query admission priority
+
+`POST /api/query` reads use the store scheduler's `background` lane by default
+so slow external reads cannot consume the capacity reserved for normal node
+work. Set `DKG_API_QUERY_PRIORITY=normal` before starting the daemon to restore
+the previous admission behavior during a canary rollback. Invalid non-empty
+values fail safe to `background` with a startup warning, and the daemon logs
+the effective lane once at boot. A background query that is shed before
+execution returns HTTP 503 with `Retry-After: 1` and
+`code: "STORE_SCHEDULER_BUSY"`.
+
 ## Running a Core Node (relay operator)
 
 A Core Node is a publicly-reachable host that runs a libp2p circuit-relay v2
@@ -384,13 +401,26 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `POST /api/endorse`, `POST /api/verify`, `POST /api/update` — Verifiable Memory trust operations
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
 - `GET /api/wallets/balances`, `GET /api/chain/rpc-health` — wallet and chain health
+- `GET /api/diagnostics/backpressure` — node-admin scheduler pressure snapshot
 - `GET /api/events` — Server-Sent Events stream for real-time notifications
+
+`GET /api/info` retains its legacy `chain.rpcUrl`, `chain.rpcUrls`, and
+`chain.hubAddress` keys for response-shape compatibility. RPC endpoint values
+are never returned (`rpcUrl` is `null`, `rpcUrls` is empty, and
+`rpcEndpointsRedacted` is `true`) because configured URLs can contain provider
+credentials. The public Hub contract address remains available, while
+`rpcEndpointCount` reports the number of configured endpoints.
 
 > The V9 `GET /api/apps` endpoint (and the `/apps/*` iframe host) was retired in
 > V10 along with the installable apps framework — the daemon now returns
 > `410 Gone` on those paths. See [Extending the Node](#extending-the-node) below.
 
 All endpoints (except public paths like `/api/status`, `/api/chain/rpc-health`, and `/.well-known/skill.md`) require an API token via `Authorization: Bearer <token>` header.
+
+`GET /api/diagnostics/backpressure` specifically requires the node-level admin
+token; agent-scoped tokens cannot inspect node-wide scheduler work. See the
+[backpressure observability operator guide](../../docs/use-dkg/backpressure-observability.md)
+for state definitions, log behavior, metrics, and response safety boundaries.
 
 The full API surface — including request bodies, response shapes, and error codes — is documented in [`skills/dkg-node/SKILL.md`](./skills/dkg-node/SKILL.md).
 

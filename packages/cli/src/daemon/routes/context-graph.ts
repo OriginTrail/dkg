@@ -61,6 +61,7 @@ import {
   ContextGraphOnChainIdUnresolvedError,
   DKGAgent,
   loadOpWallets,
+  type ContextGraphSyncMode,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
   VmReconcileUnavailableError,
@@ -170,6 +171,13 @@ import {
   type CatchupTracker,
   toCatchupStatusResponse,
 } from '../types.js';
+import {
+  beginWalkCatchupJob,
+  recordCatchupRequest,
+  recordSyntheticCatchupJob,
+  recordTerminalOnce,
+  releaseCatchupJob,
+} from '../catchup-telemetry.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -433,6 +441,69 @@ function respondReconcileError(res: ServerResponse, err: unknown): void {
     return jsonResponse(res, 503, { error: message });
   }
   return jsonResponse(res, 500, { error: message });
+}
+
+/**
+ * Refuse to mint a new catch-up job because the daemon is shutting down.
+ *
+ * Shaped after `respondIfStoreUnavailable` — retryable 503 plus `Retry-After`
+ * — because that is what this is: the request is fine, the node just cannot
+ * take on new work it will never drain. Returned from BOTH mint sites, which
+ * is why I7's `result` vocabulary needed a seventh value; a 503 that clamped
+ * to `unspecified` would hide the one route outcome shutdown introduces.
+ */
+function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: boolean): void {
+  recordCatchupRequest('shutting_down', includeSharedMemory);
+  return jsonResponse(
+    res,
+    503,
+    {
+      error:
+        'Node is shutting down and is no longer accepting catch-up jobs; retry once it is back up.',
+      code: 'CATCHUP_SHUTTING_DOWN',
+      retryable: true,
+    },
+    undefined,
+    { 'Retry-After': '5' },
+  );
+}
+
+type SubscribeLifetimeSnapshot = Readonly<{
+  subscribed?: boolean;
+  syncMode?: ContextGraphSyncMode;
+}>;
+
+type SubscribeLifetimePlan = Readonly<{
+  changesLifetime: boolean;
+  effectiveSyncMode: ContextGraphSyncMode;
+}>;
+
+function resolveSubscribeLifetimeChange(
+  existing: SubscribeLifetimeSnapshot | undefined,
+  requestedSyncMode: ContextGraphSyncMode,
+): SubscribeLifetimePlan {
+  const effectiveSyncMode = existing?.subscribed === true && existing.syncMode === 'always-on'
+    ? 'always-on'
+    : requestedSyncMode;
+  return {
+    changesLifetime: existing?.syncMode !== effectiveSyncMode,
+    effectiveSyncMode,
+  };
+}
+
+function applySubscriptionMutationAfterAdmission(input: Readonly<{
+  plan: SubscribeLifetimePlan;
+  acceptingJobs: boolean;
+  subscribe: () => ContextGraphSyncMode;
+}>): Readonly<
+  | { accepted: false }
+  | { accepted: true; syncMode: ContextGraphSyncMode }
+> {
+  if (!input.plan.changesLifetime) {
+    return { accepted: true, syncMode: input.plan.effectiveSyncMode };
+  }
+  if (!input.acceptingJobs) return { accepted: false };
+  return { accepted: true, syncMode: input.subscribe() };
 }
 
 async function handleReconcileContextGraphRoute(
@@ -1683,14 +1754,55 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     (path === "/api/context-graph/subscribe" || path === "/api/subscribe")
   ) {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = JSON.parse(body);
+    // Parsed HERE rather than letting the outer daemon error mapper catch it.
+    // That mapper still returns the same 400, but it returns it from outside
+    // this route — so a malformed body produced a subscribe-route return with
+    // NO I7 point, breaking the one-point-per-return invariant this module
+    // documents. `include_shared_memory` is reported `false` because the field
+    // that would have set it is precisely what could not be read: guessing the
+    // default would attribute an unparseable request to the `true` bucket.
+    let parsed: any;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      recordCatchupRequest('bad_request', false);
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
     const { includeWorkspace, includeSharedMemory } = parsed;
+    // Resolved before the first return so that EVERY I7 point carries a real
+    // `include_shared_memory` value; it depends only on the parsed body.
+    const shouldSyncSharedMemory =
+      (includeSharedMemory ?? includeWorkspace) !== false;
+    // Omission preserves the legacy always-on default, but an explicit null is
+    // malformed input and must not silently opt the caller into durable sync.
+    const requestedSyncMode = parsed.syncMode === undefined
+      ? 'always-on'
+      : parsed.syncMode;
+    if (requestedSyncMode !== 'on-demand' && requestedSyncMode !== 'always-on') {
+      recordCatchupRequest('bad_request', shouldSyncSharedMemory);
+      return jsonResponse(res, 400, {
+        error: 'Invalid "syncMode" (expected "on-demand" or "always-on")',
+      });
+    }
+    // Operators can explicitly revisit an existing graph whose persisted
+    // readiness predates exact RFC-64 coverage. This is a one-shot admission
+    // control, not a durable mode: omission/false preserves the ready fast
+    // path, while true runs the normal bounded foreground catch-up scheduler.
+    const forceCatchup = parsed.forceCatchup ?? false;
+    if (typeof forceCatchup !== 'boolean') {
+      recordCatchupRequest('bad_request', shouldSyncSharedMemory);
+      return jsonResponse(res, 400, {
+        error: 'Invalid "forceCatchup" (expected boolean)',
+      });
+    }
     // #1102: accept `id` as an alias for `contextGraphId`.
     const contextGraphId = parsed.contextGraphId ?? parsed.id;
-    if (!contextGraphId)
+    if (!contextGraphId) {
+      recordCatchupRequest('bad_request', shouldSyncSharedMemory);
       return jsonResponse(res, 400, {
         error: 'Missing "contextGraphId" (or "id")',
       });
+    }
 
     // For curated CGs, verify this node's agent is on the allowlist.
     // The allowlist may not be available locally yet (it lives on the
@@ -1712,6 +1824,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
         const isEthAddress = callerAddr && /^0x[0-9a-fA-F]{40}$/.test(callerAddr);
         if (isEthAddress && !localAllowed.some((a: string) => a.toLowerCase() === callerAddr.toLowerCase())) {
+          recordCatchupRequest('forbidden', shouldSyncSharedMemory);
           return jsonResponse(res, 403, {
             error: `Your agent (${callerAddr}) is not on the allowlist for this curated project. Ask the curator to invite you first.`,
           });
@@ -1719,19 +1832,38 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }
     }
 
-    const shouldSyncSharedMemory =
-      (includeSharedMemory ?? includeWorkspace) !== false;
-
     const subMap = agent.getSubscribedContextGraphs();
     const existingSub = subMap?.get(contextGraphId);
+    // Preview the only existing-live-state promotion rule without mutating the
+    // agent. The authoritative normalization still happens in
+    // subscribeToContextGraph below, after the shutdown admission guard and
+    // after the final readiness await.
+    const lifetimePlan = resolveSubscribeLifetimeChange(existingSub, requestedSyncMode);
+    let effectiveSyncMode = lifetimePlan.effectiveSyncMode;
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
     let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
+        const lifetimeMutation = applySubscriptionMutationAfterAdmission({
+          plan: lifetimePlan,
+          acceptingJobs: daemonState.catchupAcceptingJobs,
+          subscribe: () => agent.subscribeToContextGraph(contextGraphId, {
+            syncMode: requestedSyncMode,
+          }).syncMode,
+        });
+        if (!lifetimeMutation.accepted) {
+          return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
+        }
+        effectiveSyncMode = lifetimeMutation.syncMode;
+        // Dedupe: hands back a job that already exists and mints nothing, so
+        // it needs no job-admission guard and produces no I8 point. A lifetime
+        // promotion above is independently guarded because it is a mutation.
+        recordCatchupRequest('deduped', shouldSyncSharedMemory);
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
+          syncMode: effectiveSyncMode,
           catchup: {
             status: existingJob.status,
             includeWorkspace: existingJob.includeWorkspace,
@@ -1752,8 +1884,30 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         includeSharedMemory: shouldSyncSharedMemory,
         hasConfirmedMeta: hasConfirmedExistingMeta,
       });
-      if (existingReadiness.alreadyReady) {
+      if (existingReadiness.alreadyReady && !forceCatchup) {
         const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
+        // Second mint site. Guard the MINT, not the read: the guard sits AFTER
+        // `reusableDoneJob` is computed, so a replay of an existing completed
+        // job still answers 200 during shutdown, and BEFORE the id below is
+        // generated, because the response returns `jobId` unconditionally and
+        // `GET /api/sync/catchup-status?jobId=` 404s on an id that is not in
+        // the tracker. A 503 must therefore leave no id in existence at all —
+        // suppressing only the tracker insert would ship a 200 naming a
+        // resource that immediately 404s.
+        if (!reusableDoneJob && !daemonState.catchupAcceptingJobs) {
+          return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
+        }
+        const lifetimeMutation = applySubscriptionMutationAfterAdmission({
+          plan: lifetimePlan,
+          acceptingJobs: daemonState.catchupAcceptingJobs,
+          subscribe: () => agent.subscribeToContextGraph(contextGraphId, {
+            syncMode: requestedSyncMode,
+          }).syncMode,
+        });
+        if (!lifetimeMutation.accepted) {
+          return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
+        }
+        effectiveSyncMode = lifetimeMutation.syncMode;
         const jobId = reusableDoneJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         if (!reusableDoneJob) {
           const syntheticJob: CatchupJob = {
@@ -1767,9 +1921,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           };
           catchupTracker.jobs.set(jobId, syntheticJob);
           catchupTracker.latestByContextGraph.set(contextGraphId, jobId);
+          // Born terminal, so its I8 point is owed right here — there is no
+          // continuation that could later emit it. No I9: it never ran.
+          recordSyntheticCatchupJob(syntheticJob);
         }
+        recordCatchupRequest(
+          reusableDoneJob ? 'ready_replay' : 'ready_synthetic',
+          shouldSyncSharedMemory,
+        );
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
+          syncMode: effectiveSyncMode,
           catchup: {
             status: "done",
             includeWorkspace: shouldSyncSharedMemory,
@@ -1798,8 +1960,28 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
     }
 
-    console.log(`[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory}`);
-    agent.subscribeToContextGraph(contextGraphId);
+    // First mint site. The guard belongs HERE, above
+    // `subscribeToContextGraph()` — that call is synchronous but far from
+    // side-effect free: it mutates `config.syncContextGraphs`, performs four
+    // gossipsub subscribes with handlers, persists the subscription row plus
+    // local-node membership, and invalidates caches. A 503 returned after it
+    // would leave a persisted, gossiping, sync-tracked subscription with no
+    // catch-up job behind it — a hidden side effect on a retryable status.
+    //
+    // It also has to sit BELOW the last `await` above (the
+    // `hasConfirmedMetaState` probe), or the check and the mint straddle a
+    // turn boundary and TOCTOU reopens. From here to `latestByContextGraph.set`
+    // is one synchronous run.
+    if (!daemonState.catchupAcceptingJobs) {
+      return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
+    }
+
+    effectiveSyncMode = agent.subscribeToContextGraph(contextGraphId, {
+      syncMode: requestedSyncMode,
+    }).syncMode;
+    console.log(
+      `[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory} syncMode=${effectiveSyncMode} forceCatchup=${forceCatchup}`,
+    );
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const job: CatchupJob = {
@@ -1832,7 +2014,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }
     }
 
-    void (async () => {
+    // Retain the continuation so graceful shutdown can drain it, and hold the
+    // ENTRY (not the jobId) in the closure below: the ledger slot is released
+    // as soon as the job settles, and looking the entry up by id afterwards
+    // would find nothing and re-emit its terminal point.
+    const ledgerEntry = beginWalkCatchupJob(job);
+
+    ledgerEntry.task = (async () => {
       job.status = "running";
       job.startedAt = Date.now();
       if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} started`);
@@ -1914,11 +2102,25 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} threw: ${job.error}`);
       } finally {
         job.finishedAt = Date.now();
+        // Synchronous, guarded, and inside the retained task's `finally` so it
+        // runs before the task settles and the shutdown drain observes it. Not
+        // "before any await" — a terminal status only exists after the work.
+        recordTerminalOnce(ledgerEntry);
+        releaseCatchupJob(ledgerEntry);
       }
-    })();
+    })().catch((err: unknown) => {
+      // The body above catches everything into `job.error`, so this is a
+      // backstop for the `finally` itself. Without it a throw here would be an
+      // unhandled rejection on a detached task.
+      console.error(
+        `[catchup] job=${jobId} continuation failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
 
+    recordCatchupRequest('queued', shouldSyncSharedMemory);
     return jsonResponse(res, 200, {
       subscribed: contextGraphId,
+      syncMode: effectiveSyncMode,
       catchup: {
         status: "queued",
         includeWorkspace: shouldSyncSharedMemory,

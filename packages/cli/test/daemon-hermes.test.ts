@@ -3078,8 +3078,9 @@ describe('Hermes daemon routes', () => {
     });
     const importMemories = vi.fn(async () => {});
     const memoryManager = {
-      hasChatTurn: vi.fn(async () => stored),
+      getChatTurnPersistenceState: vi.fn(async () => stored ? 'stored' as const : null),
       storeChatExchange,
+      recordChatTurnPersistenceTransition: vi.fn(async () => {}),
     };
     const payload = {
       sessionId: 'hermes:default',
@@ -3294,8 +3295,9 @@ describe('Hermes daemon routes', () => {
     });
     const importMemories = vi.fn(async () => {});
     const memoryManager = {
-      hasChatTurn: vi.fn(async () => stored),
+      getChatTurnPersistenceState: vi.fn(async () => stored ? 'stored' as const : null),
       storeChatExchange,
+      recordChatTurnPersistenceTransition: vi.fn(async () => {}),
     };
     const payload = {
       sessionId: 'hermes:default',

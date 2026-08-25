@@ -50,7 +50,7 @@ describe('rootless durable legacy partition bypass', () => {
       publicTripleCount: data.length,
       privateTripleCount: 0,
       assertionGraph: graph,
-    }, 'tentative');
+    }, { status: 'tentative' });
 
     const result = selectVerifiedDurableSyncQuads(data, meta, false, {
       kind: 'changelogPage',

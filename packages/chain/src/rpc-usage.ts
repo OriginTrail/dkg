@@ -311,7 +311,9 @@ export class CountingJsonRpcProvider extends JsonRpcProvider {
     super(url, network, options);
   }
 
-  override _send(payload: JsonRpcPayload | Array<JsonRpcPayload>): Promise<Array<JsonRpcResult>> {
+  override async _send(
+    payload: JsonRpcPayload | Array<JsonRpcPayload>,
+  ): Promise<Array<JsonRpcResult>> {
     try {
       const entries = Array.isArray(payload) ? payload : [payload];
       for (const entry of entries) this.onRpcRequest(String(entry?.method ?? 'unknown'));

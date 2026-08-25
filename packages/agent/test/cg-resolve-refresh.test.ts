@@ -8,7 +8,10 @@ import {
   hasAuthoritativePrivateMetaDefinition,
 } from '../src/context-graph-private-meta-proof.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
+import {
+  fetchSyncPages,
+  type SyncPageFetchOptions,
+} from '../src/sync/requester/page-fetch.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 
 const CURATOR_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -18,6 +21,16 @@ function noop(): void {}
 
 function operationContext(): OperationContext {
   return { kind: 'sync', id: 'cg-refresh-test', startedAt: Date.now() } as never;
+}
+
+async function runDirectlyWithBackpressure<T>(
+  _ctx: OperationContext,
+  _contextGraphId: string,
+  _lane: 'durable',
+  _label: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  return work();
 }
 
 function authoritativePrivateMetaQuads(contextGraphId: string): Quad[] {
@@ -300,6 +313,7 @@ describe('refreshMetaFromCurator', () => {
 
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       resolveCuratorPeerId: async () => CURATOR_PEER_ID,
       node: {
@@ -336,6 +350,121 @@ describe('refreshMetaFromCurator', () => {
 
     expect(refreshed).toBe(false);
     expect(dialSignals).toEqual([controller.signal, controller.signal]);
+  });
+
+  it('accepts an authoritative public snapshot without a private member proof', async () => {
+    const contextGraphId = 'public/authoritative-curator-snapshot';
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const snapshot: Quad[] = [{
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: metaGraph,
+    }, {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+      object: '"public"',
+      graph: metaGraph,
+    }];
+    let staged: Quad[] = [];
+    const agent = {
+      metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
+      peerId: 'local-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [{ remotePeer: { toString: () => CURATOR_PEER_ID } }],
+        },
+      },
+      discovery: {},
+      fetchSyncPages: async () => ({
+        quads: snapshot,
+        checkpointKey: 'public-authoritative-snapshot',
+        resumedFromOffset: 0,
+        completed: true,
+      }),
+      store: {
+        insert: async (quads: Quad[]) => { staged = quads; },
+        update: async () => undefined,
+        dropGraph: async () => undefined,
+      },
+      oversizeTombstoneLog: { record: noop },
+      invalidateListContextGraphsCache: noop,
+      contextGraphMetaProjection: { markDirty: noop },
+      syncCheckpoints: new Map<string, number>(),
+      log: { warn: noop, info: noop },
+    };
+
+    const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+      agent as never,
+      contextGraphId,
+      { trustedCuratorPeerId: CURATOR_PEER_ID, force: true },
+    );
+
+    expect(refreshed).toBe(true);
+    expect(staged).toHaveLength(2);
+  });
+
+  it('rejects a public-only snapshot when private member proof was required', async () => {
+    const contextGraphId = 'private/member-proof-cannot-use-public-snapshot';
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const snapshot: Quad[] = [{
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: metaGraph,
+    }, {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+      object: '"public"',
+      graph: metaGraph,
+    }];
+    let targetMutated = false;
+    const agent = {
+      metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
+      peerId: 'local-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [{ remotePeer: { toString: () => CURATOR_PEER_ID } }],
+        },
+      },
+      discovery: {},
+      fetchSyncPages: async () => ({
+        quads: snapshot,
+        checkpointKey: 'member-proof-public-snapshot',
+        resumedFromOffset: 0,
+        completed: true,
+      }),
+      store: {
+        insert: async () => { targetMutated = true; },
+        update: async () => { targetMutated = true; },
+        dropGraph: async () => { targetMutated = true; },
+      },
+      oversizeTombstoneLog: { record: noop },
+      invalidateListContextGraphsCache: noop,
+      contextGraphMetaProjection: { markDirty: noop },
+      syncCheckpoints: new Map<string, number>(),
+      log: { warn: noop, info: noop },
+    };
+
+    const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+      agent as never,
+      contextGraphId,
+      {
+        trustedCuratorPeerId: CURATOR_PEER_ID,
+        force: true,
+        memberProof: {
+          approvedAgentAddress: '0x00000000000000000000000000000000000000A1',
+          expectedDelegateePeerId: 'local-peer',
+        },
+      },
+    );
+
+    expect(refreshed).toBe(false);
+    expect(targetMutated).toBe(false);
   });
 
   it('uses a trusted join-approved curator directly and bypasses the auth-probe cooldown', async () => {
@@ -379,6 +508,7 @@ describe('refreshMetaFromCurator', () => {
     const agent = {
       // A recent auth-driven refresh would suppress a normal call.
       metaRefreshTimestamps: new Map([[contextGraphId, Date.now()]]),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       resolveCuratorPeerId: async () => {
         resolved = true;
@@ -394,7 +524,7 @@ describe('refreshMetaFromCurator', () => {
         const peerId = args[1] as string;
         fetchPeer = peerId;
         fetchDeadline = args[6] as number;
-        forceFreshSession = args[11] as boolean | undefined;
+        forceFreshSession = (args[7] as SyncPageFetchOptions | undefined)?.forceFreshSession;
         return {
           quads: inserted,
           checkpointKey: 'trusted-meta-checkpoint',
@@ -454,6 +584,7 @@ describe('refreshMetaFromCurator', () => {
     let stored = false;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -535,6 +666,7 @@ describe('refreshMetaFromCurator', () => {
     const storedSnapshots: unknown[] = [];
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -611,6 +743,7 @@ describe('refreshMetaFromCurator', () => {
     let targetMutated = false;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -664,6 +797,7 @@ describe('refreshMetaFromCurator', () => {
     let recordedDrops = 0;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -745,6 +879,7 @@ describe('refreshMetaFromCurator', () => {
       };
       const agent = {
         metaRefreshTimestamps: new Map<string, number>(),
+        runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
         peerId: 'local-peer',
         node: {
           libp2p: {
@@ -842,6 +977,7 @@ describe('refreshMetaFromCurator', () => {
     const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -909,6 +1045,7 @@ describe('refreshMetaFromCurator', () => {
     let replacements = 0;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -973,6 +1110,7 @@ describe('refreshMetaFromCurator', () => {
     let replacements = 0;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -1118,14 +1256,22 @@ describe('refreshMetaFromCurator', () => {
     const bootstrapPeer = 'peer-from-join-approval';
     const authoritativePeer = 'peer-from-authoritative-meta';
     const preferredSyncPeers = new Map([[contextGraphId, bootstrapPeer]]);
+    const declaredFacts = {
+      // A complete canonical definition, in the shape the projection produces:
+      // each declared fact appears as the scalar AND in its array.
+      declared: true,
+      accessPolicy: 'private',
+      curator: 'did:dkg:agent:0x0000000000000000000000000000000000000abc',
+      curators: ['did:dkg:agent:0x0000000000000000000000000000000000000abc'],
+      creator: `did:dkg:agent:${authoritativePeer}`,
+      creators: [`did:dkg:agent:${authoritativePeer}`],
+    };
     const agent = {
       preferredSyncPeers,
-      getCgMeta: async () => ({
-        curator: 'did:dkg:agent:0x0000000000000000000000000000000000000abc',
-        curators: [],
-        creator: `did:dkg:agent:${authoritativePeer}`,
-        creators: [],
-      }),
+      getCgMeta: async () => declaredFacts,
+      // The Context Graph declares this curator→peer binding in its OWN `_meta`,
+      // which is what makes it authoritative rather than merely rankable (#2006).
+      getOwnCgMetaFacts: async () => declaredFacts,
       discovery: {
         findAgents: async () => {
           throw new Error('creator metadata should resolve the curator peer');
@@ -1140,10 +1286,18 @@ describe('refreshMetaFromCurator', () => {
     expect(resolved).toBe(authoritativePeer);
     expect(preferredSyncPeers.has(contextGraphId)).toBe(false);
 
-    const lifecycleResolved = await LifecycleSyncMethods.prototype.resolvePreferredSyncPeerId.call({
+    // The same resolution through the lifecycle entry points, against the real
+    // metadata rather than a stubbed curator: the join-approved peer ranks only
+    // until `_meta` names someone. The declared answer then wins the RANKING —
+    // but it confers no authority, because `_meta` identifies the graph that
+    // holds the rows, not the writer that supplied them.
+    const lifecycleAgent = {
+      ...agent,
       preferredSyncPeers: new Map([[contextGraphId, bootstrapPeer]]),
-      resolveCuratorPeerId: async () => authoritativePeer,
-    } as never, contextGraphId);
-    expect(lifecycleResolved).toBe(authoritativePeer);
+    };
+    expect(await LifecycleSyncMethods.prototype.resolvePreferredSyncPeerId
+      .call(lifecycleAgent as never, contextGraphId)).toBe(authoritativePeer);
+    expect(await LifecycleSyncMethods.prototype.resolveAuthoritativeSyncPeerId
+      .call(lifecycleAgent as never, contextGraphId)).toBeUndefined();
   });
 });

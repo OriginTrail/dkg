@@ -130,6 +130,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -553,6 +554,9 @@ export class ContextGraphMethods extends DKGAgentBase {
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
     );
+    if (!isCurated && !opts.private) {
+      quads.push(...buildAuthoritativePublicMetaQuads(opts.id));
+    }
     if (opts.publishPolicy !== undefined) {
       quads.push({
         subject: contextGraphUri,
@@ -813,7 +817,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     }
 
     if (!opts.private) {
-      this.subscribeToContextGraph(opts.id);
+      this.subscribeToContextGraph(opts.id, { syncMode: 'always-on' });
 
       // Curated CGs: definition lives in _meta, NOT in ONTOLOGY. Do not
       // broadcast to the network — only invited nodes will discover it via
@@ -924,6 +928,7 @@ export class ContextGraphMethods extends DKGAgentBase {
           UNION
           { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
         } LIMIT 1`,
+        { source: 'agent.contextGraph.register.accessPolicy' },
       );
       const apValue = accessPolicyResult.type === 'bindings'
         ? accessPolicyResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '')
@@ -938,10 +943,14 @@ export class ContextGraphMethods extends DKGAgentBase {
       await this.store.deleteByPattern({ graph: defGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
       await this.store.deleteByPattern({ graph: cgMetaGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
       await this.store.deleteByPattern({ graph: cgMetaGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
-      await this.store.insert([
+      const authorityQuads: Quad[] = [
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
-      ]);
+      ];
+      if (!isCurated) {
+        authorityQuads.push(...buildAuthoritativePublicMetaQuads(id));
+      }
+      await this.store.insert(authorityQuads);
       this.invalidateListContextGraphsCache();
       this.contextGraphMetaProjection.markDirty(id);
       this.log.info(ctx, `Stamped local node as creator contact and address curator for "${id}" (registration-time lazy stamp)`);
@@ -983,6 +992,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     const contextGraphUri = `did:dkg:context-graph:${id}`;
     const statusResult = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
+      { source: 'agent.contextGraph.register.status' },
     );
     if (statusResult.type === 'bindings' && statusResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered') {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
@@ -998,6 +1008,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         UNION
         { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
       } LIMIT 1`,
+      { source: 'agent.contextGraph.register.description' },
     );
     const description = descResult.type === 'bindings' ? descResult.bindings[0]?.['desc']?.replace(/^"|"$/g, '') : undefined;
 
@@ -1469,14 +1480,14 @@ export class ContextGraphMethods extends DKGAgentBase {
     // Update in-memory subscription record and ensure we're subscribed
     const sub = this.subscribedContextGraphs.get(id);
     if (sub) {
-      this.bindSubscriptionOnChainId(id, sub, onChainId);
-      // Keep the forward + reverse maps in lockstep so the receive
-      // path can translate the wire id back to `id` (see
-      // {@link recordCgWireId}).
-      this.recordCgWireId(id, nameHash);
-      if (!sub.subscribed) {
-        sub.subscribed = true;
-        this.subscribeToContextGraph(id, { trackSyncScope: true });
+      const next = { ...sub, onChainHash: nameHash };
+      this.bindSubscriptionOnChainId(id, next, onChainId);
+      this.setContextGraphSubscription(id, next, { persist: false });
+      this.subscribeToContextGraph(id, {
+        trackSyncScope: true,
+        syncMode: 'always-on',
+      });
+      if (!next.subscribed) {
         this.log.info(ctx, `Subscribed to newly registered context graph "${id}"`);
       }
       this.persistContextGraphSubscription(id);

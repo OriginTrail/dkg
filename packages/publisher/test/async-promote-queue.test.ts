@@ -616,6 +616,36 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     expect(await queue.claimNext('worker-1')).toBeNull(); // still backing off
   });
 
+  it('labels each claimNext store read with its caller-provided operation class', async () => {
+    const sources: Array<string | undefined> = [];
+    const recordingStore = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return (
+            sparql: Parameters<TripleStore['query']>[0],
+            options?: Parameters<TripleStore['query']>[1],
+          ) => {
+            sources.push(options?.source);
+            return target.query(sparql, options);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const queue = new TripleStoreAsyncPromoteQueue(recordingStore, {
+      now: () => now,
+      idGenerator: () => `job-${++idCounter}`,
+    });
+
+    await expect(queue.claimNext('worker-1')).resolves.toBeNull();
+    expect(sources).toEqual([
+      'publisher.asyncPromote.recoverExpired',
+      'publisher.asyncPromote.claimNext.candidates',
+      'publisher.asyncPromote.claimNext.running',
+    ]);
+  });
+
   it('13. claimNext() does NOT pick a second job for the same (cgId, subGraphName, assertionName) while one is running', async () => {
     const queue = createQueue();
     const reqA = makeRequest();

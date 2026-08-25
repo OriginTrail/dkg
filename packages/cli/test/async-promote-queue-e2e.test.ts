@@ -365,7 +365,7 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
 
   it('cap_exceeded: gossip-too-large error settles immediately in terminal failed (no retries)', async () => {
     promoteHandler = async () => {
-      throw new Error('Promoted assertion too large for gossip (12000 KB, limit 10 MB)');
+      throw new Error('Promoted assertion too large for gossip (6000 KB, limit 4 MB)');
     };
     await startServerAndSupervisor();
     const { body } = await post('/api/knowledge-assets/giant/swm/share-async', {

@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, createRpcTimeoutError, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -416,6 +416,110 @@ function collectProjectedDelegatees(
     }
   }
   return out;
+}
+
+type ContextGraphSlotBindingOutcome =
+  | { kind: 'match' }
+  | { kind: 'mismatch' }
+  | { kind: 'unprovable' }
+  | { kind: 'transportFailure'; error: unknown };
+
+type ContextGraphSlotBindingPolicy = 'legacy' | 'compatibilityStrict' | 'retryableStrict';
+
+function mapContextGraphSlotBindingOutcome(
+  outcome: ContextGraphSlotBindingOutcome,
+  policy: ContextGraphSlotBindingPolicy,
+): boolean {
+  if (outcome.kind === 'match') return true;
+  if (outcome.kind === 'unprovable') return policy === 'legacy';
+  if (outcome.kind === 'transportFailure' && policy === 'retryableStrict') {
+    throw outcome.error;
+  }
+  return false;
+}
+
+async function evaluateContextGraphSlotBinding(
+  chain: ChainAdapter,
+  contextGraphId: string,
+  onChainId: string,
+  opCtx: OperationContext | undefined,
+  signal: AbortSignal | undefined,
+  isWireIdKeyedSubscription: (localId: string) => boolean,
+  warn: (ctx: OperationContext, message: string) => void,
+  raceRead: <T>(read: Promise<T>) => Promise<T | typeof TIMEOUT_SENTINEL>,
+): Promise<ContextGraphSlotBindingOutcome> {
+  let numericId: bigint;
+  try {
+    numericId = BigInt(onChainId);
+  } catch {
+    return { kind: 'unprovable' };
+  }
+  if (numericId <= 0n) return { kind: 'unprovable' };
+
+  const trimmed = contextGraphId.trim();
+  if (/^\d+$/.test(trimmed) && trimmed === numericId.toString()) {
+    return { kind: 'match' };
+  }
+  const getNameHash = chain.getContextGraphNameHash;
+  if (typeof getNameHash !== 'function') return { kind: 'unprovable' };
+
+  const acceptable = new Set<string>();
+  try {
+    acceptable.add(ethers.keccak256(ethers.toUtf8Bytes(trimmed)).toLowerCase());
+  } catch {
+    return { kind: 'unprovable' };
+  }
+  if (/^0x[0-9a-fA-F]{64}$/.test(trimmed) && isWireIdKeyedSubscription(trimmed)) {
+    acceptable.add(trimmed.toLowerCase());
+  }
+
+  let onChainHash: string | null | typeof TIMEOUT_SENTINEL;
+  try {
+    const read = signal
+      ? getNameHash.call(chain, numericId, { signal })
+      : getNameHash.call(chain, numericId);
+    onChainHash = await raceRead(read);
+  } catch (error) {
+    warn(
+      opCtx ?? createOperationContext('share'),
+      `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) failed — `
+      + 'cannot verify local-mapping identity, treating CG as NOT public (fail-closed): '
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return { kind: 'transportFailure', error };
+  }
+  if (onChainHash === TIMEOUT_SENTINEL) {
+    warn(
+      opCtx ?? createOperationContext('share'),
+      `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) timed out after `
+      + `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — cannot verify local-mapping identity, `
+      + 'treating CG as NOT public (fail-closed)',
+    );
+    return {
+      kind: 'transportFailure',
+      error: createRpcTimeoutError(
+        `getContextGraphNameHash(${onChainId}) timed out after ${CHAIN_POLICY_READ_TIMEOUT_MS}ms`,
+      ),
+    };
+  }
+  if (!onChainHash) {
+    warn(
+      opCtx ?? createOperationContext('share'),
+      `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} has NO `
+      + 'committed name-hash — cannot affirmatively bind identity (slot reused on a fresh chain?). '
+      + 'Treating CG as NOT public (fail-closed).',
+    );
+    return { kind: 'mismatch' };
+  }
+  if (acceptable.has(onChainHash.toLowerCase())) return { kind: 'match' };
+
+  warn(
+    opCtx ?? createOperationContext('share'),
+    `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} commits `
+    + `name-hash ${onChainHash.toLowerCase()} ≠ this CG's expected wire id(s) ${[...acceptable].join(' | ')} — `
+    + 'local mapping is STALE (slot reused on a fresh chain?). Treating CG as NOT public (fail-closed).',
+  );
+  return { kind: 'mismatch' };
 }
 
 export class WorkspaceCryptoMethods extends DKGAgentBase {
@@ -961,134 +1065,58 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    *     hash-shaped cleartext id can't borrow a reused slot's commitment.
    * A genuinely reused slot commits a DIFFERENT name that matches neither.
    *
-   * Returns `false` (→ caller fails closed) on an AFFIRMATIVE mismatch (the
-   * committed hash matches neither derivation); whenever the hash cannot be
-   * verified once the adapter EXPOSES `getContextGraphNameHash` (RPC rejection or
-   * read timeout — #884 review 🔴 GZ8L_); AND when the slot has NO committed
-   * name-hash at all (`null` / empty — #884 review 🔴 GaZk2). A missing
-   * commitment is NOT an identity proof: a devnet-reset slot reused by a
-   * different no-commitment public CG would otherwise disable encryption for the
-   * wrong local graph, so a downgrade decision requires an affirmative binding.
-   * Returns `true` (proceed to the liveness/policy gate) where the adapter
-   * cannot supply the anchor at all (no `getContextGraphNameHash` getter), AND
-   * for a DIRECT NUMERIC SELF-ADDRESS — a local id that IS its own numeric
-   * on-chain slot (`onChainId === id`, e.g. a CG mirroring a raw slot created
-   * via the low-level `createOnChainContextGraph` path). The latter is the
-   * caller naming the slot directly, not a cleartext→numeric remapping, so it is
-   * treated like the bare-numeric raw-slot path (not identity-bound) and gated
-   * by liveness + fresh policy alone.
+   * The default legacy policy probe maps malformed/unprovable identifiers to
+   * `true`, but maps mismatches and transport failures to `false`. Its preserved
+   * `requireCommittedNameHash` option maps every non-match to `false`, including
+   * malformed ids and adapters without the getter. Durable sync uses the strict
+   * wrapper below, which additionally propagates transport failures so a bounded
+   * retry can perform a fresh read. All modes accept a canonical direct numeric
+   * self-address because it names the slot rather than a cleartext remapping.
    */
   async localCgMatchesOnChainSlot(this: DKGAgent,
     contextGraphId: string,
     onChainId: string,
     opCtx?: OperationContext,
+    options?: { requireCommittedNameHash?: boolean; signal?: AbortSignal },
   ): Promise<boolean> {
-    const getNameHash = this.chain.getContextGraphNameHash;
-    if (typeof getNameHash !== 'function') return true;
-    let numericId: bigint;
-    try {
-      numericId = BigInt(onChainId);
-    } catch {
-      return true;
-    }
-    if (numericId <= 0n) return true;
-
-    const trimmed = contextGraphId.trim();
-    // DIRECT NUMERIC SELF-ADDRESS: a local CG whose own id IS its numeric
-    // on-chain slot (`getContextGraphOnChainId('42') === '42'` — e.g. a CG
-    // created to mirror a raw slot via the low-level createOnChainContextGraph
-    // path, whose local id is the numeric id itself) is NOT a cleartext→numeric
-    // indirection. It is the caller naming the slot directly, identical to the
-    // bare-numeric raw-slot path which is intentionally NOT identity-bound
-    // (#884 review GZEqF test). There is no separate committed cleartext name to
-    // bind against here (any curator name-hash is unrelated to the numeric id),
-    // so name-hash binding is inapplicable — defer to the liveness + fresh-policy
-    // gate. The stale-mapping risk the name-hash defends against (#884 review
-    // 🔴 GaZk2) only exists for a cleartext id that REMAPS to a different slot.
-    if (/^\d+$/.test(trimmed) && trimmed === onChainId.trim()) return true;
-    // A locally-resolved (cleartext) id can be committed two ways, and both are
-    // legitimate (#884 review 🔴 GZumc + 🔴 GaJf_), so accept a match against EITHER:
-    //   - CLEARTEXT (always): a curator-created CG stores its cleartext id (even
-    //     one that happens to look like a 0x+64-hex string), and registration
-    //     commits keccak256(utf8(cleartextId)). → keccak(utf8(trimmed)).
-    //   - WIRE-FORM (conditional): a host-only/core subscription is keyed by the
-    //     wire id ITSELF (cleartext never left the curator), so the local id
-    //     already IS the committed nameHash. → trimmed verbatim.
-    // The WIRE-FORM branch is only added when LOCAL metadata AFFIRMATIVELY proves
-    // this subscription is wire-id keyed (#884 review 🔴 GaZky). Accepting the
-    // verbatim value for EVERY 0x+64-hex id would make the gate ambiguous between
-    // a real host-mode wire id and a user-chosen cleartext id that merely looks
-    // hash-shaped — a reused/unrelated slot whose committed nameHash equalled
-    // that raw string would then falsely pass. A genuinely reused slot commits a
-    // DIFFERENT name that matches NEITHER accepted form, so this still fails
-    // closed on a true stale mapping while never forcing a wire-keyed host CG
-    // down the fail-closed path forever.
-    const acceptable = new Set<string>();
-    try {
-      acceptable.add(ethers.keccak256(ethers.toUtf8Bytes(trimmed)).toLowerCase());
-    } catch {
-      return true;
-    }
-    if (/^0x[0-9a-fA-F]{64}$/.test(trimmed) && this.isWireIdKeyedSubscription(trimmed)) {
-      acceptable.add(trimmed.toLowerCase());
-    }
-
-    let onChainHash: string | null | typeof TIMEOUT_SENTINEL;
-    try {
-      onChainHash = await this.raceChainPolicyRead(getNameHash.call(this.chain, numericId));
-    } catch (err) {
-      // #884 review (🔴 GZ8L_): the adapter EXPOSES the name-hash getter (we
-      // passed the typeof check above), so an RPC REJECTION means we cannot
-      // VERIFY that the persisted local mapping still points at THIS CG. Fail
-      // closed — a transient flake must not re-enable the plaintext downgrade
-      // for a possibly devnet-reset / reused slot. (Fail-open is reserved for
-      // the explicit opt-out `null` below, where there is no commitment to
-      // check.)
-      this.log.warn(
-        opCtx ?? createOperationContext('share'),
-        `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) failed — ` +
-        `cannot verify local-mapping identity, treating CG as NOT public (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return false;
-    }
-    if (onChainHash === TIMEOUT_SENTINEL) {
-      // Same as a rejection: the getter exists but the hash couldn't be read in
-      // time, so the mapping identity is UNVERIFIED → fail closed.
-      this.log.warn(
-        opCtx ?? createOperationContext('share'),
-        `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) timed out after ` +
-        `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — cannot verify local-mapping identity, treating CG as NOT public (fail-closed)`,
-      );
-      return false;
-    }
-    // MISSING commitment (`null` / empty): the slot has NO on-chain name-hash.
-    // This is NOT an affirmative identity proof and must NOT re-enable the
-    // plaintext downgrade (#884 review 🔴 GaZk2). After a devnet reset the
-    // persisted `localId → onChainId` mapping can point at a DIFFERENT public CG
-    // that ALSO never committed a name-hash; trusting `null` would then disable
-    // SWM encryption for the WRONG local graph. A downgrade (encrypt→plaintext)
-    // decision requires an AFFIRMATIVE binding, so a missing commitment fails
-    // closed. (Fail-open is reserved for the no-getter case above, where the
-    // adapter cannot supply the anchor at all — distinct from a present getter
-    // returning "no commitment".)
-    if (!onChainHash) {
-      this.log.warn(
-        opCtx ?? createOperationContext('share'),
-        `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} has NO ` +
-        `committed name-hash — cannot affirmatively bind identity (slot reused on a fresh chain?). ` +
-        `Treating CG as NOT public (fail-closed).`,
-      );
-      return false;
-    }
-    if (acceptable.has(onChainHash.toLowerCase())) return true;
-
-    this.log.warn(
-      opCtx ?? createOperationContext('share'),
-      `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} commits ` +
-      `name-hash ${onChainHash.toLowerCase()} ≠ this CG's expected wire id(s) ${[...acceptable].join(' | ')} — ` +
-      `local mapping is STALE (slot reused on a fresh chain?). Treating CG as NOT public (fail-closed).`,
+    const outcome = await evaluateContextGraphSlotBinding(
+      this.chain,
+      contextGraphId,
+      onChainId,
+      opCtx,
+      options?.signal,
+      (localId) => this.isWireIdKeyedSubscription(localId),
+      (ctx, message) => this.log.warn(ctx, message),
+      (read) => this.raceChainPolicyRead(read),
     );
-    return false;
+    return mapContextGraphSlotBindingOutcome(
+      outcome,
+      options?.requireCommittedNameHash === true ? 'compatibilityStrict' : 'legacy',
+    );
+  }
+
+  /**
+   * Strict durable-sync identity proof. Unlike the legacy policy probe, this
+   * rejects malformed or unprovable mappings and propagates chain transport
+   * failures so authentication can retry a fresh read.
+   */
+  async requireLocalCgMatchesOnChainSlot(this: DKGAgent,
+    contextGraphId: string,
+    onChainId: string,
+    opCtx?: OperationContext,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    const outcome = await evaluateContextGraphSlotBinding(
+      this.chain,
+      contextGraphId,
+      onChainId,
+      opCtx,
+      options.signal,
+      (localId) => this.isWireIdKeyedSubscription(localId),
+      (ctx, message) => this.log.warn(ctx, message),
+      (read) => this.raceChainPolicyRead(read),
+    );
+    return mapContextGraphSlotBindingOutcome(outcome, 'retryableStrict');
   }
 
   /**
@@ -1097,21 +1125,18 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * rather than a user-chosen cleartext id that merely looks hash-shaped.
    *
    * Host-only auto-subscribe paths (chain-event + discovery-beacon) stage the
-   * wire id AS the local id and record `onChainHash === id` (and the reverse
-   * index `wireIdToLocalCgId[id] === id`). Only that self-referential local
-   * commitment licenses {@link localCgMatchesOnChainSlot} to accept the verbatim
-   * id against the on-chain name-hash; without it the id is treated as cleartext
-   * and must match `keccak256(utf8(id))`, so a reused slot cannot impersonate a
-   * wire-keyed CG just by sharing a hash-shaped string.
+   * wire id AS the local id and explicitly record `onChainHash === id`. Only
+   * that self-referential subscription commitment licenses
+   * {@link localCgMatchesOnChainSlot} to accept the verbatim id against the
+   * on-chain name-hash. The general reverse index is deliberately insufficient:
+   * every subscription is indexed there, including hash-shaped cleartext ids.
    */
   isWireIdKeyedSubscription(this: DKGAgent, localId: string): boolean {
     if (!/^0x[0-9a-fA-F]{64}$/.test(localId)) return false;
     const lower = localId.toLowerCase();
     const sub =
       this.subscribedContextGraphs?.get(localId) ?? this.subscribedContextGraphs?.get(lower);
-    if (sub?.onChainHash && sub.onChainHash.toLowerCase() === lower) return true;
-    const reverse = this.wireIdToLocalCgId?.get(lower);
-    return !!reverse && reverse.toLowerCase() === lower;
+    return !!sub?.onChainHash && sub.onChainHash.toLowerCase() === lower;
   }
 
   /**

@@ -60,6 +60,7 @@ import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chai
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import type { AsyncPreparedPublishPayload, LiftJob, LiftJobRetryProjection } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -104,7 +105,7 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from '../../config.js';
-import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
+import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type AsyncPublisherAvailability, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -186,6 +187,7 @@ import {
   bindingValue,
   carryForwardBundledMarkItDownBinary,
 } from '../manifest.js';
+import { respondTerminalClearOutcome } from './terminal-clear-response.js';
 import {
   resolveNameToPeerId,
   jsonResponse,
@@ -193,6 +195,7 @@ import {
   safeParseJson,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
+  normalizeContextGraphIdOrUri,
   validateEntities,
   validateConditions,
   MAX_BODY_BYTES,
@@ -321,6 +324,152 @@ import {
 import type { RequestContext } from './context.js';
 
 
+interface PublisherLifecycleFacts {
+  contextGraphId: string;
+  name: string;
+  subGraphName?: string;
+  agentAddress: string;
+  intentKey?: string;
+}
+
+// #1828/#1829 — parse + validate the lifecycle facts shared by GET /job-by-intent and
+// GET /journal from query params, using the SAME normalization admission persisted (or a
+// facts read silently misses entries): contextGraphId trimmed + prefix-stripped
+// (normalizeContextGraphIdOrUri); an empty subGraphName rejected (root lane = OMIT the
+// param); agentAddress defaulted to the caller lane (admission persists a non-empty lane,
+// an explicit param wins); C0/DEL control chars rejected so a crafted value cannot forge a
+// colliding U+001F-joined lifecycle key. Returns null after sending a 400 on any violation.
+function parsePublisherLifecycleFactsFromQuery(
+  url: URL,
+  res: ServerResponse,
+  requestAgentAddress: string,
+): PublisherLifecycleFacts | null {
+  const rawContextGraphId = url.searchParams.get("contextGraphId");
+  const name = url.searchParams.get("name") ?? undefined;
+  if (!rawContextGraphId || !name) {
+    jsonResponse(res, 400, { error: "Missing required contextGraphId and name" });
+    return null;
+  }
+  const intentKey = url.searchParams.get("intentKey") ?? undefined;
+  if (intentKey !== undefined && !/^sha256:[0-9a-f]{64}$/.test(intentKey)) {
+    jsonResponse(res, 400, { error: "Malformed intentKey" });
+    return null;
+  }
+  const contextGraphId = normalizeContextGraphIdOrUri(rawContextGraphId.trim());
+  const rawSubGraphName = url.searchParams.get("subGraphName");
+  if (!validateOptionalSubGraphName(rawSubGraphName, res)) return null;
+  const subGraphName = rawSubGraphName ?? undefined;
+  const explicitAgentAddress = url.searchParams.get("agentAddress")?.trim() || undefined;
+  const agentAddress = explicitAgentAddress ?? requestAgentAddress;
+  const hasControlChar = (value: string | undefined): boolean =>
+    value !== undefined && [...value].some((ch) => {
+      const code = ch.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f;
+    });
+  if ([contextGraphId, name, subGraphName, agentAddress].some(hasControlChar)) {
+    jsonResponse(res, 400, {
+      error: "contextGraphId, name, subGraphName and agentAddress must not contain control characters",
+    });
+    return null;
+  }
+  return { contextGraphId, name, subGraphName, agentAddress, intentKey };
+}
+
+/**
+ * GH#2270 — the job-detail response bodies, one typed builder per route generation, both over the
+ * same {@link runtimeRetryState}. Two builders rather than one with a mode flag: the shapes differ
+ * in KIND, not in a boolean, and a route that picks the wrong one should be a type error rather
+ * than a body that silently nests (or spreads) the job the other way round. Building them here at
+ * all is what keeps a fifth surface from shipping without `retryState`.
+ *
+ * `retryState` is DERIVED (never persisted), so it sits BESIDE the job rather than inside it: the
+ * job stays byte-identical to what the store holds.
+ *
+ * `payload` is included only when passed — omitting it drops the key, while `null` is a REAL value
+ * (a named lifecycle publish job has no raw prepared payload).
+ */
+function wrappedJobDetailBody(
+  ctx: JobDetailContext,
+  job: LiftJob,
+  payload?: AsyncPreparedPublishPayload | null,
+): { job: LiftJob; payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
+  return {
+    job,
+    ...(payload === undefined ? {} : { payload }),
+    retryState: runtimeRetryState(ctx, job),
+  };
+}
+
+/** The legacy shape: the job spread at the top level, where `payload` already lives. */
+function legacyJobDetailBody(
+  ctx: JobDetailContext,
+  job: LiftJob,
+  payload?: AsyncPreparedPublishPayload | null,
+): LiftJob & { payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
+  return {
+    ...job,
+    ...(payload === undefined ? {} : { payload }),
+    retryState: runtimeRetryState(ctx, job),
+  };
+}
+
+type JobDetailContext = Pick<RequestContext, 'publisherControl' | 'publisherState'>;
+
+/** The ONE place the operator-facing retry answer is derived: the publisher's configured view, */
+/** narrowed by this daemon's runtime availability. */
+function runtimeRetryState(ctx: JobDetailContext, job: LiftJob): LiftJobRetryProjection {
+  return narrowRetryStateToRuntime(
+    ctx.publisherControl.describeConfiguredRetryState(job),
+    ctx.publisherState.availability,
+  );
+}
+
+/**
+ * GH#2270 — the publisher's projection answers "does this node's CONFIGURATION retry this job",
+ * because that is all the queue can see: it derives from the job and the retry knobs and has no
+ * idea whether a publisher RUNTIME is actually running. The daemon does know, so the honesty is
+ * restored HERE — the one layer where both facts are in scope.
+ *
+ * With no runtime (no funded publisher wallet, a startup failure, still starting, or the publisher
+ * switched off) nothing will fire a scheduled retry, so `autoRetryEligible` is false and a job that
+ * would have reported `backoff` reports `operator` instead — which is what the availability reason
+ * beside it tells the operator to go and fix. Every other reason is untouched: a job held for chain
+ * proof, owned by recovery, or out of budget is waiting on that whatever the runtime does.
+ */
+function narrowRetryStateToRuntime(
+  projection: LiftJobRetryProjection,
+  availability: AsyncPublisherAvailability,
+): LiftJobRetryProjection {
+  if (availability.available) return projection;
+  return {
+    ...projection,
+    autoRetryEligible: false,
+    ...(projection.waitingReason === 'backoff' ? { waitingReason: 'operator' as const } : {}),
+  };
+}
+
+// #1890 — one request-body boundary for the publisher admin POST routes (cancel / retry /
+// clear / clear-job). Reads the small JSON body, applies the shared invalid-JSON mapping
+// (400 `{ error: 'Invalid JSON body' }`), and normalizes a missing / `null` / primitive /
+// array body to `{}` so no route destructures a non-object — a `null` body must not
+// TypeError into a 500. Each route keeps its OWN field validation and response shape.
+// Returns `null` AFTER responding, so callers do:
+//   const parsed = await readSmallJsonObject(req, res); if (!parsed) return;
+async function readSmallJsonObject(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<Record<string, unknown> | null> {
+  const body = await readBody(req, SMALL_BODY_BYTES);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body || "{}");
+  } catch {
+    jsonResponse(res, 400, { error: "Invalid JSON body" });
+    return null;
+  }
+  return isPlainRecord(parsed) ? parsed : {};
+}
+
 export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -375,7 +524,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, {
         error: `Publisher job not found: ${jobId}`,
       });
-    return jsonResponse(res, 200, { job });
+    return jsonResponse(res, 200, wrappedJobDetailBody(ctx, job));
   }
 
   // GET /api/publisher/job-payload?id=...  (new route, wrapped response)
@@ -388,7 +537,35 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
         error: `Publisher job not found: ${jobId}`,
       });
     const payload = await publisherControl.inspectPreparedPayload(jobId);
-    return jsonResponse(res, 200, { job, payload });
+    return jsonResponse(res, 200, wrappedJobDetailBody(ctx, job, payload));
+  }
+
+  // GET /api/publisher/job-by-intent?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
+  // #1828 — read-only durable-admission recovery, keyed on the lifecycle facts a
+  // client always retains (the lost 202 also loses jobId + intentKey). intentKey,
+  // when supplied, only qualifies exactIntentMatch. Never mutates.
+  if (req.method === "GET" && path === "/api/publisher/job-by-intent") {
+    const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
+    if (!facts) return; // a 400 was already sent
+    const lookup = await publisherControl.lookupKnowledgeAssetVmPublishJobByIntent(facts);
+    const { kind, ...rest } = lookup;
+    return jsonResponse(res, 200, { result: kind, ...rest });
+  }
+
+  // GET /api/publisher/journal?jobId=  OR  ?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
+  // #1829 — read-only append-only admission/transaction journal. By jobId, or facts-pure
+  // by lifecycle identity (derived with the SAME normalization admission persisted).
+  // txHashes are ATTEMPTED submissions — reconcile against chain, never treat as sent.
+  if (req.method === "GET" && path === "/api/publisher/journal") {
+    const jobId = url.searchParams.get("jobId")?.trim() || undefined;
+    if (jobId !== undefined) {
+      const result = await publisherControl.readJournalByJob(jobId);
+      return jsonResponse(res, 200, result);
+    }
+    const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
+    if (!facts) return; // a 400 was already sent
+    const result = await publisherControl.readJournalByIntent(facts);
+    return jsonResponse(res, 200, result);
   }
 
   // Legacy: GET /api/publisher/jobs/:id and /api/publisher/jobs/:id/payload (bare response)
@@ -401,11 +578,13 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, {
         error: `Publisher job not found: ${jobId}`,
       });
+    // GH#2270 — this legacy shape spreads the job at the top level, so `retryState` joins it
+    // there (as `payload` already does); the shared builder keeps every job field's value.
     if (segments[1] === "payload") {
       const payload = await publisherControl.inspectPreparedPayload(jobId);
-      return jsonResponse(res, 200, { ...job, payload });
+      return jsonResponse(res, 200, legacyJobDetailBody(ctx, job, payload));
     }
-    return jsonResponse(res, 200, job);
+    return jsonResponse(res, 200, legacyJobDetailBody(ctx, job));
   }
 
   // GET /api/publisher/stats -- returns the raw status map directly for backward compat
@@ -416,14 +595,9 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
 
   // POST /api/publisher/cancel
   if (req.method === "POST" && path === "/api/publisher/cancel") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let parsed: any;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON body" });
-    }
-    const { jobId } = parsed;
+    const parsed = await readSmallJsonObject(req, res);
+    if (!parsed) return;
+    const jobId = parsed.jobId as string | undefined;
     if (!jobId) return jsonResponse(res, 400, { error: "Missing jobId" });
     await publisherControl.cancel(jobId);
     return jsonResponse(res, 200, { cancelled: jobId });
@@ -431,32 +605,30 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
 
   // POST /api/publisher/retry
   if (req.method === "POST" && path === "/api/publisher/retry") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let retryParsed: any;
-    try {
-      retryParsed = JSON.parse(body || "{}");
-    } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON body" });
-    }
-    const { status } = retryParsed;
+    const parsed = await readSmallJsonObject(req, res);
+    if (!parsed) return;
+    const status = parsed.status as string | undefined;
     if (status && status !== "failed")
       return jsonResponse(res, 400, {
         error: "Only status=failed is supported",
       });
-    const count = await publisherControl.retry({ status: "failed" });
-    return jsonResponse(res, 200, { retried: count });
+    // GH#2270 — `retried` keeps its exact pre-#2270 meaning (jobs reaccepted), so an
+    // operator script reading it is unaffected; the two additive counts explain the jobs
+    // left failed instead of leaving them invisible: `blockedPendingRecovery` may carry an
+    // on-chain transaction and needs chain proof, `skipped` has nothing left to reaccept.
+    const outcome = await publisherControl.retryDetailed({ status: "failed" });
+    return jsonResponse(res, 200, {
+      retried: outcome.retried,
+      blockedPendingRecovery: outcome.blockedPendingRecovery,
+      skipped: outcome.skipped,
+    });
   }
 
   // POST /api/publisher/clear
   if (req.method === "POST" && path === "/api/publisher/clear") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let clearParsed: any;
-    try {
-      clearParsed = JSON.parse(body || "{}");
-    } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON body" });
-    }
-    const { status } = clearParsed;
+    const parsed = await readSmallJsonObject(req, res);
+    if (!parsed) return;
+    const status = parsed.status as string | undefined;
     if (status !== "failed" && status !== "finalized") {
       return jsonResponse(res, 400, {
         error: "status must be failed or finalized",
@@ -464,5 +636,37 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     }
     const count = await publisherControl.clear(status);
     return jsonResponse(res, 200, { cleared: count, status });
+  }
+
+  // POST /api/publisher/clear-job  { jobId }
+  // #1837 — atomic by-exact-jobId TERMINAL clear. DISTINCT from cancel (which aborts an
+  // ACCEPTED job) and from bulk /clear (status-scoped): clears exactly one job iff it is
+  // in a native terminal state, is idempotent for an absent job (already_absent = 200,
+  // NOT 404), and never touches another job. Preserves the #1829 journal (subject-scoped).
+  if (req.method === "POST" && path === "/api/publisher/clear-job") {
+    // readSmallJsonObject normalizes a `null`/primitive body to `{}`, so `jobId` is
+    // undefined there and falls through to the malformed guard (400) — never a 500.
+    const parsed = await readSmallJsonObject(req, res);
+    if (!parsed) return;
+    const jobId = parsed.jobId;
+    if (typeof jobId !== "string" || jobId.trim().length === 0) {
+      return jsonResponse(res, 400, { outcome: "rejected", reason: "malformed", error: "Missing jobId" });
+    }
+    // GH#2270 follow-up (🔴 3823952704, 🔴 3824098476) — clearing a job whose transaction may
+    // still land is a DESTRUCTIVE override, and this route is open to every registered agent token
+    // with no ownership check of its own. The route therefore states WHO is asking and WHAT they
+    // asked for; it does not look the job up itself.
+    //
+    // That matters: an earlier version read the job here, which put an unvalidated jobId into a
+    // query before `clearTerminalJob`'s safe-id guard ran, and decided ownership outside the claim
+    // lock the clear then takes. Validation, the ownership decision and the delete now happen on
+    // one record behind one boundary.
+    return respondTerminalClearOutcome(
+      res,
+      await publisherControl.clearTerminalJob(jobId, parsed.allowPendingTransaction === true
+        ? { pendingTransactionOverride: { requestedBy: requestAgentAddress } }
+        : {}),
+      jobId,
+    );
   }
 }

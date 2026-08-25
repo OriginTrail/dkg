@@ -15,12 +15,28 @@ export default defineConfig({
       : [
           'test/api-client.test.ts',
           'test/async-vm-publish-registration.test.ts',
+          // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
+          'test/publisher-job-by-intent-route.test.ts',
+          'test/publisher-journal-route.test.ts',
+          'test/publisher-clear-job-route.test.ts',
+          // GH#2270 follow-up — who may force-clear a job whose transaction may still land.
+          // A pure route-handler test, no hardhat, so it belongs in this lane.
+          'test/publisher-clear-job-override-authz.test.ts',
+          // #1890 — shared request-body boundary for the four publisher admin
+          // POST routes (pure handler, no hardhat). Belongs in the fast lane
+          // alongside its clear-job sibling above.
+          'test/publisher-admin-body-boundary.test.ts',
+          // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
+          'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
-          'test/status-route-store-quads.test.ts',
+          'test/backpressure-route.test.ts',
+      'test/status-route-store-quads.test.ts',
+      'test/query-route-lifecycle.test.ts',
+      'test/store-unavailable-response.test.ts',
           'test/status-command-store.test.ts',
           'test/memory-graph-events.test.ts',
           'test/memory-turn-route.test.ts',
@@ -48,17 +64,36 @@ export default defineConfig({
           'test/resolve-standalone-install.test.ts',
           'test/auto-update.test.ts',
           'test/dkg-doctor.test.ts',
+          'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
           'test/random-sampling-status.test.ts',
           'test/catchup-runner.test.ts',
           'test/catchup-runner-worker-impl.test.ts',
+          'test/catchup-runner-worker-lifecycle.test.ts',
+          // W1 §6.6/§6.7 — catch-up request/job accounting (I7–I9) and the
+          // producer-quiescent shutdown drain. Real WorkerCatchupRunner behind
+          // a fake worker thread; no hardhat.
+          'test/daemon-catchup-telemetry-shutdown.test.ts',
+          'test/catchup-runner-worker-killswitch.test.ts',
+          // #2050 — `DKG_SWM_CATCHUP_PASS_BUDGET_MS=0` continuation-pass kill
+          // switch, end to end through the worker with per-job config resolution.
+          'test/catchup-runner-worker-pass-budget-killswitch.test.ts',
+          // #2050 — the sibling lever, `DKG_SWM_CATCHUP_MAX_PASSES=1`.
+          'test/catchup-runner-worker-max-passes-cap.test.ts',
+          // #2050 — a deferred CONTINUATION pass must not demote a job that
+          // already succeeded (the daemon route short-circuits classification
+          // on the job-level scalar), and denial counts DISTINCT peers.
+          'test/catchup-runner-worker-continuation-deferral.test.ts',
           'test/relay-status-block.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
           'test/daemon-ka-transport.test.ts',
+          // Pure HTTP classification coverage for chain transport failures,
+          // including preserving a known transaction hash on endpoint exhaustion.
+          'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',
@@ -83,9 +118,39 @@ export default defineConfig({
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
+          'test/publisher-runtime-snapshot-store-injection.test.ts',
           'test/publisher-ka-recovery.test.ts',
+          // #2270 — the runner's chain lookup reports WHICH chain fact it found
+          // (pending vs proven-absent vs inconclusive), and the two-state
+          // resolver derived from it. Pure logic over stub adapters.
+          'test/publisher-chain-proof-resolution.test.ts',
+          // #1836 — publisher.maxRetries must propagate through
+          // createPublisherControlFromStore (incl. a literal 0). Pure logic.
+          'test/publisher-maxretries-1836.test.ts',
+          // #1836 — config→construction wiring seam (runDaemonInner forwards
+          // config.publisher.maxRetries into both admission constructors).
+          'test/publisher-maxretries-wiring-1836.test.ts',
+          // #2270 — the four retry knobs must reach the publisher instance whose
+          // scheduler/sweep run (config→construction seam, #1836 class), the
+          // daemon must reject a bad knob at config validation instead of
+          // mid-boot construction, and `publisher enable` must not erase them.
+          'test/publisher-retry-tuning-wiring-2270.test.ts',
+          'test/publisher-retry-tuning-boot-validation-2270.test.ts',
+          'test/publisher-enable-preserves-keys-2270.test.ts',
+          // #2270 — what the daemon TELLS an operator: the three retry counts on
+          // POST /api/publisher/retry, the derived `retryState` on the job-detail
+          // routes (real publisher control, no hardhat), and the CLI rendering.
+          'test/publisher-retry-surfacing-2270.test.ts',
+          'test/publisher-retry-command-output-2270.test.ts',
+          // #1828 — daemon-boot wiring seam (runDaemonInner invokes the VM-publish
+          // intent-index backfill with the admission publisher control).
+          'test/publisher-backfill-wiring-1828.test.ts',
+          // Public snapshot paging — one SQLite-indexed store must reach the
+          // agent sync responder, admission publisher, and background runtime.
+          'test/daemon-snapshot-page-index-wiring.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
+          'test/snapshot-page-index-store.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
           // + injected fetch/spawn/fs; no network, no real binary.
           'test/oxigraph-binary.test.ts',
@@ -123,6 +188,9 @@ export default defineConfig({
           // timeout attribution regressions in the fast unit lane too.
           'test/daemon-openclaw.part-*.test.ts',
           'test/daemon-hermes.test.ts',
+          'test/daemon-prime-agent.test.ts',
+          'test/daemon-prime-agent-persistence.test.ts',
+          'test/daemon-sse-final-frame.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
           // Daemon call-site wiring guard: runDaemonInner passes the resolved

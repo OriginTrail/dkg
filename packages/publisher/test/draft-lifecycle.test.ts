@@ -8,6 +8,7 @@ import {
   contextGraphDataUri,
   contextGraphMetaUri,
   contextGraphLayerUri,
+  contextGraphPrivateUri,
   MemoryLayer,
   ASSERTION_SEAL_PREDICATES,
   assertionLifecycleUri,
@@ -1211,11 +1212,12 @@ describe('Working Memory Assertion Lifecycle', () => {
     const bothClaimsInserted = new Promise<void>((resolve) => {
       releaseClaims = resolve;
     });
+    const shareOperationIdPredicateToken = `<${SHARE_OPERATION_ID_PREDICATE}>`;
     store.query = async (sparql) => {
       const result = await query(sparql);
       if (
         sparql.includes('SELECT ?shareOperationId')
-        && sparql.includes(SHARE_OPERATION_ID_PREDICATE)
+        && sparql.split(/\s+/u).some((token) => token === shareOperationIdPredicateToken)
       ) {
         initialClaimReads += 1;
         if (initialClaimReads === 2) releaseInitialReads();
@@ -1921,7 +1923,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     }
   });
 
-  it('promote accepts a payload above the old 512 KB cap and below 10 MB', async () => {
+  it('promote accepts a payload above the old 512 KB cap and below 4 MiB', async () => {
     await publisher.assertionCreate(CG_ID, 'large-promote', AGENT);
     const quads = largePayloadQuads('large-promote', 2 * 1024 * 1024);
     await publisher.assertionWrite(CG_ID, 'large-promote', AGENT, quads);
@@ -1937,7 +1939,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(result.gossipMessage!.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
   });
 
-  it('promote rejects payloads above 10 MB before mutating WM or SWM', async () => {
+  it('promote rejects payloads above 4 MiB before mutating WM or SWM', async () => {
     await publisher.assertionCreate(CG_ID, 'too-large-promote', AGENT);
     const quads = largePayloadQuads('too-large-promote', DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024);
     await publisher.assertionWrite(CG_ID, 'too-large-promote', AGENT, quads);
@@ -1945,7 +1947,7 @@ describe('Working Memory Assertion Lifecycle', () => {
 
     await expect(
       publisher.assertionPromote(CG_ID, 'too-large-promote', AGENT, { publisherPeerId: PEER }),
-    ).rejects.toThrow(/Promoted assertion too large for gossip.*10\s*MB/i);
+    ).rejects.toThrow(/Promoted assertion too large for gossip.*4\s*MB/i);
 
     const assertionQuads = await publisher.assertionQuery(CG_ID, 'too-large-promote', AGENT);
     expect(assertionQuads.length).toBe(quads.length);
@@ -2499,6 +2501,40 @@ describe('Working Memory Assertion Lifecycle', () => {
       const count = Number(String(preservedSwm.bindings[0]?.['c'] ?? '0').match(/\d+/)?.[0] ?? 0);
       expect(count).toBe(3);
     }
+  });
+
+  it('discard proceeds and archives the recovery seal when the SWM head is corrupt (GH#2273)', async () => {
+    // GH#2273 — the resolver fails closed on a corrupt SWM head, and the discard path
+    // resolves the head only to decide the advisory keep-the-recovery-seal boolean.
+    // Discard is a plausible operator remedy for a KA whose head is exactly in that
+    // corrupt state, so the throw must not abort it (pre-fix it did: the resolve had no
+    // catch, so this discard rejected with KA_WORKSPACE_HEAD_CORRUPT and the operator
+    // had no API-level way to clear the assertion). On corruption we cannot prove the
+    // seal does NOT match live SWM content, so the decision fails toward RETENTION: the
+    // seal is archived to the recovery subject rather than dropped.
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    // One dangling shareOperationId row with none of the other required head rows is
+    // the resolver's pre-existing "incomplete head or operation metadata" corrupt case
+    // — the cheapest corrupt-head shape to fabricate, and the catch under test treats
+    // every KnowledgeAssetWorkspaceHeadCorruptError alike.
+    await store.insert([{
+      subject: `${finalized.kaUal}#dkg-swm-head`,
+      predicate: SHARE_OPERATION_ID_PREDICATE,
+      object: '"phantom-op"',
+      graph: SWM_META_GRAPH,
+    }]);
+
+    await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
+
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(0);
+    const recoverySubject = `${contextGraphAssertionUri(CG_ID, AGENT, ASSERTION_NAME)}/_recovery_seal`;
+    const archived = await store.query(
+      `ASK { GRAPH <${contextGraphPrivateUri(CG_ID)}> { <${recoverySubject}> ?p ?o } }`,
+    );
+    expect(archived).toEqual({ type: 'boolean', value: true });
   });
 });
 

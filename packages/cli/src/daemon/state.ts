@@ -76,6 +76,26 @@ export const daemonState: {
    * `false` so operators see *why* the queue is closed.
    */
   promoteWorkerUnavailableReason: string | null;
+  /**
+   * Whether the subscribe route may still MINT a catch-up job.
+   *
+   * Same shape as `promoteWorkerAvailable` above and for the same reason: the
+   * route needs a shutdown signal it can actually see. The daemon's own
+   * `shuttingDown` is a closure-local `let` inside `runDaemonInner`, invisible
+   * to every route module, so without this a subscribe arriving mid-shutdown
+   * would queue a job that nothing will ever drain — the runner's worker is
+   * about to be terminated, and its exit handler rejects every pending run.
+   *
+   * Defaults to `true` (unlike `promoteWorkerAvailable`, which waits for its
+   * supervisor to come up): catch-up needs no separate readiness handshake, so
+   * the only state that closes it is shutdown itself, set as the first
+   * statement of `shutdown()`.
+   *
+   * Guards the two MINT sites only. Dedupe and already-ready replay return an
+   * existing job and create nothing, so they stay open — 503-ing them would be
+   * a regression, not a safeguard.
+   */
+  catchupAcceptingJobs: boolean;
   /** OpenClaw bridge health cache. Mutated from both `openclaw.ts`
    *  (read) and `handle-request.ts` (write after each /send round
    *  trip), so it lives here rather than inside openclaw.ts. */
@@ -95,6 +115,7 @@ export const daemonState: {
   moduleCorsAllowed: '*',
   promoteWorkerAvailable: false,
   promoteWorkerUnavailableReason: null,
+  catchupAcceptingJobs: true,
   openClawBridgeHealth: null,
 };
 

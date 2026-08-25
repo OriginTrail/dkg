@@ -11,6 +11,7 @@ import {
   encryptWorkspacePayload,
   generateWorkspaceRecipientEncryptionKey,
   computeGossipSigningPayload,
+  DKG_GOSSIP_MAX_MESSAGE_BYTES,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   STORAGE_ACK_MAX_STAGING_BYTES,
@@ -21,6 +22,7 @@ import {
   SharedMemoryHandler,
   StaleWriteError,
   resolveKnowledgeAssetWorkspaceHead,
+  resolvePublishedKnowledgeAssetWorkspaceHead,
   type ShareOptions,
   type ConditionalShareOptions,
 } from '../src/index.js';
@@ -503,7 +505,7 @@ describe('Workspace: publishFromSharedMemory', () => {
     expect(decoded).toContain(`<${ENTITY}> <http://schema.org/name> "Inline From SWM"`);
   });
 
-  it('omits staging quads for over-limit internal public SWM first ACK attempts', async () => {
+  it('omits staging quads for over-limit aggregate public SWM first ACK attempts', async () => {
     const targetBytes = STORAGE_ACK_MAX_STAGING_BYTES + 1;
     // The publisher prices/ACKs the canonical data-graph N-Quads, not the
     // caller's graphless SWM input. Build the boundary fixture with that exact
@@ -511,11 +513,24 @@ describe('Workspace: publishFromSharedMemory', () => {
     const selectedQuads = buildPublicQuadsWithByteSize(targetBytes, DATA_GRAPH);
     expect(encodedPublicByteLength(selectedQuads)).toBe(targetBytes);
 
-    await publisher.share(
+    // An aggregate SWM selection can exceed the 4 MiB ACK-inline ceiling even
+    // though every individual gossip operation respects the same 4 MiB limit.
+    // Seed that reachable state through two valid shares instead of one
+    // oversized share that must now fail at the producing boundary.
+    const graphlessQuads = selectedQuads.map((quad) => ({ ...quad, graph: '' }));
+    const splitAt = Math.ceil(graphlessQuads.length / 2);
+    const firstShare = await publisher.share(
       CONTEXT_GRAPH,
-      selectedQuads.map((quad) => ({ ...quad, graph: '' })),
-      { publisherPeerId: 'peer-oversized-inline' },
+      graphlessQuads.slice(0, splitAt),
+      { publisherPeerId: 'peer-aggregate-first' },
     );
+    const secondShare = await publisher.share(
+      CONTEXT_GRAPH,
+      graphlessQuads.slice(splitAt),
+      { publisherPeerId: 'peer-aggregate-second' },
+    );
+    expect(firstShare.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(secondShare.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
 
     let receivedParams: V10ACKProviderParams | undefined;
     const stopAfterCapture = new Error('stop after over-limit ACK capture');
@@ -1186,13 +1201,17 @@ describe('SharedMemoryHandler', () => {
 
   it('persists one durable KA-level transport owner across assertion versions', async () => {
     const peerId = '12D3KooWOwner';
+    const firstPublishedAt = 1_700_000_000_000;
+    // Oxigraph canonicalizes the valid xsd:dateTime fraction `.120Z` to `.12Z`.
+    // The resolver must validate the value semantically and normalize it to ms.
+    const secondPublishedAt = 1_700_000_000_120;
 
     const msg1 = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "First" <${DATA_GRAPH}> .`),
       publisherPeerId: peerId,
       shareOperationId: 'ws-own-1',
-      timestampMs: Date.now(),
+      timestampMs: firstPublishedAt,
     });
     await handler.handle(msg1, peerId);
 
@@ -1205,6 +1224,32 @@ describe('SharedMemoryHandler', () => {
       kaUal: firstRequest.kaUal ?? '',
     });
     expect(afterFirst?.publisherPeerId).toBe(peerId);
+    expect(afterFirst?.publishedAt).toBe(firstPublishedAt.toString());
+    await expect(resolvePublishedKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    })).resolves.toMatchObject({ publishedAt: firstPublishedAt.toString() });
+
+    await store.deleteByPattern({
+      graph: gm.sharedMemoryMetaUri(CONTEXT_GRAPH),
+      subject: `urn:dkg:share:${CONTEXT_GRAPH}:ws-own-1`,
+      predicate: 'http://dkg.io/ontology/publishedAt',
+    });
+    const legacyHeadWithoutPublishedAt = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    });
+    expect(legacyHeadWithoutPublishedAt?.publishedAt).toBeUndefined();
+    await expect(resolvePublishedKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    })).rejects.toThrow(/missing canonical publishedAt/u);
 
     const msg2 = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
@@ -1212,7 +1257,7 @@ describe('SharedMemoryHandler', () => {
       publisherPeerId: peerId,
       shareOperationId: 'ws-own-2',
       assertionVersion: '2',
-      timestampMs: Date.now(),
+      timestampMs: secondPublishedAt,
     });
     await handler.handle(msg2, peerId);
 
@@ -1225,6 +1270,7 @@ describe('SharedMemoryHandler', () => {
     expect(afterSecond).toMatchObject({
       assertionVersion: '2',
       publisherPeerId: peerId,
+      publishedAt: secondPublishedAt.toString(),
     });
   });
 });

@@ -395,6 +395,12 @@ export class QueryMethods extends DKGAgentBase {
        * `<cg>/_private`. Does not widen access for other callers.
        */
       includePrivate?: boolean;
+      /** Cancel the underlying store request when the outer caller disconnects. */
+      signal?: AbortSignal;
+      /** Store admission lane used by the query engine. */
+      priority?: import('@origintrail-official/dkg-storage').StoreWorkPriority;
+      /** Store diagnostics / slow-query attribution label. */
+      source?: string;
       operationCtx?: OperationContext;
       view?: GetView;
       agentAddress?: string;
@@ -644,6 +650,9 @@ export class QueryMethods extends DKGAgentBase {
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
       includePrivate: opts.includePrivate,
+      signal: opts.signal,
+      priority: opts.priority,
+      source: opts.source,
       view: opts.view,
       agentAddress: effectiveWmAddress,
       agentAddressAliases: wmAddressAliases,
@@ -764,6 +773,7 @@ export class QueryMethods extends DKGAgentBase {
           ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
         }
       }`,
+      { source: 'agent.query.privateGraphAccessPolicy' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return [];
 

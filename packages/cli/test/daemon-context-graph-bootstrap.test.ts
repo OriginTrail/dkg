@@ -84,6 +84,7 @@ describe('configured context graph daemon bootstrap', () => {
     expect(fixture.ensureContextGraphLocal).not.toHaveBeenCalled();
     expect(fixture.subscribeToContextGraph).toHaveBeenCalledWith(
       '0x1234567890123456789012345678901234567890/private-cg',
+      { syncMode: 'always-on' },
     );
     expect(
       fixture.subscriptions.get('0x1234567890123456789012345678901234567890/private-cg'),
@@ -148,6 +149,7 @@ describe('configured context graph daemon bootstrap', () => {
 
     expect(fixture.subscribeToContextGraph).toHaveBeenCalledWith(
       '0x1234567890123456789012345678901234567890/local-cg',
+      { syncMode: 'always-on' },
     );
     expect(fixture.markContextGraphSubscriptionState).not.toHaveBeenCalled();
     expect(
@@ -434,6 +436,7 @@ describe('configured context graph daemon bootstrap', () => {
     expect(fixture.subscribeToContextGraph).toHaveBeenCalledTimes(1);
     expect(fixture.subscribeToContextGraph).toHaveBeenCalledWith(
       '0x1234567890123456789012345678901234567890/remote-cg',
+      { syncMode: 'always-on' },
     );
     expect(fixture.subscriptions.has(SYSTEM_CONTEXT_GRAPHS.AGENTS)).toBe(false);
     expect(fixture.subscriptions.has(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(false);

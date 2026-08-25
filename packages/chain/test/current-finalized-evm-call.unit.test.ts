@@ -137,9 +137,7 @@ describe('RFC-64 current-finalized EVM call router', () => {
     const adapter = vi.fn(async () => RESULT_A);
     const router = createCurrentFinalizedEvmCallRouterV1([{ chainId: CHAIN_A, adapter }]);
 
-    await expect(router(request({ [key]: value }))).rejects.toMatchObject({
-      code: 'rpc-unavailable',
-    });
+    await expect(router(request({ [key]: value }))).rejects.toMatchObject({ code: 'rpc-unavailable' });
     expect(adapter).not.toHaveBeenCalled();
   });
 

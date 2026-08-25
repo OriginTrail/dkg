@@ -30,6 +30,7 @@ import {
   contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
+import { buildAuthoritativePublicMetaAskQuery } from '../src/context-graph-public-meta-proof.js';
 import { createEVMAdapter, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 
 const CG_ID = 'issue-865-public-cg';
@@ -86,6 +87,14 @@ describe('Issue #865 — public CG + allowlist must not be classified as private
       if (policyResult.type === 'bindings') {
         expect(policyResult.bindings[0]?.['policy']).toBe('"public"');
       }
+
+      // Late subscribers validate the curator's root `_meta` snapshot before
+      // admitting SWM. Creation must materialize the same canonical proof
+      // there instead of relying on the discoverability copy in ONTOLOGY.
+      const publicMetaProof = await store.query(
+        buildAuthoritativePublicMetaAskQuery(CG_ID),
+      );
+      expect(publicMetaProof).toEqual({ type: 'boolean', value: true });
 
       await agent.inviteAgentToContextGraph(CG_ID, INVITEE_AGENT, owner);
 

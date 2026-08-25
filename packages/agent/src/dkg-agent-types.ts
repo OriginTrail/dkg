@@ -15,6 +15,7 @@
  */
 
 import type { ethers } from 'ethers';
+import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
 import type {
   Quad,
   TripleStore,
@@ -31,11 +32,22 @@ import type {
   ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
   ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
   CatalogSealDeploymentProfileV1,
+  ContextGraphIdV1,
+  ContextGraphPolicyV1,
+  DecimalU64V1,
+  Digest32V1,
+  EvmAddressV1,
+  NetworkIdV1,
+  SubGraphNameV1,
+  TimestampMsV1,
+  UnsignedContextGraphPolicyEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
   StorageAckTiming,
+  StorageAckTimingInput,
+  WorkspacePublicSnapshotStore,
   CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
 import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore } from '@origintrail-official/dkg-chain';
@@ -48,9 +60,15 @@ import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import type {
+  Rfc64PublicCatalogActivationInputV1,
+  ResolvedRfc64PublicCatalogAutoPublishPolicyV1,
+} from './rfc64/public-catalog-activation-config-v1.js';
+import type {
+  SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
+import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -180,6 +198,8 @@ export interface SyncRequestEnvelope {
    * like `phase`/`snapshotRef`), so it's additive and backward-compatible.
    */
   sinceBatchId?: string;
+  /** Additive exact-KA response filter; present-but-invalid parses fail closed. */
+  assetUals?: string[];
   /**
    * R9 (SECURITY) — UNSIGNED member-recovery marker. When set, the responder
    * authorizes via the strict members-only `isMemberRecoveryAuthorized`
@@ -357,6 +377,20 @@ export interface PublishAsyncOpts extends PublishOpts {
   };
   /** Caller signs typed-data built by the daemon. Requires `authorAgentAddress`. */
   authorSignTypedData?: (typedData: AuthorAttestationTypedData) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
+  /**
+   * GH#2270 follow-up (3825162149) — the AUTHENTICATED identity admitting this job, for
+   * authorization only. A host that authenticated a caller (an EPCIS capture route, a plugin with
+   * a token) passes it here so that caller keeps the by-id force-clear its job may later need.
+   *
+   * Deliberately NOT the author: `authorAgentAddress` and `preSignedAuthorAttestation.authorAddress`
+   * name who SIGNED the assertion, which under curated publishing may be a third party who
+   * enqueued nothing. Granting a destructive clear to them would hand the double-publish decision
+   * to someone who never asked for the publish.
+   *
+   * Omitted → the job is admitted by the node itself (an internal producer such as the Kafka
+   * stream), and the node's default agent owns it; see `publishAsync`.
+   */
+  admittedByAgentAddress?: string;
 }
 
 export interface PublishAsyncQuadEnvelope {
@@ -593,9 +627,21 @@ export interface ChatSendResult {
 
 // ── Context-graph surface ───────────────────────────────────────────
 
+/**
+ * Lifetime of an edge node's active Context Graph synchronization intent.
+ *
+ * `on-demand` remains active only for the current process. `always-on` is
+ * restart-durable through the configured subscription store. Persisted rows
+ * written before this distinction existed are therefore implicitly
+ * `always-on` for backward compatibility.
+ */
+export type ContextGraphSyncMode = 'on-demand' | 'always-on';
+
 /** Tracks the subscription and sync state of a context graph. */
 export interface ContextGraphSub {
   name?: string;
+  /** Requested synchronization lifetime, normalized before entering live state. */
+  syncMode: ContextGraphSyncMode;
   /** GossipSub topics are active for this context graph. */
   subscribed: boolean;
   /** Definition triples exist in the local triple store. */
@@ -674,6 +720,17 @@ export interface ContextGraphSub {
 }
 
 /**
+ * Mutation input normalized at the one live-subscription state boundary.
+ *
+ * Callers that predate explicit lifetimes remain compatible; live state never
+ * observes the optional form because the mutation boundary inherits the
+ * previous mode or applies the restart-durable legacy default.
+ */
+export type ContextGraphSubInput = Omit<ContextGraphSub, 'syncMode'> & {
+  syncMode?: ContextGraphSyncMode;
+};
+
+/**
  * Metadata that passive discovery is allowed to contribute to the local
  * Context Graph catalogue.
  *
@@ -730,6 +787,38 @@ export interface ContextGraphSubscriptionStore {
   deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
 }
 
+/**
+ * Durable cursor store owned by selected-only VM reconciliation.
+ *
+ * This deliberately does not extend `ContextGraphSubscriptionStore`: selecting
+ * a public CG for RFC-64 convergence grants neither membership nor Core custody
+ * and therefore must not acquire a subscription-store dependency.
+ */
+export interface SelectedVmReconcileCursorStore {
+  loadSelectedVmReconcileCursor?(
+    deploymentId: string,
+    contextGraphId: string,
+    onChainContextGraphId: string,
+  ): Promise<SelectedVmReconcileCursorRecord | null>;
+  saveSelectedVmReconcileCursor?(record: SelectedVmReconcileCursorRecord): Promise<void>;
+}
+
+/**
+ * Restart-durable VM progress for an operator-selected RFC-64 public CG.
+ *
+ * This is deliberately not a ContextGraph subscription record: selection
+ * grants neither membership nor Core custody. The local and numeric chain ids
+ * jointly identify the cursor inside one exact chain deployment. A chain/HUB
+ * redeploy therefore cannot reuse progress from an unrelated VM inventory.
+ */
+export interface SelectedVmReconcileCursorRecord {
+  deploymentId: string;
+  contextGraphId: string;
+  onChainContextGraphId: string;
+  nameHash: string;
+  watermark: number;
+}
+
 /** Restart-durable, generation-gated record of one authoritative no-match scan. */
 export interface VmReconcileNegativeRecord {
   cacheKey: string;
@@ -741,7 +830,36 @@ export interface VmReconcileNegativeRecord {
   peerTopologyKey: string;
 }
 
+/** Process-local evidence for one chain-ordinal exact-recovery rotation. */
+export interface VmReconcileRotationRecord {
+  localCgId: string;
+  onChainCgId: string;
+  ordinal: number;
+  fingerprint: string;
+  phase: 'collecting' | 'backoff';
+  /** Retry suppression is distinct from authenticated clean-absence proof. */
+  backoffKind?: 'clean-absence' | 'incomplete-cycle';
+  candidatePeerIds: Set<string>;
+  /** Peers physically attempted during the current proof cycle. */
+  attemptedPeerIds: Set<string>;
+  cleanAbsentPeerIds: Set<string>;
+  /**
+   * A process-local curator lookup completed (or its bounded cached roster was
+   * reused). This is not cryptographic or network-wide completeness evidence;
+   * observed roster changes invalidate the cycle and backoff is time-bounded.
+   */
+  curatorRosterConfirmed: boolean;
+  /** Monotonic bound after which a partial clean-absence proof restarts. */
+  collectionDeadlineAt: number;
+  /** Cursor only; every physical attempt advances it, regardless of outcome. */
+  lastAttemptedPeerId?: string;
+  failures: number;
+  nextRetryAt: number;
+}
+
 export interface ContextGraphSubscriptionRehydrationStatus {
+  /** Whether persisted subscription activation was enabled for this boot. */
+  rehydrationEnabled: boolean;
   /** Non-system persisted rows governed by the rehydration cap. */
   persistedTotal: number;
   /** Persisted system rows seen during rehydration; excluded from cap math. */
@@ -964,6 +1082,100 @@ export interface DurableSyncDiagnostics {
   deferredBackpressure?: number;
 }
 
+/**
+ * ONE peer's public-SWM snapshot coverage for ONE round, and the ONLY shape in
+ * which that coverage travels.
+ *
+ * **Reduced whole or not at all.** Numerator and denominator are never reduced
+ * independently: an independent `max` over ready and total combines peers
+ * reporting `178/250` and `200/200` into `200/250` — a state no peer reported,
+ * attributed to a peer that never said it, alongside a missing sample drawn
+ * from a third inventory. Every reducer therefore picks one record and keeps it
+ * intact; `selectSwmSnapshotCoverage` in `sync/requester/shared-memory-sync.ts`
+ * is that reducer, and it is the only one.
+ */
+export interface SwmSnapshotCoverage {
+  /**
+   * The Context Graph this coverage describes. Required, because the reduction
+   * runs INSIDE the `contextGraphIds` loop: on a multi-CG call exactly one
+   * graph's record survives, and without this field no consumer can tell which
+   * graph the surviving counts belong to.
+   */
+  contextGraphId: string;
+  /** Last 8 chars of the peer id this whole record came from. */
+  peerIdSuffix: string;
+  /**
+   * Snapshot refs whose Knowledge Assets are MATERIALIZED — written and locally
+   * visible — either already present before this round or made visible by it.
+   *
+   * Not "fetched". A ref sitting valid in the blob cache whose write failed does
+   * NOT count here, and that is deliberate: the capability gate reads this field
+   * to decide whether a peer still owes us anything, and a round that cached
+   * every ref while writing none would otherwise report `N/N`, drop the peer as
+   * satisfied, and disable the retry loop in exactly the failure class it exists
+   * for.
+   */
+  snapshotsResolved: number;
+  /** Snapshot refs declared by this peer's verified SWM metadata. */
+  snapshotsTotal: number;
+  /**
+   * The peer's SWM metadata phase paged to completion, so `snapshotsTotal` is
+   * its full manifest rather than a truncated prefix. False means the
+   * denominator is a lower bound.
+   */
+  manifestComplete: boolean;
+  /**
+   * Whether graph-scoped snapshot descriptors were parsed authoritatively for
+   * this round. False means an empty descriptor set may be a parse failure,
+   * not proof that a manifest ref has nothing to materialize. Absent values are
+   * treated as unknown by freshness accounting for compatibility with older
+   * diagnostic producers.
+   */
+  descriptorsAuthoritative?: boolean;
+  /**
+   * Refs NOT materialized: `snapshotsTotal - snapshotsResolved`, by
+   * construction, so `resolved + missing === total` always holds.
+   *
+   * Covers both causes at once — never fetched, and fetched-but-unwritten. It is
+   * NOT a retrieval-only count, and it must never be added to
+   * `materializationFailures`; every unwritten ref is already in here.
+   */
+  missingCount: number;
+  /**
+   * Bounded identifiers for the shortfall — a public peer controls manifest
+   * size, so this is a sample, never the full inventory. Always drawn from the
+   * same round as the counts above, and deduplicated, so it can never exceed
+   * `missingCount`.
+   */
+  missingSample: string[];
+  /**
+   * Descriptor writes that FAILED after their snapshot fetched and
+   * digest-verified — a store error inside the KA write lock, the failure class
+   * the G7 repair exists for, likeliest under the same store pressure that
+   * produces incomplete rounds.
+   *
+   * A CAUSE indicator for `missingCount`, not a second disjoint count. Those
+   * refs are already counted as missing; this field says the shortfall is a
+   * store problem rather than a network one, which is what sends an operator to
+   * the right place.
+   *
+   * Note the unit: this counts failing DESCRIPTORS while `missingCount` counts
+   * REFS, and one ref can carry several descriptors. Neither is a subset count
+   * of the other, so never render them as "N of which K".
+   *
+   * `materializationFailures > 0` with `missingCount === 0` is unrepresentable:
+   * a ref with a failing descriptor is excluded from the materialized set, which
+   * forces `resolved < total`. A fixture asserting that pair is testing a state
+   * the producer cannot emit.
+   */
+  materializationFailures: number;
+  /**
+   * This round came from the metadata-resolved curator. Set only by the
+   * catch-up walk, which knows peer roles; the agent-side sync does not.
+   */
+  fromAuthority?: boolean;
+}
+
 export interface SharedMemorySyncDiagnostics {
   fetchedMetaTriples: number;
   fetchedDataTriples: number;
@@ -981,6 +1193,56 @@ export interface SharedMemorySyncDiagnostics {
   backoffWorthyFailures?: number;
   /** Context Graph admissions deferred by local scheduler pressure. */
   deferredBackpressure?: number;
+  /** Coverage for the graph this round touched; see {@link SwmSnapshotCoverage}. */
+  swmCoverage?: SwmSnapshotCoverage;
+  /**
+   * Snapshot phases that stopped on the local clock with unfetched refs
+   * remaining — a VOLUNTARY yield, not a peer fault. Deliberately distinct from
+   * `timedOutPhases`, which marks the round backoff-worthy
+   * (`durable-progress.ts` `backoffWorthyFailure`) and would put a healthy peer
+   * into backoff for our own budget decision.
+   */
+  snapshotPlaneIncomplete?: number;
+  /**
+   * Metadata phases that hit their local round deadline only after retaining
+   * the exact verified-to-date prefix for an immediate selected continuation.
+   */
+  metadataContinuationYields?: number;
+  /** Extra catch-up passes spent over the peer set beyond the first. */
+  continuationPasses?: number;
+  /**
+   * Historical `snapshotPlaneIncomplete` failures superseded by a later clean,
+   * complete selected-provider continuation in this same invocation.
+   *
+   * The raw failure and incomplete counters remain intact for telemetry. An
+   * The canonical shared-memory freshness classifier may supersede only this
+   * bounded count; transport, timeout, denial and backpressure signals remain
+   * independent vetoes. Producers must maintain
+   * `0 <= resolved <= snapshotPlaneIncomplete <= failedPhases`.
+   */
+  resolvedSnapshotPlaneIncomplete?: number;
+  /** Historical selected metadata yields superseded by exact completion. */
+  resolvedMetadataContinuationYields?: number;
+  /**
+   * Why the bounded repeat stopped. Typed as the policy's own closed union
+   * rather than `string`, so a new stop reason cannot reach the terminal message
+   * unnoticed — the terminal text renders this, and an unhandled reason there
+   * would read as a missing explanation rather than as a new state.
+   */
+  continuationStopReason?: CatchupPassDecisionReason;
+  /**
+   * The REPLAY half of `bytesReceived`: the metadata and aggregate-data phases,
+   * which a repeated pass re-fetches in full. Named for the plan's single
+   * "metadata/aggregate replay" bucket — it spans BOTH phases, not just meta.
+   *
+   * Split out because `bytesReceived` merges replay and useful bytes into one
+   * scalar, which makes the accepted cost of repeating the peer walk
+   * unmeasurable in bytes — exactly the quantity the efficiency gate exists to
+   * bound. `replayPhaseBytesReceived + snapshotPhaseBytesReceived === bytesReceived`.
+   */
+  replayPhaseBytesReceived?: number;
+  /** The USEFUL half of `bytesReceived`: immutable snapshot content. */
+  snapshotPhaseBytesReceived?: number;
 }
 
 export interface CatchupSyncDiagnostics {
@@ -992,6 +1254,13 @@ export interface CatchupSyncDiagnostics {
 export interface DurableSyncResult extends DurableSyncDiagnostics {
   insertedTriples: number;
   deniedPhases: number;
+  /**
+   * True only when every requested Context Graph reached a verified terminal
+   * state in this invocation. Committed prefixes remain observable through the
+   * counters while this stays false, so callers never have to infer whole-run
+   * completeness from per-phase progress.
+   */
+  complete: boolean;
 }
 
 export interface SharedMemorySyncResult extends SharedMemorySyncDiagnostics {
@@ -1041,6 +1310,64 @@ export interface ReplicationEvent {
 
 export type ReplicationEventSink = (event: ReplicationEvent) => void;
 
+export interface Rfc64CatalogAccessPolicyAuthorityConfigV1 {
+  readonly localAgentAddress: EvmAddressV1;
+  /** Exact authenticated libp2p-peer to agent-wallet binding. */
+  readonly resolveRemoteAgentAddress: (
+    remotePeerId: string,
+  ) => Promise<EvmAddressV1 | null>;
+}
+
+/**
+ * Opt-in RFC-64 SWM author-catalog production. Peer fan-out is an availability
+ * hint; the durable applied-head pointer remains the correctness source for
+ * pull discovery. Finalized VM inventory remains on chain.
+ */
+export interface Rfc64PublicCatalogAutoPublishConfigV1 {
+  readonly peers: readonly string[];
+  readonly catalogIssuerDelegationEffectiveAt?: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+}
+
+export interface Rfc64PublicCatalogBootstrapScopeV1 {
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly subGraphName: SubGraphNameV1 | null;
+  readonly authorAddress: EvmAddressV1;
+  readonly catalogEra: DecimalU64V1;
+}
+
+export interface Rfc64PublicCatalogBootstrapTargetV1 {
+  readonly authorAddress: EvmAddressV1;
+  /** Ordered provider failover candidates for this exact author catalog. */
+  readonly providers: readonly string[];
+}
+
+export interface Rfc64PublicCatalogBootstrapPolicyV1 {
+  /** Exact verified control object; its digest is recomputed during snapshotting. */
+  readonly policyEnvelope: UnsignedContextGraphPolicyEnvelopeV1;
+  /** Author catalogs under the policy graph/era. */
+  readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
+  /**
+   * Operator-pinned peers that each serve a complete public-SWM snapshot for
+   * this exact accepted policy generation.  Unlike a catalog target provider,
+   * one of these peers may settle the graph-wide SWM catch-up plane by itself.
+   * Omission preserves the ordinary multi-provider union walk.
+   */
+  readonly completeSwmProviders?: readonly string[];
+}
+
+/**
+ * Explicit V1 cold-start manifest. Policies are operator-pinned outputs of an
+ * independent finality/administrative verifier; the catalog lane only consumes
+ * them. A zero retry interval performs one startup pass, which is useful for
+ * deterministic harnesses. Omission defaults to a 30-second refresh pass.
+ */
+export interface Rfc64PublicCatalogBootstrapConfigV1 {
+  readonly acceptedPublicPolicies: readonly Rfc64PublicCatalogBootstrapPolicyV1[];
+  readonly retryIntervalMs?: number;
+}
+
 export interface DKGAgentConfig {
   name: string;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
@@ -1055,6 +1382,26 @@ export interface DKGAgentConfig {
    * announcement wire data.
    */
   rfc64CatalogDeploymentProfile?: CatalogSealDeploymentProfileV1;
+  /**
+   * Explicit agent-identity authority required before accepting a private
+   * RFC-64 catalog policy. Omission preserves the legacy open-only lane.
+   */
+  rfc64CatalogAccessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
+  /**
+   * Canonical selected-public activation resolved through the versioned,
+   * side-effect-free activation surface. Mutually exclusive with the legacy
+   * deployment, auto-publish, and bootstrap controls; the accepted manifest
+   * is its only CG set.
+   */
+  rfc64PublicCatalogActivation?: Rfc64PublicCatalogActivationInputV1;
+  /**
+   * Legacy all-accepted-public-CG producer configuration. Omission preserves
+   * existing publication behavior. New daemons should use the unified
+   * selected-public activation above.
+   */
+  rfc64PublicCatalogAutoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
+  /** Omission preserves manual RFC-64 current-head discovery. */
+  rfc64PublicCatalogBootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
   /**
    * public-projection enable flag. When set, a private CG's confirmed VM
    * publishes emit/refresh a verifiable public projection (the floor: existence,
@@ -1117,27 +1464,58 @@ export interface DKGAgentConfig {
   largeLiteralStorage?: LargeLiteralStorageConfig;
   /** Out-of-Oxigraph immutable public SWM operation snapshots. Defaults on when dataDir is set. */
   sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
+  /** Optional caller-owned snapshot store, used by the daemon to inject durable page indexing. */
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /**
+   * Max automatic-retry budget stamped onto async VM-publish jobs admitted
+   * through this agent's `publishAsync` (EPCIS / Kafka plugin paths). Mirrors
+   * the daemon's `publisher.maxRetries`. Nullish → the publisher's built-in
+   * default; `0` disables auto-retry. (#1836)
+   */
+  publisherMaxRetries?: number;
   importedArtifactByteStore?: ImportedArtifactByteStore;
   /** When false, peer-connect sync skips SWM catch-up and relies on gossip for new SWM writes. */
   syncSharedMemoryOnConnect?: boolean;
   /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
   syncReconcilerEnabled?: boolean;
+  /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
+  syncReconcilerIntervalMs?: number;
+  /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
+  syncStalenessThresholdMs?: number;
+  /** Initial per-peer automatic sync retry delay. Default: 5 minutes. */
+  syncBackoffBaseMs?: number;
+  /** Maximum per-peer automatic sync retry delay. Default: 60 minutes. */
+  syncBackoffMaxMs?: number;
+  /** Fractional retry jitter from 0 through 1. Default: 0.25. */
+  syncBackoffJitter?: number;
   /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
   syncOnConnectEnabled?: boolean;
+  /**
+   * Include `agents` and `ontology` in automatic peer-connect/reconciler
+   * durable sync. Defaults true on Core and false on Edge. Explicit catch-up
+   * remains available. Env DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT wins.
+   */
+  syncSystemContextGraphsOnConnect?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
-   * Global cap for concurrent sync jobs. Defaults to 2; set 0 to disable.
+   * Global cap for concurrent sync jobs. Defaults to 10; set 0 to disable.
    * Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins.
    */
   syncGlobalMaxInflight?: number;
   /** Backwards-compatible alias for syncGlobalMaxInflight. Env DKG_SYNC_GLOBAL_LIMIT wins. */
   syncGlobalLimit?: number;
-  /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
+  /** Hard cap for queued sync jobs. Shared mode defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
+  syncAdmission?: SyncAdmissionConfig;
   /** Daemon-local retained responder snapshot row/estimated-byte policy. */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
-  /** Local requester/responder priority by Context Graph ID. Higher runs first. */
+  /**
+   * Local requester/responder priority by Context Graph ID. Higher runs first.
+   * System Context Graphs default to a deprioritized priority so they run
+   * last; an explicit entry here (including 0) overrides that default.
+   */
   syncContextGraphPriorities?: SyncContextGraphPriorityConfig;
   /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
   storageAckHandlerDeadlineMs?: number;
@@ -1260,7 +1638,7 @@ export interface DKGAgentConfig {
    * legacy loose aliases below so the handler deadline and publisher send
    * timeout are treated as one invariant.
    */
-  storageAckTiming?: StorageAckTiming;
+  storageAckTiming?: StorageAckTimingInput;
   /**
    * @deprecated Use `storageAckTiming.handlerDeadlineMs`. Kept as a
    * compatibility alias and normalized by `DKGAgent.create`.
@@ -1305,6 +1683,13 @@ export interface DKGAgentConfig {
     /** Overall submitted-transaction receipt deadline (default 10 minutes). */
     receiptTimeoutMs?: number;
     /**
+     * Operator-selected receipt confirmation depth. Lower values are faster but
+     * increase reorganization risk; 1 gives no successor-block buffer. Defaults to 1.
+     */
+    finalityConfirmations?: number;
+    /** Optional operator cap for transaction fee-per-gas fields (wei). */
+    maxFeePerGasWei?: bigint;
+    /**
      * Optional V10 allowance-sizing policy. Threaded straight through to
      * the `EVMChainAdapter`; see `ApprovalPolicy` in
      * `@origintrail-official/dkg-chain`. Omit to inherit the default
@@ -1324,7 +1709,7 @@ export interface DKGAgentConfig {
   };
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
-  /** Additional context graph IDs to sync on peer connect (beyond system context graphs). */
+  /** User-selected context graph IDs to sync automatically on peer connect. */
   syncContextGraphs?: string[];
   /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   sharedMemoryTtlMs?: number;
@@ -1391,6 +1776,16 @@ export interface DKGAgentConfig {
   };
   /** Durable local store for subscribed context-graph runtime state. */
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
+  /** Durable progress owned by selected-only VM reconciliation. */
+  selectedVmReconcileCursorStore?: SelectedVmReconcileCursorStore;
+  /**
+   * Whether durable context-graph subscription rows become live subscriptions
+   * during startup. Defaults to `true`. When `false`, startup still opens the
+   * same durable stores and leaves every row and RDF graph intact, but it does
+   * not restore those rows into gossip handlers or automatic sync scope.
+   * Explicit subscriptions made after boot continue to work normally.
+   */
+  contextGraphSubscriptionRehydrationEnabled?: boolean;
   /** Durable local store for paged sync checkpoints. Defaults to in-memory. */
   syncCheckpointStore?: SyncCheckpointStore;
   /** OT-RFC-59 durable per-(peer,CG) changelog cursor store. Defaults to in-memory. */
@@ -1452,6 +1847,26 @@ export interface DKGAgentACKTransportOptions {
 }
 
 export type ResolvedDKGAgentConfig =
-  Omit<DKGAgentConfig, 'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'> & {
+  Omit<
+    DKGAgentConfig,
+    | 'storageAckTiming'
+    | 'ackHandlerDeadlineMs'
+    | 'ackSendTimeoutMs'
+    | 'syncReconcilerIntervalMs'
+    | 'syncStalenessThresholdMs'
+    | 'syncBackoffBaseMs'
+    | 'syncBackoffMaxMs'
+    | 'syncBackoffJitter'
+    | 'rfc64PublicCatalogActivation'
+    | 'rfc64PublicCatalogAutoPublish'
+    | 'rfc64PublicCatalogBootstrap'
+    | 'rfc64CatalogDeploymentProfile'
+    | 'contextGraphSubscriptionRehydrationEnabled'
+  > & {
+    contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
+    syncReconcilerTiming: SyncReconcilerTiming;
+    rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
+    rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
+    rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

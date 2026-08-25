@@ -15,6 +15,9 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
+import {
+  type Rfc64CatalogAccessAuthorizationInputV1,
+} from '../src/rfc64/catalog-access-policy-v1.js';
 import { openRfc64PersistenceV1, type Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
@@ -23,14 +26,19 @@ import {
   Rfc64PublicCatalogTransportV1,
   encodeRfc64PublicCatalogHeadAnnouncementV1,
   parseRfc64PublicCatalogHeadAnnouncementV1,
-  type Rfc64PublicCatalogAuthorizationInputV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from '../src/rfc64/public-catalog-transport-v1.js';
+import { createRfc64CatalogAccessPolicyRegistryFixture } from './support/rfc64-catalog-access-policy-fixture.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const POLICY_DIGEST = `0x${'71'.repeat(32)}` as Digest32V1;
 const DELEGATION_DIGEST = `0x${'72'.repeat(32)}` as Digest32V1;
+const CONTEXT_GRAPH_ID =
+  '0x1111111111111111111111111111111111111111/gate-1' as const;
+const LOCAL_MEMBER = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
+const REMOTE_MEMBER = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
+const CURATOR = '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 
 const temporaryDirectories: string[] = [];
 const nodes: DKGNode[] = [];
@@ -86,7 +94,7 @@ async function stageOpenCatalogHead(
 ): Promise<Rfc64PublicCatalogHeadAnnouncementV1> {
   const scope = {
     networkId: 'otp:20430',
-    contextGraphId: '0x1111111111111111111111111111111111111111/gate-1',
+    contextGraphId: CONTEXT_GRAPH_ID,
     governanceChainId: '20430',
     governanceContractAddress: '0x2222222222222222222222222222222222222222',
     ownershipTransitionDigest: null,
@@ -130,8 +138,33 @@ const OPEN_POLICY = async () => Object.freeze({
   policyDigest: POLICY_DIGEST,
 });
 
-describe('RFC-64 public/open author catalog transport v1', () => {
-  it('announces and fetches one exact signed head across two live libp2p nodes', async () => {
+function policyRegistry(
+  localAgentAddress: EvmAddressV1,
+  remoteAgentAddress: EvmAddressV1,
+  accessPolicy: 0 | 1,
+  publishPolicy: 0 | 1,
+) {
+  return createRfc64CatalogAccessPolicyRegistryFixture({
+    localAgentAddress,
+    remoteAgentAddress,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    accessPolicy,
+    publishPolicy,
+    policyDigest: POLICY_DIGEST,
+    ownerAddress: AUTHOR,
+    curatorAddress: CURATOR,
+  });
+}
+
+describe('RFC-64 author catalog transport v1', () => {
+  it.each([
+    { accessPolicy: 0 as const, publishPolicy: 0 as const },
+    { accessPolicy: 0 as const, publishPolicy: 1 as const },
+    { accessPolicy: 1 as const, publishPolicy: 0 as const },
+    { accessPolicy: 1 as const, publishPolicy: 1 as const },
+  ])(
+    'announces and fetches one exact signed head for accessPolicy=$accessPolicy publishPolicy=$publishPolicy',
+    async ({ accessPolicy, publishPolicy }) => {
     const [authorNode, receiverNode, authorPersistence, receiverPersistence] = await Promise.all([
       startNode(),
       startNode(),
@@ -145,16 +178,28 @@ describe('RFC-64 public/open author catalog transport v1', () => {
       announcement: Rfc64PublicCatalogHeadAnnouncementV1;
       remotePeerId: string;
     }> = [];
-    const authorAuthorizations: Rfc64PublicCatalogAuthorizationInputV1[] = [];
-    const receiverAuthorizations: Rfc64PublicCatalogAuthorizationInputV1[] = [];
+    const authorAuthorizations: Rfc64CatalogAccessAuthorizationInputV1[] = [];
+    const receiverAuthorizations: Rfc64CatalogAccessAuthorizationInputV1[] = [];
+    const authorPolicy = policyRegistry(
+      LOCAL_MEMBER,
+      REMOTE_MEMBER,
+      accessPolicy,
+      publishPolicy,
+    );
+    const receiverPolicy = policyRegistry(
+      REMOTE_MEMBER,
+      LOCAL_MEMBER,
+      accessPolicy,
+      publishPolicy,
+    );
 
     const authorTransport = new Rfc64PublicCatalogTransportV1(
       new ProtocolRouter(authorNode),
       {
         controlObjects: authorPersistence.controlObjects,
-        authorizeOpenCatalogOperation: async (input) => {
+        authorizeCatalogOperation: async (input) => {
           authorAuthorizations.push(input);
-          return OPEN_POLICY();
+          return authorPolicy.authorize(input);
         },
         verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
         onCatalogHeadAvailable: async () => {},
@@ -164,9 +209,9 @@ describe('RFC-64 public/open author catalog transport v1', () => {
       new ProtocolRouter(receiverNode),
       {
         controlObjects: receiverPersistence.controlObjects,
-        authorizeOpenCatalogOperation: async (input) => {
+        authorizeCatalogOperation: async (input) => {
           receiverAuthorizations.push(input);
-          return OPEN_POLICY();
+          return receiverPolicy.authorize(input);
         },
         verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
         onCatalogHeadAvailable: async (received, remotePeerId) => {
@@ -221,10 +266,13 @@ describe('RFC-64 public/open author catalog transport v1', () => {
       'announce-inbound',
       'fetch-outbound',
       'fetch-outbound',
+      'fetch-outbound',
     ]);
-  }, 30_000);
+    },
+    30_000,
+  );
 
-  it('denies private-policy fetch before revealing cache hit or miss state', async () => {
+  it('denies an unauthorized fetch before revealing cache hit or miss state', async () => {
     const [providerNode, requesterNode] = await Promise.all([startNode(), startNode()]);
     await connect(requesterNode, providerNode);
     const getVerifiedObject = vi.fn(async () => null);
@@ -245,10 +293,7 @@ describe('RFC-64 public/open author catalog transport v1', () => {
       new ProtocolRouter(providerNode),
       {
         controlObjects: { getVerifiedObject },
-        authorizeOpenCatalogOperation: async () => ({
-          accessPolicy: 1,
-          policyDigest: POLICY_DIGEST,
-        }),
+        authorizeCatalogOperation: async () => null,
         verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
         onCatalogHeadAvailable: async () => {},
       },
@@ -257,7 +302,7 @@ describe('RFC-64 public/open author catalog transport v1', () => {
       new ProtocolRouter(requesterNode),
       {
         controlObjects: { getVerifiedObject: vi.fn(async () => null) },
-        authorizeOpenCatalogOperation: OPEN_POLICY,
+        authorizeCatalogOperation: OPEN_POLICY,
         verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
         onCatalogHeadAvailable: async () => {},
       },
@@ -273,6 +318,131 @@ describe('RFC-64 public/open author catalog transport v1', () => {
     )).rejects.toThrow();
     expect(getVerifiedObject).not.toHaveBeenCalled();
   }, 15_000);
+
+  it('keeps the deprecated open authorizer fail-closed for private policy', async () => {
+    const [providerNode, requesterNode] = await Promise.all([startNode(), startNode()]);
+    await connect(requesterNode, providerNode);
+    const getVerifiedObject = vi.fn(async () => null);
+    const announcement = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+      networkId: 'otp:20430',
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      catalogEra: '0',
+      catalogVersion: '0',
+      policyDigest: POLICY_DIGEST,
+      catalogHeadObjectDigest: `0x${'81'.repeat(32)}`,
+      signatureVariantDigest: `0x${'82'.repeat(32)}`,
+    }) as Rfc64PublicCatalogHeadAnnouncementV1;
+    const providerTransport = new Rfc64PublicCatalogTransportV1(
+      new ProtocolRouter(providerNode),
+      {
+        controlObjects: { getVerifiedObject },
+        authorizeOpenCatalogOperation: async () => ({
+          accessPolicy: 1,
+          policyDigest: POLICY_DIGEST,
+        }),
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+        onCatalogHeadAvailable: async () => {},
+      },
+    );
+    const requesterTransport = new Rfc64PublicCatalogTransportV1(
+      new ProtocolRouter(requesterNode),
+      {
+        controlObjects: { getVerifiedObject: async () => null },
+        authorizeCatalogOperation: OPEN_POLICY,
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+        onCatalogHeadAvailable: async () => {},
+      },
+    );
+    transports.push(providerTransport, requesterTransport);
+    providerTransport.start();
+    requesterTransport.start();
+
+    await expect(requesterTransport.fetchCatalogHead(
+      providerNode.peerId,
+      announcement,
+      { timeoutMs: 4_000 },
+    )).rejects.toMatchObject({ code: 'catalog-transport-policy-denied' });
+    expect(getVerifiedObject).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it('rechecks current authorization after the outbound fetch await', async () => {
+    const send = vi.fn(async () => Uint8Array.of(0));
+    const router = {
+      register: () => {},
+      unregister: () => {},
+      send,
+    } as unknown as ProtocolRouter;
+    let authorizationChecks = 0;
+    const transport = new Rfc64PublicCatalogTransportV1(router, {
+      controlObjects: { getVerifiedObject: async () => null },
+      authorizeCatalogOperation: async () => {
+        authorizationChecks += 1;
+        return authorizationChecks === 1 ? {
+          accessPolicy: 1,
+          policyDigest: POLICY_DIGEST,
+        } : null;
+      },
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      onCatalogHeadAvailable: async () => {},
+    });
+    transports.push(transport);
+    transport.start();
+    const announcement = {
+      kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+      networkId: 'otp:20430',
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      catalogEra: '0',
+      catalogVersion: '0',
+      policyDigest: POLICY_DIGEST,
+      catalogHeadObjectDigest: `0x${'81'.repeat(32)}`,
+      signatureVariantDigest: `0x${'82'.repeat(32)}`,
+    } as Rfc64PublicCatalogHeadAnnouncementV1;
+
+    await expect(transport.fetchCatalogHead('remote-peer', announcement))
+      .rejects.toMatchObject({ code: 'catalog-transport-policy-denied' });
+    expect(send).toHaveBeenCalledOnce();
+    expect(authorizationChecks).toBe(2);
+  });
+
+  it('rejects a stale registry digest before sending any wire request', async () => {
+    const send = vi.fn(async () => Uint8Array.of(0));
+    const transport = new Rfc64PublicCatalogTransportV1({
+      register: () => {},
+      unregister: () => {},
+      send,
+    } as unknown as ProtocolRouter, {
+      controlObjects: { getVerifiedObject: async () => null },
+      authorizeCatalogOperation: async () => ({
+        accessPolicy: 1,
+        policyDigest: `0x${'99'.repeat(32)}` as Digest32V1,
+      }),
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      onCatalogHeadAvailable: async () => {},
+    });
+    transports.push(transport);
+    transport.start();
+    const announcement = {
+      kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+      networkId: 'otp:20430',
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      catalogEra: '0',
+      catalogVersion: '0',
+      policyDigest: POLICY_DIGEST,
+      catalogHeadObjectDigest: `0x${'81'.repeat(32)}`,
+      signatureVariantDigest: `0x${'82'.repeat(32)}`,
+    } as Rfc64PublicCatalogHeadAnnouncementV1;
+
+    await expect(transport.fetchCatalogHead('remote-peer', announcement))
+      .rejects.toMatchObject({ code: 'catalog-transport-policy-denied' });
+    expect(send).not.toHaveBeenCalled();
+  });
 
   it('round-trips only exact canonical announcement fields', () => {
     const announcement = Object.freeze({

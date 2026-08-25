@@ -12,31 +12,50 @@ import {
   type KaTransferDescriptorV1,
 } from './ka-transfer-descriptor.js';
 import {
-  assertCanonicalChainId,
   assertCanonicalDigest,
   assertCanonicalEvmAddress,
   assertCanonicalKaId,
   parseCanonicalDecimalU64,
   parseCanonicalDecimalU256,
-  type ChainIdV1,
   type CountV1,
   type DecimalU64V1,
   type Digest32V1,
   type EvmAddressV1,
   type KaIdV1,
 } from './sync-wire-scalars.js';
+import {
+  MAX_NETWORK_ID_BYTES_V1,
+  assertNetworkIdV1 as assertSharedNetworkIdV1,
+  type NetworkIdV1,
+} from './sync-wire-identifiers.js';
 import { assertExactKeys, isPlainRecord } from './sync-wire-objects.js';
+import {
+  AUTHOR_LANE_SCOPE_KEYS_V1,
+  MAX_AUTHOR_LANE_IDENTIFIER_BYTES_V1,
+  AuthorLaneScopeErrorV1,
+  assertAuthorLaneContextGraphIdV1,
+  assertAuthorLaneScopeFieldsV1 as assertSharedAuthorLaneScopeFieldsV1,
+  assertAuthorLaneScopeV1 as assertSharedAuthorLaneScopeV1,
+  assertAuthorLaneSubGraphNameV1,
+  snapshotAuthorLaneScopeV1 as snapshotSharedAuthorLaneScopeV1,
+  type AuthorLaneScopeV1,
+  type CatalogLaneV1,
+  type ContextGraphIdV1,
+  type SubGraphNameV1,
+} from './author-lane-scope-v1.js';
 
-declare const NETWORK_ID_V1_BRAND: unique symbol;
-declare const CONTEXT_GRAPH_ID_V1_BRAND: unique symbol;
-declare const SUBGRAPH_NAME_V1_BRAND: unique symbol;
 declare const ASSERTION_COORDINATE_V1_BRAND: unique symbol;
 declare const CATALOG_ASSERTION_SCOPE_V1_BRAND: unique symbol;
 declare const CATALOG_ASSERTION_SUBJECT_V1_BRAND: unique symbol;
 
-export type NetworkIdV1 = string & { readonly [NETWORK_ID_V1_BRAND]: true };
-export type ContextGraphIdV1 = string & { readonly [CONTEXT_GRAPH_ID_V1_BRAND]: true };
-export type SubGraphNameV1 = string & { readonly [SUBGRAPH_NAME_V1_BRAND]: true };
+export type { NetworkIdV1 } from './sync-wire-identifiers.js';
+export {
+  AUTHOR_LANE_SCOPE_KEYS_V1,
+  type AuthorLaneScopeV1,
+  type CatalogLaneV1,
+  type ContextGraphIdV1,
+  type SubGraphNameV1,
+} from './author-lane-scope-v1.js';
 export type AssertionCoordinateV1 = string & {
   readonly [ASSERTION_COORDINATE_V1_BRAND]: true;
 };
@@ -54,16 +73,14 @@ export const AUTHOR_CATALOG_KEY_DIGEST_DOMAIN_V1 =
 export const AUTHOR_CATALOG_ROW_DIGEST_DOMAIN_V1 =
   'dkg-author-catalog-row-v1\n' as const;
 
-export const MAX_AUTHOR_CATALOG_NETWORK_ID_BYTES_V1 = 128;
-export const MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1 = 256;
+export const MAX_AUTHOR_CATALOG_NETWORK_ID_BYTES_V1 = MAX_NETWORK_ID_BYTES_V1;
+export const MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1 = MAX_AUTHOR_LANE_IDENTIFIER_BYTES_V1;
 export const MAX_AUTHOR_CATALOG_SCOPE_BYTES_V1 = 2048;
 export const MAX_AUTHOR_CATALOG_ROW_BYTES_V1 = 2048;
 export const MAX_AUTHOR_CATALOG_ROW_DIGEST_INPUT_BYTES_V1 = 4096;
 export const MAX_AUTHOR_CATALOG_BUCKET_COUNT_V1 = 9_223_372_036_854_775_808n;
 export const PACKED_KA_NUMBER_BITS_V1 = 96n;
 
-const NETWORK_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
-const CONTEXT_GRAPH_ID_PATTERN = /^[A-Za-z0-9_:/\.@-]+$/;
 const CATALOG_IDENTIFIER_ASCII_FORBIDDEN = new Set([
   '<',
   '>',
@@ -75,25 +92,13 @@ const CATALOG_IDENTIFIER_ASCII_FORBIDDEN = new Set([
   '`',
   '\\',
 ]);
-const RESERVED_SUBGRAPH_NAMES = new Set(['context', 'assertion', 'draft']);
 const UTF8 = new TextEncoder();
 const SCOPE_DOMAIN_BYTES = UTF8.encode(AUTHOR_CATALOG_SCOPE_DIGEST_DOMAIN_V1);
 const KEY_DOMAIN_BYTES = UTF8.encode(AUTHOR_CATALOG_KEY_DIGEST_DOMAIN_V1);
 const ROW_DOMAIN_BYTES = UTF8.encode(AUTHOR_CATALOG_ROW_DIGEST_DOMAIN_V1);
 
-export interface CatalogLaneV1 {
-  readonly contextGraphId: ContextGraphIdV1;
-  readonly subGraphName: SubGraphNameV1 | null;
-}
-
 /** Exact nine-key scope committed by every author-catalog era. */
-export interface AuthorCatalogScopeV1 extends CatalogLaneV1 {
-  readonly networkId: NetworkIdV1;
-  readonly governanceChainId: ChainIdV1 | null;
-  readonly governanceContractAddress: EvmAddressV1 | null;
-  readonly ownershipTransitionDigest: Digest32V1 | null;
-  readonly authorAddress: EvmAddressV1;
-  readonly era: DecimalU64V1;
+export interface AuthorCatalogScopeV1 extends AuthorLaneScopeV1 {
   readonly bucketCount: CountV1;
 }
 
@@ -133,13 +138,13 @@ export function assertNetworkIdV1(
   value: unknown,
   label = 'networkId',
 ): asserts value is NetworkIdV1 {
-  const identifier = assertNfcUtf8Identifier(
-    value,
-    label,
-    MAX_AUTHOR_CATALOG_NETWORK_ID_BYTES_V1,
-  );
-  if (!NETWORK_ID_PATTERN.test(identifier)) {
-    fail('catalog-identifier', `${label} contains a character outside the networkId grammar`);
+  try {
+    assertSharedNetworkIdV1(value, label);
+  } catch (cause) {
+    const message = cause instanceof Error
+      ? cause.message
+      : `${label} is not a canonical networkId`;
+    fail('catalog-identifier', message, cause);
   }
 }
 
@@ -147,30 +152,14 @@ export function assertContextGraphIdV1(
   value: unknown,
   label = 'contextGraphId',
 ): asserts value is ContextGraphIdV1 {
-  const identifier = assertNfcUtf8Identifier(
-    value,
-    label,
-    MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1,
-  );
-  if (!CONTEXT_GRAPH_ID_PATTERN.test(identifier)) {
-    fail(
-      'catalog-identifier',
-      `${label} contains a character outside the contextGraphId grammar`,
-    );
-  }
+  adaptAuthorLane(() => assertAuthorLaneContextGraphIdV1(value, label));
 }
 
 export function assertSubGraphNameV1(
   value: unknown,
   label = 'subGraphName',
 ): asserts value is SubGraphNameV1 {
-  const identifier = assertCatalogLaneIdentifier(value, label);
-  if (identifier.startsWith('_')) {
-    fail('catalog-identifier', `${label} must not start with underscore`);
-  }
-  if (RESERVED_SUBGRAPH_NAMES.has(identifier)) {
-    fail('catalog-identifier', `${label} is a reserved subgraph name`);
-  }
+  adaptAuthorLane(() => assertAuthorLaneSubGraphNameV1(value, label));
 }
 
 export function assertAssertionCoordinateV1(
@@ -249,45 +238,24 @@ export function assertAuthorCatalogScopeV1(
     fail('catalog-schema', 'author catalog scope must be a plain JSON object');
   }
   assertClosedKeys(scope, [
-    'authorAddress',
+    ...AUTHOR_LANE_SCOPE_KEYS_V1,
     'bucketCount',
-    'contextGraphId',
-    'era',
-    'governanceChainId',
-    'governanceContractAddress',
-    'networkId',
-    'ownershipTransitionDigest',
-    'subGraphName',
   ], 'author catalog scope');
 
-  assertNetworkIdV1(scope.networkId);
-  assertContextGraphIdV1(scope.contextGraphId);
-  if (scope.subGraphName !== null) assertSubGraphNameV1(scope.subGraphName);
-  assertCatalogScalar(() => assertCanonicalEvmAddress(scope.authorAddress, 'authorAddress'));
-  assertCatalogU64(scope.era, 'era');
+  adaptAuthorLane(() => assertSharedAuthorLaneScopeFieldsV1(scope));
   assertAuthorCatalogBucketCountV1(scope.bucketCount);
+}
 
-  const chainIsNull = scope.governanceChainId === null;
-  const contractIsNull = scope.governanceContractAddress === null;
-  if (chainIsNull !== contractIsNull) {
-    fail(
-      'catalog-governance-tuple',
-      'governanceChainId and governanceContractAddress must both be null or both be non-null',
-    );
-  }
-  if (!chainIsNull) {
-    assertCatalogScalar(() => assertCanonicalChainId(scope.governanceChainId, 'governanceChainId'));
-    assertCatalogScalar(() => assertCanonicalEvmAddress(
-      scope.governanceContractAddress,
-      'governanceContractAddress',
-    ));
-  }
-  if (scope.ownershipTransitionDigest !== null) {
-    assertCatalogScalar(() => assertCanonicalDigest(
-      scope.ownershipTransitionDigest,
-      'ownershipTransitionDigest',
-    ));
-  }
+/** Validate the exact shared author-lane scope used by catalog and SWM commitments. */
+export function assertAuthorLaneScopeV1(
+  scope: unknown,
+): asserts scope is AuthorLaneScopeV1 {
+  adaptAuthorLane(() => assertSharedAuthorLaneScopeV1(scope));
+}
+
+/** Copy a validated structural superset into one exact immutable author-lane scope. */
+export function snapshotAuthorLaneScopeV1(scope: AuthorLaneScopeV1): AuthorLaneScopeV1 {
+  return adaptAuthorLane(() => snapshotSharedAuthorLaneScopeV1(scope));
 }
 
 export function canonicalizeAuthorCatalogScopeV1(scope: AuthorCatalogScopeV1): string {
@@ -591,6 +559,22 @@ function assertClosedKeys(
     assertExactKeys(record, keys, label);
   } catch (cause) {
     fail('catalog-schema', `${label} has an invalid field set`, cause);
+  }
+}
+
+function adaptAuthorLane<T>(operation: () => T): T {
+  try {
+    return operation();
+  } catch (cause) {
+    if (!(cause instanceof AuthorLaneScopeErrorV1)) throw cause;
+    const code: AuthorCatalogCodecErrorCode = cause.code === 'author-lane-schema'
+      ? 'catalog-schema'
+      : cause.code === 'author-lane-identifier'
+        ? 'catalog-identifier'
+        : cause.code === 'author-lane-governance-tuple'
+          ? 'catalog-governance-tuple'
+          : 'catalog-scalar';
+    fail(code, cause.message, cause);
   }
 }
 

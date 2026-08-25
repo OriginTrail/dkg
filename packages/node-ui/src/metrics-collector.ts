@@ -50,7 +50,7 @@ export interface MetricsSource {
   getRelayStats?(): RelayStatsSnapshot | null;
 }
 
-const SNAPSHOT_INTERVAL_MS = 30_000; // 30 seconds
+const SNAPSHOT_INTERVAL_MS = 86_400_000; // 24 hours
 
 /**
  * Clamp a bigint relay byte count to a safe JS Number for SQLite storage.

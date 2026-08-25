@@ -9,7 +9,15 @@
  * endpoint fail, this component renders nothing — it's purely additive.
  */
 import React from 'react';
-import { fetchSubGraphs, type SubGraphInfo } from '../api.js';
+import { type SubGraphInfo } from '../api.js';
+// PR #2131 review — route through api-wrapper so the chip row resolves in
+// mock mode. The direct `../api.js` import bypassed the mock/offline
+// fallback, so demo mode showed the Overview "Subgraphs" stat (already
+// wrapped) disagreeing with an empty Subgraph Explorer for the same CG.
+// Same fix as `ProjectView.tsx` ("Codex review bug F"). `withFallback`
+// only diverts when mock mode is latched, so real rejections still reach
+// the `.catch` below.
+import { api } from '../api-wrapper.js';
 import type { ProjectProfile } from '../hooks/useProjectProfile.js';
 import type { MemoryEntity, TrustLevel } from '../hooks/useMemoryEntities.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
@@ -220,7 +228,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   const loadSubGraphs = React.useCallback(() => {
     const requestId = ++requestIdRef.current;
     setLoading(true);
-    fetchSubGraphs(contextGraphId)
+    api.fetchSubGraphs(contextGraphId)
       .then(r => { if (requestId === requestIdRef.current) setSubGraphs(r.subGraphs ?? []); })
       .catch(() => { /* silent — leave empty */ })
       .finally(() => { if (requestId === requestIdRef.current) setLoading(false); });

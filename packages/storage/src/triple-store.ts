@@ -149,6 +149,28 @@ export interface TripleStore {
     metadataQuads: Quad[],
     options?: QueryOptions,
   ): Promise<void>;
+  /**
+   * Atomically replace every row for one subject inside a shared named graph,
+   * leaving all other subjects in that graph untouched. Implementations MUST
+   * guarantee ONE commit boundary, so a concurrent reader observes the subject
+   * fully in its prior or its new state, never transiently empty (#1863).
+   *
+   * STRICT single-subject payload: EVERY quad in `quads` MUST target `graphUri`
+   * and carry `subject` as its subject (implementations reject anything else),
+   * and `subject` must be a canonical skolem IRI (not a blank node). Co-located
+   * writes for another subject (e.g. an immutable request record re-asserted
+   * beside a mutable job record) are the caller's own separate write, sequenced
+   * so the reader never observes a dangling reference. Optional because generic
+   * `update()` support is NOT sufficient — a non-transactional SPARQL endpoint
+   * would apply the delete and the insert sequentially — so callers fall back
+   * (delete-then-insert) when it is absent or refuses.
+   */
+  replaceSubject?(
+    graphUri: string,
+    subject: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -274,6 +296,38 @@ export async function tryReplaceGraphAndSubjectAtomically(
     if (
       error instanceof UnsupportedTripleStoreCapabilityError &&
       error.capability === 'replaceGraphAndSubject'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Attempt one atomic single-subject replace inside a shared named graph.
+ *
+ * Returns `false` when the store does not implement `replaceSubject`, or when a
+ * decorator reports the wrapped store cannot guarantee it (a clean preflight
+ * capability refusal raised before mutation) — the caller then takes its
+ * non-atomic delete-then-insert fallback. Genuine execution failures propagate
+ * so a caller never mistakes an outage or a partial mutation for "unsupported".
+ */
+export async function tryReplaceSubjectAtomically(
+  store: TripleStore,
+  graphUri: string,
+  subject: string,
+  quads: Quad[],
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const replaceSubject = store.replaceSubject;
+  if (typeof replaceSubject !== 'function') return false;
+  try {
+    await replaceSubject.call(store, graphUri, subject, quads, options);
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError &&
+      error.capability === 'replaceSubject'
     ) {
       return false;
     }

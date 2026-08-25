@@ -5,7 +5,7 @@ import {
 
 interface Libp2pLike {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
-  dial(peer: unknown): Promise<unknown>;
+  dial(peer: unknown, options?: { signal?: AbortSignal }): Promise<unknown>;
   peerStore: {
     merge(peer: unknown, update: { multiaddrs: unknown[] }): Promise<void>;
   };
@@ -76,7 +76,11 @@ export async function ensurePeerConnected(
   libp2p: Libp2pLike,
   discovery: DiscoveryClient,
   peerId: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<void> {
+  if (options.signal?.aborted) {
+    throw new DOMException('Peer connection aborted', 'AbortError');
+  }
   const existingConnections = libp2p.getConnections()
     .filter((conn) => conn.remotePeer.toString() === peerId);
   if (existingConnections.length > 0) {
@@ -88,18 +92,25 @@ export async function ensurePeerConnected(
     const pid = peerIdFromString(peerId);
 
     try {
-      await libp2p.dial(pid);
+      await libp2p.dial(pid, { signal: options.signal });
       return;
     } catch {
-      const agent = await discovery.findAgentByPeerId(peerId);
+      if (options.signal?.aborted) {
+        throw new DOMException('Peer connection aborted', 'AbortError');
+      }
+      const agent = await discovery.findAgentByPeerId(peerId, { signal: options.signal });
+      if (options.signal?.aborted) {
+        throw new DOMException('Peer connection aborted', 'AbortError');
+      }
       if (!agent?.relayAddress) return;
 
       const { multiaddr } = await import('@multiformats/multiaddr');
       const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${peerId}`);
       await libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
-      await libp2p.dial(pid);
+      await libp2p.dial(pid, { signal: options.signal });
     }
-  } catch {
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
     // Non-fatal — peer may be unreachable.
   }
 }

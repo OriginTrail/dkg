@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -46,6 +46,7 @@ const agents: DKGAgent[] = [];
 const stores: TripleStore[] = [];
 const tempDataDirs: string[] = [];
 const CHAIN_JSONLD_TIMEOUT_MS = 120_000;
+const TWO_AGENT_CHAIN_JSONLD_TIMEOUT_MS = 300_000;
 
 async function createTempDataDir(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
@@ -59,6 +60,7 @@ async function createAgent(name: string, overrides: Partial<DKGAgentConfig> = {}
       kaNumberAllocator: makeTestKaNumberAllocator(),
     name,
     listenPort: 0,
+    listenHost: '127.0.0.1',
     skills: [],
     chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     nodeRole: 'core',
@@ -77,7 +79,9 @@ afterEach(async () => {
     try { await a.stop(); } catch { /* teardown best-effort */ }
   }
   agents.length = 0;
-  stores.length = 0;
+  for (const store of stores.splice(0)) {
+    try { await store.close(); } catch { /* teardown best-effort */ }
+  }
   for (const dir of tempDataDirs.splice(0)) {
     await rm(dir, { recursive: true, force: true });
   }
@@ -289,6 +293,128 @@ describe('publishJsonLd', () => {
     expect(result.status).toBe('confirmed');
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
+  it('stamps configured publisher.maxRetries onto agent publishAsync jobs (EPCIS/Kafka path, #1836)', async () => {
+    // #1836 — the agent's own publishAsync (used by the EPCIS/Kafka plugins) must
+    // stamp the operator-configured retry budget onto the queued job, not fall
+    // back to the publisher default. Reverting publishAsync to construct
+    // TripleStoreAsyncLiftPublisher without maxRetries makes this assert 10.
+    const { agent, store } = await createAgent('AsyncMaxRetriesBot', { publisherMaxRetries: 0 });
+    await agent.createContextGraph({ id: 'async-maxretries', name: 'AsyncMaxRetries', description: '' });
+    await agent.registerContextGraph('async-maxretries');
+    let releaseShadow!: () => void;
+    const deferredShadow = new Promise<void>((resolve) => { releaseShadow = resolve; });
+    const shadow = vi
+      .spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockImplementation(async () => {
+        await deferredShadow;
+        return {
+          status: 'dormant',
+          action: 'upsert',
+          attempts: 0,
+          headObjectDigest: null,
+          error: null,
+        };
+      });
+
+    const { captureID } = await Promise.race([
+      agent.publishAsync(
+        'did:dkg:context-graph:async-maxretries',
+        {
+          private: {
+            '@context': 'http://schema.org/',
+            '@id': 'http://example.org/AsyncMaxRetries',
+            '@type': 'Thing',
+            'name': 'Async MaxRetries',
+          },
+        },
+        { localOnly: true },
+      ),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('publishAsync waited for shadow observer')), 2_000);
+      }),
+    ]);
+
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
+    const job = await asyncPublisher.getStatus(captureID);
+    expect(job?.retries.maxRetries).toBe(0);
+    expect(shadow).toHaveBeenCalledOnce();
+    expect(shadow).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: 'async-maxretries',
+      assertionCoordinate: expect.any(String),
+      lifecycleAgentAddress: expect.any(String),
+      shareOperationId: expect.any(String),
+    }));
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(1);
+    releaseShadow();
+    await agent.awaitInFlightRfc64SwmInventoryObserversV1();
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(0);
+    shadow.mockRestore();
+  }, CHAIN_JSONLD_TIMEOUT_MS);
+
+  it('gives every publishAsync job an admission OWNER, and never the author (3825162149)', async () => {
+    // 3825162149 — ownership is the sole authorization for the by-id force-clear that releases a
+    // `retry_recovery` job automatic recovery cannot settle. This path (EPCIS / Kafka plugins) did
+    // not stamp one, so its jobs had no manual exit and would occupy their lifecycle subject
+    // permanently. Only the daemon's knowledge-assets route stamped an owner.
+    const { agent, store } = await createAgent('AsyncAdmissionOwnerBot');
+    await agent.createContextGraph({ id: 'async-admission', name: 'AsyncAdmission', description: '' });
+    await agent.registerContextGraph('async-admission');
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
+    const content = (name: string) => ({
+      private: {
+        '@context': 'http://schema.org/',
+        '@id': `http://example.org/${name}`,
+        '@type': 'Thing',
+        'name': name,
+      },
+    });
+
+    // An INTERNAL producer supplies no principal: the node's own default agent owns the job, the
+    // same identity a node-level token resolves to in the daemon, so the operator keeps the exit.
+    const nodeOwner = agent.getDefaultAgentAddress();
+    expect(nodeOwner).toBeTruthy();
+    const internal = await agent.publishAsync(
+      'did:dkg:context-graph:async-admission',
+      content('AsyncAdmissionInternal'),
+      { localOnly: true },
+    );
+    const internalJob = await asyncPublisher.getStatus(internal.captureID);
+    expect(internalJob?.admission?.byAgentAddress).toBe(nodeOwner);
+
+    // A host that AUTHENTICATED a caller supplies it, and that principal wins.
+    const EPCIS_CALLER = '0x00000000000000000000000000000000000000e1';
+    const authenticated = await agent.publishAsync(
+      'did:dkg:context-graph:async-admission',
+      content('AsyncAdmissionAuthenticated'),
+      { localOnly: true, admittedByAgentAddress: EPCIS_CALLER },
+    );
+    const authenticatedJob = await asyncPublisher.getStatus(authenticated.captureID);
+    expect(authenticatedJob?.admission?.byAgentAddress).toBe(EPCIS_CALLER);
+
+    // 3826008054 — malformed-but-type-valid identities. An empty or whitespace-only string is
+    // ABSENT, not a principal: it must fall back to the node owner rather than slip past the
+    // default and enqueue a job nobody can ever force-clear.
+    for (const blank of ['', '   ']) {
+      const res = await agent.publishAsync(
+        'did:dkg:context-graph:async-admission',
+        content(`AsyncAdmissionBlank${blank.length}`),
+        { localOnly: true, admittedByAgentAddress: blank },
+      );
+      const blankJob = await asyncPublisher.getStatus(res.captureID);
+      expect(blankJob?.admission?.byAgentAddress).toBe(nodeOwner);
+    }
+
+    // The discriminating half: the owner is NOT the author. Under curated publishing the signer
+    // may be a third party who enqueued nothing, and handing them a destructive clear would give
+    // the double-publish decision to someone who never asked for the publish.
+    const request = authenticatedJob?.request as { knowledgeAssetVmPublish?: { agentAddress?: string } };
+    const author = request?.knowledgeAssetVmPublish?.agentAddress;
+    expect(author).toBeTruthy();
+    expect(author?.toLowerCase()).not.toBe(EPCIS_CALLER.toLowerCase());
+    // ...and the principal did not leak into the operation payload either.
+    expect(request?.knowledgeAssetVmPublish).not.toHaveProperty('admittedByAgentAddress');
+  }, CHAIN_JSONLD_TIMEOUT_MS);
+
   it('async private-only JSON-LD enqueues one rootless KA with one non-root challenge anchor', async () => {
     const { agent, store } = await createAgent('AsyncPrivateOnlyBot');
     await agent.createContextGraph({ id: 'async-priv-only', name: 'AsyncPrivateOnly', description: '' });
@@ -320,6 +446,8 @@ describe('publishJsonLd', () => {
     expect(request.kaUal).toMatch(/^did:dkg:[^/]+\/0x[0-9a-f]{40}\/\d+$/);
     expect(request.accessPolicy).toBe('allowList');
     expect(request.allowedPeers).toEqual(['peer-a', 'peer-b']);
+    // #1836 — with publisherMaxRetries unset the agent path keeps the publisher default.
+    expect(job?.retries.maxRetries).toBe(10);
     // With a positive public challenge leaf the local queue may complete and
     // clean its mutable assertion lifecycle immediately. The immutable queued
     // request above is the durable contract; do not race cleanup by resolving
@@ -871,7 +999,10 @@ describe('publishJsonLd', () => {
     // Produce the canonical seal through the callback signing path. Each test
     // agent has a fresh deterministic KA allocator, so the second agent derives
     // the same author-scoped UAL and can exercise the pre-signed input path.
-    const source = await createAgent('AsyncValidPreSignedSourceBot');
+    const [source, target] = await Promise.all([
+      createAgent('AsyncValidPreSignedSourceBot'),
+      createAgent('AsyncValidPreSignedTargetBot'),
+    ]);
     await source.agent.createContextGraph({
       id: 'async-valid-presigned-source',
       name: 'AsyncValidPreSignedSource',
@@ -902,7 +1033,6 @@ describe('publishJsonLd', () => {
       await sourceQueue.getStatus(sourceCapture.captureID),
     );
 
-    const target = await createAgent('AsyncValidPreSignedTargetBot');
     await target.agent.createContextGraph({
       id: 'async-valid-presigned-target',
       name: 'AsyncValidPreSignedTarget',
@@ -933,7 +1063,7 @@ describe('publishJsonLd', () => {
 
     expect(targetRequest.seal).toEqual(sourceRequest.seal);
     expect(targetRequest.seal.authorAddress).toBe(externalAuthor.address);
-  }, CHAIN_JSONLD_TIMEOUT_MS);
+  }, TWO_AGENT_CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish rejects preSignedAuthorAttestation + authorAgentAddress as mutually exclusive', async () => {
     // Sync parity: pick one signing path (caller-provided seal OR daemon custodial).

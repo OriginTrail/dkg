@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isPermanentAuthorCapabilityFailure,
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
 } from '../src/async-lift-publish-result.js';
@@ -198,6 +199,50 @@ describe('async lift publish result mapping', () => {
     expect(failure.retryable).toBe(false);
   });
 
+  it('classifies PUBLISH_AUTHOR_NOT_CUSTODIAL as a TERMINAL authority_forbidden failure (not retryable)', () => {
+    // GH#1786: the async worker discovers mid-publish that it cannot re-sign this author's
+    // UpdateAuthorAttestation. That is PERMANENT — before this mapping it fell through to the
+    // retryable rpc_unavailable default and the queue reset a job that can never finalize,
+    // the same forever-retry trap #1013/#1121 fixed for unfundable publishes.
+    const err = Object.assign(
+      new Error(
+        'cannot re-sign UpdateAuthorAttestation for author 0xA32f1cc125401B55911678847426759094055B2d — '
+        + 'no custodial key on file and it is not the publisher EOA.',
+      ),
+      { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' },
+    );
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: err,
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:author-not-custodial',
+    });
+
+    expect(failure.code).toBe('authority_forbidden');
+    expect(failure.retryable).toBe(false);
+    expect(failure.resolution).toBe('fail_job');
+    // 'validation' even though this mapper only sees the broadcast origin: `phase` names the
+    // CONCERN that failed, not the state. Author capability is a validation concern wherever
+    // it surfaces — the same way wallet_claim_timeout stays a 'broadcast' concern when raised
+    // from 'accepted'. `failedFromState` is what says where the job stopped.
+    expect(failure.phase).toBe('validation');
+  });
+
+  it('classifies a code-stripped non-custodial author error (message marker only) as terminal', () => {
+    // Same robustness as the funds path below: a re-wrap can drop .code but keep the message.
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: new Error(
+        'publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation for author 0xabc — '
+        + 'no custodial key on file and it is not the publisher EOA.',
+      ),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:author-not-custodial-nocode',
+    });
+
+    expect(failure.code).toBe('authority_forbidden');
+    expect(failure.retryable).toBe(false);
+    expect(failure.phase).toBe('validation');
+  });
+
   it('classifies a code-stripped funds error (message marker only) as terminal insufficient_funds from broadcast', () => {
     // A re-wrap could drop .code but preserve the message — the marker fallback
     // must still keep it terminal (mirrors the daemon + node-ui robustness).
@@ -209,6 +254,45 @@ describe('async lift publish result mapping', () => {
 
     expect(failure.code).toBe('insufficient_funds');
     expect(failure.retryable).toBe(false);
+  });
+
+  // GH#1786 — the ONE predicate behind three decisions: the failed-from STATE (no send
+  // happened, so 'validated'), the failure code on that validated path, and the failure code
+  // on the broadcast fallback. A drifted copy would change the outcome depending on where the
+  // error surfaced, so it is pinned directly here as well as through each call site.
+  describe('isPermanentAuthorCapabilityFailure', () => {
+    it('recognizes the coded refusal and the code-stripped message', () => {
+      expect(isPermanentAuthorCapabilityFailure(
+        Object.assign(new Error('wrapped and reworded'), { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' }),
+      )).toBe(true);
+      expect(isPermanentAuthorCapabilityFailure(
+        new Error('publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation for author 0xabc'),
+      )).toBe(true);
+    });
+
+    it('does not claim unrelated publish failures', () => {
+      expect(isPermanentAuthorCapabilityFailure(new Error('RPC submit timed out after 30s'))).toBe(false);
+      expect(isPermanentAuthorCapabilityFailure(
+        new Error('No operational wallet has enough funds to publish to Verifiable Memory'),
+      )).toBe(false);
+    });
+
+    it('is throw-safe on hostile error values', () => {
+      // This predicate now gates a failure-RECORDING path (the failed-from state), not just
+      // classification, so an error whose `.code` getter throws — or which is not an Error at
+      // all — must not blow up mid-record. Centralizing on the guarded fact reader is what
+      // gives the state decision this property; its previous inline copy read `.code` raw.
+      const hostile = { get code(): never { throw new Error('boom'); }, message: 'x' };
+      expect(() => isPermanentAuthorCapabilityFailure(hostile)).not.toThrow();
+      expect(isPermanentAuthorCapabilityFailure(hostile)).toBe(false);
+      expect(isPermanentAuthorCapabilityFailure(Object.create(null))).toBe(false);
+      expect(isPermanentAuthorCapabilityFailure(undefined)).toBe(false);
+      expect(isPermanentAuthorCapabilityFailure(null)).toBe(false);
+      // ...and still recognizes it when only a hostile-ish shape carries the marker.
+      expect(isPermanentAuthorCapabilityFailure(
+        { message: 'cannot re-sign UpdateAuthorAttestation for author 0xabc' },
+      )).toBe(true);
+    });
   });
 
   it('classifies confirmation mismatches on included jobs', () => {

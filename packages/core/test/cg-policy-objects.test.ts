@@ -27,6 +27,7 @@ import {
   parseCanonicalSignedMemberRosterEnvelopeV1,
   parseCanonicalUnsignedContextGraphPolicyEnvelopeV1,
   parseCanonicalUnsignedMemberRosterEnvelopeV1,
+  snapshotContextGraphPublishDomainV1,
   type ContextGraphPolicyV1,
   type MemberRosterV1,
 } from '../src/cg-policy-objects.js';
@@ -169,6 +170,33 @@ describe('ContextGraphPolicyV1 codec', () => {
         .toThrow(/cg-policy-scalar/);
     }
     expect(() => assertContextGraphPolicyV1({ ...POLICY, publishPolicy: 2 }))
+      .toThrow(/cg-policy-scalar/);
+  });
+
+  it('owns the normalized contribution-policy tuple invariant', () => {
+    const open = snapshotContextGraphPublishDomainV1(1, null, '0');
+    const curated = snapshotContextGraphPublishDomainV1(0, ISSUER, '7');
+    expect(open).toEqual({
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+    });
+    expect(curated).toEqual({
+      publishPolicy: 0,
+      publishAuthority: ISSUER,
+      publishAuthorityAccountId: '7',
+    });
+    expect(Object.isFrozen(open)).toBe(true);
+    expect(Object.isFrozen(curated)).toBe(true);
+    expect(() => snapshotContextGraphPublishDomainV1(0, ISSUER, '0')).not.toThrow();
+
+    expect(() => snapshotContextGraphPublishDomainV1(1, ISSUER, '0'))
+      .toThrow(/cg-policy-publish-domain/);
+    expect(() => snapshotContextGraphPublishDomainV1(1, null, '7'))
+      .toThrow(/cg-policy-publish-domain/);
+    expect(() => snapshotContextGraphPublishDomainV1(0, null, '0'))
+      .toThrow(/cg-policy-publish-domain/);
+    expect(() => snapshotContextGraphPublishDomainV1(0, `0x${'00'.repeat(20)}`, '0'))
       .toThrow(/cg-policy-scalar/);
   });
 

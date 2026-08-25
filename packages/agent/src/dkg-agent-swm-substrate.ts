@@ -349,6 +349,7 @@ import {
   type DKGAgentConfig,
   type ReplicationEvent,
 } from './dkg-agent-types.js';
+import { resolveContextGraphSyncMode } from './context-graph-subscription-policy.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -384,10 +385,28 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 export class SwmSubstrateMethods extends DKGAgentBase {
-  subscribeToContextGraph(this: DKGAgent, contextGraphId: string, options?: { trackSyncScope?: boolean; persist?: boolean; deferSharedMemoryGossipSubscribe?: boolean }): void {
+  subscribeToContextGraph(this: DKGAgent, contextGraphId: string, options?: {
+    trackSyncScope?: boolean;
+    persist?: boolean;
+    deferSharedMemoryGossipSubscribe?: boolean;
+    syncMode?: 'on-demand' | 'always-on';
+  }): ContextGraphSub {
     if (options?.trackSyncScope !== false) {
       this.trackSyncContextGraph(contextGraphId);
     }
+
+    const existing = this.subscribedContextGraphs.get(contextGraphId);
+    // Opening an already durable graph must never silently downgrade it to a
+    // process-local subscription. An explicit always-on request may promote an
+    // existing on-demand subscription, while an omitted mode preserves the
+    // current lifetime (or the legacy always-on default for a new graph).
+    const syncMode = resolveContextGraphSyncMode({
+      existing,
+      requested: options?.syncMode,
+      hasDormantDurableIntent:
+        this.contextGraphSubscriptionRehydrationStatus?.dormantIds.includes(contextGraphId) === true,
+    });
+    const persist = syncMode === 'on-demand' ? false : options?.persist;
 
     // SWM gossip subscribe runs `canReadContextGraph` against the local
     // `_meta` graph. On a fresh `join-approved` notification the curator
@@ -407,15 +426,19 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       if (!deferSwmGossip) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
       }
-      const existing = this.subscribedContextGraphs.get(contextGraphId);
-      if (!existing?.subscribed) {
-        this.setContextGraphSubscription(
+      if (!existing?.subscribed || existing.syncMode !== syncMode) {
+        return this.setContextGraphSubscription(
           contextGraphId,
-          { ...existing, subscribed: true, synced: existing?.synced ?? false },
-          { persist: options?.persist },
+          {
+            ...existing,
+            subscribed: true,
+            synced: existing?.synced ?? false,
+            syncMode,
+          },
+          { persist },
         );
       }
-      return;
+      return existing;
     }
     this.gossipRegistered.add(contextGraphId);
 
@@ -425,11 +448,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this.gossip.subscribe(publishTopic);
     this.gossip.subscribe(appTopic);
 
-    const existing = this.subscribedContextGraphs.get(contextGraphId);
-    this.setContextGraphSubscription(
+    const subscription = this.setContextGraphSubscription(
       contextGraphId,
-      { ...existing, subscribed: true, synced: existing?.synced ?? false },
-      { persist: options?.persist },
+      {
+        ...existing,
+        subscribed: true,
+        synced: existing?.synced ?? false,
+        syncMode,
+      },
+      { persist },
     );
 
     this.gossip.onMessage(publishTopic, async (_topic, data, from) => {
@@ -454,6 +481,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       const fh = this.getOrCreateFinalizationHandler();
       await fh.handleFinalizationMessage(data, contextGraphId, from);
     });
+
+    return subscription;
   }
 
   /**
@@ -479,6 +508,11 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   ): void {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     if (!existing) return;
+
+    // A host-only Core may continue chain reconciliation after member
+    // unsubscribe, but peer-rotation evidence collected under the member
+    // lifecycle must not survive that ownership transition.
+    this.clearVmReconcileRotationStateForContextGraph(contextGraphId);
 
     // Drop from the active sync scope so background sweeps no longer treat
     // this as a subscribed CG to keep current.
@@ -882,6 +916,18 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     return true;
   }
 
+  /**
+   * Snapshot the agent's LIVE explicit sync scope for status/preflight callers.
+   *
+   * `subscribeToContextGraph()` mutates this runtime scope without mutating the
+   * daemon's startup `DkgConfig`, so projecting startup configuration would make
+   * an exact-CG preflight stale immediately after a successful subscription.
+   * Return a copy so diagnostics cannot mutate scheduling state.
+   */
+  public getSyncContextGraphIds(this: DKGAgent): readonly string[] {
+    return Object.freeze([...(this.config.syncContextGraphs ?? [])]);
+  }
+
   getOrCreateGossipPublishHandler(this: DKGAgent): GossipPublishHandler {
     if (!this.gossipPublishHandler) {
       this.gossipPublishHandler = new GossipPublishHandler(
@@ -916,6 +962,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         writeLocks: this.writeLocks,
         localAgentAddresses: () => [...this.localAgents.keys()],
         contextGraphMetaOracle: (cgId: string) => this.getCgMeta(cgId),
+        // Same live on-chain predicate the SENDER uses to decide plaintext vs
+        // encrypted SWM (`resolveWorkspaceRecipientsGated`). Wiring it here
+        // keeps both sides of the wire on one authority. Without it the
+        // receiver judged from local allowedAgent/participantAgent triples and
+        // permanently dropped the plaintext writes the sender is supposed to
+        // send on a public CG — silently breaking member->curator SWM shares on
+        // every public/curated context graph.
+        publicAccessPolicyOnChainOracle: (cgId: string) =>
+          this.isContextGraphPublicOnChain(cgId, createOperationContext('share')),
         markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members
@@ -1637,16 +1692,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       this.finalizationHandler = new FinalizationHandler(
         this.store,
         this.chain.chainId === 'none' ? undefined : this.chain,
-        this.eventBus,
-        // Defensive: when a peer's finalization gossip omits
-        // `targetContextGraphId` (pre-cd68fa689 publisher in the mesh),
-        // resolve the on-chain id locally so per-cgId promotion still
-        // fires and the RS prover sees the KC.
-        (cgName: string) => this.getContextGraphOnChainId(cgName),
-        (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         {
-          localPeerId: this.peerId,
-          localNodeIdentityId: this.identityId.toString(),
+          eventBus: this.eventBus,
+          // Defensive: resolve a missing pre-cd68fa689 wire CG id locally.
+          resolveContextGraphOnChainId: (cgName: string) =>
+            this.getContextGraphOnChainId(cgName),
+          markContextGraphMetaDirtyFromQuads: (quads) => {
+            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+          },
+          runtime: this.finalizationRuntime,
         },
       );
     }

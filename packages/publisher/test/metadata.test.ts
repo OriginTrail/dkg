@@ -6,6 +6,9 @@ import {
   getConfirmedStatusQuad,
   generateConfirmedMetadata,
   generateConfirmedFullMetadata,
+  generateGraphKnowledgeAssetMetadata,
+  readGraphKnowledgeAssetConfirmationKindV1,
+  readGraphKnowledgeAssetReceiptProvenanceV1,
   generateShareMetadata,
   generateAssertionCreatedMetadata,
   generateAssertionPromotedMetadata,
@@ -22,6 +25,7 @@ import {
   PROV_WAS_REVISION_OF,
   type KCMetadata,
   type KAMetadata,
+  type GraphKnowledgeAssetMetadata,
   type OnChainProvenance,
   type ShareMetadata,
   type AssertionCreatedMeta,
@@ -68,6 +72,23 @@ const PROVENANCE: OnChainProvenance = {
   batchId: 42n,
   chainId: 'base-sepolia',
 };
+
+const GRAPH_UAL =
+  'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/7';
+
+function makeGraphMeta(): GraphKnowledgeAssetMetadata {
+  return {
+    ual: GRAPH_UAL,
+    contextGraphId: CONTEXT_GRAPH,
+    merkleRoot: new Uint8Array(32).fill(7),
+    publisherPeerId: '12D3KooWGraphPeer',
+    timestamp: new Date('2026-03-01T00:00:00Z'),
+    assertionVersion: '1',
+    publicTripleCount: 2,
+    privateTripleCount: 0,
+    assertionGraph: `${META_GRAPH}/vm/7`,
+  };
+}
 
 describe('generateKCMetadata', () => {
   it('RFC ka-metadata-trim: emits NO rdf:type rows (KC nor aggregate/per-token KA)', () => {
@@ -352,6 +373,101 @@ describe('generateConfirmedFullMetadata', () => {
 
     const txQuad = quads.find(q => q.predicate === `${DKG}transactionHash`);
     expect(txQuad).toBeDefined();
+  });
+});
+
+describe('generateGraphKnowledgeAssetMetadata confirmation state', () => {
+  it('parses explicit and rolling-compatible legacy confirmation state centrally', () => {
+    const base = generateGraphKnowledgeAssetMetadata(makeGraphMeta(), { status: 'tentative' });
+    expect(readGraphKnowledgeAssetConfirmationKindV1(base)).toBe('transaction');
+    expect(readGraphKnowledgeAssetConfirmationKindV1([
+      {
+        subject: GRAPH_UAL,
+        predicate: `${DKG}confirmationKind`,
+        object: '"finalized-materialization"',
+        graph: META_GRAPH,
+      },
+    ])).toBe('finalized-materialization');
+  });
+
+  it('rejects unsupported and conflicting confirmation state centrally', () => {
+    const quad = (object: string) => ({
+      subject: GRAPH_UAL,
+      predicate: `${DKG}confirmationKind`,
+      object,
+      graph: META_GRAPH,
+    });
+    expect(() => readGraphKnowledgeAssetConfirmationKindV1([quad('"bogus"')]))
+      .toThrow('Unsupported graph knowledge asset confirmation kind');
+    expect(() => readGraphKnowledgeAssetConfirmationKindV1([
+      quad('"transaction"'),
+      quad('"finalized-materialization"'),
+    ])).toThrow('2 confirmation kinds');
+  });
+
+  it('reads a legacy confirmed transaction receipt without a confirmation kind', () => {
+    const transactionHash = `0x${'ab'.repeat(32)}`;
+    expect(readGraphKnowledgeAssetReceiptProvenanceV1([
+      {
+        subject: GRAPH_UAL,
+        predicate: `${DKG}status`,
+        object: '"confirmed"',
+        graph: META_GRAPH,
+      },
+      {
+        subject: GRAPH_UAL,
+        predicate: `${DKG}transactionHash`,
+        object: `"${transactionHash}"`,
+        graph: META_GRAPH,
+      },
+    ])).toEqual({ transactionHash });
+  });
+
+  it('preserves the tentative metadata shape without confirmation provenance', () => {
+    const quads = generateGraphKnowledgeAssetMetadata(
+      makeGraphMeta(),
+      { status: 'tentative' },
+    );
+    const byPredicate = new Map(quads.map((quad) => [quad.predicate, quad.object]));
+
+    expect(byPredicate.get(`${DKG}status`)).toBe('"tentative"');
+    expect(byPredicate.has(`${DKG}transactionHash`)).toBe(false);
+    expect(byPredicate.has(`${DKG}batchId`)).toBe(false);
+    expect(byPredicate.has(`${DKG}materializedVersion`)).toBe(false);
+  });
+
+  it('preserves transaction-confirmed provenance', () => {
+    const quads = generateGraphKnowledgeAssetMetadata(makeGraphMeta(), {
+      status: 'confirmed',
+      confirmation: { kind: 'transaction', provenance: PROVENANCE },
+    });
+    const byPredicate = new Map(quads.map((quad) => [quad.predicate, quad.object]));
+
+    expect(byPredicate.get(`${DKG}status`)).toBe('"confirmed"');
+    expect(byPredicate.get(`${DKG}confirmationKind`)).toBe('"transaction"');
+    expect(byPredicate.get(`${DKG}transactionHash`)).toBe(`"${PROVENANCE.txHash}"`);
+    expect(byPredicate.get(`${DKG}batchId`)).toContain('42');
+    expect(byPredicate.has(`${DKG}materializedVersion`)).toBe(false);
+  });
+
+  it('preserves finalized-materialization provenance without a transaction claim', () => {
+    const quads = generateGraphKnowledgeAssetMetadata(makeGraphMeta(), {
+      status: 'confirmed',
+      confirmation: {
+        kind: 'finalized-materialization',
+        provenance: {
+          batchId: 7n,
+          materializedVersion: { blockNumber: 123, txIndex: 4 },
+        },
+      },
+    });
+    const byPredicate = new Map(quads.map((quad) => [quad.predicate, quad.object]));
+
+    expect(byPredicate.get(`${DKG}status`)).toBe('"confirmed"');
+    expect(byPredicate.get(`${DKG}confirmationKind`)).toBe('"finalized-materialization"');
+    expect(byPredicate.get(`${DKG}batchId`)).toContain('7');
+    expect(byPredicate.get(`${DKG}materializedVersion`)).toBe('"123:4"');
+    expect(byPredicate.has(`${DKG}transactionHash`)).toBe(false);
   });
 });
 

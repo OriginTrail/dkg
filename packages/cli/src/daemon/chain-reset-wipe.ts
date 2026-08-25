@@ -52,7 +52,8 @@
  *
  * Files wiped: `store.nq` (always backed up, see above), `store.nq.tmp`,
  *              `random-sampling.wal`, `publish-journal.*` (all variants from
- *              publisher-runner).
+ *              publisher-runner), and `finalization-inbox-v1.sqlite3`
+ *              including its WAL/SHM sidecars.
  *
  * Files preserved: `wallets.json` (operator identity), `auth.token`,
  *              `config.json`, `node-ui.db` (dashboard state),
@@ -134,6 +135,11 @@ export interface ChainResetWipeStoreConfig {
 const V10_GRAPH_PREFIX = 'did:dkg:context-graph:';
 
 const SPARQL_DROP_ALL = 'DROP ALL';
+// Publisher control-plane / wallet-locks / journal (#1829) all live under this
+// prefix. They are node-local chain-scoped state that must not survive a chain
+// reset (stale old-chain tx hashes in the journal would otherwise read as phantom
+// submissions on the new chain), so wipe the whole prefix in one disjunct.
+const PUBLISHER_GRAPH_PREFIX = 'urn:dkg:publisher:';
 // Scoped wipe also clears the OT-RFC-59 changelog graph so a chain reset is a
 // clean reseed (stale markers referencing now-deleted CG graphs must not
 // survive). `DROP ALL` (managed namespaces) already covers it. The changelog
@@ -142,7 +148,7 @@ const SPARQL_DROP_ALL = 'DROP ALL';
 const SPARQL_SCOPED_DELETE =
   'DELETE { GRAPH ?g { ?s ?p ?o } } ' +
   'WHERE { GRAPH ?g { ?s ?p ?o } ' +
-  `FILTER(strstarts(str(?g), "${V10_GRAPH_PREFIX}") || str(?g) = "${CHANGELOG_GRAPH}") }`;
+  `FILTER(strstarts(str(?g), "${V10_GRAPH_PREFIX}") || strstarts(str(?g), "${PUBLISHER_GRAPH_PREFIX}") || str(?g) = "${CHANGELOG_GRAPH}") }`;
 
 export interface ChainResetWipeResult {
   /** True when a wipe was performed. */
@@ -545,6 +551,10 @@ function performWipe(
     ? walAbs.slice(dataDir.length).replace(/^[/\\]+/, '')
     : walAbs;
   wipeAbs(walAbs, walLabel || 'random-sampling.wal');
+  for (const suffix of ['', '-journal', '-wal', '-shm']) {
+    const filename = `finalization-inbox-v1.sqlite3${suffix}`;
+    wipeAbs(join(dataDir, filename), filename);
+  }
 
   try {
     for (const f of readdirSync(dataDir)) {
