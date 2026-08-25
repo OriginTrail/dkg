@@ -2584,18 +2584,15 @@ export async function runDaemonInner(
   chatDb = dashDb;
   log("Dashboard DB initialized at " + join(dkgDir(), "node-ui.db"));
 
-  // Redactor for the copy of each record that LEAVES the node. The local
-  // dashboard DB keeps full-fidelity records (it's the operator's own machine);
-  // redaction only protects data crossing the trust boundary to a collector.
+  // Redactor for the copy of each record that LEAVES the node. Local logs are
+  // already written to daemon.log and served by the dashboard's /api/node-log.
   const redactForRemote = createLogRedactor(config.telemetry?.logs?.redact);
 
-  // Local DB gets the FULL record; remote shippers get a single REDACTED copy.
-  // `remoteShippers` is evaluated per record so runtime enable/disable of the
-  // syslog/OTLP workers is reflected without re-wiring. Logic lives in
-  // createDaemonLogSink so this trust boundary is unit-tested (log-sink.test.ts).
+  // Avoid duplicating routine logs into SQLite on the event loop. The sink is
+  // only the remote fan-out; `remoteShippers` is evaluated per record so
+  // runtime enable/disable is reflected without re-wiring.
   Logger.setSink(
     createDaemonLogSink({
-      insertLog: (rec) => dashDb.insertLog(rec),
       redact: redactForRemote,
       remoteShippers: () => [logPusher, otlpExporter],
     }),
@@ -3000,9 +2997,9 @@ export async function runDaemonInner(
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
 
-  // A time window cannot bound a same-day log storm. The focused maintenance
-  // helper owns bounded catch-up batches, compaction retries, and timer cleanup;
-  // daemon lifecycle only starts and stops it.
+  // Drain legacy routine log rows left by older releases in bounded batches.
+  // New daemon logs are file-backed, so this cleanup converges to warn/error
+  // history instead of racing a continuing SQLite write stream.
   const logVolumePruner = startDashboardLogVolumePruner({
     dashDb,
     log,

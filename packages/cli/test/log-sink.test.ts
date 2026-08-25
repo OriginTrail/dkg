@@ -3,11 +3,9 @@ import { createLogRedactor, type LogRecord } from '@origintrail-official/dkg-cor
 import { createDaemonLogSink, type RemoteLogShipper } from '../src/daemon/log-sink.js';
 
 /**
- * Review coverage gap (PR #1317): the daemon log-sink fan-out is the trust
- * boundary where the LOCAL DB keeps the full record but remote shippers get only
- * a REDACTED copy. These tests exercise the actual fan-out wiring (not just the
- * standalone redactor) so a regression that forwarded the raw record, or skipped
- * a shipper / redaction, fails the build.
+ * The daemon log-sink fan-out is the trust boundary where remote shippers get
+ * only a REDACTED copy. Local logging is already handled by daemon.log and must
+ * not add a synchronous SQLite write per record.
  */
 function rec(over: Partial<LogRecord> = {}): LogRecord {
   return { level: 'info', operationName: 'publish', operationId: 'op-1', module: 'test', message: 'hello', ...over };
@@ -19,24 +17,16 @@ function shipper(): RemoteLogShipper & { sent: LogRecord[] } {
 
 const SECRET_MSG = 'loaded operationalWalletPrivateKey=0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef custom_secret=topsecret';
 
-describe('daemon log sink — full local, redacted remote', () => {
-  it('stores the ORIGINAL locally but ships a REDACTED copy to every active shipper', () => {
-    const stored: any[] = [];
+describe('daemon log sink — redacted remote only', () => {
+  it('ships one REDACTED copy to every active shipper', () => {
     const syslog = shipper();
     const otlp = shipper();
     const sink = createDaemonLogSink({
-      insertLog: (r) => stored.push(r),
       redact: createLogRedactor(['custom_secret']), // operator extra key honored
       remoteShippers: () => [syslog, otlp],
-      now: () => 1234,
     });
 
     sink(rec({ message: SECRET_MSG }));
-
-    // Local DB: full fidelity (the secret is intact for the operator's own debugging).
-    expect(stored).toHaveLength(1);
-    expect(stored[0].message).toBe(SECRET_MSG);
-    expect(stored[0].ts).toBe(1234);
 
     // Both remote shippers: redacted, identical, secrets gone.
     for (const s of [syslog, otlp]) {
@@ -47,21 +37,22 @@ describe('daemon log sink — full local, redacted remote', () => {
     }
   });
 
-  it('pushes to NO remote shipper when none are active (logs stay local)', () => {
-    const stored: any[] = [];
+  it('does not redact or persist when no remote shipper is active', () => {
+    let redactions = 0;
     const sink = createDaemonLogSink({
-      insertLog: (r) => stored.push(r),
-      redact: createLogRedactor(),
+      redact: (record) => {
+        redactions += 1;
+        return record;
+      },
       remoteShippers: () => [null, undefined], // exporter:'none' / disabled
     });
     sink(rec({ message: SECRET_MSG }));
-    expect(stored).toHaveLength(1); // local copy still written
+    expect(redactions).toBe(0);
   });
 
   it('skips null shippers but still ships to the active one', () => {
     const otlp = shipper();
     const sink = createDaemonLogSink({
-      insertLog: () => {},
       redact: createLogRedactor(),
       remoteShippers: () => [null, otlp], // syslog off, OTLP on
     });
@@ -70,14 +61,20 @@ describe('daemon log sink — full local, redacted remote', () => {
     expect(otlp.sent[0].message).not.toContain('deadbeef');
   });
 
-  it('a thrown DB write never breaks the node and remote shipping still happens', () => {
+  it('redacts once before fanning out to multiple shippers', () => {
+    const syslog = shipper();
     const otlp = shipper();
+    let redactions = 0;
     const sink = createDaemonLogSink({
-      insertLog: () => { throw new Error('db down'); },
-      redact: createLogRedactor(),
-      remoteShippers: () => [otlp],
+      redact: (record) => {
+        redactions += 1;
+        return createLogRedactor()(record);
+      },
+      remoteShippers: () => [syslog, otlp],
     });
-    expect(() => sink(rec({ message: SECRET_MSG }))).not.toThrow();
+    sink(rec({ message: SECRET_MSG }));
+    expect(redactions).toBe(1);
+    expect(syslog.sent).toHaveLength(1);
     expect(otlp.sent).toHaveLength(1);
   });
 });

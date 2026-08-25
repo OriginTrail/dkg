@@ -370,12 +370,11 @@ describe('DashboardDB — retention', () => {
     db2.close();
   });
 
-  it('caps routine logs incrementally while preserving warning and error history', () => {
+  it('removes legacy routine logs incrementally while preserving warning and error history', () => {
     const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-volume-'));
     const volumeDb = new DashboardDB({
       dataDir: volumeDir,
       retentionDays: 365,
-      routineLogRowCap: 3,
       logVolumePruneBatchRows: 2,
     });
     try {
@@ -391,20 +390,15 @@ describe('DashboardDB — retention', () => {
       volumeDb.insertLog({ ts: 2_001, level: 'error', module: 'sync', message: 'keep-error' });
 
       expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
-      // The second batch exactly reaches the cap. The API conservatively asks
-      // for one final probe, avoiding a second large count on every batch.
       expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
-      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 0, status: 'done' });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 1, status: 'done' });
 
       const rows = volumeDb.db.prepare(
         `SELECT level, message FROM logs ORDER BY id ASC`,
       ).all() as Array<{ level: string; message: string }>;
       expect(rows.filter((row) => row.level === 'debug' || row.level === 'info'))
-        .toEqual([
-          { level: 'debug', message: 'routine-4' },
-          { level: 'info', message: 'routine-5' },
-          { level: 'debug', message: 'routine-6' },
-        ]);
+        .toEqual([]);
       expect(rows).toContainEqual({ level: 'warn', message: 'keep-warn' });
       expect(rows).toContainEqual({ level: 'error', message: 'keep-error' });
     } finally {
@@ -419,7 +413,6 @@ describe('DashboardDB — retention', () => {
     const volumeDb = new DashboardDB({
       dataDir: volumeDir,
       retentionDays: 365,
-      routineLogRowCap: 2,
       logVolumePruneBatchRows: 10,
     });
     try {
@@ -449,7 +442,7 @@ describe('DashboardDB — retention', () => {
       ).all() as Array<{ level: string; count: number }>;
       expect(compacted).toBe(true);
       expect(afterBytes).toBeLessThan(beforeBytes / 2);
-      expect(levels).toContainEqual({ level: 'debug', count: 2 });
+      expect(levels.some((row) => row.level === 'debug')).toBe(false);
       expect(levels).toContainEqual({ level: 'warn', count: 1 });
     } finally {
       volumeDb.close();

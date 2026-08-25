@@ -755,7 +755,7 @@ export interface DkgConfig {
   /**
    * Opt-in telemetry streaming to a central network dashboard.
    * `enabled` is the master gate: when false, NOTHING is forwarded off the
-   * node (local logging — SQLite + daemon.log — is always on regardless).
+   * node (local daemon.log and dashboard operational history remain on).
    */
   telemetry?: {
     enabled?: boolean;

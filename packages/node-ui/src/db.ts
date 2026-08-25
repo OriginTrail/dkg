@@ -36,12 +36,11 @@ export const SCHEMA_VERSION = 34;
 // operator-driven post-mortem, but the mainnet sync storm proved that time
 // retention alone cannot bound worst-case growth. Operators who want longer
 // retention can override via `setRetentionDays()`; the setting is persisted
-// in the `settings` table and re-read on next boot. Time alone is not a hard
-// size bound during a log storm, so routine info/debug rows also have a count
-// ceiling. Warning/error rows keep the full operator-selected time window.
+// in the `settings` table and re-read on next boot. The daemon no longer writes
+// routine logs to SQLite; bounded background cleanup removes legacy info/debug
+// rows while warning/error rows keep the operator-selected time window.
 const DEFAULT_RETENTION_DAYS = 14;
 const LEGACY_IMPLICIT_RETENTION_DAYS = 90;
-const DEFAULT_ROUTINE_LOG_ROW_CAP = 1_000_000;
 const DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS = 25_000;
 const LOGS_VACUUM_DELETE_THRESHOLD = 10_000;
 // SQLite reports reusable-but-not-yet-reclaimed pages via freelist_count.
@@ -121,9 +120,7 @@ export interface DashboardDBOptions {
    * `DKG_DASHBOARD_CACHE_TTL_MS` env var, then a 2000ms default.
    */
   cacheTtlMs?: number;
-  /** Maximum retained info/debug/unknown log rows. Warning/error rows are time-bound only. */
-  routineLogRowCap?: number;
-  /** Maximum oldest routine rows removed by one bounded catch-up tick. */
+  /** Maximum legacy routine rows removed by one bounded cleanup tick. */
   logVolumePruneBatchRows?: number;
 }
 
@@ -230,17 +227,12 @@ export class DashboardDB {
   readonly dataDir: string;
   private retentionDays: number;
   private readonly explicitRetentionDays: boolean;
-  private readonly routineLogRowCap: number;
   private readonly logVolumePruneBatchRows: number;
 
   constructor(opts: DashboardDBOptions) {
     this.dataDir = opts.dataDir;
     this.explicitRetentionDays = opts.retentionDays !== undefined;
     this.retentionDays = opts.retentionDays ?? DEFAULT_RETENTION_DAYS;
-    this.routineLogRowCap = Math.max(
-      0,
-      Math.floor(opts.routineLogRowCap ?? DEFAULT_ROUTINE_LOG_ROW_CAP),
-    );
     this.logVolumePruneBatchRows = Math.max(
       1,
       Math.floor(opts.logVolumePruneBatchRows ?? DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS),
@@ -1291,16 +1283,9 @@ export class DashboardDB {
 
   prune(): void {
     const cutoff = Date.now() - this.retentionDays * 86_400_000;
-    // Count total rows actually deleted across all DELETE statements.
-    // SQLite's per-statement change count is exposed via better-sqlite3's
-    // `Database.run().changes`, but `exec()` returns nothing — for a
-    // proper accounting we'd switch each statement to `prepare/run`. For
-    // the VACUUM gating decision below we only need to know whether
-    // *something* substantial was deleted, so we sample the only table
-    // that actually grows fast in practice: `logs`.
-    const logsDeleted = this.db.prepare(
+    this.db.prepare(
       `DELETE FROM logs WHERE ts < ?`,
-    ).run(cutoff).changes;
+    ).run(cutoff);
     this.db.exec(`DELETE FROM metric_snapshots WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM operation_phases WHERE started_at < ${cutoff}`);
     this.db.exec(`DELETE FROM operations WHERE started_at < ${cutoff}`);
@@ -1332,59 +1317,42 @@ export class DashboardDB {
     const messengerCutoff = Date.now() - 24 * 60 * 60 * 1000;
     this.db.exec(`DELETE FROM message_idempotency WHERE ts < ${messengerCutoff}`);
 
-    // Avoid rebuilding an oversized DB at startup while millions of routine
-    // rows are still live. The daemon trims that backlog in bounded batches;
-    // the final batch performs one compacting VACUUM. Databases already under
-    // the cap retain the established time-prune reclamation behaviour.
-    if (!this.hasRoutineLogOverflow()) {
-      this.reclaimFreePagesIfNeeded(logsDeleted > LOGS_VACUUM_DELETE_THRESHOLD);
+    // If legacy routine rows remain, defer reclamation to their bounded cleanup
+    // worker so startup does not rebuild a multi-GB DB before deleting them.
+    // This existence probe stops at the first row; unlike the old OFFSET cap
+    // scan, its cost does not grow with the routine-log backlog.
+    if (!this.hasLegacyRoutineLogs()) {
+      this.reclaimFreePagesIfNeeded(false);
     }
 
     // Return the WAL file itself to the OS. journal_size_limit bounds it
     // in steady state, but a TRUNCATE checkpoint here shrinks it promptly
-    // on the prune cadence (~6h) and immediately after the VACUUM above,
-    // which rewrites the whole DB through the WAL and momentarily grows
-    // it. Runs unconditionally — independent of the VACUUM gate — because
-    // an idle node still wants its -wal reclaimed.
+    // on the prune cadence (~6h) and after a cleanup VACUUM, which rewrites
+    // the whole DB through the WAL and momentarily grows it. Runs
+    // unconditionally because an idle node still wants its -wal reclaimed.
     this.truncateWal('prune');
   }
 
   /**
-   * Remove one bounded batch of the oldest routine (non-warning/error) logs.
-   * A count cap complements time retention: a high-rate sync storm can create
-   * millions of rows inside a single day, long before a 14-day cutoff applies.
+   * Remove one bounded batch of legacy routine (non-warning/error) logs.
+   * New daemon releases use daemon.log for local logs, so no routine SQLite
+   * rows need to be retained behind the unused compatibility search endpoint.
    *
    * Deletion is deliberately incremental so an upgrade does not block node
-   * startup on a multi-GB transaction. Once the backlog reaches the cap, one
+   * startup on a multi-GB transaction. Once the backlog reaches zero, one
    * VACUUM returns the accumulated free pages to the OS and the file shrinks.
    */
   pruneLogVolumeBatch(): LogVolumePruneResult {
-    const overflowCutoff = this.routineLogOverflowCutoff();
-    if (overflowCutoff === null) {
-      const reclaim = this.reclaimFreePagesIfNeeded(false);
-      if (!reclaim.reclaimPending) this.truncateWal('log-volume prune');
-      return {
-        deleted: 0,
-        status: reclaim.reclaimPending
-          ? 'reclaim-pending'
-          : reclaim.compacted
-            ? 'done-compacted'
-            : 'done',
-      };
-    }
-
     const deleted = this.db.prepare(`
       DELETE FROM logs
       WHERE id IN (
         SELECT id
         FROM logs
-        WHERE id <= @cutoff
-          AND level NOT IN ('warn', 'error')
+        WHERE level NOT IN ('warn', 'error')
         ORDER BY id ASC
         LIMIT @batchRows
       )
     `).run({
-      cutoff: overflowCutoff,
       batchRows: this.logVolumePruneBatchRows,
     }).changes;
 
@@ -1408,19 +1376,13 @@ export class DashboardDB {
     };
   }
 
-  private routineLogOverflowCutoff(): number | null {
-    const row = this.db.prepare(`
-      SELECT id
+  private hasLegacyRoutineLogs(): boolean {
+    return this.db.prepare(`
+      SELECT 1
       FROM logs
       WHERE level NOT IN ('warn', 'error')
-      ORDER BY id DESC
-      LIMIT 1 OFFSET ?
-    `).get(this.routineLogRowCap) as { id: number } | undefined;
-    return row?.id ?? null;
-  }
-
-  private hasRoutineLogOverflow(): boolean {
-    return this.routineLogOverflowCutoff() !== null;
+      LIMIT 1
+    `).get() !== undefined;
   }
 
   private reclaimFreePagesIfNeeded(force: boolean): {
