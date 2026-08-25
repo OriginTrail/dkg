@@ -209,6 +209,20 @@ export const MOCK_SESSIONS = {
 // Only CGs whose sub-graph UI is worth exercising need an entry — the
 // provider falls back to an empty list for anything absent, which is what
 // `cg:supply-chain-eu` deliberately exercises.
+//
+// Fidelity rules this fixture must hold to, because its stated job is
+// mirroring a real `/api/sub-graph/list` response (PR #2131 review):
+//   1. `name` is the sub-graph SLUG, not a display label. `validateSubGraphName`
+//      (`packages/core/src/constants.ts:650`) rejects whitespace, so a name like
+//      `'Arctic Ice'` is a row the daemon can never emit. The human-readable
+//      label arrives from the profile binding (`displayName ?? sg.name`).
+//   2. `uri` is `did:dkg:context-graph:<cgId>/<name>` — `contextGraphSubGraphUri`
+//      (`constants.ts:563`), which `generateSubGraphRegistration` mints the
+//      registration subject from. The tail must equal `name` exactly.
+//   3. `createdBy` / `createdAt` are always emitted by the list route
+//      (`cli/src/daemon/routes/context-graph.ts:1004-1010`), so a row without
+//      them is likewise unreachable.
+// `mock-provider-subgraphs.test.ts` pins all three.
 export const MOCK_SUBGRAPHS: Record<
   string,
   { contextGraphId: string; subGraphs: SubGraphInfo[] }
@@ -217,8 +231,8 @@ export const MOCK_SUBGRAPHS: Record<
     contextGraphId: 'cg:pharma-drug-interactions',
     subGraphs: [
       {
-        name: 'Interactions',
-        uri: 'cg:pharma-drug-interactions/interactions',
+        name: 'interactions',
+        uri: 'did:dkg:context-graph:cg:pharma-drug-interactions/interactions',
         description: 'Pairwise drug interaction records',
         createdBy: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
         createdAt: '2026-04-02T09:15:00Z',
@@ -226,8 +240,8 @@ export const MOCK_SUBGRAPHS: Record<
         tripleCount: 1721,
       },
       {
-        name: 'Contraindications',
-        uri: 'cg:pharma-drug-interactions/contraindications',
+        name: 'contraindications',
+        uri: 'did:dkg:context-graph:cg:pharma-drug-interactions/contraindications',
         createdBy: 'did:dkg:agent:0x2222222222222222222222222222222222222222',
         createdAt: '2026-04-05T16:40:00Z',
         entityCount: 79,
@@ -239,9 +253,11 @@ export const MOCK_SUBGRAPHS: Record<
     contextGraphId: 'cg:climate-science',
     subGraphs: [
       {
-        name: 'Arctic Ice',
-        uri: 'cg:climate-science/arctic-ice',
+        name: 'arctic-ice',
+        uri: 'did:dkg:context-graph:cg:climate-science/arctic-ice',
         description: 'Sea-ice extent projections',
+        createdBy: 'did:dkg:agent:0x3333333333333333333333333333333333333333',
+        createdAt: '2026-04-11T08:05:00Z',
         entityCount: 32,
         tripleCount: 410,
       },
