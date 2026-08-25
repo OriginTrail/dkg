@@ -192,7 +192,31 @@ export function createFinalizedVmStoreMaterializerV1(
             options: { source: 'rfc64-finalized-vm-materialization' },
           });
       if (before !== null) {
-        const after = await snapshotFinalizedVmStoreStateV1(store, asset);
+        let after: FinalizedVmStoreStateV1;
+        try {
+          after = await snapshotFinalizedVmStoreStateV1(store, asset);
+        } catch (cause) {
+          // The replacement is already durable, but its exact identity could
+          // not be captured for conflict-safe deferred rollback. Restore the
+          // predecessor immediately while this asset's materialization lock is
+          // still held, before propagating the read failure.
+          const restored = await tryReplaceGraphAndSubjectAtomically(
+            store,
+            asset.assertionGraph,
+            [...before.graphQuads],
+            asset.metaGraph,
+            asset.ual,
+            [...before.metadataQuads],
+            { source: 'rfc64-finalized-vm-snapshot-failure-rollback' },
+          );
+          if (!restored) {
+            throw new AggregateError(
+              [cause],
+              `finalized VM store cannot restore ${asset.ual} after snapshot failure`,
+            );
+          }
+          throw cause;
+        }
         rollbackJournal.push(Object.freeze({
           assertionGraph: asset.assertionGraph,
           metaGraph: asset.metaGraph,

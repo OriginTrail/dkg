@@ -195,6 +195,10 @@ async function execute(): Promise<void> {
     exact(announcement.policyDigest, POLICY_DIGEST, 'private announcement policy digest');
     const headDigest = requiredDigest(publication.headObjectDigest, 'private head digest');
 
+    // Permit the author's outbound request, but leave the receiver without an
+    // authenticated peer-to-agent binding so the inbound private check is the
+    // authority that rejects this first delivery.
+    await bindPeer(author, receiverPeerId, RECEIVER, 'author-bind-receiver');
     const denied = output(await author.request(
       'announce',
       'private-unbound-denial',
@@ -227,10 +231,7 @@ async function execute(): Promise<void> {
     );
     exact(deniedSynchronization.output, null, 'unbound receiver synchronization evidence');
 
-    await Promise.all([
-      bindPeer(author, receiverPeerId, RECEIVER, 'author-bind-receiver'),
-      bindPeer(receiver, authorPeerId, AUTHOR, 'receiver-bind-author'),
-    ]);
+    await bindPeer(receiver, authorPeerId, AUTHOR, 'receiver-bind-author');
     const delivery = output(await author.request(
       'announce',
       'private-authorized-announce',

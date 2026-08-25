@@ -2,6 +2,7 @@ import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   MemoryLayer,
   contextGraphLayerUri,
+  contextGraphMetaUri,
   type ContextGraphPolicyV1,
   type Digest32V1,
   type MemberRosterV1,
@@ -342,7 +343,7 @@ describe('RFC-64 finalized VM runtime', () => {
     )).resolves.toEqual({ type: 'boolean', value: false });
   });
 
-  it('restores the exact predecessor when the second private VM asset fails', async () => {
+  it('restores exact non-empty predecessors when the second post-write snapshot fails', async () => {
     const store = new OxigraphStore();
     const graphlessProjection: Quad[] = [
       { subject: 'urn:rfc64:rollback', predicate: 'urn:rfc64:value', object: '"one"', graph: '' },
@@ -363,6 +364,11 @@ describe('RFC-64 finalized VM runtime', () => {
         publicTripleCount: graphlessProjection.length,
       }),
     ]);
+    const metaGraph = contextGraphMetaUri(RFC64_VM_CONTEXT_GRAPH_NAME);
+    const predecessors = new Map<number, {
+      readonly graphQuads: readonly Quad[];
+      readonly metadataQuads: readonly Quad[];
+    }>();
     for (const kaNumber of [1, 2]) {
       const swmGraph = contextGraphLayerUri(
         RFC64_VM_CONTEXT_GRAPH_NAME,
@@ -370,29 +376,67 @@ describe('RFC-64 finalized VM runtime', () => {
         RFC64_VM_AUTHOR,
         kaNumber,
       );
+      const vmGraph = contextGraphLayerUri(
+        RFC64_VM_CONTEXT_GRAPH_NAME,
+        MemoryLayer.VerifiableMemory,
+        RFC64_VM_AUTHOR,
+        kaNumber,
+      );
+      const ual = rfc64VmUal(BigInt(kaNumber));
+      const graphQuads = [
+        {
+          subject: `urn:rfc64:predecessor:${kaNumber}`,
+          predicate: 'urn:rfc64:value',
+          object: `"old-${kaNumber}"`,
+          graph: vmGraph,
+        },
+        {
+          subject: `urn:rfc64:predecessor:${kaNumber}`,
+          predicate: 'urn:rfc64:marker',
+          object: `"kept-${kaNumber}"`,
+          graph: vmGraph,
+        },
+      ] satisfies Quad[];
+      const metadataQuads = [
+        {
+          subject: ual,
+          predicate: 'urn:rfc64:predecessor-marker',
+          object: `"kept-${kaNumber}"`,
+          graph: metaGraph,
+        },
+        {
+          subject: ual,
+          predicate: 'urn:rfc64:predecessor-version',
+          object: `"${kaNumber}"`,
+          graph: metaGraph,
+        },
+      ] satisfies Quad[];
       await store.insert(graphlessProjection.map((quad) => ({ ...quad, graph: swmGraph })));
+      await store.insert([...graphQuads, ...metadataQuads]);
+      predecessors.set(kaNumber, { graphQuads, metadataQuads });
     }
-    const storeMaterializer = createFinalizedVmStoreMaterializerV1({ store });
-    let calls = 0;
-    const failingMaterializer = Object.assign(
-      async (...args: Parameters<FinalizedVmMaterializerV1>) => {
-        calls += 1;
-        if (calls === 2) throw new Error('injected second-asset failure');
-        return storeMaterializer(...args);
-      },
-      {
-        commit: () => storeMaterializer.commit(),
-        rollback: (cause?: unknown) => storeMaterializer.rollback(cause),
-      },
-    );
+    const query = store.query.bind(store);
+    let rollbackMetadataSnapshotReads = 0;
+    store.query = async (sparql, options) => {
+      if (options?.source === 'rfc64-finalized-vm-rollback-meta-snapshot') {
+        rollbackMetadataSnapshotReads += 1;
+        // First row: before=1, after=2. Second row: before=3,
+        // first post-write after=4. Fail only that first post-write read.
+        if (rollbackMetadataSnapshotReads === 4) {
+          throw new Error('injected first post-write snapshot failure');
+        }
+      }
+      return query(sparql, options);
+    };
     const runtime = createFinalizedVmRuntimeV1(runtimeConfig(
       snapshotTransport({ accessPolicy: 1, kaNumbers: [1n, 2n], assertionRoot }).snapshot,
-      failingMaterializer,
+      createFinalizedVmStoreMaterializerV1({ store }),
     ));
 
     await expect(runtime(privateRequest([first, second]))).rejects.toThrow(
       /materializer failed at finalized ordinal 1/u,
     );
+    expect(rollbackMetadataSnapshotReads).toBe(6);
     for (const kaNumber of [1, 2]) {
       const vmGraph = contextGraphLayerUri(
         RFC64_VM_CONTEXT_GRAPH_NAME,
@@ -400,11 +444,21 @@ describe('RFC-64 finalized VM runtime', () => {
         RFC64_VM_AUTHOR,
         kaNumber,
       );
-      await expect(store.hasGraph(vmGraph)).resolves.toBe(false);
-      await expect(store.query(
-        `ASK { GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
-          + `<${rfc64VmUal(BigInt(kaNumber))}> ?predicate ?object } }`,
-      )).resolves.toEqual({ type: 'boolean', value: false });
+      const predecessor = predecessors.get(kaNumber)!;
+      const restoredGraph = await readExactGraphPaged(store, vmGraph, {
+        expectedQuadCount: predecessor.graphQuads.length,
+        outputGraph: vmGraph,
+      });
+      expect(restoredGraph).toEqual(expect.arrayContaining(predecessor.graphQuads));
+      expect(restoredGraph).toHaveLength(predecessor.graphQuads.length);
+      const restoredMetadata = await store.query(
+        `SELECT ?predicate ?object WHERE { GRAPH <${metaGraph}> { `
+          + `<${rfc64VmUal(BigInt(kaNumber))}> ?predicate ?object } } ORDER BY ?predicate ?object`,
+      );
+      expect(restoredMetadata).toEqual({
+        type: 'bindings',
+        bindings: predecessor.metadataQuads.map(({ predicate, object }) => ({ predicate, object })),
+      });
     }
   });
 

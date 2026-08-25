@@ -220,6 +220,7 @@ export class Rfc64PublicCatalogReceiverV1 {
    * — could conclude scheduling had settled before the head was applied.
    */
   readonly #deferred = new Set<ReceiverTaskV1>();
+  #isolatedCompletionSequence = 0;
 
   #scheduled = 0;
   #admissionDeferred = 0;
@@ -300,7 +301,10 @@ export class Rfc64PublicCatalogReceiverV1 {
     if (inputs.some(({ announcement }) => headKey(announcement) !== firstKey)) {
       throw new TypeError('RFC-64 receiver completion inputs must name one exact head');
     }
-    return new Promise((resolve) => this.#scheduleMany(inputs, resolve));
+    const exactProviderKeys = new Set(inputs.map(({ announcement, remotePeerId }) => (
+      providerContextKey(remotePeerId, announcement)
+    )));
+    return new Promise((resolve) => this.#scheduleMany(inputs, resolve, exactProviderKeys));
   }
 
   #scheduleMany(
@@ -309,10 +313,21 @@ export class Rfc64PublicCatalogReceiverV1 {
       remotePeerId: string;
     }>[],
     completion?: (result: Rfc64PublicCatalogReceiverCompletionV1) => void,
+    exactCompletionProviderKeys?: ReadonlySet<string>,
   ): void {
     if (this.#closed) {
       completion?.(receiverCompletion('closed', null, 0, null));
       return;
+    }
+    if (completion !== undefined && exactCompletionProviderKeys !== undefined) {
+      const existing = this.#pendingByKey.get(headKey(inputs[0]!.announcement));
+      if (
+        existing !== undefined
+        && existing.providers.some(({ key }) => !exactCompletionProviderKeys.has(key))
+      ) {
+        this.#scheduleIsolatedCompletion(inputs, completion);
+        return;
+      }
     }
     let completionAttached = false;
     for (const { announcement, remotePeerId } of inputs) {
@@ -359,6 +374,55 @@ export class Rfc64PublicCatalogReceiverV1 {
       this.#pendingByKey.set(key, task);
       this.#queue.push(task);
     }
+    this.#pump();
+  }
+
+  /**
+   * Keep an explicit synchronization request on exactly its caller-supplied
+   * providers when process-wide work for the same head already contains an
+   * ambient provider. The shared scope lock still prevents two semantic
+   * writers; the isolated task therefore observes `already-applied` when the
+   * earlier task wins, but it can never report that ambient peer as its own
+   * applied provider.
+   */
+  #scheduleIsolatedCompletion(
+    inputs: readonly Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      remotePeerId: string;
+    }>[],
+    completion: (result: Rfc64PublicCatalogReceiverCompletionV1) => void,
+  ): void {
+    this.#scheduled += inputs.length;
+    const first = inputs[0]!;
+    this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));
+    if (this.#queue.length >= this.#maxQueue) {
+      this.#droppedQueueFull += 1;
+      completion(receiverCompletion('dropped', null, 0, null));
+      return;
+    }
+    const providers: ReceiverProviderV1[] = [];
+    const providerKeys = new Set<string>();
+    for (const { announcement, remotePeerId } of inputs) {
+      const key = providerContextKey(remotePeerId, announcement);
+      if (providerKeys.has(key)) continue;
+      if (providers.length >= this.#maxProvidersPerHead) {
+        this.#droppedProviders += 1;
+        continue;
+      }
+      providerKeys.add(key);
+      providers.push({ key, peerId: remotePeerId, announcement });
+    }
+    const task: ReceiverTaskV1 = {
+      key: `${headKey(first.announcement)}\nexplicit-provider-set:${
+        ++this.#isolatedCompletionSequence
+      }`,
+      scopeKey: catalogScopeKey(first.announcement),
+      providers,
+      providerKeys,
+      completionWaiters: [completion],
+    };
+    this.#pendingByKey.set(task.key, task);
+    this.#queue.push(task);
     this.#pump();
   }
 

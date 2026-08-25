@@ -120,6 +120,44 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     });
   });
 
+  it('isolates an explicit provider set from pre-existing same-head ambient work', async () => {
+    const ambientStarted = deferred<void>();
+    const releaseAmbient = deferred<void>();
+    const peers: string[] = [];
+    let applied = false;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(
+      async (peerId) => {
+        peers.push(peerId);
+        if (peerId !== 'peerC') throw new Error('explicit provider must not be needed');
+        ambientStarted.resolve(undefined);
+        await releaseAmbient.promise;
+        applied = true;
+        return 'applied';
+      },
+      async () => applied,
+    ), { retryBackoffMs: 0 });
+
+    receiver.schedule(announcement(), 'peerC');
+    await ambientStarted.promise;
+    const explicit = receiver.scheduleManyAndWait([
+      { announcement: announcement(), remotePeerId: 'peerA' },
+      { announcement: announcement(), remotePeerId: 'peerB' },
+    ]);
+    releaseAmbient.resolve(undefined);
+
+    await expect(explicit).resolves.toMatchObject({
+      outcome: 'already-applied',
+      appliedProviderPeerId: null,
+    });
+    expect(peers).toEqual(['peerC']);
+    expect(receiver.stats()).toMatchObject({
+      scheduled: 3,
+      applied: 1,
+      dedupedAlreadyApplied: 1,
+    });
+    await receiver.close();
+  });
+
   it('accounts positive provider retry backoff in the task result path', async () => {
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
       if (peerId === 'peerA') throw new Error('provider lost');

@@ -754,9 +754,18 @@ export class Rfc64PublicCatalogServiceV1 {
       remotePeerId,
       announcement: discovered.announcement,
     })));
+    const providerPeerIds = Object.freeze(selected.map(({ remotePeerId }) => remotePeerId));
+    if (
+      completion.appliedProviderPeerId !== null
+      && !providerPeerIds.includes(completion.appliedProviderPeerId)
+    ) {
+      throw new Error(
+        'RFC-64 receiver completed through a provider outside the requested failover set',
+      );
+    }
     return Object.freeze({
       current: selected[0]!.discovered,
-      providerPeerIds: Object.freeze(selected.map(({ remotePeerId }) => remotePeerId)),
+      providerPeerIds,
       appliedProviderPeerId: completion.appliedProviderPeerId,
       providerAttempts: completion.providerAttempts,
     });

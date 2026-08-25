@@ -1055,6 +1055,66 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await service.close();
   });
 
+  it('keeps explicit provider completion separate from a same-head ambient provider', async () => {
+    const router = new RecordingRouter();
+    const ambientStarted = deferred<void>();
+    const releaseAmbient = deferred<void>();
+    const reconciledPeers: string[] = [];
+    let applied = false;
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      receiver: { retryBackoffMs: 0 },
+      native: nativeOptions(() => ({
+        isHeadApplied: async () => applied,
+        reconcileHead: async (peerId) => {
+          reconciledPeers.push(peerId);
+          if (peerId !== 'peer-c') throw new Error('explicit provider must not be needed');
+          ambientStarted.resolve(undefined);
+          await releaseAmbient.promise;
+          applied = true;
+          return 'applied';
+        },
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const current = announcement(policy.policyDigest);
+    vi.spyOn(service, 'discoverCurrentCatalogHead').mockResolvedValue(Object.freeze({
+      announcement: current,
+      head: {} as never,
+    }));
+    const scope = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0' as const,
+    };
+
+    const ambient = service.synchronizeCurrentCatalogHead({
+      remotePeerId: 'peer-c',
+      scope,
+    });
+    await ambientStarted.promise;
+    const explicit = service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: ['peer-a', 'peer-b'],
+      scope,
+    });
+    await vi.waitFor(() => {
+      expect(service.stats().receiver.scheduled).toBe(3);
+    });
+    releaseAmbient.resolve(undefined);
+
+    await expect(explicit).resolves.toMatchObject({
+      providerPeerIds: ['peer-a', 'peer-b'],
+      appliedProviderPeerId: null,
+    });
+    await expect(ambient).resolves.toMatchObject({ announcement: current });
+    expect(reconciledPeers).toEqual(['peer-c']);
+    await service.close();
+  });
+
   it('keeps diagnostic staging-only mode explicitly non-applied across replays', async () => {
     const router = new RecordingRouter();
     const store = controlObjects();
