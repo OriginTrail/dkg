@@ -58,6 +58,23 @@ const MIN_SCRYPT_P = 1;
 const REQUIRED_DKLEN = 32;
 const MIN_SALT_BYTES = 16;
 
+/**
+ * Upper bounds, the counterpart to the minimums above. The minimums stop a
+ * keystore from advertising a cost so low that the KDF is cheap to attack; the
+ * maximums stop one from advertising a cost so high that simply loading the
+ * file exhausts the process before any passphrase is checked. scrypt's working
+ * set is 128 * N * r bytes: this CLI writes N=2^18, r=8, i.e. exactly 256 MiB,
+ * so the ceiling is set one doubling above that to leave room for keystores
+ * written by other tools at a higher cost, while still bounding the allocation.
+ */
+const MAX_SCRYPT_MEMORY_BYTES = 512 * 1024 * 1024;
+const MAX_SCRYPT_P = 16;
+
+/** scrypt requires N to be a power of two; a non-power-of-two throws deep in OpenSSL. */
+function isPowerOfTwo(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0 && (value & (value - 1)) === 0;
+}
+
 /** @internal Allow tests to use lighter scrypt params to avoid memory limits */
 export function _setScryptN(n: number) { SCRYPT_N = n; }
 
@@ -143,6 +160,26 @@ export async function decryptKeystore(
   if (typeof kdfparams.p !== "number" || kdfparams.p < MIN_SCRYPT_P) {
     throw new Error(
       `Refusing to load weak keystore: KDF parameters below minimum (p=${kdfparams.p} < ${MIN_SCRYPT_P}). scrypt p too low.`,
+    );
+  }
+  // Counterpart to the minimums above: reject parameters whose declared cost is
+  // too high to service. `n` must also be a power of two — scrypt requires it,
+  // and a non-power-of-two otherwise fails deep inside OpenSSL with an opaque
+  // error rather than a diagnosable one here.
+  if (!isPowerOfTwo(kdfparams.n)) {
+    throw new Error(
+      `Refusing to load keystore: scrypt N must be a power of two (got n=${kdfparams.n}).`,
+    );
+  }
+  const estimatedMemoryBytes = 128 * kdfparams.n * kdfparams.r;
+  if (!Number.isSafeInteger(estimatedMemoryBytes) || estimatedMemoryBytes > MAX_SCRYPT_MEMORY_BYTES) {
+    throw new Error(
+      `Refusing to load keystore: KDF memory cost above maximum (n=${kdfparams.n}, r=${kdfparams.r} implies ${estimatedMemoryBytes} bytes > ${MAX_SCRYPT_MEMORY_BYTES}). scrypt memory cost too high.`,
+    );
+  }
+  if (kdfparams.p > MAX_SCRYPT_P) {
+    throw new Error(
+      `Refusing to load keystore: KDF parameters above maximum (p=${kdfparams.p} > ${MAX_SCRYPT_P}). scrypt p too high.`,
     );
   }
   if (kdfparams.dklen !== REQUIRED_DKLEN) {

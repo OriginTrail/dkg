@@ -588,6 +588,15 @@ export function validateContextGraphId(id: string): { valid: boolean; reason?: s
   if (!id || id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
   if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };
   if (!/^[\w:/.@\-]+$/.test(id)) return { valid: false, reason: 'Context graph ID contains disallowed characters (allowed: alphanumeric, _, :, /, ., @, -)' };
+  // The character class above permits both `/` and `.`, because legitimate IDs
+  // are URN/DID/URI-shaped and need them. That combination also admits relative
+  // path segments, which no legitimate ID uses and which do not survive being
+  // joined into a storage namespace or URI with a stable meaning. Reject the
+  // segments themselves rather than the characters, so ordinary IDs like
+  // `did:dkg:context-graph:acme.example/v1` stay valid.
+  if (id.split('/').some((segment) => segment === '.' || segment === '..')) {
+    return { valid: false, reason: 'Context graph ID cannot contain "." or ".." path segments' };
+  }
   return { valid: true };
 }
 

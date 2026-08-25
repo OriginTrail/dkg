@@ -112,6 +112,43 @@ describe('decryptKeystore error handling', () => {
       /weak keystore/,
     );
   });
+
+  it('rejects keystore declaring a KDF memory cost above the ceiling', async () => {
+    // The existing minimums stop a file advertising a cost cheap enough to
+    // attack. This is the other end: scrypt's working set is 128 * N * r, so
+    // N=2**30 with r=8 asks the loader for ~1 TiB before the passphrase is ever
+    // checked. Rejected up-front with a diagnosable error instead.
+    const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
+    ks.crypto.kdfparams.n = 2 ** 30;
+    await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(
+      /memory cost too high/,
+    );
+  });
+
+  it('rejects keystore declaring a non-power-of-two scrypt N', async () => {
+    // scrypt requires N to be a power of two; without this check the value is
+    // handed to OpenSSL and fails there with an opaque error.
+    const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
+    ks.crypto.kdfparams.n = (2 ** 15) + 1;
+    await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(
+      /power of two/,
+    );
+  });
+
+  it('rejects keystore declaring a parallelism factor above the ceiling', async () => {
+    const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
+    ks.crypto.kdfparams.p = 1024;
+    await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(
+      /p too high/,
+    );
+  });
+
+  it('still accepts the parameters this CLI itself writes', async () => {
+    // Guards the ceiling against being set below our own defaults: the CLI
+    // writes N=2**18, r=8, which is exactly 256 MiB of working set.
+    const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
+    await expect(decryptKeystore(ks, PASSPHRASE)).resolves.toBeDefined();
+  });
 });
 
 describe('isEncryptedKeystore', () => {
