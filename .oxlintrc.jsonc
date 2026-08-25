@@ -1,37 +1,26 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "categories": {
-    "correctness": "error"
+    // Existing correctness debt is a warning-count ratchet. The lint command
+    // keeps output quiet but fails if the checked-in maximum is exceeded.
+    "correctness": "warn"
   },
-  "rules": {
-    // Baseline debt: the extracted agent and daemon modules deliberately share
-    // broad import preambles. Enable this after those preambles are narrowed.
-    "eslint/no-unused-vars": "off",
-
-    // Existing parser/regex constructs need focused cleanup before these can
-    // become blocking. Every other ESLint/TypeScript/Oxc correctness rule is
-    // enforced now, so new classes of correctness defects fail immediately.
-    "eslint/no-constant-condition": "off",
-    "eslint/no-control-regex": "off",
-    "eslint/no-extra-boolean-cast": "off",
-    "eslint/no-irregular-whitespace": "off",
-    "eslint/no-unreachable": "off",
-    "eslint/no-unsafe-finally": "off",
-    "eslint/no-useless-catch": "off",
-    "eslint/no-useless-escape": "off",
-    "eslint/no-useless-rename": "off",
-    "eslint/require-yield": "off",
-    "oxc/const-comparisons": "off",
-    "typescript/no-this-alias": "off",
-    "typescript/no-unsafe-declaration-merging": "off",
-
-    // Mechanical simplifications and the repository's shared HTTP helpers make
-    // up the current Unicorn baseline. Keep the rest of that plugin active.
-    "unicorn/no-invalid-fetch-options": "off",
-    "unicorn/no-new-array": "off",
-    "unicorn/no-useless-fallback-in-spread": "off",
-    "unicorn/no-useless-length-check": "off",
-    "unicorn/no-useless-spread": "off",
-    "unicorn/prefer-string-starts-ends-with": "off"
-  }
+  "ignorePatterns": [
+    // Generated build/test output and checked-in historical experiments are
+    // not maintained source. Everything else, including tests, devnet tools,
+    // package-local scripts, demos, and benchmarks, is linted from repo root.
+    "**/node_modules/**",
+    "**/.turbo/**",
+    "**/dist/**",
+    "**/dist-ui/**",
+    "**/coverage/**",
+    "**/test-results/**",
+    "**/artifacts/**",
+    "**/cache/**",
+    "**/playwright-report/**",
+    "docs/archive/**",
+    "packages/cli/assets/**",
+    "third_party/**",
+    "vendor/**"
+  ]
 }

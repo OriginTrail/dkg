@@ -1,0 +1,21 @@
+name: Upload Vitest JUnit report
+description: Upload a uniquely named Vitest JUnit artifact with the repository retention policy.
+
+inputs:
+  artifact-name:
+    description: Unique artifact name for this package or shard.
+    required: true
+  report-path:
+    description: Package-local JUnit XML path or glob.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Upload JUnit XML
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.report-path }}
+        retention-days: 14
+        if-no-files-found: ignore

@@ -1,6 +1,20 @@
 name: Node coverage ratchet
 
 on:
+  pull_request:
+    branches: [main, testnet-canary]
+    paths:
+      - 'packages/query/**'
+      - 'packages/okf/**'
+      - 'packages/node-ui/**'
+      - 'packages/network-sim/**'
+      - 'vitest.coverage.ts'
+      - 'turbo.json'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.nvmrc'
+      - '.github/workflows/node-coverage.yml'
   schedule:
     - cron: '23 2 * * *'
   workflow_dispatch:
@@ -9,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: node-coverage-${{ github.ref }}
+  group: node-coverage-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

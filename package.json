@@ -29,7 +29,7 @@
     "bench:swm-triple-volume": "pnpm --filter @origintrail-official/dkg benchmark:swm-triple-volume --",
     "bench:baseline": "pnpm --filter @origintrail-official/dkg-storage build && ESBENCH_RESULT=bench/results/baseline.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/baseline.html esbench --config esbench.config.mjs",
     "bench:compare": "pnpm --filter @origintrail-official/dkg-storage build && ESBENCH_DIFF=bench/results/baseline.json ESBENCH_RESULT=bench/results/compare.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/compare.html esbench --config esbench.config.mjs",
-    "lint": "oxlint -c .oxlintrc.jsonc packages/*/src scripts demo/src bench",
+    "lint": "oxlint -c .oxlintrc.jsonc . --quiet --max-warnings=16281",
     "clean": "turbo clean",
     "dev": "turbo dev",
     "dkg": "node packages/cli/dist/cli.js",

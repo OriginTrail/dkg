@@ -448,34 +448,31 @@ jobs:
       - name: Core, RDF utilities, and storage tests
         if: matrix.suite == 'core'
         run: |
-          mkdir -p packages/core/test-results packages/rdf-utils/test-results packages/storage/test-results
-          pnpm --filter @origintrail-official/dkg-core exec vitest run \
-            --reporter=default --reporter=junit --outputFile.junit=test-results/core.xml
-          pnpm --filter @origintrail-official/dkg-rdf-utils exec vitest run \
-            --reporter=default --reporter=junit --outputFile.junit=test-results/rdf-utils.xml
-          pnpm --filter @origintrail-official/dkg-storage exec vitest run \
-            --reporter=default --reporter=junit --outputFile.junit=test-results/storage.xml
+          node scripts/ci/run-vitest-junit.mjs \
+            --package-dir packages/core --output test-results/core.xml
+          node scripts/ci/run-vitest-junit.mjs \
+            --package-dir packages/rdf-utils --output test-results/rdf-utils.xml
+          node scripts/ci/run-vitest-junit.mjs \
+            --package-dir packages/storage --output test-results/storage.xml
       - name: "Chain tests (shard ${{ matrix.shard }}/3)"
         if: matrix.suite == 'chain'
         env:
           SHARD_ID: ${{ matrix.shard }}
         run: |
           set -euo pipefail
-          mkdir -p packages/chain/test-results
           mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs chain "$SHARD_ID")
           test "${#SHARD_FILES[@]}" -gt 0
-          pnpm --filter @origintrail-official/dkg-chain exec vitest run "${SHARD_FILES[@]}" \
-            --reporter=default --reporter=junit \
-            --outputFile.junit="test-results/chain-${SHARD_ID}.xml"
+          node scripts/ci/run-vitest-junit.mjs \
+            --package-dir packages/chain \
+            --output "test-results/chain-${SHARD_ID}.xml" \
+            -- "${SHARD_FILES[@]}"
 
       - name: Upload Vitest JUnit report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/upload-vitest-junit
         with:
-          name: vitest-tornado-core-${{ matrix.suite }}-${{ matrix.shard }}
-          path: packages/*/test-results/*.xml
-          retention-days: 14
-          if-no-files-found: ignore
+          artifact-name: vitest-tornado-core-${{ matrix.suite }}-${{ matrix.shard }}
+          report-path: packages/*/test-results/*.xml
 
   # ------------------------------------------------------------------
   # Tornado Blazegraph integration lane — runs the storage adapter's
@@ -602,19 +599,16 @@ jobs:
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "Publisher tests (shard ${{ matrix.shard }}/4)"
         run: |
-          mkdir -p packages/publisher/test-results
-          pnpm --filter @origintrail-official/dkg-publisher exec vitest run \
-            --shard=${{ matrix.shard }}/4 \
-            --reporter=default --reporter=junit \
-            --outputFile.junit=test-results/publisher-${{ matrix.shard }}.xml
+          node scripts/ci/run-vitest-junit.mjs \
+            --package-dir packages/publisher \
+            --output test-results/publisher-${{ matrix.shard }}.xml \
+            -- --shard=${{ matrix.shard }}/4
       - name: Upload Vitest JUnit report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/upload-vitest-junit
         with:
-          name: vitest-publisher-${{ matrix.shard }}-of-4
-          path: packages/publisher/test-results/*.xml
-          retention-days: 14
-          if-no-files-found: ignore
+          artifact-name: vitest-publisher-${{ matrix.shard }}-of-4
+          report-path: packages/publisher/test-results/*.xml
 
   # ------------------------------------------------------------------
   # Tornado agent lane — the slowest Node suite, sharded across 10 runners.
@@ -672,22 +666,20 @@ jobs:
         working-directory: packages/agent
         run: |
           set -euo pipefail
-          mkdir -p test-results
           mapfile -t SHARD_FILES < <(node scripts/ci-shard-agent.mjs ${{ matrix.shard }} 10)
           echo "::group::Agent shard ${{ matrix.shard }}/10 — ${#SHARD_FILES[@]} files"
           printf '  %s\n' "${SHARD_FILES[@]}"
           echo "::endgroup::"
-          pnpm exec vitest run "${SHARD_FILES[@]}" \
-            --reporter=default --reporter=junit \
-            --outputFile.junit=test-results/agent-${{ matrix.shard }}.xml
+          node ../../scripts/ci/run-vitest-junit.mjs \
+            --package-dir packages/agent \
+            --output test-results/agent-${{ matrix.shard }}.xml \
+            -- "${SHARD_FILES[@]}"
       - name: Upload Vitest JUnit report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/upload-vitest-junit
         with:
-          name: vitest-agent-${{ matrix.shard }}-of-10
-          path: packages/agent/test-results/*.xml
-          retention-days: 14
-          if-no-files-found: ignore
+          artifact-name: vitest-agent-${{ matrix.shard }}-of-10
+          report-path: packages/agent/test-results/*.xml
 
   # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
@@ -741,20 +733,18 @@ jobs:
           SHARD_ID: ${{ matrix.shard }}
         run: |
           set -euo pipefail
-          mkdir -p packages/cli/test-results
           mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs cli "$SHARD_ID")
           test "${#SHARD_FILES[@]}" -gt 0
-          pnpm --filter @origintrail-official/dkg exec vitest run "${SHARD_FILES[@]}" \
-            --reporter=default --reporter=junit \
-            --outputFile.junit="test-results/cli-${SHARD_ID}.xml"
+          node scripts/ci/run-vitest-junit.mjs \
+            --package-dir packages/cli \
+            --output "test-results/cli-${SHARD_ID}.xml" \
+            -- "${SHARD_FILES[@]}"
       - name: Upload Vitest JUnit report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/upload-vitest-junit
         with:
-          name: vitest-cli-${{ matrix.shard }}-of-4
-          path: packages/cli/test-results/*.xml
-          retention-days: 14
-          if-no-files-found: ignore
+          artifact-name: vitest-cli-${{ matrix.shard }}-of-4
+          report-path: packages/cli/test-results/*.xml
 
   bura-blazegraph-arm64:
     name: "Bura: Blazegraph arm64 image (native)"
