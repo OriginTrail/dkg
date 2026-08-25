@@ -20,9 +20,19 @@ export type SparqlOperationClassification =
   | { kind: 'update' }
   | { kind: 'unknown' };
 export interface SparqlOperationAnalysis {
-  operation: SparqlOperationClassification;
-  mutatingKeyword: string | null;
+  readonly operation: SparqlOperationClassification;
+  readonly mutatingKeyword: string | null;
 }
+
+// A single query traverses several store decorators (agent invalidation,
+// changelog, graph index, then the adapter), each of which needs the same safe
+// classification. Exact-string memoization makes that scan/allocation happen
+// once and also covers repeated scoring queries. Bound both cardinality and
+// source size so an untrusted query stream cannot turn this into an unbounded
+// retention surface.
+const SPARQL_ANALYSIS_CACHE_MAX_ENTRIES = 256;
+const SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH = 64 * 1024;
+const sparqlAnalysisCache = new Map<string, SparqlOperationAnalysis>();
 
 const PREFIX_DECL = /\s*PREFIX\s+[^\s:]*:\s*(?:<[^<>"{}|^`\\\x00-\x20]*>)?/iy;
 const BASE_DECL = /\s*BASE\b\s*(?:<[^<>"{}|^`\\\x00-\x20]*>)?/iy;
@@ -153,13 +163,32 @@ function classifySparqlOperationForm(form: SparqlDetectedOperation): SparqlOpera
 }
 
 export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis {
+  if (sparql.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH) {
+    const cached = sparqlAnalysisCache.get(sparql);
+    if (cached) {
+      // Refresh insertion order to keep frequently repeated queries resident.
+      sparqlAnalysisCache.delete(sparql);
+      sparqlAnalysisCache.set(sparql, cached);
+      return cached;
+    }
+  }
+
   const stripped = stripSparqlLiteralsAndComments(sparql);
   const form = detectSparqlOperationFormFromStripped(stripped);
   const match = MUTATING_PATTERN.exec(stripped);
-  return {
-    operation: classifySparqlOperationForm(form),
+  const analysis = Object.freeze({
+    operation: Object.freeze(classifySparqlOperationForm(form)),
     mutatingKeyword: match?.[1] ?? null,
-  };
+  });
+
+  if (sparql.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH) {
+    sparqlAnalysisCache.set(sparql, analysis);
+    if (sparqlAnalysisCache.size > SPARQL_ANALYSIS_CACHE_MAX_ENTRIES) {
+      const oldest = sparqlAnalysisCache.keys().next().value;
+      if (oldest !== undefined) sparqlAnalysisCache.delete(oldest);
+    }
+  }
+  return analysis;
 }
 
 export function classifySparqlOperation(sparql: string): SparqlOperationClassification {
