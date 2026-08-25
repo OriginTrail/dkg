@@ -5,7 +5,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { performance } from 'node:perf_hooks';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
-import { getExternalStorePrioritySchedulerSnapshot } from '../src/store-priority-scheduler.js';
+import {
+  externalStorePriorityScheduler,
+  getExternalStorePrioritySchedulerSnapshot,
+} from '../src/store-priority-scheduler.js';
 
 async function waitForCondition(
   predicate: () => boolean,
@@ -355,23 +358,27 @@ describe('BlazegraphStore (mocked HTTP)', () => {
   it.each([
     {
       name: 'SELECT',
+      operation: 'query',
       run: (store: BlazegraphStore) => store.query('SELECT ?s WHERE { ?s ?p ?o }'),
     },
     {
       name: 'CONSTRUCT',
+      operation: 'construct',
       run: (store: BlazegraphStore) => store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'),
     },
     {
       name: 'UPDATE',
+      operation: 'update',
       run: (store: BlazegraphStore) => store.update('DELETE WHERE { ?s ?p ?o }'),
     },
     {
       name: 'bulk insert',
+      operation: 'insert',
       run: (store: BlazegraphStore) => store.insert([
         { subject: 'http://s', predicate: 'http://p', object: '"o"', graph: 'http://g' },
       ]),
     },
-  ])('applies its end-to-end timeout to an in-flight $name fetch', async ({ run }) => {
+  ])('applies its end-to-end timeout to an in-flight $name fetch', async ({ operation, run }) => {
     let seenSignal: AbortSignal | undefined;
     setFetch(async (_url, init) => {
       seenSignal = init?.signal ?? undefined;
@@ -382,8 +389,48 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const s = new BlazegraphStore(baseUrl, { timeout: 20 });
 
     const outcome = await outcomeWithin(run(s), 200);
-    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    expect(outcome).toMatchObject({
+      name: 'TimeoutError',
+      code: 'STORE_OPERATION_TIMEOUT',
+      retryable: true,
+      backend: 'blazegraph',
+      operation,
+      timeoutMs: 20,
+      outcome: 'indeterminate',
+    });
     expect(seenSignal?.aborted).toBe(true);
+  });
+
+  it('classifies a deadline that expires before scheduler admission as not started', async () => {
+    const maxConcurrent = getExternalStorePrioritySchedulerSnapshot().maxConcurrent;
+    const releases: Array<() => void> = [];
+    const blockers = Array.from({ length: maxConcurrent }, (_, index) =>
+      externalStorePriorityScheduler.run('ack', `test.blocker.${index}`, () =>
+        new Promise<void>((resolve) => {
+          releases.push(resolve);
+        })));
+    try {
+      await waitForCondition(
+        () => releases.length === maxConcurrent,
+        'scheduler blockers were not all admitted',
+      );
+      const store = new BlazegraphStore(baseUrl, { timeout: 20 });
+      const outcome = await outcomeWithin(store.insert([
+        { subject: 'http://s', predicate: 'http://p', object: '"o"', graph: 'http://g' },
+      ]), 200);
+
+      expect(outcome).toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'blazegraph',
+        operation: 'insert',
+        timeoutMs: 20,
+        outcome: 'not_started',
+      });
+      expect(fetchCalls).toHaveLength(0);
+    } finally {
+      releases.forEach((release) => release());
+      await Promise.all(blockers);
+    }
   });
 
   it('reports TimeoutError when fetch rejects after the deadline clock but before its timer runs', async () => {
@@ -506,7 +553,11 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     await expect(s.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeDefined();
     expect(active).toBe(0);
 
-    await expect(s.query('SELECT ?s WHERE { ?s ?p ?o }')).resolves.toMatchObject({
+    // The 5 ms budget above exists only to trigger cancellation. Reusing it
+    // for the recovery probe makes this assertion depend on host scheduling
+    // latency rather than on whether the previous attempt released its slot.
+    const recoveryStore = new BlazegraphStore(baseUrl, { timeout: 200 });
+    await expect(recoveryStore.query('SELECT ?s WHERE { ?s ?p ?o }')).resolves.toMatchObject({
       type: 'bindings',
     });
     expect(maxActive).toBe(1);

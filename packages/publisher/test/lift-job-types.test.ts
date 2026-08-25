@@ -99,6 +99,7 @@ describe('LiftJob request and record types', () => {
       'jobId',
       'jobSlug',
       'request',
+      'admission',
       'timestamps.acceptedAt',
       'retries.maxRetries',
     ]);

@@ -10,6 +10,15 @@ import {
   type ProtocolOutboxStore,
   type ContextGraphJoinPolicyRecord,
   parseContextGraphJoinPolicyRecord,
+  DEFAULT_SYNC_CHECKPOINT_TTL_MS,
+  isValidSyncCheckpointEntry,
+  transitionSyncCheckpointManifestOffset,
+  transitionSyncCheckpointOffset,
+  transitionSyncCheckpointResponderSession,
+  withoutSyncCheckpointResponderSession,
+  type DurableManifestDigest,
+  type DurableManifestPrefixDigest,
+  type SyncCheckpointEntry,
 } from '@origintrail-official/dkg-core';
 
 export {
@@ -17,7 +26,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 31;
+export const SCHEMA_VERSION = 34;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -299,7 +308,7 @@ export class DashboardDB {
           );
       `);
     };
-    const ensureSyncCheckpointResponderSessionColumns = () => {
+    const ensureSyncCheckpointResumeColumns = () => {
       const table = this.db.prepare(`
         SELECT 1 AS found FROM sqlite_master
         WHERE type = 'table' AND name = 'sync_checkpoints'
@@ -315,13 +324,25 @@ export class DashboardDB {
       if (!columns.has('responder_session_expires_at')) {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN responder_session_expires_at INTEGER;`);
       }
+      if (!columns.has('responder_session_offset')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN responder_session_offset INTEGER;`);
+      }
+      if (!columns.has('manifest_digest')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN manifest_digest TEXT;`);
+      }
+      if (!columns.has('manifest_prefix_digest')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN manifest_prefix_digest TEXT;`);
+      }
+      if (!columns.has('terminal')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1));`);
+      }
     };
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
       // but lost an idempotent schema adjunct.
       ensureJoinApprovalRepairMarker();
-      ensureSyncCheckpointResponderSessionColumns();
+      ensureSyncCheckpointResumeColumns();
       ensureJoinPolicyAuditCapTrigger();
       return;
     }
@@ -946,7 +967,13 @@ export class DashboardDB {
           key TEXT PRIMARY KEY,
           offset INTEGER NOT NULL CHECK (offset >= 0),
           updated_at INTEGER NOT NULL,
-          expires_at INTEGER NOT NULL
+          expires_at INTEGER NOT NULL,
+          responder_session_id TEXT,
+          responder_session_expires_at INTEGER,
+          responder_session_offset INTEGER CHECK (responder_session_offset >= 0),
+          manifest_digest TEXT,
+          manifest_prefix_digest TEXT,
+          terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1))
         );
         CREATE INDEX IF NOT EXISTS idx_sync_checkpoints_expires_at
           ON sync_checkpoints(expires_at);
@@ -1191,7 +1218,7 @@ export class DashboardDB {
       // OFFSET pagination is scoped to an immutable responder row list. Keep
       // the opaque responder token beside the verified offset so a requester
       // restart can resume that same list instead of discarding durable work.
-      ensureSyncCheckpointResponderSessionColumns();
+      ensureSyncCheckpointResumeColumns();
     }
     if (version < 31) {
       this.db.exec(`
@@ -1210,6 +1237,41 @@ export class DashboardDB {
           CHECK (length(checksum) > 0)
         );
       `);
+    }
+    if (version < 32) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS selected_vm_reconcile_cursors (
+          deployment_id TEXT NOT NULL CHECK (length(trim(deployment_id)) > 0),
+          context_graph_id TEXT NOT NULL,
+          on_chain_context_graph_id TEXT NOT NULL,
+          name_hash TEXT NOT NULL,
+          watermark INTEGER NOT NULL CHECK (watermark >= 0),
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (deployment_id, context_graph_id, on_chain_context_graph_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_selected_vm_reconcile_cursor_cg
+          ON selected_vm_reconcile_cursors(deployment_id, context_graph_id);
+      `);
+    }
+    if (version < 33) {
+      // A durable DATA offset is reusable only with cryptographic proof of the
+      // canonical META generation and verified descriptor prefix that gave it
+      // meaning. Persist both digests beside the offset/session so production
+      // SQLite checkpoints have the same safety contract as the in-memory
+      // requester store and survive daemon restarts.
+      ensureSyncCheckpointResumeColumns();
+    }
+    if (version < 34) {
+      // The V33 manifest-bound continuation must not share a key with V32,
+      // which interpreted OFFSET as an unverified raw responder coordinate.
+      // Drop every pre-versioned durable DATA row before new code starts using
+      // the `|checkpoint:v2` namespace, so a later rollback also fails closed.
+      ensureSyncCheckpointResumeColumns();
+      this.db.prepare(`
+        DELETE FROM sync_checkpoints
+         WHERE key LIKE '%|durable|data%'
+           AND key NOT LIKE '%|durable|data|checkpoint:v2%'
+      `).run();
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
@@ -1945,6 +2007,39 @@ export class DashboardDB {
       'deleteVmReconcileNegativesForContextGraph',
       'DELETE FROM vm_reconcile_negative_cache WHERE context_graph_id = ?',
     ).run(contextGraphId);
+  }
+
+  upsertSelectedVmReconcileCursor(record: SelectedVmReconcileCursorRow): void {
+    this.stmt('upsertSelectedVmReconcileCursor', `
+      INSERT INTO selected_vm_reconcile_cursors (
+        deployment_id, context_graph_id, on_chain_context_graph_id,
+        name_hash, watermark, updated_at
+      ) VALUES (
+        @deployment_id, @context_graph_id, @on_chain_context_graph_id,
+        @name_hash, @watermark, @updated_at
+      )
+      ON CONFLICT(deployment_id, context_graph_id, on_chain_context_graph_id) DO UPDATE SET
+        name_hash = excluded.name_hash,
+        watermark = excluded.watermark,
+        updated_at = excluded.updated_at
+    `).run(record);
+  }
+
+  getSelectedVmReconcileCursor(
+    deploymentId: string,
+    contextGraphId: string,
+    onChainContextGraphId: string,
+  ): SelectedVmReconcileCursorRow | undefined {
+    return this.stmt('getSelectedVmReconcileCursor', `
+      SELECT * FROM selected_vm_reconcile_cursors
+      WHERE deployment_id = ?
+        AND context_graph_id = ?
+        AND on_chain_context_graph_id = ?
+    `).get(
+      deploymentId,
+      contextGraphId,
+      onChainContextGraphId,
+    ) as SelectedVmReconcileCursorRow | undefined;
   }
 
   // --- Phase F: chain-driven VM reconciliation telemetry ---
@@ -3286,8 +3381,6 @@ export class DashboardDB {
 
 // --- Sync requester checkpoints (issue #1138 A3) ---
 
-const DEFAULT_SYNC_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
-
 export class SqliteSyncCheckpointStore {
   private readonly db: Database.Database;
   private readonly clock: () => number;
@@ -3302,17 +3395,11 @@ export class SqliteSyncCheckpointStore {
     this.ttlMs = options.ttlMs ?? DEFAULT_SYNC_CHECKPOINT_TTL_MS;
   }
 
-  get(key: string): {
-    offset: number;
-    updatedAtMs: number;
-    expiresAtMs: number;
-    responderSessionId?: string;
-    responderSessionExpiresAtMs?: number;
-  } | undefined {
-    const now = this.clock();
+  private readRow(key: string): SyncCheckpointEntry | undefined {
     const row = this.db.prepare(
       `SELECT offset, updated_at, expires_at,
-              responder_session_id, responder_session_expires_at
+              responder_session_id, responder_session_expires_at, responder_session_offset,
+              manifest_digest, manifest_prefix_digest, terminal
          FROM sync_checkpoints WHERE key = ?`,
     ).get(key) as {
       offset: number;
@@ -3320,43 +3407,128 @@ export class SqliteSyncCheckpointStore {
       expires_at: number;
       responder_session_id: string | null;
       responder_session_expires_at: number | null;
+      responder_session_offset: number | null;
+      manifest_digest: DurableManifestDigest | null;
+      manifest_prefix_digest: DurableManifestPrefixDigest | null;
+      terminal: number;
     } | undefined;
     if (!row) return undefined;
-    if (row.expires_at < now) {
-      this.delete(key);
-      return undefined;
-    }
-    const hasFreshResponderSession = Boolean(row.responder_session_id)
-      && Number.isSafeInteger(row.responder_session_expires_at)
-      && (row.responder_session_expires_at ?? 0) > now;
-    if (row.responder_session_id && !hasFreshResponderSession) {
-      this.clearResponderSession(key);
-    }
     return {
       offset: row.offset,
       updatedAtMs: row.updated_at,
       expiresAtMs: row.expires_at,
-      ...(hasFreshResponderSession
-        ? {
-            responderSessionId: row.responder_session_id!,
-            responderSessionExpiresAtMs: row.responder_session_expires_at!,
-          }
+      ...(row.terminal === 1 ? { terminal: true } : {}),
+      ...(row.manifest_digest ? { manifestDigest: row.manifest_digest } : {}),
+      ...(row.manifest_prefix_digest
+        ? { manifestPrefixDigest: row.manifest_prefix_digest }
+        : {}),
+      // Preserve each nullable session column independently so the shared
+      // validator can distinguish an absent session from a torn/malformed
+      // persisted session. Collapsing a partial row to no session fields would
+      // turn corrupt durable state into an apparently valid ordinary offset.
+      ...(row.responder_session_id !== null
+        ? { responderSessionId: row.responder_session_id }
+        : {}),
+      ...(row.responder_session_expires_at !== null
+        ? { responderSessionExpiresAtMs: row.responder_session_expires_at }
+        : {}),
+      ...(row.responder_session_offset !== null
+        ? { responderSessionOffset: row.responder_session_offset }
         : {}),
     };
   }
 
-  set(key: string, value: number, nowMs = this.clock()): void {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
+  get(key: string, now = this.clock()): SyncCheckpointEntry | undefined {
+    const entry = this.readRow(key);
+    if (!entry) return undefined;
+    if (!isValidSyncCheckpointEntry(entry) || entry.expiresAtMs < now) {
+      this.delete(key);
+      return undefined;
     }
+    if (
+      entry.responderSessionId
+      && (entry.responderSessionExpiresAtMs ?? 0) <= now
+    ) {
+      const withoutExpiredSession = withoutSyncCheckpointResponderSession(entry);
+      this.writeEntry(key, withoutExpiredSession);
+      return withoutExpiredSession;
+    }
+    return entry;
+  }
+
+  private writeEntry(key: string, entry: SyncCheckpointEntry): void {
     this.db.prepare(`
-      INSERT INTO sync_checkpoints (key, offset, updated_at, expires_at)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO sync_checkpoints (
+        key, offset, updated_at, expires_at,
+        responder_session_id, responder_session_expires_at, responder_session_offset,
+        manifest_digest, manifest_prefix_digest, terminal
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET
         offset = excluded.offset,
         updated_at = excluded.updated_at,
-        expires_at = excluded.expires_at
-    `).run(key, value, nowMs, nowMs + this.ttlMs);
+        expires_at = excluded.expires_at,
+        responder_session_id = excluded.responder_session_id,
+        responder_session_expires_at = excluded.responder_session_expires_at,
+        responder_session_offset = excluded.responder_session_offset,
+        manifest_digest = excluded.manifest_digest,
+        manifest_prefix_digest = excluded.manifest_prefix_digest,
+        terminal = excluded.terminal
+    `).run(
+      key,
+      entry.offset,
+      entry.updatedAtMs,
+      entry.expiresAtMs,
+      entry.responderSessionId ?? null,
+      entry.responderSessionExpiresAtMs ?? null,
+      entry.responderSessionOffset ?? null,
+      entry.manifestDigest ?? null,
+      entry.manifestPrefixDigest ?? null,
+      entry.terminal ? 1 : 0,
+    );
+  }
+
+  set(
+    key: string,
+    value: number,
+    nowMs = this.clock(),
+    responderSessionOffset?: number,
+  ): void {
+    const transition = this.db.transaction(() => {
+      this.writeEntry(key, transitionSyncCheckpointOffset({
+        key,
+        existing: this.get(key, nowMs),
+        value,
+        nowMs,
+        ttlMs: this.ttlMs,
+        responderSessionOffset,
+      }));
+    });
+    transition();
+  }
+
+  setManifestBoundOffset(
+    key: string,
+    value: number,
+    manifestDigest: DurableManifestDigest,
+    nowMs = this.clock(),
+    manifestPrefixDigest?: DurableManifestPrefixDigest,
+    terminal = false,
+    responderSessionOffset?: number,
+  ): void {
+    const transition = this.db.transaction(() => {
+      this.writeEntry(key, transitionSyncCheckpointManifestOffset({
+        key,
+        existing: this.get(key, nowMs),
+        value,
+        manifestDigest,
+        nowMs,
+        ttlMs: this.ttlMs,
+        manifestPrefixDigest,
+        terminal,
+        responderSessionOffset,
+      }));
+    });
+    transition();
   }
 
   setResponderSession(
@@ -3364,32 +3536,36 @@ export class SqliteSyncCheckpointStore {
     sessionId: string,
     expiresAtMs: number,
     nowMs = this.clock(),
+    manifestDigest?: DurableManifestDigest,
+    manifestPrefixDigest?: DurableManifestPrefixDigest,
+    responderSessionOffset?: number,
   ): void {
-    if (!sessionId || !Number.isSafeInteger(expiresAtMs)) {
-      throw new Error(`Invalid sync responder session for ${key}`);
-    }
     if (expiresAtMs <= nowMs) {
       this.clearResponderSession(key);
       return;
     }
-    this.db.prepare(`
-      INSERT INTO sync_checkpoints (
-        key, offset, updated_at, expires_at,
-        responder_session_id, responder_session_expires_at
-      ) VALUES (?, 0, ?, ?, ?, ?)
-      ON CONFLICT(key) DO UPDATE SET
-        responder_session_id = excluded.responder_session_id,
-        responder_session_expires_at = excluded.responder_session_expires_at
-    `).run(key, nowMs, nowMs + this.ttlMs, sessionId, expiresAtMs);
+    const transition = this.db.transaction(() => {
+      this.writeEntry(key, transitionSyncCheckpointResponderSession({
+        key,
+        existing: this.get(key, nowMs),
+        sessionId,
+        expiresAtMs,
+        nowMs,
+        ttlMs: this.ttlMs,
+        manifestDigest,
+        manifestPrefixDigest,
+        responderSessionOffset,
+      }));
+    });
+    transition();
   }
 
   clearResponderSession(key: string): void {
-    this.db.prepare(`
-      UPDATE sync_checkpoints
-         SET responder_session_id = NULL,
-             responder_session_expires_at = NULL
-       WHERE key = ?
-    `).run(key);
+    const transition = this.db.transaction(() => {
+      const existing = this.readRow(key);
+      if (existing) this.writeEntry(key, withoutSyncCheckpointResponderSession(existing));
+    });
+    transition();
   }
 
   delete(key: string): void {
@@ -4191,6 +4367,15 @@ export interface VmReconcileNegativeRow {
   swm_gen: string;
   candidate_namespaces: string;
   peer_topology_key: string;
+  updated_at: number;
+}
+
+export interface SelectedVmReconcileCursorRow {
+  deployment_id: string;
+  context_graph_id: string;
+  on_chain_context_graph_id: string;
+  name_hash: string;
+  watermark: number;
   updated_at: number;
 }
 

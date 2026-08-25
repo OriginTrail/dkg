@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Opt-in RFC-64 producer bridge from an ordinary confirmed public KA publish
- * to this provider's durable exact author-catalog head.
+ * Opt-in RFC-64 SWM inventory and explicit public-catalog authoring support.
+ * Finalized VM remains inventoried by the chain and never advances this lane.
  */
 
 import {
@@ -97,14 +97,18 @@ function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
   ]);
 }
 
-/** Internal normal-publication handoff after VM confirmation is durable locally. */
-export interface RecordConfirmedRfc64PublicCatalogAssetParamsV1 {
+/** Explicit catalog-authoring input; ordinary VM confirmation never calls it. */
+export interface RecordRfc64PublicCatalogAssetParamsV1 {
   readonly contextGraphId: ContextGraphIdV1;
   readonly subGraphName?: SubGraphNameV1 | null;
   readonly assertionCoordinate: AssertionCoordinateV1;
   readonly publicQuads: readonly Quad[];
   readonly seal: AssertionSeal;
 }
+
+/** @deprecated Use RecordRfc64PublicCatalogAssetParamsV1. */
+export type RecordConfirmedRfc64PublicCatalogAssetParamsV1 =
+  RecordRfc64PublicCatalogAssetParamsV1;
 
 function shadowResult(
   status: Rfc64SwmAuthorInventoryShadowMutationResultV1['status'],
@@ -146,7 +150,6 @@ export interface ObserveRfc64ConfirmedVmParamsV1 {
   readonly contextGraphId: string;
   readonly subGraphName?: string | null;
   readonly assertionCoordinate: string;
-  readonly publicQuads: readonly Quad[];
   readonly seal: AssertionSeal;
   readonly assertionUri: string;
   readonly ctx: OperationContext;
@@ -225,7 +228,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     );
   }
 
-  /** Canonical non-blocking observer for catalog advancement and exact SWM removal. */
+  /**
+   * Canonical post-confirmation observer for exact SWM-inventory removal.
+   * Finalized VM is already inventoried by the chain and therefore MUST NOT
+   * advance an RFC-64 catalog head.
+   */
   async observeRfc64ConfirmedVmV1(
     this: DKGAgent,
     params: ObserveRfc64ConfirmedVmParamsV1,
@@ -259,44 +266,23 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       assertionCoordinate,
     });
     shadowRuntime.markVmConfirmed(assetKey, confirmedSeal.assertionVersion);
-    const runObserver = async (
-      failureMessage: string,
-      observer: () => Promise<unknown>,
-    ): Promise<void> => {
-      try {
-        await observer();
-      } catch (cause) {
-        this.log.warn(
-          params.ctx,
-          `${failureMessage}: ${cause instanceof Error ? cause.message : String(cause)}`,
-        );
-      }
-    };
-    await Promise.all([
-      runObserver(
-        `Confirmed ${params.publicationLabel} for <${params.assertionUri}> but RFC-64 catalog advancement failed`,
-        () => this.recordConfirmedRfc64PublicCatalogAssetV1({
-          contextGraphId,
-          subGraphName,
-          assertionCoordinate,
-          publicQuads: params.publicQuads,
-          seal: params.seal,
-        }),
-      ),
-      runObserver(
-        `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary`,
-        () => shadowRuntime.runExclusive(
-          assetKey,
-          async () => {
-            await this.removeRfc64SwmAuthorInventoryShadowV1({
-              contextGraphId,
-              subGraphName,
-              seal: params.seal,
-            });
-          },
-        ),
-      ),
-    ]);
+    try {
+      await shadowRuntime.runExclusive(
+        assetKey,
+        async () => {
+          await this.removeRfc64SwmAuthorInventoryShadowV1({
+            contextGraphId,
+            subGraphName,
+            seal: params.seal,
+          });
+        },
+      );
+    } catch (cause) {
+      this.log.warn(
+        params.ctx,
+        `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
   }
 
   readRfc64SwmAuthorInventorySnapshotV1(
@@ -479,7 +465,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     }
   }
 
-  /** Remove a row after VM confirmation, independently of VM catalog advancement. */
+  /** Remove a row after VM confirmation; the chain becomes the VM inventory. */
   async removeRfc64SwmAuthorInventoryShadowV1(
     this: DKGAgent,
     params: RemoveRfc64SwmAuthorInventoryShadowParamsV1,
@@ -542,16 +528,16 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       );
     }
   }
+
   /**
-   * Advance this provider's exact public-root author catalog after an ordinary
-   * graph-scoped KA publish has confirmed. The hook is dormant unless the
-   * preview config is present. Catalog objects and bundles are staged first,
-   * the provider's applied-head pointer advances second, and peer availability
-   * hints are sent last.
+   * Explicit low-level public-root catalog authoring entrypoint. This is kept
+   * for catalog construction and the upcoming SWM producer lane; it is not a
+   * VM lifecycle hook. Objects and bundles are staged before the applied head
+   * advances, then peer availability hints are sent best-effort.
    */
-  async recordConfirmedRfc64PublicCatalogAssetV1(
+  async recordRfc64PublicCatalogAssetV1(
     this: DKGAgent,
-    params: RecordConfirmedRfc64PublicCatalogAssetParamsV1,
+    params: RecordRfc64PublicCatalogAssetParamsV1,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
     const lane = this.resolveRfc64AcceptedPublicRootLaneV1(
       params.contextGraphId,
@@ -560,14 +546,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     if (lane === null) return null;
     const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
     // V1 deliberately catalogs public-only KA projections. Private-bearing
-    // publishes require the reserved cg-shared-v1 anchor/hash statements to be
-    // present in the author-sealed public projection; ordinary publication does
-    // not synthesize those statements yet, so attempting an upsert would always
-    // fail projection verification after chain confirmation.
+    // assets require the reserved cg-shared-v1 anchor/hash statements in the
+    // author-sealed public projection; this entrypoint does not synthesize them.
     if (BigInt(seal.privateTripleCount) > 0n) return null;
     if (params.publicQuads.length !== Number(seal.publicTripleCount)) {
       throw new Error(
-        'RFC-64 auto-publish public projection count differs from the confirmed author seal',
+        'RFC-64 public projection count differs from the supplied author seal',
       );
     }
     const projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(params.publicQuads);
@@ -594,6 +578,17 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       catalogIssuerDelegationExpiresAt:
         lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
     });
+  }
+
+  /**
+   * @deprecated Explicit compatibility alias only. Ordinary VM confirmation
+   * does not call this method; the chain remains the finalized-VM inventory.
+   */
+  recordConfirmedRfc64PublicCatalogAssetV1(
+    this: DKGAgent,
+    params: RecordConfirmedRfc64PublicCatalogAssetParamsV1,
+  ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
+    return this.recordRfc64PublicCatalogAssetV1(params);
   }
 
   /** One canonical activation, policy, ownership, and era boundary for catalog and SWM. */

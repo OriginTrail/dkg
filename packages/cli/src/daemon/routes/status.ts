@@ -56,7 +56,11 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import {
+  DKGAgent,
+  loadOpWallets,
+  resolveSyncReconcilerEnabled,
+} from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -85,6 +89,7 @@ import {
   ensureDkgDir,
   TELEMETRY_ENDPOINTS,
   type DkgConfig,
+  type ResolvedChainConfig,
   type AutoUpdateConfig,
   type LocalAgentIntegrationCapabilities,
   type LocalAgentIntegrationConfig,
@@ -387,6 +392,64 @@ async function probeRpcEndpoint(rpcUrl: string, index: number): Promise<{
   }
 }
 
+interface PublicChainSummary {
+  chainId: string | null;
+  configured: boolean;
+  rpcEndpointCount: number;
+  hubConfigured: boolean;
+}
+
+interface PublicInfoChainSummary extends PublicChainSummary {
+  /**
+   * Compatibility fields retained from the original `/api/info` contract.
+   * RPC endpoint values are deliberately unavailable on every response: the
+   * configured URLs may carry userinfo, provider keys, or path/query tokens.
+   */
+  rpcUrl: null;
+  rpcUrls: [];
+  hubAddress: string | null;
+  rpcEndpointsRedacted: true;
+}
+
+/**
+ * Project effective chain configuration onto the non-secret HTTP status shape.
+ * Keeping this boundary shared prevents either status route from accidentally
+ * serializing credential-bearing RPC URLs or raw contract addresses.
+ */
+function buildPublicChainSummary(
+  chainConf: ResolvedChainConfig | undefined,
+): PublicChainSummary | null {
+  if (!chainConf) return null;
+  return {
+    chainId: chainConf.chainId ?? null,
+    configured: Boolean(chainConf.rpcUrl && chainConf.hubAddress),
+    rpcEndpointCount: chainConf.rpcUrl
+      ? resolveRpcUrls(chainConf.rpcUrl, chainConf.rpcUrls).length
+      : 0,
+    hubConfigured: Boolean(chainConf.hubAddress),
+  };
+}
+
+/**
+ * Keep the established `/api/info.chain` keys without returning credentials.
+ * The Hub contract address is public chain metadata, so it remains usable;
+ * endpoint fields fail closed and the additive marker makes that intentional
+ * contract visible to clients instead of silently changing the object shape.
+ */
+function buildPublicInfoChainSummary(
+  chainConf: ResolvedChainConfig | undefined,
+): PublicInfoChainSummary | null {
+  const summary = buildPublicChainSummary(chainConf);
+  if (!summary || !chainConf) return null;
+  return {
+    ...summary,
+    rpcUrl: null,
+    rpcUrls: [],
+    hubAddress: chainConf.hubAddress ?? null,
+    rpcEndpointsRedacted: true,
+  };
+}
+
 function createRouteEvmProvider(rpcUrl: string, rpcUrls?: string[]): ethers.JsonRpcProvider | ethers.FallbackProvider {
   const providers = resolveRpcUrls(rpcUrl, rpcUrls)
     .map((url) => new ethers.JsonRpcProvider(url, undefined, { cacheTimeout: -1 }));
@@ -518,6 +581,25 @@ function summarizeRegistryEntry(e: IntegrationEntry) {
   };
 }
 
+function projectRfc64SelectedPublicSyncStatus(
+  agent: DKGAgent,
+  networkDefaultContextGraphs: readonly string[],
+  catalogBackedContextGraphs: readonly string[],
+) {
+  // This is the effective requested sync scope, not proof that every listed
+  // graph is public. Runtime classification still decides whether a graph uses
+  // the RFC-64 selected-public lane or the private curator-recovery lane.
+  const requestedContextGraphs = [...new Set([
+    ...agent.getSyncContextGraphIds(),
+    ...networkDefaultContextGraphs,
+  ])];
+  return {
+    defaultEnabled: true,
+    requestedContextGraphs,
+    catalogBackedContextGraphs: [...new Set(catalogBackedContextGraphs)],
+  };
+}
+
 export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -646,9 +728,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     );
     const networkId = network?.networkId ?? await computeNetworkId(network?.genesisId);
     const chainConf = resolveChainConfig(config, network);
-    const rpcEndpointCount = chainConf?.rpcUrl
-      ? resolveRpcUrls(chainConf.rpcUrl, chainConf.rpcUrls).length
-      : 0;
+    const publicChainSummary = buildPublicChainSummary(chainConf);
     // Process-wide multi-RPC write-failover counters (host-only; no URLs).
     // Reflects WRITE failover/exhaustion across all chain adapters in this
     // daemon process; read-path failover is internal to the FallbackProvider.
@@ -703,6 +783,19 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       && typeof agent.readRfc64PublicCatalogBootstrapStatusV1 === 'function'
         ? agent.readRfc64PublicCatalogBootstrapStatusV1()
         : null;
+    const rfc64CompleteSwmProviders = rfc64PublicCatalogActivation.enabled
+      ? (rfc64PublicCatalogActivation.bootstrap?.acceptedPublicPolicies ?? [])
+        .filter((accepted) => (accepted.completeSwmProviders?.length ?? 0) > 0)
+        .map((accepted) => ({
+          contextGraphId: accepted.policyEnvelope.payload.contextGraphId,
+          providers: accepted.completeSwmProviders,
+        }))
+      : [];
+    const rfc64SelectedPublicSync = projectRfc64SelectedPublicSyncStatus(
+      agent,
+      resolveNetworkDefaultContextGraphs(network),
+      rfc64PublicCatalogActivation.selectedContextGraphs,
+    );
     const unavailableFinalizationRecovery = (reason: string) => ({
       available: false,
       closed: false,
@@ -789,6 +882,15 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         })),
         diagnosticsAvailable: '/api/diagnostics/backpressure',
       },
+      // The certification harness must be able to distinguish an operator
+      // setting from the switch the agent actually honors. This projection
+      // deliberately uses the same resolver as both runtime reconcile gates,
+      // including environment-variable precedence.
+      syncLifecycle: {
+        syncReconcilerEnabled: resolveSyncReconcilerEnabled(
+          config.syncReconcilerEnabled,
+        ),
+      },
       connectedPeers: uniquePeers.size,
       connections: {
         total: allConns.length,
@@ -807,19 +909,24 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         enabled: rfc64PublicCatalogActivation.enabled,
         selectedContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
         autoPublishEnabled: rfc64PublicCatalogActivation.autoPublish !== undefined,
+        completeSwmProviders: rfc64CompleteSwmProviders,
         service: rfc64PublicCatalogService,
         bootstrap: rfc64PublicCatalogBootstrap,
       },
+      // Product-default scheduling is deliberately separate from the signed
+      // catalog authority surface above. Every explicitly requested CG is
+      // eligible for RFC-64 selected PUBLIC-SWM scheduling; private CGs retain
+      // curator recovery, and only `completeSwmProviders` may prove a whole
+      // public SWM scope terminal. The harness knows its generated CG is public
+      // and uses this exact requested-scope projection as its no-spend preflight.
+      rfc64SelectedPublicSync,
       hasOpenClawChannel: hasConfiguredLocalAgentChat(config, 'openclaw'),
       localAgentIntegrations,
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),
       autoUpdate: resolveAutoUpdateEnabled(config),
-      chain: chainConf
+      chain: publicChainSummary
         ? {
-            chainId: chainConf.chainId ?? null,
-            configured: Boolean(chainConf.rpcUrl && chainConf.hubAddress),
-            rpcEndpointCount,
-            hubConfigured: Boolean(chainConf.hubAddress),
+            ...publicChainSummary,
             // Multi-RPC failover observability (counts only — no RPC URLs).
             rpcFailovers: rpcFailoverStats.failovers,
             rpcExhaustions: rpcFailoverStats.exhaustions,
@@ -862,14 +969,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       startedAt: new Date(startedAt).toISOString(),
       uptimeSeconds: Math.floor((now - startedAt) / 1000),
       timestamp: new Date(now).toISOString(),
-      chain: chainConf
-        ? {
-            chainId: chainConf.chainId ?? null,
-            rpcUrl: chainConf.rpcUrl,
-            rpcUrls: chainConf.rpcUrls ?? [],
-            hubAddress: chainConf.hubAddress,
-          }
-        : null,
+      chain: buildPublicInfoChainSummary(chainConf),
       peers: uniquePeers.size,
       contextGraphs: resolveContextGraphs(config).length,
       telemetry: config.telemetry?.enabled ?? false,

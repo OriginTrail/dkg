@@ -33,6 +33,8 @@ import {
 } from '../atomic-graph-replace.js';
 import { quadToNQuad } from '../bounded-rdf.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
+import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
+import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
@@ -114,16 +116,20 @@ function abortError(signal: AbortSignal): Error {
 function createStoreOperationDeadline(
   timeoutMs: number,
   callerSignal?: AbortSignal,
+  operation = 'operation',
+  outcome: () => 'not_started' | 'indeterminate' = () => 'indeterminate',
 ): StoreOperationDeadline {
   const controller = new AbortController();
   const deadlineAt = performance.now() + timeoutMs;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let callerAttached = false;
 
-  const timeoutError = () => new DOMException(
-    `Blazegraph operation exceeded its ${timeoutMs}ms deadline`,
-    'TimeoutError',
-  );
+  const timeoutError = () => new StoreOperationTimeoutError({
+    backend: 'blazegraph',
+    operation,
+    timeoutMs,
+    outcome: outcome(),
+  });
   const detachCaller = () => {
     if (!callerAttached) return;
     callerAttached = false;
@@ -216,9 +222,14 @@ export class BlazegraphStore implements TripleStore {
     options: QueryOptions | undefined,
     work: (deadline: StoreOperationDeadline) => Promise<T>,
   ): Promise<T> {
-    const deadline = createStoreOperationDeadline(this.operationTimeoutMs, options?.signal);
-    const source = options?.source ?? `blazegraph.${operation}`;
     let admitted = false;
+    const deadline = createStoreOperationDeadline(
+      this.operationTimeoutMs,
+      options?.signal,
+      operation,
+      () => admitted ? 'indeterminate' : 'not_started',
+    );
+    const source = options?.source ?? `blazegraph.${operation}`;
     const scheduled = externalStorePriorityScheduler.run(
       options?.priority,
       source,
@@ -449,11 +460,11 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
-    return this.runStoreWork('query', options, async (deadline) => {
-      const trimmed = sparql.trim();
-      const upper = trimmed.toUpperCase();
-      const isAsk = upper.startsWith('ASK');
-      const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+    const trimmed = sparql.trim();
+    const upper = trimmed.toUpperCase();
+    const isAsk = upper.startsWith('ASK');
+    const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+    return this.runStoreWork(isConstruct ? 'construct' : 'query', options, async (deadline) => {
 
       if (isConstruct) {
         return this.queryConstruct(trimmed, deadline, options);
@@ -706,18 +717,18 @@ function formatTerm(term: string): string {
  *  - the final non-comment line must parse as a complete N-Quad statement
  *  - Blazegraph's appended failure text carries a Java exception marker
  *
- * Parsing and final-line validation intentionally share {@link parseNQuadLine}
- * so there is one definition of a statement. Interior unparseable lines retain
- * the adapter's historical tolerant behaviour; an unparseable final statement
- * is the truncation signal that must fail closed.
+ * Parsing and final-line validation consume {@link scanNQuadLines}, so line
+ * normalization and parse-failure metadata have one shared definition.
+ * Interior unparseable lines retain the adapter's historical tolerant
+ * behaviour; an unparseable final statement is the truncation signal that
+ * must fail closed.
  */
 function parseBlazegraphConstructNQuads(text: string): DKGQuad[] {
   const quads: DKGQuad[] = [];
-  let finalStatement: { line: string; parsed: boolean } | undefined;
+  let finalStatement: NQuadLineScan | undefined;
 
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
+  for (const scanned of scanNQuadLines(text)) {
+    const { line } = scanned;
 
     // Both alternatives are line-start anchored on purpose. The engine
     // appends failure text as standalone lines, while the same words inside a
@@ -731,9 +742,8 @@ function parseBlazegraphConstructNQuads(text: string): DKGQuad[] {
       );
     }
 
-    const quad = parseNQuadLine(line);
-    finalStatement = { line, parsed: quad !== undefined };
-    if (quad) quads.push(quad);
+    finalStatement = scanned;
+    if (scanned.parsed) quads.push(scanned.quad);
   }
 
   if (finalStatement && !finalStatement.parsed) {
@@ -745,23 +755,6 @@ function parseBlazegraphConstructNQuads(text: string): DKGQuad[] {
   }
 
   return quads;
-}
-
-function parseNQuadLine(line: string): DKGQuad | undefined {
-  const match = line.match(
-    /^(<[^>]+>|_:\S+)\s+(<[^>]+>)\s+(<[^>]+>|_:\S+|"(?:[^"\\]|\\.)*"(?:@\S+|\^\^<[^>]+>)?)\s*(?:(<[^>]+>)\s*)?\.$/,
-  );
-  if (!match) return undefined;
-  return {
-    subject: stripAngle(match[1]),
-    predicate: stripAngle(match[2]),
-    object: match[3].startsWith('<') ? stripAngle(match[3]) : match[3],
-    graph: match[4] ? stripAngle(match[4]) : '',
-  };
-}
-
-function stripAngle(s: string): string {
-  return s.startsWith('<') && s.endsWith('>') ? s.slice(1, -1) : s;
 }
 
 function escapeUri(uri: string): string {

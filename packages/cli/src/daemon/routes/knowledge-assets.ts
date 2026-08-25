@@ -39,6 +39,8 @@ import {
   isWritableQuad,
   validateQuadObjectTerms,
   respondIfReconcileUnavailable,
+  respondIfStoreUnavailable,
+  classifyStoreUnavailable,
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
   validateWritableQuadLiteralSizes,
@@ -73,7 +75,7 @@ import {
   isSameAgentAddress,
   scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
-import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
+import { AsyncLiftJobConflictError, LiftJobPendingChainProofError, PromoteJobConflictError, isKnowledgeAssetWorkspaceHeadCorruptError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import {
   validateAssertionName,
@@ -226,6 +228,7 @@ function respondAssertionError(res: RequestContext["res"], e: any): void {
     jsonResponse(res, 413, payloadTooLargeResponseBody(e));
     return;
   }
+  if (respondIfStoreUnavailable(res, e)) return;
   if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
     jsonResponse(res, 409, {
       error: e.message,
@@ -1063,6 +1066,28 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       }
 
       const errors: Array<{ phase: string; error: string }> = [];
+      const respondWithPartialStoreFailure = (
+        error: unknown,
+        phase: 'swm-share' | 'vm-publish',
+      ): boolean => {
+        const classified = classifyStoreUnavailable(error);
+        if (!classified) return false;
+        jsonResponse(
+          res,
+          503,
+          {
+            created: true,
+            ...result,
+            phase,
+            ...classified.body,
+            retryAction: 'retry_same_knowledge_asset',
+            retryKnowledgeAssetName: name,
+          },
+          undefined,
+          { 'Retry-After': '1' },
+        );
+        return true;
+      };
       if (alsoShareSwm === true) {
         try {
           // Carry the same resolved author into the share. The asset is already
@@ -1088,6 +1113,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             recordActivityAndNotify(ctx, { contextGraphId: resolvedContextGraphId, kind: "promoted", actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
           }
         } catch (e: any) {
+          if (respondWithPartialStoreFailure(e, 'swm-share')) return;
           errors.push({ phase: "swm-share", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
       }
@@ -1120,6 +1146,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           }
           recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
         } catch (e: any) {
+          if (respondWithPartialStoreFailure(e, 'vm-publish')) return;
           errors.push({ phase: "vm-publish", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
       }
@@ -1132,6 +1159,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (e?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
       }
+      if (respondIfStoreUnavailable(res, e)) return;
       // Transient KA-number-floor reconcile failure (rate-limited RPC) -> 503.
       if (respondIfReconcileUnavailable(res, e)) return;
       return jsonResponse(res, 500, { error: e?.message ?? String(e) });
@@ -1563,7 +1591,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             : {}),
         });
         await agent.preflightKnowledgeAssetVmPublishSnapshot(intent);
-        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent);
+        // 🔴 3824484639 — record WHO admitted this job, for authorization only. `requestAgentAddress`
+        // is always resolvable (a node-level token maps to the default owner agent), unlike the
+        // author-resolution hint, which is deliberately absent for node tokens — authorizing on
+        // that left every node-token job unable to use the force-clear the daemon advertises to it.
+        // Kept separate from `callerAgentAddress` so author selection is untouched.
+        // Admission travels BESIDE the request (🟡 3824743779), never inside it: the operation
+        // payload that execution and recovery act on carries no authorization principal.
+        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent, {
+          admittedByAgentAddress: requestAgentAddress,
+        });
         return jsonResponse(res, 202, {
           jobId,
           status: "accepted",
@@ -1590,8 +1627,49 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             existingJobId: err.existingJobId,
           });
         }
+        // GH#2270 — admission refused to republish a job that may already have sent a
+        // transaction. Deliberately NOT the 409 below: nothing is wrong with the client's
+        // request, and the job KEEPS its lifecycle subject (`existingJobId`).
+        //
+        // PR #2300 r1 (🟡 3809054821) — `retryable` is JOB-SPECIFIC, carried on the error from
+        // the policy module's hasAutomaticRecoveryExit: `true` means an automatic lane exists
+        // that can move THIS job (the proof-first dispatcher re-checks it every recover() tick —
+        // canonical recognition, or the create-only absence release), so re-submitting converges
+        // without an operator; it is still not a deadline — while the chain stays silent the 503
+        // keeps coming. `false` means the record has no automatic exit (a legacy no-nonce create,
+        // an update with no formable recognition question): retrying will 503 forever, and the
+        // by-id clear is the only move.
+        if (err instanceof LiftJobPendingChainProofError) {
+          return jsonResponse(res, 503, {
+            code: err.code,
+            error: `${err.message}. ${err.retryable
+              ? 'Chain recovery re-checks this job every tick and releases it once the chain can '
+                + 'account for the transaction: if it mined, recovery finalizes this job; if it is '
+                + 'provably absent and this job may safely re-run, recovery puts it back on the '
+                + 'queue. A dropped transaction on a job recovery may not re-run blind stays held '
+                + 'until you check it yourself and clear the job with '
+              : 'This job\'s record gives chain recovery no automatic exit (no provable absence '
+                + 'and no formable recognition), so retrying will not release it. Check the '
+                + 'transaction yourself, then clear the job with '
+            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true} — which the agent that ENQUEUED that job must run, since the override is scoped to its admission lane.`,
+            retryable: err.retryable,
+            existingJobId: err.existingJobId,
+          });
+        }
         if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {
           return jsonResponse(res, 409, { code: err.code, error: err.message ?? String(err) });
+        }
+        // GH#2273 — a multi-valued SWM head now fails closed in the resolver. That is
+        // transient SERVER-side corruption the sync repair heals, not a stale client
+        // intent, so it must not read as the 409 above (the client would re-share for
+        // nothing) or fall through to a generic 500: 503 + retryable tells the caller to
+        // retry the same enqueue after catch-up converges the head.
+        if (isKnowledgeAssetWorkspaceHeadCorruptError(err)) {
+          return jsonResponse(res, 503, {
+            code: err.code,
+            error: err.message ?? String(err),
+            retryable: true,
+          });
         }
         // GH#1778 — several authors share this KA name; the caller must
         // disambiguate. Surface the candidate authors so the UI/CLI can pick.
@@ -1707,6 +1785,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // relabel an author-selection failure whose message happens to contain
         // "is not finalized" as a generic VM_PUBLISH_PRECONDITION.
         if (respondAuthorSelectionError(res, e)) return;
+        if (respondIfStoreUnavailable(res, e)) return;
         if (e?.code === "PUBLISH_NOT_FULL_SHARE" || /is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {
           return jsonResponse(res, 409, { code: e?.code === "PUBLISH_NOT_FULL_SHARE" ? "PUBLISH_NOT_FULL_SHARE" : "VM_PUBLISH_PRECONDITION", error: msg });
         }

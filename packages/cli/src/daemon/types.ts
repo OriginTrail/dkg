@@ -3,24 +3,14 @@
 // Pure type/interface declarations used across the daemon sub-modules.
 
 import type { CatchupJobResult } from '../catchup-runner.js';
+import type { Rfc64SelectedSwmGraphSyncStatus } from '@origintrail-official/dkg-agent';
+import {
+  toLegacyCatchupJobState,
+  type CatchupJobState,
+  type CatchupStatusResponse,
+} from '../catchup-status.js';
 
-export type CatchupJobState =
-  | "queued"
-  | "running"
-  | "done"
-  | "failed"
-  | "denied"
-  /** Local scheduler capacity was unavailable; retry is safe. */
-  | "deferred"
-  /**
-   * Catchup completed but no peer could deliver the CG content within
-   * the run — every per-peer sync round either failed or returned
-   * nothing while no responder explicitly denied access. Distinct from
-   * `denied` (curator refused) and `failed` (the worker itself threw)
-   * so the UI can render targeted copy + a "send signed join request"
-   * CTA without misclassifying slow public CGs as denied.
-   */
-  | "unreachable";
+export type { CatchupJobState } from '../catchup-status.js';
 
 export interface CatchupJob {
   jobId: string;
@@ -39,10 +29,26 @@ export interface CatchupTracker {
   latestByContextGraph: Map<string, string>;
 }
 
-export function toCatchupStatusResponse(job: CatchupJob) {
+export type CatchupGraphSyncStatus = Rfc64SelectedSwmGraphSyncStatus;
+
+export function toCatchupStatusResponse(
+  job: CatchupJob,
+  graphSync?: CatchupGraphSyncStatus,
+): CatchupStatusResponse {
   return {
-    ...job,
+    jobId: job.jobId,
     contextGraphId: job.contextGraphId,
+    includeWorkspace: job.includeWorkspace,
     includeSharedMemory: job.includeWorkspace,
+    /** Older clients keep their closed terminal vocabulary. */
+    status: toLegacyCatchupJobState(job.status),
+    /** Precise bounded-job outcome for upgraded clients. */
+    jobStatus: job.status,
+    queuedAt: job.queuedAt,
+    ...(job.startedAt === undefined ? {} : { startedAt: job.startedAt }),
+    ...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
+    ...(job.result === undefined ? {} : { result: job.result }),
+    ...(job.error === undefined ? {} : { error: job.error }),
+    ...(graphSync === undefined ? {} : { graphSync }),
   };
 }

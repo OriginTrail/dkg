@@ -146,6 +146,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     result?: CatchupJobResult;
     includeSharedMemory?: boolean;
     syncMode?: unknown;
+    forceCatchup?: unknown;
     readiness?: {
       version: number;
       durableVerified: boolean;
@@ -227,6 +228,13 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       isPrivateContextGraph: async () => opts.isPrivate ?? false,
       resolveAgentByToken: () => undefined,
       getDefaultAgentAddress: () => opts.callerAddress ?? '0x0000000000000000000000000000000000000001',
+      getRfc64SelectedSwmGraphSyncStatus: () => ({
+        mechanism: 'rfc64-selected-on-connect',
+        state: 'inactive',
+        configuredProviderCount: 0,
+        retryRequiredProviderCount: 0,
+        terminalProviderCount: 0,
+      }),
     };
 
     server = createServer(async (req, res) => {
@@ -286,6 +294,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         contextGraphId,
         includeSharedMemory: opts.includeSharedMemory ?? true,
         ...(opts.syncMode !== undefined ? { syncMode: opts.syncMode } : {}),
+        ...(opts.forceCatchup !== undefined ? { forceCatchup: opts.forceCatchup } : {}),
       }),
     });
     const response = await httpResponse.json() as any;
@@ -590,6 +599,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.statusResponse).toMatchObject({
       jobId: result.response.catchup.jobId,
       status: 'done',
+      jobStatus: 'done',
+      graphSync: {
+        state: 'inactive',
+      },
       result: {
         dataSynced: 3,
         sharedMemorySynced: 4,
@@ -758,7 +771,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
   });
 
-  it('records clean private shared-memory progress without fabricating durable readiness', async () => {
+  it('records clean private shared-memory progress without reporting VM-complete catch-up', async () => {
     const result = await subscribe({
       hasConfirmedMeta: true,
       isPrivate: true,
@@ -772,8 +785,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
 
     expect(result.runCalls).toBe(1);
-    expect(result.job.status).toBe('done');
-    expect(result.job.error).toBeUndefined();
+    expect(result.job).toMatchObject({
+      status: 'unreachable',
+      error: expect.stringContaining('durable VM catch-up did not complete'),
+    });
     expect(result.job.result).toMatchObject({
       dataSynced: 0,
       sharedMemorySynced: 4,
@@ -812,8 +827,12 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
 
     expect(result.job).toMatchObject({
+      status: 'partial',
+      error: expect.stringContaining('bounded catch-up job ended'),
+    });
+    expect(result.statusResponse).toMatchObject({
       status: 'unreachable',
-      error: expect.stringContaining('did not complete without a timeout'),
+      jobStatus: 'partial',
     });
     expect(result.state).toMatchObject({
       synced: false,
@@ -848,7 +867,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       },
     });
 
-    expect(result.job.status).toBe('unreachable');
+    expect(result.job.status).toBe('partial');
     expect(result.state).toMatchObject({
       synced: false,
       sharedMemorySynced: false,
@@ -921,6 +940,39 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
   });
 
+  it('does not synthesize done from existing SWM-only provenance when VM is unverified', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      includeSharedMemory: false,
+      result: privateSharedMemoryOnlyResult(),
+      readiness: {
+        version: 1,
+        durableVerified: false,
+        sharedMemoryVerified: true,
+      },
+      initial: {
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.response.catchup.status).toBe('queued');
+    expect(result.runCalls).toBe(1);
+    expect(result.job.status).toBe('partial');
+    expect(result.state).toMatchObject({
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+    });
+    expect(result.readiness).toMatchObject({
+      durableVerified: false,
+      sharedMemoryVerified: true,
+    });
+  });
+
   it('only returns synthetic done when all ready flags include metaSynced=true', async () => {
     const result = await subscribe({
       hasConfirmedMeta: true,
@@ -941,5 +993,57 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.runCalls).toBe(0);
     expect(result.job.status).toBe('done');
     expect(result.patches).toEqual([]);
+  });
+
+  it('forces RFC-64 catch-up for an already-ready graph when requested', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      forceCatchup: true,
+      result: publicDurableAndSharedMemoryResult(),
+      readiness: {
+        version: 1,
+        durableVerified: true,
+        sharedMemoryVerified: true,
+      },
+      initial: {
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.response.catchup.status).toBe('queued');
+    expect(result.runCalls).toBe(1);
+    expect(result.runRequests).toEqual([
+      expect.objectContaining({ includeSharedMemory: true }),
+    ]);
+    expect(result.job.status).toBe('done');
+    // Repair must not make an already-ready graph unavailable while the
+    // bounded reconciliation runs.
+    expect(result.patches).toEqual([
+      expect.objectContaining({
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+      }),
+    ]);
+    expect(result.state).toMatchObject({
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+    });
+  });
+
+  it('rejects a non-boolean forceCatchup value without starting work', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      forceCatchup: 'true',
+    });
+
+    expect(result.responseStatus).toBe(400);
+    expect(result.response.error).toContain('Invalid "forceCatchup"');
+    expect(result.runCalls).toBe(0);
+    expect(result.job).toBeUndefined();
   });
 });

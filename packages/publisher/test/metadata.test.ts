@@ -8,6 +8,7 @@ import {
   generateConfirmedFullMetadata,
   generateGraphKnowledgeAssetMetadata,
   readGraphKnowledgeAssetConfirmationKindV1,
+  readGraphKnowledgeAssetReceiptProvenanceV1,
   generateShareMetadata,
   generateAssertionCreatedMetadata,
   generateAssertionPromotedMetadata,
@@ -402,6 +403,24 @@ describe('generateGraphKnowledgeAssetMetadata confirmation state', () => {
       quad('"transaction"'),
       quad('"finalized-materialization"'),
     ])).toThrow('2 confirmation kinds');
+  });
+
+  it('reads a legacy confirmed transaction receipt without a confirmation kind', () => {
+    const transactionHash = `0x${'ab'.repeat(32)}`;
+    expect(readGraphKnowledgeAssetReceiptProvenanceV1([
+      {
+        subject: GRAPH_UAL,
+        predicate: `${DKG}status`,
+        object: '"confirmed"',
+        graph: META_GRAPH,
+      },
+      {
+        subject: GRAPH_UAL,
+        predicate: `${DKG}transactionHash`,
+        object: `"${transactionHash}"`,
+        graph: META_GRAPH,
+      },
+    ])).toEqual({ transactionHash });
   });
 
   it('preserves the tentative metadata shape without confirmation provenance', () => {

@@ -170,7 +170,7 @@ describe('WorkerCatchupRunner lifecycle', () => {
  */
 describe('WorkerCatchupRunner agent bridge', () => {
   function bridgeAgent(overrides: Record<string, unknown> = {}) {
-    const calls: Record<string, unknown[][]> = { durable: [], shared: [] };
+    const calls: Record<string, unknown[][]> = { durable: [], shared: [], selectedShared: [] };
     let resolutionCalls = 0;
     const agent = {
       isPrivateContextGraph: async () => false,
@@ -189,6 +189,10 @@ describe('WorkerCatchupRunner agent bridge', () => {
       syncSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
         calls.shared.push(args);
         return {};
+      },
+      syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
+        calls.selectedShared.push(args);
+        return { kind: 'selected-shared-memory', shared: {}, selectedScopeComplete: true };
       },
       ...overrides,
     };
@@ -263,9 +267,18 @@ describe('WorkerCatchupRunner agent bridge', () => {
 
     await invokeThroughBridge(agent, 'syncDurable', ['peer-a', 'cg-x', 2000, 'durable:urn:cg:private:abc']);
     await invokeThroughBridge(agent, 'syncSharedMemory', ['peer-a', 'cg-x', 2000, { not: 'a string' }]);
+    await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-swm', 'cg-x', 2000, 'durable:urn:cg:private:abc', true],
+    );
 
     expect(calls.durable[0]!.at(-1)).toMatchObject({ source: 'unspecified' });
     expect(calls.shared[0]!.at(-1)).toMatchObject({ source: 'unspecified' });
+    expect(calls.selectedShared[0]!.at(-1)).toMatchObject({
+      source: 'unspecified',
+      selectedSwmPriority: true,
+    });
   });
 
   it('hands the resolved peer into selection and returns an authority-ranked list', async () => {
@@ -314,6 +327,89 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.result.connectedPeers).toBe(3);
   });
 
+  it('keeps connected fallback peers when the preferred curator connection fails', async () => {
+    const { agent } = bridgeAgent({
+      resolveSyncPeerWithProvenance: async () => ({
+        peerId: 'peer-stale-curator',
+        provenance: 'metadata',
+      }),
+      ensurePeerConnected: async () => {
+        throw new Error('failed to connect via relay with status NO_RESERVATION');
+      },
+      node: {
+        libp2p: {
+          getConnections: () => [{
+            remotePeer: { toString: () => 'peer-connected-core' },
+          }],
+        },
+      },
+      selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+    });
+
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-public-repair']);
+
+    expect(posted.error).toBeUndefined();
+    expect(posted.result).toMatchObject({
+      preferredPeerId: 'peer-stale-curator',
+      authoritativePeerId: 'peer-stale-curator',
+      peerIds: ['peer-connected-core'],
+      connectedPeers: 1,
+    });
+  });
+
+  it('ranks an RFC-64 complete-SWM provider ahead of fallback peers', async () => {
+    const ensured: string[] = [];
+    const { agent } = bridgeAgent({
+      resolveSyncPeerWithProvenance: async () => ({
+        peerId: 'peer-curator',
+        provenance: 'metadata',
+      }),
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => ['peer-swm'],
+      ensurePeerConnected: async (peerId: string) => { ensured.push(peerId); },
+      node: {
+        libp2p: {
+          getConnections: () => ['peer-a', 'peer-curator', 'peer-swm'].map(
+            (id) => ({ remotePeer: { toString: () => id } }),
+          ),
+        },
+      },
+      selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+    });
+
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-rfc64-swm', true]);
+
+    expect(ensured).toEqual(['peer-curator', 'peer-swm']);
+    expect(posted.result.authoritativePeerId).toBe('peer-curator');
+    expect(posted.result.authoritativeSharedMemoryPeerIds).toEqual(['peer-swm']);
+    expect(posted.result.peerIds).toEqual(['peer-swm', 'peer-curator', 'peer-a']);
+  });
+
+  it('does not prioritize an RFC-64 SWM provider for a VM-only catch-up', async () => {
+    const ensured: string[] = [];
+    const { agent } = bridgeAgent({
+      resolveSyncPeerWithProvenance: async () => ({
+        peerId: 'peer-curator',
+        provenance: 'metadata',
+      }),
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => ['peer-swm'],
+      ensurePeerConnected: async (peerId: string) => { ensured.push(peerId); },
+      node: {
+        libp2p: {
+          getConnections: () => ['peer-a', 'peer-curator', 'peer-swm'].map(
+            (id) => ({ remotePeer: { toString: () => id } }),
+          ),
+        },
+      },
+      selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+    });
+
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-rfc64-swm', false]);
+
+    expect(ensured).toEqual(['peer-curator']);
+    expect(posted.result.authoritativeSharedMemoryPeerIds).toEqual([]);
+    expect(posted.result.peerIds).toEqual(['peer-curator', 'peer-a', 'peer-swm']);
+  });
+
   it('forwards the admission source into both detailed sync calls', async () => {
     const { agent, calls } = bridgeAgent();
 
@@ -329,6 +425,38 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(calls.shared[0]!.at(-1)).toMatchObject({
       priority: 2000,
       source: 'catchup-foreground',
+    });
+  });
+
+  it('routes an RFC-64 complete provider through the typed selected SWM lane', async () => {
+    const { agent, calls } = bridgeAgent({
+      syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
+        calls.selectedShared.push(args);
+        return {
+          kind: 'selected-shared-memory',
+          shared: { insertedDataTriples: 7 },
+          selectedScopeComplete: true,
+        };
+      },
+    });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-swm', 'cg-x', 2000, 'catchup-foreground', true],
+    );
+
+    expect(calls.shared).toEqual([]);
+    expect(calls.selectedShared).toHaveLength(1);
+    expect(calls.selectedShared[0]!.at(-1)).toMatchObject({
+      priority: 2000,
+      source: 'catchup-foreground',
+      selectedSwmPriority: true,
+    });
+    expect(posted.result).toEqual({
+      kind: 'selected-shared-memory',
+      shared: { insertedDataTriples: 7 },
+      selectedScopeComplete: true,
     });
   });
 

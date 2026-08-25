@@ -1,9 +1,10 @@
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
-import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
+import type { PreBroadcastRecord } from './publisher.js';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { GraphManager, invalidateSwmMaterializationWitness, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
@@ -52,6 +53,8 @@ import {
   WM_CURRENT_ASSERTION_PRED,
   SWM_CURRENT_ASSERTION_PRED,
   VM_CURRENT_ASSERTION_PRED,
+  SHARE_OPERATION_ID_PRED,
+  PROMOTE_OPERATION_INTENT_PRED,
   toHex,
   buildScopedMinimalMeta,
   resolveUalByBatchId,
@@ -69,6 +72,7 @@ import {
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
   storeWorkspaceOperationPublicQuads,
+  tryResolveKnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { ethers } from 'ethers';
@@ -84,6 +88,12 @@ import {
   type CASCondition,
 } from './errors.js';
 import { isQuorumUnmetError } from './ack-errors.js';
+import { stripOptionalLiteral } from './sparql-binding-literal.js';
+import {
+  runLegacyWorkingMemoryMigration,
+  type LegacyWmMigrationHost,
+  type LegacyWmMigrationResult,
+} from './legacy-wm-migration.js';
 import { PublishLifecycleLogger } from './publish-lifecycle-logger.js';
 import {
   PublisherPlanner,
@@ -112,8 +122,6 @@ export {
 // finalize(layer:"swm") so a subset share — which also stamps dkg:rootEntity
 // member rows — cannot be sealed-in-SWM and published as a partial asset.
 const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
-const SHARE_OPERATION_ID_PRED = 'http://dkg.io/ontology/shareOperationId';
-const PROMOTE_OPERATION_INTENT_PRED = 'http://dkg.io/ontology/promoteOperationIntent';
 
 type PromoteOperationIntent = {
   version: 1;
@@ -593,6 +601,69 @@ function formatGossipLimit(bytes: number): string {
   return formatBytesAsKb(bytes);
 }
 
+/**
+ * GH#2270 PR-3 r4 — the ONE write-ahead hook for both signing paths.
+ *
+ * `publish` and `update` each carried a private copy of the same three-part contract: a once-only
+ * latch (adapters may invoke `onBroadcast` more than once across retries, the boundary must fire
+ * once), the hash-bearing `chain:txsigned` breadcrumb and `chain:writeahead:start`
+ * instrumentation FIRST, and the durable `onBeforeBroadcast` callback LAST — awaited, so nothing
+ * fallible runs between the durable record and the send, and a throw anywhere in here aborts the
+ * broadcast with the record and the wire still agreeing. Two copies of an ordering contract is
+ * two places for the order to be edited in one; this is the single owner.
+ *
+ * The phase-name-encodes-the-hash convention (PR #241): `PhaseCallback` is a 2-arg function, so
+ * the signed tx identity travels as `chain:txsigned:tx-<hash>`, emitted as a balanced start/end
+ * pair to preserve the golden-sequence "every start has a matching end" invariant. The durable
+ * callback used to run FIRST; a rejecting `onPhase` after it then aborted the broadcast with the
+ * 'broadcast' record already on disk — a persisted transaction that was never sent (r3).
+ *
+ * `didWriteAhead()` is how the call sites keep the surrounding `try/finally` contract: the
+ * balancing `chain:writeahead:end` is emitted only if `:start` actually fired.
+ */
+function createWriteAheadHook(hooks: {
+  onPhase?: PhaseCallback;
+  onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
+  /**
+   * GH#2270 PR #2300 r3 — WHICH BRANCH is signing, recorded because it cannot be inferred later.
+   * Recovery's absence-release is create-only, and the job's request does not settle the question:
+   * the queued publish resolves its update branch from `request.vmCurrentAssertion ?? the live
+   * lifecycle pointer`, so a request carrying no pointer of its own can still sign an update. The
+   * one moment the answer is certain is here, at the signing site, and it is a static fact of the
+   * call site: this builder's two consumers ARE the two branches.
+   */
+  operationKind: 'create' | 'update';
+}): {
+  emitWriteAheadStart: (signal: PreBroadcastSignal) => Promise<void>;
+  didWriteAhead: () => boolean;
+} {
+  const { onPhase, onBeforeBroadcast, operationKind } = hooks;
+  let wroteAhead = false;
+  const emitPhase = async (phase: string, status: 'start' | 'end') => {
+    await (onPhase?.(phase, status) as unknown as Promise<void> | void);
+  };
+  return {
+    didWriteAhead: () => wroteAhead,
+    // The signal is REQUIRED (r3 3811569467): a call with no signed transaction would latch the
+    // hook, emit the write-ahead phase, skip the durable callback, and then suppress the real
+    // signal that follows — a state the chain interface never produces and this contract must
+    // not permit.
+    emitWriteAheadStart: async (signal: PreBroadcastSignal) => {
+      if (wroteAhead) return;
+      wroteAhead = true;
+      // Instrumentation runs FIRST. It is caller-supplied and therefore fallible, and it is
+      // awaited, so a rejecting listener aborts the send — which is fine, and even desirable,
+      // as long as nothing durable has been written yet.
+      const phase = `chain:txsigned:tx-${signal.txHash}`;
+      await emitPhase(phase, 'start');
+      await emitPhase(phase, 'end');
+      await emitPhase('chain:writeahead', 'start');
+      // The DURABLE boundary is LAST, so nothing fallible runs between it and the send.
+      await onBeforeBroadcast?.({ ...signal, operationKind });
+    },
+  };
+}
+
 function recoverCompactMessageSigner(
   message: Uint8Array,
   signature: { r: Uint8Array; vs: Uint8Array },
@@ -854,19 +925,6 @@ function selectPublicStagingQuads(
     return undefined;
   }
   return publicNquadsBytes;
-}
-
-function stripOptionalLiteral(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  if (value.startsWith('"')) {
-    try {
-      return JSON.parse(value);
-    } catch {
-      const lastQuote = value.lastIndexOf('"');
-      return value.slice(1, lastQuote > 0 ? lastQuote : undefined);
-    }
-  }
-  return value;
 }
 
 function parsePromoteOperationIntent(
@@ -2044,6 +2102,8 @@ export class DKGPublisher implements Publisher {
       operationCtx?: OperationContext;
       clearSharedMemoryAfter?: boolean;
       onPhase?: PhaseCallback;
+      onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
+      onBroadcastAccepted?: (record: PreBroadcastRecord) => Promise<void> | void;
       /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
       publishContextGraphId?: string;
       /** On-chain CG ID for the V10 chain tx (ACK digest + publishDirect). Does NOT trigger remap. */
@@ -2244,6 +2304,8 @@ export class DKGPublisher implements Publisher {
       ...(graphPublish ? { privateQuads } : {}),
       operationCtx: ctx,
       onPhase: options?.onPhase,
+      onBeforeBroadcast: options?.onBeforeBroadcast,
+      onBroadcastAccepted: options?.onBroadcastAccepted,
       publisherPeerId: options?.publisherPeerId,
       v10ACKProvider: options?.v10ACKProvider,
       trustedNonManifestCatalogTriples: options?.trustedNonManifestCatalogTriples,
@@ -2589,6 +2651,8 @@ export class DKGPublisher implements Publisher {
       operationCtx,
       entityProofs = false,
       onPhase,
+      onBeforeBroadcast,
+      onBroadcastAccepted,
     } = options;
     // Round 9 Bug 25 + Round 12 Bug 34: reject user-authored reserved-
     // namespace subjects. The bypass is keyed on a module-private
@@ -3794,35 +3858,10 @@ export class DKGPublisher implements Publisher {
         // emits neither and listeners simply see the parent `chain`
         // phase; adapters upgrading to the new hook regain the
         // precise boundary. See P-1 / P-1.2 in BUGS_FOUND.md.
-        let wroteAhead = false;
-        const emitPhase = async (phase: string, status: 'start' | 'end') => {
-          await (onPhase?.(phase, status) as unknown as Promise<void> | void);
-        };
-        const emitWriteAheadStart = async (info?: { txHash?: string }) => {
-          if (wroteAhead) return;
-          wroteAhead = true;
-          // PR #241 Codex iter-5: emit a hash-bearing phase BEFORE the
-          // generic `chain:writeahead:start` so WAL listeners can
-          // persist the signed-but-not-yet-broadcast tx identity
-          // (spec axiom 4 / §06 "txHash persisted" requirement, P-1.2
-          // in BUGS_FOUND.md). The phase name encodes the hash because
-          // `PhaseCallback` is a 2-arg function; adding a detail
-          // parameter would be a source-level break for existing
-          // onPhase consumers. Listeners can regex the phase string
-          // to recover the hash, or legacy consumers can ignore it.
-          //
-          // Emit balanced `start` + `end` back-to-back: the phase is a
-          // single-shot breadcrumb (the actual broadcast window is
-          // already bracketed by `chain:writeahead`), and keeping
-          // starts balanced by ends preserves the "every start has a
-          // matching end" golden-sequence invariant.
-          if (info?.txHash) {
-            const phase = `chain:txsigned:tx-${info.txHash}`;
-            await emitPhase(phase, 'start');
-            await emitPhase(phase, 'end');
-          }
-          await emitPhase('chain:writeahead', 'start');
-        };
+        // GH#2270 PR-3 r4 — the latch, ordering and durable-boundary contract live in the one
+        // `createWriteAheadHook` builder shared with `update` (see its doc for the full history).
+        const writeAhead = createWriteAheadHook({ onPhase, onBeforeBroadcast, operationKind: 'create' });
+        const emitWriteAheadStart = writeAhead.emitWriteAheadStart;
         // OT-RFC-43 Option 1 — reserve the deterministic packed kaId for this
         // author BEFORE the on-chain mint, so the UAL is known pre-tx and the
         // contract _safeMints exactly this id. `undefined` when no allocator is
@@ -3944,9 +3983,11 @@ export class DKGPublisher implements Publisher {
               vs: ack.signatureVS,
             })),
             onBroadcast: emitWriteAheadStart,
+            onBroadcastAccepted: (signal) =>
+              onBroadcastAccepted?.({ ...signal, operationKind: 'create' }),
           });
         } finally {
-          if (wroteAhead) onPhase?.('chain:writeahead', 'end');
+          if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
         }
 
         onChainResult.tokenAmount = tokenAmount;
@@ -4505,6 +4546,8 @@ export class DKGPublisher implements Publisher {
   }
 
   async update(kaId: bigint, options: PublishOptions): Promise<PublishResult> {
+    const onBeforeBroadcast = options.onBeforeBroadcast;
+    const onBroadcastAccepted = options.onBroadcastAccepted;
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const graphUpdate = resolveGraphScopedPublishDescriptor(options);
     if (graphUpdate) {
@@ -5184,24 +5227,10 @@ export class DKGPublisher implements Publisher {
     // provide the V10 `updateKnowledgeCollectionV10` surface.
     let txResult: { success: boolean; hash: string; blockNumber?: number; txIndex?: number; publisherAddress?: string };
     let earlyReturn: PublishResult | undefined;
-    let wroteAhead = false;
-    const emitPhase = async (phase: string, status: 'start' | 'end') => {
-      await (onPhase?.(phase, status) as unknown as Promise<void> | void);
-    };
-    const emitWriteAheadStart = async (info?: { txHash?: string }) => {
-      if (wroteAhead) return;
-      wroteAhead = true;
-      // Mirror the publish path (above): emit a balanced, hash-bearing
-      // phase first so WAL listeners record the signed-but-not-yet-
-      // broadcast update tx identity, then the generic
-      // `chain:writeahead:start` for legacy consumers.
-      if (info?.txHash) {
-        const phase = `chain:txsigned:tx-${info.txHash}`;
-        await emitPhase(phase, 'start');
-        await emitPhase(phase, 'end');
-      }
-      await emitPhase('chain:writeahead', 'start');
-    };
+    // GH#2270 PR-3 r4 — the same one write-ahead hook the publish path consumes; the ordering
+    // contract (latch, phases first, durable callback LAST) has exactly one owner now.
+    const writeAhead = createWriteAheadHook({ onPhase, onBeforeBroadcast, operationKind: 'update' });
+    const emitWriteAheadStart = writeAhead.emitWriteAheadStart;
     // CRITICAL CORRECTNESS INVARIANT (consensus): the digest fields the
     // peers sign MUST be byte-identical to what the on-chain update tx
     // carries + what the contract reads. We source the on-chain-resolved
@@ -5358,6 +5387,8 @@ export class DKGPublisher implements Publisher {
               vs: ack.signatureVS,
             })),
             onBroadcast: emitWriteAheadStart,
+            onBroadcastAccepted: (signal) =>
+              onBroadcastAccepted?.({ ...signal, operationKind: 'update' }),
           });
         } catch (v10Err) {
           const errorName = extractV10UpdateRejectionName(v10Err);
@@ -5374,7 +5405,7 @@ export class DKGPublisher implements Publisher {
         throw new Error('Chain adapter does not support V10 updates (updateKnowledgeCollectionV10 missing)');
       }
     } finally {
-      if (wroteAhead) onPhase?.('chain:writeahead', 'end');
+      if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
     }
 
     if (earlyReturn) {
@@ -7357,6 +7388,86 @@ export class DKGPublisher implements Publisher {
     this.sharedMemoryOwnedEntities.delete(swmOwnershipKey);
   }
 
+  /**
+   * Explicit, opt-in migration for a legacy name-keyed Working Memory draft.
+   *
+   * The normal mutation APIs deliberately keep legacy/root-scoped KAs
+   * read-only. Local durable integrations such as `agent-context/chat-turns`,
+   * however, can predate graph-scoped KA storage and must survive an upgrade.
+   * This operation is therefore intentionally separate from `assertionCreate`:
+   * callers must select the exact local assertion they are willing to migrate.
+   *
+   * The publisher only owns the lifecycle write lock and the primitive
+   * boundary; phase ordering, classification, and the safety properties live
+   * in `legacy-wm-migration.ts`.
+   */
+  async migrateLegacyRootScopedWorkingMemory(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }> },
+  ): Promise<LegacyWmMigrationResult> {
+    return this.withAssertionLifecycleWriteLock(
+      contextGraphId,
+      name,
+      agentAddress,
+      subGraphName,
+      () => runLegacyWorkingMemoryMigration(this.legacyWmMigrationHost(), {
+        contextGraphId,
+        name,
+        agentAddress,
+        subGraphName,
+        allocateKaNumber: opts?.allocateKaNumber,
+      }),
+    );
+  }
+
+  /**
+   * The complete primitive surface the legacy-WM migration is allowed to
+   * touch. Everything here is a thin binding onto existing publisher
+   * internals — no migration policy.
+   */
+  private legacyWmMigrationHost(): LegacyWmMigrationHost {
+    return {
+      store: this.store,
+      prepareSubGraph: async (contextGraphId, subGraphName) => {
+        DKGPublisher.validateOptionalSubGraph(subGraphName);
+        await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
+      },
+      loadMigratableContent: async (selector) => {
+        // Two independent reads off one selector — no ordering requirement
+        // between them, so read them together.
+        const [publicQuads, privateQuads] = await Promise.all([
+          this.assertionScopedQuads(selector.sourceGraph),
+          this.privateStore.getKnowledgeAssetPrivateDraftTriples(
+            selector.contextGraphId,
+            selector.agentAddress,
+            selector.name,
+            selector.subGraphName,
+          ),
+        ]);
+        return { publicQuads, privateQuads };
+      },
+      assertContentMigratable: (publicQuads, privateQuads) => {
+        rejectUserAuthoredProtocolMetadata(publicQuads);
+        rejectOversizedRdfLiterals(publicQuads, 'legacyWorkingMemoryMigration.publicQuads');
+        rejectOversizedRdfLiterals(privateQuads, 'legacyWorkingMemoryMigration.privateQuads');
+      },
+      hasRetainedSourceContent: async (sourceGraph) =>
+        (await this.assertionScopedQuads(sourceGraph)).length > 0,
+      canSelfAllocateGraphIdentity: (agentAddress) =>
+        this.kaAllocator !== undefined && isAllocatableKaAuthorV1(agentAddress),
+      createGraphScopedDraft: (contextGraphId, name, agentAddress, subGraphName, opts) =>
+        this.assertionCreateUnlocked(contextGraphId, name, agentAddress, subGraphName, opts),
+      writeGraphScopedDraft: (contextGraphId, name, agentAddress, quads, subGraphName) =>
+        this.assertionWriteUnlocked(contextGraphId, name, agentAddress, quads, subGraphName),
+      wmGraphUri: (contextGraphId, agentAddress, name, subGraphName) =>
+        this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName),
+      logInfo: (message) => this.log.info(createOperationContext('system'), message),
+    };
+  }
+
   async assertionCreate(
     contextGraphId: string,
     name: string,
@@ -7478,7 +7589,7 @@ export class DKGPublisher implements Publisher {
       if (m) kaNumber = BigInt(m[1]);
     } else if (opts?.allocateKaNumber) {
       ({ number: kaNumber, reservedUal } = await opts.allocateKaNumber());
-    } else if (this.kaAllocator && /^0x[a-fA-F0-9]{40}$/.test(agentAddress)) {
+    } else if (this.kaAllocator && isAllocatableKaAuthorV1(agentAddress)) {
       // Direct (non-agent-wrapper) callers still get a number from the SHARED allocator
       // (same instance the agent wrapper uses — no double-mint), so the per-KA graph is
       // the ONE layout. Without this, a direct create would fall back to a name-keyed
@@ -8889,15 +9000,30 @@ export class DKGPublisher implements Publisher {
           || !seal.kaUal
           || !seal.assertionVersion
         ) continue;
-        const head = await resolveKnowledgeAssetWorkspaceHead({
+        // GH#2273 — the resolver fails closed on a multi-valued head. The head here feeds
+        // only the advisory keep-the-recovery-seal decision, and discard is a plausible
+        // operator remedy for a KA whose head is exactly in that corrupt state — so a throw
+        // must not abort the discard. On corruption we cannot prove the seal does NOT match
+        // the live SWM content, so fail toward RETENTION: archive the seal (benign extra
+        // storage) rather than risk destroying the only recovery artifact for content that
+        // is genuinely resident.
+        const headResolution = await tryResolveKnowledgeAssetWorkspaceHead({
           store: this.store,
           graphManager: this.graphManager,
           contextGraphId,
           kaUal: seal.kaUal,
           subGraphName,
         });
-        preserveSwmRecoverySeal = head?.kaUal === seal.kaUal
-          && head.assertionVersion === seal.assertionVersion;
+        if (headResolution.status === 'corrupt') {
+          this.log.warn(
+            createOperationContext('system'),
+            `assertionDiscard: SWM head for ${seal.kaUal} is corrupt; retaining recovery seal (${headResolution.error.message})`,
+          );
+        }
+        preserveSwmRecoverySeal = headResolution.status === 'corrupt'
+          || (headResolution.status === 'resolved'
+            && headResolution.head.kaUal === seal.kaUal
+            && headResolution.head.assertionVersion === seal.assertionVersion);
         if (preserveSwmRecoverySeal) {
           await this.archiveAssertionSeal(
             contextGraphId,

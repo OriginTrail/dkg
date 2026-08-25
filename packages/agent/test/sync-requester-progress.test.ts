@@ -9,6 +9,7 @@ import { swmFixtures } from './swm-descriptor-fixtures.js';
 import {
   runDurableSync,
   runDurableSyncDetailed,
+  type DurableSyncCheckpointWrite,
   type DurableSyncFetchRequest,
   type DurableSyncStoreInsertRequest,
 } from '../src/sync/requester/durable-sync.js';
@@ -19,13 +20,14 @@ import {
   collectPublicSnapshotMetadata,
   runSharedMemorySync,
   selectSwmSnapshotCoverage,
+  syncPublicSnapshotsForMeta,
 } from '../src/sync/requester/shared-memory-sync.js';
 import type { SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import {
   SyncPageAccumulationLimitError,
   type SyncPageResult,
 } from '../src/sync/requester/page-fetch.js';
-import { markSyncTransportFailure } from '../src/sync/error-tags.js';
+import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -69,8 +71,7 @@ function deniedError(): Error & { syncDenied: boolean } {
 
 function transportError(message: string): Error {
   const err = new Error(message);
-  markSyncTransportFailure(err);
-  return err;
+  return toSyncTransportFailureError(err);
 }
 
 function quad(subject: string): Quad {
@@ -108,6 +109,128 @@ function sharedMemoryProcessResult() {
     entityCreators: [],
   };
 }
+
+describe('selected snapshot walk continuation', () => {
+  it('skips an exact resolved prefix and spends the next slice on unresolved snapshots', async () => {
+    const first = [quad('resolved-prefix')].map((row) => ({ ...row, graph: '' }));
+    const second = [quad('next-unresolved')].map((row) => ({ ...row, graph: '' }));
+    const firstDigest = workspacePublicQuadsDigest(first);
+    const secondDigest = workspacePublicQuadsDigest(second);
+    const snapshots = [
+      { ref: firstDigest, digest: firstDigest, count: first.length },
+      { ref: secondDigest, digest: secondDigest, count: second.length },
+    ];
+    const cacheReads: string[] = [];
+    const fetchedRefs: string[] = [];
+    const readyRefs: string[] = [];
+
+    const result = await syncPublicSnapshotsForMeta({
+      ctx,
+      remotePeerId: 'peer-resume-prefix',
+      contextGraphId: 'cg-resume-prefix',
+      deadline: Date.now() + 60_000,
+      snapshotWalk: {
+        orderedManifestSnapshot: () => snapshots.map((snapshot) => ({ ...snapshot })),
+        isResolved: (ref) => ref === firstDigest,
+        resolvedCount: () => 1,
+        resolvedRefsSnapshot: () => [firstDigest],
+        suppressedMetadataRows: () => [],
+        markResolved: () => {},
+      },
+      publicSnapshotStore: {
+        getSnapshot: async (ref) => {
+          cacheReads.push(ref);
+          return null;
+        },
+        putSnapshot: async ({ digest }) => ({ ref: digest, byteLength: 1 }),
+      },
+      fetchSyncPages: async (
+        _ctx,
+        _peer,
+        contextGraphId,
+        _includeSharedMemory,
+        phase,
+        _graph,
+        _deadline,
+        options,
+      ) => {
+        expect(phase).toBe('snapshot');
+        fetchedRefs.push(options!.snapshotRef!);
+        return pageResult(contextGraphId, phase, { quads: second });
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      onSnapshotReady: async (snapshot) => { readyRefs.push(snapshot.ref); },
+    });
+
+    expect(cacheReads).toEqual([secondDigest]);
+    expect(fetchedRefs).toEqual([secondDigest]);
+    expect(readyRefs).toEqual([secondDigest]);
+    expect(result).toMatchObject({
+      readySnapshots: 2,
+      totalSnapshots: 2,
+      completed: true,
+      missingCount: 0,
+    });
+  });
+
+  it('starts at the first snapshot when a changed manifest has no retained resolution', async () => {
+    const first = [quad('changed-manifest-first')].map((row) => ({ ...row, graph: '' }));
+    const second = [quad('changed-manifest-second')].map((row) => ({ ...row, graph: '' }));
+    const firstDigest = workspacePublicQuadsDigest(first);
+    const secondDigest = workspacePublicQuadsDigest(second);
+    const snapshots = [
+      { ref: firstDigest, digest: firstDigest, count: first.length },
+      { ref: secondDigest, digest: secondDigest, count: second.length },
+    ];
+    const fetchedRefs: string[] = [];
+
+    const result = await syncPublicSnapshotsForMeta({
+      ctx,
+      remotePeerId: 'peer-changed-manifest',
+      contextGraphId: 'cg-changed-manifest',
+      deadline: Date.now() + 60_000,
+      snapshotWalk: {
+        orderedManifestSnapshot: () => snapshots.map((snapshot) => ({ ...snapshot })),
+        isResolved: () => false,
+        resolvedCount: () => 0,
+        resolvedRefsSnapshot: () => [],
+        suppressedMetadataRows: () => [],
+        markResolved: () => {},
+      },
+      publicSnapshotStore: {
+        getSnapshot: async () => null,
+        putSnapshot: async ({ digest }) => ({ ref: digest, byteLength: 1 }),
+      },
+      fetchSyncPages: async (
+        _ctx,
+        _peer,
+        contextGraphId,
+        _includeSharedMemory,
+        phase,
+        _graph,
+        _deadline,
+        options,
+      ) => {
+        const ref = options!.snapshotRef!;
+        fetchedRefs.push(ref);
+        return pageResult(contextGraphId, phase, {
+          quads: ref === firstDigest ? first : second,
+        });
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+    });
+
+    expect(fetchedRefs).toEqual([firstDigest, secondDigest]);
+    expect(result).toMatchObject({
+      readySnapshots: 2,
+      totalSnapshots: 2,
+      completed: true,
+      missingCount: 0,
+    });
+  });
+});
 
 describe('sync requester progress accounting', () => {
   it('does not count a denied durable graph but counts the subsequent clean-empty graph', async () => {
@@ -368,6 +491,10 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['resumed-cg'],
+      // Full rootless snapshots now require a fresh, complete META manifest
+      // before DATA. Exercise phase-level progress accounting on the delta
+      // path, where independent resumed META/DATA cursors remain valid.
+      sinceBatchIdFor: () => 'progress-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: async ({ contextGraphId, phase }) => (
         pageResult(contextGraphId, phase, { resumedFromOffset: 500, nextOffset: 500 })
@@ -387,7 +514,7 @@ describe('sync requester progress accounting', () => {
   });
 
   it('counts only the clean-empty durable phase when its sibling times out', async () => {
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
       contextGraphId,
@@ -415,11 +542,14 @@ describe('sync requester progress accounting', () => {
     expect(summary.completedPhases).toBe(1);
     expect(summary.checkpointAdvances).toBe(1);
     expect(deleteCheckpoint.calls).toContainEqual(['large-cg:meta']);
-    expect(setCheckpoint.calls).toContainEqual(['large-cg:data', 500]);
+    expect(setCheckpoint.calls).toContainEqual([
+      'large-cg:data',
+      { offset: 500, responderSessionOffset: undefined },
+    ]);
   });
 
   it('does not report durable checkpoint progress when data is rejected for missing meta', async () => {
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
       contextGraphId,
@@ -456,7 +586,7 @@ describe('sync requester progress accounting', () => {
 
   it('does not advance durable checkpoints when integrity verification rejects a KA', async () => {
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const logWarn = recorder((_ctx: OperationContext, _message: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
@@ -502,7 +632,7 @@ describe('sync requester progress accounting', () => {
   it('advances only the durable meta checkpoint after storing metadata-only responses', async () => {
     const metaQuad = quad('meta-only-meta');
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
       contextGraphId,
@@ -515,6 +645,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['meta-only-cg'],
+      sinceBatchIdFor: () => 'meta-only-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -541,11 +672,14 @@ describe('sync requester progress accounting', () => {
     expect(storeInsert.calls[0]![0]).toHaveProperty('signal', undefined);
     expect(deleteCheckpoint.calls).toEqual([]);
     expect(setCheckpoint.calls).toHaveLength(1);
-    expect(setCheckpoint.calls).toContainEqual(['meta-only-cg:meta', 5]);
+    expect(setCheckpoint.calls).toContainEqual([
+      'meta-only-cg:meta',
+      { offset: 5, responderSessionOffset: undefined },
+    ]);
   });
 
   it('advances the meta cursor when every fetched metadata row was deliberately discarded', async () => {
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
@@ -559,6 +693,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-controls'],
+      sinceBatchIdFor: () => 'discarded-controls-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -582,11 +717,14 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(0);
     expect(storeInsert.calls).toEqual([]);
     expect(deleteCheckpoint.calls).toEqual([]);
-    expect(setCheckpoint.calls).toEqual([['discarded-controls:meta', 3]]);
+    expect(setCheckpoint.calls).toEqual([[
+      'discarded-controls:meta',
+      { offset: 3, responderSessionOffset: undefined },
+    ]]);
   });
 
   it('keeps the meta cursor pinned when discarded rows do not account for the whole page', async () => {
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
       contextGraphId,
@@ -625,7 +763,7 @@ describe('sync requester progress accounting', () => {
     // into consumedUnpersistedMetaTriples === totalFetchedMetaQuads and no meta
     // is persisted. The requester must still advance the meta cursor (the rows
     // were deliberately consumed) or durable sync pins on the same poisoned page.
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
@@ -639,6 +777,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-non-iri'],
+      sinceBatchIdFor: () => 'discarded-non-iri-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -660,14 +799,17 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(0);
     expect(storeInsert.calls).toEqual([]);
     expect(deleteCheckpoint.calls).toEqual([]);
-    expect(setCheckpoint.calls).toEqual([['discarded-non-iri:meta', 3]]);
+    expect(setCheckpoint.calls).toEqual([[
+      'discarded-non-iri:meta',
+      { offset: 3, responderSessionOffset: undefined },
+    ]]);
   });
 
   it('advances the meta cursor when a mixed page is fully discarded by controls + non-IRI drops (#1921)', async () => {
     // A mixed all-discarded page (some unverified controls + some non-IRI rows):
     // the worker sums both reasons into consumedUnpersistedMetaTriples === the
     // fetched total, so the requester advances the cursor rather than pinning.
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
@@ -681,6 +823,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-mixed'],
+      sinceBatchIdFor: () => 'discarded-mixed-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -701,13 +844,16 @@ describe('sync requester progress accounting', () => {
     expect(summary.metaOnlyResponses).toBe(1);
     expect(storeInsert.calls).toEqual([]);
     expect(deleteCheckpoint.calls).toEqual([]);
-    expect(setCheckpoint.calls).toEqual([['discarded-mixed:meta', 3]]);
+    expect(setCheckpoint.calls).toEqual([[
+      'discarded-mixed:meta',
+      { offset: 3, responderSessionOffset: undefined },
+    ]]);
   });
 
   it('deletes only the durable meta checkpoint after completing metadata-only responses', async () => {
     const metaQuad = quad('meta-only-complete-meta');
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
       contextGraphId,
@@ -752,7 +898,7 @@ describe('sync requester progress accounting', () => {
   it('stores verified private-only metadata and advances both durable checkpoints cleanly', async () => {
     const metaQuad = quad('verified-private-only-meta');
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
       contextGraphId,
@@ -1608,6 +1754,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
       snapshotsResolved: 0,
       snapshotsTotal: 2,
       manifestComplete: true,
+      descriptorsAuthoritative: true,
       missingCount: 2,
       // The ref that was never served, named — not an empty placeholder. The
       // sample and the count come from the same walk, so they cannot disagree.
@@ -1714,8 +1861,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
           phase: string,
           _graph: string,
           _deadline: number,
-          snapshotRef?: string,
+          fetchOptions?: { snapshotRef?: string },
         ) => {
+          const snapshotRef = fetchOptions?.snapshotRef;
           if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
           return pageResult(contextGraphId, phase);
         },
@@ -1767,6 +1915,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
         snapshotsResolved: 2,
         snapshotsTotal: 2,
         manifestComplete: true,
+        descriptorsAuthoritative: true,
         missingCount: 0,
         missingSample: [],
         materializationFailures: 0,
@@ -1870,7 +2019,12 @@ describe('public SWM snapshot coverage (#2050)', () => {
     // 1` below would be measuring something else), and NOTHING may be
     // described (or this row would silently become a second copy of the mixed
     // row above, travelling the described path it is meant to avoid).
-    expect(collectPublicSnapshotMetadata(meta)).toEqual([{ ref: digest, digest, count: payload.length }]);
+    expect(collectPublicSnapshotMetadata(meta)).toEqual([{
+      ref: digest,
+      digest,
+      count: payload.length,
+      publishedAtMs: 0,
+    }]);
     expect(parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: COVERAGE_CG, metaQuads: meta })).toEqual([]);
 
     // The blob is already cached: the state of a node whose earlier pass
@@ -1903,8 +2057,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
           phase: string,
           _graph: string,
           _deadline: number,
-          snapshotRef?: string,
+          fetchOptions?: { snapshotRef?: string },
         ) => {
+          const snapshotRef = fetchOptions?.snapshotRef;
           if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
           // Every phase completes cleanly, so `manifestComplete` is true — the
           // other half of the vacuity gate. A truncated meta phase parses no
@@ -1953,6 +2108,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
         snapshotsResolved: 1,
         snapshotsTotal: 1,
         manifestComplete: true,
+        descriptorsAuthoritative: true,
         missingCount: 0,
         missingSample: [],
         materializationFailures: 0,
@@ -2087,8 +2243,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
           phase: string,
           _graph: string,
           _deadline: number,
-          snapshotRef?: string,
+          fetchOptions?: { snapshotRef?: string },
         ) => {
+          const snapshotRef = fetchOptions?.snapshotRef;
           if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
           // Every phase completes cleanly. That is not incidental: it is what
           // makes `manifestComplete` true, which is the field that turns this
@@ -2153,6 +2310,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
         snapshotsResolved: 0,
         snapshotsTotal: 2,
         manifestComplete: true,
+        descriptorsAuthoritative: false,
         missingCount: 2,
         missingSample: [],
         materializationFailures: 0,
@@ -2386,6 +2544,7 @@ describe('T14 — a throwing snapshot round still reports what it resolved', () 
       snapshotsResolved: 2,
       snapshotsTotal: 3,
       manifestComplete: true,
+      descriptorsAuthoritative: true,
       missingCount: 1,
       missingSample: [unreachable.digest],
       materializationFailures: 0,

@@ -4,6 +4,7 @@ import {
   VmReconcileDispatcher,
   RecentUalSet,
   type ChainReconcilerDeps,
+  type OrdinalRecoveryTarget,
   type OrdinalOutcome,
 } from '../src/chain-reconciler.js';
 import {
@@ -39,6 +40,22 @@ function makeDeps(overrides: Partial<ChainReconcilerDeps> = {}): {
     ...overrides,
   };
   return { deps, persisted, attempted };
+}
+
+function recoveryTarget(
+  ordinal: number,
+  overrides: Partial<OrdinalRecoveryTarget> = {},
+): OrdinalRecoveryTarget {
+  return {
+    localCgId: 'cg',
+    onChainCgId: '1',
+    ordinal,
+    ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
+    merkleRoot: `0x${ordinal.toString(16).padStart(64, '0')}`,
+    kaId: String(ordinal),
+    reason: 'no-swm',
+    ...overrides,
+  };
 }
 
 describe('reconcileContextGraph — sweep', () => {
@@ -203,6 +220,125 @@ describe('reconcileContextGraph — sweep', () => {
     expect(state.scanOrdinal).toBe(0);
   });
 
+  it('makes the recent head useful while preserving bounded historical progress', async () => {
+    const attempts: number[][] = [[], [], []];
+    let pass = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 30,
+      maxOrdinalsPerPass: 10,
+      recentOrdinalsPerPass: 7,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        return { status: 'reconciled', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    const second = await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    const third = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(attempts).toEqual([
+      [0, 1, 2, 23, 24, 25, 26, 27, 28, 29],
+      [3, 4, 5, 16, 17, 18, 19, 20, 21, 22],
+      [6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    ]);
+    expect([first.hasMore, second.hasMore, third.hasMore]).toEqual([true, true, false]);
+    expect([first.watermark, second.watermark, third.watermark]).toEqual([3, 6, 30]);
+    expect(state.scanOrdinal).toBe(30);
+  });
+
+  it('spends selected exact-recovery budget on recent ordinals before history', async () => {
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 30,
+      maxOrdinalsPerPass: 10,
+      recentOrdinalsPerPass: 7,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: recoveryTarget(ordinal),
+      }),
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        recoveryCalls.push(targets.map(({ ordinal }) => ordinal));
+        return {
+          outcomes: new Map(),
+          attemptedOrdinals: [targets[0]!.ordinal],
+          continuationOrdinal: targets[1]!.ordinal,
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+
+    await reconcileContextGraph(deps, createCursorState(0), 'cg', 1n);
+
+    expect(recoveryCalls).toEqual([[
+      29, 28, 27, 26, 25, 24, 23,
+      0, 1, 2,
+    ]]);
+  });
+
+  it('never lets recent recovery continuation starve history while the head grows', async () => {
+    let head = 30;
+    let pass = 0;
+    const attempts: number[][] = [[], [], []];
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => head,
+      maxOrdinalsPerPass: 10,
+      recentOrdinalsPerPass: 7,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        if (ordinal < head - 7) {
+          return { status: 'reconciled', blockNumber: 0 };
+        }
+        return {
+          status: 'pending',
+          recovery: recoveryTarget(ordinal),
+        };
+      },
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        const ordinals = targets.map(({ ordinal }) => ordinal);
+        recoveryCalls.push(ordinals);
+        const attempted = targets[0]!;
+        return {
+          outcomes: new Map([[
+            attempted.ordinal,
+            { status: 'pending', recovery: attempted } as OrdinalOutcome,
+          ]]),
+          attemptedOrdinals: [attempted.ordinal],
+          continuationOrdinal: targets[1]?.ordinal,
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(first.watermark).toBe(3);
+    expect(state.scanOrdinal).toBe(3);
+
+    head = 35;
+    pass += 1;
+    const second = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(second.watermark).toBe(6);
+    expect(state.scanOrdinal).toBe(6);
+
+    head = 40;
+    pass += 1;
+    const third = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(third.watermark).toBe(9);
+    expect(state.scanOrdinal).toBe(9);
+
+    expect(attempts).toEqual([
+      [0, 1, 2, 23, 24, 25, 26, 27, 28, 29],
+      [3, 4, 5, 28, 29, 30, 31, 32, 33, 34],
+      [6, 7, 8, 33, 34, 35, 36, 37, 38, 39],
+    ]);
+    expect(recoveryCalls.map((ordinals) => ordinals[0])).toEqual([29, 34, 39]);
+  });
+
   it('runs each bounded slice with capped ordinal concurrency', async () => {
     let active = 0;
     let maxActive = 0;
@@ -235,12 +371,7 @@ describe('reconcileContextGraph — sweep', () => {
         if (ordinal === 0) return { status: 'already', blockNumber: 100 };
         return {
           status: 'pending',
-          recovery: {
-            ordinal,
-            ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
-            kaId: String(ordinal),
-            reason: 'no-swm',
-          },
+          recovery: recoveryTarget(ordinal),
         };
       },
       recoverPendingOrdinals: async (_cg, _onchain, targets) => {
@@ -252,6 +383,7 @@ describe('reconcileContextGraph — sweep', () => {
           ])),
           attemptedOrdinals: targets.map((target) => target.ordinal),
           continuationOrdinal: undefined,
+          hasImmediateRecoveryWork: false,
         };
       },
     });
@@ -270,12 +402,7 @@ describe('reconcileContextGraph — sweep', () => {
       maxOrdinalsPerPass: 10,
       reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
         status: 'pending',
-        recovery: {
-          ordinal,
-          ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
-          kaId: String(ordinal),
-          reason: 'no-swm',
-        },
+        recovery: recoveryTarget(ordinal),
       }),
       recoverPendingOrdinals: async (_cg, _onchain, targets) => {
         const ordinals = targets.map((target) => target.ordinal);
@@ -288,6 +415,7 @@ describe('reconcileContextGraph — sweep', () => {
           ])),
           attemptedOrdinals: attempted,
           continuationOrdinal: ordinals[attempted.length],
+          hasImmediateRecoveryWork: false,
         };
       },
     });
@@ -306,6 +434,61 @@ describe('reconcileContextGraph — sweep', () => {
     ]);
   });
 
+  it('visits an untouched ordinal before reprobing an earlier provider rotation', async () => {
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 2,
+      maxOrdinalsPerPass: 1,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: recoveryTarget(ordinal),
+      }),
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        recoveryCalls.push(targets.map((target) => target.ordinal));
+        const target = targets[0]!;
+        return {
+          outcomes: new Map([[
+            target.ordinal,
+            { status: 'pending', recovery: target } as OrdinalOutcome,
+          ]]),
+          attemptedOrdinals: [target.ordinal],
+          continuationOrdinal: undefined,
+          hasImmediateRecoveryWork: true,
+        };
+      },
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(first.hasMore).toBe(true);
+    expect(state.scanOrdinal).toBe(1);
+
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(recoveryCalls).toEqual([[0], [1]]);
+  });
+
+  it('schedules another pass when recovery alone reports immediate work', async () => {
+    const target = recoveryTarget(0);
+    const { deps } = makeDeps({
+      getKCCount: async () => 1,
+      maxOrdinalsPerPass: 1,
+      reconcileOrdinal: async () => ({ status: 'pending', recovery: target }),
+      recoverPendingOrdinals: async () => ({
+        outcomes: new Map([[0, { status: 'pending', recovery: target }]]),
+        attemptedOrdinals: [0],
+        continuationOrdinal: undefined,
+        hasImmediateRecoveryWork: true,
+      }),
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(result.hasMore).toBe(true);
+    expect(state.scanOrdinal).toBe(0);
+  });
+
   it('preserves the next recovery target across a cooldown-only pass', async () => {
     const recoveryCalls: number[][] = [];
     const networkAttempts: number[] = [];
@@ -314,12 +497,7 @@ describe('reconcileContextGraph — sweep', () => {
       maxOrdinalsPerPass: 2,
       reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
         status: 'pending',
-        recovery: {
-          ordinal,
-          ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
-          kaId: String(ordinal),
-          reason: 'no-swm',
-        },
+        recovery: recoveryTarget(ordinal),
       }),
       recoverPendingOrdinals: async (_cg, _onchain, targets) => {
         const ordinals = targets.map((target) => target.ordinal);
@@ -329,6 +507,7 @@ describe('reconcileContextGraph — sweep', () => {
             outcomes: new Map(),
             attemptedOrdinals: [],
             continuationOrdinal: targets[0]?.ordinal,
+            hasImmediateRecoveryWork: false,
             cooldownOnly: true,
           };
         }
@@ -342,6 +521,7 @@ describe('reconcileContextGraph — sweep', () => {
           attemptedOrdinals: [attempted.ordinal],
           continuationOrdinal: targets[1]?.ordinal
             ?? (outcome.status === 'pending' ? attempted.ordinal : undefined),
+          hasImmediateRecoveryWork: false,
         };
       },
     });
@@ -379,18 +559,14 @@ describe('reconcileContextGraph — sweep', () => {
         if (ordinal !== 0) return { status: 'reconciled', blockNumber: 100 };
         return {
           status: 'pending',
-          recovery: {
-            ordinal,
-            ual: 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/0',
-            kaId: '0',
-            reason: 'no-swm',
-          },
+          recovery: recoveryTarget(ordinal),
         };
       },
       recoverPendingOrdinals: async (_cg, _onchain, targets) => ({
         outcomes: new Map(),
         attemptedOrdinals: [],
         continuationOrdinal: targets[0]?.ordinal,
+        hasImmediateRecoveryWork: false,
         cooldownOnly: false,
       }),
     });
@@ -420,18 +596,14 @@ describe('reconcileContextGraph — sweep', () => {
         if (ordinal !== 0) return { status: 'reconciled', blockNumber: 100 };
         return {
           status: 'pending',
-          recovery: {
-            ordinal,
-            ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
-            kaId: String(ordinal),
-            reason: 'no-swm',
-          },
+          recovery: recoveryTarget(ordinal),
         };
       },
       recoverPendingOrdinals: async () => ({
         outcomes: new Map(),
         attemptedOrdinals: [],
         continuationOrdinal: undefined,
+        hasImmediateRecoveryWork: false,
       }),
     });
     const state = createCursorState(0);
@@ -522,12 +694,7 @@ describe('reconcileContextGraph — sweep', () => {
       isTargetCurrent: async () => current,
       reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
         status: 'pending',
-        recovery: {
-          ordinal,
-          ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
-          kaId: String(ordinal),
-          reason: 'no-swm',
-        },
+        recovery: recoveryTarget(ordinal),
       }),
       recoverPendingOrdinals: async (_cg, _onchain, targets) => {
         // The rebind lands while the long recovery await is in flight. The
@@ -540,6 +707,7 @@ describe('reconcileContextGraph — sweep', () => {
           ])),
           attemptedOrdinals: targets.map((target) => target.ordinal),
           continuationOrdinal: undefined,
+          hasImmediateRecoveryWork: false,
         };
       },
     });

@@ -1,8 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
+import {
+  fetchSyncPages,
+  SyncPageSizeProfileCache,
+} from '../src/sync/requester/page-fetch.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import { didSyncPeerRespond, isSyncTransportFailure } from '../src/sync/error-tags.js';
+import { SYNC_REQUEST_SAFE_PAGE_SIZE } from '../src/dkg-agent-constants.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
 /**
@@ -185,7 +189,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(didSyncPeerRespond(transportError)).toBe(false);
   });
 
-  it('backs a preferred 256-row page down to the 64-row frame-safe floor across retries', async () => {
+  it('reaches the 64-row frame-safe floor on the first transport retry', async () => {
     const limits: number[] = [];
     let attempts = 0;
     const promise = fetchSyncPages({
@@ -231,7 +235,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
       completed: true,
       nextOffset: 0,
     });
-    expect(limits).toEqual([256, 128, 64]);
+    expect(limits).toEqual([256, 64, 64]);
   });
 
   it('tags parser failures after response bytes as peer responses', async () => {
@@ -808,7 +812,12 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
       syncSessionId: string | undefined;
     }> = [];
     const deletedCheckpoints: string[] = [];
-    const checkpointKey = `${REMOTE_PEER_ID}|expired-incomplete-session-cg|durable|data`;
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      'expired-incomplete-session-cg',
+      false,
+      'data',
+    );
 
     await runFetchWithFakeTimers(
       fetchSyncPages({
@@ -922,7 +931,12 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     }> = [];
     const checkpointValues = new Map<string, ReturnType<typeof freshCheckpoint>>();
     const deletedCheckpoints: string[] = [];
-    const checkpointKey = `${REMOTE_PEER_ID}|superseded-incomplete-session-cg|durable|data`;
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      'superseded-incomplete-session-cg',
+      false,
+      'data',
+    );
     let sendMode: 'timeout' | 'superseded' | 'complete' = 'timeout';
 
     const checkpointStore = {
@@ -1003,7 +1017,12 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
   it('rotates an expired responder session immediately even when its checkpoint offset is zero', async () => {
     vi.setSystemTime(1_700_100_000_000);
     const contextGraphId = 'expired-offset-zero-session-cg';
-    const checkpointKey = `${REMOTE_PEER_ID}|${contextGraphId}|durable|data`;
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      contextGraphId,
+      false,
+      'data',
+    );
     const checkpointStore = new MemorySyncCheckpointStore({ clock: () => Date.now() });
     checkpointStore.set(checkpointKey, 0);
     checkpointStore.setResponderSession(
@@ -1143,7 +1162,12 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     const observedBuilds: Array<{ offset: number; syncSessionId: string | undefined }> = [];
     const checkpointValues = new Map<string, ReturnType<typeof freshCheckpoint>>();
     const deletedCheckpoints: string[] = [];
-    const checkpointKey = `${REMOTE_PEER_ID}|generic-abort-resume-cg|durable|data`;
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      'generic-abort-resume-cg',
+      false,
+      'data',
+    );
     let sendMode: 'timeout' | 'abort' | 'complete' = 'timeout';
 
     const checkpointStore = {
@@ -1229,7 +1253,12 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     const observedBuilds: Array<{ offset: number; syncSessionId: string | undefined }> = [];
     const checkpointValues = new Map<string, ReturnType<typeof freshCheckpoint>>();
     const deletedCheckpoints: string[] = [];
-    const checkpointKey = `${REMOTE_PEER_ID}|accepted-page-then-drop-cg|durable|data`;
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      'accepted-page-then-drop-cg',
+      false,
+      'data',
+    );
     let sendMode: 'timeout' | 'page-then-drop' | 'complete' = 'timeout';
     let callsThisRound = 0;
 
@@ -1391,7 +1420,9 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(observedBuilds[0].offset).toBe(0);
     expect(typeof observedBuilds[0].syncSessionId).toBe('string');
     expect(observedBuilds[0].syncSessionId?.length).toBeGreaterThan(0);
-    expect(deletedCheckpoints).toEqual([`${REMOTE_PEER_ID}|${contextGraphId}|durable|data`]);
+    expect(deletedCheckpoints).toEqual([
+      getSyncCheckpointKey(REMOTE_PEER_ID, contextGraphId, false, 'data'),
+    ]);
   });
 
   it('uses one stable sync session id across pages for durable delta sync', async () => {
@@ -1743,6 +1774,14 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
 
   it('retries legacy responder busy bodies before parsing a page', async () => {
     const warnings: string[] = [];
+    const limits: number[] = [];
+    const pageSizeProfileCache = new SyncPageSizeProfileCache();
+    const pageSizeProfileScope = {
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+    };
     let sendCalls = 0;
 
     await runFetchWithFakeTimers(
@@ -1761,12 +1800,16 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         syncDeniedResponse: '#DENIED',
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
+        pageSizeProfileCache,
         checkpointStore: {
           get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
-        buildSyncRequest: async () => new TextEncoder().encode('request'),
+        buildSyncRequest: async (_cg, _offset, limit) => {
+          limits.push(limit);
+          return new TextEncoder().encode('request');
+        },
         parseAndFilter: singleQuadParser,
         send: async () => {
           sendCalls++;
@@ -1779,6 +1822,8 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     );
 
     expect(sendCalls).toBe(2);
+    expect(limits).toEqual([100, SYNC_REQUEST_SAFE_PAGE_SIZE]);
+    expect(pageSizeProfileCache.preferred(pageSizeProfileScope)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
     expect(warnings.some((message) => message.includes('Legacy sync responder busy'))).toBe(true);
   });
 

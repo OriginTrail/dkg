@@ -528,7 +528,12 @@ jobs:
         # leaf for the same typed literal (else RandomSampling forks). dateTime/time
         # are fixed here; date/gregorian/double/escaping remain it.fails pending
         # the rest of the backend-independent canon.
-        run: pnpm --filter @origintrail-official/dkg-storage exec vitest run test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts
+        # Both files share Blazegraph's single `kb` namespace. Unique graph IRIs
+        # isolate assertions, but the 2.1.5 bulk-load stream is namespace-global:
+        # concurrent inserts intermittently fail with `IllegalStateException:
+        # STREAM` and leave later requests timing out. Keep the unit lanes
+        # parallel; serialize only these two live-server files.
+        run: pnpm --filter @origintrail-official/dkg-storage exec vitest run --no-file-parallelism test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts
 
   # ------------------------------------------------------------------
   # Tornado publisher lane — sharded across 4 parallel runners.

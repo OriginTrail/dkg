@@ -25,6 +25,8 @@ import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
+import { ContextGraphBindingState } from './context-graph-binding-state.js';
+import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -160,6 +162,7 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import { SelectedSwmMetaTransferCoordinator } from './sync/selected-swm-meta-transfer-coordinator.js';
 import { bindRandomSampling, type RandomSamplingDisabledReason, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -363,6 +366,7 @@ import {
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
   type VmReconcileNegativeRecord,
+  type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
@@ -1022,6 +1026,19 @@ export class DKGAgentBase {
   protected vmReconcileSweepInFlight: Promise<void> | null = null;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */
   protected readonly reconcileCursors = new Map<string, CursorState>();
+  /**
+   * RFC-64 selected-only VM progress is separate from membership subscriptions.
+   * Each entry is fenced by the exact chain deployment, numeric chain binding,
+   * and a monotonically increasing process-local generation; its watermark is
+   * persisted in a dedicated non-subscription record when the configured store
+   * supports it.
+   */
+  protected readonly selectedVmReconcileCursors = new Map<string, {
+    record: SelectedVmReconcileCursorRecord;
+    cursor: CursorState;
+    bindingGeneration: number;
+  }>();
+  protected selectedVmReconcileBindingGeneration = 0;
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
   protected readonly recentReconciledUals = new RecentUalSet();
   /**
@@ -1057,8 +1074,15 @@ export class DKGAgentBase {
   protected vmReconcileLifecycleGeneration = 0;
   /** Abortable boundary paired with the generation guard for restart-safe async work. */
   protected vmReconcileLifecycleController = new AbortController();
-  /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
-  protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
+  /**
+   * Phase D/A4 — one owned per-CG active-fetch cooldown record. Keeping the
+   * timestamp and lifecycle owner together makes it impossible for stale
+   * cleanup to observe or leave half of the suppression state behind.
+   */
+  protected readonly vmReconcileFetchCooldowns = new Map<string, {
+    startedAt: number;
+    owner: symbol;
+  }>();
   /** Last stranded UAL visited by the bounded RS-heal sweep for each CG. */
   protected readonly rsHealCursorByCg = new Map<string, string>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */
@@ -1123,8 +1147,8 @@ export class DKGAgentBase {
   /** Serialize local author-head construction/CAS independently per exact scope. */
   protected readonly rfc64AuthorCatalogMutationQueuesV1 = new Map<string, Promise<void>>();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
-  /** Monotonic per-CG fence for async work captured across an on-chain binding transition. */
-  protected readonly contextGraphBindingGenerations = new Map<string, number>();
+  /** Process-local reverse candidates plus the monotonic binding fence. */
+  protected readonly contextGraphBindingState = new ContextGraphBindingState();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
@@ -1584,6 +1608,8 @@ export class DKGAgentBase {
    * so denied peers must remain eligible on the next reconciler cadence.
    */
   protected readonly lastSyncProgressAt = new Map<string, number>();
+  /** Peer + selected-CG scoped seed/retry/terminal state for RFC-64 SWM. */
+  protected readonly selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   /**
    * Per-peer sync-reconciler backoff. `failures` is the count of
    * consecutive reconciler attempts that did NOT produce a successful
@@ -1611,6 +1637,22 @@ export class DKGAgentBase {
   protected syncCheckpoints: SyncCheckpointStore = new MemorySyncCheckpointStore();
   protected changelogCursors: ChangelogCursorStore = new MemoryChangelogCursorStore();
   protected syncVerifyWorker?: SyncVerifyWorker;
+  /** Agent-owned retained selected-SWM transfers, created lazily and drained before store close. */
+  protected selectedSwmMetaTransfers?: SelectedSwmMetaTransferCoordinator;
+
+  protected getSelectedSwmMetaTransfers(): SelectedSwmMetaTransferCoordinator {
+    this.selectedSwmMetaTransfers ??= new SelectedSwmMetaTransferCoordinator();
+    return this.selectedSwmMetaTransfers;
+  }
+
+  protected async closeSelectedSwmMetaTransfers(): Promise<void> {
+    const transfers = this.selectedSwmMetaTransfers;
+    if (!transfers) return;
+    await transfers.close();
+    if (this.selectedSwmMetaTransfers === transfers) {
+      this.selectedSwmMetaTransfers = undefined;
+    }
+  }
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */
   protected readonly localAgents = new Map<string, AgentKeyRecord>();

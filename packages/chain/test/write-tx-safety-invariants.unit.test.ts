@@ -61,8 +61,13 @@ function freshAdapter(cfg: EVMAdapterConfig): EVMChainAdapter {
 
 const SIGNED = '0xSIGNEDTX';
 const TXHASH = '0x' + '11'.repeat(32);
+const BLOCK_HASH = '0x' + '33'.repeat(32);
 const fakeReceipt = (status: number) =>
-  ({ hash: TXHASH, blockNumber: 1, index: 0, status, logs: [] }) as unknown as ethers.TransactionReceipt;
+  ({ hash: TXHASH, blockNumber: 1, blockHash: BLOCK_HASH, index: 0, status, logs: [] }) as unknown as ethers.TransactionReceipt;
+const withFinality = <T extends object>(provider: T) => Object.assign(provider, {
+  getBlockNumber: recorder(async () => 1),
+  getBlock: recorder(async () => ({ number: 1, hash: BLOCK_HASH })),
+});
 const retryable429 = () => { const e = new Error('429 too many requests'); (e as any).status = 429; return e; };
 const neverNull = (pre: string): never => { throw new Error(`unexpected null receipt for ${pre}`); };
 
@@ -82,14 +87,14 @@ describe('write-path tx-safety invariants (real dispatch/broadcast/receipt path)
     const a = freshAdapter(minimalConfig());
     const buildSignedTx = recorder(async () => ({ signedTx: SIGNED, txHash: TXHASH }));
     const onBroadcast = recorder(async () => undefined);
-    const primary = {
+    const primary = withFinality({
       broadcastTransaction: recorder(async () => { throw retryable429(); }),
       getTransactionReceipt: recorder(async () => null),
-    };
-    const backup = {
+    });
+    const backup = withFinality({
       broadcastTransaction: recorder(async () => ({ hash: TXHASH })),
       getTransactionReceipt: recorder(async () => fakeReceipt(1)),
-    };
+    });
     (a as any).providers = [primary, backup];
 
     const receipt = await runDispatch(a, { onBroadcast, buildSignedTx });
@@ -106,10 +111,10 @@ describe('write-path tx-safety invariants (real dispatch/broadcast/receipt path)
     const a = freshAdapter(minimalConfig({ rpcUrls: [] })); // single endpoint, happy path
     const timeline: string[] = [];
     const onBroadcast = recorder(async () => { timeline.push('wal'); });
-    const only = {
+    const only = withFinality({
       broadcastTransaction: recorder(async () => { timeline.push('broadcast'); return { hash: TXHASH }; }),
       getTransactionReceipt: recorder(async () => fakeReceipt(1)),
-    };
+    });
     (a as any).providers = [only];
 
     await runDispatch(a, { onBroadcast });
@@ -121,14 +126,14 @@ describe('write-path tx-safety invariants (real dispatch/broadcast/receipt path)
   it('INV-4: broadcast idempotency — #1 transient error → #2 "already known" → success, single signed tx', async () => {
     const a = freshAdapter(minimalConfig());
     const buildSignedTx = recorder(async () => ({ signedTx: SIGNED, txHash: TXHASH }));
-    const primary = {
+    const primary = withFinality({
       broadcastTransaction: recorder(async () => { throw retryable429(); }),
       getTransactionReceipt: recorder(async () => fakeReceipt(1)),
-    };
-    const backup = {
+    });
+    const backup = withFinality({
       broadcastTransaction: recorder(async () => { throw new Error('already known'); }),
       getTransactionReceipt: recorder(async () => fakeReceipt(1)),
-    };
+    });
     (a as any).providers = [primary, backup];
 
     const receipt = await runDispatch(a, { buildSignedTx });
@@ -142,10 +147,10 @@ describe('write-path tx-safety invariants (real dispatch/broadcast/receipt path)
 
   it('INV-5a: a mined REVERTED receipt (status=0) throws CALL_EXCEPTION with NO resubmit', async () => {
     const a = freshAdapter(minimalConfig({ rpcUrls: [] }));
-    const only = {
+    const only = withFinality({
       broadcastTransaction: recorder(async () => ({ hash: TXHASH })),
       getTransactionReceipt: recorder(async () => fakeReceipt(0)), // mined, reverted
-    };
+    });
     (a as any).providers = [only];
 
     await expect(runDispatch(a, {})).rejects.toMatchObject({ code: 'CALL_EXCEPTION' });
@@ -159,10 +164,10 @@ describe('write-path tx-safety invariants (real dispatch/broadcast/receipt path)
     const buildSignedTx = recorder(async () => {
       const e = new Error('insufficient funds for gas'); (e as any).code = 'INSUFFICIENT_FUNDS'; throw e;
     });
-    const primary = {
+    const primary = withFinality({
       broadcastTransaction: recorder(async () => ({ hash: TXHASH })),
       getTransactionReceipt: recorder(async () => fakeReceipt(1)),
-    };
+    });
     (a as any).providers = [primary];
 
     await expect(runDispatch(a, { onBroadcast, buildSignedTx })).rejects.toThrow(/insufficient funds/i);
@@ -195,7 +200,7 @@ describe('write-path tx-safety invariants — set-retry MULTI-PASS (S2)', () => 
       const a = freshAdapter(minimalConfig());
       const buildSignedTx = recorder(async () => ({ signedTx: SIGNED, txHash: TXHASH }));
       const onBroadcast = recorder(async () => undefined);
-      const throttled = () => ({
+      const throttled = () => withFinality({
         broadcastTransaction: recorder(async (_raw: string) => { throw retryable429(); }),
         getTransactionReceipt: recorder(async () => null),
       });
@@ -228,7 +233,7 @@ describe('write-path tx-safety invariants — set-retry MULTI-PASS (S2)', () => 
       const buildSignedTx = recorder(async () => ({ signedTx: SIGNED, txHash: TXHASH }));
       const onBroadcast = recorder(async () => undefined);
       let attempt = 0; // shared across both providers: pass 0 = first 2 attempts (429), pass 1 accepts
-      const provider = () => ({
+      const provider = () => withFinality({
         broadcastTransaction: recorder(async (_raw: string) => { attempt += 1; if (attempt <= 2) throw retryable429(); return { hash: TXHASH }; }),
         getTransactionReceipt: recorder(async () => fakeReceipt(1)),
       });
@@ -251,10 +256,10 @@ describe('write-path tx-safety invariants — set-retry MULTI-PASS (S2)', () => 
   it('INV-5/C2: a mined REVERTED receipt does NOT trigger a set-retry re-broadcast (broadcast pass == 1)', async () => {
     const a = freshAdapter(minimalConfig({ rpcUrls: [] }));
     const buildSignedTx = recorder(async () => ({ signedTx: SIGNED, txHash: TXHASH }));
-    const only = {
+    const only = withFinality({
       broadcastTransaction: recorder(async () => ({ hash: TXHASH })), // broadcast SUCCEEDS
       getTransactionReceipt: recorder(async () => fakeReceipt(0)),     // but mined REVERTED
-    };
+    });
     (a as any).providers = [only];
     const broadcastPasses = spyBroadcastPasses(a);
 
@@ -274,11 +279,11 @@ describe('write-path tx-safety invariants — set-retry MULTI-PASS (S2)', () => 
       const signer = new ethers.Wallet(PK);
       const events: string[] = [];
       let attempt = 0;
-      const provider = {
+      const provider = withFinality({
         // Write-1: 429 on its first broadcast (forces a set-retry backoff), accepts next.
         broadcastTransaction: recorder(async () => { attempt += 1; if (attempt === 1) throw retryable429(); return { hash: TXHASH }; }),
         getTransactionReceipt: recorder(async () => fakeReceipt(1)),
-      };
+      });
       (a as any).providers = [provider];
       const w1build = recorder(async () => { events.push('w1:build'); return { signedTx: SIGNED, txHash: TXHASH }; });
       const w2build = recorder(async () => { events.push('w2:build'); return { signedTx: '0xW2', txHash: '0x' + '22'.repeat(32) }; });

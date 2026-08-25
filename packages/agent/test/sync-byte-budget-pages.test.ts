@@ -9,13 +9,18 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+  SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD,
   SYNC_PAGE_SIZE,
+  SYNC_REQUEST_INITIAL_PAGE_SIZE,
   SYNC_REQUEST_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../src/dkg-agent-constants.js';
 import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
-import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
+import {
+  fetchSyncPages,
+  SyncPageSizeProfileCache,
+} from '../src/sync/requester/page-fetch.js';
 import {
   serializeResponderRowsWithinByteBudget,
   type SyncRow,
@@ -35,6 +40,48 @@ function makeCtx(): OperationContext {
 }
 
 function noopLog(): void {}
+
+function pageSizeScope(
+  remotePeerId: string,
+  phase: 'meta' | 'data' | 'snapshot' = 'meta',
+  includeSharedMemory = true,
+) {
+  return {
+    remotePeerId,
+    contextGraphId: CG_ID,
+    includeSharedMemory,
+    phase,
+  } as const;
+}
+
+type PageFetchParams = Parameters<typeof fetchSyncPages>[0];
+
+function pageFetchParams(overrides: Partial<PageFetchParams> = {}): PageFetchParams {
+  return {
+    ctx: makeCtx(),
+    remotePeerId: REMOTE_PEER_ID,
+    contextGraphId: CG_ID,
+    includeSharedMemory: true,
+    phase: 'meta',
+    graphUri: 'urn:meta',
+    deadline: Date.now() + 15_000,
+    syncPageTimeoutMs: 5_000,
+    syncRouterAttempts: 1,
+    syncPageRetryAttempts: 3,
+    syncPageSize: SYNC_REQUEST_PAGE_SIZE,
+    syncDeniedResponse: '#DENIED',
+    debugSyncProgress: false,
+    protocolSync: '/dkg/test/sync',
+    checkpointStore: new MemorySyncCheckpointStore(),
+    buildSyncRequest: async () => new TextEncoder().encode('request'),
+    parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+    send: async () => new Uint8Array(),
+    logWarn: noopLog,
+    logInfo: noopLog,
+    logDebug: noopLog,
+    ...overrides,
+  };
+}
 
 describe('byte-budget sync pagination', () => {
   it('advertises byte-budget paging in an unauthenticated public request', async () => {
@@ -84,6 +131,47 @@ describe('byte-budget sync pagination', () => {
     expect(request.pageMode).toBe(SYNC_BYTE_BUDGET_PAGE_MODE);
     expect(request.pageRowsHint).toBe(SYNC_REQUEST_PAGE_SIZE);
     expect(request.requesterSignatureR).toMatch(/^0x/);
+  });
+
+  it('keeps an exact DATA request on page-only mode after fallback reaches 64 rows', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const exactUal = 'did:dkg:hardhat:31337/0x0000000000000000000000000000000000000001/1';
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      includeSharedMemory: false,
+      targetPeerId: REMOTE_PEER_ID,
+      requesterPeerId: LOCAL_PEER_ID,
+      phase: 'data',
+      assetUals: [exactUal],
+      needsAuth: true,
+      computeSyncDigest: () => new Uint8Array(32),
+      getIdentityId: async () => 0n,
+      claimedAgentAddress: wallet.address,
+      claimedAgentPrivateKey: wallet.privateKey,
+    });
+
+    const request = JSON.parse(new TextDecoder().decode(encoded));
+    expect(request).toMatchObject({
+      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      assetUals: [exactUal],
+    });
+    expect(resolveDurableDataRequestPolicy({
+      legacyLimit: request.limit,
+      includeSharedMemory: false,
+      phase: request.phase,
+      pageMode: request.pageMode,
+      pageRowsHint: request.pageRowsHint,
+      hasExactAssetFilter: true,
+    })).toEqual({
+      usesByteBudgetPage: true,
+      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      cacheMode: 'page-only',
+      exactGraphReadMode: 'page-only',
+    });
   });
 
   // #1916: durable META now negotiates byte-budget paging exactly like durable
@@ -181,33 +269,51 @@ describe('byte-budget sync pagination', () => {
     });
 
     expect(requested).toEqual([
-      { offset: 0, limit: SYNC_REQUEST_PAGE_SIZE },
-      { offset: SYNC_PAGE_SIZE, limit: SYNC_REQUEST_PAGE_SIZE },
+      { offset: 0, limit: SYNC_REQUEST_INITIAL_PAGE_SIZE },
+      { offset: SYNC_PAGE_SIZE, limit: SYNC_REQUEST_INITIAL_PAGE_SIZE },
     ]);
     expect(result.nextOffset).toBe(SYNC_PAGE_SIZE);
     expect(result.completed).toBe(true);
   });
 
+  it('returns a soft page boundary as incomplete progress without a timeout', async () => {
+    let sends = 0;
+    const observedProgress: Array<{ resumedFromOffset: number; nextOffset: number }> = [];
+    const result = await fetchSyncPages(pageFetchParams({
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: `did:dkg:context-graph:${CG_ID}`,
+      parseAndFilter: async () => ({ quads: [], totalQuads: SYNC_PAGE_SIZE }),
+      send: async () => {
+        sends += 1;
+        return new TextEncoder().encode('<urn:s> <urn:p> <urn:o> <urn:g> .');
+      },
+      shouldStopAfterPage: (progress) => {
+        observedProgress.push(progress);
+        return true;
+      },
+    }));
+
+    expect(sends).toBe(1);
+    expect(observedProgress).toEqual([{
+      resumedFromOffset: 0,
+      nextOffset: SYNC_PAGE_SIZE,
+    }]);
+    expect(result).toMatchObject({
+      nextOffset: SYNC_PAGE_SIZE,
+      completed: false,
+      timedOut: false,
+    });
+  });
+
   it('keeps a successful fallback size sticky and probes upward gradually', async () => {
     const requestedSizes: number[] = [];
     let sends = 0;
-    const result = await fetchSyncPages({
-      ctx: makeCtx(),
-      remotePeerId: REMOTE_PEER_ID,
-      contextGraphId: CG_ID,
-      includeSharedMemory: true,
+    const result = await fetchSyncPages(pageFetchParams({
       phase: 'snapshot',
       graphUri: '',
       snapshotRef: 'snapshot-ref',
-      deadline: Date.now() + 15_000,
-      syncPageTimeoutMs: 5_000,
-      syncRouterAttempts: 1,
       syncPageRetryAttempts: 2,
-      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
-      syncDeniedResponse: '#DENIED',
-      debugSyncProgress: false,
-      protocolSync: '/dkg/test/sync',
-      checkpointStore: new MemorySyncCheckpointStore(),
       buildSyncRequest: async (_cg, _offset, limit) => {
         requestedSizes.push(limit);
         return new TextEncoder().encode('request');
@@ -216,23 +322,151 @@ describe('byte-budget sync pagination', () => {
       send: async () => {
         sends += 1;
         if (sends === 1) throw new Error('relay stream reset');
-        return sends <= 4
+        return sends <= SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD + 1
           ? new TextEncoder().encode('<urn:s> <urn:p> <urn:o> <urn:g> .')
           : new Uint8Array();
       },
-      logWarn: noopLog,
-      logInfo: noopLog,
-      logDebug: noopLog,
-    });
+    }));
 
     expect(requestedSizes).toEqual([
-      SYNC_REQUEST_PAGE_SIZE,
-      SYNC_REQUEST_PAGE_SIZE / 2,
-      SYNC_REQUEST_PAGE_SIZE / 2,
-      SYNC_REQUEST_PAGE_SIZE / 2,
-      SYNC_REQUEST_PAGE_SIZE,
+      SYNC_REQUEST_INITIAL_PAGE_SIZE,
+      ...Array.from(
+        { length: SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD },
+        () => SYNC_REQUEST_SAFE_PAGE_SIZE,
+      ),
+      SYNC_REQUEST_SAFE_PAGE_SIZE * 2,
     ]);
     expect(result.completed).toBe(true);
+  });
+
+  it('retains the safe fallback across bounded continuation fetches', async () => {
+    const requestedSizes: number[] = [];
+    const pageSizeProfileCache = new SyncPageSizeProfileCache();
+    const scope = pageSizeScope(REMOTE_PEER_ID);
+    const checkpointStore = new MemorySyncCheckpointStore();
+    let failFirstRound = true;
+    const run = () => fetchSyncPages(pageFetchParams({
+      syncPageRetryAttempts: 3,
+      checkpointStore,
+      pageSizeProfileCache,
+      buildSyncRequest: async (_cg, _offset, limit) => {
+        requestedSizes.push(limit);
+        return new TextEncoder().encode('request');
+      },
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+      send: async () => {
+        if (failFirstRound) throw new Error('sync responder queue wait exceeded');
+        return new Uint8Array();
+      },
+    }));
+
+    await expect(run()).rejects.toThrow('sync responder queue wait exceeded');
+    expect(requestedSizes).toEqual([
+      SYNC_REQUEST_INITIAL_PAGE_SIZE,
+      SYNC_REQUEST_SAFE_PAGE_SIZE,
+      SYNC_REQUEST_SAFE_PAGE_SIZE,
+    ]);
+    expect(pageSizeProfileCache.preferred(scope)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
+
+    failFirstRound = false;
+    await expect(run()).resolves.toMatchObject({ completed: true, nextOffset: 0 });
+    expect(requestedSizes.at(-1)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
+  });
+
+  it('retains a terminal transport fallback when no retry callback runs', async () => {
+    const requestedSizes: number[] = [];
+    const pageSizeProfileCache = new SyncPageSizeProfileCache();
+    const scope = pageSizeScope(REMOTE_PEER_ID);
+    const checkpointStore = new MemorySyncCheckpointStore();
+    let failTransport = true;
+    const run = () => fetchSyncPages(pageFetchParams({
+      syncPageRetryAttempts: 1,
+      checkpointStore,
+      pageSizeProfileCache,
+      buildSyncRequest: async (_cg, _offset, limit) => {
+        requestedSizes.push(limit);
+        return new TextEncoder().encode('request');
+      },
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+      send: async () => {
+        if (failTransport) throw new Error('terminal relay stream reset');
+        return new Uint8Array();
+      },
+    }));
+
+    await expect(run()).rejects.toThrow('terminal relay stream reset');
+    expect(requestedSizes).toEqual([SYNC_REQUEST_INITIAL_PAGE_SIZE]);
+    expect(pageSizeProfileCache.preferred(scope)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
+
+    failTransport = false;
+    await expect(run()).resolves.toMatchObject({ completed: true, nextOffset: 0 });
+    expect(requestedSizes).toEqual([
+      SYNC_REQUEST_INITIAL_PAGE_SIZE,
+      SYNC_REQUEST_SAFE_PAGE_SIZE,
+    ]);
+  });
+
+  it('does not poison page-size learning when request construction fails locally', async () => {
+    const pageSizeProfileCache = new SyncPageSizeProfileCache();
+    const scope = pageSizeScope(REMOTE_PEER_ID);
+    pageSizeProfileCache.remember(scope, 2_048);
+    const requestedSizes: number[] = [];
+    await expect(fetchSyncPages(pageFetchParams({
+      syncPageRetryAttempts: 2,
+      pageSizeProfileCache,
+      buildSyncRequest: async (_cg, _offset, limit) => {
+        requestedSizes.push(limit);
+        throw new Error('wallet signer unavailable');
+      },
+    }))).rejects.toThrow('wallet signer unavailable');
+
+    expect(requestedSizes).toEqual([2_048, 2_048]);
+    expect(pageSizeProfileCache.preferred(scope)).toBe(2_048);
+  });
+
+  it('does not poison page-size learning when the caller aborts during send', async () => {
+    const controller = new AbortController();
+    const pageSizeProfileCache = new SyncPageSizeProfileCache();
+    const scope = pageSizeScope(REMOTE_PEER_ID);
+    pageSizeProfileCache.remember(scope, 2_048);
+    const requestedSizes: number[] = [];
+    await expect(fetchSyncPages(pageFetchParams({
+      syncPageRetryAttempts: 2,
+      signal: controller.signal,
+      pageSizeProfileCache,
+      buildSyncRequest: async (_cg, _offset, limit) => {
+        requestedSizes.push(limit);
+        return new TextEncoder().encode('request');
+      },
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+      send: async () => {
+        controller.abort(new Error('node stopping'));
+        throw new Error('transport closed during shutdown');
+      },
+    }))).rejects.toThrow('transport closed during shutdown');
+
+    expect(requestedSizes).toEqual([2_048]);
+    expect(pageSizeProfileCache.preferred(scope)).toBe(2_048);
+  });
+
+  it('bounds and expires agent-local page-size profiles', () => {
+    const cache = new SyncPageSizeProfileCache(2, 100);
+    cache.remember(pageSizeScope('first'), 64, 0);
+    cache.remember(pageSizeScope('second'), 128, 1);
+    expect(cache.preferred(pageSizeScope('first'), 2)).toBe(64);
+    cache.remember(pageSizeScope('third'), 256, 3);
+    expect(cache.preferred(pageSizeScope('second'), 4)).toBeUndefined();
+
+    const expiringCache = new SyncPageSizeProfileCache(2, 100);
+    expiringCache.remember(pageSizeScope('expiring'), 64, 0);
+    expect(expiringCache.preferred(pageSizeScope('expiring'), 99)).toBe(64);
+    expect(expiringCache.preferred(pageSizeScope('expiring'), 199)).toBeUndefined();
+
+    const writeRefreshed = new SyncPageSizeProfileCache(2, 100);
+    writeRefreshed.remember(pageSizeScope('write-refreshed'), 64, 0);
+    writeRefreshed.remember(pageSizeScope('write-refreshed'), 128, 99);
+    expect(writeRefreshed.preferred(pageSizeScope('write-refreshed'), 198)).toBe(128);
+    expect(() => writeRefreshed.remember(pageSizeScope('invalid'), 0)).toThrow(RangeError);
   });
 
   it('serializes a UTF-8-correct prefix inside the response target', () => {
@@ -282,6 +516,49 @@ describe('byte-budget sync pagination', () => {
       pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
     });
     expect(linesFromNquads(upgraded)).toHaveLength(1_200);
+
+    await store.close();
+  });
+
+  it('honours the negotiated row hint for durable meta while legacy meta remains capped', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'byte-budget-meta-cg';
+    const graph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+    await store.insert(Array.from({ length: 1_200 }, (_, i) => ({
+      graph,
+      subject: `did:dkg:activity:meta-subject-${i.toString().padStart(4, '0')}`,
+      predicate: 'urn:predicate',
+      object: `"value-${i}"`,
+    })));
+    // Model a responder whose legacy page was deliberately reduced. The
+    // additive byte-budget hint must bypass that row cap without bypassing the
+    // serializer's byte cap.
+    const legacyPageSize = 128;
+    const cap = registerTestSyncHandler(store, { syncPageSize: legacyPageSize });
+
+    const legacy = await cap.invoke({
+      contextGraphId,
+      offset: 0,
+      limit: legacyPageSize,
+      includeSharedMemory: false,
+      phase: 'meta',
+      syncSessionId: 'legacy-meta-session',
+    });
+    expect(linesFromNquads(legacy)).toHaveLength(legacyPageSize);
+
+    const upgraded = await cap.invoke({
+      contextGraphId,
+      offset: 0,
+      limit: legacyPageSize,
+      includeSharedMemory: false,
+      phase: 'meta',
+      syncSessionId: 'byte-budget-meta-session',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+    });
+    expect(linesFromNquads(upgraded)).toHaveLength(1_200);
+    expect(new TextEncoder().encode(upgraded).byteLength)
+      .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
 
     await store.close();
   });

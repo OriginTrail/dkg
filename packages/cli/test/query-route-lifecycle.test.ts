@@ -1,22 +1,30 @@
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
+import {
+  StoreOperationTimeoutError,
+  StoreSchedulerBusyError,
+} from '@origintrail-official/dkg-storage';
 import {
   configureApiQueryPriority,
   createApiQueryRequestLifecycle,
   handleQueryRoutes,
   resolveApiQueryPriority,
-  respondIfApiQueryStoreBusy,
 } from '../src/daemon/routes/query.js';
+import { respondIfStoreUnavailable } from '../src/daemon/http-utils.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
 class RequestStub extends EventEmitter {
   aborted = false;
   method = 'POST';
-  __dkgPrebufferedBody = Buffer.from(JSON.stringify({
+  __dkgPrebufferedBody: Buffer;
+
+  constructor(body: Record<string, unknown> = {
     sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
-  }));
+  }) {
+    super();
+    this.__dkgPrebufferedBody = Buffer.from(JSON.stringify(body));
+  }
 }
 
 class ResponseStub extends EventEmitter {
@@ -131,10 +139,10 @@ describe('/api/query request lifecycle', () => {
       'api.query',
     );
 
-    expect(respondIfApiQueryStoreBusy(
+    expect(respondIfStoreUnavailable(
       res as unknown as ServerResponse,
       error,
-    )).toBe(true);
+    )).toBe('not_started');
     expect(res.statusCode).toBe(503);
     expect(res.headers['Retry-After']).toBe('1');
     expect(JSON.parse(res.body)).toMatchObject({
@@ -142,23 +150,47 @@ describe('/api/query request lifecycle', () => {
       reason: 'queue_wait_timeout',
       priority: 'background',
       retryable: true,
+      outcome: 'not_started',
+    });
+  });
+
+  it('maps store deadlines to retryable HTTP 503', () => {
+    const res = new ResponseStub();
+    const error = new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation: 'query',
+      timeoutMs: 30_000,
+    });
+
+    expect(respondIfStoreUnavailable(
+      res as unknown as ServerResponse,
+      error,
+    )).toBe('indeterminate');
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toMatchObject({
+      code: 'STORE_OPERATION_TIMEOUT',
+      retryable: true,
+      outcome: 'indeterminate',
+      backend: 'oxigraph-server',
+      operation: 'query',
     });
   });
 
   it('does not reclassify unrelated route errors', () => {
     const res = new ResponseStub();
-    expect(respondIfApiQueryStoreBusy(
+    expect(respondIfStoreUnavailable(
       res as unknown as ServerResponse,
       new Error('parse failed'),
-    )).toBe(false);
-    expect(respondIfApiQueryStoreBusy(
+    )).toBeNull();
+    expect(respondIfStoreUnavailable(
       res as unknown as ServerResponse,
       {
         code: 'STORE_SCHEDULER_BUSY',
         reason: 'queue_full',
         priority: 'background',
       },
-    )).toBe(false);
+    )).toBeNull();
     expect(res.writableEnded).toBe(false);
   });
 
@@ -193,6 +225,67 @@ describe('/api/query request lifecycle', () => {
     expect(res.statusCode).toBe(200);
     expect(tracker.complete).toHaveBeenCalledTimes(1);
     expect(tracker.fail).not.toHaveBeenCalled();
+  });
+
+  it('tracks not-started store failures as cancellation and indeterminate failures as failure', async () => {
+    for (const outcome of ['not_started', 'indeterminate'] as const) {
+      const req = new RequestStub();
+      const res = new ResponseStub();
+      const tracker = {
+        start: vi.fn(),
+        startPhase: vi.fn(),
+        completePhase: vi.fn(),
+        complete: vi.fn(),
+        fail: vi.fn(),
+        cancel: vi.fn(),
+      };
+      const error = new StoreOperationTimeoutError({
+        backend: 'oxigraph-server',
+        operation: 'query',
+        outcome,
+      });
+
+      await handleQueryRoutes(queryRouteContext(req, res, {
+        query: vi.fn(async () => { throw error; }),
+      }, tracker));
+
+      expect(res.statusCode).toBe(503);
+      expect(JSON.parse(res.body)).toMatchObject({ outcome });
+      expect(tracker.cancel).toHaveBeenCalledTimes(outcome === 'not_started' ? 1 : 0);
+      expect(tracker.fail).toHaveBeenCalledTimes(outcome === 'indeterminate' ? 1 : 0);
+    }
+  });
+
+  it('maps a GenUI entity-query store timeout through the route as retryable 503', async () => {
+    const req = new RequestStub({
+      contextGraphId: 'cg-1',
+      entityUri: 'urn:entity:1',
+      libraryPrompt: 'Render the entity',
+    });
+    const res = new ResponseStub();
+    const timeout = new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation: 'query',
+      timeoutMs: 30_000,
+    });
+    const ctx = queryRouteContext(req, res, {
+      query: vi.fn(async () => { throw timeout; }),
+    }, {});
+    ctx.path = '/api/genui/render';
+    ctx.url = new URL('http://127.0.0.1/api/genui/render');
+    ctx.config = { llm: { apiKey: 'test-key' } } as RequestContext['config'];
+
+    await handleQueryRoutes(ctx);
+
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toMatchObject({
+      code: 'STORE_OPERATION_TIMEOUT',
+      retryable: true,
+      outcome: 'indeterminate',
+      backend: 'oxigraph-server',
+      operation: 'query',
+    });
   });
 
   it('aborts the route signal on disconnect and maps canonical shedding to 503', async () => {
