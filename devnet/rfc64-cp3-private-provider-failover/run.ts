@@ -245,17 +245,8 @@ async function execute(): Promise<void> {
       'provider delivery success count');
     exact(array(providerDelivery.failedPeers, 'provider delivery failures').length, 0,
       'provider delivery failure count');
-    await Promise.all([
-      providerA.request('awaitReceiverIdle', 'provider-a-idle', 'receiver-idle'),
-      providerB.request('awaitReceiverIdle', 'provider-b-idle', 'receiver-idle'),
-    ]);
     for (const [label, child] of [['provider A', providerA], ['provider B', providerB]] as const) {
-      const evidence = output(await child.request(
-        'exactInventoryReadback',
-        `${label.replaceAll(' ', '-')}-inventory`,
-        'operation-completed',
-        { catalogHeadDigest: headDigest },
-      ), `${label} inventory`);
+      const evidence = await waitForSynchronizationEvidence(child, headDigest, label);
       exact(evidence.inventoryRowCount, ASSET_COUNT, `${label} exact row count`);
       exact(evidence.activatedTripleCount, ASSET_COUNT * 2, `${label} SWM triple count`);
       exact(evidence.appliedHeadStatus, 'applied', `${label} applied head`);
@@ -509,6 +500,32 @@ async function bindPeer(
   ), `${requestId} result`);
   exact(binding.peerId, peerId, `${requestId} peer ID`);
   exact(binding.agentAddress, agentAddress, `${requestId} agent address`);
+}
+
+async function waitForSynchronizationEvidence(
+  child: Gate2AgentChild,
+  headDigest: Digest32V1,
+  label: string,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + PROCESS_EVENT_TIMEOUT_MS;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    attempt += 1;
+    await child.request(
+      'awaitReceiverIdle',
+      `${label.replaceAll(' ', '-')}-idle-${attempt}`,
+      'receiver-idle',
+    );
+    const event = await child.request(
+      'exactInventoryReadback',
+      `${label.replaceAll(' ', '-')}-inventory-${attempt}`,
+      'operation-completed',
+      { catalogHeadDigest: headDigest },
+    );
+    if (event.output !== null) return record(event.output, `${label} inventory output`);
+    await delay(200);
+  }
+  throw new Error(`${label} did not apply the exact catalog head before the deadline`);
 }
 
 async function authorSeal(kaNumber: bigint): Promise<CanonicalGraphScopedAuthorSealV1> {
