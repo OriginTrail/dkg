@@ -3089,10 +3089,6 @@ export class FinalizationHandler {
       contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
       kaId, versionBlock, authorAddress, subGraphName, trustedAssertionEvidence,
     } = input;
-    const ctxGraphId = onChainCgId.length > 0 ? onChainCgId : undefined;
-    const targetMetaGraph = ctxGraphId
-      ? contextGraphMetaUri(contextGraphId, ctxGraphId)
-      : `did:dkg:context-graph:${contextGraphId}/_meta`;
 
     if (!(await this.verifyChainCgBinding(kaId, onChainCgId, ctx))) {
       this.log.info(
@@ -3139,15 +3135,6 @@ export class FinalizationHandler {
       );
       return { outcome: 'no-swm', legacyEligible: false, input };
     }
-    if (await this.isAlreadyConfirmed(
-      ual,
-      targetMetaGraph,
-      `did:dkg:context-graph:${contextGraphId}/_meta`,
-    )) {
-      this.log.info(ctx, `Chain-reconcile: legacy ${ual} already confirmed in VM, skipping`);
-      return { outcome: 'already-confirmed', legacyEligible: false, input };
-    }
-
     this.log.info(
       ctx,
       `Chain-reconcile: exact graph-scoped state is absent for ${ual}; legacy scan is not part of the exact operation`,
@@ -3181,6 +3168,21 @@ export class FinalizationHandler {
       kaId, versionBlock, authorAddress, subGraphName,
     } = exact.input;
     const ctxGraphId = onChainCgId.length > 0 ? onChainCgId : undefined;
+    const targetMetaGraph = ctxGraphId
+      ? contextGraphMetaUri(contextGraphId, ctxGraphId)
+      : `did:dkg:context-graph:${contextGraphId}/_meta`;
+
+    // The ordinary compatibility path may retain the historical confirmed
+    // marker shortcut. Exact RFC-64 fetch cannot use this marker because it
+    // proves neither the current assertion version nor the current chain root.
+    if (await this.isAlreadyConfirmed(
+      ual,
+      targetMetaGraph,
+      `did:dkg:context-graph:${contextGraphId}/_meta`,
+    )) {
+      this.log.info(ctx, `Chain-reconcile: legacy ${ual} already confirmed in VM, skipping`);
+      return 'already-confirmed';
+    }
 
     // Recover the published roots from the legacy local SWM snapshot. This is
     // the only operation that may scan historical workspace operations.
@@ -3206,9 +3208,6 @@ export class FinalizationHandler {
       resolvedSubGraphName,
     );
     const isDualWrite = keepRootCopyOnLabel === true && !!ctxGraphId && !resolvedSubGraphName;
-    const targetMetaGraph = ctxGraphId
-      ? contextGraphMetaUri(contextGraphId, ctxGraphId)
-      : `did:dkg:context-graph:${contextGraphId}/_meta`;
     const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
 
     const outcome = await this.applyVerifiedFinalization({

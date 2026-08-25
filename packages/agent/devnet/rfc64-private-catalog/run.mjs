@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -9,6 +9,10 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { roleAgentAddress } from './fixture.mjs';
+import {
+  runRfc64PrivateGateArtifactLifecycleV1,
+  sanitizeGateFailureV1,
+} from './gate-artifact.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENT_ROOT = join(HERE, '..', '..');
@@ -315,10 +319,6 @@ async function main() {
       },
       restartedReceiver: safeState(restartState, null),
     };
-    await mkdir(dirname(ARTIFACT), { recursive: true });
-    await writeFile(ARTIFACT, `${stableJson(artifact)}\n`);
-    process.stdout.write(`${stableJson(artifact)}\n`);
-    process.stdout.write(`RFC-64 private Releases 1-3 four-process gate: ${status}\n`);
     if (status !== 'PASS') process.exitCode = 1;
   } finally {
     await Promise.all([...active].map((child) => child.stop().catch(() => undefined)));
@@ -437,12 +437,19 @@ function parseTcpMultiaddr(value) {
   return { host: match[1], port: Number(match[2]) };
 }
 
-main().catch(async (error) => {
-  const message = error instanceof Error ? error.stack ?? error.message : String(error);
-  process.stderr.write(`RFC-64 private release gate failed: ${message}\n`);
-  try {
-    const prior = await readFile(ARTIFACT, 'utf8');
-    if (prior.length === 0) process.stderr.write('No prior gate artifact exists.\n');
-  } catch { /* no prior artifact */ }
+runRfc64PrivateGateArtifactLifecycleV1({
+  artifactPath: ARTIFACT,
+  execute: main,
+  sourceRevision: process.env.GITHUB_SHA ?? null,
+}).then((artifact) => {
+  process.stdout.write(`${stableJson(artifact)}\n`);
+  process.stdout.write(
+    `RFC-64 private Releases 1-3 four-process gate: ${artifact.status}\n`,
+  );
+}).catch((error) => {
+  const failure = sanitizeGateFailureV1(error);
+  process.stderr.write(
+    `RFC-64 private release gate failed (${failure.failureClass})\n`,
+  );
   process.exitCode = 1;
 });
