@@ -50,7 +50,26 @@ function loadAuthToken() {
 }
 
 export const TEST_ENTITY_COUNT = Number(process.env.TEST_ENTITY_COUNT || 500);
-export const TEST_CONTENT_SIZE_KB = Number(process.env.TEST_CONTENT_SIZE_KB || 1);
+// Payload sizing is split by CG visibility (2026-08-25, after the PCA-4 drain
+// review): every node that syncs a PUBLIC graph stores our test payloads, so
+// public KAs stay SMALL — publishing 3 MiB blobs into a public CG both spams
+// the network and costs ~30-50x more TRAC per publish (cost is linear in
+// bytes x epochs). Private/curated CGs reach only their participants, so they
+// may carry a larger, more realistic payload.
+//
+// An explicit TEST_CONTENT_SIZE_KB always wins (Jenkins "size override" knob);
+// when it is unset/blank the code picks the per-visibility default. Private
+// mode is what the harness already treats as private: a non-public access
+// policy or subscribe-first publishing (V10_CG_SUBSCRIBE).
+const CG_IS_PRIVATE =
+  Number(process.env.V10_CG_ACCESS_POLICY || 0) !== 0 ||
+  String(process.env.V10_CG_SUBSCRIBE || 'false').toLowerCase() === 'true';
+export const TEST_CONTENT_SIZE_KB_PUBLIC = Number(process.env.TEST_CONTENT_SIZE_KB_PUBLIC || 16);
+export const TEST_CONTENT_SIZE_KB_PRIVATE = Number(process.env.TEST_CONTENT_SIZE_KB_PRIVATE || 256);
+export const TEST_CONTENT_SIZE_KB = Number(
+  process.env.TEST_CONTENT_SIZE_KB
+  || (CG_IS_PRIVATE ? TEST_CONTENT_SIZE_KB_PRIVATE : TEST_CONTENT_SIZE_KB_PUBLIC)
+);
 export const TEST_KA_BATCHES = Number(process.env.TEST_KA_BATCHES || 10);
 export const TEST_PARALLEL_KA_BATCH_SIZE = Number(process.env.TEST_PARALLEL_KA_BATCH_SIZE || 1);
 export const TEST_BATCH_DELAY_MS = Number(process.env.TEST_BATCH_DELAY_MS || 0);
