@@ -21,6 +21,9 @@ import type {
   Rfc64PublicCatalogBootstrapScopeV1,
 } from './dkg-agent-types.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import {
+  classifyRfc64CatalogReconciliationTerminalReasonV1,
+} from './rfc64/public-catalog-reconciliation-failure-v1.js';
 
 const MAX_STATUS_ERROR_BYTES_V1 = 1024;
 const MAX_CONCURRENT_TARGETS_V1 = 4;
@@ -68,14 +71,38 @@ export function classifyRfc64CatalogBootstrapFailureV1(
   completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
 }> {
   const knownIncomplete = requiresPrivateVm
-    && error instanceof Rfc64CatalogSynchronizationErrorV1
-    && error.terminalReason === 'no-authorized-provider';
+    && hasNoAuthorizedProviderTerminalReasonV1(error);
   return Object.freeze({
     outcome: knownIncomplete
       ? 'known-incomplete'
       : error === null ? 'not-found' : 'failed',
     completionReason: knownIncomplete ? 'no-authorized-provider' : null,
   });
+}
+
+function hasNoAuthorizedProviderTerminalReasonV1(error: unknown): boolean {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; current !== null && depth < 8 && !seen.has(current); depth += 1) {
+    seen.add(current);
+    if (
+      current instanceof Rfc64CatalogSynchronizationErrorV1
+      && current.terminalReason === 'no-authorized-provider'
+    ) {
+      return true;
+    }
+    if (classifyRfc64CatalogReconciliationTerminalReasonV1(current)
+      === 'no-authorized-provider') {
+      return true;
+    }
+    if (typeof current !== 'object') return false;
+    try {
+      current = (current as { readonly cause?: unknown }).cause ?? null;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 interface MutableTargetStatusV1 {
@@ -387,7 +414,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     target.catalogVersion = null;
     target.inventoryRowCount = null;
     target.lastError = null;
-    target.attempts = 0;
     let lastError: string | null = null;
     let terminalError: unknown | null = null;
     try {
@@ -417,6 +443,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       target.attempts = target.providers.length;
     } catch (error) {
       if (signal.aborted) return;
+      // The bounded discovery call snapshots and attempts the complete
+      // configured provider set before it reports a terminal failure. Keep
+      // that work visible for both failed and known-incomplete outcomes.
+      target.attempts = target.providers.length;
       terminalError = error;
       lastError = boundedErrorV1(errorMessageV1(error));
     }

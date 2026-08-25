@@ -71,15 +71,28 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
     remotePeerId: string,
   ) => void;
   /**
-   * Called once when a distinct exact-head schedule request starts. This also
-   * clears a stale result when bounded admission later rejects that request.
+   * Scheduling-time observer called once for a distinct exact-head request.
+   * It is not an execution boundary and must not own attempt-scoped state.
    */
   readonly onAttemptStart?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ) => void;
+  /**
+   * Called once when the scheduled task actually starts execution. The return
+   * value is an opaque registry token passed to terminal callbacks.
+   */
+  readonly onReconciliationAttemptStart?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ) => number;
+  /** Finalize only the exact successful execution-time attempt. */
+  readonly onReconciliationAttemptSuccess?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    attemptToken: number,
+  ) => void;
   readonly onError?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     error: unknown,
+    attemptToken: number | null,
   ) => void;
 }
 
@@ -151,6 +164,8 @@ interface ReceiverTaskV1 {
   lastProviderKey?: string;
   providerAttempts?: number;
   completionWaiters?: Array<(result: Rfc64PublicCatalogReceiverCompletionV1) => void>;
+  reconciliationAttemptStarted?: boolean;
+  reconciliationAttemptToken?: number | null;
 }
 
 interface ReceiverProviderV1 {
@@ -194,6 +209,10 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #retryBackoffMs: number;
   readonly #onHeadApplied?: Rfc64PublicCatalogReceiverOptionsV1['onHeadApplied'];
   readonly #onAttemptStart?: Rfc64PublicCatalogReceiverOptionsV1['onAttemptStart'];
+  readonly #onReconciliationAttemptStart?:
+    Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptStart'];
+  readonly #onReconciliationAttemptSuccess?:
+    Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptSuccess'];
   readonly #onError?: Rfc64PublicCatalogReceiverOptionsV1['onError'];
 
   readonly #queue: ReceiverTaskV1[] = [];
@@ -261,6 +280,8 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#isDeferrableError = options.isDeferrableError ?? DEFAULT_DEFERRABLE_ERROR;
     this.#onHeadApplied = options.onHeadApplied;
     this.#onAttemptStart = options.onAttemptStart;
+    this.#onReconciliationAttemptStart = options.onReconciliationAttemptStart;
+    this.#onReconciliationAttemptSuccess = options.onReconciliationAttemptSuccess;
     this.#onError = options.onError;
   }
 
@@ -535,6 +556,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       this.#safeNotify(() => this.#onError?.(
         task.providers[0]!.announcement,
         new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
+        task.reconciliationAttemptToken ?? null,
       ));
       this.#finishTask(task, receiverCompletion(
         'failed',
@@ -570,6 +592,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   async #runTask(
     task: ReceiverTaskV1,
   ): Promise<Rfc64PublicCatalogReceiverCompletionV1 | 'defer-admission'> {
+    this.#beginReconciliationAttempt(task);
     let lastError: unknown;
     // Resumed, not reset: see `ReceiverTaskV1.attemptsByProvider`.
     const notFoundProviders = (task.notFoundProviders ??= new Set<string>());
@@ -595,7 +618,11 @@ export class Rfc64PublicCatalogReceiverV1 {
           return receiverCompletion('not-found', null, task.providerAttempts ?? 0, null);
         }
         this.#failed += 1;
-        this.#safeNotify(() => this.#onError?.(task.providers[0]!.announcement, lastError));
+        this.#safeNotify(() => this.#onError?.(
+          task.providers[0]!.announcement,
+          lastError,
+          task.reconciliationAttemptToken ?? null,
+        ));
         return receiverCompletion('failed', null, task.providerAttempts ?? 0, lastError);
       }
       const { provider, nextCursor } = selection;
@@ -612,6 +639,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       try {
         if (await this.#reconciler.isHeadApplied(provider.announcement)) {
           this.#dedupedAlreadyApplied += 1;
+          this.#finishSuccessfulReconciliationAttempt(task, provider.announcement);
           return receiverCompletion(
             'already-applied', null, task.providerAttempts, null,
           );
@@ -634,6 +662,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         this.#applied += 1;
         this.#providerSuccesses += 1;
         this.#safeNotify(() => this.#onHeadApplied?.(provider.announcement, provider.peerId));
+        this.#finishSuccessfulReconciliationAttempt(task, provider.announcement);
         return receiverCompletion(
           'applied', provider.peerId, task.providerAttempts, null,
         );
@@ -681,6 +710,26 @@ export class Rfc64PublicCatalogReceiverV1 {
     } catch {
       // Observer callbacks must never break the scheduler.
     }
+  }
+
+  #beginReconciliationAttempt(task: ReceiverTaskV1): void {
+    if (task.reconciliationAttemptStarted === true) return;
+    task.reconciliationAttemptStarted = true;
+    try {
+      task.reconciliationAttemptToken =
+        this.#onReconciliationAttemptStart?.(task.providers[0]!.announcement) ?? null;
+    } catch {
+      task.reconciliationAttemptToken = null;
+    }
+  }
+
+  #finishSuccessfulReconciliationAttempt(
+    task: ReceiverTaskV1,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ): void {
+    const token = task.reconciliationAttemptToken;
+    if (token === undefined || token === null) return;
+    this.#safeNotify(() => this.#onReconciliationAttemptSuccess?.(announcement, token));
   }
 
   #finishTask(

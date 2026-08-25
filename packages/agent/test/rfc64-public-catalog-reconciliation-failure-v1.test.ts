@@ -84,19 +84,57 @@ describe('RFC-64 public catalog terminal failure registry v1', () => {
   it('keeps immutable diagnostics separate from the current retry result', () => {
     const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
     const head = digest(1);
-    registry.beginAttempt(head);
-    registry.record(head, Object.assign(new Error('first'), { code: 'first-code' }));
+    const firstAttempt = registry.beginAttempt(head);
+    registry.record(
+      head,
+      Object.assign(new Error('first'), { code: 'first-code' }),
+      null,
+      firstAttempt,
+    );
     expect(registry.readCurrentAttempt(head)).toMatchObject({ errorCode: 'first-code' });
 
-    registry.beginAttempt(head);
+    const secondAttempt = registry.beginAttempt(head);
     expect(registry.readCurrentAttempt(head)).toBeNull();
-    registry.record(head, Object.assign(new Error('second'), { code: 'second-code' }));
+    registry.record(
+      head,
+      Object.assign(new Error('second'), { code: 'second-code' }),
+      null,
+      secondAttempt,
+    );
 
     expect(registry.read(head)).toMatchObject({ errorCode: 'first-code' });
     expect(registry.readCurrentAttempt(head)).toMatchObject({
       terminalReason: null,
       errorCode: 'second-code',
     });
+  });
+
+  it('fences stale failure and success callbacks by monotonic attempt token', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const head = digest(1);
+    const older = registry.beginAttempt(head);
+    const newer = registry.beginAttempt(head);
+    expect(newer).toBeGreaterThan(older);
+
+    registry.record(
+      head,
+      Object.assign(new Error('older failure'), { code: 'older-code' }),
+      null,
+      older,
+    );
+    expect(registry.readCurrentAttempt(head)).toBeNull();
+
+    registry.record(
+      head,
+      Object.assign(new Error('newer failure'), { code: 'newer-code' }),
+      null,
+      newer,
+    );
+    expect(registry.readCurrentAttempt(head)).toMatchObject({ errorCode: 'newer-code' });
+    registry.completeAttempt(head, older);
+    expect(registry.readCurrentAttempt(head)).toMatchObject({ errorCode: 'newer-code' });
+    registry.completeAttempt(head, newer);
+    expect(registry.readCurrentAttempt(head)).toBeNull();
   });
 
   it('translates only the exact typed private VM incomplete failure', () => {

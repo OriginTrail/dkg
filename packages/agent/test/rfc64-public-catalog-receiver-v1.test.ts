@@ -5,6 +5,9 @@ import {
   type Rfc64PublicCatalogReceiverReconcilerV1,
   type Rfc64PublicCatalogReconcileResultV1,
 } from '../src/rfc64/public-catalog-receiver-v1.js';
+import {
+  Rfc64PublicCatalogReconciliationFailureRegistryV1,
+} from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from '../src/rfc64/public-catalog-transport-v1.js';
 
 function announcement(
@@ -354,6 +357,51 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     receiver.schedule(head, 'peerA');
     await receiver.whenIdle();
     expect(onAttemptStart).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retain an older failure after a queued rotated-policy attempt succeeds', async () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const olderStarted = deferred<void>();
+    const releaseOlder = deferred<void>();
+    const older = announcement({ policyDigest: `0x${'71'.repeat(32)}` });
+    const newer = announcement({ policyDigest: `0x${'72'.repeat(32)}` });
+    const reconciledPolicies: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      reconciledPolicies.push(head.policyDigest);
+      if (head.policyDigest === older.policyDigest) {
+        olderStarted.resolve(undefined);
+        await releaseOlder.promise;
+        throw Object.assign(new Error('older policy failed'), { code: 'older-policy-failed' });
+      }
+      return 'applied';
+    }), {
+      maxAttempts: 1,
+      retryBackoffMs: 0,
+      onReconciliationAttemptStart: (head) => (
+        registry.beginAttempt(head.catalogHeadObjectDigest)
+      ),
+      onReconciliationAttemptSuccess: (head, attemptToken) => {
+        registry.completeAttempt(head.catalogHeadObjectDigest, attemptToken);
+      },
+      onError: (head, error, attemptToken) => {
+        registry.record(
+          head.catalogHeadObjectDigest,
+          error,
+          null,
+          attemptToken ?? undefined,
+        );
+      },
+    });
+
+    receiver.schedule(older, 'peer-old');
+    await olderStarted.promise;
+    receiver.schedule(newer, 'peer-new');
+    releaseOlder.resolve(undefined);
+    await receiver.whenIdle();
+
+    expect(reconciledPolicies).toEqual([older.policyDigest, newer.policyDigest]);
+    expect(receiver.stats()).toMatchObject({ failed: 1, applied: 1 });
+    expect(registry.readCurrentAttempt(older.catalogHeadObjectDigest)).toBeNull();
   });
 
   it('serializes different heads in one catalog scope', async () => {

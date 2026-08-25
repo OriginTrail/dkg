@@ -26,6 +26,9 @@ export interface Rfc64CatalogReconciliationAttemptFailureV1 {
   readonly errorCode: string | null;
 }
 
+/** Monotonic process-local identity for one execution-time reconciliation attempt. */
+export type Rfc64CatalogReconciliationAttemptTokenV1 = number;
+
 /** Hard process-memory bound for distinct terminal receiver failures. */
 export const RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1 = 128;
 
@@ -42,10 +45,18 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
     Digest32V1,
     Rfc64CatalogReconciliationAttemptFailureV1
   >();
+  readonly #currentAttemptTokens = new Map<
+    Digest32V1,
+    Rfc64CatalogReconciliationAttemptTokenV1
+  >();
+  #attemptSequence = 0;
 
   /** Start a new semantic attempt without changing immutable diagnostic history. */
-  beginAttempt(catalogHeadDigest: Digest32V1): void {
+  beginAttempt(catalogHeadDigest: Digest32V1): Rfc64CatalogReconciliationAttemptTokenV1 {
+    const token = ++this.#attemptSequence;
+    this.#currentAttemptTokens.set(catalogHeadDigest, token);
     this.#currentAttemptFailures.delete(catalogHeadDigest);
+    return token;
   }
 
   /** Scheduler-terminal callback sink. The first failure for one head wins. */
@@ -53,6 +64,7 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
     catalogHeadDigest: Digest32V1,
     error: unknown,
     terminalReason: Rfc64CatalogReconciliationTerminalReasonV1 | null = null,
+    attemptToken?: Rfc64CatalogReconciliationAttemptTokenV1,
   ): void {
     const errorName = stableErrorNameV1(error);
     const errorCode = stableErrorCodeV1(error);
@@ -66,6 +78,13 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
         ...(causeCode === null ? {} : { causeCode }),
       }));
     }
+    const currentAttemptToken = this.#currentAttemptTokens.get(catalogHeadDigest);
+    if (
+      (currentAttemptToken !== undefined && currentAttemptToken !== attemptToken)
+      || (currentAttemptToken === undefined && attemptToken !== undefined)
+    ) {
+      return;
+    }
     evictOldestWhenFullV1(this.#currentAttemptFailures);
     this.#currentAttemptFailures.set(catalogHeadDigest, Object.freeze({
       catalogHeadDigest,
@@ -73,6 +92,16 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
       errorName,
       errorCode,
     }));
+  }
+
+  /** Clear only the exact current attempt; stale successes cannot erase a newer failure. */
+  completeAttempt(
+    catalogHeadDigest: Digest32V1,
+    attemptToken: Rfc64CatalogReconciliationAttemptTokenV1,
+  ): void {
+    if (this.#currentAttemptTokens.get(catalogHeadDigest) !== attemptToken) return;
+    this.#currentAttemptFailures.delete(catalogHeadDigest);
+    this.#currentAttemptTokens.delete(catalogHeadDigest);
   }
 
   read(catalogHeadDigest: Digest32V1): Rfc64PublicCatalogReconciliationFailureV1 | null {
@@ -89,6 +118,7 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
   clear(): void {
     this.#failures.clear();
     this.#currentAttemptFailures.clear();
+    this.#currentAttemptTokens.clear();
   }
 
   /** Internal test/diagnostic bound assertion; never exposed on DKGAgent. */

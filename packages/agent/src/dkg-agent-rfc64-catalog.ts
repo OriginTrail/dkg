@@ -302,16 +302,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       receiver: {
-        onAttemptStart: (announcement) => {
+        onReconciliationAttemptStart: (announcement) => (
           this.rfc64PublicCatalogReconciliationFailuresV1.beginAttempt(
             announcement.catalogHeadObjectDigest,
+          )
+        ),
+        onReconciliationAttemptSuccess: (announcement, attemptToken) => {
+          this.rfc64PublicCatalogReconciliationFailuresV1.completeAttempt(
+            announcement.catalogHeadObjectDigest,
+            attemptToken,
           );
         },
-        onError: (announcement, error) => {
+        onError: (announcement, error, attemptToken) => {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
             announcement.catalogHeadObjectDigest,
             error,
             classifyRfc64CatalogReconciliationTerminalReasonV1(error),
+            attemptToken ?? undefined,
           );
         },
       },

@@ -392,6 +392,44 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await service.close();
   });
 
+  it('rejects a named private current-head lane before router work', async () => {
+    const router = new RecordingRouter();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+    });
+    const policy = catalogPolicy(CONTEXT_GRAPH_ID, 1, 1);
+    const policyDigest = `0x${'f1'.repeat(32)}` as Digest32V1;
+    service.acceptPolicySnapshot({
+      policy,
+      policyDigest,
+      roster: memberRoster(policy, policyDigest),
+    });
+    service.start();
+
+    await expect(service.discoverCurrentCatalogHead({
+      remotePeerId: 'peer-private-provider',
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: 'service-lane',
+        authorAddress: AUTHOR,
+        catalogEra: '0',
+      },
+    })).rejects.toMatchObject({
+      cause: expect.objectContaining({
+        message: 'RFC-64 current-head discovery supports only the root catalog lane',
+      }),
+    });
+    expect(countEvent(
+      router,
+      `send:${RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1}`,
+    )).toBe(0);
+    await service.close();
+  });
+
   it('allows private fan-out only when exact scope-bound native reads are configured', async () => {
     const policy = catalogPolicy(`${CONTEXT_GRAPH_ID}-private-fanout`, 1, 1);
     const policyDigest = `0x${'2b'.repeat(32)}` as Digest32V1;

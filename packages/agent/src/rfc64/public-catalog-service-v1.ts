@@ -909,6 +909,11 @@ export class Rfc64PublicCatalogServiceV1 {
       );
     }
     try {
+      if (input.subGraphName !== null) {
+        throw new Error(
+          'RFC-64 current-head discovery supports only the root catalog lane',
+        );
+      }
       if (!this.#policies.isSwmAuthorAuthorized({
         networkId: input.networkId,
         contextGraphId: input.contextGraphId,
@@ -930,7 +935,7 @@ export class Rfc64PublicCatalogServiceV1 {
         governanceChainId: record.policy.governanceChainId,
         governanceContractAddress: record.policy.governanceContractAddress,
         ownershipTransitionDigest: record.policy.ownershipTransitionDigest,
-        subGraphName: input.subGraphName,
+        subGraphName: null,
         authorAddress: input.authorAddress,
         era: record.policy.era,
         bucketCount: '1',

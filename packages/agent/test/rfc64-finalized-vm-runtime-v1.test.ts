@@ -589,6 +589,91 @@ describe('RFC-64 finalized VM runtime', () => {
     }
   });
 
+  it('rejects rollback over an external VM replacement and preserves the newer state', async () => {
+    const store = new OxigraphStore();
+    const graphlessProjection: Quad[] = [{
+      subject: 'urn:rfc64:rollback-conflict',
+      predicate: 'urn:rfc64:value',
+      object: '"catalog"',
+      graph: '',
+    }];
+    const assertionRoot = ethers.hexlify(computeFlatKCRootV10(
+      graphlessProjection,
+      [],
+    )).toLowerCase() as Digest32V1;
+    const placement = await createRfc64FinalizedVmPlacementFixture({
+      assertionRoot,
+      publicTripleCount: graphlessProjection.length,
+    });
+    const swmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.SharedWorkingMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    const vmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.VerifiableMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    const metaGraph = contextGraphMetaUri(RFC64_VM_CONTEXT_GRAPH_NAME);
+    await store.insert(graphlessProjection.map((quad) => ({ ...quad, graph: swmGraph })));
+    const materializer = createFinalizedVmStoreMaterializerV1({ store });
+    const runtime = createFinalizedVmRuntimeV1(runtimeConfig(
+      snapshotTransport({ accessPolicy: 1, assertionRoot }).snapshot,
+      materializer,
+    ));
+    await expect(runtime(privateRequest(placement))).resolves.toBeDefined();
+
+    const externalGraph: Quad[] = [{
+      subject: 'urn:rfc64:rollback-conflict',
+      predicate: 'urn:rfc64:value',
+      object: '"newer-external"',
+      graph: vmGraph,
+    }];
+    const externalMetadata: Quad[] = [{
+      subject: rfc64VmUal(1n),
+      predicate: 'urn:rfc64:external-generation',
+      object: '"newer-external"',
+      graph: metaGraph,
+    }];
+    await store.replaceGraphAndSubject!(
+      vmGraph,
+      externalGraph,
+      metaGraph,
+      rfc64VmUal(1n),
+      externalMetadata,
+      { source: 'rfc64-finalized-vm-external-replacement-test' },
+    );
+
+    let rollbackFailure: unknown;
+    try {
+      await materializer.rollback();
+    } catch (cause) {
+      rollbackFailure = cause;
+    }
+    expect(rollbackFailure).toBeInstanceOf(AggregateError);
+    const rowFailures = (rollbackFailure as AggregateError).errors;
+    expect(rowFailures).toHaveLength(1);
+    expect(rowFailures[0]).toMatchObject({
+      cause: expect.objectContaining({
+        message: expect.stringMatching(/rollback conflict/u),
+      }),
+    });
+    await expect(readExactGraphPaged(store, vmGraph, {
+      expectedQuadCount: externalGraph.length,
+      outputGraph: vmGraph,
+    })).resolves.toEqual(externalGraph);
+    await expect(store.query(
+      `SELECT ?predicate ?object WHERE { GRAPH <${metaGraph}> { `
+        + `<${rfc64VmUal(1n)}> ?predicate ?object } } ORDER BY ?predicate ?object`,
+    )).resolves.toEqual({
+      type: 'bindings',
+      bindings: externalMetadata.map(({ predicate, object }) => ({ predicate, object })),
+    });
+  });
+
   it('rolls back a private VM write when accepted authority changes during atomic commit', async () => {
     const store = new OxigraphStore();
     const graphlessProjection: Quad[] = [

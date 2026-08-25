@@ -1551,6 +1551,54 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     expect(rollback).not.toHaveBeenCalled();
   }, 30_000);
 
+  it('reconciles a write-then-throw head CAS and keeps target SWM and VM aligned', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+    const durableCas =
+      fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      );
+    const compareAndSwapAppliedCatalogHeadV1 = vi.fn((...args: Parameters<typeof durableCas>) => {
+      durableCas(...args);
+      throw new Error('injected failure after durable applied-head CAS');
+    });
+    const commit = vi.fn();
+    const rollback = vi.fn();
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+      compareAndSwapAppliedCatalogHeadV1,
+    }, undefined, undefined, fixture.receiverStore, async () => {
+      await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
+      return {
+        commit,
+        rollback: async (cause) => {
+          rollback(cause);
+          await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+        },
+      };
+    });
+
+    const result = await fixture.synchronize(fixture.announcement, receiver);
+
+    expect(result.appliedHeadStatus).toBe('existing');
+    expect(compareAndSwapAppliedCatalogHeadV1).toHaveBeenCalledOnce();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+    await expect(fixture.receiverStore.hasGraph(
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
+    )).resolves.toBe(true);
+    await expect(readTransactionTestVmGeneration(fixture.receiverStore))
+      .resolves.toBe('target');
+    expect(commit).toHaveBeenCalledOnce();
+    expect(rollback).not.toHaveBeenCalled();
+  }, 30_000);
+
   it('retries a partially materialized two-row precommit before committing the head', async () => {
     const fixture = await setupLiveReceiver();
     await fixture.bootstrap();

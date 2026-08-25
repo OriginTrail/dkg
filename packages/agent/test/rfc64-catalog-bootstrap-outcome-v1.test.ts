@@ -47,11 +47,12 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
       'the exact precommit failed',
       { cause: compositionFailure },
     );
-    registry.beginAttempt(headDigest);
+    const attemptToken = registry.beginAttempt(headDigest);
     registry.record(
       headDigest,
       receiverFailure,
       classifyRfc64CatalogReconciliationTerminalReasonV1(receiverFailure),
+      attemptToken,
     );
     const attempt = registry.readCurrentAttempt(headDigest)!;
     const synchronizationFailure = new Rfc64CatalogSynchronizationErrorV1(

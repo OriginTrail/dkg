@@ -1994,6 +1994,40 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     synchronize.mockRestore();
   }, 30_000);
 
+  it('reports configured provider attempts when bootstrap synchronization fails', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const synchronize = vi.spyOn(
+      DKGAgent.prototype,
+      'synchronizeRfc64CatalogFromProvidersV1',
+    ).mockRejectedValue(new Error('simulated bootstrap synchronization failure'));
+    const providers = ['12D3KooFailedProviderA', '12D3KooFailedProviderB'];
+    const receiver = await startNativeAgentWithOptions({
+      name: 'bootstrap-failed-attempt-count',
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [{ authorAddress: AUTHOR, providers }],
+        }],
+        retryIntervalMs: 60_000,
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+        outcome: 'failed',
+        attempts: providers.length,
+        providerPeerId: null,
+        appliedHeadDigest: null,
+      });
+    }, { timeout: 10_000, interval: 50 });
+    expect(synchronize).toHaveBeenCalledTimes(1);
+    synchronize.mockRestore();
+  }, 30_000);
+
 
   it('serializes mixed-case projection terms in raw UTF-8 order', async () => {
     const author = await startNativeAgent(
@@ -2849,6 +2883,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(cold.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
       outcome: 'known-incomplete',
       completionReason: 'no-authorized-provider',
+      attempts: 1,
       providerPeerId: null,
       appliedHeadDigest: null,
     });
