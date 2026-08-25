@@ -82,6 +82,46 @@ export interface GraphListMemo {
   }): Promise<readonly string[]>;
 }
 
+type GraphListRevision =
+  | { kind: 'write-generation'; value: number }
+  | { kind: 'session-generation'; value: string };
+
+interface GraphListRevisionPolicy {
+  current(refreshGeneration: string | undefined): GraphListRevision | null;
+  supersedes(
+    stored: GraphListRevision | null,
+    current: GraphListRevision | null,
+  ): boolean;
+  permitsReuseOnExplicitRefresh: boolean;
+}
+
+function createGraphListRevisionPolicy(store: TripleStore): GraphListRevisionPolicy {
+  const writeGenerationSource = asGraphWriteGenSource(store);
+  if (writeGenerationSource) {
+    return {
+      current: () => ({
+        kind: 'write-generation',
+        value: writeGenerationSource.getWriteGen(''),
+      }),
+      supersedes: (stored, current) =>
+        stored?.kind !== 'write-generation'
+        || current?.kind !== 'write-generation'
+        || stored.value !== current.value,
+      permitsReuseOnExplicitRefresh: true,
+    };
+  }
+  return {
+    current: (refreshGeneration) => refreshGeneration === undefined
+      ? null
+      : { kind: 'session-generation', value: refreshGeneration },
+    // A deep-page read without a session generation joins/uses the current
+    // snapshot; only an explicitly newer responder session supersedes it.
+    supersedes: (stored, current) => current?.kind === 'session-generation'
+      && (stored?.kind !== 'session-generation' || stored.value !== current.value),
+    permitsReuseOnExplicitRefresh: false,
+  };
+}
+
 export interface SubGraphNameMemo {
   get(contextGraphId: string, options?: {
     refresh?: boolean;
@@ -235,17 +275,15 @@ export function createResponderGraphListMemo(
   store: TripleStore,
   ttlMs = 10_000,
 ): GraphListMemo {
-  const writeGenerationSource = asGraphWriteGenSource(store);
+  const revisionPolicy = createGraphListRevisionPolicy(store);
   let cached: {
     value: readonly string[];
     cachedAt: number;
-    refreshGeneration?: string;
-    writeGeneration?: number;
+    revision: GraphListRevision | null;
   } | null = null;
   let inflight: {
     promise: Promise<readonly string[]>;
-    refreshGeneration?: string;
-    writeGeneration?: number;
+    revision: GraphListRevision | null;
   } | null = null;
   return {
     async get(options?: {
@@ -256,12 +294,8 @@ export function createResponderGraphListMemo(
       throwIfAborted(options?.signal);
       while (inflight) {
         const pending = inflight;
-        const currentWriteGeneration = writeGenerationSource?.getWriteGen('');
-        const supersedesPending = writeGenerationSource
-          ? currentWriteGeneration !== pending.writeGeneration
-          : options?.refreshGeneration !== undefined &&
-            options.refreshGeneration !== pending.refreshGeneration;
-        if (!supersedesPending) {
+        const currentRevision = revisionPolicy.current(options?.refreshGeneration);
+        if (!revisionPolicy.supersedes(pending.revision, currentRevision)) {
           return [...(await raceAgainstAbort(pending.promise, options?.signal))];
         }
         try {
@@ -271,18 +305,12 @@ export function createResponderGraphListMemo(
         }
       }
       const now = Date.now();
-      const currentWriteGeneration = writeGenerationSource?.getWriteGen('');
-      if (cached) {
-        const invalidated = writeGenerationSource
-          ? cached.writeGeneration !== currentWriteGeneration
-          : options?.refreshGeneration !== undefined &&
-            cached.refreshGeneration !== options.refreshGeneration;
-        if (invalidated) cached = null;
-      }
+      const currentRevision = revisionPolicy.current(options?.refreshGeneration);
+      if (cached && revisionPolicy.supersedes(cached.revision, currentRevision)) cached = null;
       if (
         cached &&
         now - cached.cachedAt < ttlMs &&
-        (writeGenerationSource || !options?.refresh)
+        (revisionPolicy.permitsReuseOnExplicitRefresh || !options?.refresh)
       ) return [...cached.value];
       // This load is shared by concurrent responders. Do not bind it to the
       // first stream's abort signal; waiters race their own abort locally via
@@ -293,8 +321,7 @@ export function createResponderGraphListMemo(
           cached = {
             value: sorted,
             cachedAt: Date.now(),
-            refreshGeneration: options?.refreshGeneration,
-            writeGeneration: currentWriteGeneration,
+            revision: currentRevision,
           };
           return sorted;
         })
@@ -303,8 +330,7 @@ export function createResponderGraphListMemo(
         });
       inflight = {
         promise: load,
-        refreshGeneration: options?.refreshGeneration,
-        writeGeneration: currentWriteGeneration,
+        revision: currentRevision,
       };
       const graphs = await load;
       throwIfAborted(options?.signal);

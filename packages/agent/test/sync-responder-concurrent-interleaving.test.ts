@@ -1529,6 +1529,32 @@ describe('sync responder pagination interleaving', () => {
     expect(calls).toBe(3);
   });
 
+  it('supersedes an in-flight graph list when write generation changes', async () => {
+    const oldGraphs = deferred<string[]>();
+    const newGraphs = deferred<string[]>();
+    let generation = 0;
+    let calls = 0;
+    const store = {
+      getWriteGen: () => generation,
+      listGraphs: async () => {
+        calls++;
+        return calls === 1 ? oldGraphs.promise : newGraphs.promise;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const beforeWrite = memo.get({ refresh: true, refreshGeneration: 'old-session' });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    generation++;
+    const afterWrite = memo.get({ refresh: true, refreshGeneration: 'new-session' });
+
+    oldGraphs.resolve(['urn:graph:old']);
+    await expect(beforeWrite).resolves.toEqual(['urn:graph:old']);
+    await vi.waitFor(() => expect(calls).toBe(2));
+    newGraphs.resolve(['urn:graph:new']);
+    await expect(afterWrite).resolves.toEqual(['urn:graph:new']);
+  });
+
   it('retains the TTL backstop for writers outside the tracked store process', async () => {
     let calls = 0;
     const store = {
