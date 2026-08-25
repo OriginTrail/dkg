@@ -55,3 +55,5 @@ a.chip, a.stmt, a.mopt, a.poolchip { text-decoration:none; cursor:pointer; }
 .dkg-nav .row .car { margin-left:auto; color:var(--text-muted); font-size:var(--fs-xs); }
 .dkg-nav .subnav { display:flex; flex-direction:column; }
 .dkg-nav .row.sub { padding-left:calc(var(--sp-3) + var(--sp-5)); font-size:var(--fs-sm); }
+/* monochrome emoji glyph — renders the brain in the rail's grey like its neighbors */
+.ic-mono { filter: grayscale(1) brightness(1.35) contrast(0.85); opacity: .85; }
