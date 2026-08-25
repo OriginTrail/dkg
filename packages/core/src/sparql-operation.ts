@@ -20,8 +20,8 @@ export type SparqlOperationClassification =
   | { kind: 'update' }
   | { kind: 'unknown' };
 export interface SparqlOperationAnalysis {
-  readonly operation: SparqlOperationClassification;
-  readonly mutatingKeyword: string | null;
+  operation: SparqlOperationClassification;
+  mutatingKeyword: string | null;
 }
 
 // A single query traverses several store decorators (agent invalidation,
@@ -162,6 +162,28 @@ function classifySparqlOperationForm(form: SparqlDetectedOperation): SparqlOpera
   return { kind: 'unknown' };
 }
 
+function cloneSparqlOperationClassification(
+  operation: SparqlOperationClassification,
+): SparqlOperationClassification {
+  switch (operation.kind) {
+    case 'read':
+      return { kind: 'read', form: operation.form };
+    case 'update':
+      return { kind: 'update' };
+    case 'unknown':
+      return { kind: 'unknown' };
+  }
+}
+
+function cloneSparqlOperationAnalysis(
+  analysis: SparqlOperationAnalysis,
+): SparqlOperationAnalysis {
+  return {
+    operation: cloneSparqlOperationClassification(analysis.operation),
+    mutatingKeyword: analysis.mutatingKeyword,
+  };
+}
+
 export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis {
   if (sparql.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH) {
     const cached = sparqlAnalysisCache.get(sparql);
@@ -169,17 +191,17 @@ export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis 
       // Refresh insertion order to keep frequently repeated queries resident.
       sparqlAnalysisCache.delete(sparql);
       sparqlAnalysisCache.set(sparql, cached);
-      return cached;
+      return cloneSparqlOperationAnalysis(cached);
     }
   }
 
   const stripped = stripSparqlLiteralsAndComments(sparql);
   const form = detectSparqlOperationFormFromStripped(stripped);
   const match = MUTATING_PATTERN.exec(stripped);
-  const analysis = Object.freeze({
-    operation: Object.freeze(classifySparqlOperationForm(form)),
+  const analysis: SparqlOperationAnalysis = {
+    operation: classifySparqlOperationForm(form),
     mutatingKeyword: match?.[1] ?? null,
-  });
+  };
 
   if (sparql.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH) {
     sparqlAnalysisCache.set(sparql, analysis);
@@ -188,7 +210,10 @@ export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis 
       if (oldest !== undefined) sparqlAnalysisCache.delete(oldest);
     }
   }
-  return analysis;
+  // Cache owns the canonical object. Public APIs historically returned mutable
+  // data, so expose a fresh copy and prevent one caller from poisoning later
+  // classifications shared across store layers.
+  return cloneSparqlOperationAnalysis(analysis);
 }
 
 export function classifySparqlOperation(sparql: string): SparqlOperationClassification {

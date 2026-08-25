@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeSparqlOperation } from '../src/sparql-operation.js';
+import {
+  analyzeSparqlOperation,
+  classifySparqlOperation,
+} from '../src/sparql-operation.js';
 
 describe('analyzeSparqlOperation memoization', () => {
-  it('reuses one immutable analysis for an exact query across store layers', () => {
+  it('returns isolated mutable analyses while reusing the internal classification', () => {
     const sparql = `
       SELECT ?g WHERE {
         VALUES ?g { <urn:graph:1> <urn:graph:2> }
@@ -13,28 +16,39 @@ describe('analyzeSparqlOperation memoization', () => {
     const first = analyzeSparqlOperation(sparql);
     const second = analyzeSparqlOperation(sparql);
 
-    expect(second).toBe(first);
-    expect(Object.isFrozen(first)).toBe(true);
-    expect(Object.isFrozen(first.operation)).toBe(true);
-    expect(first).toEqual({
+    expect(second).not.toBe(first);
+    expect(second.operation).not.toBe(first.operation);
+    expect(Object.isFrozen(first)).toBe(false);
+    expect(Object.isFrozen(first.operation)).toBe(false);
+    expect(second).toEqual({
       operation: { kind: 'read', form: 'SELECT' },
       mutatingKeyword: null,
     });
+
+    first.operation = { kind: 'update' };
+    first.mutatingKeyword = 'DELETE';
+    expect(analyzeSparqlOperation(sparql)).toEqual(second);
+
+    const classification = classifySparqlOperation(sparql);
+    expect(() => { classification.kind = 'unknown'; }).not.toThrow();
+    expect(classifySparqlOperation(sparql)).toEqual({ kind: 'read', form: 'SELECT' });
   });
 
-  it('does not retain oversized one-off query strings', () => {
+  it('keeps oversized one-off query results isolated', () => {
     const sparql = `SELECT * WHERE { ?s ?p ?o } # ${'x'.repeat(64 * 1024)}`;
 
-    expect(analyzeSparqlOperation(sparql)).not.toBe(analyzeSparqlOperation(sparql));
+    const first = analyzeSparqlOperation(sparql);
+    first.operation = { kind: 'unknown' };
+    expect(analyzeSparqlOperation(sparql).operation).toEqual({ kind: 'read', form: 'SELECT' });
   });
 
-  it('evicts cold entries when the bounded cache fills', () => {
+  it('preserves cold-query correctness when the bounded cache fills', () => {
     const cold = 'SELECT * WHERE { <urn:cold> ?p ?o }';
-    const first = analyzeSparqlOperation(cold);
+    expect(analyzeSparqlOperation(cold).operation).toEqual({ kind: 'read', form: 'SELECT' });
     for (let i = 0; i < 300; i += 1) {
       analyzeSparqlOperation(`SELECT * WHERE { <urn:hot:${i}> ?p ?o }`);
     }
 
-    expect(analyzeSparqlOperation(cold)).not.toBe(first);
+    expect(analyzeSparqlOperation(cold).operation).toEqual({ kind: 'read', form: 'SELECT' });
   });
 });
