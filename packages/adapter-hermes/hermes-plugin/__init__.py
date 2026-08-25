@@ -2543,8 +2543,9 @@ def _filter_context_graphs_for_scope(graphs: Any, scope: str) -> List[Any]:
 _ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
-# GH#1086 — one warning per process for a missing keccak backend; the
-# normalizer runs on every write and must not spam the operator log.
+# GH#1086 — the checksum fallback below warns at most once per process. The
+# normalizer runs on every call on both the read and the write path, so an
+# unconditional warning would flood the operator log.
 _CHECKSUM_FALLBACK_WARNED = False
 
 
@@ -2557,18 +2558,17 @@ def _normalize_wm_agent_address(agent_address: str) -> str:
             from eth_utils import to_checksum_address
             return to_checksum_address(value)
         except Exception as exc:  # GH#1086
-            # eth-utils ships no keccak backend by default and the Hermes setup
-            # pip-installs nothing, so this path is reached routinely rather
-            # than exceptionally. Fail open: the value is still a usable
-            # identifier and refusing the call would be a worse regression.
+            # eth-utils ships no keccak backend by default and the Hermes
+            # setup pip-installs nothing, so this is a routine condition rather
+            # than an exceptional one. Fail open: the value is still a usable
+            # identifier, and refusing the call would be the worse regression.
             #
-            # PR #2334 review — keep the wording OPERATION-NEUTRAL and
-            # CONDITIONAL. This helper is shared: it runs on the
-            # working-memory READ path (dkg_query, view="working-memory") as
-            # well as the finalize author path, and its input may ALREADY be
-            # checksummed, in which case returning it unchanged is correct.
-            # Asserting "this will split attribution" would be a definitive but
-            # often false diagnosis.
+            # INVARIANT: this helper is shared by the working-memory read path
+            # (dkg_query, view="working-memory") and the finalize author path,
+            # and its input may already be checksummed — in which case
+            # returning it unchanged is correct. Diagnostics here must
+            # therefore stay operation-neutral and conditional: never name a
+            # write-only consequence, and never assert the value is wrong.
             global _CHECKSUM_FALLBACK_WARNED
             if not _CHECKSUM_FALLBACK_WARNED:
                 _CHECKSUM_FALLBACK_WARNED = True
