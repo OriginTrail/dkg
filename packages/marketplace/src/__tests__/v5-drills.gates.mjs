@@ -197,5 +197,41 @@ ok("D-i6-3 interim publish on a CLEAN period fails; on a divergent one it is all
    !checkI6([{ pair: PAIR, periodId: PERIOD, kind: "statement" }, { pair: PAIR, periodId: PERIOD, kind: "interim-dispute" }], [{ pair: PAIR, periodId: PERIOD }]).ok
    && checkI6([{ pair: PAIR, periodId: PERIOD, kind: "statement" }, { pair: PAIR, periodId: PERIOD, kind: "interim-dispute" }], []).ok);
 
+// ── gateway admission: 402 fork, no-fallback, both-sides hooks (G22) ───────
+console.log("— gateway admission —");
+const { admit, recordDelivery, recordProviderFailure } = await import(join(DIST, "subs/gateway.js"));
+const G = mkT(join((await import("node:os")).tmpdir(), "v5g-"));
+seedAsk(G, { seller: OKF, offeringId: "qwen14b", unit: "tokens", askMicroPerUnit: 0.6, effectiveFromCycle: 1 });
+seedAsk(G, { seller: OKF, offeringId: "okf-knowledge", unit: "query-units", askMicroPerUnit: 15.24, effectiveFromCycle: 1 });
+const gasks = [askInForce(G, "qwen14b", OKF, 1), askInForce(G, "okf-knowledge", OKF, 1)];
+const gplan = buildPlan({ buyer: BUYER, periodMs: 3600_000, cycle: 1, now,
+  lines: [ { offeringId: "qwen14b", seller: OKF, allocationMicroTrac: 600 },
+           { offeringId: "okf-knowledge", seller: OKF, allocationMicroTrac: 152_400 } ],
+  asks: gasks, paymentTxBySeller: { [OKF]: "0xgtx" } });
+purchasePlan(G, gplan);
+
+ok("D-gw-1 no plan → 402 with start-new-period fork", admit(G, { plan: null, offeringId: "qwen14b" }).body?.error === "no_active_plan");
+const adm = admit(G, { plan: gplan, offeringId: "qwen14b" });
+ok("D-gw-2 active ceiling admits and names the ONE chosen provider", adm.ok === true && adm.allowance.seller === OKF);
+
+recordDelivery(G, { plan: gplan, allowance: adm.allowance, callId: "g1", units: 900, unit: "tokens",
+  requestDigest: "sha256:g1", responseDigest: "sha256:g1x", keyId: "kA", now });
+recordDelivery(G, { plan: gplan, allowance: adm.allowance, callId: "g2", units: 100, unit: "tokens",
+  requestDigest: "sha256:g2", responseDigest: "sha256:g2x", keyId: "kA", now });
+const adm2 = admit(G, { plan: gplan, offeringId: "qwen14b" });
+ok("D-gw-3 exhausted ceiling → 402 fork: topUp + switch (NO wait option in the body)",
+   adm2.ok === false && adm2.body.fork.topUp === true && !("wait" in adm2.body.fork)
+   && adm2.body.fork.switch.some((s) => s.offeringId === "okf-knowledge" && s.pctLeft === 100));
+ok("D-gw-4 the other meter stays usable after one ceiling hit", admit(G, { plan: gplan, offeringId: "okf-knowledge" }).ok === true);
+
+const qadm = admit(G, { plan: gplan, offeringId: "okf-knowledge" });
+const failure = recordProviderFailure(G, { plan: gplan, allowance: qadm.allowance, callId: "gf", unit: "query-units",
+  requestDigest: "sha256:gf", now, reason: "connect ECONNREFUSED" });
+ok("D-gw-5 provider failure charges NOTHING and says so (no fallback attempted)",
+   failure.status === 502 && failure.body.charged === 0 && /charged nothing/.test(failure.body.detail));
+ok("D-gw-6 failure did not decrement the meter",
+   admit(G, { plan: gplan, offeringId: "okf-knowledge" }).allowance.consumedUnits === 0);
+ok("D-gw-7 I2/I5 hold after gateway traffic", checkI2(G, gplan).ok && checkI5(G).ok);
+
 console.log(`\n${pass}/${pass + fail} v5 core drills pass`);
 process.exit(fail ? 1 : 0);
