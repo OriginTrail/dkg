@@ -50,3 +50,15 @@ just-reset (bars at 0, expiry line showing) · disputed-statement.
 - [ ] Shared bar itemizes offerings and the itemized values sum to the bar's consumed value (I5 on screen).
 - [ ] Expired value renders with `meter.expired.journal` — never as a refundable amount.
 - [ ] 390 px: bars full-width, itemized lines wrap, fork buttons stack.
+
+## CP-R revision (D1–D12, 2026-08-25)
+See UI-COPY.md §CP-R revision for the binding strings. Applied here: default
+journey = 3 interactions w/ ONE consent (D1) · "NN% left" chip grammar (D2) ·
+USD-only primary, TRAC at consent only (D3) · composer collapses to
+budget+template+Confirm with Advanced holding pooling/max-price/pins (D4) ·
+fork = Top up + one line (D5) · banned-term purge (D6) · D7 expiry line ·
+segmented pool bars w/ --usage-seg-*/--usage-query tokens + plain legend
+(D8) · sparkline + one pace sentence per pool, amber early-exhaustion state
+(D9) · playground before/after linkage w/ Pool chip (D10) · Recent-activity
+list, key-filterable, on Plans (D11) · Access restored to nav + runthrough
+(D12).

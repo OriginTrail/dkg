@@ -1,0 +1,73 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — P5 Access (keys)</title>
+<link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
+<link rel="stylesheet" href="../shell.css">
+<style>
+  .krow { display:grid; grid-template-columns:1fr auto auto; gap:var(--sp-3); align-items:center; padding:var(--sp-3) 0; border-top:1px solid var(--border-subtle); font-size:var(--fs-sm); }
+  .krow:first-of-type { border-top:none; }
+  .kmix { color:var(--text-muted); font-size:var(--fs-xs); }
+  .chip { font-size:var(--fs-xs); border-radius:var(--r-full); padding:var(--sp-1) var(--sp-3); background:color-mix(in srgb, var(--state-verified) 16%, var(--surface-1)); color:var(--state-verified); white-space:nowrap; }
+  .snippet { background:var(--surface-0); border:1px solid var(--border-strong); border-radius:var(--r-sm); padding:var(--sp-3); font-family:var(--font-mono); font-size:var(--fs-xs); overflow-wrap:anywhere; }
+  .warn-once { color:var(--state-pending); font-size:var(--fs-sm); }
+  .modal { border:1px solid var(--border-strong); border-radius:var(--r-md); padding:var(--sp-4); display:grid; gap:var(--sp-3); background:var(--surface-2); }
+</style></head><body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/06-access-keys.md §P5 — nothing here is wired</span></div>
+<div class="dkg">
+  <header class="dkg-h">
+    <span class="logo">DKG<b>v10</b></span><span class="pby">powered by ⊙ origintrail</span>
+    <span class="node"><span class="dot"></span>buyer-node <span class="addr">0x1B7a…b2E4</span></span>
+    <span class="right"><span><span class="dot"></span> syncing · 2 peers</span>
+      <span class="icons">◔ ∿ ⊚ ⚙ ◐ ▯</span></span>
+  </header>
+  <div class="dkg-body">
+    <aside class="dkg-side">
+      <div class="dkg-cgbtns"><span class="b">+ New<br>Context<br>Graph</span><span class="b">↗ Join<br>Context<br>Graph</span></div>
+      <div class="dkg-railtabs"><span class="on">Context<br>Graphs</span><span>Context<br>Oracle</span></div>
+      <div class="dkg-nav"><div class="row"><span class="ic">▪</span>Dashboard</div><div class="row"><span class="ic">◈</span>Marketplace</div><div class="row"><span class="ic">▤</span>Plans</div><div class="row on"><span class="ic">⚿</span>Access</div><div class="row"><span class="ic">◉</span>Operate</div></div>
+      <div class="dkg-nocg"><div class="t">neurosymbolic-marketplace</div><div class="s">odysseus · 2 graphs joined</div></div>
+      <div class="dkg-flag">marketplace.enabled</div>
+    </aside>
+    <main class="dkg-center">
+      <div class="dkg-tabs"><span class="t">Dashboard</span><span class="t on">Access</span></div>
+      <div class="dkg-content">
+<div class="frame frame--narrow">
+
+  <div class="state-label">state: key list</div>
+  <div class="card card--pad stack">
+    <div style="display:flex; justify-content:space-between; align-items:baseline"><h1 style="font-size:var(--fs-xl)">Access</h1><button class="btn btn--primary">+ Mint key</button></div>
+    <div class="krow">
+      <span><strong>my-agent</strong> <span class="mono muted xs">nsm_k_9f2e…c41a</span><div class="kmix">mostly Qwen 14B · 12% queries</div></span>
+      <span class="chip">61% of cap</span>
+      <button class="btn">Revoke</button>
+    </div>
+    <div class="krow">
+      <span><strong>ci-bot</strong> <span class="mono muted xs">nsm_k_77aa…d203</span><div class="kmix">mostly gpt-5.x</div></span>
+      <span class="chip">18% of cap</span>
+      <button class="btn">Revoke</button>
+    </div>
+    <p class="muted xs">Revoke — stops at the next call. Activity per key lives on Plans → Recent activity.</p>
+  </div>
+
+  <div class="state-label">state: mint modal (same key step as onboarding)</div>
+  <div class="card card--pad stack">
+    <div class="modal">
+      <div style="display:flex; gap:var(--sp-3); align-items:baseline"><label class="sec sm">Name</label><input class="input" value="reporting-bot"><label class="sec sm">Budget cap</label><input class="input mono" value="$0.25" size="6"></div>
+      <div class="snippet">base_url = "http://127.0.0.1:9500/marketplace/gateway/v1"<br>api_key&nbsp;&nbsp;= "nsm_k_31bc…88e0"</div>
+      <div class="warn-once">Shown once. Store it now.</div>
+    </div>
+  </div>
+
+</div>
+</div>
+      <div class="dkg-dock"><span class="on">Node Log</span><span>Transactions</span><span class="exp">⌄</span></div>
+    </main>
+    <aside class="dkg-right">
+      <div class="rtabs"><span class="on">Agents</span><span>Network</span><span>Sessions</span></div>
+      <div class="dkg-agent"><span class="chip"><span class="dot"></span>Hermes</span><span class="muted">+</span></div>
+      <div class="empty">Start a conversation with Hermes.<div class="s">Try: "What can you help me with?"</div></div>
+      <div class="dkg-msg">Message Hermes…</div>
+    </aside>
+  </div>
+</div>
+</body></html>

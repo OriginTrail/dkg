@@ -44,6 +44,13 @@
   --prov-pinned:var(--teal-500);          /* ⛓ weights-pinned */
   --prov-claimed:var(--sky-500);          /* ☁ upstream-claimed */
 
+  /* usage segments (D8) — pool-bar composition; query visually distinct */
+  --usage-seg-1:var(--accent-500);
+  --usage-seg-2:var(--sky-500);
+  --usage-seg-3:var(--teal-500);
+  --usage-seg-4:var(--gray-5);
+  --usage-query:var(--amber-500);
+
   /* gauges */
   --gauge-track:var(--gray-3);
   --gauge-low:var(--gray-5);              /* < 25% — not yet meaningful */

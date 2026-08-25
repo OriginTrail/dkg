@@ -1,18 +1,30 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>M-gate mockup — P5 Plans &amp; meters (Claude usage idiom)</title>
+<title>M-gate mockup — P5 Plans & meters (D8/D9/D11)</title>
 <link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
 <link rel="stylesheet" href="../shell.css">
 <style>
-  .bar { height: var(--sp-3); border-radius: var(--r-full); background: var(--gauge-track); overflow: hidden; }
-  .bar i { display:block; height:100%; background: var(--interactive); }
-  .bar.warn i { background: var(--gauge-mid); }
-  .bar.hit i { background: var(--gauge-over); }
+  .bar { height:var(--sp-3); border-radius:var(--r-full); background:var(--gauge-track); overflow:hidden; display:flex; }
+  .bar i { display:block; height:100%; }
+  .seg1{background:var(--usage-seg-1)} .seg2{background:var(--usage-seg-2)} .seg3{background:var(--usage-seg-3)} .segq{background:var(--usage-query)}
+  .bar.plain i { background:var(--interactive); }
+  .bar.warn i { background:var(--gauge-mid); } .bar.hit i { background:var(--gauge-over); }
   .mrow { display:grid; gap:var(--sp-2); padding:var(--sp-4) 0; border-top:1px solid var(--border-subtle); }
   .mhead { display:flex; justify-content:space-between; gap:var(--sp-3); flex-wrap:wrap; font-size:var(--fs-sm); }
-  .items { color:var(--text-secondary); font-size:var(--fs-xs); display:grid; gap:var(--sp-1); padding-left:var(--sp-4); }
-  .fork { display:flex; gap:var(--sp-3); flex-wrap:wrap; }
+  .legend { color:var(--text-secondary); font-size:var(--fs-xs); }
+  .pace { font-size:var(--fs-xs); } .pace.warn { color:var(--gauge-mid); } .pace.quiet { color:var(--text-muted); }
+  .sparkrow { display:flex; align-items:center; gap:var(--sp-3); }
+  .spark { display:flex; align-items:flex-end; gap:2px; height:var(--sp-5); }
+  .spark i { width:4px; background:var(--gray-5); border-radius:1px; display:block; }
+  .pop { background:var(--surface-3); border:1px solid var(--border-strong); border-radius:var(--r-sm); padding:var(--sp-2) var(--sp-3); font-size:var(--fs-xs); color:var(--text-secondary); width:fit-content; }
+  .fork { display:flex; gap:var(--sp-3); align-items:center; flex-wrap:wrap; }
   .planhead { display:flex; justify-content:space-between; align-items:baseline; gap:var(--sp-3); flex-wrap:wrap; }
+  .act { width:100%; border-collapse:collapse; font-size:var(--fs-xs); }
+  .act td { padding:var(--sp-2) var(--sp-3); border-top:1px solid var(--border-subtle); color:var(--text-secondary); }
+  .act td:first-child { font-family:var(--font-mono); color:var(--text-muted); }
+  .fchips { display:flex; gap:var(--sp-2); font-size:var(--fs-xs); }
+  .fchips span { border:1px solid var(--border-strong); border-radius:var(--r-full); padding:var(--sp-1) var(--sp-3); color:var(--text-secondary); }
+  .fchips .on { border-color:var(--interactive); color:var(--interactive); }
 </style></head><body>
 <div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/09-plans-meters.md — nothing here is wired</span></div>
 <div class="dkg">
@@ -33,54 +45,66 @@
     <main class="dkg-center">
       <div class="dkg-tabs"><span class="t">Dashboard</span><span class="t on">Plans</span></div>
       <div class="dkg-content">
-
 <div class="frame frame--narrow">
 
-  <div class="state-label">state: normal (38% used)</div>
+  <div class="state-label">state: normal — the pool shows its composition</div>
   <div class="card card--pad stack">
-    <div class="planhead"><h1 style="font-size:var(--fs-xl)">Plan: 38% used</h1><span class="sec">Resets in 12 days · <a href="#">Top up</a></span></div>
-    <div class="bar"><i style="width:38%"></i></div>
+    <div class="planhead"><h1 style="font-size:var(--fs-xl)">Plan: 38% used</h1><span class="sec">Resets in 12 days · <a href="#">Top up</a> · <a href="#" class="muted">Upgrade next period</a></span></div>
+    <div class="bar plain"><i style="width:38%"></i></div>
     <div class="mrow">
-      <div class="mhead"><span><strong>okf-mainnet shared</strong> — 1.064 of 2.8 TRAC · any mix of 4 offerings</span><span class="mono sec">38%</span></div>
-      <div class="bar"><i style="width:38%"></i></div>
-      <div class="items">
-        <span>Qwen2.5 14B: 1,200,000 tokens · 720,000 µ</span>
-        <span>Qwen2.5 7B: 800,000 tokens · 280,000 µ</span>
-        <span>okf knowledge: 4,200 units · 64,000 µ</span>
-      </div>
+      <div class="mhead"><span><strong>okf-mainnet pool</strong> — $0.30 of $0.78 · any mix of 4 offerings</span><span class="mono sec">38%</span></div>
+      <div class="bar"><i class="seg1" style="width:23.2%"></i><i class="seg2" style="width:9.5%"></i><i class="seg3" style="width:3%"></i><i class="segq" style="width:2.3%"></i></div>
+      <div class="legend">Mostly Qwen 14B (61%) · Qwen 7B 25% · gpt-5.x 8% · queries 6%</div>
+      <div class="pop">Qwen 14B — 1.08M tokens · $0.18 <span class="muted">(tapped segment)</span></div>
+      <div class="sparkrow"><span class="spark"><i style="height:16%"></i><i style="height:24%"></i><i style="height:24%"></i><i style="height:32%"></i><i style="height:48%"></i><i style="height:72%"></i><i style="height:96%"></i></span><span class="pace warn">At this pace: runs out ~4 days before reset</span></div>
     </div>
     <div class="mrow">
-      <div class="mhead"><span><strong>hermes · Qwen2.5 7B</strong> (scoped) — 1.2M of 5M tokens</span><span class="mono sec">24%</span></div>
-      <div class="bar"><i style="width:24%"></i></div>
-      <div class="items"><span>At your price cap: 5M guaranteed — routed cheaper twice, +140k above the floor</span></div>
+      <div class="mhead"><span><strong>hermes · Qwen2.5 7B</strong> (separate budget) — 24% used</span><span class="mono sec">76% left</span></div>
+      <div class="bar plain"><i style="width:24%"></i></div>
+      <div class="legend">At least 5M tokens at your max price — routed cheaper twice, +140k extra</div>
+      <div class="sparkrow"><span class="spark"><i style="height:16%"></i><i style="height:16%"></i><i style="height:24%"></i><i style="height:16%"></i><i style="height:24%"></i><i style="height:16%"></i><i style="height:24%"></i></span><span class="pace quiet">On track to reset</span></div>
     </div>
     <div class="sec sm">This period: our count 1,238,400 · provider count 1,238,400 ✓</div>
   </div>
 
   <div class="state-label">state: approaching (87%)</div>
   <div class="card card--pad stack">
-    <div class="mhead"><span><strong>okf-mainnet shared</strong></span><span style="color:var(--gauge-mid)">87% used — approaching your ceiling</span></div>
+    <div class="mhead"><span><strong>okf-mainnet pool</strong></span><span style="color:var(--gauge-mid)">87% used — approaching your ceiling</span></div>
     <div class="bar warn"><i style="width:87%"></i></div>
   </div>
 
-  <div class="state-label">state: ceiling hit — the fork, never a wall</div>
+  <div class="state-label">state: ceiling hit — one button, one line</div>
   <div class="card card--pad stack">
     <div class="mhead"><span><strong>hermes · Qwen2.5 7B</strong></span><span style="color:var(--gauge-over)">100%</span></div>
     <div class="bar hit"><i style="width:100%"></i></div>
     <h2>You've reached this ceiling</h2>
-    <p class="sec sm">Three ways forward — nothing is lost, your plan resets in 12 days.</p>
-    <div class="fork"><button class="btn">Wait for reset (12 d)</button><button class="btn">Upgrade next period</button><button class="btn btn--primary">Top up now</button></div>
+    <div class="fork"><button class="btn btn--primary">Top up</button><span class="sec sm">or wait — resets in 12 d · or switch to Qwen 7B (okf), 92% left</span></div>
   </div>
 
   <div class="state-label">state: just reset — expiry journaled, not returned</div>
   <div class="card card--pad stack">
     <div class="mhead"><span><strong>Plan: 0% used</strong></span><span class="sec">Resets in 30 days</span></div>
-    <div class="bar"><i style="width:0%"></i></div>
-    <p class="sec sm">Expired at reset: 173,000 µ — value recognized, not returned</p>
-    <p class="muted xs">Subscriptions don't refund. What you don't use funds the network you're part of.</p>
+    <div class="bar plain"><i style="width:0%"></i></div>
+    <p class="sec sm">Expired at reset: $0.05 — value recognized, not returned</p>
+    <p class="muted xs">Unused allowance expires at reset — like any subscription.</p>
   </div>
 
-</div></div>
+  <div class="state-label">recent activity — where the allowance went</div>
+  <div class="card card--pad stack">
+    <div class="mhead"><h2>Recent activity</h2><span class="fchips"><span class="on">All</span><span>my-agent</span><span>ci-bot</span></span></div>
+    <table class="act">
+      <tr><td>14:32</td><td>Qwen 14B</td><td>via okf-mainnet</td><td>1,840 tokens</td><td>&lt;$0.01</td><td>my-agent</td></tr>
+      <tr><td>14:31</td><td>query</td><td>via okf-mainnet</td><td>41 units</td><td>&lt;$0.01</td><td>my-agent</td></tr>
+      <tr><td>14:12</td><td>Qwen 7B</td><td>via hermes</td><td>3,120 tokens</td><td>&lt;$0.01</td><td>my-agent</td></tr>
+      <tr><td>13:58</td><td>gpt-5.x</td><td>via okf-mainnet</td><td>950 tokens</td><td>&lt;$0.01</td><td>ci-bot</td></tr>
+      <tr><td>13:41</td><td>Qwen 14B</td><td>via okf-mainnet</td><td>12,400 tokens</td><td>&lt;$0.01</td><td>ci-bot</td></tr>
+      <tr><td>13:29</td><td>query</td><td>via okf-mainnet</td><td>5 units</td><td>&lt;$0.01</td><td>my-agent</td></tr>
+    </table>
+    <p class="muted xs">Last 20 · the live twin of the period statement's itemization</p>
+  </div>
+
+</div>
+</div>
       <div class="dkg-dock"><span class="on">Node Log</span><span>Transactions</span><span class="exp">⌄</span></div>
     </main>
     <aside class="dkg-right">

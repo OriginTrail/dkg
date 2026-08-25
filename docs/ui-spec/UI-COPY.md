@@ -329,3 +329,46 @@ table remains, relabeled for the dispute drawer.
 |---|---|
 | fork.402.title | No active ceiling for {model} |
 | fork.402.body | Subscribe, upgrade, or top up — this key's plan doesn't cover this model right now. |
+
+---
+
+# CP-R revision (D1–D12) — supersedes conflicting P5 keys above
+
+**Banned in the primary layer** (D6): metered completion · cost-schedule
+priced · statement-verified · epoch · provenance · scoped · price cap ·
+unit basis. These words may appear only one reveal deeper (drawers, tooltips).
+
+| key | string |
+|---|---|
+| onboard.p5.title | Three steps to your first answer |
+| onboard.consent.title | One confirmation — your plan's payments |
+| onboard.consent.total | {n} transfers · {trac} TRAC total (~${usd}) |
+| onboard.consent.progress | Transfer {i} of {n} confirmed… |
+| onboard.customize | Customize → |
+| chip.left | {pct}% left |
+| chip.tap | Tap for exact amounts, reset date and pool |
+| composer.advanced | Advanced |
+| composer.pool.one | One pool (recommended) |
+| composer.pool.separate | Separate budgets |
+| composer.maxprice | Max price |
+| composer.route.note | Your node picks the cheapest included provider automatically. |
+| meter.pool.line | {seller} pool — ${used} of ${ceiling} · any mix of {n} offerings |
+| meter.separate.label | (separate budget) |
+| meter.floor.note | At least {floor} tokens at your max price — routed cheaper {n}×, +{extra} extra |
+| meter.legend | Mostly {top} ({pct}%) · {rest} |
+| meter.pace.warn | At this pace: runs out ~{d} days before reset |
+| meter.pace.ok | On track to reset |
+| meter.expired.tip | Unused allowance expires at reset — like any subscription. |
+| fork.topup | Top up |
+| fork.line | or wait — resets in {t} · or switch to {alt}, {pct}% left |
+| play.pool | Pool: {pct}% left |
+| activity.title | Recent activity |
+| activity.filter | Key: {key} |
+| store.volume.plain | {n} units served · counted by both sides this period |
+| catalog.query.plain | priced per query |
+| access.cap | {pct}% of cap |
+| access.mix | {mix} |
+| access.revoke | Revoke — stops at the next call |
+
+Removed (D7): `meter.expired.tip` former text ("What you don't use funds the
+network…") — false in P5; unused value accrues to the seller until the RFC.

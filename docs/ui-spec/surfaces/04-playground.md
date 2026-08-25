@@ -65,3 +65,15 @@ Acceptance additions:
 - [ ] No verified/checking chips anywhere in the P5 playground.
 - [ ] The inline fork renders inside the conversation flow at fixture 100%.
 - [ ] Served-by line names seller + provenance class on every response.
+
+## CP-R revision (D1–D12, 2026-08-25)
+See UI-COPY.md §CP-R revision for the binding strings. Applied here: default
+journey = 3 interactions w/ ONE consent (D1) · "NN% left" chip grammar (D2) ·
+USD-only primary, TRAC at consent only (D3) · composer collapses to
+budget+template+Confirm with Advanced holding pooling/max-price/pins (D4) ·
+fork = Top up + one line (D5) · banned-term purge (D6) · D7 expiry line ·
+segmented pool bars w/ --usage-seg-*/--usage-query tokens + plain legend
+(D8) · sparkline + one pace sentence per pool, amber early-exhaustion state
+(D9) · playground before/after linkage w/ Pool chip (D10) · Recent-activity
+list, key-filterable, on Plans (D11) · Access restored to nav + runthrough
+(D12).

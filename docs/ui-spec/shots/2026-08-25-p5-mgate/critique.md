@@ -43,3 +43,11 @@ the node UI's neutral palette (the rebase tokens.css always allowed). One
 cascade leak fixed (page-local `.row` justify bleeding into rail nav —
 shell selectors hardened). Verified: 03-catalog desktop + 09-operate desktop
 read as the node UI with the mockup banner above. Mobile keeps header+tabs.
+
+**Round 6 (CP-R directives D1–D12):** all twelve applied; full re-shoot.
+Verified on 05 desktop: segmented pool + legend incl. gpt-5.x (fixture bug
+fixed), tapped-segment reveal, sparklines with amber pace sentence, 1-button
+fork + line, D7 line replaced, activity table + key chips, USD-only, "NN%
+left" grammar. Banned-term sweep clean in buyer surfaces; seller Operate
+keeps µ/tok asks deliberately (sellers price in µ — flagged in the re-gate
+note). Keep-list untouched byte-wise except where directives required.

@@ -293,26 +293,44 @@
         "itemized": [
           {
             "offering": "Qwen2.5 14B",
-            "units": 1200000,
+            "units": 1080000,
             "unit": "tokens",
-            "askMicroPerUnit": 0.6,
-            "valueMicro": 720000
+            "valueMicro": 649000,
+            "usd": 0.18,
+            "segPct": 61,
+            "segToken": "--usage-seg-1"
           },
           {
             "offering": "Qwen2.5 7B",
-            "units": 800000,
+            "units": 760000,
             "unit": "tokens",
-            "askMicroPerUnit": 0.35,
-            "valueMicro": 280000
+            "valueMicro": 266000,
+            "usd": 0.07,
+            "segPct": 25,
+            "segToken": "--usage-seg-2"
+          },
+          {
+            "offering": "gpt-5.x",
+            "units": 77000,
+            "unit": "tokens",
+            "valueMicro": 85000,
+            "usd": 0.02,
+            "segPct": 8,
+            "segToken": "--usage-seg-3"
           },
           {
             "offering": "okf knowledge",
             "units": 4200,
             "unit": "query units",
-            "askMicroPerUnit": 15.24,
-            "valueMicro": 64000
+            "valueMicro": 64000,
+            "usd": 0.02,
+            "segPct": 6,
+            "segToken": "--usage-query"
           }
-        ]
+        ],
+        "usdConsumed": 0.3,
+        "usdCeiling": 0.78,
+        "legend": "Mostly Qwen 14B (61%) · Qwen 7B 25% · gpt-5.x 8% · queries 6%"
       },
       {
         "kind": "scoped",
@@ -323,7 +341,7 @@
         "consumedUnits": 1200000,
         "pct": 24,
         "guaranteedFloor": 5000000,
-        "note": "at price cap; routed cheaper twice -> +140k tokens above floor"
+        "note": "At least 5M tokens at your max price — routed cheaper twice, +140k extra"
       }
     ],
     "meterStates": {
@@ -451,6 +469,122 @@
     "kpi": {
       "freshNodeToFirstMeteredSeconds": null,
       "target": "< 60 s mainnet"
+    },
+    "pace": {
+      "okfPool": {
+        "spark": [
+          2,
+          3,
+          3,
+          4,
+          6,
+          9,
+          12
+        ],
+        "projection": "At this pace: runs out ~4 days before reset",
+        "tone": "warn"
+      },
+      "hermes": {
+        "spark": [
+          2,
+          2,
+          3,
+          2,
+          3,
+          2,
+          3
+        ],
+        "projection": "On track to reset",
+        "tone": "quiet"
+      }
+    },
+    "chips": {
+      "qwen14b": "76% left",
+      "qwen7b": "88% left",
+      "gpt": "62% left",
+      "knowledge": "92% left",
+      "pool": "62% left",
+      "poolAfter": "61% left"
+    },
+    "activity": [
+      {
+        "t": "14:32",
+        "what": "Qwen 14B",
+        "via": "okf-mainnet",
+        "units": "1,840 tokens",
+        "usd": "<$0.01",
+        "key": "my-agent"
+      },
+      {
+        "t": "14:31",
+        "what": "query",
+        "via": "okf-mainnet",
+        "units": "41 units",
+        "usd": "<$0.01",
+        "key": "my-agent"
+      },
+      {
+        "t": "14:12",
+        "what": "Qwen 7B",
+        "via": "hermes",
+        "units": "3,120 tokens",
+        "usd": "<$0.01",
+        "key": "my-agent"
+      },
+      {
+        "t": "13:58",
+        "what": "gpt-5.x",
+        "via": "okf-mainnet",
+        "units": "950 tokens",
+        "usd": "<$0.01",
+        "key": "ci-bot"
+      },
+      {
+        "t": "13:41",
+        "what": "Qwen 14B",
+        "via": "okf-mainnet",
+        "units": "12,400 tokens",
+        "usd": "<$0.01",
+        "key": "ci-bot"
+      },
+      {
+        "t": "13:29",
+        "what": "query",
+        "via": "okf-mainnet",
+        "units": "5 units",
+        "usd": "<$0.01",
+        "key": "my-agent"
+      }
+    ],
+    "keys": [
+      {
+        "name": "my-agent",
+        "capPct": 61,
+        "mix": "mostly Qwen 14B · 12% queries"
+      },
+      {
+        "name": "ci-bot",
+        "capPct": 18,
+        "mix": "mostly gpt-5.x"
+      }
+    ],
+    "consent": {
+      "totalTrac": 3.6,
+      "totalUsd": 1.01,
+      "lines": [
+        {
+          "seller": "okf-mainnet",
+          "trac": 2.8,
+          "usd": 0.78,
+          "to": "0x…okf revenue wallet"
+        },
+        {
+          "seller": "hermes",
+          "trac": 0.8,
+          "usd": 0.22,
+          "to": "0x…hermes revenue wallet"
+        }
+      ]
     }
   }
 }

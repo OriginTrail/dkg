@@ -1,19 +1,19 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>M-gate mockup — P5 Playground, allowance-in-context</title>
+<title>M-gate mockup — P5 Playground (D10 before/after)</title>
 <link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
 <link rel="stylesheet" href="../shell.css">
 <style>
-  .switcher { display:flex; gap:var(--sp-2); flex-wrap:wrap; }
+  .switcher { display:flex; gap:var(--sp-2); flex-wrap:wrap; align-items:center; }
   .mopt { border:1px solid var(--border-strong); border-radius:var(--r-full); padding:var(--sp-1) var(--sp-3); font-size:var(--fs-xs); }
   .mopt.on { border-color:var(--interactive); color:var(--interactive); }
+  .poolchip { margin-left:auto; font-size:var(--fs-xs); color:var(--text-secondary); border:1px solid var(--border-subtle); border-radius:var(--r-full); padding:var(--sp-1) var(--sp-3); }
   .bubble { border-radius:var(--r-md); padding:var(--sp-3) var(--sp-4); max-width:56ch; font-size:var(--fs-sm); }
   .bubble.user { background:var(--surface-3); margin-left:auto; }
   .bubble.model { background:var(--surface-1); border:1px solid var(--border-subtle); }
   .servedby { color:var(--text-muted); font-size:var(--fs-xs); margin-top:var(--sp-1); }
   .chat { display:grid; gap:var(--sp-3); }
   .fork-inline { border:1px solid var(--gauge-over); border-radius:var(--r-md); padding:var(--sp-4); display:grid; gap:var(--sp-3); }
-  .fork-inline .btns { display:flex; gap:var(--sp-2); flex-wrap:wrap; }
 </style></head><body>
 <div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/04-playground.md §P5 — nothing here is wired</span></div>
 <div class="dkg">
@@ -34,41 +34,55 @@
     <main class="dkg-center">
       <div class="dkg-tabs"><span class="t">Dashboard</span><span class="t on">Marketplace</span></div>
       <div class="dkg-content">
-
 <div class="frame frame--narrow">
 
-  <div class="state-label">state: chatting — switcher shows remaining allowance</div>
+  <div class="state-label">before — a query is about to land</div>
   <div class="card card--pad stack">
     <div class="switcher">
       <span class="mopt on">Qwen 14B · 76% left</span>
-      <span class="mopt">Qwen 7B · 92% left</span>
-      <span class="mopt">gpt-5.x · shared 62%</span>
-      <span class="mopt">okf knowledge · 45.8k units</span>
+      <span class="mopt">Qwen 7B · 88% left</span>
+      <span class="mopt">gpt-5.x · 62% left</span>
+      <span class="mopt">okf knowledge · 92% left</span>
+      <span class="poolchip">Pool: 62% left</span>
     </div>
     <div class="chat">
-      <div class="bubble user">Summarize the certification gaps for supplier A-114.</div>
-      <div><div class="bubble model">Two certificates lapsed in July: ISO 9001 (renewal filed) and the welding qualification (no renewal on record). One audit is scheduled…</div>
-        <div class="servedby">via okf-mainnet <span style="color:var(--prov-pinned)">⛓</span></div></div>
       <div class="bubble user">Which suppliers share that welding cert issue?</div>
-      <div><div class="bubble model">Query over okf knowledge: 3 suppliers match…</div>
-        <div class="servedby">via okf-mainnet · 41 query units <span class="muted">(3 joins + aggregation — tap for the unit basis)</span></div></div>
     </div>
   </div>
 
-  <div class="state-label">state: mid-chat ceiling hit — the fork, inline, never a dead end</div>
+  <div class="state-label">after — the answer landed and the meter moved</div>
+  <div class="card card--pad stack">
+    <div class="switcher">
+      <span class="mopt on">Qwen 14B · 76% left</span>
+      <span class="mopt">Qwen 7B · 88% left</span>
+      <span class="mopt">gpt-5.x · 62% left</span>
+      <span class="mopt">okf knowledge · 92% left</span>
+      <span class="poolchip">Pool: 61% left</span>
+    </div>
+    <div class="chat">
+      <div class="bubble user">Which suppliers share that welding cert issue?</div>
+      <div><div class="bubble model">Query over okf knowledge: 3 suppliers match…</div>
+        <div class="servedby">via okf-mainnet · 41 units</div></div>
+    </div>
+    <p class="muted xs">The Plans bar reflects the same move — one store, two views. Unit details are one tap away.</p>
+  </div>
+
+  <div class="state-label">state: mid-chat ceiling hit — one button, one line, inline</div>
   <div class="card card--pad stack">
     <div class="chat">
       <div class="bubble user">And the full remediation plan for each?</div>
       <div class="fork-inline">
         <strong>This model's ceiling is reached mid-conversation. Your words are safe.</strong>
-        <span class="sec sm">Three ways forward — nothing is lost, your plan resets in 12 days.</span>
-        <div class="btns"><button class="btn">Wait for reset (12 d)</button><button class="btn">Upgrade next period</button><button class="btn btn--primary">Top up now</button></div>
-        <span class="muted xs">Or switch models above — Qwen 7B has 92% left.</span>
+        <div style="display:flex; gap:var(--sp-3); align-items:center; flex-wrap:wrap">
+          <button class="btn btn--primary">Top up</button>
+          <span class="sec sm">or wait — resets in 12 d · or switch to Qwen 7B, 88% left</span>
+        </div>
       </div>
     </div>
   </div>
 
-</div></div>
+</div>
+</div>
       <div class="dkg-dock"><span class="on">Node Log</span><span>Transactions</span><span class="exp">⌄</span></div>
     </main>
     <aside class="dkg-right">
