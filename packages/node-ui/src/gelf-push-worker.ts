@@ -11,6 +11,7 @@
  */
 
 import { Socket } from 'node:net';
+import type { LogLevel } from '@origintrail-official/dkg-core';
 
 const RECONNECT_DELAY_MS = 5_000;
 const FLUSH_INTERVAL_MS = 2_000;
@@ -49,7 +50,7 @@ export interface LogPushWorkerOptions {
 }
 
 interface LogEntry {
-  level: string;
+  level: LogLevel;
   operationName: string;
   operationId: string;
   module: string;

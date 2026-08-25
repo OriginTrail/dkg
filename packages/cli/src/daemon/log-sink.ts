@@ -5,7 +5,11 @@
  * made high-volume sync/query logging block the event loop. Low-volume warning
  * and error records remain in SQLite for operation and dashboard diagnostics.
  */
-import type { LogRecord } from '@origintrail-official/dkg-core';
+import {
+  isDiagnosticLogLevel,
+  type LogLevel,
+  type LogRecord,
+} from '@origintrail-official/dkg-core';
 
 /** Minimal shape of a remote log shipper (LogPushWorker / OtlpLogWorker). */
 export interface RemoteLogShipper {
@@ -16,7 +20,7 @@ export interface DaemonLogSinkDeps {
   /** Persist a FULL (un-redacted) warning/error record to the local DB. */
   insertDiagnosticLog: (rec: {
     ts: number;
-    level: string;
+    level: LogLevel;
     operation_name?: string | null;
     operation_id?: string | null;
     module: string;
@@ -41,7 +45,7 @@ export interface DaemonLogSinkDeps {
 export function createDaemonLogSink(deps: DaemonLogSinkDeps): (entry: LogRecord) => void {
   const now = deps.now ?? Date.now;
   return (entry: LogRecord): void => {
-    if (entry.level === 'warn' || entry.level === 'error') {
+    if (isDiagnosticLogLevel(entry.level)) {
       try {
         deps.insertDiagnosticLog({
           ts: now(),

@@ -375,44 +375,73 @@ describe('DashboardDB — retention', () => {
     let volumeDb = new DashboardDB({
       dataDir: volumeDir,
       retentionDays: 365,
-      logVolumePruneBatchRows: 2,
+      legacyRoutineLogCleanupBatchRows: 2,
     });
     try {
       const recentTs = Date.now() - 60_000;
-      for (let i = 0; i < 7; i += 1) {
-        volumeDb.insertLog({
-          ts: recentTs + i,
-          level: i % 2 === 0 ? 'debug' : 'info',
-          module: 'sync',
-          message: `routine-${i}`,
-        });
-      }
       volumeDb.insertOperation({
         operation_id: 'legacy-op',
         operation_name: 'sync',
         started_at: recentTs,
       });
+      // Match the former daemon sink shape: EVERY record carried the active
+      // operation ID, including the high-volume debug/info stream.
+      for (let i = 0; i < 7; i += 1) {
+        volumeDb.insertLog({
+          ts: recentTs + i,
+          level: i % 2 === 0 ? 'debug' : 'info',
+          operation_name: 'sync',
+          operation_id: 'legacy-op',
+          module: 'sync',
+          message: `routine-${i}`,
+        });
+      }
       volumeDb.insertLog({
-        ts: recentTs + 10,
+        ts: recentTs + 8,
         level: 'info',
+        operation_name: 'sync',
+        operation_id: 'orphan-operation-id',
+        module: 'sync',
+        message: 'delete-orphan-routine',
+      });
+      volumeDb.insertLog({
+        ts: recentTs + 11,
+        level: 'warn',
         operation_name: 'sync',
         operation_id: 'legacy-op',
         module: 'sync',
-        message: 'keep-operation-diagnostic',
+        message: 'keep-warn',
       });
-      volumeDb.insertLog({ ts: recentTs + 11, level: 'warn', module: 'sync', message: 'keep-warn' });
-      volumeDb.insertLog({ ts: recentTs + 12, level: 'error', module: 'sync', message: 'keep-error' });
+      volumeDb.insertLog({
+        ts: recentTs + 12,
+        level: 'error',
+        operation_name: 'sync',
+        operation_id: 'legacy-op',
+        module: 'sync',
+        message: 'keep-error',
+      });
 
-      // Simulate the first startup containing this upgrade: the cutoff marker
-      // does not exist until the new release opens an already-populated DB.
+      // Simulate upgrading from the first patchset, whose narrower cleanup had
+      // already declared completion while missing every operation-tagged row.
+      // V2 must reuse its original high-water mark and run the corrected policy.
+      const highWaterId = (volumeDb.db.prepare(
+        `SELECT MAX(id) AS id FROM logs`,
+      ).get() as { id: number }).id;
       volumeDb.db.prepare(
         `DELETE FROM settings WHERE key LIKE 'legacyRoutineLogCleanup%'`,
       ).run();
+      volumeDb.db.prepare(
+        `INSERT INTO settings (key, value) VALUES (?, ?), (?, '1')`,
+      ).run(
+        'legacyRoutineLogCleanupHighWater.v1',
+        String(highWaterId),
+        'legacyRoutineLogCleanupComplete.v1',
+      );
       volumeDb.close();
       volumeDb = new DashboardDB({
         dataDir: volumeDir,
         retentionDays: 365,
-        logVolumePruneBatchRows: 2,
+        legacyRoutineLogCleanupBatchRows: 2,
       });
       volumeDb.insertLog({
         ts: recentTs + 20,
@@ -421,24 +450,35 @@ describe('DashboardDB — retention', () => {
         message: 'keep-post-cutover',
       });
 
-      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
-      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
-      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
-      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 1, status: 'done' });
-      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 0, status: 'done' });
+      expect(volumeDb.runLegacyRoutineLogCleanupBatch()).toEqual({ deleted: 2, status: 'more' });
+      volumeDb.close();
+      volumeDb = new DashboardDB({
+        dataDir: volumeDir,
+        retentionDays: 365,
+        legacyRoutineLogCleanupBatchRows: 2,
+      });
+      expect(volumeDb.runLegacyRoutineLogCleanupBatch()).toEqual({ deleted: 2, status: 'more' });
+      expect(volumeDb.runLegacyRoutineLogCleanupBatch()).toEqual({ deleted: 2, status: 'more' });
+      expect(volumeDb.runLegacyRoutineLogCleanupBatch()).toEqual({ deleted: 1, status: 'done' });
+      expect(volumeDb.runLegacyRoutineLogCleanupBatch()).toEqual({ deleted: 0, status: 'done' });
 
       const rows = volumeDb.db.prepare(
         `SELECT level, message FROM logs ORDER BY id ASC`,
       ).all() as Array<{ level: string; message: string }>;
       expect(rows.filter((row) => row.level === 'debug' || row.level === 'info')).toEqual([
-        { level: 'info', message: 'keep-operation-diagnostic' },
+        { level: 'debug', message: 'routine-6' },
         { level: 'info', message: 'keep-post-cutover' },
       ]);
       expect(rows).toContainEqual({ level: 'warn', message: 'keep-warn' });
       expect(rows).toContainEqual({ level: 'error', message: 'keep-error' });
-      expect(volumeDb.getOperation('legacy-op').logs).toMatchObject([
-        { message: 'keep-operation-diagnostic' },
+      expect(volumeDb.getOperation('legacy-op').logs.map((row) => row.message)).toEqual([
+        'routine-6',
+        'keep-warn',
+        'keep-error',
       ]);
+      expect(volumeDb.db.prepare(
+        `SELECT key, value FROM settings WHERE key LIKE 'legacyRoutineLogCleanup%'`,
+      ).all()).toEqual([{ key: 'legacyRoutineLogCleanup.v2', value: 'complete' }]);
     } finally {
       volumeDb.close();
       rmSync(volumeDir, { recursive: true, force: true });
@@ -451,7 +491,7 @@ describe('DashboardDB — retention', () => {
     let volumeDb = new DashboardDB({
       dataDir: volumeDir,
       retentionDays: 365,
-      logVolumePruneBatchRows: 10,
+      legacyRoutineLogCleanupBatchRows: 10,
     });
     try {
       const payload = 'x'.repeat(256 * 1024);
@@ -472,14 +512,14 @@ describe('DashboardDB — retention', () => {
       volumeDb = new DashboardDB({
         dataDir: volumeDir,
         retentionDays: 365,
-        logVolumePruneBatchRows: 10,
+        legacyRoutineLogCleanupBatchRows: 10,
       });
       volumeDb.db.pragma('wal_checkpoint(TRUNCATE)');
       const beforeBytes = statSync(dbPath).size;
 
       let compacted = false;
       for (let i = 0; i < 10; i += 1) {
-        const result = volumeDb.pruneLogVolumeBatch();
+        const result = volumeDb.runLegacyRoutineLogCleanupBatch();
         compacted ||= result.status === 'done-compacted';
         if (result.status === 'done' || result.status === 'done-compacted') break;
       }

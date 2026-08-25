@@ -21,7 +21,7 @@ export {
 } from './chain-cursor-stores.js';
 export type {
   DashboardDBOptions,
-  LogVolumePruneResult,
+  LegacyRoutineLogCleanupResult,
   MetricSnapshotRow,
   OperationRow,
   OperationPhaseRow,

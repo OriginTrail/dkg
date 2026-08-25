@@ -19,7 +19,8 @@
  *  - Transport is outbound HTTPS push only — no inbound scrape endpoint.
  */
 
-import type { LogRecord } from '@origintrail-official/dkg-core';
+import type { LogLevel, LogRecord } from '@origintrail-official/dkg-core';
+export type { LogLevel } from '@origintrail-official/dkg-core';
 import { buildTelemetryResourceAttrs } from './telemetry-resource.js';
 
 // OpenTelemetry severity numbers (logs data model).
@@ -30,7 +31,6 @@ const OTEL_SEVERITY: Record<string, { num: number; text: string }> = {
   error: { num: 17, text: 'ERROR' },
 };
 
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 const LEVEL_RANK: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
@@ -161,7 +161,7 @@ export class OtlpLogWorker {
 
   /** Append a record. Filters below minLevel; never awaits the network. */
   push(record: LogRecord): void {
-    if ((LEVEL_RANK[record.level as LogLevel] ?? LEVEL_RANK.info) < this.minRank) return;
+    if (LEVEL_RANK[record.level] < this.minRank) return;
     if (this.buffer.length >= this.maxBuffer) this.buffer.shift();
     this.buffer.push({ r: record, tsMs: Date.now() });
   }

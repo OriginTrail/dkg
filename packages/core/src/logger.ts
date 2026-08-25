@@ -3,6 +3,29 @@ import { currentTraceIds } from './telemetry-api.js';
 
 export type OperationName = 'publish' | 'update' | 'query' | 'resolve' | 'connect' | 'sync' | 'system' | 'share' | 'publishFromSWM' | 'gossip' | 'ka-update' | 'reconstruct' | 'init' | 'verify' | 'migrate-swm-attr';
 
+export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
+export type LogLevel = typeof LOG_LEVELS[number];
+export type LogPersistenceClass = 'routine' | 'diagnostic';
+export const LOG_LEVEL_PERSISTENCE_CLASS = {
+  debug: 'routine',
+  info: 'routine',
+  warn: 'diagnostic',
+  error: 'diagnostic',
+} as const satisfies Record<LogLevel, LogPersistenceClass>;
+export type DiagnosticLogLevel = {
+  [Level in LogLevel]: typeof LOG_LEVEL_PERSISTENCE_CLASS[Level] extends 'diagnostic'
+    ? Level
+    : never;
+}[LogLevel];
+export const DIAGNOSTIC_LOG_LEVELS = LOG_LEVELS.filter(
+  (level): level is DiagnosticLogLevel => LOG_LEVEL_PERSISTENCE_CLASS[level] === 'diagnostic',
+);
+
+export function isDiagnosticLogLevel(level: string): level is DiagnosticLogLevel {
+  return level in LOG_LEVEL_PERSISTENCE_CLASS
+    && LOG_LEVEL_PERSISTENCE_CLASS[level as LogLevel] === 'diagnostic';
+}
+
 export interface OperationContext {
   operationId: string;
   operationName: OperationName;
@@ -17,7 +40,7 @@ export interface OperationContext {
  * Keep it stable — redaction and the exporters consume it.
  */
 export interface LogRecord {
-  level: string;
+  level: LogLevel;
   operationName: string;
   operationId: string;
   sourceOperationId?: string;
@@ -53,7 +76,7 @@ export class Logger {
    * span's trace/span id when one is recording (no-op/empty otherwise), so logs
    * emitted inside an instrumented boundary correlate to its trace.
    */
-  private emit(level: string, ctx: OperationContext, message: string): void {
+  private emit(level: LogLevel, ctx: OperationContext, message: string): void {
     if (!Logger.sink) return;
     Logger.sink({
       level,

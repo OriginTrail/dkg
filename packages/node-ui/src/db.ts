@@ -18,8 +18,10 @@ import {
   withoutSyncCheckpointResponderSession,
   type DurableManifestDigest,
   type DurableManifestPrefixDigest,
+  type LogLevel,
   type SyncCheckpointEntry,
 } from '@origintrail-official/dkg-core';
+import { LegacyRoutineLogCleanup } from './legacy-routine-log-cleanup.js';
 
 export {
   SqliteChainEventCursorStore,
@@ -41,10 +43,8 @@ export const SCHEMA_VERSION = 34;
 // rows while warning/error rows keep the operator-selected time window.
 const DEFAULT_RETENTION_DAYS = 14;
 const LEGACY_IMPLICIT_RETENTION_DAYS = 90;
-const DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS = 25_000;
-const LOGS_VACUUM_DELETE_THRESHOLD = 10_000;
-const LEGACY_ROUTINE_LOG_HIGH_WATER_KEY = 'legacyRoutineLogCleanupHighWater.v1';
-const LEGACY_ROUTINE_LOG_COMPLETE_KEY = 'legacyRoutineLogCleanupComplete.v1';
+const DEFAULT_LEGACY_ROUTINE_LOG_CLEANUP_BATCH_ROWS = 25_000;
+const LEGACY_ROUTINE_LOG_VACUUM_DELETE_THRESHOLD = 10_000;
 // SQLite reports reusable-but-not-yet-reclaimed pages via freelist_count.
 // With the default 4 KiB page size this is roughly 4 MiB, large enough
 // to avoid VACUUM churn on idle nodes but small enough to retry a failed
@@ -123,10 +123,10 @@ export interface DashboardDBOptions {
    */
   cacheTtlMs?: number;
   /** Maximum legacy routine rows removed by one bounded cleanup tick. */
-  logVolumePruneBatchRows?: number;
+  legacyRoutineLogCleanupBatchRows?: number;
 }
 
-export interface LogVolumePruneResult {
+export interface LegacyRoutineLogCleanupResult {
   deleted: number;
   status: 'more' | 'reclaim-pending' | 'done' | 'done-compacted';
 }
@@ -229,15 +229,19 @@ export class DashboardDB {
   readonly dataDir: string;
   private retentionDays: number;
   private readonly explicitRetentionDays: boolean;
-  private readonly logVolumePruneBatchRows: number;
+  private readonly legacyRoutineLogCleanupBatchRows: number;
+  private readonly legacyRoutineLogCleanup: LegacyRoutineLogCleanup;
 
   constructor(opts: DashboardDBOptions) {
     this.dataDir = opts.dataDir;
     this.explicitRetentionDays = opts.retentionDays !== undefined;
     this.retentionDays = opts.retentionDays ?? DEFAULT_RETENTION_DAYS;
-    this.logVolumePruneBatchRows = Math.max(
+    this.legacyRoutineLogCleanupBatchRows = Math.max(
       1,
-      Math.floor(opts.logVolumePruneBatchRows ?? DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS),
+      Math.floor(
+        opts.legacyRoutineLogCleanupBatchRows
+          ?? DEFAULT_LEGACY_ROUTINE_LOG_CLEANUP_BATCH_ROWS,
+      ),
     );
     this._memoTtlMs = resolveCacheTtlMs(opts.cacheTtlMs);
     const dbPath = join(opts.dataDir, 'node-ui.db');
@@ -254,7 +258,10 @@ export class DashboardDB {
     // autocheckpoint while bounding the worst case.
     this.db.pragma('journal_size_limit = 67108864');
     this.migrate();
-    this.initializeLegacyRoutineLogCleanup();
+    this.legacyRoutineLogCleanup = new LegacyRoutineLogCleanup(
+      this.db,
+      this.legacyRoutineLogCleanupBatchRows,
+    );
     this.loadRetentionSetting();
     this.prune();
   }
@@ -1324,7 +1331,7 @@ export class DashboardDB {
     // worker so startup does not rebuild a multi-GB DB before deleting them.
     // This existence probe stops at the first row; unlike the old OFFSET cap
     // scan, its cost does not grow with the routine-log backlog.
-    if (!this.hasPendingLegacyRoutineLogs()) {
+    if (!this.legacyRoutineLogCleanup.hasPendingRows()) {
       this.reclaimFreePagesIfNeeded(false);
     }
 
@@ -1337,47 +1344,28 @@ export class DashboardDB {
   }
 
   /**
-   * Remove one bounded batch of unscoped legacy routine logs captured below a
-   * durable upgrade high-water mark. Operation-associated records, warnings,
-   * errors, and any compatibility writes made after cutover are preserved.
+   * Run one bounded batch of the finite legacy routine-log migration.
    *
    * Deletion is deliberately incremental so an upgrade does not block node
    * startup on a multi-GB transaction. Once the backlog reaches zero, one
    * VACUUM returns the accumulated free pages to the OS and the file shrinks.
    */
-  pruneLogVolumeBatch(): LogVolumePruneResult {
-    if (this.isLegacyRoutineLogCleanupComplete()) {
-      return { deleted: 0, status: 'done' };
-    }
-    const highWaterId = this.getLegacyRoutineLogHighWaterId();
-    const deleted = this.db.prepare(`
-      DELETE FROM logs
-      WHERE id IN (
-        SELECT id
-        FROM logs
-        WHERE id <= @highWaterId
-          AND operation_id IS NULL
-          AND level NOT IN ('warn', 'error')
-        ORDER BY id ASC
-        LIMIT @batchRows
-      )
-    `).run({
-      highWaterId,
-      batchRows: this.logVolumePruneBatchRows,
-    }).changes;
+  runLegacyRoutineLogCleanupBatch(): LegacyRoutineLogCleanupResult {
+    const batch = this.legacyRoutineLogCleanup.deleteBatch();
+    const deleted = batch.deleted;
 
     // If the batch filled, conservatively schedule another tick. An exact-size
     // final batch costs one extra cheap probe before compaction, which is safer
     // than running a second million-row count after every deletion.
-    const hasMore = deleted === this.logVolumePruneBatchRows;
+    const hasMore = batch.hasMore;
     const reclaim = hasMore
       ? { compacted: false, reclaimPending: false }
-      : this.reclaimFreePagesIfNeeded(deleted > LOGS_VACUUM_DELETE_THRESHOLD);
+      : this.reclaimFreePagesIfNeeded(
+        deleted > LEGACY_ROUTINE_LOG_VACUUM_DELETE_THRESHOLD,
+      );
     if (!hasMore && !reclaim.reclaimPending) {
-      this.db.prepare(
-        `INSERT OR REPLACE INTO settings (key, value) VALUES (?, '1')`,
-      ).run(LEGACY_ROUTINE_LOG_COMPLETE_KEY);
-      this.truncateWal('log-volume prune');
+      this.legacyRoutineLogCleanup.markComplete();
+      this.truncateWal('legacy routine-log cleanup');
     }
     return {
       deleted,
@@ -1389,46 +1377,6 @@ export class DashboardDB {
             ? 'done-compacted'
             : 'done',
     };
-  }
-
-  private initializeLegacyRoutineLogCleanup(): void {
-    const marker = this.db.prepare(
-      `SELECT value FROM settings WHERE key IN (?, ?) LIMIT 1`,
-    ).get(
-      LEGACY_ROUTINE_LOG_HIGH_WATER_KEY,
-      LEGACY_ROUTINE_LOG_COMPLETE_KEY,
-    );
-    if (marker !== undefined) return;
-    const row = this.db.prepare(`SELECT COALESCE(MAX(id), 0) AS id FROM logs`).get() as { id: number };
-    this.db.prepare(
-      `INSERT INTO settings (key, value) VALUES (?, ?)`,
-    ).run(LEGACY_ROUTINE_LOG_HIGH_WATER_KEY, String(row.id));
-  }
-
-  private getLegacyRoutineLogHighWaterId(): number {
-    const row = this.db.prepare(
-      `SELECT value FROM settings WHERE key = ?`,
-    ).get(LEGACY_ROUTINE_LOG_HIGH_WATER_KEY) as { value: string } | undefined;
-    const parsed = Number(row?.value ?? 0);
-    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
-  }
-
-  private isLegacyRoutineLogCleanupComplete(): boolean {
-    return this.db.prepare(
-      `SELECT 1 FROM settings WHERE key = ? LIMIT 1`,
-    ).get(LEGACY_ROUTINE_LOG_COMPLETE_KEY) !== undefined;
-  }
-
-  private hasPendingLegacyRoutineLogs(): boolean {
-    if (this.isLegacyRoutineLogCleanupComplete()) return false;
-    return this.db.prepare(`
-      SELECT 1
-      FROM logs
-      WHERE id <= ?
-        AND operation_id IS NULL
-        AND level NOT IN ('warn', 'error')
-      LIMIT 1
-    `).get(this.getLegacyRoutineLogHighWaterId()) !== undefined;
   }
 
   private reclaimFreePagesIfNeeded(force: boolean): {
@@ -3084,7 +3032,7 @@ export class DashboardDB {
 
   insertLog(entry: {
     ts: number;
-    level: string;
+    level: LogLevel;
     operation_name?: string | null;
     operation_id?: string | null;
     module: string;

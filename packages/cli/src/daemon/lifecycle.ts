@@ -157,7 +157,7 @@ import {
 } from '../metrics-collector-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
-import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
+import { startLegacyRoutineLogCleanup } from './legacy-routine-log-cleanup.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
@@ -3002,7 +3002,7 @@ export async function runDaemonInner(
   // Drain legacy routine log rows left by older releases in bounded batches.
   // New daemon logs are file-backed, so this cleanup converges to warn/error
   // history instead of racing a continuing SQLite write stream.
-  const logVolumePruner = startDashboardLogVolumePruner({
+  const legacyRoutineLogCleanup = startLegacyRoutineLogCleanup({
     dashDb,
     log,
   });
@@ -3804,7 +3804,7 @@ export async function runDaemonInner(
         clearInterval(chainScanTimer);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
-        logVolumePruner.stop();
+        legacyRoutineLogCleanup.stop();
         backpressureMonitor.stop();
         // Clears the timer AND performs the final best-effort drain (BEFORE
         // telemetry stops), so a partial window still reaches Loki — keeps
