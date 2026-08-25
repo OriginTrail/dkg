@@ -29,13 +29,48 @@ function sparseCheckoutPaths(step, context) {
     throw new Error(`${context}: trusted checkout needs a sparse-checkout file list`);
   }
   const paths = sparseCheckout.split('\n').map((entry) => entry.trim()).filter(Boolean);
+  const expectedPaths = [...CONTROLLER_POLICY_FILES].sort();
   if (
     paths.length !== CONTROLLER_POLICY_FILES.length
-    || paths.some((entry, index) => entry !== CONTROLLER_POLICY_FILES[index])
+    || paths.some((entry) => !CONTROLLER_POLICY_FILES.includes(entry))
+    || [...paths].sort().some((entry, index) => entry !== expectedPaths[index])
   ) {
     throw new Error(`${context}: trusted checkout must use the canonical controller file list`);
   }
   return paths;
+}
+
+export function synchronizeTrustedControllerSparseCheckouts(source) {
+  const lines = source.split('\n');
+  for (let pathIndex = 0; pathIndex < lines.length; pathIndex += 1) {
+    if (!/^\s*path:\s*["']?trusted-ci["']?\s*$/.test(lines[pathIndex])) continue;
+    const pathIndent = lines[pathIndex].match(/^\s*/)[0].length;
+    let sparseIndex = -1;
+    for (let index = pathIndex + 1; index < lines.length; index += 1) {
+      const indent = lines[index].match(/^\s*/)[0].length;
+      if (lines[index].trim() && indent < pathIndent) break;
+      if (/^\s*sparse-checkout:\s*\|\s*$/.test(lines[index])) {
+        sparseIndex = index;
+        break;
+      }
+    }
+    if (sparseIndex === -1) continue;
+    const sparseIndent = lines[sparseIndex].match(/^\s*/)[0].length;
+    let endIndex = sparseIndex + 1;
+    while (endIndex < lines.length) {
+      const indent = lines[endIndex].match(/^\s*/)[0].length;
+      if (lines[endIndex].trim() && indent <= sparseIndent) break;
+      endIndex += 1;
+    }
+    const entryIndent = ' '.repeat(sparseIndent + 2);
+    lines.splice(
+      sparseIndex + 1,
+      endIndex - sparseIndex - 1,
+      ...CONTROLLER_POLICY_FILES.map((filePath) => `${entryIndent}${filePath}`),
+    );
+    pathIndex = sparseIndex + CONTROLLER_POLICY_FILES.length;
+  }
+  return lines.join('\n');
 }
 
 export function trustedControllerCheckouts(source, sourceName = '<workflow>') {
@@ -119,5 +154,37 @@ export function validateTrustedControllerPins(workflows) {
   if (refs.size !== 1) {
     throw new Error(`trusted CI controller checkouts use ${refs.size} different refs`);
   }
+  validatePolicyGateWiring(workflows);
   return { ref: allCheckouts[0].ref, checkouts: allCheckouts };
+}
+
+export function validatePolicyGateWiring(workflows) {
+  const candidates = workflows.map((workflowFile) => ({
+    sourceName: workflowFile.sourceName,
+    workflow: parseYaml(workflowFile.source),
+  })).filter(({ workflow }) => workflow?.jobs?.['ci-gate']);
+  if (candidates.length !== 1) {
+    throw new Error(`expected one primary workflow with ci-gate, found ${candidates.length}`);
+  }
+
+  const [{ sourceName, workflow }] = candidates;
+  const prerequisite = workflow.jobs['ci-policy-prerequisites'];
+  if (!prerequisite || prerequisite.if !== undefined) {
+    throw new Error(`${sourceName}: ci-policy-prerequisites must run unconditionally`);
+  }
+  const inspectorSteps = (prerequisite.steps ?? []).filter((step) => (
+    typeof step?.run === 'string'
+    && /\bnode scripts\/ci\/inspect-ci-policy\.mjs\b/.test(step.run)
+    && /--mode\s+enforce\b/.test(step.run)
+  ));
+  if (inspectorSteps.length !== 1) {
+    throw new Error(`${sourceName}: ci-policy-prerequisites must run the enforcing inspector once`);
+  }
+
+  const gateNeeds = Array.isArray(workflow.jobs['ci-gate'].needs)
+    ? workflow.jobs['ci-gate'].needs
+    : [workflow.jobs['ci-gate'].needs].filter(Boolean);
+  if (!gateNeeds.includes('ci-policy-prerequisites')) {
+    throw new Error(`${sourceName}: ci-gate must require ci-policy-prerequisites`);
+  }
 }

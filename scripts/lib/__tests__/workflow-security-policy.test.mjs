@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { parse as parseYaml } from 'yaml';
 import {
   parseZizmorSarifArguments,
   runZizmorSarifGate,
@@ -13,17 +14,51 @@ import {
   inspectCiPolicyFreshness,
   inspectCiPolicyPrerequisites,
   parseCiPolicyArguments,
+  renderCiPolicyReport,
   runCiPolicyInspector,
 } from '../../ci/inspect-ci-policy.mjs';
 import {
   CONTROLLER_POLICY_FILES,
   isProtectedHistoryComparison,
+  synchronizeTrustedControllerSparseCheckouts,
   validateTrustedControllerPins,
 } from '../../ci/trusted-controller-pins.mjs';
-import { evaluateEffectiveDeltaRolloutRules } from '../../ci/validate-delta-rollout-ruleset.mjs';
+import {
+  evaluateEffectiveDeltaRolloutRules,
+  GITHUB_ACTIONS_INTEGRATION_ID,
+} from '../../ci/validate-delta-rollout-ruleset.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const CONTROLLER_SHA = '780f14aa60c39bdca788967121085c3c0d82d85c';
+
+function rulesetDetail(id, overrides = {}) {
+  return {
+    id: Number(id),
+    enforcement: 'active',
+    source_type: 'Repository',
+    source: 'OriginTrail/dkg',
+    target: 'branch',
+    bypass_actors: null,
+    conditions: {
+      ref_name: { include: ['refs/heads/testnet-canary'], exclude: [] },
+    },
+    ...overrides,
+  };
+}
+
+function rulesetDetailsFor(rules) {
+  return [...new Set(rules.map((rule) => rule.ruleset_id).filter(Boolean).map(String))]
+    .map((rulesetId) => rulesetDetail(rulesetId));
+}
+
+function evaluateDeltaRules(rules, rulesets = rulesetDetailsFor(rules)) {
+  return evaluateEffectiveDeltaRolloutRules({
+    branch: 'testnet-canary',
+    repository: 'OriginTrail/dkg',
+    rules,
+    rulesets,
+  });
+}
 
 function controllerCheckout({
   ref = CONTROLLER_SHA,
@@ -58,11 +93,16 @@ function workflowFixture({
   return `
 name: fixture
 jobs:
+  ci-policy-prerequisites:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node scripts/ci/inspect-ci-policy.mjs --mode enforce
   plan:
     runs-on: ubuntu-latest
     steps:
 ${unrelated}${planCheckoutAfterConsumer ? `${planConsumer}\n${planCheckout}` : `${planCheckout}\n${planConsumer}`}
-  gate:
+  ci-gate:
+    needs: [ci-policy-prerequisites]
     runs-on: ubuntu-latest
     steps:
 ${gateCheckout}
@@ -89,6 +129,14 @@ test('controller validation models quoted and id-first YAML and ignores unrelate
   }]);
   assert.equal(result.ref, CONTROLLER_SHA);
   assert.equal(result.checkouts.length, 2);
+
+  const reordered = validateTrustedControllerPins([{
+    sourceName: 'reordered.yml',
+    source: workflowFixture({
+      planCheckout: controllerCheckout({ controllerFiles: [...CONTROLLER_POLICY_FILES].reverse() }),
+    }),
+  }]);
+  assert.equal(reordered.ref, CONTROLLER_SHA, 'manifest membership must not impose file ordering');
 });
 
 test('controller validation rejects missing, inconsistent, fake, and over-broad checkouts', () => {
@@ -147,6 +195,23 @@ test('controller validation rejects missing, inconsistent, fake, and over-broad 
     }]),
     /must precede its controller consumer/,
   );
+  assert.throws(
+    () => validateTrustedControllerPins([{
+      sourceName: 'detached-prerequisite.yml',
+      source: workflowFixture().replace(
+        'needs: [ci-policy-prerequisites]',
+        'needs: [plan]',
+      ),
+    }]),
+    /ci-gate must require ci-policy-prerequisites/,
+  );
+  assert.throws(
+    () => validateTrustedControllerPins([{
+      sourceName: 'non-enforcing-prerequisite.yml',
+      source: workflowFixture().replace('--mode enforce', '--mode report'),
+    }]),
+    /must run the enforcing inspector once/,
+  );
 });
 
 test('repository workflows expose one canonical protected-history controller pin', () => {
@@ -162,6 +227,14 @@ test('repository workflows expose one canonical protected-history controller pin
   ]);
   assert.equal(result.ref, CONTROLLER_SHA);
   assert.equal(result.checkouts.length, 4);
+  for (const workflowPath of ['.github/workflows/ci.yml', '.github/workflows/evm-integration.yml']) {
+    const source = fs.readFileSync(path.join(REPO_ROOT, workflowPath), 'utf8');
+    assert.equal(
+      synchronizeTrustedControllerSparseCheckouts(source),
+      source,
+      `${workflowPath} trusted checkout fragments must be generated from the canonical manifest`,
+    );
+  }
   assert.ok(CONTROLLER_POLICY_FILES.includes('scripts/ci/plan-ci.mjs'));
   assert.equal(
     CONTROLLER_POLICY_FILES.includes('scripts/ci/enforce-zizmor-sarif.mjs'),
@@ -176,7 +249,9 @@ test('repository workflows expose one canonical protected-history controller pin
     path.join(REPO_ROOT, '.github/workflows/supply-chain-scan.yml'),
     'utf8',
   );
-  assert.equal(freshnessWorkflow.match(/node scripts\/ci\/inspect-ci-policy\.mjs/g)?.length, 2);
+  assert.equal(freshnessWorkflow.match(/node scripts\/ci\/inspect-ci-policy\.mjs/g)?.length, 1);
+  assert.match(freshnessWorkflow, /--summary "\$\{GITHUB_STEP_SUMMARY\}"/);
+  assert.doesNotMatch(freshnessWorkflow, /\.controller\.tree|\.deltaRollout/);
   assert.doesNotMatch(freshnessWorkflow, /repos\/\$\{GITHUB_REPOSITORY\}\/rulesets/);
   assert.doesNotMatch(freshnessWorkflow, /git diff --quiet/);
 });
@@ -190,37 +265,51 @@ test('testnet delta rollout requires PRs, merge queue, and both aggregate gates'
       ruleset_id: 20,
       parameters: {
         required_status_checks: [
-          { context: 'CI gate' },
-          { context: 'EVM integration gate' },
+          { context: 'CI gate', integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
+          { context: 'EVM integration gate', integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
         ],
       },
     },
   ];
-  const layered = evaluateEffectiveDeltaRolloutRules({
-    branch: 'testnet-canary', rules: effectiveRules,
-  });
+  const layered = evaluateDeltaRules(effectiveRules);
   assert.equal(layered.ok, true, 'protections split across effective rulesets must aggregate');
   assert.deepEqual(layered.rulesetIds, ['10', '20']);
 
-  assert.equal(evaluateEffectiveDeltaRolloutRules({
-    branch: 'testnet-canary',
-    rules: effectiveRules.filter((rule) => rule.type !== 'pull_request'),
-  }).ok, false);
-  assert.equal(evaluateEffectiveDeltaRolloutRules({
-    branch: 'testnet-canary',
-    rules: effectiveRules.filter((rule) => rule.type !== 'merge_queue'),
-  }).ok, false);
-  assert.equal(evaluateEffectiveDeltaRolloutRules({
-    branch: 'testnet-canary',
-    rules: effectiveRules.map((rule) => (
+  assert.equal(evaluateDeltaRules(
+    effectiveRules.filter((rule) => rule.type !== 'pull_request'),
+  ).ok, false);
+  assert.equal(evaluateDeltaRules(
+    effectiveRules.filter((rule) => rule.type !== 'merge_queue'),
+  ).ok, false);
+  assert.equal(evaluateDeltaRules(
+    effectiveRules.map((rule) => (
       rule.type === 'required_status_checks'
-        ? { ...rule, parameters: { required_status_checks: [{ context: 'CI gate' }] } }
+        ? {
+          ...rule,
+          parameters: {
+            required_status_checks: [{
+              context: 'CI gate', integration_id: GITHUB_ACTIONS_INTEGRATION_ID,
+            }],
+          },
+        }
         : rule
     )),
-  }).ok, false);
-  assert.equal(evaluateEffectiveDeltaRolloutRules({
-    branch: 'testnet-canary', rules: [],
-  }).ok, false, 'an excluded, inactive, or other-branch ruleset is absent from effective rules');
+  ).ok, false);
+  assert.equal(evaluateDeltaRules([]).ok, false,
+    'an excluded, inactive, or other-branch ruleset is absent from effective rules');
+
+  const wrongIntegration = structuredClone(effectiveRules);
+  wrongIntegration[2].parameters.required_status_checks[0].integration_id = 999;
+  assert.equal(evaluateDeltaRules(wrongIntegration).ok, false,
+    'a context from the wrong integration must not impersonate the Actions gate');
+
+  const bypassedRuleset = rulesetDetailsFor(effectiveRules).map((ruleset) => (
+    ruleset.id === 20
+      ? { ...ruleset, bypass_actors: [{ actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' }] }
+      : ruleset
+  ));
+  assert.equal(evaluateDeltaRules(effectiveRules, bypassedRuleset).ok, false,
+    'merge-capable bypass actors must fail the prerequisite');
 });
 
 test('prerequisite inspection excludes freshness-only acquisition', async () => {
@@ -233,8 +322,8 @@ test('prerequisite inspection excludes freshness-only acquisition', async () => 
       ruleset_id: 2,
       parameters: {
         required_status_checks: [
-          { context: 'CI gate' },
-          { context: 'EVM integration gate' },
+          { context: 'CI gate', integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
+          { context: 'EVM integration gate', integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
         ],
       },
     },
@@ -245,6 +334,9 @@ test('prerequisite inspection excludes freshness-only acquisition', async () => 
     if (endpoint.includes('/compare/')) return { status: 'ahead' };
     if (endpoint === 'repos/OriginTrail/dkg/rules/branches/testnet-canary?per_page=100&page=1') {
       return effectiveRules;
+    }
+    if (endpoint.startsWith('repos/OriginTrail/dkg/rulesets/')) {
+      return rulesetDetail(endpoint.split('/').at(-1));
     }
     if (endpoint.includes('/contents/')) return { sha: 'same-controller-blob' };
     throw new Error(`unexpected endpoint: ${endpoint}`);
@@ -280,7 +372,10 @@ test('prerequisite inspection excludes freshness-only acquisition', async () => 
     requestedEndpoints.filter((endpoint) => endpoint.includes('/contents/')).length,
     CONTROLLER_POLICY_FILES.length * 2,
   );
-  assert.equal(requestedEndpoints.some((endpoint) => endpoint.includes('/rulesets')), false);
+  assert.deepEqual(
+    requestedEndpoints.filter((endpoint) => endpoint.includes('/rulesets/')).sort(),
+    ['repos/OriginTrail/dkg/rulesets/1', 'repos/OriginTrail/dkg/rulesets/2'],
+  );
 
   const missingPrerequisites = { ...snapshot, prerequisites: { ok: false } };
   assert.equal(ciPolicyModeExitCode(missingPrerequisites, 'enforce'), 1);
@@ -310,14 +405,15 @@ test('effective policy inspection reads every rules page and rejects malformed p
             ruleset_id: 101,
             parameters: {
               required_status_checks: [
-                { context: 'CI gate' },
-                { context: 'EVM integration gate' },
+                { context: 'CI gate', integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
+                { context: 'EVM integration gate', integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
               ],
             },
           },
         ];
       }
     }
+    if (endpoint === 'repos/OriginTrail/dkg/rulesets/101') return rulesetDetail(101);
     throw new Error(`unexpected endpoint: ${endpoint}`);
   };
   const input = {
@@ -349,6 +445,7 @@ test('executable policy inspector preserves enforce and report exit boundaries',
   t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
   const workflowPath = path.join(temporaryDirectory, 'workflow.yml');
   const outputPath = path.join(temporaryDirectory, 'snapshot.json');
+  const summaryPath = path.join(temporaryDirectory, 'summary.md');
   fs.writeFileSync(workflowPath, workflowFixture());
 
   const validRules = [
@@ -359,8 +456,8 @@ test('executable policy inspector preserves enforce and report exit boundaries',
       ruleset_id: 1,
       parameters: {
         required_status_checks: [
-          { context: 'CI gate' },
-          { context: 'EVM integration gate' },
+          { context: 'CI gate', integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
+          { context: 'EVM integration gate', integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
         ],
       },
     },
@@ -369,6 +466,9 @@ test('executable policy inspector preserves enforce and report exit boundaries',
     if (endpoint === 'repos/OriginTrail/dkg') return { default_branch: 'main' };
     if (endpoint.includes('/compare/')) return { status: 'identical' };
     if (endpoint.includes('/rules/branches/')) return validRules;
+    if (endpoint.startsWith('repos/OriginTrail/dkg/rulesets/')) {
+      return rulesetDetail(endpoint.split('/').at(-1));
+    }
     if (endpoint.includes('/contents/')) return { sha: 'same-controller-blob' };
     throw new Error(`unexpected endpoint: ${endpoint}`);
   };
@@ -378,6 +478,7 @@ test('executable policy inspector preserves enforce and report exit boundaries',
     '--branch', 'testnet-canary',
     '--workflow', workflowPath,
     '--output', outputPath,
+    ...(mode === 'report' ? ['--summary', summaryPath] : []),
   ];
 
   const enforceRequests = [];
@@ -421,6 +522,48 @@ test('executable policy inspector preserves enforce and report exit boundaries',
   assert.equal(snapshot.prerequisites.ok, true);
   assert.equal(snapshot.freshness.ok, false);
   assert.match(snapshot.acquisitionError, /freshness API unavailable/);
+  assert.match(fs.readFileSync(summaryPath, 'utf8'), /⚠ unable to inspect/);
+});
+
+test('policy report renderer owns clean, drift, prerequisite, and acquisition statuses', () => {
+  const clean = {
+    controller: {
+      pin: CONTROLLER_SHA,
+      defaultBranch: 'main',
+      provenance: { ok: true, status: 'ahead' },
+      tree: { ok: true, driftedFiles: [] },
+    },
+    deltaRollout: { ok: true, missing: [] },
+    prerequisites: { ok: true },
+  };
+  const cleanReport = renderCiPolicyReport(clean);
+  assert.equal(cleanReport.warnings.length, 0);
+  assert.match(cleanReport.markdown, /trusted CI controller.*✓ current/);
+  assert.match(cleanReport.markdown, /testnet-canary delta safeguards.*✓ current/);
+
+  const driftReport = renderCiPolicyReport({
+    ...clean,
+    controller: { ...clean.controller, tree: { ok: false, driftedFiles: ['scripts/ci/plan-ci.mjs'] } },
+  });
+  assert.match(driftReport.markdown, /⚠ policy drift/);
+  assert.match(driftReport.warnings.join('\n'), /differs from main/);
+
+  const missingReport = renderCiPolicyReport({
+    ...clean,
+    deltaRollout: { ok: false, missing: ['merge_queue'] },
+    prerequisites: { ok: false },
+  });
+  assert.match(missingReport.markdown, /⚠ prerequisites missing/);
+  assert.match(missingReport.warnings.join('\n'), /merge_queue/);
+
+  const failedReport = renderCiPolicyReport({
+    version: 1,
+    acquisitionError: 'GitHub API unavailable',
+    prerequisites: { ok: false },
+    freshness: { ok: false },
+  });
+  assert.match(failedReport.markdown, /⚠ unable to inspect/);
+  assert.match(failedReport.warnings.join('\n'), /GitHub API unavailable/);
 });
 
 test('real policy CLIs use strict parsers with intentional repeat behavior', () => {
@@ -494,8 +637,7 @@ test('supply-chain workflow preserves SARIF upload and gates findings plus audit
   assert.match(workflow, /if: \|\n\s+always\(\)/);
   assert.match(workflow, /SCAN_OUTCOME: \$\{\{ steps\.zizmor_scan\.outcome \}\}/);
   assert.match(workflow, /node scripts\/ci\/enforce-zizmor-sarif\.mjs/);
-  assert.match(workflow, /^  ci-policy-prerequisites:$/m);
-  assert.match(workflow, /Verify controller provenance and testnet rollout safeguards/);
+  assert.doesNotMatch(workflow, /^  ci-policy-prerequisites:$/m);
   assert.match(workflow, /- 'pnpm-lock\.yaml'/);
   assert.match(workflow, /- '\*\*\/package\.json'/);
   assert.match(workflow, /^  schedule:$/m);
@@ -506,4 +648,15 @@ test('supply-chain workflow preserves SARIF upload and gates findings plus audit
   const auditEnd = auditRemainder.search(/^  [a-zA-Z0-9_-]+:\n/m);
   const auditBlock = auditEnd === -1 ? auditRemainder : auditRemainder.slice(0, auditEnd);
   assert.doesNotMatch(auditBlock, /^    if:/m);
+
+  const primaryWorkflow = parseYaml(fs.readFileSync(
+    path.join(REPO_ROOT, '.github/workflows/ci.yml'),
+    'utf8',
+  ));
+  assert.ok(primaryWorkflow.jobs['ci-policy-prerequisites']);
+  assert.ok(primaryWorkflow.jobs['ci-gate'].needs.includes('ci-policy-prerequisites'));
+  assert.match(
+    primaryWorkflow.jobs['ci-policy-prerequisites'].steps.at(-1).run,
+    /inspect-ci-policy\.mjs\s+--mode enforce/,
+  );
 });

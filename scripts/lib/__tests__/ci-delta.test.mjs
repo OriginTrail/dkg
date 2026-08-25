@@ -107,6 +107,7 @@ test('unknown PR diffs fail closed with Solidity selected and enforced', () => {
 
   const needs = {
     changes: { result: 'success' },
+    'ci-policy-prerequisites': { result: 'success' },
     build: { result: 'success' },
     'abi-freshness': { result: 'success' },
     solidity: { result: 'skipped' },
@@ -676,6 +677,7 @@ test('aggregate gates reject failed or accidentally skipped selected jobs', () =
   const plan = pullRequestPlan([change('packages/network-sim/src/index.ts')]);
   const needs = {
     changes: { result: 'success' },
+    'ci-policy-prerequisites': { result: 'success' },
     build: { result: 'success' },
     'abi-freshness': { result: 'skipped' },
     solidity: { result: 'skipped' },
@@ -691,12 +693,22 @@ test('aggregate gates reject failed or accidentally skipped selected jobs', () =
   needs['kosava-supporting'].result = 'skipped';
   assert.match(validatePrimaryResults({ eventName: 'pull_request', plan, needs }).join('\n'), /selected/);
 
+  needs['kosava-supporting'].result = 'success';
+  needs['ci-policy-prerequisites'].result = 'failure';
+  assert.match(
+    validatePrimaryResults({ eventName: 'pull_request', plan, needs }).join('\n'),
+    /ci-policy-prerequisites ended with failure/,
+    'a missing rollout safeguard must prevent the required CI aggregate from succeeding',
+  );
+  needs['ci-policy-prerequisites'].result = 'success';
+
   const fullNonContract = pullRequestPlan(
     [change('scripts/unrelated-maintenance.mjs')],
     { labels: ['ci:full'] },
   );
   const fullNonContractNeeds = {
     changes: { result: 'success' },
+    'ci-policy-prerequisites': { result: 'success' },
     build: { result: 'success' },
     'abi-freshness': { result: 'skipped' },
     solidity: { result: 'skipped' },
@@ -752,6 +764,7 @@ test('aggregate gate accepts the full-push and docs-only job shapes', () => {
   const full = planCi({ eventName: 'push' });
   const fullNeeds = {
     changes: { result: 'success' },
+    'ci-policy-prerequisites': { result: 'success' },
     build: { result: 'success' },
     ...Object.fromEntries(laneJobs.map((job) => [job, { result: 'success' }])),
     'abi-freshness': { result: 'success' },
@@ -800,6 +813,7 @@ test('aggregate gate accepts the full-push and docs-only job shapes', () => {
   const docs = pullRequestPlan([change('CHANGELOG.md')]);
   const docsNeeds = {
     changes: { result: 'success' },
+    'ci-policy-prerequisites': { result: 'success' },
     build: { result: 'skipped' },
     ...Object.fromEntries(laneJobs.map((job) => [job, { result: 'skipped' }])),
     'abi-freshness': { result: 'skipped' },

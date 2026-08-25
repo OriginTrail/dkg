@@ -61,6 +61,11 @@ file names cannot alter the decision. Its routing table lives in
   git fetch origin main
   git merge-base --is-ancestor <controller-sha> origin/main
   ```
+- `CONTROLLER_POLICY_FILES` in `scripts/ci/trusted-controller-pins.mjs` is the
+  single manifest for the narrow controller boundary. After changing it, run
+  `pnpm ci:controller:sync`; CI runs `pnpm ci:controller:check` semantics in
+  the policy tests so the four generated sparse-checkout fragments cannot
+  drift. File ordering is not part of the security contract.
 - The merge queue tests every Node/EVM lane and the sharded Solidity suite
   against the exact combined commit before it lands. Protected-branch Solidity
   coverage remains the post-merge safety net.

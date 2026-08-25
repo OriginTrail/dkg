@@ -243,34 +243,6 @@ jobs:
           --sarif zizmor.sarif
           --scan-outcome "${SCAN_OUTCOME}"
 
-  ci-policy-prerequisites:
-    name: CI policy prerequisites (protected history + rulesets)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - name: Install policy parser
-        run: pnpm install --frozen-lockfile --ignore-scripts
-      - name: Verify controller provenance and testnet rollout safeguards
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          node scripts/ci/inspect-ci-policy.mjs
-          --mode enforce
-          --repository "${GITHUB_REPOSITORY}"
-          --branch testnet-canary
-          --workflow .github/workflows/ci.yml
-          --workflow .github/workflows/evm-integration.yml
-
   dependency-deny-list:
     name: Dependency deny-list (named-package blocklist)
     # Hard gate. Scans `pnpm-lock.yaml` + every `package.json` in the
@@ -721,30 +693,13 @@ jobs:
           # controller-tree freshness inspection. The per-PR hard gate runs
           # only the prerequisite half, so optional contents-API drift checks
           # cannot block protected-history or ruleset enforcement.
-          POLICY_SNAPSHOT="${RUNNER_TEMP}/ci-policy-snapshot.json"
           node scripts/ci/inspect-ci-policy.mjs \
             --mode report \
             --repository "${GITHUB_REPOSITORY}" \
             --branch testnet-canary \
             --workflow .github/workflows/ci.yml \
             --workflow .github/workflows/evm-integration.yml \
-            --output "${POLICY_SNAPSHOT}"
-
-          CONTROLLER_PINNED=$(jq -r '.controller.pin // "?"' "${POLICY_SNAPSHOT}")
-          DEFAULT_BRANCH=$(jq -r '.controller.defaultBranch // "default branch"' "${POLICY_SNAPSHOT}")
-          if ! jq -e '.controller.provenance.ok == true' "${POLICY_SNAPSHOT}" > /dev/null; then
-            report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" "protected ${DEFAULT_BRANCH} history" '⚠ untrusted provenance'
-          elif jq -e '.controller.tree.ok == true' "${POLICY_SNAPSHOT}" > /dev/null; then
-            report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" 'default-branch policy tree' '✓ current'
-          else
-            report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" 'default-branch policy tree' '⚠ policy drift'
-          fi
-
-          if jq -e '.deltaRollout.ok == true' "${POLICY_SNAPSHOT}" > /dev/null; then
-            report 'testnet-canary delta safeguards' 'active ruleset' 'PR + queue + aggregate gates' '✓ current'
-          else
-            report 'testnet-canary delta safeguards' '?' 'PR + queue + aggregate gates' '⚠ prerequisites missing'
-          fi
+            --summary "${GITHUB_STEP_SUMMARY}"
 
           # shellcheck disable=SC2016
           # Backticks in the markdown string below are intentional
@@ -753,8 +708,8 @@ jobs:
           {
             echo
             if [ "${STALE}" -eq 0 ]; then
-              echo '_All CI policy pins are current._'
+              echo '_All scanner pins are current._'
             else
-              echo '_One or more CI policy pins need attention. Open a focused rotation PR and recompute integrity hashes where applicable._'
+              echo '_One or more scanner pins need attention. Open a focused rotation PR and recompute integrity hashes where applicable._'
             fi
           } >> "$GITHUB_STEP_SUMMARY"

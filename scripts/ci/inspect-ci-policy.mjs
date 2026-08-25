@@ -80,7 +80,21 @@ export async function inspectCiPolicyPrerequisites({
     token,
     requestJson,
   );
-  const deltaRollout = evaluateEffectiveDeltaRolloutRules({ branch, rules: effectiveRules });
+  const enforcementRuleTypes = new Set(['pull_request', 'merge_queue', 'required_status_checks']);
+  const effectiveRulesetIds = [...new Set(effectiveRules
+    .filter((rule) => enforcementRuleTypes.has(rule?.type))
+    .map((rule) => rule?.ruleset_id)
+    .filter((rulesetId) => rulesetId !== undefined)
+    .map(String))];
+  const rulesets = await Promise.all(effectiveRulesetIds.map((rulesetId) => (
+    requestJson(`repos/${repository}/rulesets/${encodeURIComponent(rulesetId)}`, token)
+  )));
+  const deltaRollout = evaluateEffectiveDeltaRolloutRules({
+    branch,
+    repository,
+    rules: effectiveRules,
+    rulesets,
+  });
 
   const provenanceOk = isProtectedHistoryComparison(compare?.status);
   return {
@@ -152,6 +166,7 @@ export function parseCiPolicyArguments(argv) {
       branch: { type: 'string' },
       workflow: { type: 'string', multiple: true, default: [] },
       output: { type: 'string' },
+      summary: { type: 'string' },
     },
     strict: true,
     allowPositionals: false,
@@ -164,12 +179,71 @@ export function parseCiPolicyArguments(argv) {
   ) {
     throw new Error('mode, repository, branch, and at least one workflow are required');
   }
+  if (options.summary && options.mode !== 'report') {
+    throw new Error('--summary is available only in report mode');
+  }
   const { workflow: workflows, ...singleValueOptions } = options;
   return { ...singleValueOptions, workflows };
 }
 
 function writeSnapshot(filePath, snapshot) {
   if (filePath) fs.writeFileSync(filePath, `${JSON.stringify(snapshot, null, 2)}\n`);
+}
+
+export function renderCiPolicyReport(snapshot) {
+  const warnings = [];
+  const controller = snapshot.controller ?? {};
+  const pinned = typeof controller.pin === 'string' ? controller.pin.slice(0, 12) : '?';
+  const defaultBranch = controller.defaultBranch ?? 'default branch';
+  let controllerExpected = `protected ${defaultBranch} history`;
+  let controllerStatus = '⚠ unable to inspect';
+
+  if (snapshot.acquisitionError) {
+    warnings.push(`trusted CI controller inspection failed: ${snapshot.acquisitionError}`);
+  } else if (controller.provenance?.ok !== true) {
+    controllerStatus = '⚠ untrusted provenance';
+    warnings.push(`trusted CI controller ${pinned} is not in protected ${defaultBranch} history`);
+  } else {
+    controllerExpected = 'default-branch policy tree';
+    if (controller.tree?.ok === true) {
+      controllerStatus = '✓ current';
+    } else {
+      controllerStatus = '⚠ policy drift';
+      warnings.push(`trusted CI controller ${pinned} differs from ${defaultBranch}`);
+    }
+  }
+
+  let safeguardsPinned = '?';
+  let safeguardsStatus = '⚠ unable to inspect';
+  if (snapshot.deltaRollout?.ok === true) {
+    safeguardsPinned = 'active ruleset';
+    safeguardsStatus = '✓ current';
+  } else if (snapshot.deltaRollout) {
+    safeguardsStatus = '⚠ prerequisites missing';
+    warnings.push(`testnet-canary delta safeguards missing: ${snapshot.deltaRollout.missing.join(', ')}`);
+  } else if (snapshot.acquisitionError) {
+    warnings.push(`testnet-canary safeguard inspection failed: ${snapshot.acquisitionError}`);
+  }
+
+  const markdown = [
+    '## Protected CI policy',
+    '',
+    '| Component | Pinned | Expected upstream | Status |',
+    '|-----------|--------|-------------------|--------|',
+    `| trusted CI controller | \`${pinned}\` | \`${controllerExpected}\` | ${controllerStatus} |`,
+    `| testnet-canary delta safeguards | \`${safeguardsPinned}\` | \`PR + queue + Actions-owned aggregate gates, no bypass\` | ${safeguardsStatus} |`,
+    '',
+  ].join('\n');
+  return { markdown, warnings };
+}
+
+function writePolicySummary(filePath, snapshot) {
+  if (!filePath) return;
+  const report = renderCiPolicyReport(snapshot);
+  fs.appendFileSync(filePath, report.markdown);
+  for (const warning of report.warnings) {
+    console.log(`::warning title=CI policy inspection::${warning}`);
+  }
 }
 
 export async function runCiPolicyInspector(argv, { token = process.env.GH_TOKEN, requestJson } = {}) {
@@ -193,6 +267,7 @@ export async function runCiPolicyInspector(argv, { token = process.env.GH_TOKEN,
       });
     }
     writeSnapshot(options.output, snapshot);
+    writePolicySummary(options.summary, snapshot);
     if (!snapshot.prerequisites.ok) {
       console.error(`ci-policy-inspection: prerequisites missing: ${snapshot.deltaRollout.missing.join(', ') || snapshot.controller.provenance.status}`);
     } else {
@@ -211,6 +286,7 @@ export async function runCiPolicyInspector(argv, { token = process.env.GH_TOKEN,
       freshness: { ok: false },
     };
     writeSnapshot(options?.output, failedSnapshot);
+    writePolicySummary(options?.summary, failedSnapshot);
     console.error(`ci-policy-inspection: ${error.message}`);
     return options?.mode === 'report' ? 0 : 1;
   }
