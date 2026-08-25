@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
@@ -13,7 +12,6 @@ import {
 } from '../../ci/check-oxlint-baseline.mjs';
 import {
   buildVitestJunitInvocation,
-  loadVitestJunitLanes,
   runVitestJunit,
 } from '../../ci/run-vitest-junit.mjs';
 
@@ -21,51 +19,76 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const readRepositoryFile = (filePath) => fs.readFileSync(path.join(REPO_ROOT, filePath), 'utf8');
 const parseRepositoryYaml = (filePath) => parseYaml(readRepositoryFile(filePath));
 
-function validateJunitUploadCoverage({ workflow, lanes, observedLanes }) {
+const JUNIT_UPLOAD_PATTERN = 'packages/*/test-results/*.xml';
+
+function validateJunitUploadCoverage(workflow) {
   const uploadsByJob = new Map();
   for (const [jobName, job] of Object.entries(workflow.jobs)) {
+    const runnerSteps = (job.steps ?? []).filter(
+      (step) => typeof step?.run === 'string' && step.run.includes('run-vitest-junit.mjs'),
+    );
     const uploads = (job.steps ?? []).filter(
       (step) => step?.uses === './.github/actions/upload-vitest-junit',
     );
-    if (uploads.length > 0) uploadsByJob.set(jobName, uploads);
-  }
-
-  for (const [laneName, lane] of Object.entries(lanes)) {
-    const jobName = observedLanes.get(laneName);
-    const uploads = uploadsByJob.get(jobName) ?? [];
+    if (runnerSteps.length === 0) {
+      if (uploads.length > 0) throw new Error(`${jobName} uploads JUnit without running the shared runner`);
+      continue;
+    }
     if (uploads.length !== 1) {
       throw new Error(`${jobName} must define exactly one Vitest JUnit upload step`);
     }
-    const reportPath = path.posix.join(
-      lane.packageDir,
-      lane.output.replaceAll('{shard}', '1'),
-    );
     const patterns = uploads[0].with?.['report-path']
       ?.split('\n')
       .map((entry) => entry.trim())
       .filter(Boolean) ?? [];
-    if (!patterns.some((pattern) => path.posix.matchesGlob(reportPath, pattern))) {
-      throw new Error(`${jobName} upload path does not cover ${laneName} report ${reportPath}`);
+    const conventionalReports = [
+      'packages/example/test-results/example.xml',
+      'packages/example/test-results/example-1.xml',
+    ];
+    if (!conventionalReports.every((report) => (
+      patterns.some((pattern) => path.posix.matchesGlob(report, pattern))
+    ))) {
+      throw new Error(`${jobName} upload path does not cover conventional Vitest JUnit reports`);
     }
+    for (const step of runnerSteps) assert.doesNotMatch(step.run, /--reporter=junit/);
+    uploadsByJob.set(jobName, uploads);
   }
 
   return uploadsByJob;
 }
 
-test('shared Vitest runner uses package-owned test contracts', () => {
-  const invocation = buildVitestJunitInvocation([
+test('shared Vitest runner derives sharded and unsharded package reports', () => {
+  const sharded = buildVitestJunitInvocation([
     '--lane', 'chain', '--shard', '2', '--', 'test/example.test.ts',
   ]);
-  assert.deepEqual(invocation.args.slice(2), [
+  assert.deepEqual(sharded.args.slice(2), [
     'test',
     'test/example.test.ts',
     '--reporter=default',
     '--reporter=junit',
     '--outputFile.junit=test-results/chain-2.xml',
   ]);
+  assert.equal(sharded.output, 'test-results/chain-2.xml');
+
+  const unsharded = buildVitestJunitInvocation(['--lane', 'core']);
+  assert.deepEqual(unsharded.args.slice(2), [
+    'test',
+    '--reporter=default',
+    '--reporter=junit',
+    '--outputFile.junit=test-results/core.xml',
+  ]);
+  assert.equal(unsharded.output, 'test-results/core.xml');
   assert.throws(
-    () => buildVitestJunitInvocation(['--lane', 'chain']),
-    /requires a numeric --shard/,
+    () => buildVitestJunitInvocation(['--lane', 'chain', '--shard', 'two']),
+    /--shard must be numeric/,
+  );
+  assert.throws(
+    () => buildVitestJunitInvocation(['--lane', '../core']),
+    /package directory name/,
+  );
+  assert.throws(
+    () => buildVitestJunitInvocation(['--lane', 'does-not-exist']),
+    /package\.json does not exist/,
   );
   assert.throws(
     () => buildVitestJunitInvocation([
@@ -73,44 +96,16 @@ test('shared Vitest runner uses package-owned test contracts', () => {
     ]),
     /managed by the shared CI runner/,
   );
-
-  for (const lane of Object.values(loadVitestJunitLanes())) {
-    const packageJson = JSON.parse(readRepositoryFile(`${lane.packageDir}/package.json`));
-    assert.equal(typeof packageJson.scripts.test, 'string');
-    assert.equal(packageJson.scripts['test:ci'], undefined);
-  }
 });
 
-test('JUnit workflow and upload policy match the semantic lane manifest', () => {
+test('every shared JUnit runner job uploads convention-derived reports', () => {
   const workflow = parseRepositoryYaml('.github/workflows/ci.yml');
-  const lanes = loadVitestJunitLanes();
-  const observedLanes = new Map();
-
-  for (const [jobName, job] of Object.entries(workflow.jobs)) {
-    for (const step of job.steps ?? []) {
-      if (typeof step?.run !== 'string' || !step.run.includes('run-vitest-junit.mjs')) continue;
-      for (const match of step.run.matchAll(/--lane\s+([a-z0-9-]+)/g)) {
-        assert.equal(observedLanes.has(match[1]), false, `${match[1]} must be invoked once`);
-        observedLanes.set(match[1], jobName);
-      }
-      assert.doesNotMatch(step.run, /--reporter=junit/);
-    }
-  }
-
-  assert.deepEqual([...observedLanes.keys()].sort(), Object.keys(lanes).sort());
-  for (const [laneName, lane] of Object.entries(lanes)) {
-    assert.equal(observedLanes.get(laneName), lane.ciJob);
-  }
-  const uploadsByJob = validateJunitUploadCoverage({ workflow, lanes, observedLanes });
+  const uploadsByJob = validateJunitUploadCoverage(workflow);
   assert.equal(uploadsByJob.size, 4);
-  for (const [jobName, [step]] of uploadsByJob) {
+  for (const [, [step]] of uploadsByJob) {
     assert.equal(step.if, 'always()');
     assert.equal(typeof step.with?.['artifact-name'], 'string');
-    assert.equal(typeof step.with?.['report-path'], 'string');
-    assert.ok(
-      Object.values(lanes).some((lane) => lane.ciJob === jobName),
-      `${jobName} upload must correspond to a manifest lane`,
-    );
+    assert.equal(step.with?.['report-path'], JUNIT_UPLOAD_PATTERN);
   }
 
   const mismatchedWorkflow = structuredClone(workflow);
@@ -119,12 +114,8 @@ test('JUnit workflow and upload policy match the semantic lane manifest', () => 
   );
   publisherUpload.with['report-path'] = 'packages/publisher/test-result/*.xml';
   assert.throws(
-    () => validateJunitUploadCoverage({
-      workflow: mismatchedWorkflow,
-      lanes,
-      observedLanes,
-    }),
-    /tornado-publisher upload path does not cover publisher report packages\/publisher\/test-results\/publisher-1\.xml/,
+    () => validateJunitUploadCoverage(mismatchedWorkflow),
+    /tornado-publisher upload path does not cover conventional Vitest JUnit reports/,
   );
 
   const uploadAction = parseRepositoryYaml('.github/actions/upload-vitest-junit/action.yml');
@@ -138,11 +129,6 @@ test('JUnit workflow and upload policy match the semantic lane manifest', () => 
     'retention-days': 14,
     'if-no-files-found': 'ignore',
   });
-  assert.equal(
-    new Set(Object.values(lanes).map((lane) => lane.output)).size,
-    Object.keys(lanes).length,
-    'JUnit outputs must be unique',
-  );
 });
 
 test('shared JUnit runner creates reports and propagates child failures', (t) => {
@@ -285,13 +271,12 @@ test('Oxlint baseline is scoped by rule/path and fails closed on runner errors',
   );
 });
 
-test('checked-in Oxlint baseline passes in the current repository', () => {
-  const result = spawnSync('pnpm', ['lint'], {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-  });
-  assert.equal(result.error, undefined);
-  assert.equal(result.signal, null);
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /Oxlint rule\/path baseline passed|baseline entries? (?:is|are) now reducible/);
+test('CI keeps one explicit repository lint gate', () => {
+  const workflow = parseRepositoryYaml('.github/workflows/ci.yml');
+  const lintSteps = Object.values(workflow.jobs).flatMap((job) => (
+    (job.steps ?? []).filter((step) => step?.run === 'pnpm lint')
+  ));
+  assert.deepEqual(lintSteps.map((step) => step.name), [
+    'Lint source and repository tooling',
+  ]);
 });

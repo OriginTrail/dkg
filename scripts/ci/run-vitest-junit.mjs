@@ -7,7 +7,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIRECTORY, '../..');
-const LANE_MANIFEST_PATH = path.join(SCRIPT_DIRECTORY, 'vitest-junit-lanes.json');
 
 function repositoryPath(relativePath, optionName) {
   if (!relativePath || path.isAbsolute(relativePath)) {
@@ -19,23 +18,6 @@ function repositoryPath(relativePath, optionName) {
     throw new Error(`${optionName} must stay inside the repository`);
   }
   return resolved;
-}
-
-export function loadVitestJunitLanes() {
-  const manifest = JSON.parse(fs.readFileSync(LANE_MANIFEST_PATH, 'utf8'));
-  if (manifest?.version !== 1 || !manifest.lanes || typeof manifest.lanes !== 'object') {
-    throw new Error('Vitest JUnit lane manifest must use version 1');
-  }
-  for (const [laneName, lane] of Object.entries(manifest.lanes)) {
-    if (
-      typeof lane?.ciJob !== 'string'
-      || typeof lane?.packageDir !== 'string'
-      || typeof lane?.output !== 'string'
-    ) {
-      throw new Error(`${laneName} must define ciJob, packageDir, and output`);
-    }
-  }
-  return manifest.lanes;
 }
 
 function parseArguments(argv) {
@@ -61,26 +43,29 @@ function parseArguments(argv) {
 
 export function buildVitestJunitInvocation(argv) {
   const { laneName, shard, testArguments } = parseArguments(argv);
-  const lane = loadVitestJunitLanes()[laneName];
-  if (!lane) throw new Error(`unknown Vitest JUnit lane: ${laneName}`);
-
-  const needsShard = lane.output.includes('{shard}');
-  if (needsShard && !/^\d+$/.test(shard ?? '')) {
-    throw new Error(`${laneName} requires a numeric --shard`);
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(laneName)) {
+    throw new Error('--lane must be a package directory name');
   }
-  if (!needsShard && shard !== undefined) throw new Error(`${laneName} does not accept --shard`);
+  if (shard !== undefined && !/^\d+$/.test(shard)) {
+    throw new Error('--shard must be numeric');
+  }
 
-  const packageDirectory = repositoryPath(lane.packageDir, 'lane packageDir');
-  const packageJson = JSON.parse(fs.readFileSync(path.join(packageDirectory, 'package.json'), 'utf8'));
+  const packageRelativePath = `packages/${laneName}`;
+  const packageDirectory = repositoryPath(packageRelativePath, 'lane package directory');
+  const packageJsonPath = path.join(packageDirectory, 'package.json');
+  if (!fs.existsSync(packageJsonPath)) {
+    throw new Error(`${packageRelativePath}/package.json does not exist`);
+  }
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
   if (typeof packageJson.scripts?.test !== 'string') {
-    throw new Error(`${lane.packageDir}/package.json must define the package-owned test contract`);
+    throw new Error(`${packageRelativePath}/package.json must define the package-owned test contract`);
   }
 
-  const output = lane.output.replaceAll('{shard}', shard ?? '');
+  const output = `test-results/${laneName}${shard === undefined ? '' : `-${shard}`}.xml`;
   const outputPath = path.resolve(packageDirectory, output);
   const relativeOutput = path.relative(packageDirectory, outputPath);
   if (relativeOutput === '..' || relativeOutput.startsWith(`..${path.sep}`)) {
-    throw new Error(`${laneName} output must stay inside its package directory`);
+    throw new Error('JUnit output must stay inside its package directory');
   }
 
   return {

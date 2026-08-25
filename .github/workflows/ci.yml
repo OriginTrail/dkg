@@ -606,7 +606,7 @@ jobs:
         uses: ./.github/actions/upload-vitest-junit
         with:
           artifact-name: vitest-publisher-${{ matrix.shard }}-of-4
-          report-path: packages/publisher/test-results/*.xml
+          report-path: packages/*/test-results/*.xml
 
   # ------------------------------------------------------------------
   # Tornado agent lane — the slowest Node suite, sharded across 10 runners.
@@ -676,7 +676,7 @@ jobs:
         uses: ./.github/actions/upload-vitest-junit
         with:
           artifact-name: vitest-agent-${{ matrix.shard }}-of-10
-          report-path: packages/agent/test-results/*.xml
+          report-path: packages/*/test-results/*.xml
 
   # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
@@ -740,7 +740,7 @@ jobs:
         uses: ./.github/actions/upload-vitest-junit
         with:
           artifact-name: vitest-cli-${{ matrix.shard }}-of-4
-          report-path: packages/cli/test-results/*.xml
+          report-path: packages/*/test-results/*.xml
 
   bura-blazegraph-arm64:
     name: "Bura: Blazegraph arm64 image (native)"
