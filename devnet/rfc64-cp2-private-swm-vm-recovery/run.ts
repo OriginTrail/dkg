@@ -233,6 +233,7 @@ async function execute(): Promise<void> {
 
     let swmRecovered = 0;
     let vmRecovered = 0;
+    const recoveredChainOrdinals = new Set<number>();
     for (const [index, value] of rows.entries()) {
       const row = record(value, `private row ${index}`);
       const semantic = output(await receiver.request(
@@ -250,6 +251,10 @@ async function execute(): Promise<void> {
       if (!Number.isSafeInteger(ordinal) || ordinal < 0 || ordinal >= ASSET_COUNT) {
         throw new Error(`private row ${index} has an unexpected finalized KA ordinal`);
       }
+      if (recoveredChainOrdinals.has(ordinal)) {
+        throw new Error(`private row ${index} duplicates finalized KA ordinal ${ordinal}`);
+      }
+      recoveredChainOrdinals.add(ordinal);
       const ual = requiredString(row.kaUal, `private row ${index} KA UAL`);
       const vmGraph = contextGraphLayerUri(
         CONTEXT_GRAPH_ID,
@@ -273,9 +278,16 @@ async function execute(): Promise<void> {
         'batchId',
         `"${kaId}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
       );
-      metadataObject(metadata, 'materializedVersion', `"123:${ordinal}"`);
+      // The mock finalized snapshot places every KA at block 123, transaction index 0.
+      // The KA number above, not materializedVersion, proves the exact chain ordinal set.
+      metadataObject(metadata, 'materializedVersion', '"123:0"');
       vmRecovered += 1;
     }
+    exactJson(
+      [...recoveredChainOrdinals].sort((left, right) => left - right),
+      Array.from({ length: ASSET_COUNT }, (_, ordinal) => ordinal),
+      'private recovered finalized chain ordinal set',
+    );
 
     const [authorStopped, receiverStopped] = await Promise.all([
       author.stop('private-author-stop'),
