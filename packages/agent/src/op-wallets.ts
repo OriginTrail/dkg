@@ -103,21 +103,17 @@ export async function loadOpWallets(
         // but malformed goes to validateWalletEntry, which lets ethers judge it
         // and reports the entry path.
         if (stored.privateKey === undefined || stored.privateKey === null || stored.privateKey === '') {
-          // PR #2332 review — do NOT promise provisioning. `loadOpWallets` never
-          // replenishes an entry in an existing file: deleting one just leaves
-          // fewer wallets, and deleting `adminWallet` leaves it undefined.
-          // Say what actually happens, and say it differently for the two cases.
-          const consequence =
-            path === 'adminWallet'
-              ? 'Removing it leaves the node with no admin wallet; it is NOT regenerated on load. ' +
-                'Restore the key from backup, or remove the entry deliberately and re-provision ' +
-                'the admin wallet with the documented procedure.'
-              : 'Removing it leaves the node with one fewer operational wallet; a replacement is ' +
-                'NOT provisioned on load. Restore the key from backup, or remove the entry ' +
-                'deliberately, accepting the reduced wallet count.';
+          // PR #2332 review — do NOT promise provisioning: `loadOpWallets`
+          // never replenishes an entry, so removing one just leaves fewer
+          // wallets (or no admin wallet). Keep it factual and role-neutral —
+          // an earlier version selected guidance by comparing the display path
+          // to the literal 'adminWallet', which would silently pick the wrong
+          // branch if that locator were ever reformatted.
           throw new Error(
-            `Operational wallet at ${path} in wallets.json has no key: it carries neither an ` +
-              `encrypted \`keystore\` nor a plaintext \`privateKey\`. ${consequence}`,
+            `Wallet entry at ${path} in wallets.json has no key: it carries neither an ` +
+              `encrypted \`keystore\` nor a plaintext \`privateKey\`. Restore the key from backup; ` +
+              `removing the entry is NOT repaired on load — the node simply starts with that ` +
+              `wallet absent.`,
           );
         }
         sawLegacyPlaintext = true;
@@ -202,33 +198,38 @@ function createWalletEntry(): WalletEntry {
 }
 
 /**
- * Describe a rejected key WITHOUT revealing it.
+ * Describe a rejected key WITHOUT revealing it, and WITHOUT reimplementing
+ * ethers' grammar.
  *
- * PR #2332 review — an earlier version kept a local regex copy of ethers'
- * private-key grammar. That duplicated a dependency-owned contract for the
- * sake of an error message: it already had to be widened once when ethers
- * turned out to accept bare hex, and it still admitted values ethers rejects
- * (all-zero, or a scalar at/above the secp256k1 order). `ethers.Wallet` stays
- * the canonical validator; this only supplies the context its error lacks.
+ * PR #2332 review — an earlier version classified prefix/hex/length locally to
+ * explain WHY a key was refused. That recreated a dependency-owned parser: it
+ * already had to be widened once when ethers turned out to accept bare hex, and
+ * it then misdiagnosed an uppercase `0X` prefix (which ethers rejects, but whose
+ * payload is perfectly in range) as an out-of-range scalar. `ethers.Wallet`
+ * owns validity; this reports only what is knowable locally and safe to print.
  */
 function describeRejectedKey(value: unknown): string {
   if (value === undefined || value === null) return 'is missing';
   if (typeof value !== 'string') return `is a ${typeof value}, not a string`;
   if (value.length === 0) return 'is empty';
-  const hex = value.startsWith('0x') || value.startsWith('0X') ? value.slice(2) : value;
-  if (!/^[0-9a-fA-F]*$/.test(hex)) return 'contains non-hexadecimal characters';
-  if (hex.length !== 64) {
-    return `is ${hex.length} hex characters (expected 64, optionally 0x-prefixed)`;
-  }
-  // Correct shape, still refused: out of range for secp256k1 (zero, or >= n).
-  return 'is not a valid secp256k1 key (out of range)';
+  return 'is not a key ethers accepts (expected 64 hex characters, optionally 0x-prefixed)';
+}
+
+/**
+ * `address` is UNTRUSTED until it parses. A malformed wallets.json can carry
+ * key material in that field, and this message goes to console and daemon logs
+ * — so print it only once it is a well-formed public address (PR #2332 review).
+ */
+function safeAddressForDiagnostic(address: unknown): string {
+  return typeof address === 'string' && /^0x[0-9a-fA-F]{40}$/.test(address)
+    ? address
+    : '(missing or malformed)';
 }
 
 /**
  * A wallets.json entry as PARSED, before validation. `privateKey` is `unknown`
- * because the file is untrusted input: the previous signature declared it a
- * `string`, which forced callers into an `as string` cast and split the
- * validation across two places (PR #2332 review).
+ * because the file is untrusted input: declaring it a `string` forced callers
+ * into an `as string` cast and split validation across two places.
  */
 interface CandidateWalletEntry {
   address: string;
@@ -239,8 +240,8 @@ function validateWalletEntry(entry: CandidateWalletEntry, path: string): WalletE
   // GH#1432 — `new ethers.Wallet(...)` throws INVALID_ARGUMENT with the value
   // redacted, naming neither the file nor the offending entry, so `dkg wallet`
   // died with a message an operator could not act on. Let ethers decide what is
-  // valid, and translate its refusal into something addressable. The key itself
-  // is never echoed.
+  // valid, and add the context its error lacks. Neither the key nor an
+  // unvalidated address is ever echoed.
   let derived: ethers.Wallet;
   try {
     derived = new ethers.Wallet(entry.privateKey as string);
@@ -248,7 +249,7 @@ function validateWalletEntry(entry: CandidateWalletEntry, path: string): WalletE
     throw new Error(
       `Invalid operational wallet key at ${path} in wallets.json: privateKey ` +
         `${describeRejectedKey(entry.privateKey)}. Address on the entry: ` +
-        `${entry.address ?? '(none)'}.`,
+        `${safeAddressForDiagnostic(entry.address)}.`,
     );
   }
   if (derived.address.toLowerCase() !== entry.address.toLowerCase()) {

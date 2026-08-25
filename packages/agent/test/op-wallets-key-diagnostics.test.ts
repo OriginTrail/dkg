@@ -40,9 +40,7 @@ describe('loadOpWallets — actionable key diagnostics (GH#1432)', () => {
     await writeWallets(dir, [{ address: '0x1111111111111111111111111111111111111111', privateKey: '0xdeadbeef' }]);
 
     await expect(loadOpWallets(dir)).rejects.toThrow(/wallets\[0\]/);
-    // Reported in HEX characters (the `0x` is not counted), so the number
-    // lines up with the "expected 64" it is compared against.
-    await expect(loadOpWallets(dir)).rejects.toThrow(/is 8 hex characters \(expected 64/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/not a key ethers accepts/);
   });
 
   it('names the entry for a non-string key', async () => {
@@ -105,7 +103,7 @@ describe('loadOpWallets — actionable key diagnostics (GH#1432)', () => {
     ]);
 
     await expect(loadOpWallets(dir)).rejects.toThrow(/wallets\[0\]/);
-    await expect(loadOpWallets(dir)).rejects.toThrow(/non-hexadecimal/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/not a key ethers accepts/);
     await expect(loadOpWallets(dir)).rejects.not.toThrow(/INVALID_ARGUMENT/);
   });
 
@@ -118,7 +116,7 @@ describe('loadOpWallets — actionable key diagnostics (GH#1432)', () => {
     ]);
 
     await expect(loadOpWallets(dir)).rejects.toThrow(/wallets\[0\]/);
-    await expect(loadOpWallets(dir)).rejects.toThrow(/out of range/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/not a key ethers accepts/);
   });
 
   it('names the entry for a key at the secp256k1 group order', async () => {
@@ -128,7 +126,7 @@ describe('loadOpWallets — actionable key diagnostics (GH#1432)', () => {
     await writeWallets(dir, [{ address: '0x1111111111111111111111111111111111111111', privateKey: n }]);
 
     await expect(loadOpWallets(dir)).rejects.toThrow(/wallets\[0\]/);
-    await expect(loadOpWallets(dir)).rejects.toThrow(/out of range/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/not a key ethers accepts/);
   });
 
   it('never echoes the rejected key material in the diagnostic', async () => {
@@ -153,7 +151,7 @@ describe('loadOpWallets — actionable key diagnostics (GH#1432)', () => {
     ]);
 
     await expect(loadOpWallets(dir)).rejects.toThrow(/wallets\[1\]/);
-    await expect(loadOpWallets(dir)).rejects.toThrow(/NOT provisioned on load/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/NOT repaired on load/);
 
     // And the promise holds: removing the entry yields one wallet, not two.
     await writeWallets(dir, [{ address: new Wallet(good).address, privateKey: good }]);
@@ -175,7 +173,34 @@ describe('loadOpWallets — actionable key diagnostics (GH#1432)', () => {
     );
 
     await expect(loadOpWallets(dir)).rejects.toThrow(/adminWallet/);
-    await expect(loadOpWallets(dir)).rejects.toThrow(/no admin wallet/);
-    await expect(loadOpWallets(dir)).rejects.toThrow(/NOT regenerated on load/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/NOT repaired on load/);
+  });
+
+  // PR #2332 review — the diagnostic must not become a secret-disclosure path.
+  // A malformed file can duplicate key material into `address`, and this
+  // message goes to console and daemon logs.
+  it('never echoes key material that was copied into the address field', async () => {
+    const dir = await tempDir();
+    const leaked = '0x' + 'ab'.repeat(32) + 'ff'; // 33 bytes -> rejected
+    await writeWallets(dir, [{ address: leaked, privateKey: leaked }]);
+
+    await expect(loadOpWallets(dir)).rejects.toThrow(/wallets\[0\]/);
+    // Neither copy may appear, in any casing.
+    await expect(loadOpWallets(dir)).rejects.not.toThrow(new RegExp('ab'.repeat(8), 'i'));
+    await expect(loadOpWallets(dir)).rejects.toThrow(/missing or malformed/);
+  });
+
+  // PR #2332 review — ethers REJECTS an uppercase `0X` prefix even though the
+  // payload is in range, so the diagnostic must not claim to know the reason.
+  it('does not misdiagnose an uppercase 0X prefix as a scalar problem', async () => {
+    const dir = await tempDir();
+    await writeWallets(dir, [
+      { address: '0x1111111111111111111111111111111111111111', privateKey: '0X' + '11'.repeat(32) },
+    ]);
+
+    await expect(loadOpWallets(dir)).rejects.toThrow(/wallets\[0\]/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/not a key ethers accepts/);
+    // The old classifier stripped `0X` and reported an out-of-range scalar.
+    await expect(loadOpWallets(dir)).rejects.not.toThrow(/out of range/);
   });
 });
