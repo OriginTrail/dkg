@@ -21,6 +21,37 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const readRepositoryFile = (filePath) => fs.readFileSync(path.join(REPO_ROOT, filePath), 'utf8');
 const parseRepositoryYaml = (filePath) => parseYaml(readRepositoryFile(filePath));
 
+function validateJunitUploadCoverage({ workflow, lanes, observedLanes }) {
+  const uploadsByJob = new Map();
+  for (const [jobName, job] of Object.entries(workflow.jobs)) {
+    const uploads = (job.steps ?? []).filter(
+      (step) => step?.uses === './.github/actions/upload-vitest-junit',
+    );
+    if (uploads.length > 0) uploadsByJob.set(jobName, uploads);
+  }
+
+  for (const [laneName, lane] of Object.entries(lanes)) {
+    const jobName = observedLanes.get(laneName);
+    const uploads = uploadsByJob.get(jobName) ?? [];
+    if (uploads.length !== 1) {
+      throw new Error(`${jobName} must define exactly one Vitest JUnit upload step`);
+    }
+    const reportPath = path.posix.join(
+      lane.packageDir,
+      lane.output.replaceAll('{shard}', '1'),
+    );
+    const patterns = uploads[0].with?.['report-path']
+      ?.split('\n')
+      .map((entry) => entry.trim())
+      .filter(Boolean) ?? [];
+    if (!patterns.some((pattern) => path.posix.matchesGlob(reportPath, pattern))) {
+      throw new Error(`${jobName} upload path does not cover ${laneName} report ${reportPath}`);
+    }
+  }
+
+  return uploadsByJob;
+}
+
 test('shared Vitest runner uses package-owned test contracts', () => {
   const invocation = buildVitestJunitInvocation([
     '--lane', 'chain', '--shard', '2', '--', 'test/example.test.ts',
@@ -54,11 +85,9 @@ test('JUnit workflow and upload policy match the semantic lane manifest', () => 
   const workflow = parseRepositoryYaml('.github/workflows/ci.yml');
   const lanes = loadVitestJunitLanes();
   const observedLanes = new Map();
-  const uploadSteps = [];
 
   for (const [jobName, job] of Object.entries(workflow.jobs)) {
     for (const step of job.steps ?? []) {
-      if (step?.uses === './.github/actions/upload-vitest-junit') uploadSteps.push(step);
       if (typeof step?.run !== 'string' || !step.run.includes('run-vitest-junit.mjs')) continue;
       for (const match of step.run.matchAll(/--lane\s+([a-z0-9-]+)/g)) {
         assert.equal(observedLanes.has(match[1]), false, `${match[1]} must be invoked once`);
@@ -72,12 +101,31 @@ test('JUnit workflow and upload policy match the semantic lane manifest', () => 
   for (const [laneName, lane] of Object.entries(lanes)) {
     assert.equal(observedLanes.get(laneName), lane.ciJob);
   }
-  assert.equal(uploadSteps.length, 4);
-  for (const step of uploadSteps) {
+  const uploadsByJob = validateJunitUploadCoverage({ workflow, lanes, observedLanes });
+  assert.equal(uploadsByJob.size, 4);
+  for (const [jobName, [step]] of uploadsByJob) {
     assert.equal(step.if, 'always()');
     assert.equal(typeof step.with?.['artifact-name'], 'string');
     assert.equal(typeof step.with?.['report-path'], 'string');
+    assert.ok(
+      Object.values(lanes).some((lane) => lane.ciJob === jobName),
+      `${jobName} upload must correspond to a manifest lane`,
+    );
   }
+
+  const mismatchedWorkflow = structuredClone(workflow);
+  const publisherUpload = mismatchedWorkflow.jobs['tornado-publisher'].steps.find(
+    (step) => step?.uses === './.github/actions/upload-vitest-junit',
+  );
+  publisherUpload.with['report-path'] = 'packages/publisher/test-result/*.xml';
+  assert.throws(
+    () => validateJunitUploadCoverage({
+      workflow: mismatchedWorkflow,
+      lanes,
+      observedLanes,
+    }),
+    /tornado-publisher upload path does not cover publisher report packages\/publisher\/test-results\/publisher-1\.xml/,
+  );
 
   const uploadAction = parseRepositoryYaml('.github/actions/upload-vitest-junit/action.yml');
   assert.equal(uploadAction.runs.using, 'composite');
