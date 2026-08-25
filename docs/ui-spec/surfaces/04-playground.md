@@ -47,3 +47,19 @@ Treasury link).
 - [ ] Every chip opens the drawer; every drawer reaches Basescan when txs exist.
 - [ ] Compare mode shows two independent receipts for one prompt.
 - [ ] No raw error code, digest, or µTRAC-first string in the primary layer.
+
+---
+
+## P5 amendment — allowance-in-context, chips retired
+
+Streaming stays. The per-message verified chip is retired; each response
+carries a subtle served-by line (`play.servedby`: "via okf-mainnet ⛓") so
+routing stays transparent without ceremony. The model switcher shows
+remaining allowance beside every model (`play.remaining`). A mid-chat
+ceiling hit renders the 402 fork INLINE in the conversation
+(`play.fork.inline` + the three `meter.hit.*` buttons) — never a dead end.
+Query calls show `play.query.cost` with the units basis one reveal deeper.
+Acceptance additions:
+- [ ] No verified/checking chips anywhere in the P5 playground.
+- [ ] The inline fork renders inside the conversation flow at fixture 100%.
+- [ ] Served-by line names seller + provenance class on every response.

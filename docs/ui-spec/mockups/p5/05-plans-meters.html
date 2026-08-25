@@ -1,0 +1,63 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — P5 Plans &amp; meters (Claude usage idiom)</title>
+<link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
+<style>
+  .bar { height: var(--sp-3); border-radius: var(--r-full); background: var(--gauge-track); overflow: hidden; }
+  .bar i { display:block; height:100%; background: var(--interactive); }
+  .bar.warn i { background: var(--gauge-mid); }
+  .bar.hit i { background: var(--gauge-over); }
+  .mrow { display:grid; gap:var(--sp-2); padding:var(--sp-4) 0; border-top:1px solid var(--border-subtle); }
+  .mhead { display:flex; justify-content:space-between; gap:var(--sp-3); flex-wrap:wrap; font-size:var(--fs-sm); }
+  .items { color:var(--text-secondary); font-size:var(--fs-xs); display:grid; gap:var(--sp-1); padding-left:var(--sp-4); }
+  .fork { display:flex; gap:var(--sp-3); flex-wrap:wrap; }
+  .planhead { display:flex; justify-content:space-between; align-items:baseline; gap:var(--sp-3); flex-wrap:wrap; }
+</style></head><body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/09-plans-meters.md — nothing here is wired</span></div>
+<div class="frame frame--narrow">
+
+  <div class="state-label">state: normal (38% used)</div>
+  <div class="card card--pad stack">
+    <div class="planhead"><h1 style="font-size:var(--fs-xl)">Plan: 38% used</h1><span class="sec">Resets in 12 days · <a href="#">Top up</a></span></div>
+    <div class="bar"><i style="width:38%"></i></div>
+    <div class="mrow">
+      <div class="mhead"><span><strong>okf-mainnet shared</strong> — 1.064 of 2.8 TRAC · any mix of 4 offerings</span><span class="mono sec">38%</span></div>
+      <div class="bar"><i style="width:38%"></i></div>
+      <div class="items">
+        <span>Qwen2.5 14B: 1,200,000 tokens · 720,000 µ</span>
+        <span>Qwen2.5 7B: 800,000 tokens · 280,000 µ</span>
+        <span>okf knowledge: 4,200 units · 64,000 µ</span>
+      </div>
+    </div>
+    <div class="mrow">
+      <div class="mhead"><span><strong>hermes · Qwen2.5 7B</strong> (scoped) — 1.2M of 5M tokens</span><span class="mono sec">24%</span></div>
+      <div class="bar"><i style="width:24%"></i></div>
+      <div class="items"><span>At your price cap: 5M guaranteed — routed cheaper twice, +140k above the floor</span></div>
+    </div>
+    <div class="sec sm">This period: our count 1,238,400 · provider count 1,238,400 ✓</div>
+  </div>
+
+  <div class="state-label">state: approaching (87%)</div>
+  <div class="card card--pad stack">
+    <div class="mhead"><span><strong>okf-mainnet shared</strong></span><span style="color:var(--gauge-mid)">87% used — approaching your ceiling</span></div>
+    <div class="bar warn"><i style="width:87%"></i></div>
+  </div>
+
+  <div class="state-label">state: ceiling hit — the fork, never a wall</div>
+  <div class="card card--pad stack">
+    <div class="mhead"><span><strong>hermes · Qwen2.5 7B</strong></span><span style="color:var(--gauge-over)">100%</span></div>
+    <div class="bar hit"><i style="width:100%"></i></div>
+    <h2>You've reached this ceiling</h2>
+    <p class="sec sm">Three ways forward — nothing is lost, your plan resets in 12 days.</p>
+    <div class="fork"><button class="btn">Wait for reset (12 d)</button><button class="btn">Upgrade next period</button><button class="btn btn--primary">Top up now</button></div>
+  </div>
+
+  <div class="state-label">state: just reset — expiry journaled, not returned</div>
+  <div class="card card--pad stack">
+    <div class="mhead"><span><strong>Plan: 0% used</strong></span><span class="sec">Resets in 30 days</span></div>
+    <div class="bar"><i style="width:0%"></i></div>
+    <p class="sec sm">Expired at reset: 173,000 µ — value recognized, not returned</p>
+    <p class="muted xs">Subscriptions don't refund. What you don't use funds the network you're part of.</p>
+  </div>
+
+</div></body></html>

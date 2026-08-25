@@ -1,0 +1,59 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — P5 Subscribe → Key</title>
+<link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
+<style>
+  .steps { display:flex; align-items:center; gap:var(--sp-3); margin-bottom:var(--sp-6); }
+  .step { display:flex; align-items:center; gap:var(--sp-2); font-size:var(--fs-sm); font-weight:var(--fw-medium); }
+  .step .n { width:var(--sp-6); height:var(--sp-6); border-radius:var(--r-full); display:grid; place-items:center; font-size:var(--fs-xs); border:1px solid var(--border-strong); color:var(--text-muted); }
+  .step.is-active .n { background:var(--interactive); border-color:var(--interactive); color:var(--text-on-accent); }
+  .step.is-done .n { background:var(--state-verified); border-color:var(--state-verified); color:var(--text-on-accent); }
+  .steps .bar { flex:1; height:1px; background:var(--border-subtle); }
+  .tmpl { display:flex; justify-content:space-between; gap:var(--sp-3); align-items:center; border:1px solid var(--border-strong); border-radius:var(--r-md); padding:var(--sp-4); }
+  .gate { border:1px solid var(--state-pending); border-radius:var(--r-md); padding:var(--sp-4); display:grid; gap:var(--sp-3); }
+  .gate .line { display:flex; justify-content:space-between; gap:var(--sp-3); flex-wrap:wrap; }
+  .norefund { color:var(--text-secondary); font-size:var(--fs-sm); border-top:1px solid var(--border-subtle); padding-top:var(--sp-3); }
+  .snippet { background:var(--surface-0); border:1px solid var(--border-strong); border-radius:var(--r-sm); padding:var(--sp-3); font-family:var(--font-mono); font-size:var(--fs-xs); overflow-wrap:anywhere; }
+  .warn-once { color:var(--state-pending); font-size:var(--fs-sm); }
+</style></head><body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/01-onboarding.md §P5 — nothing here is wired</span></div>
+<div class="frame frame--narrow">
+
+  <div class="state-label">state: step 1 — choose a plan</div>
+  <div class="card card--pad stack">
+    <h1 style="font-size:var(--fs-xl)">Two steps to your first metered completion</h1>
+    <div class="steps"><div class="step is-active"><span class="n">1</span> Subscribe</div><div class="bar"></div><div class="step is-idle"><span class="n">2</span> Get your key</div></div>
+    <p class="sec">Pick a plan or compose your own. One payment per provider per period — then everything is included up to your ceilings.</p>
+    <div class="tmpl">
+      <div><div style="font-weight:var(--fw-semibold)">Starter plan</div>
+      <div class="sec sm">Qwen 14B + Qwen 7B + 50k query units · 3.6 TRAC/month (~$1.01)</div>
+      <div class="muted xs">Pays 2 providers: okf-mainnet 2.8 TRAC · hermes 0.8 TRAC</div></div>
+      <button class="btn btn--primary">Choose a plan</button>
+    </div>
+    <a href="02-plan-composer.html" class="sm">Or compose your own →</a>
+  </div>
+
+  <div class="state-label">state: payment gate (one per seller — human-gated)</div>
+  <div class="card card--pad stack">
+    <h2>Confirm this period's payment</h2>
+    <div class="gate">
+      <div class="line"><span>Amount</span><span class="mono">2.8 TRAC (~$0.78)</span></div>
+      <div class="line"><span>From</span><span class="mono">0x1B7a44F2… (this node)</span></div>
+      <div class="line"><span>To</span><span class="mono">0x…okf subscription-revenue wallet</span></div>
+      <div class="line sec sm"><span>Covers</span><span>Qwen 14B · Qwen 7B · gpt-5.x · okf knowledge, until Sep 24</span></div>
+      <div class="norefund">Payments are final. Unused allowance expires at reset — like any subscription.</div>
+      <div class="line"><button class="btn">Cancel</button><button class="btn btn--primary">Confirm payment</button></div>
+    </div>
+    <p class="muted xs">Then: 0.8 TRAC to hermes — its own gate, same anatomy.</p>
+  </div>
+
+  <div class="state-label">state: step 2 — key, shown once</div>
+  <div class="card card--pad stack">
+    <div class="steps"><div class="step is-done"><span class="n">✓</span> Subscribe</div><div class="bar"></div><div class="step is-active"><span class="n">2</span> Get your key</div></div>
+    <p class="sec">Works with anything that speaks the OpenAI API — paste the two lines below.</p>
+    <div class="snippet">base_url = "http://127.0.0.1:9500/marketplace/gateway/v1"<br>api_key&nbsp;&nbsp;= "nsm_k_9f2e…c41a"</div>
+    <div class="warn-once">Shown once. Store it now.</div>
+    <p class="muted xs">This one key covers every model and query service in your plan — across all providers.</p>
+  </div>
+
+</div></body></html>

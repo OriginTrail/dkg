@@ -43,3 +43,18 @@ the KPI toast). Error: wallet API unreachable → `err.offline`, retry.
 - [ ] Key plaintext is unrecoverable after dismiss (verified in gallery state).
 - [ ] KPI event pair fires; the measured mm:ss appears in REPORT-v35.
 - [ ] 390px width: no horizontal scroll, snippet wraps with copy intact.
+
+---
+
+## P5 amendment — Subscribe → Key (the Fund step is retired)
+
+Step 1 becomes **Subscribe** (`onboard.p5.title`, `onboard.sub.*`): pick a
+built-in plan template (ship one or two) or open the composer (surface 08).
+Payment gates are per seller (`onboard.pay.gate` / `onboard.pay.line`), each
+restating amount/from/to, with `onboard.pay.norefund` always visible at the
+gate — the no-refund doctrine is stated before the first payment, not
+discovered after. Step 2 (key mint, shown-once) is unchanged. KPI string
+becomes "first metered completion". Acceptance additions:
+- [ ] No Fund/deposit vocabulary anywhere; a tab-era string is a defect.
+- [ ] The no-refund line is on the payment gate itself, not a tooltip.
+- [ ] Template preview shows per-seller payment lines before the gate.

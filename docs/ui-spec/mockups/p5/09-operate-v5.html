@@ -1,0 +1,46 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — P5 Seller Operate</title>
+<link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
+<style>
+  .cols { display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-4); }
+  @media (max-width:760px){ .cols { grid-template-columns:1fr; } }
+  .row { display:flex; justify-content:space-between; gap:var(--sp-3); font-size:var(--fs-sm); flex-wrap:wrap; padding:var(--sp-2) 0; border-top:1px solid var(--border-subtle); }
+  .row:first-of-type { border-top:none; }
+  .wallets { display:grid; gap:var(--sp-3); }
+  .wallet { border:1px solid var(--border-strong); border-radius:var(--r-md); padding:var(--sp-3) var(--sp-4); }
+  .wallet.rev { border-color:var(--state-verified); }
+</style></head><body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/07-operate-seller.md §P5 — nothing here is wired</span></div>
+<div class="frame">
+  <div class="state-label">state: seller dashboard, active period</div>
+  <div class="cols">
+    <div class="card card--pad stack">
+      <h2>Your ask — takes effect next cycle</h2>
+      <div class="row"><span>Qwen2.5 14B</span><span class="mono">0.6 µ/tok <span class="muted xs">no change queued</span></span></div>
+      <div class="row"><span>Qwen2.5 7B</span><span class="mono">0.35 µ/tok → <input class="input mono" value="0.32" size="4"> µ <span class="muted xs">next cycle</span></span></div>
+      <div class="row"><span>okf knowledge</span><span class="mono">15.24 µ/unit</span></div>
+      <p class="muted xs">Current subscribers keep their frozen price to reset.</p>
+    </div>
+    <div class="card card--pad stack">
+      <h2>2 active subscriptions this period</h2>
+      <div class="row"><span class="mono">0x1B7a44F2…</span><span class="sec">shared · 38% consumed · resets 12 d</span></div>
+      <div class="row"><span class="mono">0x9A21fCe0… (hermes)</span><span class="sec">shared · 71% consumed · resets 12 d</span></div>
+    </div>
+    <div class="card card--pad stack">
+      <h2>Statements awaiting your signature: 1</h2>
+      <div class="row"><span>↔ 0x1B7a44F2… · Sep period</span><span class="mono sec">1,238,400 units itemized</span></div>
+      <div class="row"><span class="sec sm">Qwen 14B 1.2M tok · knowledge 4,200 units</span><button class="btn btn--primary">Review &amp; co-sign</button></div>
+    </div>
+    <div class="card card--pad stack">
+      <h2>Wallets</h2>
+      <div class="wallets">
+        <div class="wallet rev"><strong>Subscription revenue</strong> — separate from the operations wallet<br>
+          <span class="mono">3.6 TRAC</span> <span class="muted xs">· 0x…rev</span><br>
+          <span class="muted xs">Buyer payments land here and only here. The ops wallet never holds customer funds.</span></div>
+        <div class="wallet"><strong>Operations</strong><br><span class="mono">39.0044 TRAC</span> <span class="muted xs">· 0x633E5a7C… · gas + publishing</span></div>
+      </div>
+      <div class="row"><span class="muted xs">Prototype 4 archive (read-only) ↗</span><button class="btn">Export calibration data</button></div>
+    </div>
+  </div>
+</div></body></html>

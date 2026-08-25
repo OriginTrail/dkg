@@ -217,3 +217,115 @@ diagnostics) that had no key yet. Same tone rules.
 | wizard.price | Price |
 | wizard.preview | Preview |
 | wizard.publish | Publish |
+
+---
+
+# P5 additions — the subscription rail (surfaces 08–11 + amendments)
+
+P4 keys above remain valid where their surfaces survive. The per-message
+verification chips (`state.*`) are retired from primary surfaces in P5 —
+verification lives at the statement line and spot-check flags. The withhold
+table remains, relabeled for the dispute drawer.
+
+## Subscribe → Key onboarding (amends §Onboarding)
+
+| key | string |
+|---|---|
+| onboard.p5.title | Two steps to your first metered completion |
+| onboard.sub.title | Subscribe |
+| onboard.sub.body | Pick a plan or compose your own. One payment per provider per period — then everything is included up to your ceilings. |
+| onboard.sub.cta | Choose a plan |
+| onboard.sub.template | Starter plan — {models} plus {units} query units, {price}/period |
+| onboard.pay.gate | Confirm this period's payment |
+| onboard.pay.line | {amount} TRAC to {seller} — covers {scope} until {resetDate} |
+| onboard.pay.norefund | Payments are final. Unused allowance expires at reset — like any subscription. |
+
+## Plan composer
+
+| key | string |
+|---|---|
+| composer.title | Compose your plan |
+| composer.budget | Period budget |
+| composer.period | Period |
+| composer.period.note | Prices are frozen for the period. Changes you make take effect at the next reset. |
+| composer.seller.auto | Provider chosen automatically at your price cap |
+| composer.seller.pinned | Pinned to {seller} |
+| composer.shared | Shared allowance (recommended) |
+| composer.shared.preview | ≈ up to {tokens} {model} tokens or {units} query units — any mix |
+| composer.scoped | Scoped allowance |
+| composer.scoped.preview | At least {floor} tokens at your price cap — more if routed cheaper |
+| composer.payments | This plan pays {n} providers: {lines} |
+| composer.guarantee | Guaranteed at your price cap. Cheaper routing gives you more, never less. |
+
+## Plans & meters (replaces §Treasury; the Claude usage idiom)
+
+| key | string |
+|---|---|
+| meter.plan.headline | Plan: {pct}% used |
+| meter.plan.resets | Resets in {n} days |
+| meter.plan.resets.hours | Resets in {n} hours |
+| meter.line.model | {model}: {used} of {ceiling} tokens |
+| meter.line.query | {offering}: {used} of {ceiling} query units |
+| meter.line.shared | {seller} shared: {usedValue} of {ceilingValue} — any mix of {scope} |
+| meter.warn.approaching | {pct}% used — approaching your ceiling |
+| meter.hit.title | You've reached this ceiling |
+| meter.hit.body | Three ways forward — nothing is lost, your plan resets in {t}. |
+| meter.hit.wait | Wait for reset ({t}) |
+| meter.hit.upgrade | Upgrade next period |
+| meter.hit.topup | Top up now |
+| meter.topup.gate | Confirm top-up: {amount} TRAC to {seller} — extends {scope} this period |
+| meter.expired.journal | Expired at reset: {value} — value recognized, not returned |
+| meter.expired.tip | Subscriptions don't refund. What you don't use funds the network you're part of. |
+
+## Statement line
+
+| key | string |
+|---|---|
+| stmt.line.ok | This period: our count {ours} · provider count {theirs} ✓ |
+| stmt.line.wait | Period closes in {t} — counts reconcile then |
+| stmt.line.disputed | Counts disagree: ours {ours} · theirs {theirs} — dispute opened |
+| stmt.resolved | Resolved: {resolution} — recorded in the statement |
+| stmt.ka | Statement published — view the Knowledge Asset |
+| stmt.spot.ok | Spot-checks this period: {n} sampled, all matched |
+| stmt.spot.flag | A spot-check didn't match — this pair goes to full recount at close |
+| stmt.itemized | Itemized: {lines} |
+
+## Node storefront
+
+| key | string |
+|---|---|
+| store.title | Everything {node} serves |
+| store.ask.current | Current ask |
+| store.ask.next | Next cycle: {ask} |
+| store.volume | {n} statement-verified units this epoch |
+| store.uptime | {pct}% responding, last {window} |
+| store.subscribe.all | Subscribe to this node's shelf |
+| store.query.covers | Answers queries over: {cgs} |
+| store.query.schedule | Priced by the published cost schedule — both sides can recompute every unit |
+
+## Playground (amendments)
+
+| key | string |
+|---|---|
+| play.servedby | via {seller} {prov} |
+| play.remaining | {model} · {pct}% left |
+| play.fork.inline | This model's ceiling is reached mid-conversation. Your words are safe. |
+| play.query.cost | {units} query units — {basis} |
+
+## Seller Operate v5
+
+| key | string |
+|---|---|
+| op.ask.editor | Your ask — takes effect next cycle |
+| op.subscribers | {n} active subscriptions this period |
+| op.stmt.queue | Statements awaiting your signature: {n} |
+| op.revenue.wallet | Subscription revenue — separate from the operations wallet |
+| op.revenue.note | Buyer payments land here and only here. The ops wallet never holds customer funds. |
+| op.calibration | Export calibration data |
+
+## 402 fork (API-level, rendered by clients)
+
+| key | string |
+|---|---|
+| fork.402.title | No active ceiling for {model} |
+| fork.402.body | Subscribe, upgrade, or top up — this key's plan doesn't cover this model right now. |

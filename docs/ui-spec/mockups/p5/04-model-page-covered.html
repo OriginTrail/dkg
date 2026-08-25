@@ -1,0 +1,24 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — P5 Model page, two sellers</title>
+<link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
+<style>
+  .srow { display:grid; grid-template-columns: 1fr auto auto auto; gap:var(--sp-3); align-items:center; padding:var(--sp-3) var(--sp-4); border-top:1px solid var(--border-subtle); font-size:var(--fs-sm); }
+  .srow:first-of-type { border-top:none; }
+  .chip { font-size:var(--fs-xs); border-radius:var(--r-full); padding:var(--sp-1) var(--sp-3); white-space:nowrap; }
+  .chip--allow { background:color-mix(in srgb, var(--state-verified) 16%, var(--surface-1)); color:var(--state-verified); }
+  .chip--add { border:1px solid var(--interactive); color:var(--interactive); }
+  @media (max-width:640px){ .srow { grid-template-columns:1fr auto; } .srow .ask { grid-column:1; } }
+</style></head><body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/03-model-page.md §P5 — nothing here is wired</span></div>
+<div class="frame frame--narrow">
+  <div class="state-label">state: one model, two sellers — the routing centerpiece</div>
+  <div class="card">
+    <div class="card--pad"><h1 style="font-size:var(--fs-xl)">Qwen2.5 7B Instruct</h1>
+      <p class="sec sm">Qwen · text · 8k context · <span style="color:var(--prov-pinned)">⛓ Weights verified</span> · weights sha256:1875fb29…</p></div>
+    <div class="srow"><span><strong>hermes</strong> <span class="muted xs">lane</span></span><span class="ask mono sec">~$0.084/1M <span class="muted xs">0.30 µ/tok</span></span><span class="chip chip--allow">covered · 3.8M left</span><span class="muted xs">routes first at your cap</span></div>
+    <div class="srow"><span><strong>okf-mainnet</strong> <span class="muted xs">direct · streams</span></span><span class="ask mono sec">~$0.10/1M <span class="muted xs">0.35 µ/tok · next cycle: 0.32 µ</span></span><span class="chip chip--allow">shared pool · 62% left</span><span class="muted xs">fallback</span></div>
+    <div class="srow"><span><strong>third-node.example</strong></span><span class="ask mono sec">~$0.12/1M</span><span class="chip chip--add">Add to plan</span><span class="muted xs">not covered</span></div>
+  </div>
+  <p class="muted xs" style="margin-top:var(--sp-3)">A request names the model; the router picks a covered seller under your price cap. Pinned sellers and provenance preferences apply.</p>
+</div></body></html>

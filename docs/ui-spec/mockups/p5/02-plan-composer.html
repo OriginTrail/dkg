@@ -1,0 +1,56 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — P5 Plan composer</title>
+<link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
+<style>
+  .head { display:flex; justify-content:space-between; align-items:baseline; gap:var(--sp-4); flex-wrap:wrap; }
+  .sellergrp { border:1px solid var(--border-subtle); border-radius:var(--r-md); padding:var(--sp-4); display:grid; gap:var(--sp-3); }
+  .sellergrp header { display:flex; justify-content:space-between; align-items:center; gap:var(--sp-3); flex-wrap:wrap; }
+  .toggle { display:inline-flex; border:1px solid var(--border-strong); border-radius:var(--r-full); overflow:hidden; font-size:var(--fs-xs); }
+  .toggle span { padding:var(--sp-1) var(--sp-3); }
+  .toggle .on { background:var(--interactive); color:var(--text-on-accent); }
+  .off-row { display:grid; grid-template-columns:1fr auto; gap:var(--sp-2) var(--sp-3); font-size:var(--fs-sm); align-items:baseline; }
+  .off-row > :last-child { text-align:right; white-space:nowrap; }
+  @media (max-width:640px){ .off-row.stack-sm { grid-template-columns:1fr; } .off-row.stack-sm > :last-child { text-align:left; white-space:normal; } }
+  .preview { background:var(--surface-2); border-radius:var(--r-sm); padding:var(--sp-3); font-size:var(--fs-sm); color:var(--text-secondary); }
+  .pay { border-top:1px solid var(--border-subtle); padding-top:var(--sp-4); display:grid; gap:var(--sp-2); }
+</style></head><body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/08-plan-composer.md — nothing here is wired</span></div>
+<div class="frame frame--narrow">
+
+  <div class="state-label">state: composing (live preview)</div>
+  <div class="card card--pad stack">
+    <div class="head"><h1 style="font-size:var(--fs-xl)">Compose your plan</h1>
+      <div class="sec sm">Period <select><option>monthly</option><option>weekly</option></select></div></div>
+    <div class="off-row"><label class="sec">Period budget</label><span><input class="input mono" value="3.6 TRAC" size="9"> <span class="sec">≈ $1.01</span></span></div>
+
+    <div class="sellergrp">
+      <header><strong>okf-mainnet</strong><span class="toggle"><span class="on">shared · recommended</span><span>scoped</span></span></header>
+      <div class="off-row"><span>✓ Qwen2.5 14B <span style="color:var(--prov-pinned)">⛓</span></span><span class="mono sec">~$0.17/1M <span class="muted xs">0.6 µ/tok</span></span></div>
+      <div class="off-row"><span>✓ Qwen2.5 7B <span style="color:var(--prov-pinned)">⛓</span> <span class="muted xs">seller: auto (price cap 0.4 µ)</span></span><span class="mono sec">~$0.10/1M</span></div>
+      <div class="off-row"><span>✓ gpt-5.x <span style="color:var(--prov-claimed)">☁</span></span><span class="mono sec">~$0.31/1M</span></div>
+      <div class="off-row"><span>✓ okf knowledge <span class="muted xs">query · CGs: neurosymbolic-marketplace, odysseus</span></span><span class="mono sec">15.24 µ/unit</span></div>
+      <div class="preview">≈ up to 4.6M Qwen tokens or 183k query units — any mix</div>
+    </div>
+
+    <div class="sellergrp">
+      <header><strong>hermes</strong><span class="toggle"><span>shared</span><span class="on">scoped</span></span></header>
+      <div class="off-row"><span>✓ Qwen2.5 7B <span style="color:var(--prov-pinned)">⛓</span> <span class="muted xs">pinned to hermes</span></span><span class="mono sec">~$0.084/1M <span class="muted xs">0.30 µ/tok</span></span></div>
+      <div class="preview">At least 5,000,000 tokens at your price cap — more if routed cheaper</div>
+    </div>
+
+    <div class="pay">
+      <div class="off-row stack-sm"><span class="sec">This plan pays 2 providers</span><span class="mono">okf-mainnet 2.8 TRAC · hermes 0.8 TRAC</span></div>
+      <div class="sec sm">Guaranteed at your price cap. Cheaper routing gives you more, never less.</div>
+      <div class="muted xs">Prices are frozen for the period. Changes you make take effect at the next reset.</div>
+      <div style="text-align:right"><button class="btn btn--primary">Review payments →</button></div>
+    </div>
+  </div>
+
+  <div class="state-label">state: mid-cycle (read-only except top-up)</div>
+  <div class="card card--pad stack">
+    <div class="off-row"><span class="sec">Plan active — resets in 12 days</span><button class="btn">Top up</button></div>
+    <p class="muted xs">Allocation edits queue for the next cycle. Prices stay frozen until then.</p>
+  </div>
+
+</div></body></html>

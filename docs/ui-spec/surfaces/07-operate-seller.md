@@ -45,3 +45,24 @@ notice — failed calls create no legs).
 - [ ] ◷ legs count down; deadline miss transitions to voided on screen.
 - [ ] ListingPreview is pixel-identical to the buyer-side components (same code).
 - [ ] Settle action absent from any public route (404 probe unaffected).
+
+---
+
+## P5 amendment — Operate v5 (seller side of the subscription rail)
+
+New blocks: **AskEditor** (`op.ask.editor` — edits queue for next cycle,
+current ask stays visibly in force) · **SubscriberList** (`op.subscribers`:
+plan scope, period, consumed vs ceiling per subscriber) · **StatementQueue**
+(`op.stmt.queue`: awaiting-signature items with itemized counts; disagree →
+dispute panel, same vocabulary as surface 11) · **RevenueWallet**
+(`op.revenue.wallet` + `op.revenue.note` — the dedicated subscription wallet
+balance, VISIBLY distinct from the ops wallet; the P3 commingling defect made
+structurally unrepeatable is a rendered fact, not a footnote) ·
+**CalibrationExport** (`op.calibration` button → file download).
+The P4 tabs/legs/election blocks are retired from this surface; the ledger
+archive remains reachable via a read-only "Prototype 4 archive" link.
+Acceptance additions:
+- [ ] Ask edit shows both current and next-cycle values simultaneously.
+- [ ] Revenue wallet and ops wallet render as two visibly separate balances.
+- [ ] Statement queue items itemize units per offering before signing.
+- [ ] No tab-era vocabulary outside the archive link.

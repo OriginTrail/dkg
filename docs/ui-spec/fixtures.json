@@ -1,84 +1,456 @@
 {
   "_": "NSM v3.5 UI fixtures — real numbers from docs/REPORT-v3.md where mandated by ui-spec/README §Loop; plausible fixture values elsewhere. Drives /dev/gallery and the M-gate mockups. Mockups rendering this data are ALWAYS labeled as mockups (CLAUDE.md rule 9).",
-  "fx": { "tracUsd": 0.28, "note": "1 TRAC = $0.28 reference rate; 1 µTRAC = 1e-6 TRAC" },
-  "chain": { "id": 8453, "name": "Base", "explorer": "https://basescan.org" },
-  "wallets": {
-    "buyer": { "address": "0x1B7a44F2c9d0E83aa51c6b02D9CE33F14a09b2E4", "trac": 1.25, "eth": 0.0031 },
-    "sellerOkf": { "address": "0x633E5a7C5e612d9981538F60D824cC03be97e2Ab", "label": "okf-mainnet" },
-    "sellerHermes": { "address": "0x9A21fCe082B41C3E7dA5B9a4bE0dD1685A33C90B", "label": "hermes" }
+  "fx": {
+    "tracUsd": 0.28,
+    "note": "1 TRAC = $0.28 reference rate; 1 µTRAC = 1e-6 TRAC"
   },
-  "conservation": { "lhs": 1000000, "billed": 761, "refundable": 999239, "ok": true },
-  "conservationBroken": { "lhs": 1000000, "billed": 761, "refundable": 999237, "ok": false },
+  "chain": {
+    "id": 8453,
+    "name": "Base",
+    "explorer": "https://basescan.org"
+  },
+  "wallets": {
+    "buyer": {
+      "address": "0x1B7a44F2c9d0E83aa51c6b02D9CE33F14a09b2E4",
+      "trac": 1.25,
+      "eth": 0.0031
+    },
+    "sellerOkf": {
+      "address": "0x633E5a7C5e612d9981538F60D824cC03be97e2Ab",
+      "label": "okf-mainnet"
+    },
+    "sellerHermes": {
+      "address": "0x9A21fCe082B41C3E7dA5B9a4bE0dD1685A33C90B",
+      "label": "hermes"
+    }
+  },
+  "conservation": {
+    "lhs": 1000000,
+    "billed": 761,
+    "refundable": 999239,
+    "ok": true
+  },
+  "conservationBroken": {
+    "lhs": 1000000,
+    "billed": 761,
+    "refundable": 999237,
+    "ok": false
+  },
   "tab": {
-    "tabId": "tab_1dfe28cb", "provider": "0x9A21fCe082B41C3E7dA5B9a4bE0dD1685A33C90B",
-    "fundedMicro": 1000000, "billedMicro": 761, "refundableMicro": 999239,
+    "tabId": "tab_1dfe28cb",
+    "provider": "0x9A21fCe082B41C3E7dA5B9a4bE0dD1685A33C90B",
+    "fundedMicro": 1000000,
+    "billedMicro": 761,
+    "refundableMicro": 999239,
     "openTx": "0x62a51d56"
   },
   "treasury": {
-    "ringTrac": 1.9992, "ringUsd": 0.56,
-    "walletTrac": 1.0, "refundableTrac": 0.999239
+    "ringTrac": 1.9992,
+    "ringUsd": 0.56,
+    "walletTrac": 1.0,
+    "refundableTrac": 0.999239
   },
-  "threshold": { "earnedMicro": 761, "thresholdMicro": 2941000, "pct": 0.03 },
+  "threshold": {
+    "earnedMicro": 761,
+    "thresholdMicro": 2941000,
+    "pct": 0.03
+  },
   "legs": {
     "verified": {
-      "legId": "leg_e1552c0a", "state": "verified", "costMicro": 258, "usd": 0.00007,
-      "counts": { "claimedIn": 42, "claimedOut": 29, "ourIn": 42, "ourOut": 29 },
-      "bytesDigest": "sha256:7f3a91c2", "sellerSig": "0x8c41ab09", "countersig": "0x1e77d3f2",
+      "legId": "leg_e1552c0a",
+      "state": "verified",
+      "costMicro": 258,
+      "usd": 7e-05,
+      "counts": {
+        "claimedIn": 42,
+        "claimedOut": 29,
+        "ourIn": 42,
+        "ourOut": 29
+      },
+      "bytesDigest": "sha256:7f3a91c2",
+      "sellerSig": "0x8c41ab09",
+      "countersig": "0x1e77d3f2",
       "closeDigest": "sha256:99488cff"
     },
     "pending": {
-      "legId": "leg_27796e2b", "state": "pending-delivery", "costMicro": 258,
-      "transport": "lane", "deadlineIn": "04:12"
+      "legId": "leg_27796e2b",
+      "state": "pending-delivery",
+      "costMicro": 258,
+      "transport": "lane",
+      "deadlineIn": "04:12"
     },
     "voided": {
-      "legId": "leg_27796e2b", "state": "voided", "costMicro": 258,
+      "legId": "leg_27796e2b",
+      "state": "voided",
+      "costMicro": 258,
       "reason": "delivery-deadline-missed"
     },
     "blocked": {
-      "legId": "leg_b90d411a", "state": "blocked", "code": "E_OVERBILL",
-      "claimedMicro": 310, "recountMicro": 258,
-      "counts": { "claimedIn": 42, "claimedOut": 41, "ourIn": 42, "ourOut": 29 }
+      "legId": "leg_b90d411a",
+      "state": "blocked",
+      "code": "E_OVERBILL",
+      "claimedMicro": 310,
+      "recountMicro": 258,
+      "counts": {
+        "claimedIn": 42,
+        "claimedOut": 41,
+        "ourIn": 42,
+        "ourOut": 29
+      }
     },
-    "checking": { "legId": "leg_4de07c31", "state": "checking", "costMicro": 194 }
+    "checking": {
+      "legId": "leg_4de07c31",
+      "state": "checking",
+      "costMicro": 194
+    }
   },
-  "withholdCodes": ["E_BYTES_DIGEST", "E_RECOUNT_MISMATCH", "E_TOKENIZER_DRIFT", "E_OVERBILL", "E_LEG_SIGNATURE"],
+  "withholdCodes": [
+    "E_BYTES_DIGEST",
+    "E_RECOUNT_MISMATCH",
+    "E_TOKENIZER_DRIFT",
+    "E_OVERBILL",
+    "E_LEG_SIGNATURE"
+  ],
   "models": [
     {
       "modelRef": "urn:nsm:model:sha256:3f66aa10c2b944d1",
-      "displayName": "Qwen2.5 14B Instruct", "family": "qwen", "modality": "text",
-      "contextLength": 32768, "quantization": "Q4_K_M", "provenance": ["weights-pinned", "weights-pinned"],
+      "displayName": "Qwen2.5 14B Instruct",
+      "family": "qwen",
+      "modality": "text",
+      "contextLength": 32768,
+      "quantization": "Q4_K_M",
+      "provenance": [
+        "weights-pinned",
+        "weights-pinned"
+      ],
       "logo": "monogram:Qw",
       "providers": [
-        { "addr": "0x633E5a7C5e612d9981538F60D824cC03be97e2Ab", "label": "okf", "inMicro": 2, "outMicro": 6, "usdPer1M": 0.84, "class": "weights-pinned", "ttftMs": 380, "tokS": 42, "via": "direct", "up": true, "rep": { "verified": 4, "disputed": 0 } },
-        { "addr": "0x9A21fCe082B41C3E7dA5B9a4bE0dD1685A33C90B", "label": "hermes", "inMicro": 2, "outMicro": 7, "usdPer1M": 0.91, "class": "weights-pinned", "ttftMs": 510, "tokS": 35, "via": "lane", "up": true, "rep": { "verified": 4, "disputed": 0 } }
+        {
+          "addr": "0x633E5a7C5e612d9981538F60D824cC03be97e2Ab",
+          "label": "okf",
+          "inMicro": 2,
+          "outMicro": 6,
+          "usdPer1M": 0.84,
+          "class": "weights-pinned",
+          "ttftMs": 380,
+          "tokS": 42,
+          "via": "direct",
+          "up": true,
+          "rep": {
+            "verified": 4,
+            "disputed": 0
+          }
+        },
+        {
+          "addr": "0x9A21fCe082B41C3E7dA5B9a4bE0dD1685A33C90B",
+          "label": "hermes",
+          "inMicro": 2,
+          "outMicro": 7,
+          "usdPer1M": 0.91,
+          "class": "weights-pinned",
+          "ttftMs": 510,
+          "tokS": 35,
+          "via": "lane",
+          "up": true,
+          "rep": {
+            "verified": 4,
+            "disputed": 0
+          }
+        }
       ],
-      "settledTokens": 1200000, "trend": "up"
+      "settledTokens": 1200000,
+      "trend": "up"
     },
     {
       "modelRef": "urn:nsm:model:gpt-5.4-codex",
-      "displayName": "GPT-5.4 Codex", "family": "openai", "modality": "text",
-      "contextLength": 128000, "provenance": ["upstream-claimed"],
+      "displayName": "GPT-5.4 Codex",
+      "family": "openai",
+      "modality": "text",
+      "contextLength": 128000,
+      "provenance": [
+        "upstream-claimed"
+      ],
       "logo": "monogram:G5",
       "providers": [
-        { "addr": "0x633E5a7C5e612d9981538F60D824cC03be97e2Ab", "label": "okf", "inMicro": 9, "outMicro": 36, "usdPer1M": 4.2, "class": "upstream-claimed", "ttftMs": null, "tokS": null, "via": "direct", "up": true, "rep": { "verified": 2, "disputed": 1 } }
+        {
+          "addr": "0x633E5a7C5e612d9981538F60D824cC03be97e2Ab",
+          "label": "okf",
+          "inMicro": 9,
+          "outMicro": 36,
+          "usdPer1M": 4.2,
+          "class": "upstream-claimed",
+          "ttftMs": null,
+          "tokS": null,
+          "via": "direct",
+          "up": true,
+          "rep": {
+            "verified": 2,
+            "disputed": 1
+          }
+        }
       ],
-      "settledTokens": 240000, "trend": "flat"
+      "settledTokens": 240000,
+      "trend": "flat"
     }
   ],
   "keys": [
     {
-      "name": "openclaw-main", "prefix": "nsm_k_9f", "capMicro": 250000, "spentMicro": 152500,
-      "pct": 61, "models": ["Qwen2.5 14B ⛓"], "query": true, "rps": 2, "lastUsed": "2m ago",
-      "state": "active", "expiryDays": 30, "sumOk": true
+      "name": "openclaw-main",
+      "prefix": "nsm_k_9f",
+      "capMicro": 250000,
+      "spentMicro": 152500,
+      "pct": 61,
+      "models": [
+        "Qwen2.5 14B ⛓"
+      ],
+      "query": true,
+      "rps": 2,
+      "lastUsed": "2m ago",
+      "state": "active",
+      "expiryDays": 30,
+      "sumOk": true
     },
-    { "name": "hermes-probe", "prefix": "nsm_k_c4", "capMicro": 50000, "spentMicro": 50000, "pct": 100, "models": ["Qwen2.5 14B ⛓"], "query": false, "rps": 1, "lastUsed": "1h ago", "state": "exhausted", "expiryDays": 30, "sumOk": true },
-    { "name": "old-demo", "prefix": "nsm_k_a1", "capMicro": 10000, "spentMicro": 1200, "pct": 12, "models": ["any"], "query": true, "rps": 1, "lastUsed": "6d ago", "state": "revoked", "expiryDays": 30, "sumOk": true }
+    {
+      "name": "hermes-probe",
+      "prefix": "nsm_k_c4",
+      "capMicro": 50000,
+      "spentMicro": 50000,
+      "pct": 100,
+      "models": [
+        "Qwen2.5 14B ⛓"
+      ],
+      "query": false,
+      "rps": 1,
+      "lastUsed": "1h ago",
+      "state": "exhausted",
+      "expiryDays": 30,
+      "sumOk": true
+    },
+    {
+      "name": "old-demo",
+      "prefix": "nsm_k_a1",
+      "capMicro": 10000,
+      "spentMicro": 1200,
+      "pct": 12,
+      "models": [
+        "any"
+      ],
+      "query": true,
+      "rps": 1,
+      "lastUsed": "6d ago",
+      "state": "revoked",
+      "expiryDays": 30,
+      "sumOk": true
+    }
   ],
   "mintedKeyPlaintextOnce": "nsm_k_9f3ab6e01d5c47f2b8a9",
   "gatewaySnippet": {
     "baseUrl": "https://buyer-node.local:9301/marketplace/gateway/v1",
     "note": "mockup placeholder — real value renders from the node's own config, never hardcoded"
   },
-  "margin": { "upstreamEstUsd": 0.41, "billedUsd": 0.38, "reasoningOverheadPct": 9 },
-  "kpi": { "firstVerifiedMmss": "07:41" }
+  "margin": {
+    "upstreamEstUsd": 0.41,
+    "billedUsd": 0.38,
+    "reasoningOverheadPct": 9
+  },
+  "kpi": {
+    "firstVerifiedMmss": "07:41"
+  },
+  "p5": {
+    "_": "P5 subscription-rail fixtures. Brief-mandated numbers: the 1,238,400 statement counts, the 1.2M-of-5M meter, 12-day reset. Everything renders as MOCKUP until wired.",
+    "plan": {
+      "period": "monthly",
+      "resetsInDays": 12,
+      "pctUsed": 38,
+      "paidTrac": 3.6,
+      "sellers": 2,
+      "payments": [
+        {
+          "seller": "okf-mainnet",
+          "trac": 2.8,
+          "scope": "Qwen 14B · Qwen 7B · gpt-5.x · okf knowledge"
+        },
+        {
+          "seller": "hermes",
+          "trac": 0.8,
+          "scope": "Qwen 7B (scoped)"
+        }
+      ]
+    },
+    "allowances": [
+      {
+        "kind": "shared",
+        "seller": "okf-mainnet",
+        "scope": [
+          "Qwen2.5 14B ⛓",
+          "Qwen2.5 7B ⛓",
+          "gpt-5.x ☁",
+          "okf knowledge (query)"
+        ],
+        "ceilingValueMicro": 2800000,
+        "consumedValueMicro": 1064000,
+        "pct": 38,
+        "itemized": [
+          {
+            "offering": "Qwen2.5 14B",
+            "units": 1200000,
+            "unit": "tokens",
+            "askMicroPerUnit": 0.6,
+            "valueMicro": 720000
+          },
+          {
+            "offering": "Qwen2.5 7B",
+            "units": 800000,
+            "unit": "tokens",
+            "askMicroPerUnit": 0.35,
+            "valueMicro": 280000
+          },
+          {
+            "offering": "okf knowledge",
+            "units": 4200,
+            "unit": "query units",
+            "askMicroPerUnit": 15.24,
+            "valueMicro": 64000
+          }
+        ]
+      },
+      {
+        "kind": "scoped",
+        "seller": "hermes",
+        "offering": "Qwen2.5 7B ⛓",
+        "unit": "tokens",
+        "ceilingUnits": 5000000,
+        "consumedUnits": 1200000,
+        "pct": 24,
+        "guaranteedFloor": 5000000,
+        "note": "at price cap; routed cheaper twice -> +140k tokens above floor"
+      }
+    ],
+    "meterStates": {
+      "normal": {
+        "pct": 38
+      },
+      "approaching": {
+        "pct": 87
+      },
+      "hit": {
+        "pct": 100,
+        "resetsIn": "12 days"
+      },
+      "expiredJournal": {
+        "valueMicro": 173000,
+        "at": "period close 2026-09-06"
+      }
+    },
+    "statement": {
+      "ok": {
+        "pair": "this node <-> okf-mainnet",
+        "ours": 1238400,
+        "theirs": 1238400,
+        "itemized": [
+          {
+            "offering": "Qwen2.5 14B",
+            "unit": "tokens",
+            "ours": 1200000,
+            "theirs": 1200000
+          },
+          {
+            "offering": "okf knowledge",
+            "unit": "query units",
+            "ours": 4200,
+            "theirs": 4200
+          }
+        ],
+        "kaUal": "did:dkg:base:8453/0xabc…/stmt-2026-09"
+      },
+      "disputed": {
+        "pair": "this node <-> hermes",
+        "ours": 1200000,
+        "theirs": 1274000,
+        "resolution": "per-call recount over hash-chained logs: 1,200,000 confirmed; seller count corrected",
+        "code": "STMT_RECOUNT"
+      },
+      "spot": {
+        "sampled": 14,
+        "matched": 14
+      }
+    },
+    "asks": [
+      {
+        "seller": "okf-mainnet",
+        "offering": "Qwen2.5 14B Instruct ⛓",
+        "askMicroPerToken": 0.6,
+        "usdPer1M": 0.17,
+        "nextCycle": null
+      },
+      {
+        "seller": "okf-mainnet",
+        "offering": "Qwen2.5 7B Instruct ⛓",
+        "askMicroPerToken": 0.35,
+        "usdPer1M": 0.1,
+        "nextCycle": 0.32
+      },
+      {
+        "seller": "hermes",
+        "offering": "Qwen2.5 7B Instruct ⛓",
+        "askMicroPerToken": 0.3,
+        "usdPer1M": 0.084,
+        "nextCycle": null
+      },
+      {
+        "seller": "okf-mainnet",
+        "offering": "gpt-5.x ☁",
+        "askMicroPerToken": 1.1,
+        "usdPer1M": 0.31,
+        "nextCycle": null
+      },
+      {
+        "seller": "okf-mainnet",
+        "offering": "okf knowledge (query)",
+        "askMicroPerUnit": 15.24,
+        "unit": "query unit",
+        "nextCycle": null
+      }
+    ],
+    "queryCost": {
+      "scheduleKa": "urn:nsm:query-schedule:sha256:4c1f09aa…",
+      "base": 2,
+      "example": {
+        "simple": {
+          "desc": "single-pattern lookup, LIMIT 20",
+          "units": 5
+        },
+        "heavy": {
+          "desc": "3 joins + aggregation + no-LIMIT surcharge",
+          "units": 41
+        },
+        "aborted": {
+          "desc": "guard-aborted at scan budget",
+          "unitsCharged": 9,
+          "note": "admission cost kept, nothing further"
+        }
+      }
+    },
+    "storefront": {
+      "node": "okf-mainnet",
+      "uptimePct": 99.2,
+      "window": "30 d",
+      "volume": "2.4M statement-verified units",
+      "cgs": [
+        "neurosymbolic-marketplace",
+        "odysseus"
+      ],
+      "revenueWalletTrac": 3.6,
+      "opsWalletNote": "separate"
+    },
+    "fork402": {
+      "model": "Qwen2.5 14B",
+      "resetsIn": "12 days",
+      "topupTrac": 0.5
+    },
+    "kpi": {
+      "freshNodeToFirstMeteredSeconds": null,
+      "target": "< 60 s mainnet"
+    }
+  }
 }

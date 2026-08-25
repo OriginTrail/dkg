@@ -42,3 +42,14 @@ loading (skeleton cards) · empty (`empty.catalog`) · single-provider network
 - [ ] Settled volume tooltip = `catalog.volume.tip` verbatim.
 - [ ] Sort by settled / price / newest all functional against live data.
 - [ ] 390px: cards single-column, filter rail collapses to a sheet.
+
+---
+
+## P5 amendment — subscription-aware catalog
+
+Covered models carry a remaining-allowance chip ("3.8M left · resets 12 d" —
+`meter.line.model` compact form). Uncovered models render normally with the
+`model.buy` action replaced by **Add to plan**. Sort/filter unchanged.
+Acceptance additions:
+- [ ] Chip appears only on models with an active ceiling; absence ≠ zero.
+- [ ] Chip numbers come from the same projection as surface 09's bars.

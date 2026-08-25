@@ -38,3 +38,15 @@ no-telemetry-yet.
 - [ ] Rep popover shows the disputes-are-evidence copy verbatim.
 - [ ] A row with a failed quote verification cannot be bought or tried.
 - [ ] TTFT/tok/s show em-dash + "no data yet" before first measurement.
+
+---
+
+## P5 amendment — covered/not-covered seller rows
+
+Each per-seller row gains a covered state (chip: remaining allowance under
+that seller) or an **Add to plan** action — comparing and switching sellers
+of one model is a browsing act, not a config file. The two-seller Qwen 7B
+case (okf + hermes) is the fixture centerpiece. Ask column shows committed
+ask; queued changes render as `store.ask.next`. Acceptance additions:
+- [ ] A model with two sellers shows both rows with independent covered states.
+- [ ] Add to plan deep-links into the composer with the seller pre-pinned.

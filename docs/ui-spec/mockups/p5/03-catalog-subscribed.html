@@ -1,0 +1,34 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — P5 Catalog, subscription-aware</title>
+<link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
+<style>
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:var(--sp-4); }
+  .mcard { display:grid; gap:var(--sp-2); padding:var(--sp-4); }
+  .mcard h3 { font-size:var(--fs-md); }
+  .row { display:flex; justify-content:space-between; gap:var(--sp-2); font-size:var(--fs-sm); flex-wrap:wrap; }
+  .chip { font-size:var(--fs-xs); border-radius:var(--r-full); padding:var(--sp-1) var(--sp-3); }
+  .chip--allow { background:color-mix(in srgb, var(--state-verified) 16%, var(--surface-1)); color:var(--state-verified); }
+  .chip--add { border:1px solid var(--interactive); color:var(--interactive); }
+</style></head><body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/02-catalog.md §P5 — nothing here is wired</span></div>
+<div class="frame">
+  <div class="state-label">state: browsing with an active plan</div>
+  <div class="grid">
+    <div class="card mcard"><h3>Qwen2.5 14B Instruct</h3>
+      <div class="row"><span class="sec">Qwen · text · 2 providers</span><span style="color:var(--prov-pinned)">⛓ Weights verified</span></div>
+      <div class="row"><span class="mono sec">~$0.17/1M tokens</span><span class="chip chip--allow">3.8M left · resets 12 d</span></div></div>
+    <div class="card mcard"><h3>Qwen2.5 7B Instruct</h3>
+      <div class="row"><span class="sec">Qwen · text · 2 providers</span><span style="color:var(--prov-pinned)">⛓ Weights verified</span></div>
+      <div class="row"><span class="mono sec">from ~$0.084/1M</span><span class="chip chip--allow">covered · 2 sellers</span></div></div>
+    <div class="card mcard"><h3>gpt-5.x</h3>
+      <div class="row"><span class="sec">OpenAI · text · 1 provider</span><span style="color:var(--prov-claimed)">☁ Provider-reported</span></div>
+      <div class="row"><span class="mono sec">~$0.31/1M tokens</span><span class="chip chip--allow">shared pool · 62% left</span></div></div>
+    <div class="card mcard"><h3>okf knowledge</h3>
+      <div class="row"><span class="sec">query · 2 context graphs</span><span class="muted xs">cost-schedule priced</span></div>
+      <div class="row"><span class="mono sec">15.24 µ/unit</span><span class="chip chip--allow">45.8k units left</span></div></div>
+    <div class="card mcard"><h3>Llama 3.1 70B</h3>
+      <div class="row"><span class="sec">Meta · text · 1 provider</span><span style="color:var(--prov-pinned)">⛓ Weights verified</span></div>
+      <div class="row"><span class="mono sec">~$0.42/1M tokens</span><span class="chip chip--add">Add to plan</span></div></div>
+  </div>
+</div></body></html>

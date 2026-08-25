@@ -1,0 +1,41 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — P5 Statement line &amp; dispute</title>
+<link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../mock.css">
+<style>
+  .stmt { font-size:var(--fs-md); }
+  .stmt.ok { color:var(--state-verified); }
+  .stmt.bad { color:var(--state-blocked); }
+  .drawer { border-left:2px solid var(--border-strong); margin:var(--sp-3) 0 0 var(--sp-2); padding-left:var(--sp-4); display:grid; gap:var(--sp-2); font-size:var(--fs-sm); color:var(--text-secondary); }
+</style></head><body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/11-statements.md — nothing here is wired</span></div>
+<div class="frame frame--narrow">
+
+  <div class="state-label">state: agreed</div>
+  <div class="card card--pad">
+    <div class="stmt ok">This period: our count <span class="mono">1,238,400</span> · provider count <span class="mono">1,238,400</span> ✓</div>
+    <div class="drawer">
+      <span>Qwen2.5 14B: <span class="mono">1,200,000 / 1,200,000</span> tokens</span>
+      <span>okf knowledge: <span class="mono">4,200 / 4,200</span> query units</span>
+      <span>Spot-checks this period: 14 sampled, all matched</span>
+      <a href="#">Statement published — view the Knowledge Asset ↗</a>
+    </div>
+  </div>
+
+  <div class="state-label">state: period open</div>
+  <div class="card card--pad"><div class="stmt sec">Period closes in 12 days — counts reconcile then</div></div>
+
+  <div class="state-label">state: disputed → resolved</div>
+  <div class="card card--pad">
+    <div class="stmt bad">Counts disagree: ours <span class="mono">1,200,000</span> · theirs <span class="mono">1,274,000</span> — dispute opened</div>
+    <div class="drawer">
+      <span>Per-call recount over hash-chained logs: <span class="mono">1,200,000</span> confirmed; seller count corrected</span>
+      <span style="color:var(--state-verified)">Resolved — recorded in the statement</span>
+      <span class="mono muted xs">STMT_RECOUNT</span>
+    </div>
+  </div>
+
+  <div class="state-label">state: spot-check flag</div>
+  <div class="card card--pad"><div class="stmt" style="color:var(--state-pending)">A spot-check didn't match — this pair goes to full recount at close</div></div>
+
+</div></body></html>
