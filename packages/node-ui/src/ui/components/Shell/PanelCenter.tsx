@@ -4,6 +4,8 @@ import { DashboardView } from '../../views/DashboardView.js';
 import { MarketplaceV5View } from '../../views/MarketplaceV5View.js';
 import { OperateV35View } from '../../views/OperateV35View.js';
 import { PlansV5View } from '../../views/PlansV5View.js';
+import { AccessV5View } from '../../views/AccessV5View.js';
+import { OperateV5View } from '../../views/OperateV5View.js';
 import { ProjectView } from '../../views/ProjectView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
 import { MemoryLayerView } from '../../views/MemoryLayerView.js';
@@ -287,7 +289,9 @@ function ViewContainer() {
 
   if (activeTabId === 'nsm-plans') return <PlansV5View />;
 
-  if (activeTabId === 'marketplace-operate') return <OperateV35View />;
+  if (activeTabId === 'nsm-access') return <AccessV5View />;
+
+  if (activeTabId === 'marketplace-operate') return <OperateV5View />;
 
   if (activeTabId === 'operations') {
     return (
