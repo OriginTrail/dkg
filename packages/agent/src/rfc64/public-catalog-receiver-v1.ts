@@ -141,8 +141,10 @@ export interface Rfc64PublicCatalogReceiverCompletionV1 {
 interface ReceiverTaskV1 {
   readonly key: string;
   readonly scopeKey: string;
-  readonly providers: ReceiverProviderV1[];
-  readonly providerKeys: Set<string>;
+  /** Canonical provider registry; Map insertion order is the round-robin order. */
+  readonly providers: Map<string, ReceiverProviderV1>;
+  /** Monotonic accepted mutation revision used to close the settlement race. */
+  revision: bigint;
   /**
    * How many times this task has stepped aside for a busy finalized chain lane.
    * Mutable, and deliberately NOT a provider attempt: contention says nothing
@@ -159,7 +161,8 @@ interface ReceiverTaskV1 {
    * attempts. Repeated contention multiplied retries without limit.
    */
   attemptsByProvider?: Map<string, number>;
-  notFoundProviders?: Set<string>;
+  /** Latest provider hint revision that returned not-found. */
+  notFoundProviderRevisions?: Map<string, bigint>;
   providerCursor?: number;
   lastProviderKey?: string;
   providerAttempts?: number;
@@ -172,7 +175,36 @@ interface ReceiverProviderV1 {
   readonly key: string;
   readonly peerId: string;
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  /**
+   * Monotonic availability observation for this exact provider context. A
+   * repeated hint advances the revision so a prior `not-found` observation
+   * cannot suppress newly advertised availability while another provider is
+   * still being tried. The existing per-provider attempt budget remains the
+   * hard bound against duplicate-hint retry amplification.
+   */
+  hintRevision: bigint;
 }
+
+type ReceiverTaskOutcomeV1 =
+  | { readonly kind: 'defer-admission' }
+  | { readonly kind: 'aborted' }
+  | {
+    readonly kind: 'already-applied';
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  }
+  | {
+    readonly kind: 'applied';
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+    readonly peerId: string;
+  }
+  | { readonly kind: 'staged-only'; readonly taskRevision: bigint }
+  | { readonly kind: 'not-found'; readonly taskRevision: bigint }
+  | {
+    readonly kind: 'failed';
+    readonly taskRevision: bigint;
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+    readonly error: unknown;
+  };
 
 const DEFAULTS = Object.freeze({
   maxConcurrent: 4,
@@ -344,7 +376,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       const existing = this.#pendingByKey.get(headKey(inputs[0]!.announcement));
       if (
         existing !== undefined
-        && existing.providers.some(({ key }) => !exactCompletionProviderKeys.has(key))
+        && [...existing.providers.keys()].some((key) => !exactCompletionProviderKeys.has(key))
       ) {
         this.#scheduleIsolatedCompletion(inputs, completion);
         return;
@@ -362,14 +394,22 @@ export class Rfc64PublicCatalogReceiverV1 {
         }
         this.#dedupedInFlight += 1;
         const providerKey = providerContextKey(remotePeerId, announcement);
-        if (!existing.providerKeys.has(providerKey)) {
-          if (existing.providers.length >= this.#maxProvidersPerHead) {
+        const provider = existing.providers.get(providerKey);
+        if (provider !== undefined) {
+          provider.hintRevision += 1n;
+        } else {
+          if (existing.providers.size >= this.#maxProvidersPerHead) {
             this.#droppedProviders += 1;
             continue;
           }
-          existing.providerKeys.add(providerKey);
-          existing.providers.push({ key: providerKey, peerId: remotePeerId, announcement });
+          existing.providers.set(providerKey, {
+            key: providerKey,
+            peerId: remotePeerId,
+            announcement,
+            hintRevision: 1n,
+          });
         }
+        existing.revision += 1n;
         continue;
       }
       this.#safeNotify(() => this.#onAttemptStart?.(announcement));
@@ -385,8 +425,13 @@ export class Rfc64PublicCatalogReceiverV1 {
       const task: ReceiverTaskV1 = {
         key,
         scopeKey: catalogScopeKey(announcement),
-        providers: [{ key: providerKey, peerId: remotePeerId, announcement }],
-        providerKeys: new Set([providerKey]),
+        revision: 1n,
+        providers: new Map([[providerKey, {
+          key: providerKey,
+          peerId: remotePeerId,
+          announcement,
+          hintRevision: 1n,
+        }]]),
         ...(completion === undefined || completionAttached
           ? {}
           : { completionWaiters: [completion] }),
@@ -421,25 +466,28 @@ export class Rfc64PublicCatalogReceiverV1 {
       completion(receiverCompletion('dropped', null, 0, null));
       return;
     }
-    const providers: ReceiverProviderV1[] = [];
-    const providerKeys = new Set<string>();
+    const providers = new Map<string, ReceiverProviderV1>();
     for (const { announcement, remotePeerId } of inputs) {
       const key = providerContextKey(remotePeerId, announcement);
-      if (providerKeys.has(key)) continue;
-      if (providers.length >= this.#maxProvidersPerHead) {
+      if (providers.has(key)) continue;
+      if (providers.size >= this.#maxProvidersPerHead) {
         this.#droppedProviders += 1;
         continue;
       }
-      providerKeys.add(key);
-      providers.push({ key, peerId: remotePeerId, announcement });
+      providers.set(key, {
+        key,
+        peerId: remotePeerId,
+        announcement,
+        hintRevision: 1n,
+      });
     }
     const task: ReceiverTaskV1 = {
       key: `${headKey(first.announcement)}\nexplicit-provider-set:${
         ++this.#isolatedCompletionSequence
       }`,
       scopeKey: catalogScopeKey(first.announcement),
+      revision: 1n,
       providers,
-      providerKeys,
       completionWaiters: [completion],
     };
     this.#pendingByKey.set(task.key, task);
@@ -519,14 +567,72 @@ export class Rfc64PublicCatalogReceiverV1 {
         // A deferral releases the concurrency slot AND the semantic scope lock
         // before waiting, and keeps the pending key so a duplicate announcement
         // still dedupes onto this task instead of creating a second writer.
-        if (outcome === 'defer-admission') {
-          if (!this.#closed) this.#scheduleAdmissionRetry(task);
-          else this.#finishTask(task, receiverCompletion(
-            'closed', null, task.providerAttempts ?? 0, null,
-          ));
+        if (outcome.kind === 'defer-admission' && !this.#closed) {
+          this.#scheduleAdmissionRetry(task);
           return;
         }
-        this.#finishTask(task, outcome);
+        if (
+          !this.#closed
+          && 'taskRevision' in outcome
+          && outcome.taskRevision !== task.revision
+        ) {
+          // `#runTask` chose a non-durable terminal result, then `schedule`
+          // accepted a fresher hint before this completion continuation ran.
+          // Keep the pending key and put the mutated task back through the
+          // scheduler instead of deleting the accepted observation.
+          this.#queue.push(task);
+          return;
+        }
+        switch (outcome.kind) {
+          case 'already-applied':
+            this.#dedupedAlreadyApplied += 1;
+            this.#finishSuccessfulReconciliationAttempt(task, outcome.announcement);
+            this.#finishTask(task, receiverCompletion(
+              'already-applied', null, task.providerAttempts ?? 0, null,
+            ));
+            break;
+          case 'applied':
+            this.#applied += 1;
+            this.#providerSuccesses += 1;
+            this.#safeNotify(() => this.#onHeadApplied?.(
+              outcome.announcement,
+              outcome.peerId,
+            ));
+            this.#finishSuccessfulReconciliationAttempt(task, outcome.announcement);
+            this.#finishTask(task, receiverCompletion(
+              'applied', outcome.peerId, task.providerAttempts ?? 0, null,
+            ));
+            break;
+          case 'staged-only':
+            this.#stagedOnly += 1;
+            this.#finishTask(task, receiverCompletion(
+              'staged-only', null, task.providerAttempts ?? 0, null,
+            ));
+            break;
+          case 'not-found':
+            this.#notFound += 1;
+            this.#finishTask(task, receiverCompletion(
+              'not-found', null, task.providerAttempts ?? 0, null,
+            ));
+            break;
+          case 'failed':
+            this.#failed += 1;
+            this.#safeNotify(() => this.#onError?.(
+              outcome.announcement,
+              outcome.error,
+              task.reconciliationAttemptToken ?? null,
+            ));
+            this.#finishTask(task, receiverCompletion(
+              'failed', null, task.providerAttempts ?? 0, outcome.error,
+            ));
+            break;
+          case 'aborted':
+          case 'defer-admission':
+            this.#finishTask(task, receiverCompletion(
+              'closed', null, task.providerAttempts ?? 0, null,
+            ));
+            break;
+        }
         this.#pendingByKey.delete(task.key);
       }).finally(() => {
         this.#active.delete(run);
@@ -553,8 +659,9 @@ export class Rfc64PublicCatalogReceiverV1 {
       this.#failed += 1;
       this.#deferred.delete(task);
       this.#pendingByKey.delete(task.key);
+      const firstProvider = task.providers.values().next().value;
       this.#safeNotify(() => this.#onError?.(
-        task.providers[0]!.announcement,
+        firstProvider!.announcement,
         new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
         task.reconciliationAttemptToken ?? null,
       ));
@@ -589,41 +696,46 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#deferralTimers.add(timer);
   }
 
-  async #runTask(
-    task: ReceiverTaskV1,
-  ): Promise<Rfc64PublicCatalogReceiverCompletionV1 | 'defer-admission'> {
+  async #runTask(task: ReceiverTaskV1): Promise<ReceiverTaskOutcomeV1> {
     this.#beginReconciliationAttempt(task);
     let lastError: unknown;
     // Resumed, not reset: see `ReceiverTaskV1.attemptsByProvider`.
-    const notFoundProviders = (task.notFoundProviders ??= new Set<string>());
+    const notFoundProviderRevisions = (
+      task.notFoundProviderRevisions ??= new Map<string, bigint>()
+    );
     const attemptsByProvider = (task.attemptsByProvider ??= new Map<string, number>());
     let providerCursor = task.providerCursor ?? 0;
     while (true) {
-      if (this.#closing.signal.aborted) {
-        return receiverCompletion('closed', null, task.providerAttempts ?? 0, null);
-      }
+      if (this.#closing.signal.aborted) return { kind: 'aborted' };
+      const providers = [...task.providers.values()];
       const selection = nextEligibleProvider(
-        task.providers,
-        notFoundProviders,
+        providers,
+        notFoundProviderRevisions,
         attemptsByProvider,
         this.#maxAttempts,
         providerCursor,
       );
       if (selection === null) {
         if (
-          task.providers.length > 0
-          && task.providers.every((provider) => notFoundProviders.has(provider.key))
+          providers.length > 0
+          && providers.every(
+            (provider) => notFoundProviderRevisions.get(provider.key)
+              === provider.hintRevision,
+          )
         ) {
-          this.#notFound += 1;
-          return receiverCompletion('not-found', null, task.providerAttempts ?? 0, null);
+          return { kind: 'not-found', taskRevision: task.revision };
         }
-        this.#failed += 1;
-        this.#safeNotify(() => this.#onError?.(
-          task.providers[0]!.announcement,
-          lastError,
-          task.reconciliationAttemptToken ?? null,
-        ));
-        return receiverCompletion('failed', null, task.providerAttempts ?? 0, lastError);
+        return {
+          kind: 'failed',
+          taskRevision: task.revision,
+          announcement: providers[0]!.announcement,
+          error: lastError !== undefined
+            ? lastError
+            : new Error(
+              'RFC-64 receiver exhausted the per-provider attempt budget before '
+              + 'reconciling the latest accepted provider hint',
+            ),
+        };
       }
       const { provider, nextCursor } = selection;
       providerCursor = nextCursor;
@@ -634,15 +746,12 @@ export class Rfc64PublicCatalogReceiverV1 {
         this.#providerSwitches += 1;
       }
       task.lastProviderKey = provider.key;
+      const hintRevision = provider.hintRevision;
       const providerAttempt = (attemptsByProvider.get(provider.key) ?? 0) + 1;
       attemptsByProvider.set(provider.key, providerAttempt);
       try {
         if (await this.#reconciler.isHeadApplied(provider.announcement)) {
-          this.#dedupedAlreadyApplied += 1;
-          this.#finishSuccessfulReconciliationAttempt(task, provider.announcement);
-          return receiverCompletion(
-            'already-applied', null, task.providerAttempts, null,
-          );
+          return { kind: 'already-applied', announcement: provider.announcement };
         }
         const result = await this.#reconciler.reconcileHead(
           provider.peerId,
@@ -650,22 +759,17 @@ export class Rfc64PublicCatalogReceiverV1 {
           this.#closing.signal,
         );
         if (result === 'not-found') {
-          notFoundProviders.add(provider.key);
+          notFoundProviderRevisions.set(provider.key, hintRevision);
           continue;
         }
         if (result === 'staged-only') {
-          this.#stagedOnly += 1;
-          return receiverCompletion(
-            'staged-only', null, task.providerAttempts, null,
-          );
+          return { kind: 'staged-only', taskRevision: task.revision };
         }
-        this.#applied += 1;
-        this.#providerSuccesses += 1;
-        this.#safeNotify(() => this.#onHeadApplied?.(provider.announcement, provider.peerId));
-        this.#finishSuccessfulReconciliationAttempt(task, provider.announcement);
-        return receiverCompletion(
-          'applied', provider.peerId, task.providerAttempts, null,
-        );
+        return {
+          kind: 'applied',
+          announcement: provider.announcement,
+          peerId: provider.peerId,
+        };
       } catch (error) {
         if (this.#isDeferrableError(error)) {
           // Not this head's fault and not this provider's fault: roll back ONLY
@@ -674,12 +778,10 @@ export class Rfc64PublicCatalogReceiverV1 {
           // cannot launder a provider back to a full attempt budget.
           if (providerAttempt <= 1) attemptsByProvider.delete(provider.key);
           else attemptsByProvider.set(provider.key, providerAttempt - 1);
-          return 'defer-admission';
+          return { kind: 'defer-admission' };
         }
         lastError = error;
-        if (this.#closing.signal.aborted) {
-          return receiverCompletion('closed', null, task.providerAttempts, error);
-        }
+        if (this.#closing.signal.aborted) return { kind: 'aborted' };
         await this.#backoff(providerAttempt - 1);
       }
     }
@@ -716,8 +818,9 @@ export class Rfc64PublicCatalogReceiverV1 {
     if (task.reconciliationAttemptStarted === true) return;
     task.reconciliationAttemptStarted = true;
     try {
+      const firstProvider = task.providers.values().next().value;
       task.reconciliationAttemptToken =
-        this.#onReconciliationAttemptStart?.(task.providers[0]!.announcement) ?? null;
+        this.#onReconciliationAttemptStart?.(firstProvider!.announcement) ?? null;
     } catch {
       task.reconciliationAttemptToken = null;
     }
@@ -792,16 +895,11 @@ function providerContextKey(
 
 function nextEligibleProvider(
   providers: readonly ReceiverProviderV1[],
-  notFoundProviders: ReadonlySet<string>,
+  notFoundProviderRevisions: ReadonlyMap<string, bigint>,
   attemptsByProvider: ReadonlyMap<string, number>,
   maxAttempts: number,
   cursor: number,
 ): { readonly provider: ReceiverProviderV1; readonly nextCursor: number } | null {
-  let selected: {
-    readonly provider: ReceiverProviderV1;
-    readonly nextCursor: number;
-    readonly attempts: number;
-  } | null = null;
   for (let offset = 0; offset < providers.length; offset += 1) {
     const index = (cursor + offset) % providers.length;
     const provider = providers[index];
@@ -810,18 +908,17 @@ function nextEligibleProvider(
       : attemptsByProvider.get(provider.key) ?? 0;
     if (
       provider !== undefined
-      && !notFoundProviders.has(provider.key)
+      && notFoundProviderRevisions.get(provider.key) !== provider.hintRevision
       && attempts < maxAttempts
-      && (selected === null || attempts < selected.attempts)
     ) {
-      selected = { provider, nextCursor: cursor + offset + 1, attempts };
+      // Preserve round-robin order. A provider that just stepped aside for
+      // admission contention must not jump ahead of a fresher hint that is
+      // next at the cursor merely because its rolled-back attempt count is
+      // lower.
+      return { provider, nextCursor: cursor + offset + 1 };
     }
   }
-  if (selected === null) return null;
-  // Keep this monotonic. A modulo cursor would select the first provider again
-  // when a new provider is appended after the first attempt. Lowest-attempt
-  // scoring makes a healthy alternate win immediately after one provider fails.
-  return { provider: selected.provider, nextCursor: selected.nextCursor };
+  return null;
 }
 
 function positiveInt(value: number | undefined, fallback: number): number {
