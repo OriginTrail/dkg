@@ -792,7 +792,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           getEvmChainId: () => this.chain.getEvmChainId(),
           getKnowledgeAssetStorageAddress: async () => {
             if (typeof this.chain.getDKGKnowledgeAssetsAddress !== 'function') {
-              throw new Error('RFC-64 private VM recovery requires KnowledgeAssetStorage');
+              throw new Error('RFC-64 finalized VM recovery requires KnowledgeAssetStorage');
             }
             return this.chain.getDKGKnowledgeAssetsAddress();
           },
@@ -805,10 +805,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           signal: AbortSignal,
         ): Promise<void> => {
           const accepted = acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
-          if (
-            accepted.policy.accessPolicy === 1
-            && accepted.policy.source.kind === 'finalized-chain'
-          ) {
+          if (accepted.policy.source.kind === 'finalized-chain') {
             await finalizedVmPrecommit(plan, signal);
             return;
           }
