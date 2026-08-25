@@ -633,10 +633,12 @@ function validatePrivateActivationAuthorityV1(
     authority.peerAgentBindings.map(({ peerId, agentAddress }) => [peerId, agentAddress]),
   );
   const usedPeers = new Set<string>();
+  const currentMemberAddresses = new Set<EvmAddressV1>();
   for (const accepted of bootstrap.acceptedPolicies) {
     if (accepted.policyEnvelope.payload.accessPolicy !== 1) continue;
     const roster = accepted.rosterEnvelope!.payload;
     const members = new Map(roster.members.map((member) => [member.agentAddress, member]));
+    for (const member of roster.members) currentMemberAddresses.add(member.agentAddress);
     if (!members.has(authority.localAgentAddress)) {
       throw new TypeError(
         'rfc64Catalog localAgentAddress is not a current member of every selected private CG',
@@ -661,10 +663,10 @@ function validatePrivateActivationAuthorityV1(
       }
     }
   }
-  for (const peerId of bindings.keys()) {
-    if (!usedPeers.has(peerId)) {
+  for (const [peerId, agentAddress] of bindings) {
+    if (!usedPeers.has(peerId) && !currentMemberAddresses.has(agentAddress)) {
       throw new TypeError(
-        `rfc64Catalog peerAgentBinding ${peerId} is outside the selected private provider set`,
+        `rfc64Catalog peerAgentBinding ${peerId} is not a current member of any selected private CG`,
       );
     }
   }

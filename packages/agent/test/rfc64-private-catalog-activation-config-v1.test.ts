@@ -35,6 +35,7 @@ const OUTSIDER = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
 const PROVIDER_TWO = '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 const PROVIDER_PEER = '12D3KooPrivateProvider';
 const PROVIDER_TWO_PEER = '12D3KooPrivateProviderTwo';
+const HOLDER_PEER = '12D3KooPrivateHolder';
 
 function policy(contextGraphId: ContextGraphIdV1, accessPolicy: 0 | 1): ContextGraphPolicyV1 {
   return {
@@ -246,6 +247,25 @@ describe('RFC-64 private catalog activation', () => {
     expect(() => resolveRfc64CatalogActivationConfigV1(privateActivation({
       roster: rosterEnvelope(envelope, { providerRole: false }),
     }), chainIdentity)).toThrow(/not a current roster provider/u);
+  });
+
+  it('allows a provider to bind a holder-only current member for inbound reads', () => {
+    const activation = privateActivation({ localAgentAddress: PROVIDER });
+    const resolved = resolveRfc64CatalogActivationConfigV1({
+      ...activation,
+      accessPolicyAuthority: {
+        ...activation.accessPolicyAuthority,
+        peerAgentBindings: [
+          ...activation.accessPolicyAuthority.peerAgentBindings,
+          { peerId: HOLDER_PEER, agentAddress: LOCAL },
+        ],
+      },
+    }, chainIdentity);
+
+    expect(resolved.accessPolicyAuthority?.peerAgentBindings).toContainEqual({
+      peerId: HOLDER_PEER,
+      agentAddress: LOCAL,
+    });
   });
 
   it('accepts multiple complete providers and keeps every target on the exact ordered set', () => {
