@@ -150,6 +150,9 @@ export interface Rfc64PublicCatalogReconcilerClientsV1 {
   readonly headTransport: Rfc64PublicCatalogHeadFetchClientV1;
   readonly contentTransport: Rfc64PublicCatalogContentFetchClientV1;
   readonly resolveTrustedCatalogScope: Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1;
+  readonly verifyIssuerSignature: (
+    envelope: SignedControlEnvelopeV1,
+  ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
   readonly transportTimeoutMs: number;
 }
 
@@ -256,6 +259,10 @@ export interface SynchronizedRfc64CatalogCurrentHeadProvidersV1 {
   readonly current: DiscoveredRfc64PublicCatalogCurrentHeadV1;
   /** Providers that proved the exact selected current head before reconciliation. */
   readonly providerPeerIds: readonly string[];
+  /** Provider that produced the applied transition; null for durable replay/failure. */
+  readonly appliedProviderPeerId: string | null;
+  /** Actual reconciliation attempts for this exact scheduled task. */
+  readonly providerAttempts: number;
 }
 
 export interface Rfc64PublicCatalogServiceStatsV1 {
@@ -342,6 +349,7 @@ export class Rfc64PublicCatalogServiceV1 {
         }),
         resolveTrustedCatalogScope: (announcement: Rfc64PublicCatalogHeadAnnouncementV1) =>
           this.#resolveTrustedCatalogScope(announcement),
+        verifyIssuerSignature: this.#verifyIssuerSignature,
         transportTimeoutMs: this.#transportTimeoutMs,
       }));
     this.#receiver = new Rfc64PublicCatalogReceiverV1(reconciler, options.receiver);
@@ -739,14 +747,18 @@ export class Rfc64PublicCatalogServiceV1 {
       exactHeadIdentityV1(discovered.announcement) === selectedIdentity
     ));
     if (signal?.aborted) throw signal.reason;
-    this.#receiver.scheduleMany(selected.map(({ remotePeerId, discovered }) => ({
+    const completion = await this.#receiver.scheduleManyAndWait(selected.map(({
+      remotePeerId,
+      discovered,
+    }) => ({
       remotePeerId,
       announcement: discovered.announcement,
     })));
-    await this.#receiver.whenIdle();
     return Object.freeze({
       current: selected[0]!.discovered,
       providerPeerIds: Object.freeze(selected.map(({ remotePeerId }) => remotePeerId)),
+      appliedProviderPeerId: completion.appliedProviderPeerId,
+      providerAttempts: completion.providerAttempts,
     });
   }
 

@@ -2502,6 +2502,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
   it('reports the real private finalized missing-placement path as known-incomplete', async () => {
     const providerAgentAddress = `0x${'91'.repeat(20)}` as EvmAddressV1;
     const coldAgentAddress = `0x${'92'.repeat(20)}` as EvmAddressV1;
+    const authorizedColdAgentAddress = `0x${'93'.repeat(20)}` as EvmAddressV1;
+    const nonRosterAgentAddress = `0x${'94'.repeat(20)}` as EvmAddressV1;
     const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
     const firstAsset = Object.freeze({
       assertionRoot: ASSERTION_ROOT,
@@ -2584,10 +2586,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       previousRosterDigest: null,
       policyDigest,
       administrativeDelegationDigest: null,
-      members: [AUTHOR, providerAgentAddress, coldAgentAddress].map((agentAddress) => ({
+      members: [AUTHOR, providerAgentAddress, coldAgentAddress, authorizedColdAgentAddress]
+        .map((agentAddress) => ({
         agentAddress,
         roles: ['holder', 'provider'] as const,
-      })),
+        })),
       issuedAt: policy.issuedAt,
     };
     const rosterEnvelope = {
@@ -2616,13 +2619,14 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const providerPeerAddresses = new Map<string, EvmAddressV1>([
       [author.peerId, AUTHOR],
     ]);
+    let unboundColdAgentAddress = authorizedColdAgentAddress;
     const provider = await startNativeAgentWithOptions({
       name: 'private-incomplete-provider',
       networkIdentityChainId: NETWORK_ID,
       accessPolicyAuthority: {
         localAgentAddress: providerAgentAddress,
         resolveRemoteAgentAddress: async (peerId) => (
-          providerPeerAddresses.get(peerId) ?? coldAgentAddress
+          providerPeerAddresses.get(peerId) ?? unboundColdAgentAddress
         ),
       },
       finalizedRuntime: {
@@ -2683,6 +2687,82 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
     })?.currentCatalogHeadDigest).toBe(successor.headObjectDigest);
 
+    const authorizedRpc = createFinalizedVmLoopbackRpcV1(providerFixture);
+    const authorizedRpcServer = await rpcHarness.start((call, response) => {
+      try {
+        sendJsonRpcResult(response, call, authorizedRpc.respond(call.method, call.params));
+      } catch (cause) {
+        sendJsonRpcError(
+          response,
+          call,
+          -32602,
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      }
+    });
+    const authorizedAdapter = new FinalizedVmLoopbackMockChainAdapterV1(providerFixture);
+    await authorizedAdapter.createOnChainContextGraph({
+      accessPolicy: 1,
+      publishPolicy: 0,
+      nameHash,
+    });
+    const authorizedCold = await startNativeAgentWithOptions({
+      name: 'private-authorized-cold',
+      finalizedRuntime: {
+        rpcUrl: authorizedRpcServer.url,
+        chainAdapter: authorizedAdapter,
+        initialSubscription: CONTEXT_GRAPH_ID,
+      },
+      catalogActivation: {
+        enabled: true,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        accessPolicyAuthority: {
+          localAgentAddress: authorizedColdAgentAddress,
+          peerAgentBindings: [{
+            peerId: provider.peerId,
+            agentAddress: providerAgentAddress,
+          }],
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope,
+            rosterEnvelope,
+            targets: [{ authorAddress: AUTHOR, providers: [provider.peerId] }],
+            completeSwmProviders: [provider.peerId],
+          }],
+          retryIntervalMs: 0,
+        },
+      },
+    });
+    providerPeerAddresses.set(authorizedCold.peerId, authorizedColdAgentAddress);
+    await authorizedCold.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(authorizedCold.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0])
+      .toMatchObject({ outcome: 'applied', providerPeerId: provider.peerId });
+
+    const recoveredNameQuery =
+      'SELECT ?name WHERE { <https://example.org/alice> <https://schema.org/name> ?name }';
+    const authorizedResult = await authorizedCold.query(recoveredNameQuery, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      view: 'verifiable-memory',
+      callerAgentAddress: authorizedColdAgentAddress,
+    });
+    expect(authorizedResult.bindings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: '"Alice"' })]),
+    );
+    const deniedScopedResult = await authorizedCold.query(recoveredNameQuery, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      view: 'verifiable-memory',
+      callerAgentAddress: nonRosterAgentAddress,
+    });
+    expect(deniedScopedResult.bindings).toEqual([]);
+    const deniedUnscopedResult = await authorizedCold.query(
+      'SELECT ?name WHERE { GRAPH ?g { <https://example.org/alice> '
+        + '<https://schema.org/name> ?name } }',
+      { callerAgentAddress: nonRosterAgentAddress },
+    );
+    expect(deniedUnscopedResult.bindings).toEqual([]);
+
+    unboundColdAgentAddress = coldAgentAddress;
     const coldAdapter = new FinalizedVmLoopbackMockChainAdapterV1(coldFixture);
     await coldAdapter.createOnChainContextGraph({
       accessPolicy: 1,

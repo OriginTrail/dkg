@@ -108,6 +108,23 @@ export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly providerBackoffMs: number;
 }
 
+export type Rfc64PublicCatalogReceiverCompletionOutcomeV1 =
+  | 'already-applied'
+  | 'applied'
+  | 'staged-only'
+  | 'not-found'
+  | 'failed'
+  | 'dropped'
+  | 'closed';
+
+/** Exact terminal result for one scheduled head, separate from global idleness. */
+export interface Rfc64PublicCatalogReceiverCompletionV1 {
+  readonly outcome: Rfc64PublicCatalogReceiverCompletionOutcomeV1;
+  readonly appliedProviderPeerId: string | null;
+  readonly providerAttempts: number;
+  readonly error: unknown | null;
+}
+
 interface ReceiverTaskV1 {
   readonly key: string;
   readonly scopeKey: string;
@@ -132,6 +149,8 @@ interface ReceiverTaskV1 {
   notFoundProviders?: Set<string>;
   providerCursor?: number;
   lastProviderKey?: string;
+  providerAttempts?: number;
+  completionWaiters?: Array<(result: Rfc64PublicCatalogReceiverCompletionV1) => void>;
 }
 
 interface ReceiverProviderV1 {
@@ -264,12 +283,47 @@ export class Rfc64PublicCatalogReceiverV1 {
       remotePeerId: string;
     }>[],
   ): void {
-    if (this.#closed) return;
+    this.#scheduleMany(inputs);
+  }
+
+  /** Schedule one exact head and await that task's result, not global idleness. */
+  scheduleManyAndWait(
+    inputs: readonly Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      remotePeerId: string;
+    }>[],
+  ): Promise<Rfc64PublicCatalogReceiverCompletionV1> {
+    if (inputs.length === 0) {
+      throw new TypeError('RFC-64 receiver completion requires at least one provider');
+    }
+    const firstKey = headKey(inputs[0]!.announcement);
+    if (inputs.some(({ announcement }) => headKey(announcement) !== firstKey)) {
+      throw new TypeError('RFC-64 receiver completion inputs must name one exact head');
+    }
+    return new Promise((resolve) => this.#scheduleMany(inputs, resolve));
+  }
+
+  #scheduleMany(
+    inputs: readonly Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      remotePeerId: string;
+    }>[],
+    completion?: (result: Rfc64PublicCatalogReceiverCompletionV1) => void,
+  ): void {
+    if (this.#closed) {
+      completion?.(receiverCompletion('closed', null, 0, null));
+      return;
+    }
+    let completionAttached = false;
     for (const { announcement, remotePeerId } of inputs) {
       this.#scheduled += 1;
       const key = headKey(announcement);
       const existing = this.#pendingByKey.get(key);
       if (existing !== undefined) {
+        if (!completionAttached && completion !== undefined) {
+          (existing.completionWaiters ??= []).push(completion);
+          completionAttached = true;
+        }
         this.#dedupedInFlight += 1;
         const providerKey = providerContextKey(remotePeerId, announcement);
         if (!existing.providerKeys.has(providerKey)) {
@@ -285,6 +339,10 @@ export class Rfc64PublicCatalogReceiverV1 {
       this.#safeNotify(() => this.#onAttemptStart?.(announcement));
       if (this.#queue.length >= this.#maxQueue) {
         this.#droppedQueueFull += 1;
+        if (!completionAttached && completion !== undefined) {
+          completion(receiverCompletion('dropped', null, 0, null));
+          completionAttached = true;
+        }
         continue;
       }
       const providerKey = providerContextKey(remotePeerId, announcement);
@@ -293,7 +351,11 @@ export class Rfc64PublicCatalogReceiverV1 {
         scopeKey: catalogScopeKey(announcement),
         providers: [{ key: providerKey, peerId: remotePeerId, announcement }],
         providerKeys: new Set([providerKey]),
+        ...(completion === undefined || completionAttached
+          ? {}
+          : { completionWaiters: [completion] }),
       };
+      if (completion !== undefined) completionAttached = true;
       this.#pendingByKey.set(key, task);
       this.#queue.push(task);
     }
@@ -318,10 +380,20 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#closed = true;
     for (const timer of this.#deferralTimers) clearTimeout(timer);
     this.#deferralTimers.clear();
-    for (const task of this.#deferred) this.#pendingByKey.delete(task.key);
+    for (const task of this.#deferred) {
+      this.#finishTask(task, receiverCompletion(
+        'closed', null, task.providerAttempts ?? 0, null,
+      ));
+      this.#pendingByKey.delete(task.key);
+    }
     this.#deferred.clear();
     const abandoned = this.#queue.splice(0);
-    for (const task of abandoned) this.#pendingByKey.delete(task.key);
+    for (const task of abandoned) {
+      this.#finishTask(task, receiverCompletion(
+        'closed', null, task.providerAttempts ?? 0, null,
+      ));
+      this.#pendingByKey.delete(task.key);
+    }
     this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
     await Promise.allSettled([...this.#active]);
     this.#resolveIdle();
@@ -362,10 +434,14 @@ export class Rfc64PublicCatalogReceiverV1 {
         // A deferral releases the concurrency slot AND the semantic scope lock
         // before waiting, and keeps the pending key so a duplicate announcement
         // still dedupes onto this task instead of creating a second writer.
-        if (outcome === 'defer-admission' && !this.#closed) {
-          this.#scheduleAdmissionRetry(task);
+        if (outcome === 'defer-admission') {
+          if (!this.#closed) this.#scheduleAdmissionRetry(task);
+          else this.#finishTask(task, receiverCompletion(
+            'closed', null, task.providerAttempts ?? 0, null,
+          ));
           return;
         }
+        this.#finishTask(task, outcome);
         this.#pendingByKey.delete(task.key);
       }).finally(() => {
         this.#active.delete(run);
@@ -396,6 +472,12 @@ export class Rfc64PublicCatalogReceiverV1 {
         task.providers[0]!.announcement,
         new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
       ));
+      this.#finishTask(task, receiverCompletion(
+        'failed',
+        null,
+        task.providerAttempts ?? 0,
+        new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
+      ));
       if (this.#isIdle()) this.#resolveIdle();
       return;
     }
@@ -406,6 +488,9 @@ export class Rfc64PublicCatalogReceiverV1 {
       this.#deferralTimers.delete(timer);
       this.#deferred.delete(task);
       if (this.#closed || this.#closing.signal.aborted) {
+        this.#finishTask(task, receiverCompletion(
+          'closed', null, task.providerAttempts ?? 0, null,
+        ));
         this.#pendingByKey.delete(task.key);
         if (this.#isIdle()) this.#resolveIdle();
         return;
@@ -418,14 +503,18 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#deferralTimers.add(timer);
   }
 
-  async #runTask(task: ReceiverTaskV1): Promise<'done' | 'defer-admission'> {
+  async #runTask(
+    task: ReceiverTaskV1,
+  ): Promise<Rfc64PublicCatalogReceiverCompletionV1 | 'defer-admission'> {
     let lastError: unknown;
     // Resumed, not reset: see `ReceiverTaskV1.attemptsByProvider`.
     const notFoundProviders = (task.notFoundProviders ??= new Set<string>());
     const attemptsByProvider = (task.attemptsByProvider ??= new Map<string, number>());
     let providerCursor = task.providerCursor ?? 0;
     while (true) {
-      if (this.#closing.signal.aborted) return 'done';
+      if (this.#closing.signal.aborted) {
+        return receiverCompletion('closed', null, task.providerAttempts ?? 0, null);
+      }
       const selection = nextEligibleProvider(
         task.providers,
         notFoundProviders,
@@ -439,16 +528,17 @@ export class Rfc64PublicCatalogReceiverV1 {
           && task.providers.every((provider) => notFoundProviders.has(provider.key))
         ) {
           this.#notFound += 1;
-          return 'done';
+          return receiverCompletion('not-found', null, task.providerAttempts ?? 0, null);
         }
         this.#failed += 1;
         this.#safeNotify(() => this.#onError?.(task.providers[0]!.announcement, lastError));
-        return 'done';
+        return receiverCompletion('failed', null, task.providerAttempts ?? 0, lastError);
       }
       const { provider, nextCursor } = selection;
       providerCursor = nextCursor;
       task.providerCursor = nextCursor;
       this.#providerAttempts += 1;
+      task.providerAttempts = (task.providerAttempts ?? 0) + 1;
       if (task.lastProviderKey !== undefined && task.lastProviderKey !== provider.key) {
         this.#providerSwitches += 1;
       }
@@ -458,7 +548,9 @@ export class Rfc64PublicCatalogReceiverV1 {
       try {
         if (await this.#reconciler.isHeadApplied(provider.announcement)) {
           this.#dedupedAlreadyApplied += 1;
-          return 'done';
+          return receiverCompletion(
+            'already-applied', null, task.providerAttempts, null,
+          );
         }
         const result = await this.#reconciler.reconcileHead(
           provider.peerId,
@@ -471,12 +563,16 @@ export class Rfc64PublicCatalogReceiverV1 {
         }
         if (result === 'staged-only') {
           this.#stagedOnly += 1;
-          return 'done';
+          return receiverCompletion(
+            'staged-only', null, task.providerAttempts, null,
+          );
         }
         this.#applied += 1;
         this.#providerSuccesses += 1;
         this.#safeNotify(() => this.#onHeadApplied?.(provider.announcement, provider.peerId));
-        return 'done';
+        return receiverCompletion(
+          'applied', provider.peerId, task.providerAttempts, null,
+        );
       } catch (error) {
         if (this.#isDeferrableError(error)) {
           // Not this head's fault and not this provider's fault: roll back ONLY
@@ -488,7 +584,9 @@ export class Rfc64PublicCatalogReceiverV1 {
           return 'defer-admission';
         }
         lastError = error;
-        if (this.#closing.signal.aborted) return 'done';
+        if (this.#closing.signal.aborted) {
+          return receiverCompletion('closed', null, task.providerAttempts, error);
+        }
         await this.#backoff(providerAttempt - 1);
       }
     }
@@ -519,6 +617,14 @@ export class Rfc64PublicCatalogReceiverV1 {
     } catch {
       // Observer callbacks must never break the scheduler.
     }
+  }
+
+  #finishTask(
+    task: ReceiverTaskV1,
+    result: Rfc64PublicCatalogReceiverCompletionV1,
+  ): void {
+    const waiters = task.completionWaiters?.splice(0) ?? [];
+    for (const resolve of waiters) this.#safeNotify(() => resolve(result));
   }
 
   #isIdle(): boolean {
@@ -609,4 +715,13 @@ function positiveInt(value: number | undefined, fallback: number): number {
 
 function nonNegativeInt(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
+function receiverCompletion(
+  outcome: Rfc64PublicCatalogReceiverCompletionOutcomeV1,
+  appliedProviderPeerId: string | null,
+  providerAttempts: number,
+  error: unknown | null,
+): Rfc64PublicCatalogReceiverCompletionV1 {
+  return Object.freeze({ outcome, appliedProviderPeerId, providerAttempts, error });
 }

@@ -69,8 +69,7 @@ const ASSET_COUNT = boundedAssetCount(
   32,
 );
 const PROCESS_EVENT_TIMEOUT_MS = Math.max(120_000, ASSET_COUNT * 4_000);
-const PROVIDER_A_BUNDLE_DELAY_MS = 150;
-const PROVIDER_A_KILL_DELAY_MS = 750;
+const PROVIDER_A_BUNDLE_DELAY_MS = 1_000;
 const FIRST_KA_NUMBER = 2_000n;
 const ASSERTION_ROOT =
   '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f' as Digest32V1;
@@ -251,6 +250,12 @@ async function execute(): Promise<void> {
       exact(evidence.activatedTripleCount, ASSET_COUNT * 2, `${label} SWM triple count`);
       exact(evidence.appliedHeadStatus, 'applied', `${label} applied head`);
     }
+    const barrierArm = output(await providerA.request(
+      'armBundleReadBarrier',
+      'provider-a-arm-transfer-barrier',
+      'operation-completed',
+    ), 'provider A transfer barrier');
+    exact(barrierArm.armed, true, 'provider A transfer barrier armed');
 
     const synchronizationPromise = receiver.request(
       'synchronizeCatalogProviders',
@@ -258,7 +263,8 @@ async function execute(): Promise<void> {
       'operation-completed',
       { remotePeerIds: [providerAPeerId, providerBPeerId], scope: currentHeadScope() },
     );
-    await delay(PROVIDER_A_KILL_DELAY_MS);
+    const transferBarrier = await providerA.waitFor('bundle-read-start', 'bundle-read-2');
+    exact(transferBarrier.ordinal, 2, 'provider A deterministic transfer barrier ordinal');
     const providerAExit = await registry.terminateAndWait(providerA.tracked, 'SIGKILL');
     exact(providerAExit.code, null, 'provider A exit code');
     exact(providerAExit.signal, 'SIGKILL', 'provider A exit signal');
@@ -268,6 +274,7 @@ async function execute(): Promise<void> {
       [providerAPeerId, providerBPeerId],
       'discovered exact-head providers',
     );
+    exact(synchronization.appliedProviderPeerId, providerBPeerId, 'successful failover provider');
 
     const failure = await receiver.request(
       'terminalFailureReadback',
@@ -333,6 +340,7 @@ async function execute(): Promise<void> {
     exact(receiverStats.providerSuccesses, 1, 'provider successes');
     exact(receiverStats.failed, 0, 'receiver failures');
     atLeast(resourceStats.kaBundleNetworkFetches, 1, 'bundle network fetches');
+    atLeast(resourceStats.kaBundleCacheHits, 1, 'bundle cache reuse after provider switch');
 
     const [authorStopped, providerBStopped, receiverStopped] = await Promise.all([
       author.stop('author-stop'),
@@ -349,6 +357,8 @@ async function execute(): Promise<void> {
       catalogTransport: 'private-v2-only',
       providers: { configured: 2, discoveredExactHead: 2, terminatedDuringTransfer: 1 },
       failover: {
+        deterministicBarrier: 'provider-a-bundle-read-start-2',
+        appliedProviderPeerId: synchronization.appliedProviderPeerId,
         providerAttempts: receiverStats.providerAttempts,
         providerSwitches: receiverStats.providerSwitches,
         providerSuccesses: receiverStats.providerSuccesses,

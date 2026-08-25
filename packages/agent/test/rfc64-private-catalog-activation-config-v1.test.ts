@@ -20,6 +20,7 @@ import {
   resolveRfc64CatalogActivationsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import { mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
 
 const NETWORK = 'otp:20430' as NetworkIdV1;
 const PRIVATE_CG = (
@@ -330,5 +331,28 @@ describe('RFC-64 private catalog activation', () => {
       catalog: privateActivation(),
       publicCatalog: conflictingPublic,
     }, chainIdentity)).toThrow(/conflict for selected graph/u);
+  });
+
+  it('merges additive private bootstrap with legacy public bootstrap without dropping either', () => {
+    const privateBootstrap = privateActivation().bootstrap;
+    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
+    const legacyPublic = {
+      acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
+      retryIntervalMs: 1_000,
+    } as const;
+
+    const merged = mergeRfc64CatalogBootstrapsV1(privateBootstrap, legacyPublic);
+
+    expect(merged?.acceptedPolicies.map(({ policyEnvelope: envelope }) => (
+      envelope.payload.contextGraphId
+    ))).toEqual([PRIVATE_CG, PUBLIC_CG]);
+    expect(merged?.retryIntervalMs).toBe(1_000);
+    expect(() => mergeRfc64CatalogBootstrapsV1(privateBootstrap, {
+      ...legacyPublic,
+      acceptedPublicPolicies: [{
+        policyEnvelope: privateBootstrap.acceptedPolicies[0]!.policyEnvelope,
+        targets: [],
+      }],
+    })).toThrow(/configured twice/u);
   });
 });

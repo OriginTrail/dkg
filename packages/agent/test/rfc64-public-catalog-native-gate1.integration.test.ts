@@ -155,6 +155,26 @@ async function connect(from: DKGNode, to: DKGNode): Promise<void> {
 }
 
 describe('RFC-64 Gate 1 native successor to public SWM', () => {
+  it('keeps the pre-cache receiver dependency shape source-compatible', () => {
+    expect(() => new Rfc64PublicCatalogNativeReceiverV1({
+      headTransport: { fetchCatalogHead: async () => null },
+      contentTransport: {
+        fetchCatalogObject: async () => null,
+        fetchKaBundle: async () => null,
+      },
+      controlObjects: {
+        stageVerifiedObjects: async () => ({ durable: true, objects: [] }),
+        getVerifiedObjectByDigest: async () => null,
+      },
+      inventory: {
+        readAppliedCatalogHeadV1: () => null,
+        compareAndSwapAppliedCatalogHeadV1: async () => 'applied',
+      },
+      kaBundles: { putKaBundle: async () => undefined },
+      store: new OxigraphStore(),
+    } as never)).not.toThrow();
+  });
+
   it('refuses cold bootstrap when an omitted author projection and seal lack durable history', async () => {
     const fixture = await setupLiveReceiver();
     const decoded = decodeOpaqueKaBundleV1(fixture.secondRowBundle.bundleBytes);
@@ -410,11 +430,25 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.scopeDigest,
       AUTHOR,
     )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+    expect(interruptedReceiver.resourceStats()).toMatchObject({
+      kaBundleCacheHits: 1,
+      kaBundleNetworkFetches: 1,
+      kaBundleCacheBytes: fixture.rowBundle.bundleBytes.byteLength,
+      kaBundleNetworkBytes: fixture.secondRowBundle.bundleBytes.byteLength,
+    });
 
     fixture.receiverBundleFetch.mockClear();
+    const exactControlRead = vi.fn(
+      fixture.receiverPersistence.controlObjects.getVerifiedObject.bind(
+        fixture.receiverPersistence.controlObjects,
+      ),
+    );
     const restartedReceiver = fixture.createReceiver(
       fixture.receiverPersistence.inventory,
-      fixture.receiverPersistence.controlObjects,
+      {
+        ...fixture.receiverPersistence.controlObjects,
+        getVerifiedObject: exactControlRead,
+      },
     );
     await expect(fixture.synchronizeAny(
       fixture.multiAssetAnnouncement,
@@ -424,10 +458,43 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       inventoryRowCount: 2,
     });
     expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
+    expect(exactControlRead).toHaveBeenCalledWith(expect.objectContaining({
+      objectDigest: fixture.multiAssetAnnouncement.catalogHeadObjectDigest,
+      signatureVariantDigest: fixture.multiAssetAnnouncement.signatureVariantDigest,
+    }));
     expect(restartedReceiver.resourceStats()).toMatchObject({
+      controlObjectCacheHits: 4,
+      controlObjectNetworkFetches: 0,
       kaBundleCacheHits: 2,
       kaBundleNetworkFetches: 0,
+      kaBundleCacheBytes:
+        fixture.rowBundle.bundleBytes.byteLength
+        + fixture.secondRowBundle.bundleBytes.byteLength,
+      kaBundleNetworkBytes: 0,
     });
+  }, 30_000);
+
+  it('uses the configured verifier for cached heads after restart', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    const configuredVerifier = vi.fn(async () => {
+      throw new Error('configured verifier rejected cached object');
+    });
+    fixture.receiverHeadFetch.mockClear();
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      fixture.receiverPersistence.controlObjects,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      fixture.receiverPersistence.kaBundles,
+      configuredVerifier,
+    );
+
+    await expect(fixture.synchronizeAny(fixture.multiAssetAnnouncement, receiver))
+      .rejects.toThrow(/catalog issuer delegation fetch or generic signature verification failed/u);
+    expect(configuredVerifier).toHaveBeenCalled();
   }, 30_000);
 
   it('converges a valid two-to-one successor by removing the omitted SWM projection and seal before CAS', async () => {
@@ -1925,7 +1992,10 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     controlObjects: Pick<
       Rfc64PersistenceV1['controlObjects'],
       'stageVerifiedObjects' | 'getVerifiedObjectByDigest'
-    > = receiverPersistence.controlObjects,
+    > & Partial<Pick<
+      Rfc64PersistenceV1['controlObjects'],
+      'getVerifiedObject'
+    >> = receiverPersistence.controlObjects,
     contentTransport: Pick<
       Rfc64PublicCatalogNativeTransportV1,
       'fetchCatalogObject' | 'fetchKaBundle'
@@ -1940,6 +2010,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       'putKaBundle' | 'readKaBundleByDigest'
     > =
       receiverPersistence.kaBundles,
+    verifyIssuerSignature?: typeof verifyControlEnvelopeIssuerSignatureV1,
   ) => new Rfc64PublicCatalogNativeReceiverV1({
     headTransport: { fetchCatalogHead: receiverHeadFetch },
     contentTransport,
@@ -1947,6 +2018,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     inventory,
     kaBundles,
     store,
+    verifyIssuerSignature,
     beforeAppliedHeadCommit,
   });
   const createCasObservedReceiver = (contentTransport?: Pick<

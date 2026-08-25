@@ -366,6 +366,7 @@ import {
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type Rfc64CatalogBootstrapConfigV1,
   type Rfc64CatalogBootstrapPolicyV1,
+  type Rfc64PublicCatalogBootstrapConfigV1,
   type DKGAgentACKTransportOptions,
   type ImportedArtifactByteStore,
   type ReplicationEvent,
@@ -484,6 +485,7 @@ export type {
   Rfc64CatalogAccessPolicyAuthorityConfigV1,
   Rfc64CatalogBootstrapConfigV1,
   Rfc64CatalogBootstrapPolicyV1,
+  Rfc64PublicCatalogBootstrapConfigV1,
   DKGAgentACKTransportOptions,
   ImportedArtifactByteStore,
 };
@@ -752,6 +754,38 @@ function createACKSendP2P(input: {
  *   const response = await agent.invokeSkill(offerings[0], inputData);
  *   await agent.stop();
  */
+export function mergeRfc64CatalogBootstrapsV1(
+  catalog: Readonly<Rfc64CatalogBootstrapConfigV1> | undefined,
+  legacyPublic: Readonly<Rfc64PublicCatalogBootstrapConfigV1> | undefined,
+): Readonly<Rfc64CatalogBootstrapConfigV1> | undefined {
+  if (catalog === undefined && legacyPublic === undefined) return undefined;
+  if (
+    catalog?.retryIntervalMs !== undefined
+    && legacyPublic?.retryIntervalMs !== undefined
+    && catalog.retryIntervalMs !== legacyPublic.retryIntervalMs
+  ) {
+    throw new TypeError('RFC-64 catalog bootstrap retry intervals conflict');
+  }
+  const acceptedPolicies = [
+    ...(catalog?.acceptedPolicies ?? []),
+    ...(legacyPublic?.acceptedPublicPolicies ?? []),
+  ];
+  const seen = new Set<string>();
+  for (const { policyEnvelope } of acceptedPolicies) {
+    const policy = policyEnvelope.payload;
+    const key = `${policy.networkId}\n${policy.contextGraphId}`;
+    if (seen.has(key)) {
+      throw new TypeError('RFC-64 catalog bootstrap Context Graph is configured twice');
+    }
+    seen.add(key);
+  }
+  const retryIntervalMs = catalog?.retryIntervalMs ?? legacyPublic?.retryIntervalMs;
+  return Object.freeze({
+    acceptedPolicies: Object.freeze([...acceptedPolicies]),
+    ...(retryIntervalMs === undefined ? {} : { retryIntervalMs }),
+  });
+}
+
 export class DKGAgent extends DKGAgentBase {
   private chainContextGraphScanFailure:
     | { signature: string; count: number }
@@ -899,7 +933,10 @@ export class DKGAgent extends DKGAgentBase {
     const rfc64PublicCatalogAutoPublishPolicy =
       rfc64PublicCatalogControls.autoPublishPolicy;
     const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
-    const rfc64CatalogBootstrap = catalogActivation.bootstrap;
+    const rfc64CatalogBootstrap = mergeRfc64CatalogBootstrapsV1(
+      catalogActivation.bootstrap,
+      rfc64PublicCatalogBootstrap,
+    );
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {

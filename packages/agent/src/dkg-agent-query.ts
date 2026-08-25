@@ -613,6 +613,15 @@ export class QueryMethods extends DKGAgentBase {
         this.log.info(ctx, 'Query denied: SPARQL references private context graphs the caller cannot read');
         return emptyQueryResultForKind(sparql);
       }
+      // Post-filtering cannot make arbitrary unscoped SPARQL safe: ASK,
+      // aggregates, and projections that omit the GRAPH variable can disclose
+      // private rows before bindings are filtered. Until the query engine owns
+      // a dataset-level graph exclusion, fail closed when this caller lacks any
+      // private CG on the node. Scoped public queries remain available.
+      if (excludeGraphPrefixes.length > 0) {
+        this.log.info(ctx, 'Unscoped query denied because the caller cannot read every private context graph');
+        return emptyQueryResultForKind(sparql);
+      }
     }
 
     // #1106 (3): an UNAUTHENTICATED / admin caller omitting `agentAddress`
@@ -682,6 +691,14 @@ export class QueryMethods extends DKGAgentBase {
       allowSubscriptionFallback?: boolean;
     } = {},
   ): Promise<boolean> {
+    const rfc64Roster = this.resolveRfc64PrivateReadRosterV1(contextGraphId);
+    if (rfc64Roster !== undefined) {
+      if (rfc64Roster === null) return false;
+      const effectiveCaller = opts.callerAgentAddress
+        ?? this.config.rfc64CatalogAccessPolicyAuthority?.localAgentAddress
+        ?? this.defaultAgentAddress;
+      return this.isAgentAddressAllowed(effectiveCaller, rfc64Roster);
+    }
     if (!(await this.isPrivateContextGraph(contextGraphId))) {
       return true;
     }
@@ -762,6 +779,42 @@ export class QueryMethods extends DKGAgentBase {
   }
 
   /**
+   * Resolve the current accepted RFC-64 roster for a selected private CG.
+   * `undefined` means the CG is not owned by RFC-64 activation. `null` means
+   * it is selected but current authority is unavailable, so reads must deny.
+   */
+  resolveRfc64PrivateReadRosterV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): readonly string[] | null | undefined {
+    const configured = this.config.rfc64CatalogBootstrap?.acceptedPolicies.filter(
+      ({ policyEnvelope }) => (
+        policyEnvelope.payload.contextGraphId === contextGraphId
+        && policyEnvelope.payload.accessPolicy === 1
+      ),
+    ) ?? [];
+    if (configured.length === 0) return undefined;
+    const service = this.rfc64PublicCatalogServiceV1;
+    if (service === undefined) return null;
+
+    for (const { policyEnvelope } of configured) {
+      const policy = policyEnvelope.payload;
+      const current = service.acceptedPolicySnapshot(
+        policy.networkId,
+        policy.contextGraphId,
+      );
+      if (
+        current !== null
+        && current.policy.accessPolicy === 1
+        && current.roster !== null
+      ) {
+        return Object.freeze(current.roster.members.map(({ agentAddress }) => agentAddress));
+      }
+    }
+    return null;
+  }
+
+  /**
    * Returns graph URI prefixes for private CGs the caller cannot read.
    * Used to exclude them from unscoped queries.
    */
@@ -775,16 +828,22 @@ export class QueryMethods extends DKGAgentBase {
       }`,
       { source: 'agent.query.privateGraphAccessPolicy' },
     );
-    if (result.type !== 'bindings' || result.bindings.length === 0) return [];
-
+    const privateContextGraphIds = new Set<string>();
+    if (result.type === 'bindings') {
+      for (const row of result.bindings) {
+        const cgUri = row['cg'];
+        if (!cgUri) continue;
+        const match = cgUri.match(/^<?did:dkg:context-graph:([^>]+)>?$/);
+        if (match?.[1]) privateContextGraphIds.add(match[1]);
+      }
+    }
+    for (const { policyEnvelope } of this.config.rfc64CatalogBootstrap?.acceptedPolicies ?? []) {
+      if (policyEnvelope.payload.accessPolicy === 1) {
+        privateContextGraphIds.add(policyEnvelope.payload.contextGraphId);
+      }
+    }
     const prefixes: string[] = [];
-    for (const row of result.bindings) {
-      const cgUri = row['cg'];
-      if (!cgUri) continue;
-      // cgUri is like "did:dkg:context-graph:some-id" — extract the ID
-      const match = cgUri.match(/^<?did:dkg:context-graph:([^>]+)>?$/);
-      if (!match) continue;
-      const contextGraphId = match[1];
+    for (const contextGraphId of privateContextGraphIds) {
       if (await this.canReadContextGraph(contextGraphId, {
         callerAgentAddress: opts.callerAgentAddress,
       })) continue;

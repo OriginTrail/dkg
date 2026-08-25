@@ -838,6 +838,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           inventory: persistence.inventory,
           kaBundles: persistence.kaBundles,
           store: this.store,
+          verifyIssuerSignature: clients.verifyIssuerSignature,
           beforeAppliedHeadCommit,
           transportTimeoutMs: clients.transportTimeoutMs,
         });

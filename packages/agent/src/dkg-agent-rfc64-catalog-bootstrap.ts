@@ -387,7 +387,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     target.catalogVersion = null;
     target.inventoryRowCount = null;
     target.lastError = null;
-    target.attempts = target.providers.length;
+    target.attempts = 0;
     let lastError: string | null = null;
     let terminalError: unknown | null = null;
     try {
@@ -399,7 +399,8 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       if (applied !== null) {
         target.outcome = 'applied';
         target.completionReason = null;
-        target.providerPeerId = applied.providerPeerIds[0] ?? null;
+        target.providerPeerId = applied.appliedProviderPeerId;
+        target.attempts = applied.providerAttempts;
         target.appliedHeadDigest = applied.currentCatalogHeadDigest;
         target.catalogVersion = applied.catalogVersion;
         target.inventoryRowCount = applied.inventoryRowCount;

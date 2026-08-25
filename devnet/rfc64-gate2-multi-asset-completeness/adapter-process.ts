@@ -82,6 +82,7 @@ let stopping = false;
 let commandTail = Promise.resolve();
 const peerCatalogAgentAddresses = new Map<string, EvmAddressV1>();
 const harnessCatalogFailureMessages = new Map<string, string>();
+let armHarnessBundleReadBarrier: (() => void) | undefined;
 
 interface Command {
   readonly command: string;
@@ -281,6 +282,13 @@ function installHarnessBundleServeDelay(created: DKGAgent, delayMs: number): voi
     if (typeof originalRead !== 'function') {
       throw new Error('RFC-64 KA bundle reader is unavailable');
     }
+    let readOrdinal = 0;
+    let readTail = Promise.resolve();
+    let barrierArmed = false;
+    armHarnessBundleReadBarrier = () => {
+      readOrdinal = 0;
+      barrierArmed = true;
+    };
     Object.defineProperty(persistence, 'kaBundles', {
       configurable: true,
       enumerable: true,
@@ -288,8 +296,21 @@ function installHarnessBundleServeDelay(created: DKGAgent, delayMs: number): voi
       value: Object.freeze({
         ...kaBundles,
         readKaBundleByDigest: async (digest: unknown) => {
-          await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delayMs));
-          return (originalRead as (value: unknown) => Promise<unknown>)(digest);
+          const ordinal = ++readOrdinal;
+          const requestId = `bundle-read-${String(ordinal)}`;
+          const read = readTail.then(async () => {
+            if (barrierArmed) {
+              await emitAndFlush({ event: 'bundle-read-start', ordinal, requestId });
+            }
+            await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delayMs));
+            const result = await (originalRead as (value: unknown) => Promise<unknown>)(digest);
+            if (barrierArmed) {
+              await emitAndFlush({ event: 'bundle-read-complete', ordinal, requestId });
+            }
+            return result;
+          });
+          readTail = read.then(() => undefined, () => undefined);
+          return read;
         },
       }),
     });
@@ -488,6 +509,15 @@ async function handle(command: Command): Promise<void> {
         scope: scope as never,
       });
       emitOperationResult(command, output);
+      return;
+    }
+    case 'armBundleReadBarrier': {
+      requireRole('receiver');
+      if (armHarnessBundleReadBarrier === undefined) {
+        throw new Error('bundle read barrier is unavailable');
+      }
+      armHarnessBundleReadBarrier();
+      emitOperationResult(command, { armed: true });
       return;
     }
     case 'semanticGraphReadback': {

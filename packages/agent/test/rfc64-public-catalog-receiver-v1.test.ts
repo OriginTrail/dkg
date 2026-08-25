@@ -97,13 +97,18 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       return 'applied';
     }), { maxAttempts: 2, retryBackoffMs: 0 });
 
-    receiver.scheduleMany([
+    const completion = await receiver.scheduleManyAndWait([
       { announcement: announcement(), remotePeerId: 'peerA' },
       { announcement: announcement(), remotePeerId: 'peerB' },
     ]);
-    await receiver.whenIdle();
 
     expect(peers).toEqual(['peerA', 'peerB']);
+    expect(completion).toMatchObject({
+      outcome: 'applied',
+      appliedProviderPeerId: 'peerB',
+      providerAttempts: 2,
+      error: null,
+    });
     expect(receiver.stats()).toMatchObject({
       scheduled: 2,
       applied: 1,
@@ -113,6 +118,24 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       providerSuccesses: 1,
       providerBackoffMs: 0,
     });
+  });
+
+  it('accounts positive provider retry backoff in the task result path', async () => {
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      if (peerId === 'peerA') throw new Error('provider lost');
+      return 'applied';
+    }), { maxAttempts: 1, retryBackoffMs: 4 });
+
+    const completion = await receiver.scheduleManyAndWait([
+      { announcement: announcement(), remotePeerId: 'peerA' },
+      { announcement: announcement(), remotePeerId: 'peerB' },
+    ]);
+    expect(completion).toMatchObject({
+      outcome: 'applied',
+      appliedProviderPeerId: 'peerB',
+      providerAttempts: 2,
+    });
+    expect(receiver.stats().providerBackoffMs).toBe(4);
   });
 
   it('never retries an authoritative not-found peer while a viable peer can retry', async () => {

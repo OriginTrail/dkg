@@ -58,6 +58,8 @@ export interface SynchronizeRfc64CatalogFromProvidersParamsV1 {
 export interface SynchronizeRfc64CatalogFromProvidersResultV1
   extends AppliedCatalogHeadSnapshotV1 {
   readonly providerPeerIds: readonly string[];
+  readonly appliedProviderPeerId: string | null;
+  readonly providerAttempts: number;
   readonly signatureVariantDigest: Digest32V1;
 }
 
@@ -131,6 +133,8 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
     return Object.freeze({
       ...applied,
       providerPeerIds: synchronized.providerPeerIds,
+      appliedProviderPeerId: synchronized.appliedProviderPeerId,
+      providerAttempts: synchronized.providerAttempts,
       signatureVariantDigest: synchronized.current.announcement.signatureVariantDigest,
     });
   }

@@ -786,6 +786,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       'headTransport',
       'contentTransport',
       'resolveTrustedCatalogScope',
+      'verifyIssuerSignature',
       'transportTimeoutMs',
     ]);
     expect(clients!.transportTimeoutMs).toBe(4_321);

@@ -57,10 +57,14 @@ import {
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SignedAuthorCatalogIssuerDelegationEnvelopeV1,
+  type SignedControlEnvelopeV1,
   type VerifiedCatalogSealBindingV1,
   type VerifiedCatalogSealBindingSnapshotV1,
 } from '@origintrail-official/dkg-core';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import {
+  verifyControlEnvelopeIssuerSignatureV1,
+  type VerifiedControlEnvelopeIssuerSignatureV1,
+} from '@origintrail-official/dkg-chain';
 import {
   quadsToNQuads,
   readExactGraphPaged,
@@ -124,20 +128,22 @@ export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
     Rfc64PublicCatalogNativeTransportV1,
     'fetchCatalogObject' | 'fetchKaBundle'
   >;
-  readonly controlObjects: Pick<
-    Rfc64ControlObjectOperationsV1,
-    'stageVerifiedObjects' | 'getVerifiedObjectByDigest'
-  >;
+  readonly controlObjects:
+    Pick<Rfc64ControlObjectOperationsV1, 'stageVerifiedObjects' | 'getVerifiedObjectByDigest'>
+    & Partial<Pick<Rfc64ControlObjectOperationsV1, 'getVerifiedObject'>>;
   readonly inventory: Pick<
     Rfc64InventoryV1OperationsV1,
     'readAppliedCatalogHeadV1' | 'compareAndSwapAppliedCatalogHeadV1'
   >;
   /** Durable immutable cache that makes every applied receiver a provider. */
-  readonly kaBundles: Pick<
-    Rfc64KaBundleOperationsV1,
-    'putKaBundle' | 'readKaBundleByDigest'
-  >;
+  readonly kaBundles:
+    Pick<Rfc64KaBundleOperationsV1, 'putKaBundle'>
+    & Partial<Pick<Rfc64KaBundleOperationsV1, 'readKaBundleByDigest'>>;
   readonly store: TripleStore;
+  /** Use the service's configured verifier for both network and cache paths. */
+  readonly verifyIssuerSignature?: (
+    envelope: SignedControlEnvelopeV1,
+  ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
   /**
    * Final fail-closed same-process barrier. It runs after the exact SWM
    * post-read and before the durable applied-head CAS. A rejection leaves the
@@ -271,6 +277,9 @@ export class Rfc64PublicCatalogNativeReceiverErrorV1 extends Error {
 
 export class Rfc64PublicCatalogNativeReceiverV1 {
   readonly #timeoutMs: number;
+  readonly #verifyIssuerSignature: (
+    envelope: SignedControlEnvelopeV1,
+  ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
   readonly #scopeSynchronizations = new Map<string, Promise<void>>();
   #controlObjectCacheHits = 0;
   #controlObjectNetworkFetches = 0;
@@ -289,8 +298,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       || typeof options.inventory?.readAppliedCatalogHeadV1 !== 'function'
       || typeof options.inventory?.compareAndSwapAppliedCatalogHeadV1 !== 'function'
       || typeof options.kaBundles?.putKaBundle !== 'function'
-      || typeof options.kaBundles?.readKaBundleByDigest !== 'function'
       || typeof options.store?.query !== 'function'
+      || (
+        options.verifyIssuerSignature !== undefined
+        && typeof options.verifyIssuerSignature !== 'function'
+      )
       || (
         options.beforeAppliedHeadCommit !== undefined
         && typeof options.beforeAppliedHeadCommit !== 'function'
@@ -298,6 +310,8 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     ) {
       fail('catalog-native-receiver-input', 'receiver dependencies are incomplete');
     }
+    this.#verifyIssuerSignature =
+      options.verifyIssuerSignature ?? verifyControlEnvelopeIssuerSignatureV1;
     const timeoutMs = options.transportTimeoutMs ?? 10_000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
       fail('catalog-native-receiver-input', 'transportTimeoutMs must be a positive safe integer');
@@ -900,6 +914,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         this.options.controlObjects,
         head,
         trustedCatalogScope,
+        this.#verifyIssuerSignature,
       );
     if (historyDisposition === 'cold-bootstrap') {
       await assertColdBootstrapHasNoOmittedSemanticStateV1(
@@ -1202,10 +1217,16 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     signal: AbortSignal | undefined,
   ): Promise<FetchedRfc64PublicCatalogHeadV1 | null> {
-    const cached = await this.options.controlObjects.getVerifiedObjectByDigest({
-      objectDigest: announcement.catalogHeadObjectDigest,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-    });
+    const cached = this.options.controlObjects.getVerifiedObject === undefined
+      ? await this.options.controlObjects.getVerifiedObjectByDigest({
+        objectDigest: announcement.catalogHeadObjectDigest,
+        verifyIssuerSignature: this.#verifyIssuerSignature,
+      })
+      : await this.options.controlObjects.getVerifiedObject({
+        objectDigest: announcement.catalogHeadObjectDigest,
+        signatureVariantDigest: announcement.signatureVariantDigest,
+        verifyIssuerSignature: this.#verifyIssuerSignature,
+      });
     if (cached !== null) {
       assertSignedAuthorCatalogHeadEnvelopeV1(cached.envelope);
       const signatureVariantDigest = computeControlSignatureVariantDigestHex(
@@ -1237,7 +1258,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   ): Promise<FetchedRfc64PublicCatalogObjectV1 | null> {
     const cached = await this.options.controlObjects.getVerifiedObjectByDigest({
       objectDigest: targetObjectDigest,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      verifyIssuerSignature: this.#verifyIssuerSignature,
     });
     if (cached !== null && cached.envelope.objectType === targetObjectType) {
       this.#controlObjectCacheHits += 1;
@@ -1266,7 +1287,9 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     byteLength: string,
     signal: AbortSignal | undefined,
   ): Promise<Uint8Array | null> {
-    const cached = await this.options.kaBundles.readKaBundleByDigest(blobDigest);
+    const cached = this.options.kaBundles.readKaBundleByDigest === undefined
+      ? null
+      : await this.options.kaBundles.readKaBundleByDigest(blobDigest);
     if (cached !== null) {
       this.#kaBundleCacheHits += 1;
       this.#kaBundleCacheBytes += cached.byteLength;
@@ -1602,6 +1625,9 @@ async function loadExactAppliedPredecessorRows(
   controlObjects: Pick<Rfc64ControlObjectOperationsV1, 'getVerifiedObjectByDigest'>,
   targetHead: SignedAuthorCatalogHeadEnvelopeV1,
   trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
+  verifyIssuerSignature: (
+    envelope: SignedControlEnvelopeV1,
+  ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>,
 ): Promise<readonly Readonly<AuthorCatalogRowV1>[]> {
   const predecessorDigest = targetHead.payload.previousHeadDigest;
   if (predecessorDigest === null) {
@@ -1610,7 +1636,7 @@ async function loadExactAppliedPredecessorRows(
   try {
     const storedHead = await controlObjects.getVerifiedObjectByDigest({
       objectDigest: predecessorDigest,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      verifyIssuerSignature,
     });
     if (storedHead === null) throw new Error('applied predecessor head is not staged');
     assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
@@ -1627,7 +1653,7 @@ async function loadExactAppliedPredecessorRows(
 
     const storedDelegation = await controlObjects.getVerifiedObjectByDigest({
       objectDigest: predecessorHead.payload.catalogIssuerDelegationDigest,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      verifyIssuerSignature,
     });
     if (storedDelegation === null) throw new Error('predecessor delegation is not staged');
     assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(storedDelegation.envelope);
@@ -1639,7 +1665,7 @@ async function loadExactAppliedPredecessorRows(
 
     const storedDirectory = await controlObjects.getVerifiedObjectByDigest({
       objectDigest: predecessorHead.payload.directoryRootDigest,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      verifyIssuerSignature,
     });
     if (storedDirectory === null) throw new Error('predecessor directory root is not staged');
     assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(
@@ -1685,7 +1711,7 @@ async function loadExactAppliedPredecessorRows(
 
     const storedBucket = await controlObjects.getVerifiedObjectByDigest({
       objectDigest: descriptor.bucketDigest,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      verifyIssuerSignature,
     });
     if (storedBucket === null) throw new Error('predecessor bucket is not staged');
     assertSignedAuthorCatalogBucketEnvelopeV1(storedBucket.envelope);

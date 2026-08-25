@@ -15,6 +15,7 @@ import {
   resolveRfc64FinalizedPolicyAgentPrecommitV1,
 } from './finalized-policy-agent-precommit-v1.js';
 import { createFinalizedVmRuntimeV1 } from './finalized-vm-runtime-v1.js';
+import type { FinalizedVmMaterializerV1 } from './finalized-vm-runtime-v1.js';
 import { FinalizedVmCompositionErrorV1 } from './finalized-vm-composer-v1.js';
 import { createFinalizedVmStoreMaterializerV1 } from './finalized-vm-store-materializer-v1.js';
 
@@ -28,6 +29,8 @@ export interface Rfc64FinalizedVmAgentPrecommitOptionsV1 {
   readonly getKnowledgeAssetStorageAddress: () => Promise<string>;
   readonly getKnowledgeAssetsLifecycleAddress: () => Promise<string>;
   readonly store: TripleStore;
+  /** Test or embedding seam; production uses the durable store materializer. */
+  readonly materialize?: FinalizedVmMaterializerV1;
 }
 
 /**
@@ -81,7 +84,8 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
         // concurrent precommits on one chain would both admit.
         owner: 'rfc64',
       }),
-      materialize: createFinalizedVmStoreMaterializerV1({ store: options.store }),
+      materialize: options.materialize
+        ?? createFinalizedVmStoreMaterializerV1({ store: options.store }),
     });
     await runtime({
       catalogLane: Object.freeze({

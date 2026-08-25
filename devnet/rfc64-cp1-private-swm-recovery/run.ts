@@ -209,6 +209,12 @@ async function execute(): Promise<void> {
     ), 'private inventory');
     const rows = array(synchronization.rows, 'private inventory rows');
     exact(rows.length, ASSET_COUNT, 'private recovered row count');
+    const expectedKaIds = assets.map(({ seal }) => seal.reservedKaId).sort();
+    const recoveredKaIds = rows.map((value, index) => (
+      requiredString(record(value, `private row ${index}`).kaId, `private row ${index} kaId`)
+    )).sort();
+    exact(new Set(recoveredKaIds).size, ASSET_COUNT, 'private recovered unique KA identity count');
+    exact(recoveredKaIds, expectedKaIds, 'private recovered exact KA identity set');
     exact(synchronization.inventoryRowCount, ASSET_COUNT, 'private inventory row count');
     exact(synchronization.activatedTripleCount, ASSET_COUNT * 2, 'private activated triples');
     exact(synchronization.appliedHeadStatus, 'applied', 'private applied head status');
@@ -236,6 +242,7 @@ async function execute(): Promise<void> {
       accessPolicy: 1,
       assetsPublished: ASSET_COUNT,
       assetsRecovered: rows.length,
+      exactKaIdentitySetVerified: true,
       deniedUnboundPeer: true,
       processBoundary: {
         authorExitCode: authorStopped.exit.code,
