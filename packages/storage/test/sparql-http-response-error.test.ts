@@ -33,9 +33,14 @@ describe('SparqlHttpStore — typed non-OK responses (GH#1758)', () => {
   });
 
   async function queryError(): Promise<unknown> {
+    return runError((store) => store.query('SELECT WHERE {'));
+  }
+
+  /** Drive any store operation against the failing endpoint and return its error. */
+  async function runError(op: (store: SparqlHttpStore) => Promise<unknown>): Promise<unknown> {
     const store = new SparqlHttpStore({ queryEndpoint: endpoint, updateEndpoint: endpoint });
     try {
-      await store.query('SELECT WHERE {');
+      await op(store);
       return undefined;
     } catch (err) {
       return err;
@@ -71,4 +76,46 @@ describe('SparqlHttpStore — typed non-OK responses (GH#1758)', () => {
     const err = await queryError() as Error;
     expect(err.message).toMatch(/^SPARQL HTTP query failed \(400\): error at 1:15/);
   });
+
+  // PR #2330 review — the contract is implemented at THREE independent throw
+  // sites and this suite reached only the SELECT one. CONSTRUCT in particular
+  // is part of the caller-query behaviour #1758 repairs: if it returned to
+  // throwing a plain Error, a malformed CONSTRUCT rejected by an external store
+  // would surface as HTTP 500 again with every other test still green.
+  const operations: Array<{
+    label: string;
+    operation: string;
+    run: (store: SparqlHttpStore) => Promise<unknown>;
+  }> = [
+    { label: 'SELECT', operation: 'query', run: (s) => s.query('SELECT WHERE {') },
+    {
+      label: 'CONSTRUCT',
+      operation: 'construct',
+      run: (s) => s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'),
+    },
+    {
+      label: 'UPDATE',
+      operation: 'update',
+      run: (s) => s.update('INSERT DATA { <urn:a> <urn:b> <urn:c> }'),
+    },
+  ];
+
+  for (const { label, operation, run } of operations) {
+    it(`${label} throws the typed contract on a non-OK response`, async () => {
+      const err = await runError(run);
+      expect(isSparqlHttpResponseError(err), `${label} was not typed`).toBe(true);
+      const typed = err as SparqlHttpResponseError;
+      expect(typed.status).toBe(400);
+      expect(typed.operation).toBe(operation);
+      expect(typed.responseExcerpt).toContain('error at 1:15');
+      expect(typed.message).toMatch(new RegExp(`^SPARQL HTTP ${operation} failed \\(400\\):`));
+    });
+
+    it(`${label} carries a store-rejects-us status unmarked as malformed`, async () => {
+      respond = { status: 401, body: 'Unauthorized' };
+      const err = await runError(run);
+      expect(isSparqlHttpResponseError(err)).toBe(true);
+      expect((err as SparqlHttpResponseError).status).toBe(401);
+    });
+  }
 });
