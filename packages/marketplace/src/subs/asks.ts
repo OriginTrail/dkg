@@ -49,3 +49,22 @@ export function queuedAsk(home: string, offeringId: string, seller: string, curr
     (a) => a.offeringId === offeringId && a.seller === seller && a.effectiveFromCycle > currentCycle);
   return q.length ? q[q.length - 1] : null;
 }
+
+// ── the seller's pricing cycle (the domain effectiveFromCycle lives in) ────
+// Ask commitments are SELLER cycles, not buyer plan counters. The seller
+// advances its cycle explicitly (operate action, aligned with its posted
+// period cadence); queued asks take effect at that boundary. Subscribers
+// who already froze a price keep it until their own period expires.
+import { writeFileSync } from "node:fs";
+
+export function sellerCycle(home: string): number {
+  const p = join(subsHome(home), "cycle.json");
+  if (!existsSync(p)) return 1;
+  try { return Math.max(1, (JSON.parse(readFileSync(p, "utf8")) as { cycle: number }).cycle); } catch { return 1; }
+}
+
+export function advanceSellerCycle(home: string): number {
+  const next = sellerCycle(home) + 1;
+  writeFileSync(join(subsHome(home), "cycle.json"), JSON.stringify({ cycle: next }));
+  return next;
+}

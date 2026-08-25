@@ -84,6 +84,9 @@ export interface MarketplaceConfig {
   /** P5: SAFE-HEAD confirmations required before a period payment enrolls
    *  a subscription (default 3; compressed devnet periods may use 1). */
   confirmationDepth?: number;
+  /** P5 checkpoint cadence (default 100 calls / 15 min, jittered);
+   *  compressed test periods scale these down. */
+  subsCadence?: { everyCalls: number; everyActiveMs: number; jitterPct: number };
   /** transports the signed quote ADVERTISES (["direct"], ["lane"], or both).
    *  Absent ⇒ ["direct","lane"] (the historical default). Found by Hermes
    *  (event 833d6ef0): this field was silently dropped at load, so a
@@ -116,6 +119,7 @@ export function loadMarketplaceConfig(dkgHome: string): MarketplaceConfig {
       revenueWallet: typeof raw.revenueWallet === "string" ? raw.revenueWallet : undefined,
       registryContextGraphId: typeof raw.registryContextGraphId === "string" ? raw.registryContextGraphId : undefined,
       confirmationDepth: typeof raw.confirmationDepth === "number" && raw.confirmationDepth >= 0 ? raw.confirmationDepth : undefined,
+      subsCadence: raw.subsCadence && typeof raw.subsCadence === "object" ? raw.subsCadence as MarketplaceConfig["subsCadence"] : undefined,
       offerings: Array.isArray(raw.offerings) ? (raw.offerings as OfferingConfig[]) : [],
       chainId: typeof raw.chainId === "number" ? raw.chainId : undefined,
       rpcUrl: typeof raw.rpcUrl === "string" ? raw.rpcUrl : undefined,

@@ -33,8 +33,15 @@ export async function serveChat(ob: OfferingBinding, messages: ChatMessage[], ma
   try {
     if (ob.binding.kind === "llamacpp") {
       const served = await completeLlamaCpp(ob.binding, messages, maxTokens);
-      return { ok: true, completion: served.completion,
-               inputTokens: served.inputTokenIds.length, outputTokens: served.outputTokenIds.length,
+      // bill on bundle counts (both seats compute the identical formula from
+      // bytes both hold); generation ids are serving detail only
+      const eng = ob.countEngine;
+      const per = CHAT_TEMPLATE_CONSTANTS;
+      const inputTokens = eng
+        ? messages.reduce((s2, m) => s2 + eng.encodeCount(m.content) + eng.encodeCount(m.role) + per.perMessageTokens, 0) + per.perReplyPrimerTokens
+        : served.inputTokenIds.length;
+      const outputTokens = eng ? eng.encodeCount(served.completion) : served.outputTokenIds.length;
+      return { ok: true, completion: served.completion, inputTokens, outputTokens,
                requestDigest, responseDigest: sha(Buffer.from(served.completion, "utf8")),
                finishReason: served.finishReason };
     }

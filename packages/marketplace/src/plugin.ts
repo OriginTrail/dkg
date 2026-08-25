@@ -17,9 +17,9 @@ import { readFileSync, existsSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Plan } from "./subs/objects.js";
-import { activePlan, allowances, appendCallLog, planSummaryPct, readJournal, subsHome } from "./subs/journal.js";
+import { activePlan, allowances, appendCallLog, appendJournal, planSummaryPct, readJournal, subsHome } from "./subs/journal.js";
 import { buildPlan, purchasePlan, topUp, expirePeriod, requestSwitch, nextCycle } from "./subs/plan.js";
-import { seedAsk, publishAsk, askInForce, queuedAsk, readAsks } from "./subs/asks.js";
+import { seedAsk, publishAsk, askInForce, queuedAsk, readAsks, sellerCycle, advanceSellerCycle } from "./subs/asks.js";
 import { admit, recordDelivery, recordProviderFailure } from "./subs/gateway.js";
 import { serveChat, serveQuery, type ChatMessage } from "./subs/serve.js";
 import { emitCheckpoint, verifyPeerCheckpoint, freshness, checkpointChain } from "./subs/checkpoint.js";
@@ -103,7 +103,11 @@ async function mount(cfg: MarketplaceConfig, ctx: RequestContext, log: (l: strin
     try {
       if (off.connector.kind === "llamacpp") {
         const binding: LlamaCppBinding = await connectLlamaCpp(off.connector);
-        const ob: OfferingBinding = { offering: off, binding, tokenizerBundleRef: binding.tokenizerBundleDigest };
+        // billing basis = the PINNED BUNDLE, same formula both seats — the
+        // generation ids stay serving detail (found by drill D2b: id-count vs
+        // re-encode diverged the checkpoints on honest traffic)
+        const ob: OfferingBinding = { offering: off, binding, tokenizerBundleRef: binding.tokenizerBundleDigest,
+          countEngine: hfEngine(readFileSync(join(off.connector.tokenizerDir, "tokenizer.json"), "utf8")) };
         offerings.set(off.id, ob);
         offerings.set(binding.modelId, ob);
         log(`offering ${off.id} ⛓ ${binding.modelId} gguf=${binding.ggufSha256.slice(0, 18)}… tok=${binding.tokenizerBundleDigest.slice(0, 18)}…`);
@@ -238,7 +242,7 @@ export const plugin: RoutePlugin = {
           const { publishOffering } = await import("./seller/offering.js");
           const token = cfg.nodeToken ?? [...ctx.validTokens][0] ?? "";
           const { scheduleDigest, SCHEDULE_V1 } = await import("./subs/query-cost.js");
-          const cyc = nextCycle(home) - 1 || 1;
+          const cyc = sellerCycle(home);
           const inForce = askInForce(home, ob.offering.id, mounted.seller.providerAddress, cyc) ?? undefined;
           out = await publishOffering(`http://127.0.0.1:${ctx.apiPortRef.value}`, token, ob, {
             providerAddress: mounted.seller.providerAddress,
@@ -270,9 +274,9 @@ export const plugin: RoutePlugin = {
     if (path === BASE + "/operate/ask" && method === "POST") {
       if (!isLocalOrToken(ctx)) { send(res, 401, { error: "E_TOKEN" }); return; }
       try {
-        const b = JSON.parse(await readBody(req)) as { offeringId: string; unit: "tokens" | "query-units"; askMicroPerUnit: number; effectiveFromCycle: number; currentCycle: number; seed?: boolean };
+        const b = JSON.parse(await readBody(req)) as { offeringId: string; unit: "tokens" | "query-units"; askMicroPerUnit: number; effectiveFromCycle: number; currentCycle?: number; seed?: boolean };
         const ask = { seller: mounted.seller?.providerAddress ?? cfg.providerAddress ?? "", offeringId: b.offeringId, unit: b.unit, askMicroPerUnit: b.askMicroPerUnit, effectiveFromCycle: b.effectiveFromCycle };
-        send(res, 200, b.seed ? seedAsk(home, ask) : publishAsk(home, ask, b.currentCycle));
+        send(res, 200, b.seed ? seedAsk(home, ask) : publishAsk(home, ask, b.currentCycle ?? sellerCycle(home)));
       } catch (e) { send(res, 400, { error: String((e as Error).message) }); }
       return;
     }
@@ -281,7 +285,7 @@ export const plugin: RoutePlugin = {
     // The registry CG is the durable path; this is the live storefront read.
     if (path === BASE + "/subs/offers" && method === "GET") {
       if (!mounted.seller) { send(res, 200, { seller: null, offerings: [] }); return; }
-      const cyc = nextCycle(home) - 1 || 1;
+      const cyc = sellerCycle(home);
       const uniq = [...new Map([...mounted.seller.offerings.values()].map((o) => [o.offering.id, o])).values()];
       const offers = uniq.map((ob) => ({
         offeringId: ob.offering.id,
@@ -307,6 +311,36 @@ export const plugin: RoutePlugin = {
       return;
     }
 
+    if (path === BASE + "/operate/cycle/advance" && method === "POST") {
+      if (!isLocalOrToken(ctx)) { send(res, 401, { error: "E_TOKEN" }); return; }
+      send(res, 200, { cycle: advanceSellerCycle(home) });
+      return;
+    }
+
+    // ── subscription wire: seller-side top-up (payment-verified, like enroll)
+    if (path === BASE + "/subs/topup-notify" && method === "POST") {
+      try {
+        const b = JSON.parse(await readBody(req)) as { planId: string; offeringId: string; transfer: ObservedTransfer };
+        if (!mounted.seller) { send(res, 503, { error: "E_NOT_SELLING" }); return; }
+        const enr = readEnrollments(home).filter((e) => e.plan.planId === b.planId).pop();
+        if (!enr) { send(res, 404, { error: "E_NO_ENROLLMENT" }); return; }
+        const alloc = enr.plan.allocations.find((x) => x.offeringId === b.offeringId);
+        if (!alloc) { send(res, 400, { error: "E_NO_SUCH_ALLOWANCE" }); return; }
+        const verdict = evaluatePayment(b.transfer, {
+          sellerRevenueWallet: cfg.revenueWallet ?? mounted.seller.providerAddress,
+          tracContract: cfg.tracContract ?? "0xA81a52B4dda010896cDd386C7fBdc5CDc835ba23",
+          buyer: enr.plan.buyer, confirmationDepth: cfg.confirmationDepth ?? 3, minimumMicroTrac: 1,
+        });
+        if (!verdict.ok) { send(res, 402, verdict); return; }
+        const units = Math.floor(Number(b.transfer.amountTrac) * 1_000_000 / alloc.frozenAskMicroPerUnit);
+        appendJournal(home, { kind: "toppedUp", at: now.toISOString(), planId: b.planId,
+          offeringId: b.offeringId, seller: mounted.seller.providerAddress, units,
+          microTrac: Number(b.transfer.amountTrac) * 1_000_000, detail: verdict.identity });
+        send(res, 200, { ok: true, addedUnits: units });
+      } catch (e) { send(res, 400, { error: String((e as Error).message).slice(0, 140) }); }
+      return;
+    }
+
     // ── subscription wire: enroll (buyer → seller, payment-verified) ───────
     if (path === BASE + "/subs/enroll" && method === "POST") {
       try {
@@ -316,7 +350,7 @@ export const plugin: RoutePlugin = {
         if (!myLines.length) { send(res, 400, { error: "E_NOT_MY_PLAN" }); return; }
         // frozen asks must match MY committed asks for the cycle — trust but verify
         for (const l of myLines) {
-          const mine = askInForce(home, l.offeringId, mounted.seller.providerAddress, b.plan.cycle);
+          const mine = askInForce(home, l.offeringId, mounted.seller.providerAddress, sellerCycle(home));
           if (!mine || mine.askMicroPerUnit !== l.frozenAskMicroPerUnit) {
             send(res, 400, { error: "E_ASK_MISMATCH", offeringId: l.offeringId }); return;
           }
@@ -360,7 +394,7 @@ export const plugin: RoutePlugin = {
           const units = served.inputTokens + served.outputTokens;
           recordDelivery(home, { plan: enr.plan, allowance: sellerAdm.allowance, callId: b.callId, units,
             unit: "tokens", requestDigest: served.requestDigest, responseDigest: served.responseDigest,
-            keyId: b.keyId ?? "wire", now, sign: (d) => providerSign(home, "nsm:ckpt:v5", d) });
+            keyId: b.keyId ?? "wire", now, cadence: cfg.subsCadence, sign: (d) => providerSign(home, "nsm:ckpt:v5", d) });
           send(res, 200, { completion: served.completion, inputTokens: served.inputTokens,
             outputTokens: served.outputTokens, requestDigest: served.requestDigest,
             responseDigest: served.responseDigest, units });
@@ -380,7 +414,7 @@ export const plugin: RoutePlugin = {
         recordDelivery(home, { plan: enr.plan, allowance: sellerAdm.allowance, callId: b.callId,
           units: served.totalUnits, unit: "query-units",
           requestDigest: served.requestDigest, responseDigest: served.responseDigest,
-          keyId: b.keyId ?? "wire", now, sign: (d) => providerSign(home, "nsm:ckpt:v5", d) });
+          keyId: b.keyId ?? "wire", now, cadence: cfg.subsCadence, sign: (d) => providerSign(home, "nsm:ckpt:v5", d) });
         send(res, 200, { body: served.body, returnedRows: served.returnedRows,
           units: served.totalUnits, admission: served.admission, delivery: served.delivery,
           requestDigest: served.requestDigest, responseDigest: served.responseDigest });
@@ -433,6 +467,21 @@ export const plugin: RoutePlugin = {
       return;
     }
 
+    if (path === BASE + "/subs/checkpoints" && method === "GET") {
+      const pair = new URL("http://x" + path + (ctx.req.url?.includes("?") ? ctx.req.url.slice(ctx.req.url.indexOf("?")) : "")).searchParams.get("pair") ?? "";
+      send(res, 200, { pair, chain: checkpointChain(home, pair) });
+      return;
+    }
+
+    if (path === BASE + "/subs/statement/record" && method === "POST") {
+      try {
+        const st = JSON.parse(await readBody(req));
+        saveStatement(home, st);
+        send(res, 200, { ok: true, digest: statementDigest(st) });
+      } catch (e) { send(res, 400, { error: String((e as Error).message).slice(0, 120) }); }
+      return;
+    }
+
     if (path === BASE + "/subs/status" && method === "GET") {
       const bc = readBuyerCfg(home);
       const plan = activePlan(home, now);
@@ -464,10 +513,25 @@ export const plugin: RoutePlugin = {
 
     if (path === BASE + "/subs/topup" && method === "POST") {
       try {
-        const b = JSON.parse(await readBody(req)) as { offeringId: string; seller: string; microTrac: number; tx: string };
+        const b = JSON.parse(await readBody(req)) as { offeringId: string; seller: string; microTrac: number; tx: string; transfer?: ObservedTransfer };
         const plan = activePlan(home, now);
         if (!plan) { send(res, 402, { error: "no_active_plan" }); return; }
-        send(res, 200, { addedUnits: topUp(home, plan, b.offeringId, b.seller, b.microTrac, b.tx, now) });
+        const added = topUp(home, plan, b.offeringId, b.seller, b.microTrac, b.tx, now);
+        // a top-up is a real payment — the SELLER verifies it too, or its
+        // ceiling never grows and serving stays refused (found by drill D1d)
+        let sellerAck: unknown = null;
+        if (b.transfer) {
+          const bc = readBuyerCfg(home);
+          const apiBase = bc?.sellers[b.seller]?.apiBase;
+          if (apiBase) {
+            const r = await fetch(apiBase + BASE + "/subs/topup-notify", { method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ planId: plan.planId, offeringId: b.offeringId, transfer: b.transfer }),
+              signal: AbortSignal.timeout(15_000) }).catch(() => null);
+            sellerAck = r ? await r.json().catch(() => null) : null;
+          }
+        }
+        send(res, 200, { addedUnits: added, sellerAck });
       } catch (e) { send(res, 400, { error: String((e as Error).message).slice(0, 140) }); }
       return;
     }
@@ -555,13 +619,17 @@ export const plugin: RoutePlugin = {
         try {
           const raw = readFileSync(off.bundlePath, "utf8");
           const eng: BpeEngine = off.bundleKind === "hf" ? hfEngine(raw) : tiktokenEngine(raw);
+          const { CHAT_TEMPLATE_CONSTANTS: per } = await import("./seller/connector-openai.js");
+          const inTok = (parsed.messages ?? []).reduce(
+            (s2, m) => s2 + eng.encodeCount(m.content) + eng.encodeCount(m.role) + per.perMessageTokens, 0,
+          ) + per.perReplyPrimerTokens;
           const outTok = eng.encodeCount(String(body.completion ?? ""));
-          buyerUnits = Number(body.inputTokens ?? 0) + outTok;   // input counted at admission parity
+          buyerUnits = inTok + outTok;   // the identical formula the seller bills with
         } catch { /* engine unavailable → delivered counts + spot-checks */ }
       }
       recordDelivery(home, { plan: plan!, allowance: adm.allowance, callId, units: buyerUnits,
         unit: adm.allowance.unit, requestDigest: String(body.requestDigest ?? "sha256:na"),
-        responseDigest: String(body.responseDigest ?? "sha256:na"), keyId, now });
+        responseDigest: String(body.responseDigest ?? "sha256:na"), keyId, now, cadence: cfg.subsCadence });
       {
         const { recordKeyUsage } = await import("./gateway/keys.js");
         recordKeyUsage(home, { keyId, legId: callId, costMicroTrac: buyerUnits, kind: isQueryCall ? "query" : "inference" });

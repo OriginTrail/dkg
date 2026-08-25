@@ -157,11 +157,15 @@ export function verifyCallLogChain(home: string, pair: string): { ok: boolean; b
   return { ok: true };
 }
 
-export function unitTotals(home: string, pair: string, periodStartAt?: string): Record<string, number> {
+export function unitTotals(home: string, pair: string, periodStartAt?: string, untilAt?: string): Record<string, number> {
   // running totals per offering from the call log — the checkpoint substrate.
+  // `untilAt` cuts at a checkpoint's moment: agreement means "AT that
+  // instant both seats matched", not "now vs then" (found by drill D2b —
+  // in-flight calls after the peer's emit read as spurious divergence).
   const out: Record<string, number> = {};
   for (const e of readCallLog(home, pair)) {
     if (periodStartAt && e.at < periodStartAt) continue;
+    if (untilAt && e.at > untilAt) continue;
     if (e.phase === "void") continue;         // no delivery, no decrement
     out[e.offeringId] = (out[e.offeringId] ?? 0) + e.units;
   }

@@ -105,7 +105,9 @@ export type CheckpointVerdict =
  *  names the offerings AND the interval — dispute scope is the interval
  *  since the last agreed checkpoint, never the whole period. */
 export function verifyPeerCheckpoint(home: string, peer: Checkpoint, a: { periodStartAt: string }): CheckpointVerdict {
-  const ours = unitTotals(home, peer.pair, a.periodStartAt);
+  // compare AS OF the peer's emit moment (+250ms cross-seat skew grace)
+  const cutoff = new Date(new Date(peer.at).getTime() + 250).toISOString();
+  const ours = unitTotals(home, peer.pair, a.periodStartAt, cutoff);
   const offerings = new Set([...Object.keys(ours), ...Object.keys(peer.totals)]);
   const diverged = [...offerings].filter((o) => (ours[o] ?? 0) !== (peer.totals[o] ?? 0));
   if (!diverged.length) {
