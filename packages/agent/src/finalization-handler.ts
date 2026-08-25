@@ -102,6 +102,11 @@ import {
 } from './finalization-graph-envelope.js';
 import { recoverReceiptBackedGraphScopedEvidence } from './receipt-backed-graph-scoped-evidence.js';
 import { resolveConfirmedGraphScopedVm } from './confirmed-graph-scoped-vm-resolver.js';
+import {
+  verifyExactGraphContent,
+  type ExactGraphContentVerification,
+  type VerifiedExactGraphContent,
+} from './exact-graph-content-verifier.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 /**
@@ -187,31 +192,8 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
     && left.every((byte, index) => byte === right[index]);
 }
 
-type ExactGraphScopedLayerVerification =
-  | {
-      status: 'verified';
-      graphUri: string;
-      quads: Quad[];
-      merkleRoot: Uint8Array;
-    }
-  | {
-      status: 'count-mismatch';
-      graphUri: string;
-      actualCount: number;
-    }
-  | {
-      status: 'merkle-mismatch';
-      graphUri: string;
-    }
-  | {
-      status: 'head-mismatch';
-      graphUri: string;
-    };
-
-type VerifiedGraphScopedLayer = Extract<
-  ExactGraphScopedLayerVerification,
-  { status: 'verified' }
->;
+type ExactGraphScopedLayerVerification = ExactGraphContentVerification;
+type VerifiedGraphScopedLayer = VerifiedExactGraphContent;
 
 /**
  * Exact local content accepted by the receiptless public-finalization policy.
@@ -1410,30 +1392,18 @@ export class FinalizationHandler {
       input.scope,
       input.subGraphName,
     );
-    const result = await this.store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(graphUri)}> { ?s ?p ?o } }`,
-      { source: 'agent.finalization.verifyExactLayer' },
-    );
-    const quads = result.type === 'quads'
-      ? result.quads.map((quad) => ({ ...quad, graph: '' }))
-      : [];
-    if (quads.length !== input.publicTripleCount) {
-      return { status: 'count-mismatch', graphUri, actualCount: quads.length };
-    }
-    const merkleRoot = computeFlatKCRoot(
-      quads,
-      input.privateMerkleRoot ? [input.privateMerkleRoot] : [],
-    );
-    if (!equalBytes(merkleRoot, input.expectedMerkleRoot)) {
-      return { status: 'merkle-mismatch', graphUri };
-    }
-    if (
-      input.expectedPublicQuadsDigest !== undefined
-      && workspacePublicQuadsDigest(quads) !== input.expectedPublicQuadsDigest
-    ) {
-      return { status: 'head-mismatch', graphUri };
-    }
-    return { status: 'verified', graphUri, quads, merkleRoot };
+    return verifyExactGraphContent(this.store, {
+      graphUri,
+      publicTripleCount: input.publicTripleCount,
+      ...(input.privateMerkleRoot
+        ? { privateMerkleRoot: input.privateMerkleRoot }
+        : {}),
+      expectedMerkleRoot: input.expectedMerkleRoot,
+      ...(input.expectedPublicQuadsDigest
+        ? { expectedPublicQuadsDigest: input.expectedPublicQuadsDigest }
+        : {}),
+      source: 'agent.finalization.verifyExactLayer',
+    });
   }
 
   /** Recognize exact confirmed VM state from surviving immutable metadata. */

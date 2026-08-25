@@ -30,6 +30,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
+import { verifyExactGraphContent } from '../src/exact-graph-content-verifier.js';
 import {
   openSqliteFinalizationRecoveryStore,
   type SqliteFinalizationRecoveryStore,
@@ -3168,7 +3169,43 @@ describe('graph-scoped finalization handler', () => {
     })).resolves.toEqual({ status: 'invalid', reason: 'metadata' });
   });
 
-  it('settles a RECEIVED inbox row from exact receipt-backed VM after the workspace head is lost', async () => {
+  it('uses one verifier for exact graph content, count, root, and digest checks', async () => {
+    const { message, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    const base = {
+      graphUri: vmGraph,
+      publicTripleCount: Number(message.publicTripleCount),
+      ...(message.privateMerkleRoot?.length
+        ? { privateMerkleRoot: message.privateMerkleRoot }
+        : {}),
+      expectedMerkleRoot: message.kcMerkleRoot,
+      includePublicQuadsDigest: true,
+      source: 'agent.test.verifyExactGraphContent',
+    };
+
+    const matching = await verifyExactGraphContent(store, base);
+    expect(matching).toMatchObject({ status: 'verified', graphUri: vmGraph });
+    if (matching.status !== 'verified') throw new Error('expected matching graph content');
+
+    await expect(verifyExactGraphContent(store, {
+      ...base,
+      publicTripleCount: base.publicTripleCount + 1,
+    })).resolves.toMatchObject({ status: 'count-mismatch', actualCount: 2 });
+    await expect(verifyExactGraphContent(store, {
+      ...base,
+      expectedMerkleRoot: new Uint8Array(32),
+    })).resolves.toMatchObject({ status: 'merkle-mismatch' });
+    await expect(verifyExactGraphContent(store, {
+      ...base,
+      expectedPublicQuadsDigest: `sha256:${'00'.repeat(32)}`,
+    })).resolves.toMatchObject({ status: 'head-mismatch' });
+    await expect(verifyExactGraphContent(store, {
+      ...base,
+      expectedPublicQuadsDigest: matching.publicQuadsDigest,
+    })).resolves.toMatchObject({ status: 'verified' });
+  });
+
+  it('settles a RECEIVED inbox row after the workspace head is lost and its receipt moves', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-received-vm-settle-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
     try {
@@ -3192,12 +3229,19 @@ describe('graph-scoped finalization handler', () => {
         kaUal: UAL,
       })).resolves.toBeUndefined();
 
+      const movedReceipt = canonicalReceipt(message);
+      movedReceipt.receipt = {
+        ...movedReceipt.receipt,
+        blockNumber: 124,
+        blockHash: `0x${'ef'.repeat(32)}`,
+        txIndex: 7,
+      };
       const chain = {
         chainId: 'base:84532',
         getLatestMerkleRoot: async () => message.kcMerkleRoot,
         getMerkleRootCount: async () => 1n,
         getKAContextGraphId: async () => 42n,
-        resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+        resolveCanonicalFinalizationReceipt: async () => movedReceipt,
       } as ChainAdapter;
       inbox = await openSqliteFinalizationRecoveryStore(directory);
       const recoveryHandler = new FinalizationHandler(
@@ -3220,8 +3264,12 @@ describe('graph-scoped finalization handler', () => {
       expect(await store.countQuads(vmGraph)).toBe(2);
       expect(await inbox.list()).toMatchObject([{
         state: 'SETTLED',
+        generation: 1,
         verifiedEvidence: {
           transactionHash: message.txHash,
+          blockNumber: 124,
+          blockHash: `0x${'ef'.repeat(32)}`,
+          txIndex: 7,
           publisherAddress: PUBLISHER,
           accessPolicy: 'ownerOnly',
         },
@@ -3230,6 +3278,51 @@ describe('graph-scoped finalization handler', () => {
       await closeInbox(inbox);
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('uses the confirmed VM namespace when a named workspace head is lost', async () => {
+    const { message, vmGraph } = await stageGraph(undefined, 'named-scope');
+    await store.insert(generateAssertionCreatedMetadata({
+      contextGraphId: CG,
+      agentAddress: AUTHOR,
+      assertionName: 'named-asset',
+      subGraphName: 'named-scope',
+      timestamp: new Date(),
+      kaNumber: 7,
+      reservedUal: UAL,
+    }, { provenanceEvents: false }));
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    await store.deleteByPattern({
+      graph: graphManager.sharedMemoryMetaUri(CG, 'named-scope'),
+      subject: `${UAL}#dkg-swm-head`,
+    });
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+      subGraphName: 'named-scope',
+    })).resolves.toBeUndefined();
+
+    const internals = handler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    const input = graphReconcileInput(message);
+    await expect(handler.handleExactChainReconciledKC(
+      input,
+      createOperationContext('system'),
+    )).resolves.toBe('already-confirmed');
+    await expect(handler.handleExactChainReconciledKC(
+      { ...input, subGraphName: 'named-scope' },
+      createOperationContext('system'),
+    )).resolves.toBe('already-confirmed');
+    await expect(handler.handleExactChainReconciledKC(
+      { ...input, subGraphName: 'different-scope' },
+      createOperationContext('system'),
+    )).resolves.toBe('no-swm');
+    expect(await store.countQuads(vmGraph)).toBe(2);
   });
 
   it('recognizes an exact confirmed VM copy when the mutable workspace head is corrupt', async () => {

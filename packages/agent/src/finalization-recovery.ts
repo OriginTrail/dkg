@@ -1905,7 +1905,8 @@ export class FinalizationRecovery<
     candidate: ParsedGraphScopedFinalization,
     replay: FinalizationRecoveryReplayInput,
   ): Promise<EnsuredVerifiedReplayEntry> {
-    const evidence = entry.state === 'VERIFIED'
+    const persistedEvidence = entry.state === 'VERIFIED';
+    const evidence = persistedEvidence
       ? entry.verifiedEvidence
       : await this.materializer.recoverVerifiedEvidence({
           replay,
@@ -1913,7 +1914,7 @@ export class FinalizationRecovery<
           candidate,
         });
     if (!evidence) {
-      if (entry.state === 'VERIFIED') {
+      if (persistedEvidence) {
         this.log.warn(
           `Finalization recovery VERIFIED entry has no evidence for ${entry.ual}`,
         );
@@ -1923,19 +1924,21 @@ export class FinalizationRecovery<
       return { status: 'unverified', entry };
     }
 
-    const matchesEnvelope = entry.generation > 0
-      ? VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
+    const matchesImmutableEnvelope =
+      VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
+        evidence,
+        candidate,
+        entry,
+      );
+    const matchesEnvelope = persistedEvidence && entry.generation === 0
+      ? VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
           evidence,
           candidate,
           entry,
         )
-      : VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
-          evidence,
-          candidate,
-          entry,
-        );
+      : matchesImmutableEnvelope;
     if (!matchesEnvelope) {
-      if (entry.state === 'VERIFIED') {
+      if (persistedEvidence) {
         this.log.warn(
           `Finalization recovery evidence does not match its envelope for ${entry.ual}`,
         );
@@ -1952,13 +1955,39 @@ export class FinalizationRecovery<
       return { status: 'unverified', entry };
     }
 
-    if (entry.state === 'VERIFIED') {
+    if (persistedEvidence) {
       return { status: 'verified', entry, evidence };
     }
-    const committed = await this.recordVerified(entry, evidence);
+
+    let commitEntry = entry;
+    if (
+      entry.generation === 0
+      && !VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
+        evidence,
+        candidate,
+        entry,
+      )
+    ) {
+      const reorged = await this.markReorged(
+        entry,
+        'independently recovered canonical receipt moved',
+      );
+      if (!reorged) return { status: 'unverified', entry };
+      const current = await this.getStore()?.get(entry.key);
+      if (
+        !current
+        || current.state !== 'REORGED'
+        || current.generation !== entry.generation + 1
+      ) {
+        return { status: 'invalid' };
+      }
+      commitEntry = current;
+    }
+
+    const committed = await this.recordVerified(commitEntry, evidence);
     return committed
       ? { status: 'verified', entry: committed, evidence }
-      : { status: 'unverified', entry };
+      : { status: 'unverified', entry: commitEntry };
   }
 
   private decodeEntry(

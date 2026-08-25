@@ -34,6 +34,7 @@ import {
 import {
   openSqliteFinalizationRecoveryStore,
 } from '../src/finalization-recovery-sqlite-store.js';
+import type { FinalizationRecoveryStore } from '../src/finalization-recovery-store.js';
 
 const CONTEXT_GRAPH = 'finalization-recovery-admission';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -875,6 +876,68 @@ describe('graph-scoped finalization recovery admission', () => {
           publisherAddress: PUBLISHER,
         },
       }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back without side effects when recovered evidence cannot be committed', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recover-commit-failed-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      const markVerified = vi.fn(async () => ({ status: 'closed' as const }));
+      const refusingStore = new Proxy(store, {
+        get(target, property) {
+          if (property === 'markVerified') return markVerified;
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }) as FinalizationRecoveryStore;
+      const prepare = vi.fn(recoveryMaterializer().prepare);
+      const apply = vi.fn(async () => 'applied' as const);
+      const recoverVerifiedEvidence = vi.fn(async () => verifiedEvidence());
+      const replayVerified = vi.fn(async () => 'already-confirmed' as const);
+      const chain = recoveryChain();
+      const recovery = new FinalizationRecovery(
+        refusingStore,
+        chain,
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          prepare,
+          apply,
+          recoverVerifiedEvidence,
+          replayVerified,
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await expect(recovery.replayMatching({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('none');
+
+      expect(recoverVerifiedEvidence).toHaveBeenCalledOnce();
+      expect(markVerified).toHaveBeenCalledTimes(2);
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(apply).not.toHaveBeenCalled();
+      expect(replayVerified).not.toHaveBeenCalled();
+      const [entry] = await store.list();
+      expect(entry).toMatchObject({
+        state: 'RECEIVED',
+        attemptCount: 1,
+      });
+      expect(entry?.verifiedEvidence).toBeUndefined();
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });

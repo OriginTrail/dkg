@@ -1,14 +1,10 @@
+import { createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import {
-  assertSafeIri,
-  createGraphKnowledgeAssetScope,
-} from '@origintrail-official/dkg-core';
-import {
-  computeFlatKCRootV10,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
-  workspacePublicQuadsDigest,
   type ConfirmedGraphKnowledgeAssetMetadataEnvelope,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import { verifyExactGraphContent } from './exact-graph-content-verifier.js';
 
 export interface ConfirmedGraphScopedVmResolutionInput {
   contextGraphId: string;
@@ -76,28 +72,27 @@ export async function resolveConfirmedGraphScopedVm(
     return { status: 'invalid', reason: 'identity' };
   }
 
-  const result = await store.query(
-    `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(envelope.assertionGraph)}> { ?s ?p ?o } }`,
-    { source: 'agent.finalization.resolveConfirmedGraphScopedVm' },
-  );
-  const quads = result.type === 'quads'
-    ? result.quads.map((quad) => ({ ...quad, graph: '' }))
-    : [];
-  if (quads.length !== envelope.publicTripleCount) {
+  const content = await verifyExactGraphContent(store, {
+    graphUri: envelope.assertionGraph,
+    publicTripleCount: envelope.publicTripleCount,
+    ...(envelope.privateMerkleRoot
+      ? { privateMerkleRoot: envelope.privateMerkleRoot }
+      : {}),
+    expectedMerkleRoot: input.merkleRoot,
+    includePublicQuadsDigest: true,
+    source: 'agent.finalization.resolveConfirmedGraphScopedVm',
+  });
+  if (content.status === 'count-mismatch') {
     return { status: 'invalid', reason: 'content-count' };
   }
-  const merkleRoot = computeFlatKCRootV10(
-    quads,
-    envelope.privateMerkleRoot ? [envelope.privateMerkleRoot] : [],
-  );
-  if (!equalBytes(merkleRoot, input.merkleRoot)) {
+  if (content.status !== 'verified' || !content.publicQuadsDigest) {
     return { status: 'invalid', reason: 'content-merkle' };
   }
   return {
     status: 'verified',
     envelope,
     scope,
-    quads,
-    publicQuadsDigest: workspacePublicQuadsDigest(quads),
+    quads: content.quads,
+    publicQuadsDigest: content.publicQuadsDigest,
   };
 }
