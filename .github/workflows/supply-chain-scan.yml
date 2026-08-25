@@ -49,6 +49,7 @@ on:
       - 'scripts/check-dependency-deny-list.mjs'
       - 'scripts/ci/enforce-zizmor-sarif.mjs'
       - 'scripts/ci/trusted-controller-pins.mjs'
+      - 'scripts/ci/validate-delta-rollout-ruleset.mjs'
       # Recursive filename deny-list entries that are themselves IoCs.
       # Keep this in sync with denied_filenames[] so an IoC-only PR
       # cannot avoid the scanner by touching no package metadata.
@@ -68,6 +69,7 @@ on:
       - 'scripts/check-dependency-deny-list.mjs'
       - 'scripts/ci/enforce-zizmor-sarif.mjs'
       - 'scripts/ci/trusted-controller-pins.mjs'
+      - 'scripts/ci/validate-delta-rollout-ruleset.mjs'
       - '.cursorrules'
       - '**/.cursorrules'
   schedule:
@@ -238,6 +240,52 @@ jobs:
           node scripts/ci/enforce-zizmor-sarif.mjs
           --sarif zizmor.sarif
           --scan-outcome "${SCAN_OUTCOME}"
+
+  ci-policy-prerequisites:
+    name: CI policy prerequisites (protected history + rulesets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install policy parser
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify controller provenance and testnet rollout safeguards
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          CONTROLLER_PINNED=$(node scripts/ci/trusted-controller-pins.mjs \
+            .github/workflows/ci.yml \
+            .github/workflows/evm-integration.yml)
+          DEFAULT_BRANCH=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')
+          CONTROLLER_PROVENANCE=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${CONTROLLER_PINNED}...${DEFAULT_BRANCH}" \
+            --jq '.status')
+          node scripts/ci/trusted-controller-pins.mjs \
+            --validate-provenance-status "${CONTROLLER_PROVENANCE}"
+
+          mapfile -t RULESET_IDS < <(
+            gh api "repos/${GITHUB_REPOSITORY}/rulesets" --paginate \
+              --jq '.[] | select(.enforcement == "active") | .id'
+          )
+          test "${#RULESET_IDS[@]}" -gt 0
+          RULESET_FILES=()
+          for ruleset_id in "${RULESET_IDS[@]}"; do
+            ruleset_file="${RUNNER_TEMP}/ruleset-${ruleset_id}.json"
+            gh api "repos/${GITHUB_REPOSITORY}/rulesets/${ruleset_id}" > "${ruleset_file}"
+            RULESET_FILES+=("${ruleset_file}")
+          done
+          node scripts/ci/validate-delta-rollout-ruleset.mjs \
+            --branch testnet-canary "${RULESET_FILES[@]}"
 
   dependency-deny-list:
     name: Dependency deny-list (named-package blocklist)
@@ -600,6 +648,13 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install policy parser
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Compare pinned CI tooling and controller policy
         env:
@@ -678,25 +733,57 @@ jobs:
             fi
           fi
 
-          # Trusted CI controller: the planner and aggregate gate deliberately
-          # execute from one immutable commit. Verify all call sites agree on
-          # that SHA and that its checked-out policy tree still matches the
-          # default branch. Policy changes therefore produce a weekly reminder
-          # until the reviewed controller pin is rotated in a follow-up PR.
+          # Trusted CI controller: structurally validate every checkout and
+          # consumer, prove the shared pin is reachable from the protected
+          # default branch, then compare only the canonical controller module.
+          # Unrelated CI helpers do not create controller-rotation noise.
           if CONTROLLER_PINNED=$(node scripts/ci/trusted-controller-pins.mjs \
-            .github/workflows/ci.yml=2 \
-            .github/workflows/evm-integration.yml=2); then
-            if git fetch --no-tags --depth=1 origin "${CONTROLLER_PINNED}" \
-              && git diff --quiet "${CONTROLLER_PINNED}" HEAD -- \
-                scripts/ci \
-                scripts/lib/ci-delta.mjs \
-                scripts/lib/ci-results.mjs; then
+            .github/workflows/ci.yml \
+            .github/workflows/evm-integration.yml); then
+            DEFAULT_BRANCH=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')
+            CONTROLLER_PROVENANCE=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/compare/${CONTROLLER_PINNED}...${DEFAULT_BRANCH}" \
+              --jq '.status' || true)
+            mapfile -t CONTROLLER_FILES < <(
+              node scripts/ci/trusted-controller-pins.mjs --list-controller-files
+            )
+            if ! node scripts/ci/trusted-controller-pins.mjs \
+              --validate-provenance-status "${CONTROLLER_PROVENANCE}"; then
+              report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" "protected ${DEFAULT_BRANCH} history" '⚠ untrusted provenance'
+            elif git fetch --no-tags --depth=1 origin "${CONTROLLER_PINNED}" \
+              && git diff --quiet "${CONTROLLER_PINNED}" HEAD -- "${CONTROLLER_FILES[@]}"; then
               report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" 'default-branch policy tree' '✓ current'
             else
               report 'trusted CI controller' "${CONTROLLER_PINNED:0:12}" 'default-branch policy tree' '⚠ policy drift'
             fi
           else
             report 'trusted CI controller' '?' 'one shared immutable SHA' '⚠ invalid checkout model'
+          fi
+
+          # Delta CI on testnet-canary is safe only while repository policy
+          # requires PRs, both aggregate gates, and the merge queue. Fetch every
+          # active ruleset through the API and validate the branch semantically.
+          mapfile -t RULESET_IDS < <(
+            gh api "repos/${GITHUB_REPOSITORY}/rulesets" --paginate \
+              --jq '.[] | select(.enforcement == "active") | .id'
+          )
+          RULESET_FILES=()
+          RULESET_FETCH_OK=1
+          for ruleset_id in "${RULESET_IDS[@]}"; do
+            ruleset_file="${RUNNER_TEMP}/ruleset-${ruleset_id}.json"
+            if gh api "repos/${GITHUB_REPOSITORY}/rulesets/${ruleset_id}" > "${ruleset_file}"; then
+              RULESET_FILES+=("${ruleset_file}")
+            else
+              RULESET_FETCH_OK=0
+            fi
+          done
+          if [ "${RULESET_FETCH_OK}" -eq 1 ] \
+            && [ "${#RULESET_FILES[@]}" -gt 0 ] \
+            && node scripts/ci/validate-delta-rollout-ruleset.mjs \
+              --branch testnet-canary "${RULESET_FILES[@]}"; then
+            report 'testnet-canary delta safeguards' 'active ruleset' 'PR + queue + aggregate gates' '✓ current'
+          else
+            report 'testnet-canary delta safeguards' '?' 'PR + queue + aggregate gates' '⚠ prerequisites missing'
           fi
 
           # shellcheck disable=SC2016

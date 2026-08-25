@@ -3,78 +3,120 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { parse as parseYaml } from 'yaml';
 
-const CHECKOUT_PATTERN = /actions\/checkout@[0-9a-f]{40}/;
+const CHECKOUT_PATTERN = /^actions\/checkout@[0-9a-f]{40}$/;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
+const TRUSTED_SCRIPT_PATTERN = /\btrusted-ci\/scripts\/ci\/(plan-ci|assert-ci-results)\.mjs\b/g;
 
-function scalarFromBlock(block, key) {
-  const matches = [...block.matchAll(new RegExp(`^\\s+${key}:\\s*([^#\\n]+?)\\s*$`, 'gm'))];
-  if (matches.length !== 1) return undefined;
-  return matches[0][1].replace(/^['"]|['"]$/g, '');
+// This is the controller's module boundary. Workflow sparse checkouts and the
+// scheduled freshness comparison are both validated against this exact list;
+// unrelated scripts/ci helpers do not require controller rotation.
+export const CONTROLLER_POLICY_FILES = Object.freeze([
+  'scripts/ci/plan-ci.mjs',
+  'scripts/ci/assert-ci-results.mjs',
+  'scripts/lib/ci-delta.mjs',
+  'scripts/lib/ci-results.mjs',
+]);
+
+export function isProtectedHistoryComparison(status) {
+  return status === 'ahead' || status === 'identical';
+}
+
+function trustedScriptNames(step) {
+  if (typeof step?.run !== 'string') return [];
+  return [...step.run.matchAll(TRUSTED_SCRIPT_PATTERN)].map((match) => match[1]);
+}
+
+function sparseCheckoutPaths(step, context) {
+  const sparseCheckout = step?.with?.['sparse-checkout'];
+  if (typeof sparseCheckout !== 'string') {
+    throw new Error(`${context}: trusted checkout needs a sparse-checkout file list`);
+  }
+  const paths = sparseCheckout.split('\n').map((entry) => entry.trim()).filter(Boolean);
+  if (
+    paths.length !== CONTROLLER_POLICY_FILES.length
+    || paths.some((entry, index) => entry !== CONTROLLER_POLICY_FILES[index])
+  ) {
+    throw new Error(`${context}: trusted checkout must use the canonical controller file list`);
+  }
+  return paths;
 }
 
 export function trustedControllerCheckouts(source, sourceName = '<workflow>') {
-  const lines = source.split('\n');
+  let workflow;
+  try {
+    workflow = parseYaml(source);
+  } catch (error) {
+    throw new Error(`${sourceName}: invalid workflow YAML: ${error.message}`);
+  }
+  if (!workflow?.jobs || typeof workflow.jobs !== 'object' || Array.isArray(workflow.jobs)) {
+    throw new Error(`${sourceName}: workflow must contain a jobs mapping`);
+  }
+
   const checkouts = [];
+  const scriptCounts = new Map([
+    ['plan-ci', 0],
+    ['assert-ci-results', 0],
+  ]);
 
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const pathMatch = lines[lineIndex].match(/^(\s+)path:\s*trusted-ci\s*(?:#.*)?$/);
-    if (!pathMatch) continue;
+  for (const [jobName, job] of Object.entries(workflow.jobs)) {
+    const steps = job?.steps;
+    if (!Array.isArray(steps)) continue;
 
-    let stepStart = -1;
-    let stepIndent = -1;
-    for (let cursor = lineIndex; cursor >= 0; cursor -= 1) {
-      const stepMatch = lines[cursor].match(/^(\s*)-\s+(?:name|uses):/);
-      if (stepMatch && stepMatch[1].length < pathMatch[1].length) {
-        stepStart = cursor;
-        stepIndent = stepMatch[1].length;
-        break;
+    const consumers = [];
+    for (const [stepIndex, step] of steps.entries()) {
+      for (const scriptName of trustedScriptNames(step)) {
+        consumers.push({ stepIndex, scriptName });
+        scriptCounts.set(scriptName, scriptCounts.get(scriptName) + 1);
       }
     }
-    if (stepStart === -1) {
-      throw new Error(`${sourceName}:${lineIndex + 1}: trusted-ci path is not inside a workflow step`);
+    if (consumers.length === 0) continue;
+
+    const trustedCheckouts = steps
+      .map((step, stepIndex) => ({ step, stepIndex }))
+      .filter(({ step }) => step?.with?.path === 'trusted-ci');
+    const context = `${sourceName}: job ${jobName}`;
+    if (trustedCheckouts.length !== 1) {
+      throw new Error(`${context}: expected one trusted-ci checkout, found ${trustedCheckouts.length}`);
     }
 
-    let stepEnd = lines.length;
-    for (let cursor = stepStart + 1; cursor < lines.length; cursor += 1) {
-      const nextStep = lines[cursor].match(/^(\s*)-\s+(?:name|uses):/);
-      if (nextStep && nextStep[1].length === stepIndent) {
-        stepEnd = cursor;
-        break;
-      }
+    const [{ step, stepIndex }] = trustedCheckouts;
+    if (stepIndex >= Math.min(...consumers.map((consumer) => consumer.stepIndex))) {
+      throw new Error(`${context}: trusted checkout must precede its controller consumer`);
     }
-    const block = lines.slice(stepStart, stepEnd).join('\n');
-    if (!CHECKOUT_PATTERN.test(block)) {
-      throw new Error(`${sourceName}:${lineIndex + 1}: trusted-ci path must belong to a SHA-pinned checkout step`);
+    if (typeof step.uses !== 'string' || !CHECKOUT_PATTERN.test(step.uses)) {
+      throw new Error(`${context}: trusted-ci must use actions/checkout pinned to a 40-character SHA`);
     }
+    sparseCheckoutPaths(step, context);
     checkouts.push({
       sourceName,
-      line: lineIndex + 1,
-      repository: scalarFromBlock(block, 'repository'),
-      ref: scalarFromBlock(block, 'ref'),
+      jobName,
+      uses: step.uses,
+      repository: step.with?.repository,
+      ref: step.with?.ref,
     });
+  }
+
+  for (const [scriptName, count] of scriptCounts) {
+    if (count !== 1) {
+      throw new Error(`${sourceName}: expected one trusted ${scriptName} consumer, found ${count}`);
+    }
   }
   return checkouts;
 }
 
 export function validateTrustedControllerPins(workflows) {
-  const allCheckouts = [];
-  for (const workflow of workflows) {
-    const checkouts = trustedControllerCheckouts(workflow.source, workflow.sourceName);
-    if (checkouts.length !== workflow.expectedCount) {
-      throw new Error(
-        `${workflow.sourceName}: expected ${workflow.expectedCount} trusted-ci checkouts, found ${checkouts.length}`,
-      );
-    }
-    allCheckouts.push(...checkouts);
-  }
+  const allCheckouts = workflows.flatMap((workflow) => (
+    trustedControllerCheckouts(workflow.source, workflow.sourceName)
+  ));
 
   for (const checkout of allCheckouts) {
     if (checkout.repository !== 'OriginTrail/dkg') {
-      throw new Error(`${checkout.sourceName}:${checkout.line}: trusted checkout must use OriginTrail/dkg`);
+      throw new Error(`${checkout.sourceName}: job ${checkout.jobName}: trusted checkout must use OriginTrail/dkg`);
     }
     if (!SHA_PATTERN.test(checkout.ref ?? '')) {
-      throw new Error(`${checkout.sourceName}:${checkout.line}: trusted checkout needs an immutable 40-character ref`);
+      throw new Error(`${checkout.sourceName}: job ${checkout.jobName}: trusted checkout needs an immutable 40-character ref`);
     }
   }
 
@@ -85,25 +127,28 @@ export function validateTrustedControllerPins(workflows) {
   return { ref: allCheckouts[0].ref, checkouts: allCheckouts };
 }
 
-function parseWorkflowArgument(argument) {
-  const separator = argument.lastIndexOf('=');
-  if (separator <= 0) throw new Error(`expected WORKFLOW=COUNT, received: ${argument}`);
-  const filePath = argument.slice(0, separator);
-  const expectedCount = Number(argument.slice(separator + 1));
-  if (!Number.isInteger(expectedCount) || expectedCount < 1) {
-    throw new Error(`invalid trusted checkout count in: ${argument}`);
-  }
+function workflowFromPath(filePath) {
   return {
     sourceName: filePath,
     source: fs.readFileSync(filePath, 'utf8'),
-    expectedCount,
   };
 }
 
 export function runTrustedControllerValidator(argv) {
   try {
-    if (argv.length === 0) throw new Error('provide at least one WORKFLOW=COUNT argument');
-    const result = validateTrustedControllerPins(argv.map(parseWorkflowArgument));
+    if (argv.length === 1 && argv[0] === '--list-controller-files') {
+      console.log(CONTROLLER_POLICY_FILES.join('\n'));
+      return 0;
+    }
+    if (argv.length === 2 && argv[0] === '--validate-provenance-status') {
+      if (!isProtectedHistoryComparison(argv[1])) {
+        throw new Error(`controller comparison status is ${argv[1] || 'missing'}`);
+      }
+      console.log(`controller is reachable from protected history (${argv[1]})`);
+      return 0;
+    }
+    if (argv.length === 0) throw new Error('provide at least one workflow path');
+    const result = validateTrustedControllerPins(argv.map(workflowFromPath));
     console.log(result.ref);
     return 0;
   } catch (error) {

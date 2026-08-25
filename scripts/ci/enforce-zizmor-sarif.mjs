@@ -24,6 +24,10 @@ export function evaluateZizmorSarif({ scanOutcome, sarif }) {
     if (!run || typeof run !== 'object' || Array.isArray(run)) {
       return { ok: false, message: `zizmor SARIF run ${index} is malformed` };
     }
+    const driverName = run.tool?.driver?.name;
+    if (typeof driverName !== 'string' || driverName.toLowerCase() !== 'zizmor') {
+      return { ok: false, message: `zizmor SARIF run ${index} has an invalid tool driver` };
+    }
     if (run.results !== undefined && !Array.isArray(run.results)) {
       return { ok: false, message: `zizmor SARIF run ${index} has a non-array results field` };
     }

@@ -462,8 +462,8 @@ test('workflows execute the planner and aggregate gates from one immutable trust
   }
 
   const controller = validateTrustedControllerPins([
-    { sourceName: 'primary', source: workflows.get('primary'), expectedCount: 2 },
-    { sourceName: 'evm', source: workflows.get('evm'), expectedCount: 2 },
+    { sourceName: 'primary', source: workflows.get('primary') },
+    { sourceName: 'evm', source: workflows.get('evm') },
   ]);
   assert.equal(controller.ref, TRUSTED_CI_CONTROLLER_SHA);
   assert.equal(controller.checkouts.length, 4);
