@@ -151,8 +151,12 @@ describe('origin identity, proven end-to-end through the config boundary', () =>
     ])).toEqual(['https://a.example.com/rpc', 'https://b.example.com/']);
   });
 
-  it('rejects credentialed URLs before they reach native fetch', () => {
-    expect(() => sel(['https://user:pass@a.example.com/rpc']))
+  it.each([
+    'https://user@a.example.com/rpc',
+    'https://:pass@a.example.com/rpc',
+    'https://user:pass@a.example.com/rpc',
+  ])('rejects credentialed URL %s before it reaches native fetch', (endpoint) => {
+    expect(() => sel([endpoint]))
       .toThrow(/must not contain username or password credentials/);
   });
 
