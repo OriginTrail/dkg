@@ -110,5 +110,27 @@ const totals = unitTotals(T, pair);
 ok("D-log-2 void (undelivered) counts nothing on either side", totals["qwen14b"] === 500);
 ok("D-log-3 running totals per offering (checkpoint substrate)", totals["okf-knowledge"] === 41);
 
+// ── query cost schedule (G19) ──────────────────────────────────────────────
+console.log("— query cost schedule —");
+const { SCHEDULE_V1, scheduleDigest, analyzeQuery, admissionUnits, deliveryUnits, unitsForOutcome } = await import(join(DIST, "subs/query-cost.js"));
+ok("D-q-1 schedule is content-addressed and stable",
+   scheduleDigest(SCHEDULE_V1) === scheduleDigest({ ...SCHEDULE_V1 }));
+ok("D-q-2 digest changes when any term changes",
+   scheduleDigest(SCHEDULE_V1) !== scheduleDigest({ ...SCHEDULE_V1, base: 3 }));
+const simple = "SELECT ?s WHERE { ?s <p> ?o . } LIMIT 20";
+const heavy = `SELECT ?a (COUNT(?c) AS ?n) WHERE {
+  ?a <p1> ?b . ?b <p2>/<p3> ?c . OPTIONAL { ?c <p4> ?d . }
+  ?a <p5> ?e . FILTER(?e > 5) } GROUP BY ?a`;
+ok("D-q-3 aggregation-heavy query costs visibly more than a simple lookup",
+   admissionUnits(heavy) > admissionUnits(simple) * 3, `${admissionUnits(heavy)} vs ${admissionUnits(simple)}`);
+ok("D-q-4 missing LIMIT carries the surcharge",
+   admissionUnits("SELECT ?s WHERE { ?s <p> ?o . }") === admissionUnits(simple) + SCHEDULE_V1.missingLimitSurcharge);
+ok("D-q-5 both seats compute identical units from identical bytes",
+   admissionUnits(heavy) === admissionUnits(heavy) && JSON.stringify(analyzeQuery(heavy)) === JSON.stringify(analyzeQuery(heavy)));
+const delivered = unitsForOutcome(simple, { kind: "delivered", rows: 200 });
+const aborted = unitsForOutcome(heavy, { kind: "aborted", reason: "scan-budget" });
+ok("D-q-6 delivery adds per-returned-result weight", delivered.total === delivered.admission + deliveryUnits(200));
+ok("D-q-7 guard-aborted query keeps ONLY its admission cost", aborted.delivery === 0 && aborted.total === aborted.admission && aborted.total > 0);
+
 console.log(`\n${pass}/${pass + fail} v5 core drills pass`);
 process.exit(fail ? 1 : 0);
