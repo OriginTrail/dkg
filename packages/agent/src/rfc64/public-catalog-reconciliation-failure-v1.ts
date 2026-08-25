@@ -54,6 +54,7 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
   /** Start a new semantic attempt without changing immutable diagnostic history. */
   beginAttempt(catalogHeadDigest: Digest32V1): Rfc64CatalogReconciliationAttemptTokenV1 {
     const token = ++this.#attemptSequence;
+    evictOldestWhenFullV1(this.#currentAttemptTokens);
     this.#currentAttemptTokens.set(catalogHeadDigest, token);
     this.#currentAttemptFailures.delete(catalogHeadDigest);
     return token;
@@ -104,6 +105,15 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
     this.#currentAttemptTokens.delete(catalogHeadDigest);
   }
 
+  /** Release only the exact terminal attempt token; retain its failure result. */
+  endAttempt(
+    catalogHeadDigest: Digest32V1,
+    attemptToken: Rfc64CatalogReconciliationAttemptTokenV1,
+  ): void {
+    if (this.#currentAttemptTokens.get(catalogHeadDigest) !== attemptToken) return;
+    this.#currentAttemptTokens.delete(catalogHeadDigest);
+  }
+
   read(catalogHeadDigest: Digest32V1): Rfc64PublicCatalogReconciliationFailureV1 | null {
     const failure = this.#failures.get(catalogHeadDigest);
     return failure === undefined ? null : failure;
@@ -124,6 +134,16 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
   /** Internal test/diagnostic bound assertion; never exposed on DKGAgent. */
   get size(): number {
     return this.#failures.size;
+  }
+
+  /** Internal test/diagnostic bound assertion; never exposed on DKGAgent. */
+  get currentAttemptFailureSize(): number {
+    return this.#currentAttemptFailures.size;
+  }
+
+  /** Internal test/diagnostic bound assertion; never exposed on DKGAgent. */
+  get currentAttemptTokenSize(): number {
+    return this.#currentAttemptTokens.size;
   }
 }
 

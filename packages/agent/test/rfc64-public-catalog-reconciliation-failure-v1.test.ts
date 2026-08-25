@@ -59,7 +59,50 @@ describe('RFC-64 public catalog terminal failure registry v1', () => {
 
     registry.clear();
     expect(registry.size).toBe(0);
+    expect(registry.currentAttemptFailureSize).toBe(0);
+    expect(registry.currentAttemptTokenSize).toBe(0);
     expect(registry.read(digest(1))).toBeNull();
+  });
+
+  it('releases terminal attempt tokens while bounding retained failure state', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    for (
+      let index = 1;
+      index <= RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1 + 32;
+      index += 1
+    ) {
+      const head = digest(index);
+      const token = registry.beginAttempt(head);
+      registry.record(
+        head,
+        Object.assign(new Error('terminal'), { code: 'terminal-code' }),
+        null,
+        token,
+      );
+      registry.endAttempt(head, token);
+    }
+
+    expect(registry.currentAttemptTokenSize).toBe(0);
+    expect(registry.currentAttemptFailureSize).toBe(
+      RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+    );
+    expect(registry.size).toBe(
+      RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+    );
+  });
+
+  it('bounds active attempt tokens when a lifecycle callback is lost', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    for (
+      let index = 1;
+      index <= RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1 + 32;
+      index += 1
+    ) {
+      registry.beginAttempt(digest(index));
+    }
+    expect(registry.currentAttemptTokenSize).toBe(
+      RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+    );
   });
 
   it('retains one stable typed cause code without retaining cause text', () => {

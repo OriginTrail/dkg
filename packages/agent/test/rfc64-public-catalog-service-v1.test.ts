@@ -29,6 +29,7 @@ import {
 } from '../src/rfc64/public-catalog-service-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
+  parseRfc64PublicCatalogCurrentHeadQueryV1,
 } from '../src/rfc64/public-catalog-current-head-discovery-v1.js';
 import {
   RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2,
@@ -64,6 +65,7 @@ type RouterHandler = (
 class RecordingRouter {
   readonly handlers = new Map<string, RouterHandler>();
   readonly events: string[] = [];
+  readonly sends: Array<Readonly<{ protocolId: string; data: Uint8Array }>> = [];
   failRegistrationFor: string | undefined;
   sendResponse: (protocolId: string) => Promise<Uint8Array> = async () => Uint8Array.of(0);
 
@@ -83,9 +85,10 @@ class RecordingRouter {
   async send(
     _peerId: string,
     protocolId: string,
-    _data: Uint8Array,
+    data: Uint8Array,
   ): Promise<Uint8Array> {
     this.events.push(`send:${protocolId}`);
+    this.sends.push(Object.freeze({ protocolId, data }));
     return this.sendResponse(protocolId);
   }
 
@@ -427,6 +430,40 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       router,
       `send:${RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1}`,
     )).toBe(0);
+    await service.close();
+  });
+
+  it('preserves named current-head discovery for public catalogs', async () => {
+    const router = new RecordingRouter();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+    });
+    acceptPolicy(service);
+    service.start();
+
+    await expect(service.discoverCurrentCatalogHead({
+      remotePeerId: 'peer-public-provider',
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: 'service-lane',
+        authorAddress: AUTHOR,
+        catalogEra: '0',
+      },
+    })).resolves.toBeNull();
+    expect(countEvent(
+      router,
+      `send:${RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1}`,
+    )).toBe(1);
+    const sent = router.sends.find(
+      ({ protocolId }) => protocolId === RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
+    );
+    expect(sent).toBeDefined();
+    expect(parseRfc64PublicCatalogCurrentHeadQueryV1(sent!.data).subGraphName)
+      .toBe('service-lane');
     await service.close();
   });
 

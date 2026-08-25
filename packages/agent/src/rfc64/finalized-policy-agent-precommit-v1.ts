@@ -52,6 +52,9 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
   options: Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1,
   plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
   signal: AbortSignal,
+  assertAcceptedPolicyBeforeChainResolution?: (
+    acceptedPolicy: Readonly<AcceptedRfc64CatalogAccessSnapshotV1>,
+  ) => void,
 ): Promise<Readonly<ResolvedRfc64FinalizedPolicyAgentPrecommitV1> | null> {
   signal.throwIfAborted();
   const untrustedAcceptedPolicy = options.acceptedPolicySnapshotForCatalogScope(
@@ -96,6 +99,7 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
     policyDigest: untrustedAcceptedPolicy.policyDigest,
     roster,
   });
+  assertAcceptedPolicyBeforeChainResolution?.(acceptedPolicy);
   const chainId = policy.governanceChainId;
   const contextGraphStorageAddress = policy.governanceContractAddress;
   if (

@@ -909,7 +909,7 @@ export class Rfc64PublicCatalogServiceV1 {
       );
     }
     try {
-      if (input.subGraphName !== null) {
+      if (record.policy.accessPolicy === 1 && input.subGraphName !== null) {
         throw new Error(
           'RFC-64 current-head discovery supports only the root catalog lane',
         );
@@ -935,7 +935,7 @@ export class Rfc64PublicCatalogServiceV1 {
         governanceChainId: record.policy.governanceChainId,
         governanceContractAddress: record.policy.governanceContractAddress,
         ownershipTransitionDigest: record.policy.ownershipTransitionDigest,
-        subGraphName: null,
+        subGraphName: input.subGraphName,
         authorAddress: input.authorAddress,
         era: record.policy.era,
         bucketCount: '1',

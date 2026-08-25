@@ -657,6 +657,9 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       onReconciliationAttemptSuccess: (head, attemptToken) => {
         registry.completeAttempt(head.catalogHeadObjectDigest, attemptToken);
       },
+      onReconciliationAttemptEnd: (head, attemptToken) => {
+        registry.endAttempt(head.catalogHeadObjectDigest, attemptToken);
+      },
       onError: (head, error, attemptToken) => {
         registry.record(
           head.catalogHeadObjectDigest,
@@ -676,6 +679,47 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(reconciledPolicies).toEqual([older.policyDigest, newer.policyDigest]);
     expect(receiver.stats()).toMatchObject({ failed: 1, applied: 1 });
     expect(registry.readCurrentAttempt(older.catalogHeadObjectDigest)).toBeNull();
+  });
+
+  it('ends attempt tokens after terminal not-found and failed outcomes', async () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const notFoundHead = headWith(`0x${'a3'.repeat(32)}`);
+    const failedHead = headWith(`0x${'a4'.repeat(32)}`);
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      if (head.catalogHeadObjectDigest === notFoundHead.catalogHeadObjectDigest) {
+        return 'not-found';
+      }
+      throw Object.assign(new Error('terminal failure'), { code: 'terminal-failure' });
+    }), {
+      maxAttempts: 1,
+      retryBackoffMs: 0,
+      onReconciliationAttemptStart: (head) => (
+        registry.beginAttempt(head.catalogHeadObjectDigest)
+      ),
+      onReconciliationAttemptEnd: (head, attemptToken) => {
+        registry.endAttempt(head.catalogHeadObjectDigest, attemptToken);
+      },
+      onError: (head, error, attemptToken) => {
+        registry.record(
+          head.catalogHeadObjectDigest,
+          error,
+          null,
+          attemptToken ?? undefined,
+        );
+      },
+    });
+
+    receiver.schedule(notFoundHead, 'peer-not-found');
+    receiver.schedule(failedHead, 'peer-failed');
+    await receiver.whenIdle();
+
+    expect(receiver.stats()).toMatchObject({ notFound: 1, failed: 1 });
+    expect(registry.currentAttemptTokenSize).toBe(0);
+    expect(registry.currentAttemptFailureSize).toBe(1);
+    expect(registry.readCurrentAttempt(notFoundHead.catalogHeadObjectDigest)).toBeNull();
+    expect(registry.readCurrentAttempt(failedHead.catalogHeadObjectDigest)).toMatchObject({
+      errorCode: 'terminal-failure',
+    });
   });
 
   it('serializes different heads in one catalog scope', async () => {

@@ -119,11 +119,17 @@ describe('RFC-64 finalized VM agent precommit', () => {
   it('applies the root-only restriction to private finalized recovery', async () => {
     const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
     const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
+    const getKnowledgeAssetStorageAddress = vi.fn(async () => RFC64_VM_KA_STORAGE);
+    const getKnowledgeAssetsLifecycleAddress = vi.fn(async () => RFC64_VM_KA_STORAGE);
+    const materialize = vi.fn();
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...baseOptions(),
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
       getOnChainContextGraphId,
       getEvmChainId,
+      getKnowledgeAssetStorageAddress,
+      getKnowledgeAssetsLifecycleAddress,
+      materialize,
     });
     const namedPlan = {
       ...plan(),
@@ -134,8 +140,11 @@ describe('RFC-64 finalized VM agent precommit', () => {
       name: 'FinalizedVmCompositionErrorV1',
       code: 'finalized-vm-composition-input',
     } satisfies Partial<FinalizedVmCompositionErrorV1>);
-    expect(getOnChainContextGraphId).toHaveBeenCalledOnce();
-    expect(getEvmChainId).toHaveBeenCalledOnce();
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
+    expect(getEvmChainId).not.toHaveBeenCalled();
+    expect(getKnowledgeAssetStorageAddress).not.toHaveBeenCalled();
+    expect(getKnowledgeAssetsLifecycleAddress).not.toHaveBeenCalled();
+    expect(materialize).not.toHaveBeenCalled();
   });
 
   it('does not apply the private root-only restriction to a public finalized lane', async () => {

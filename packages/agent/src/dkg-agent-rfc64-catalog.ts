@@ -313,6 +313,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             attemptToken,
           );
         },
+        onReconciliationAttemptEnd: (announcement, attemptToken) => {
+          this.rfc64PublicCatalogReconciliationFailuresV1.endAttempt(
+            announcement.catalogHeadObjectDigest,
+            attemptToken,
+          );
+        },
         onError: (announcement, error, attemptToken) => {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
             announcement.catalogHeadObjectDigest,
