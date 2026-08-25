@@ -17,8 +17,8 @@
 // An unpinned seller key makes check 5 UNVERIFIABLE — reported as withhold
 // E_LEG_SIGNATURE, never as a pass.
 import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
-import { canonicalize } from "../core/ledger.js";
-import { LEG_DOMAIN_V3 } from "../seller/front.js";
+import { canonicalize } from "../core/canonical.js";
+import { LEG_DOMAIN_V3 } from "../dispute/domains.js";
 import { CHAT_TEMPLATE_CONSTANTS } from "../seller/connector-openai.js";
 import type { BpeEngine } from "./bpe.js";
 

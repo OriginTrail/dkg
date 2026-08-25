@@ -7,7 +7,7 @@
 // swm/share) — the same lane every Iteration-2 registry artifact used. SWM is
 // the safe, immediate registry; on-chain (VM) publication is a separate,
 // operator-gated money step and is NOT performed here.
-import type { OfferingBinding } from "./front.js";
+import type { OfferingBinding } from "./binding.js";
 import { buildModelKaQuads, modelKaFromBinding } from "./model-ka.js";
 
 export const NSM = "https://w3id.org/neurosymbolic-marketplace/nsm#";

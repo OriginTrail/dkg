@@ -233,5 +233,43 @@ ok("D-gw-6 failure did not decrement the meter",
    admit(G, { plan: gplan, offeringId: "okf-knowledge" }).allowance.consumedUnits === 0);
 ok("D-gw-7 I2/I5 hold after gateway traffic", checkI2(G, gplan).ok && checkI5(G).ok);
 
+// ── kill-list + probe sweep (rule 2 absolute; G13/G22) ─────────────────────
+console.log("— kill-list & probes —");
+const { readdirSync, existsSync: fsx, readFileSync: rfx } = await import("node:fs");
+const SRC = new URL("../../src/", import.meta.url).pathname;
+const DELETED = ["core/deposit-rail.ts", "core/ledger.ts", "core/inference-quote.ts",
+  "seller/front.ts", "seller/tabs.ts", "seller/lifecycle.ts",
+  "buyer/actions.ts", "buyer/client.ts", "gateway/router.ts", "lane/client.ts", "lane/executor.ts"];
+ok("D-kill-1 every tab-rail module is physically deleted", DELETED.every((f) => !fsx(join(SRC, f))));
+
+function allSrc(dir) {
+  const out = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.name === "__tests__" || e.name.startsWith(".")) continue;
+    const p = join(dir, e.name);
+    if (e.isDirectory()) out.push(...allSrc(p));
+    else if (e.name.endsWith(".ts")) out.push(p);
+  }
+  return out;
+}
+const srcFiles = allSrc(SRC);
+const refundish = srcFiles.filter((f) => /\brefund|withdraw(al)?\b|\bsettle(ment)?\b/i.test(rfx(f, "utf8"))
+  && !/tab-rail deletion|nothing here refunds|refunds nowhere|refund-shaped|have no handlers/.test(rfx(f, "utf8")));
+ok("D-kill-2 nothing refund-shaped survives in src (comment-acknowledged mentions only)",
+   refundish.length === 0, refundish.join(", "));
+const pluginSrc = rfx(join(SRC, "plugin.ts"), "utf8");
+const TABPATHS = ["/tab", "/deposit", "/refund", "/withdraw", "/settle", "/credit", "/release"];
+ok("D-kill-3 plugin registers NO handler for any tab-rail path",
+   TABPATHS.every((p) => !pluginSrc.includes(`BASE + "${p}`)));
+ok("D-kill-4 no auto-renewal or reset scheduling anywhere",
+   srcFiles.every((f) => !/setInterval[^)]*renew|autoRenew|\brenewPlan\b/i.test(rfx(f, "utf8"))));
+
+// data-copy probe rides along (rider 2 made it part of the fixture suite)
+const { execFileSync } = await import("node:child_process");
+let probeOk = true;
+try { execFileSync(process.execPath, [join(SRC, "../../..", "docs/ui-spec/mockups/p5/copy-probe.mjs")], { stdio: "pipe" }); }
+catch { probeOk = false; }
+ok("D-copy-1 zero unkeyed strings in the runthrough (copy-probe)", probeOk);
+
 console.log(`\n${pass}/${pass + fail} v5 core drills pass`);
 process.exit(fail ? 1 : 0);

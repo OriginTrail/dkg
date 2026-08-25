@@ -8,7 +8,7 @@
 //
 // The UI rule that pairs with this (CLAUDE.md §7): endpoints render ONLY from
 // the live signed quote; the Model KA carries identity, never endpoints.
-import type { OfferingBinding } from "./front.js";
+import type { OfferingBinding } from "./binding.js";
 import { NSM, type Quad } from "./offering.js";
 
 const RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";

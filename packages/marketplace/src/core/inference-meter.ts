@@ -1,6 +1,6 @@
-// V2 — inference metering. Prices and binds a served model call so it settles
-// through the SAME spine as read metering (deposit → EIP-191 → leg → gradual
-// release → countersign → close → on-chain withdrawal), unchanged.
+// P5 role: the recount core of the DISPUTE ENGINE and spot-checks — prices
+// and binds a served call's counts so either seat can recompute them from
+// bytes both hold. Its tab-era lifecycle is gone (tab-rail deletion).
 //
 // Receipt contract ratified by Hermes/Bo (buyer seat, event d4146b41), then
 // REVISED after his adversarial pass (event 1571496d) which blocked v0.4:
@@ -27,7 +27,7 @@
 // RECOUNT VERIFY takes an injected tokenizer (a real HF tokenizer at runtime, a
 // stub in unit gates, the BUYER's local bundle when he recounts).
 import { createHash } from "node:crypto";
-import { canonicalize } from "./ledger.js";
+import { canonicalize } from "./canonical.js";
 
 const sha256hex = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 const sha256 = (b: string | Buffer) => "sha256:" + sha256hex(b);

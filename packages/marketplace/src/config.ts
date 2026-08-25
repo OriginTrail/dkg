@@ -74,6 +74,16 @@ export interface MarketplaceConfig {
    *  this context graph (the reviewed HTTP front is unchanged; the lane tunnels
    *  it over shared-memory gossip). Absent ⇒ HTTP-only, no lane. */
   laneContextGraphId?: string;
+  /** P5 subscription rail — the DEDICATED subscription-revenue wallet.
+   *  Buyer payments land here and only here; the ops wallet never holds
+   *  customer funds (bug #12 made structurally unrepeatable). */
+  revenueWallet?: string;
+  /** P5: the open Marketplace Registry CG (Model KAs, offers/asks,
+   *  tokenizer bundles, cost schedule). Default "nsm-registry". */
+  registryContextGraphId?: string;
+  /** P5: SAFE-HEAD confirmations required before a period payment enrolls
+   *  a subscription (default 3; compressed devnet periods may use 1). */
+  confirmationDepth?: number;
   /** transports the signed quote ADVERTISES (["direct"], ["lane"], or both).
    *  Absent ⇒ ["direct","lane"] (the historical default). Found by Hermes
    *  (event 833d6ef0): this field was silently dropped at load, so a
