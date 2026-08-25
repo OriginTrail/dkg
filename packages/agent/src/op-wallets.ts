@@ -96,8 +96,25 @@ export async function loadOpWallets(
         }
         // Legacy plaintext entry — accepted (back-compat), and flagged for
         // opportunistic migration to an encrypted keystore below.
+        // GH#1432 — an entry with NEITHER `keystore` nor `privateKey` lands
+        // here too (isEncryptedEntry only tests `keystore`), and the old
+        // `as string` cast handed `undefined` straight to ethers. Only count it
+        // as legacy plaintext once we know a key is actually present.
+        if (stored.privateKey === undefined || stored.privateKey === null || stored.privateKey === '') {
+          throw new Error(
+            `Operational wallet at ${path} in wallets.json has no key: it carries neither an ` +
+              `encrypted \`keystore\` nor a plaintext \`privateKey\`. Restore the entry from backup, ` +
+              `or remove it and let the node provision a replacement.`,
+          );
+        }
         sawLegacyPlaintext = true;
-        return validateWalletEntry({ address: stored.address, privateKey: stored.privateKey as string }, path);
+        // A present-but-malformed key falls through to validateWalletEntry, which
+        // reports the specific defect (wrong type / wrong length) rather than the
+        // generic "no key" above.
+        return validateWalletEntry(
+          { address: stored.address, privateKey: stored.privateKey as string },
+          path,
+        );
       };
 
       const wallets = existingWallets.map((w, index) => resolve(w, `wallets[${index}]`));
@@ -174,7 +191,26 @@ function createWalletEntry(): WalletEntry {
   return { address: wallet.address, privateKey: wallet.privateKey };
 }
 
+/** Matches an ethers-acceptable secp256k1 key: 0x + 32 bytes of hex. */
+const PRIVATE_KEY_RE = /^0x[0-9a-fA-F]{64}$/;
+
 function validateWalletEntry(entry: WalletEntry, path: string): WalletEntry {
+  // GH#1432 — `new ethers.Wallet(...)` throws INVALID_ARGUMENT with the value
+  // redacted, naming neither the file nor the offending entry, so `dkg wallet`
+  // died with a message an operator could not act on. Check the shape first and
+  // say exactly which entry in which file is wrong.
+  if (typeof entry.privateKey !== 'string' || !PRIVATE_KEY_RE.test(entry.privateKey)) {
+    const shape = entry.privateKey === undefined || entry.privateKey === null
+      ? 'is missing'
+      : typeof entry.privateKey !== 'string'
+        ? `is a ${typeof entry.privateKey}, not a string`
+        : `is ${entry.privateKey.length} characters (expected 66: 0x + 64 hex)`;
+    throw new Error(
+      `Invalid operational wallet key at ${path} in wallets.json: privateKey ${shape}. ` +
+        `Entries must carry either an encrypted \`keystore\` or a plaintext \`privateKey\`; ` +
+        `this one carries neither in usable form. Address on the entry: ${entry.address ?? '(none)'}.`,
+    );
+  }
   const derived = new ethers.Wallet(entry.privateKey);
   if (derived.address.toLowerCase() !== entry.address.toLowerCase()) {
     throw new Error(
