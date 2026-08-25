@@ -84,9 +84,13 @@ def test_fallback_is_fail_open_but_not_silent(plugin_module, no_keccak, caplog):
     assert out == LOWER
     # But no longer silently, and the message says how to fix it.
     text = caplog.text.lower()
-    assert "cannot checksum agent address" in text
+    assert "could not canonicalize agent address" in text
     assert "eth-hash" in caplog.text
-    assert "attribution" in text
+    # PR #2334 review — the wording must stay CONDITIONAL. This helper also
+    # serves working-memory reads, and the input may already be checksummed, so
+    # a definitive "attribution will split" claim is often simply false.
+    assert "if it is not" in text
+    assert "may fail to match" in text
 
 
 def test_fallback_warns_once_not_per_write(plugin_module, no_keccak, caplog):
@@ -96,7 +100,7 @@ def test_fallback_warns_once_not_per_write(plugin_module, no_keccak, caplog):
         for _ in range(25):
             plugin_module._normalize_wm_agent_address(LOWER)
 
-    warnings = [r for r in caplog.records if "checksum agent address" in r.getMessage().lower()]
+    warnings = [r for r in caplog.records if "canonicalize agent address" in r.getMessage().lower()]
     assert len(warnings) == 1, f"expected exactly one warning, got {len(warnings)}"
 
 
@@ -113,4 +117,32 @@ def test_missing_package_also_fails_open_with_a_warning(plugin_module, no_eth_ut
         out = plugin_module._normalize_wm_agent_address(LOWER)
 
     assert out == LOWER
-    assert "cannot checksum agent address" in caplog.text.lower()
+    assert "could not canonicalize agent address" in caplog.text.lower()
+
+
+def test_already_checksummed_input_passes_through_correctly(plugin_module, no_keccak, caplog):
+    """PR #2334 review — the value returned is already correct here, so the
+    warning must not assert that it will fail to match anything."""
+    plugin_module._CHECKSUM_FALLBACK_WARNED = False
+
+    with caplog.at_level("WARNING"):
+        out = plugin_module._normalize_wm_agent_address(CHECKSUMMED)
+
+    # Unchanged and still canonical — no attribution split occurs at all.
+    assert out == CHECKSUMMED
+    text = caplog.text.lower()
+    assert "will not match" not in text
+    assert "may fail to match" in text
+
+
+def test_working_memory_read_path_gets_no_write_specific_claim(plugin_module, no_keccak, caplog):
+    """The helper runs on dkg_query(view="working-memory") too (line ~1495),
+    which performs no write, so the message must not describe an author write."""
+    plugin_module._CHECKSUM_FALLBACK_WARNED = False
+
+    with caplog.at_level("WARNING"):
+        plugin_module._normalize_wm_agent_address(LOWER)
+
+    text = caplog.text.lower()
+    for write_specific in ("author", "emitting", "on-chain", "split"):
+        assert write_specific not in text, f"message names a write-only consequence: {write_specific}"

@@ -2559,24 +2559,25 @@ def _normalize_wm_agent_address(agent_address: str) -> str:
         except Exception as exc:  # GH#1086
             # eth-utils ships no keccak backend by default and the Hermes setup
             # pip-installs nothing, so this path is reached routinely rather
-            # than exceptionally. Returning `value` unchanged silently emits a
-            # NON-CHECKSUMMED (usually all-lowercase) address as the on-chain
-            # author, which is a different string from the checksummed form
-            # every other surface writes — so attribution splits in two and the
-            # operator sees nothing explaining why.
+            # than exceptionally. Fail open: the value is still a usable
+            # identifier and refusing the call would be a worse regression.
             #
-            # Still fail open: a lowercase address is a valid EIP-55-agnostic
-            # identifier and refusing the write would be a worse regression
-            # than a mixed-case mismatch. But say so, once, loudly enough to be
-            # actionable.
+            # PR #2334 review — keep the wording OPERATION-NEUTRAL and
+            # CONDITIONAL. This helper is shared: it runs on the
+            # working-memory READ path (dkg_query, view="working-memory") as
+            # well as the finalize author path, and its input may ALREADY be
+            # checksummed, in which case returning it unchanged is correct.
+            # Asserting "this will split attribution" would be a definitive but
+            # often false diagnosis.
             global _CHECKSUM_FALLBACK_WARNED
             if not _CHECKSUM_FALLBACK_WARNED:
                 _CHECKSUM_FALLBACK_WARNED = True
                 logger.warning(
-                    "DKG: cannot checksum agent address %s (%s: %s). Emitting it "
-                    "unchanged, which will NOT match the checksummed form used "
-                    "elsewhere and will split author attribution. Install a keccak "
-                    "backend to fix: pip install 'eth-hash[pycryptodome]'",
+                    "DKG: could not canonicalize agent address %s to EIP-55 "
+                    "checksum form (%s: %s); using it as-is. If it is not "
+                    "already checksummed it may fail to match canonical "
+                    "identity records. Install a keccak backend to fix: "
+                    "pip install 'eth-hash[pycryptodome]'",
                     value,
                     type(exc).__name__,
                     exc,
