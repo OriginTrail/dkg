@@ -1,4 +1,4 @@
-import { renderStandaloneDkgNodeSkill } from './daemon/skill-template.js';
+import { renderStandaloneDkgNodeSkill } from './skill-template.js';
 import type { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { assertSelectableNetwork } from './config.js';

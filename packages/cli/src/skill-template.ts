@@ -2,6 +2,11 @@
  * SKILL.md template rendering — the ONE boundary every delivery surface goes
  * through (GH#1125, PR #2331 review).
  *
+ * Package-level, not under daemon/: this artifact serves the daemon endpoint
+ * AND the non-daemon `dkg mcp setup` / `dkg hermes setup` flows, so setup
+ * commands must not have to reach into a daemon implementation directory for
+ * it. Daemon and setup are peers here.
+ *
  * `skills/dkg-node/SKILL.md` has two delivery modes and they must not diverge:
  *
  *   1. SERVED, by the daemon at `/.well-known/skill.md`, with live node state.
@@ -54,7 +59,7 @@ let cachedSkillMd: string | null = null;
 
 export function loadSkillTemplate(): string {
   if (cachedSkillMd) return cachedSkillMd;
-  const skillPath = new URL("../../skills/dkg-node/SKILL.md", import.meta.url);
+  const skillPath = new URL("../skills/dkg-node/SKILL.md", import.meta.url);
   cachedSkillMd = readFileSync(skillPath, "utf-8");
   return cachedSkillMd;
 }

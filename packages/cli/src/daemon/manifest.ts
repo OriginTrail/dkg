@@ -777,7 +777,7 @@ export {
   REQUIRED_SKILL_TOKENS,
   STANDALONE_SKILL_VALUES,
   type SkillTokenValues,
-} from "./skill-template.js";
+} from "../skill-template.js";
 
 
 let cachedImporterSkillMd: string | null = null;

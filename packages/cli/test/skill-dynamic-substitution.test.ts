@@ -4,9 +4,10 @@ import {
   buildSkillMd,
   loadSkillTemplate,
   missingSkillTokens,
+  renderSkillTemplate,
   renderStandaloneDkgNodeSkill,
   unknownSkillTokens,
-} from '../src/daemon/skill-template.js';
+} from '../src/skill-template.js';
 import { loadBundledDkgNodeSkill } from '../src/hermes-setup.js';
 
 // GH#1125 — the served skill doc shipped literal "(dynamic)" placeholders.
@@ -115,13 +116,29 @@ describe('SKILL.md template token contract (GH#1125 review)', () => {
   });
 
   it('substitution survives prose and label edits around the tokens', () => {
-    // The exact failure that caused #1125: reword the surrounding Markdown.
+    // PR #2331 review — an earlier version asserted only that the reworded
+    // template still CONTAINED the tokens, which is true regardless of how
+    // rendering works, so a return to exact-block replacement would have passed
+    // it. RENDER the drifted template and check the output.
     const reworded = loadSkillTemplate()
       .replace('- **Node role:**', '- **Node type:**')
       .replace('If the Node UI injects', 'If the Node UI supplies');
-    for (const token of REQUIRED_SKILL_TOKENS) {
-      expect(reworded).toContain(`{{${token}}}`);
-    }
+
+    const rendered = renderSkillTemplate(
+      {
+        nodeVersion: '10.0.14',
+        baseUrl: 'http://127.0.0.1:9200',
+        peerId: '12D3KooWRendered',
+        nodeRole: 'edge',
+        extractionPipelines: 'markitdown',
+      },
+      reworded,
+    );
+
+    expect(rendered).not.toMatch(/\{\{[a-zA-Z]+\}\}/);
+    expect(rendered).toContain('- **Node type:** edge');
+    expect(rendered).toContain('- **Node version:** 10.0.14');
+    expect(rendered).toContain('If the Node UI supplies');
   });
 });
 
@@ -144,9 +161,11 @@ describe('standalone skill delivery renders too (GH#1125 review)', () => {
     expect(delivered).toContain('- **Node role:** _(`core` or `edge` — run `dkg status`)_');
   });
 
-  it('the setup delivery path goes through the renderer, not the raw file', () => {
-    // Guards the actual regression: hermes-setup/mcp-setup previously
-    // readFileSync'd the bundled SKILL.md straight into the client directory.
+  it('the hermes setup path goes through the renderer, not the raw file', () => {
+    // NOTE: this covers hermes-setup ONLY. mcp-setup had its own private copy
+    // of this loader, so reverting just that file passed every assertion here
+    // (PR #2331 review). The duplicate is deleted and mcp-setup calls the
+    // shared renderer directly; `mcp-setup.test.ts` asserts the delivered file.
     const shipped = loadBundledDkgNodeSkill();
     expect(shipped).not.toMatch(/\{\{[a-zA-Z]+\}\}/);
     expect(shipped).toBe(renderStandaloneDkgNodeSkill());
