@@ -523,6 +523,17 @@ async function waitForSynchronizationEvidence(
       { catalogHeadDigest: headDigest },
     );
     if (event.output !== null) return record(event.output, `${label} inventory output`);
+    const failure = await child.request(
+      'terminalFailureReadback',
+      `${label.replaceAll(' ', '-')}-failure-${attempt}`,
+      'operation-completed',
+      { catalogHeadDigest: headDigest },
+    );
+    if (failure.output !== null) {
+      throw new Error(
+        `${label} catalog reconciliation failed: ${JSON.stringify(failure.output)}`,
+      );
+    }
     await delay(200);
   }
   throw new Error(`${label} did not apply the exact catalog head before the deadline`);
