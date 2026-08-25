@@ -466,7 +466,7 @@ jobs:
           test "${#SHARD_FILES[@]}" -gt 0
           pnpm --filter @origintrail-official/dkg-chain exec vitest run "${SHARD_FILES[@]}" \
             --reporter=default --reporter=junit \
-            --outputFile.junit=test-results/chain-${SHARD_ID}.xml
+            --outputFile.junit="test-results/chain-${SHARD_ID}.xml"
 
       - name: Upload Vitest JUnit report
         if: always()
@@ -746,7 +746,7 @@ jobs:
           test "${#SHARD_FILES[@]}" -gt 0
           pnpm --filter @origintrail-official/dkg exec vitest run "${SHARD_FILES[@]}" \
             --reporter=default --reporter=junit \
-            --outputFile.junit=test-results/cli-${SHARD_ID}.xml
+            --outputFile.junit="test-results/cli-${SHARD_ID}.xml"
       - name: Upload Vitest JUnit report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
