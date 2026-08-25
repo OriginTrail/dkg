@@ -466,10 +466,16 @@ export class ProtocolRouter {
       const handlerSignal = handlerSignalScope.signal;
       try {
         const remotePeer = connection.remotePeer.toString();
-        const requestData = await readAllWithSignal(stream, limit, handlerSignal);
+        // Admission is checked before the request body is read, so work done on
+        // behalf of a peer is bounded by its admission state rather than by the
+        // read limit alone. `requirePeerAccepted` depends only on the peer id and
+        // protocol, never on the request payload, so this ordering is free.
+        // The pooled inbound path above already resolves admission before it
+        // dispatches; this keeps the direct path consistent with it.
         await this.requirePeerAccepted(remotePeer, protocolId, 'inbound', {
           signal: handlerSignal,
         });
+        const requestData = await readAllWithSignal(stream, limit, handlerSignal);
         const peerId = {
           toString: () => remotePeer,
           toBytes: () => connection.remotePeer.toMultihash().bytes,
