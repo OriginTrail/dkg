@@ -1,0 +1,34 @@
+/* P5 surfaces — tokens only (30-nsm-tokens.css is law). */
+.nsm5-frame { max-width: 1040px; padding: var(--sp-6) var(--sp-5); display: grid; gap: var(--sp-5); }
+.nsm5-card { background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: var(--r-lg); padding: var(--sp-6); display: grid; gap: var(--sp-4); }
+.nsm5-muted { color: var(--text-muted); }
+.nsm5-sec { color: var(--text-secondary); }
+.nsm5-xs { font-size: var(--fs-xs); }
+.nsm5-sm { font-size: var(--fs-sm); }
+.nsm5-planhead { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap; }
+.nsm5-planhead h1 { font-size: var(--fs-xl); font-weight: var(--fw-semibold); margin: 0; }
+.nsm5-mrow { display: grid; gap: var(--sp-2); padding: var(--sp-4) 0; border-top: 1px solid var(--border-subtle); }
+.nsm5-mhead { display: flex; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; font-size: var(--fs-sm); align-items: baseline; }
+.nsm5-mhead h2 { font-size: var(--fs-lg); margin: 0; }
+.nsm5-bar { height: var(--sp-3); border-radius: var(--r-full); background: var(--gauge-track); overflow: hidden; }
+.nsm5-bar i { display: block; height: 100%; background: var(--interactive); }
+.nsm5-bar.warn i { background: var(--gauge-mid); }
+.nsm5-bar.hit i { background: var(--gauge-over); }
+.nsm5-sparkrow { display: flex; align-items: center; gap: var(--sp-3); }
+.nsm5-spark { display: flex; align-items: flex-end; gap: 2px; height: var(--sp-5); }
+.nsm5-spark i { width: 4px; background: var(--gray-5); border-radius: 1px; display: block; }
+.nsm5-pace { font-size: var(--fs-xs); }
+.nsm5-pace.warn { color: var(--gauge-mid); }
+.nsm5-pace.quiet { color: var(--text-muted); }
+.nsm5-fork { display: flex; gap: var(--sp-3); align-items: center; flex-wrap: wrap; }
+.nsm5-btn { border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text-primary); border-radius: var(--r-sm); padding: var(--sp-2) var(--sp-4); font-size: var(--fs-sm); cursor: pointer; }
+.nsm5-btn--primary { background: var(--interactive); border-color: var(--interactive); color: var(--text-on-accent); }
+.nsm5-stmtline { color: var(--state-verified); font-size: var(--fs-sm); border-top: 1px solid var(--border-subtle); padding-top: var(--sp-3); }
+.nsm5-fchips { display: flex; gap: var(--sp-2); }
+.nsm5-fchips button { border: 1px solid var(--border-strong); border-radius: var(--r-full); padding: var(--sp-1) var(--sp-3); font-size: var(--fs-xs); background: transparent; color: var(--text-secondary); cursor: pointer; }
+.nsm5-fchips button.on { border-color: var(--interactive); color: var(--interactive); }
+.nsm5-act { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
+.nsm5-act td { padding: var(--sp-2) var(--sp-3); border-top: 1px solid var(--border-subtle); color: var(--text-secondary); }
+.nsm5-sub { padding-left: calc(var(--sp-3) + var(--sp-5)); }
+.nsm5-caret { margin-left: auto; color: var(--text-muted); font-size: var(--fs-xs); }
+.nsm5-icmono { filter: grayscale(1) brightness(1.35) contrast(0.85); opacity: .85; }

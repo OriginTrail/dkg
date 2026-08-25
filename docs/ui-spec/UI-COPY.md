@@ -262,15 +262,15 @@ table remains, relabeled for the dispute drawer.
 | key | string |
 |---|---|
 | meter.plan.headline | Plan: {pct}% used |
-| meter.plan.resets | Resets in {n} days |
-| meter.plan.resets.hours | Resets in {n} hours |
+| meter.plan.resets | Expires in {n} days |
+| meter.plan.resets.hours | Expires in {n} hours |
 | meter.line.model | {model}: {used} of {ceiling} tokens |
 | meter.line.query | {offering}: {used} of {ceiling} query units |
 | meter.line.shared | {seller} shared: {usedValue} of {ceilingValue} — any mix of {scope} |
 | meter.warn.approaching | {pct}% used — approaching your ceiling |
 | meter.hit.title | You've reached this ceiling |
 | meter.hit.body | Three ways forward — nothing is lost, your plan resets in {t}. |
-| meter.hit.wait | Wait for reset ({t}) |
+
 | meter.hit.upgrade | Upgrade next period |
 | meter.hit.topup | Top up now |
 | meter.topup.gate | Confirm top-up: {amount} TRAC to {seller} — extends {scope} this period |
@@ -386,7 +386,7 @@ The shared value-denominated pool is removed from P5. Superseded keys:
 |---|---|
 | meter.summary | Plan overall: {pct}% of this period's value used |
 | meter.summary.note | A readout, not a limit — each meter below is its own ceiling. |
-| meter.offering.line | {offering} — {pct}% used · Resets in {t} |
+| meter.offering.line | {offering} — {pct}% used · Expires in {t} |
 | meter.offering.tap | {used} of {ceiling} {unit} · ${usd} spent |
 | composer.preview.offering | ≈ {ceiling} {unit} per period |
 

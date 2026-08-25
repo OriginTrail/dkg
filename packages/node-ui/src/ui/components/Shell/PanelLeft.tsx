@@ -303,15 +303,28 @@ export function PanelLeft() {
             } catch { return null; }
             return (
               <>
+                {/* P5 (CP-R correction): collapsible marketplace group — the
+                    parent opens the catalog; Plans/Access/Operate nest under it */}
                 <div
                   className={`v10-tree-dashboard ${activeTabId === 'marketplace' ? 'active' : ''}`}
-                  onClick={() => { openTab({ id: 'marketplace', label: 'Marketplace', closable: true }); setActiveTab('marketplace'); setActiveProject(null); }}
+                  onClick={() => { openTab({ id: 'marketplace', label: 'Neurosymbolic Marketplace', closable: true }); setActiveTab('marketplace'); setActiveProject(null); }}
                 >
-                  <span>◈</span> Marketplace
+                  <span className="nsm5-icmono">🧠</span> Neurosymbolic Marketplace <span className="nsm5-caret">▾</span>
                 </div>
-                {/* NSM v3 — the operator surface (Offerings/Tabs/Access), same flag */}
                 <div
-                  className={`v10-tree-dashboard ${activeTabId === 'marketplace-operate' ? 'active' : ''}`}
+                  className={`v10-tree-dashboard nsm5-sub ${activeTabId === 'nsm-plans' ? 'active' : ''}`}
+                  onClick={() => { openTab({ id: 'nsm-plans', label: 'Plans', closable: true }); setActiveTab('nsm-plans'); setActiveProject(null); }}
+                >
+                  <span>▤</span> Plans
+                </div>
+                <div
+                  className={`v10-tree-dashboard nsm5-sub ${activeTabId === 'nsm-access' ? 'active' : ''}`}
+                  onClick={() => { openTab({ id: 'nsm-access', label: 'Access', closable: true }); setActiveTab('nsm-access'); setActiveProject(null); }}
+                >
+                  <span>⚿</span> Access
+                </div>
+                <div
+                  className={`v10-tree-dashboard nsm5-sub ${activeTabId === 'marketplace-operate' ? 'active' : ''}`}
                   onClick={() => { openTab({ id: 'marketplace-operate', label: 'Operate', closable: true }); setActiveTab('marketplace-operate'); setActiveProject(null); }}
                 >
                   <span>◉</span> Operate
