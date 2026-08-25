@@ -70,7 +70,10 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void;
-  /** Called once when a distinct exact-head attempt is admitted to the queue. */
+  /**
+   * Called once when a distinct exact-head schedule request starts. This also
+   * clears a stale result when bounded admission later rejects that request.
+   */
   readonly onAttemptStart?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ) => void;
@@ -259,6 +262,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       }
       return;
     }
+    this.#safeNotify(() => this.#onAttemptStart?.(announcement));
     if (this.#queue.length >= this.#maxQueue) {
       this.#droppedQueueFull += 1;
       return;
@@ -272,7 +276,6 @@ export class Rfc64PublicCatalogReceiverV1 {
     };
     this.#pendingByKey.set(key, task);
     this.#queue.push(task);
-    this.#safeNotify(() => this.#onAttemptStart?.(announcement));
     this.#pump();
   }
 

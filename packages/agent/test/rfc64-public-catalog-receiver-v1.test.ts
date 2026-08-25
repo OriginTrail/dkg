@@ -208,14 +208,16 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
 
   it('drops distinct heads when the bounded queue is full', async () => {
     const gate = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const onAttemptStart = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(
       reconciler(async () => gate.promise),
-      { maxConcurrent: 1, maxQueue: 1 },
+      { maxConcurrent: 1, maxQueue: 1, onAttemptStart },
     );
     receiver.schedule(headWith(`0x${'a1'.repeat(32)}`), 'peer');
     receiver.schedule(headWith(`0x${'a2'.repeat(32)}`), 'peer');
     receiver.schedule(headWith(`0x${'a3'.repeat(32)}`), 'peer');
     expect(receiver.stats().droppedQueueFull).toBe(1);
+    expect(onAttemptStart).toHaveBeenCalledTimes(3);
     gate.resolve('not-found');
     await receiver.whenIdle();
   });
