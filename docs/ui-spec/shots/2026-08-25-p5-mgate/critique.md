@@ -51,3 +51,16 @@ fork + line, D7 line replaced, activity table + key chips, USD-only, "NN%
 left" grammar. Banned-term sweep clean in buyer surfaces; seller Operate
 keeps µ/tok asks deliberately (sellers price in µ — flagged in the re-gate
 note). Keep-list untouched byte-wise except where directives required.
+
+**Round 7 (CP-R feedback: clickability + one-provider selection):**
+(1) Journeys are now walkable by clicking: shell rail + header tabs navigate
+between surfaces on every page; all primary controls are wired (Choose plan
+→ consent → key via anchors; Customize/Add to plan/Upgrade → composer;
+Top up → consent; chips → Plans; statement line → statement page; activity
+key chips → Access; storefront rows → model page; Operate co-sign →
+statement). (2) Provider selection is singular: the Starter picks ONE
+provider (okf-mainnet, $0.78/month, one transfer on the consent); the
+two-line consent with sequential transfers now exists only in the composer,
+labeled as the explicitly-composed case, with the note that nothing
+subscribes to a second seller implicitly. Model-page footnote states adding
+a provider adds exactly that one seller. Re-shot; verified 01 desktop.

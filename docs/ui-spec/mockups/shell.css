@@ -47,3 +47,7 @@
 .dkg-msg { margin-top:auto; border:1px solid var(--border-strong); border-radius:var(--r-md); padding:var(--sp-3); color:var(--text-muted); font-size:var(--fs-sm); background:var(--surface-1); }
 @media (max-width:1100px){ .dkg-right { display:none; } .dkg-body { grid-template-columns:196px 1fr; } .dkg-center { border-right:none; } }
 @media (max-width:760px){ .dkg-body { grid-template-columns:1fr; } .dkg-side { display:none; } .dkg-h .pby { display:none; } .dkg-tabs { overflow-x:auto; } }
+/* runthrough navigability — anchors behave like the controls they mock */
+a.btn { text-decoration:none; display:inline-flex; align-items:center; justify-content:center; }
+.dkg-nav a.row, .dkg-tabs a.t { text-decoration:none; }
+a.chip, a.stmt, a.mopt, a.poolchip { text-decoration:none; cursor:pointer; }
