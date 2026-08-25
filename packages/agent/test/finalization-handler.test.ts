@@ -533,6 +533,27 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
     expect(promoted.type === 'boolean' && promoted.value).toBe(true);
   });
 
+  it('does not enter the legacy workspace scan during an exact RFC64 check', async () => {
+    const store = new OxigraphStore();
+    const sharedMemoryReads: QueryOptions[] = [];
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: QueryOptions) => {
+      if (options?.source === 'agent.finalization.sharedMemorySlice') {
+        sharedMemoryReads.push(options);
+      }
+      return originalQuery(sparql, options);
+    }) as typeof store.query;
+    const handler = new FinalizationHandler(store, makeBindingChain(42n));
+
+    const outcome = await handler.handleExactChainReconciledKC(
+      input(new Uint8Array(32).fill(9)),
+      createOperationContext('system'),
+    );
+
+    expect(outcome).toBe('no-swm');
+    expect(sharedMemoryReads).toHaveLength(0);
+  });
+
   it('chain-reconcile regenerates generated private-CG catalog floor for merkle match without adding it as a root', async () => {
     const store = new OxigraphStore();
     await seedSwmSnapshot(store);

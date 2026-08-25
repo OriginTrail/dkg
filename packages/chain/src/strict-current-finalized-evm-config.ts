@@ -249,6 +249,11 @@ function normalizeEndpoint(input: unknown): StrictFinalizedEndpointV1 {
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.hash !== '') {
     throw new TypeError('Strict current-finalized RPC endpoint must use HTTP(S) without a fragment');
   }
+  if (url.username !== '' || url.password !== '') {
+    throw new TypeError(
+      'Strict current-finalized RPC endpoint must not contain username or password credentials',
+    );
+  }
   let origin: string;
   try {
     origin = normalizeEndpointOrigin(url.origin, 'strict current-finalized RPC endpoint origin');
