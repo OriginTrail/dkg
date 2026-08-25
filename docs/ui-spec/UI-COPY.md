@@ -238,7 +238,7 @@ table remains, relabeled for the dispute drawer.
 | onboard.sub.template | Starter plan — {models} plus {units} query units, {price}/period |
 | onboard.pay.gate | Confirm this period's payment |
 | onboard.pay.line | {amount} TRAC to {seller} — covers {scope} until {resetDate} |
-| onboard.pay.norefund | Payments are final. Unused allowance expires at reset — like any subscription. |
+| onboard.pay.norefund | Payments are final. Unused allowance expires at period end — like any subscription. |
 
 ## Plan composer
 
@@ -247,7 +247,7 @@ table remains, relabeled for the dispute drawer.
 | composer.title | Compose your plan |
 | composer.budget | Period budget |
 | composer.period | Period |
-| composer.period.note | Prices are frozen for the period. Changes you make take effect at the next reset. |
+| composer.period.note | Prices are frozen for the period. Changes you make take effect at the next period. |
 | composer.seller.auto | Provider chosen automatically at your price cap |
 | composer.seller.pinned | Pinned to {seller} |
 | composer.shared | Shared allowance (recommended) |
@@ -274,7 +274,7 @@ table remains, relabeled for the dispute drawer.
 | meter.hit.upgrade | Upgrade next period |
 | meter.hit.topup | Top up now |
 | meter.topup.gate | Confirm top-up: {amount} TRAC to {seller} — extends {scope} this period |
-| meter.expired.journal | Expired at reset: {value} — value recognized, not returned |
+| meter.expired.journal | Expired at period end: {value} — value recognized, not returned |
 | meter.expired.tip | Subscriptions don't refund. What you don't use funds the network you're part of. |
 
 ## Statement line
@@ -357,8 +357,8 @@ unit basis. These words may appear only one reveal deeper (drawers, tooltips).
 | meter.floor.note | At least {floor} tokens at your max price — routed cheaper {n}×, +{extra} extra |
 | meter.legend | Mostly {top} ({pct}%) · {rest} |
 | meter.pace.warn | At this pace: runs out ~{d} days before reset |
-| meter.pace.ok | On track to reset |
-| meter.expired.tip | Unused allowance expires at reset — like any subscription. |
+| meter.pace.ok | On track to expiry |
+| meter.expired.tip | Unused allowance expires at period end — like any subscription. |
 | fork.topup | Top up |
 | fork.line | or wait — resets in {t} · or switch to {alt}, {pct}% left |
 | play.pool | Pool: {pct}% left |
