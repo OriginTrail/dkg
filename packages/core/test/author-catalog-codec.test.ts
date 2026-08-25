@@ -25,6 +25,7 @@ import {
   computeAuthorCatalogKeyDigestV1,
   computeAuthorCatalogRowDigestV1,
   computeAuthorCatalogScopeDigestV1,
+  isCatalogForbiddenCodePointV1,
   iriComponentV1,
   parseCanonicalAuthorCatalogRowV1,
   parseCanonicalAuthorCatalogScopeV1,
@@ -110,6 +111,35 @@ describe('RFC-64 author catalog identifiers and graph names', () => {
     }
     expect(() => assertAssertionCoordinateV1('_private')).not.toThrow();
   });
+
+  it('pins every forbidden code-point boundary and its adjacent allowed values', () => {
+    for (const codePoint of [
+      0x0000, 0x001f,
+      0x007f, 0x009f,
+      0x00a0,
+      0x1680,
+      0x2000, 0x200b,
+      0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
+    ]) {
+      expect(isCatalogForbiddenCodePointV1(codePoint)).toBe(true);
+      const value = `a${String.fromCodePoint(codePoint)}b`;
+      expect(() => assertAssertionCoordinateV1(value)).toThrow();
+      expect(() => assertSubGraphNameV1(value)).toThrow();
+    }
+    for (const codePoint of [
+      0x0020, 0x007e,
+      0x00a1,
+      0x167f, 0x1681,
+      0x1fff, 0x200c,
+      0x2027, 0x202a, 0x202e, 0x2030, 0x205e, 0x2060, 0x2fff, 0x3001,
+      0xfefe, 0xff00,
+    ]) {
+      expect(isCatalogForbiddenCodePointV1(codePoint)).toBe(false);
+      const value = `a${String.fromCodePoint(codePoint)}b`;
+      expect(() => assertAssertionCoordinateV1(value)).not.toThrow();
+      expect(() => assertSubGraphNameV1(value)).not.toThrow();
+    }
+  });
 });
 
 describe('AuthorCatalogScopeV1', () => {
@@ -142,6 +172,14 @@ describe('AuthorCatalogScopeV1', () => {
       ...VALID_SCOPE,
       governanceContractAddress: null,
     })).toThrow(/catalog-governance-tuple/);
+    const inverseMixed = {
+      ...VALID_SCOPE,
+      governanceChainId: null,
+    };
+    expect(() => assertAuthorCatalogScopeV1(inverseMixed))
+      .toThrow(/catalog-governance-tuple/);
+    expect(() => parseCanonicalAuthorCatalogScopeV1(JSON.stringify(inverseMixed)))
+      .toThrow(/catalog-governance-tuple/);
     expect(() => assertAuthorCatalogScopeV1({ ...VALID_SCOPE, era: 0 })).toThrow(
       /catalog-scalar/,
     );
