@@ -2590,13 +2590,15 @@ export async function runDaemonInner(
 
   // Avoid duplicating routine logs into SQLite on the event loop. Low-volume
   // warning/error records remain available to operation and dashboard views;
-  // `remoteShippers` is evaluated per record so runtime enable/disable is
+  // `remoteShipper` is evaluated per record so runtime enable/disable is
   // reflected without re-wiring.
   Logger.setSink(
     createDaemonLogSink({
       insertDiagnosticLog: (rec) => dashDb.insertLog(rec),
       redact: redactForRemote,
-      remoteShippers: () => [logPusher, otlpExporter],
+      // Configuration selects exactly one log-export protocol. The nullish
+      // fallback preserves runtime enable/disable without modeling fan-out.
+      remoteShipper: () => logPusher ?? otlpExporter,
     }),
   );
 

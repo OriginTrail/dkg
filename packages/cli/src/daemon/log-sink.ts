@@ -1,6 +1,6 @@
 /**
- * The daemon log-sink fan-out — the trust boundary where a REDACTED log record
- * is forwarded to remote shippers (syslog / OTLP). The canonical local log is
+ * The daemon log sink — the trust boundary where a REDACTED log record is
+ * forwarded to the selected remote shipper (syslog or OTLP). The canonical local log is
  * already written to daemon.log; duplicating every routine record into SQLite
  * made high-volume sync/query logging block the event loop. Low-volume warning
  * and error records remain in SQLite for operation and dashboard diagnostics.
@@ -28,19 +28,15 @@ export interface DaemonLogSinkDeps {
   }) => void;
   /** Redactor applied to the copy that leaves the node. */
   redact: (record: LogRecord) => LogRecord;
-  /**
-   * The CURRENT set of active remote shippers, evaluated per record so the sink
-   * reflects runtime start/stop without re-wiring. `null`/`undefined` entries
-   * (a disabled exporter) are skipped.
-   */
-  remoteShippers: () => Array<RemoteLogShipper | null | undefined>;
+  /** The currently selected shipper, evaluated per record for runtime toggles. */
+  remoteShipper: () => RemoteLogShipper | null | undefined;
   /** Clock, injectable for tests. Defaults to Date.now. */
   now?: () => number;
 }
 
 /**
- * Build the `Logger.setSink` callback. Forwards exactly ONE redacted copy to
- * each active remote shipper, and does no extra work when none are active.
+ * Build the `Logger.setSink` callback. Forwards one redacted copy to the
+ * selected shipper and does no redaction work when export is disabled.
  */
 export function createDaemonLogSink(deps: DaemonLogSinkDeps): (entry: LogRecord) => void {
   const now = deps.now ?? Date.now;
@@ -59,10 +55,8 @@ export function createDaemonLogSink(deps: DaemonLogSinkDeps): (entry: LogRecord)
         /* Diagnostic persistence must never break logging or remote export. */
       }
     }
-    const shippers = deps.remoteShippers().filter((s): s is RemoteLogShipper => !!s);
-    if (shippers.length === 0) return;
-    // Fan out a single redacted copy to every active remote shipper.
-    const safe = deps.redact(entry);
-    for (const shipper of shippers) shipper.push(safe);
+    const shipper = deps.remoteShipper();
+    if (!shipper) return;
+    shipper.push(deps.redact(entry));
   };
 }
