@@ -81,6 +81,7 @@ let finalizedVmRuntime: Readonly<FinalizedVmHarnessRuntimeV1> | undefined;
 let stopping = false;
 let commandTail = Promise.resolve();
 const peerCatalogAgentAddresses = new Map<string, EvmAddressV1>();
+const harnessCatalogFailureMessages = new Map<string, string>();
 
 interface Command {
   readonly command: string;
@@ -193,6 +194,7 @@ async function boot(): Promise<void> {
       ),
     }),
   });
+  installHarnessCatalogFailureDiagnostics(created);
   if (bundleServeDelayMs > 0) {
     installHarnessBundleServeDelay(created, bundleServeDelayMs);
   }
@@ -217,6 +219,37 @@ async function boot(): Promise<void> {
     finalizedVmRuntime: finalizedVmConfig !== null,
     startupRepair: null,
   });
+}
+
+function installHarnessCatalogFailureDiagnostics(created: DKGAgent): void {
+  const surface = created as unknown as Record<string, unknown>;
+  const registryValue = surface.rfc64PublicCatalogReconciliationFailuresV1;
+  if (
+    registryValue === null
+    || typeof registryValue !== 'object'
+    || Array.isArray(registryValue)
+  ) {
+    throw new Error('catalog failure registry is unavailable');
+  }
+  const registry = registryValue as Record<string, unknown>;
+  const originalRecord = registry.record;
+  if (typeof originalRecord !== 'function') {
+    throw new Error('catalog failure registry record hook is unavailable');
+  }
+  registry.record = function recordWithHarnessDiagnostic(
+    this: unknown,
+    catalogHeadDigest: unknown,
+    error: unknown,
+  ): unknown {
+    if (typeof catalogHeadDigest === 'string') {
+      harnessCatalogFailureMessages.set(
+        catalogHeadDigest,
+        boundedErrorChainMessage(error),
+      );
+    }
+    return (originalRecord as (this: unknown, digest: unknown, cause: unknown) => unknown)
+      .call(this, catalogHeadDigest, error);
+  };
 }
 
 /**
@@ -547,7 +580,15 @@ async function handle(command: Command): Promise<void> {
         currentAgent,
         catalogHeadDigest,
       );
-      emitOperationResult(command, output);
+      emitOperationResult(
+        command,
+        input.includeHarnessDiagnostic === true && output !== null
+          ? {
+              ...(output as Record<string, unknown>),
+              harnessDiagnostic: harnessCatalogFailureMessages.get(catalogHeadDigest) ?? null,
+            }
+          : output,
+      );
       return;
     }
     case 'awaitReceiverIdle':

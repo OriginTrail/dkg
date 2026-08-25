@@ -527,7 +527,7 @@ async function waitForSynchronizationEvidence(
       'terminalFailureReadback',
       `${label.replaceAll(' ', '-')}-failure-${attempt}`,
       'operation-completed',
-      { catalogHeadDigest: headDigest },
+      { catalogHeadDigest: headDigest, includeHarnessDiagnostic: true },
     );
     if (failure.output !== null) {
       throw new Error(
