@@ -221,7 +221,8 @@ function paletteIndex(agent: string): number {
 }
 
 /**
- * GH#1128 — assign every agent a DISTINCT colour.
+ * GH#1128 — assign distinct colours until the palette is exhausted, then give
+ * each overflow agent its preferred slot.
  *
  * The hash above is stable but not injective: over an 8-slot palette, five
  * agents collide with ~70% probability, and two agents rendering the same
@@ -229,12 +230,20 @@ function paletteIndex(agent: string): number {
  * the legend and the graph tint each called `paletteIndex` independently, so
  * there was no single place a collision could even be observed.
  *
- * Keep the hash as each agent's *preferred* slot (so colours stay stable when
- * the agent set is unchanged) and linear-probe to the next free slot on a
- * collision. Agents are processed in sorted order so the result is
- * deterministic regardless of arrival order. Beyond AGENT_PALETTE.length
- * agents reuse is unavoidable; we fall back to the raw hash so behaviour
- * degrades to the old scheme rather than crowding everyone onto one colour.
+ * The hash stays each agent's *preferred* slot and we linear-probe to the next
+ * free one on a collision, so distinctness holds for the first
+ * AGENT_PALETTE.length agents. Agents are processed in sorted order, making the
+ * result deterministic regardless of arrival order.
+ *
+ * Past exhaustion reuse is arithmetic, not a policy choice — there are more
+ * agents than colours. Those agents take their preferred slot, which keeps the
+ * reuse spread across the palette instead of crowding onto one colour, and
+ * leaves the already-assigned agents untouched.
+ *
+ * The trade-off this encodes: distinctness requires coordinating slots across
+ * the whole set, so assignment depends on set MEMBERSHIP. Colours are stable
+ * for a fixed roster but may permute when it changes. #1128 asked for distinct
+ * colours, so distinctness wins.
  */
 export function buildAgentColorMap(agents: Iterable<string>): Map<string, string> {
   const distinct = [...new Set(agents)].sort();
