@@ -543,6 +543,9 @@ importers:
       '@origintrail-official/dkg-random-sampling':
         specifier: workspace:*
         version: link:../random-sampling
+      '@origintrail-official/dkg-rdf-utils':
+        specifier: workspace:*
+        version: link:../rdf-utils
       '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage

@@ -232,6 +232,12 @@ describe('httpAuthGuard', () => {
     expect(body.error).toContain('Unauthorized');
   });
 
+  it('rejects /api/info without token', async () => {
+    const res = await fetch(`${baseUrl}/api/info`);
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toBe('Bearer realm="dkg-node"');
+  });
+
   it('rejects Hermes provider persistence without token', async () => {
     const res = await fetch(`${baseUrl}/api/hermes-channel/persist-turn`, { method: 'POST' });
     expect(res.status).toBe(401);

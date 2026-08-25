@@ -53,6 +53,14 @@ export {
   type StoreSchedulerBusyReason,
 } from './store-priority-scheduler.js';
 export {
+  STORE_OPERATION_TIMEOUT_CODE,
+  StoreOperationTimeoutError,
+  isStoreOperationTimeoutError,
+  type StoreOperationTimeoutErrorOptions,
+  type StoreOperationTimeoutErrorLike,
+  type StoreOperationOutcome,
+} from './store-operation-timeout.js';
+export {
   EXTERNAL_LITERAL_REF_DATATYPE,
   SHARED_MEMORY_GRAPH_SUFFIX,
   DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
@@ -110,6 +118,7 @@ export {
 } from './adapters/blazegraph.js';
 export {
   SparqlHttpStore,
+  DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
   type SparqlHttpStoreOptions,
   type SparqlHttpQueryOptions,
   type SparqlHttpSlowQueryEvent,

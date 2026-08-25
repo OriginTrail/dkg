@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import { readFile, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
+import type { AsyncLiftRetryOutcome } from '@origintrail-official/dkg-publisher';
 import {
   dkgAuthTokenPath,
   FAUCET_WALLETS_PER_REQUEST,
@@ -173,7 +174,12 @@ publisherCmd
   .action(async (opts: ActionOpts) => {
     try {
       const config = await loadConfig();
+      // Spread first so the keys this command does NOT manage survive — notably
+      // the GH#2270 retry knobs (autoRetryEnabled, retryJitterRatio,
+      // retryBackoffBaseMs/MaxMs), which a wholesale replace would erase on the
+      // next `dkg publisher enable`. Mirrors `publisher disable` below.
       config.publisher = {
+        ...(config.publisher ?? {}),
         enabled: true,
         pollIntervalMs: parsePositiveMsOption(String(opts.pollInterval ?? '12000'), '--poll-interval'),
         errorBackoffMs: parsePositiveMsOption(String(opts.errorBackoff ?? '5000'), '--error-backoff'),
@@ -374,23 +380,30 @@ publisherCmd
         console.error(`Invalid retry status: ${status}. Only "failed" is supported.`);
         process.exit(1);
       }
-      let count: number;
+      // GH#2270 — the full disposition of the pass. `retried` keeps its old sentence so
+      // existing operator habits (and scripts scraping it) still read; the other two say
+      // why the remaining failed jobs were left alone, which the old output hid entirely.
+      let outcome: AsyncLiftRetryOutcome;
       try {
         const client = await ApiClient.connect();
-        const result = await client.publisherRetry(status);
-        count = result.retried;
+        outcome = await client.publisherRetry(status);
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
         try {
-          count = await inspector.publisher.retry({ status: 'failed' });
+          outcome = await inspector.publisher.retryDetailed({ status: 'failed' });
         } finally {
           await inspector.stop();
         }
       }
-      console.log(`Retried ${count} publisher job(s).`);
+      console.log(`Retried ${outcome.retried} publisher job(s).`);
+      console.log(
+        `Left failed: ${outcome.blockedPendingRecovery} awaiting chain proof `
+          + `(a transaction may exist), ${outcome.skipped} with nothing to retry `
+          + '(terminal failure or retry budget spent).',
+      );
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

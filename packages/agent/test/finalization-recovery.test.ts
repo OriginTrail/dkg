@@ -703,11 +703,12 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
-  it('does not let duplicate live gossip erase a live-entry retry deadline', async () => {
+  it('does not let duplicate live gossip bypass a live-entry retry deadline', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-live-backoff-'));
     try {
       let now = 1_000;
       let receiptCalls = 0;
+      let prepareCalls = 0;
       const store = await openSqliteFinalizationRecoveryStore(directory, {
         now: () => now,
       });
@@ -720,7 +721,13 @@ describe('graph-scoped finalization recovery admission', () => {
           },
         }),
         { info: () => {}, warn: () => {} },
-        recoveryMaterializer(),
+        {
+          ...recoveryMaterializer(),
+          prepare: async () => {
+            prepareCalls += 1;
+            return recoveryMaterializer().prepare();
+          },
+        },
         {
           liveRetryLimit: 1,
           liveRetryWindowMs: 10_000,
@@ -743,18 +750,20 @@ describe('graph-scoped finalization recovery admission', () => {
         nextAttemptAt: 2_000,
       });
       await recovery.processLive(input);
-      expect(receiptCalls).toBe(2);
+      expect(receiptCalls).toBe(1);
+      expect(prepareCalls).toBe(1);
       expect(await store.list()).toMatchObject([{
-        attemptCount: 2,
+        attemptCount: 1,
         nextAttemptAt: 2_000,
       }]);
 
       now = 2_000;
       await recovery.processDueBatch(16);
-      expect(receiptCalls).toBe(3);
+      expect(receiptCalls).toBe(2);
+      expect(prepareCalls).toBe(2);
       expect(await store.list()).toMatchObject([{
         state: 'RECEIVED',
-        attemptCount: 3,
+        attemptCount: 2,
       }]);
       await store.close();
     } finally {

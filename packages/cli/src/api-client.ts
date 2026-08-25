@@ -5,7 +5,13 @@ import type {
   ContextGraphSyncMode,
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
-import type { JournalReadResult } from '@origintrail-official/dkg-publisher';
+import type {
+  AsyncLiftRetryOutcome,
+  AsyncPreparedPublishPayload,
+  JournalReadResult,
+  LiftJob,
+  LiftJobRetryProjection,
+} from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -14,6 +20,10 @@ import {
 } from './finalized-publish-options.js';
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import type {
+  CatchupStatusResponse,
+  CatchupStatusWireResponse,
+} from './catchup-status.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -333,6 +343,17 @@ export interface DaemonStatusResponse {
   relayConnected: boolean;
   multiaddrs: string[];
   relay: RelayStatusResponse;
+  /**
+   * RFC-64 scheduling input for explicitly requested Context Graphs. The
+   * requested scope is not a public classification; runtime classification
+   * still chooses the public or private synchronization lane.
+   */
+  rfc64SelectedPublicSync?: {
+    defaultEnabled: boolean;
+    /** Requested scheduling scope; runtime classification still chooses the lane. */
+    requestedContextGraphs: string[];
+    catalogBackedContextGraphs: string[];
+  };
   chain?: {
     chainId: string | null;
     configured: boolean;
@@ -1260,11 +1281,23 @@ export class ApiClient {
     return this.get(`/api/publisher/jobs${qs}`);
   }
 
-  async publisherJob(jobId: string): Promise<{ job: any }> {
+  // GH#2270 — `retryState` is the daemon's DERIVED answer to "will this node retry this
+  // job by itself?", served beside the untouched `job`. `job` and `payload` carry the
+  // publisher's own exported types rather than `any`: these two routes serialize the queue's
+  // persisted job and prepared-payload shapes verbatim, so a drift there should break the
+  // build here instead of surfacing as an undefined field at runtime.
+  async publisherJob(jobId: string): Promise<{ job: LiftJob; retryState: LiftJobRetryProjection }> {
     return this.get(`/api/publisher/job?id=${encodeURIComponent(jobId)}`);
   }
 
-  async publisherJobPayload(jobId: string): Promise<{ job: any; payload: any }> {
+  async publisherJobPayload(
+    jobId: string,
+  ): Promise<{
+    // Named lifecycle publish jobs have no raw prepared payload; the route serves null there.
+    job: LiftJob;
+    payload: AsyncPreparedPublishPayload | null;
+    retryState: LiftJobRetryProjection;
+  }> {
     return this.get(`/api/publisher/job-payload?id=${encodeURIComponent(jobId)}`);
   }
 
@@ -1319,7 +1352,9 @@ export class ApiClient {
     return this.post('/api/publisher/cancel', { jobId });
   }
 
-  async publisherRetry(status: 'failed' = 'failed'): Promise<{ retried: number }> {
+  // GH#2270 — `retried` keeps its pre-#2270 meaning; the other two counts explain the
+  // failed jobs the pass left alone (see AsyncLiftRetryOutcome).
+  async publisherRetry(status: 'failed' = 'failed'): Promise<AsyncLiftRetryOutcome> {
     return this.post('/api/publisher/retry', { status });
   }
 
@@ -1331,8 +1366,19 @@ export class ApiClient {
   // status-scoped publisherClear). cleared / already_absent resolve normally (200);
   // rejected (nonterminal/unknown → 409, malformed → 400) throws via the post() helper
   // carrying { outcome:'rejected', reason } in the response body.
-  async publisherClearJob(jobId: string): Promise<{ outcome: 'cleared' | 'already_absent'; jobId: string }> {
-    return this.post('/api/publisher/clear-job', { jobId });
+  //
+  // GH#2270 follow-up (🔴 3824098486) — `allowPendingTransaction` opts in to clearing a job whose
+  // transaction may still land, which is the ONLY way to remove a held record that recovery has no
+  // automatic exit for. It defaults to false, so an ordinary clear is unchanged, and the daemon
+  // grants it only to a caller that owns the job.
+  async publisherClearJob(
+    jobId: string,
+    options: { allowPendingTransaction?: boolean } = {},
+  ): Promise<{ outcome: 'cleared' | 'already_absent'; jobId: string }> {
+    return this.post('/api/publisher/clear-job', {
+      jobId,
+      ...(options.allowPendingTransaction === true ? { allowPendingTransaction: true } : {}),
+    });
   }
 
   // ------------------------- EPCIS -------------------------------------
@@ -1493,6 +1539,8 @@ export class ApiClient {
   async subscribeToContextGraph(contextGraphId: string, options?: {
     includeSharedMemory?: boolean;
     syncMode?: ContextGraphSyncMode;
+    /** Reconcile even when persisted readiness already says this graph is complete. */
+    forceCatchup?: boolean;
   }): Promise<{
     subscribed: string;
     syncMode: ContextGraphSyncMode;
@@ -1561,6 +1609,7 @@ export class ApiClient {
       contextGraphId,
       includeWorkspace: options?.includeSharedMemory,
       syncMode: options?.syncMode ?? 'always-on',
+      forceCatchup: options?.forceCatchup,
     });
   }
 
@@ -1643,71 +1692,18 @@ export class ApiClient {
     });
   }
 
-  async catchupStatus(contextGraphId: string): Promise<{
-    jobId: string;
-    contextGraphId: string;
-    includeWorkspace: boolean;
-    status: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'failed' | 'unreachable';
-    queuedAt: number;
-    startedAt?: number;
-    finishedAt?: number;
-    result?: {
-      connectedPeers: number;
-      totalPeers?: number;
-      selectedPeers?: number;
-      syncCapablePeers: number;
-      peersTried: number;
-      peersResponded: number;
-      peersSucceeded: number;
-      /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
-      peersNotAttempted?: number;
-      deferredBackpressure: number;
-      dataSynced: number;
-      sharedMemorySynced: number;
-      denied: boolean;
-      deniedPeers: number;
-      diagnostics?: {
-        noProtocolPeers: number;
-        durable: {
-          fetchedMetaTriples: number;
-          fetchedDataTriples: number;
-          insertedMetaTriples: number;
-          insertedDataTriples: number;
-          bytesReceived: number;
-          resumedPhases: number;
-          timedOutPhases: number;
-          completedPhases: number;
-          checkpointAdvances: number;
-          emptyResponses: number;
-          metaOnlyResponses: number;
-          verifiedPrivateOnlyResponses?: number;
-          dataRejectedMissingMeta: number;
-          rejectedKcs: number;
-          failedPeers: number;
-          failedPhases: number;
-          deferredBackpressure: number;
-        };
-        sharedMemory: {
-          fetchedMetaTriples: number;
-          fetchedDataTriples: number;
-          insertedMetaTriples: number;
-          insertedDataTriples: number;
-          bytesReceived: number;
-          resumedPhases: number;
-          timedOutPhases: number;
-          completedPhases: number;
-          checkpointAdvances: number;
-          emptyResponses: number;
-          droppedDataTriples: number;
-          failedPeers: number;
-          failedPhases: number;
-          deferredBackpressure: number;
-        };
-      };
+  async catchupStatus(contextGraphId: string): Promise<CatchupStatusResponse> {
+    const raw = await this.get<CatchupStatusWireResponse>(
+      `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`,
+    );
+    const normalized: CatchupStatusResponse = {
+      ...raw,
+      /** Normalize the pre-alias workspace flag at the API boundary. */
+      includeSharedMemory: raw.includeSharedMemory ?? raw.includeWorkspace,
+      /** Normalize pre-field daemon responses at the API boundary. */
+      jobStatus: raw.jobStatus ?? raw.status,
     };
-    error?: string;
-  }> {
-    return this.get(`/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
+    return normalized;
   }
 
   async connect(multiaddr: string): Promise<{ connected: boolean }> {

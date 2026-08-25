@@ -32,6 +32,7 @@ import {
   resolveNetworkConfigName,
   resolveAutoUpdateConfig,
   resolveAutoUpdateSource,
+  resolveContextGraphSubscriptionRehydrationEnabled,
   resolveApprovalPolicy,
   resolveChainConfig,
   resolveReadyChainConfig,
@@ -40,6 +41,35 @@ import {
   resolveStorageAckTiming,
 } from '../src/config.js';
 import { rfc64PublicCatalogPolicy as policy } from './helpers/rfc64-public-catalog.js';
+
+describe('resolveContextGraphSubscriptionRehydrationEnabled', () => {
+  it('defaults to enabled and preserves explicit config values', () => {
+    expect(resolveContextGraphSubscriptionRehydrationEnabled(undefined, undefined)).toBe(true);
+    expect(resolveContextGraphSubscriptionRehydrationEnabled(true, undefined)).toBe(true);
+    expect(resolveContextGraphSubscriptionRehydrationEnabled(false, undefined)).toBe(false);
+  });
+
+  it('lets the strict environment override win', () => {
+    for (const value of ['1', 'true', ' TRUE ']) {
+      expect(resolveContextGraphSubscriptionRehydrationEnabled(false, value)).toBe(true);
+    }
+    for (const value of ['0', 'false', ' FALSE ']) {
+      expect(resolveContextGraphSubscriptionRehydrationEnabled(true, value)).toBe(false);
+    }
+  });
+
+  it('rejects invalid environment and persisted config values', () => {
+    expect(() => resolveContextGraphSubscriptionRehydrationEnabled(true, 'yes')).toThrow(
+      'DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED must be one of 1, 0, true, or false',
+    );
+    expect(() => resolveContextGraphSubscriptionRehydrationEnabled(true, '')).toThrow(
+      'DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED',
+    );
+    expect(() => resolveContextGraphSubscriptionRehydrationEnabled('false', undefined)).toThrow(
+      'contextGraphSubscriptionRehydrationEnabled must be a boolean',
+    );
+  });
+});
 
 describe('resolveRfc64PublicCatalogActivation', () => {
   const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430');
@@ -99,6 +129,32 @@ describe('resolveRfc64PublicCatalogActivation', () => {
         peers: ['12D3KooReceiver'],
       },
     });
+  });
+
+  it('activates a valid selected manifest without a redundant enabled switch', () => {
+    const resolved = resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-by-manifest')],
+        },
+      },
+    }, chainIdentity);
+
+    expect(resolved).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['selected-by-manifest'],
+    });
+  });
+
+  it('still rejects a non-boolean enabled value', () => {
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: 'true',
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-invalid-switch')],
+        },
+      } as any,
+    }, chainIdentity)).toThrow(/enabled must be a boolean/u);
   });
 
   it('keeps receiver-only activation selected while leaving auto-publish absent', () => {
@@ -275,6 +331,7 @@ describe('resolveStorageAckTiming', () => {
     expect(resolveStorageAckTiming()).toEqual({
       handlerDeadlineMs: 15_000,
       sendTimeoutMs: 20_000,
+      maxConcurrentCollections: 1,
     });
   });
 
@@ -282,6 +339,7 @@ describe('resolveStorageAckTiming', () => {
     expect(resolveStorageAckTiming({ handlerDeadlineMs: 55_000 })).toEqual({
       handlerDeadlineMs: 55_000,
       sendTimeoutMs: 60_000,
+      maxConcurrentCollections: 1,
     });
   });
 
@@ -289,11 +347,20 @@ describe('resolveStorageAckTiming', () => {
     expect(resolveStorageAckTiming({ handlerDeadlineMs: 0 })).toEqual({
       handlerDeadlineMs: 0,
       sendTimeoutMs: 20_000,
+      maxConcurrentCollections: 1,
     });
     expect(resolveStorageAckTiming({ handlerDeadlineMs: 0, sendTimeoutMs: 10_000 })).toEqual({
       handlerDeadlineMs: 0,
       sendTimeoutMs: 10_000,
+      maxConcurrentCollections: 1,
     });
+  });
+
+  it('defaults ACK collection concurrency to one and accepts an explicit positive limit', () => {
+    expect(resolveStorageAckTiming({ maxConcurrentCollections: 4 }).maxConcurrentCollections).toBe(4);
+    expect(() => resolveStorageAckTiming({ maxConcurrentCollections: 0 })).toThrow(
+      /storageAck\.maxConcurrentCollections must be a positive safe integer/,
+    );
   });
 
   it('rejects explicitly misaligned handler/send pairs', () => {
@@ -1211,6 +1278,23 @@ describe('resolveChainConfig (field-level merge)', () => {
     })?.receiptTimeoutMs).toBe(300_000);
   });
 
+  it('validates finality confirmations with network fallback and operator precedence', () => {
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, finalityConfirmations: 5 },
+    })?.finalityConfirmations).toBe(5);
+    expect(resolveChainConfig({ chain: { finalityConfirmations: 1 } }, {
+      chain: { ...fullNetworkChain, finalityConfirmations: 5 },
+    })?.finalityConfirmations).toBe(1);
+
+    for (const finalityConfirmations of [null, 0, -1, 1.5, Number.NaN]) {
+      expect(() => resolveChainConfig({
+        chain: { finalityConfirmations: finalityConfirmations as any },
+      }, { chain: fullNetworkChain })).toThrow(
+        /finalityConfirmations must be an integer >= 1/,
+      );
+    }
+  });
+
   it('rejects non-finite and sub-minimum receipt timeouts', () => {
     for (const receiptTimeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 999]) {
       expect(() => resolveChainConfig({ chain: { receiptTimeoutMs } }, { chain: fullNetworkChain }))
@@ -1493,6 +1577,18 @@ describe('resolveChainConfig (field-level merge)', () => {
     );
     expect(overridden?.minPublisherNativeWei).toBe(789n);
     expect(overridden?.minPublisherTracWei).toBe(456n);
+  });
+
+  it('normalizes and validates an operator transaction fee cap', () => {
+    const merged = resolveChainConfig(
+      { chain: { maxFeePerGasWei: '100000000' } },
+      { chain: fullNetworkChain },
+    );
+    expect(merged?.maxFeePerGasWei).toBe(100_000_000n);
+    expect(() => resolveChainConfig(
+      { chain: { maxFeePerGasWei: '0' } },
+      { chain: fullNetworkChain },
+    )).toThrow(/chain\.maxFeePerGasWei must be greater than zero/);
   });
 
   it('normalizes persisted (JSON/YAML) funding-floor strings and numbers to bigint', () => {

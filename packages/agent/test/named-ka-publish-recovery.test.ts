@@ -11,7 +11,6 @@ import {
 import type {
   AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   KnowledgeAssetVmPublishRequest,
-  LiftJobBroadcastMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { normalizeRecoveredNamedKaPublish } from '../src/named-ka-publish-recovery.js';
 
@@ -123,10 +122,12 @@ function baseRequest(
 
 // The normalizer only reads job.broadcast; its input type is the narrow structural
 // shape, so this fixture is a real contract guard (no cast) rather than a faked job.
-function broadcastJob(): { broadcast: LiftJobBroadcastMetadata } {
-  return {
-    broadcast: { txHash: TX_HASH, walletId: 'wallet-1', merkleRoot: SEAL_MERKLE_ROOT },
-  };
+/**
+ * GH#2270 PR-3 r3 — the two queued-transaction facts the normalizer reads, named. It used to take
+ * `job.broadcast`, which a failed job held on the recovery carrier alone does not have.
+ */
+function queuedTx(): { txHash: string; merkleRoot?: string } {
+  return { txHash: TX_HASH, merkleRoot: SEAL_MERKLE_ROOT };
 }
 
 // Typed optional tweaks (no Partial-over-required spread) so the fixture satisfies
@@ -168,7 +169,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     // `ual !== expectedReceiptUal` check; with the fix it resolves.
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),
-      job: broadcastJob(),
+      queued: queuedTx(),
       recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
       chain: seededChain(),
     });
@@ -198,10 +199,371 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     });
   });
 
+  it('treats a recovered update as SUPERSEDED when the history moved on, even if the root repeats [PR#2300 r5]', async () => {
+    // 3812275749 — merkle roots are not version identifiers. An asset updated A -> B -> A makes the
+    // FIRST update's root equal the LATEST root, so deciding supersession by root bytes calls that
+    // old transaction current and stamps its provenance and version block over newer state. The
+    // verified history POSITION settles it: this proof wrote root #1, the chain now holds #3.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint) => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({ latestRoot: SEAL_MERKLE_ROOT, rootCount: 3n, latestAuthor: AUTHOR, latestPublisher: PUBLISHER, blockNumber: 300 });
+    (chain as unknown as { getLatestMerkleRootAuthor: (kaId: bigint) => Promise<string> })
+      .getLatestMerkleRootAuthor = async () => ethers.getAddress(AUTHOR);
+    (chain as unknown as { getLatestMerkleRootPublisher: (kaId: bigint) => Promise<string> })
+      .getLatestMerkleRootPublisher = async () => ethers.getAddress(PUBLISHER);
+    (chain as unknown as { getBlockNumber: () => Promise<number> }).getBlockNumber = async () => 300;
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
+      }),
+    });
+
+    // The latest root EQUALS this proof's root, so root equality would have said "current".
+    expect(result.materialization.superseded).toBe(true);
+    expect(result.materialization.versionBlock).toBe(300);
+  });
+
+  it('an equal COUNT with a different root is a CONTRADICTION, not supersession [r7 -> r28]', async () => {
+    // 3812436109 originally, re-aimed by 🔴 3821720818.
+    //
+    // r7 read this fixture as "the root read already proved supersession, and a lagging count must
+    // not talk it back down", because root and count were then SEPARATE round trips that could
+    // observe different chain states. r11 dissolved that premise: both now come from one pinned,
+    // coherent view, so they cannot disagree by being read at different moments.
+    //
+    // Under a coherent view the same numbers mean something else. `rootCount == position` says the
+    // view describes THIS transaction's version, so a different root is not a later write — it is
+    // the view contradicting the proof (a forked or inconsistent endpoint). Calling that
+    // supersession finalizes the job receipt-only while the lifecycle is never repaired. The
+    // safety goal r7 protected — never materialize an old transaction as current — is unchanged
+    // and now rests on the position comparison, where a view BELOW the position defers as stale.
+    const chain = seededChain();
+    (chain as unknown as { getLatestMerkleRoot: (kaId: bigint) => Promise<Uint8Array> })
+      .getLatestMerkleRoot = async () => ethers.getBytes(`0x${'cd'.repeat(32)}`);
+    // r11 — the view is now the ONE source, so this pins the property inside it: a root that
+    // differs proves supersession, and an equal count cannot talk it back down.
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint) => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: `0x${'cd'.repeat(32)}`,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 100,
+      });
+    (chain as unknown as { getLatestMerkleRootAuthor: (kaId: bigint) => Promise<string> })
+      .getLatestMerkleRootAuthor = async () => ethers.getAddress(AUTHOR);
+    (chain as unknown as { getLatestMerkleRootPublisher: (kaId: bigint) => Promise<string> })
+      .getLatestMerkleRootPublisher = async () => ethers.getAddress(PUBLISHER);
+    (chain as unknown as { getBlockNumber: () => Promise<number> }).getBlockNumber = async () => 400;
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
+      }),
+    })).rejects.toThrow(/DIFFERENT root/);
+  });
+
+  it('stays CURRENT when the pinned pair reports this proof as the latest position [r9]', async () => {
+    // 3812794155 — the equality polarity of the position comparison. This update IS the latest:
+    // same root, same count. `>` must not become `>=`, which would classify a current recovered
+    // update as historical and stamp the latest-version attribution over its own.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint) => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({ latestRoot: SEAL_MERKLE_ROOT, rootCount: 3n, latestAuthor: AUTHOR, latestPublisher: PUBLISHER, blockNumber: 300 });
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '3' },
+      }),
+    });
+
+    expect(result.materialization.superseded).toBe(false);
+    // …and the version stays the recovered transaction's own inclusion block, not the head.
+    expect(result.materialization.versionBlock).toBe(77);
+  });
+
+  it('materializes the ROOT from the same view that decided supersession [r11]', async () => {
+    // 3813210019 — the decision and the materialized facts must come from ONE observation. Before
+    // this, supersession could be decided from a newer view while the record was materialized with
+    // the root from an earlier read and attribution from a third — a lifecycle version that never
+    // existed on chain. Here the standalone latest-root read still answers the OLD root A; the
+    // view has moved to B, and everything materialized must follow the view.
+    const chain = seededChain();
+    const NEWER_ROOT = `0x${'cd'.repeat(32)}`;
+    const NEWER_AUTHOR = `0x${'12'.repeat(20)}`;
+    const NEWER_PUBLISHER = `0x${'34'.repeat(20)}`;
+    (chain as unknown as { getLatestMerkleRoot: (kaId: bigint) => Promise<Uint8Array> })
+      .getLatestMerkleRoot = async () => ethers.getBytes(SEAL_MERKLE_ROOT);
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint) => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: NEWER_ROOT,
+        rootCount: 2n,
+        latestAuthor: NEWER_AUTHOR,
+        latestPublisher: NEWER_PUBLISHER,
+        blockNumber: 250,
+      });
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
+      }),
+    });
+
+    expect(result.materialization.superseded).toBe(true);
+    // Root, attribution and version all from the view that made the call — never mixed.
+    expect(result.materialization.merkleRoot).toBe(NEWER_ROOT);
+    expect(result.materialization.authorAddress).toBe(ethers.getAddress(NEWER_AUTHOR));
+    expect(result.materialization.publisherAddress).toBe(ethers.getAddress(NEWER_PUBLISHER));
+    expect(result.materialization.versionBlock).toBe(250);
+  });
+
+  it('DEFERS instead of deciding when no coherent view can be established [r12]', async () => {
+    // 3813505553 (and subsuming r8's bare-count row: with no view there is nothing to consult) — with a position in the proof there is no weaker answer to fall back to: root
+    // equality cannot tell an old repeated root from the current one, so falling back would stamp
+    // stale provenance exactly when the real proof is missing. The job stays held and the next
+    // tick asks again.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: () => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => null;
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
+      }),
+    })).rejects.toThrow(/could not be established from a single coherent chain view/);
+  });
+
+  it('does not need the standalone root read when it has a view [r12]', async () => {
+    // 3813506089 — the view is the only chain view consulted when it exists, so a failing (or
+    // absent) latest-root read must not abort a recovery the view can already settle.
+    const chain = seededChain();
+    (chain as unknown as { getLatestMerkleRoot: () => Promise<never> })
+      .getLatestMerkleRoot = async () => { throw new Error('standalone read is down'); };
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: () => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: SEAL_MERKLE_ROOT,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 120,
+      });
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
+      }),
+    });
+
+    expect(result.materialization.superseded).toBe(false);
+    expect(result.materialization.merkleRoot).toBe(SEAL_MERKLE_ROOT);
+  });
+
+  it('DEFERS when the view is BEHIND the recovered position — the third boundary [r13]', async () => {
+    // 3813796856 — greater and equal were covered; this is the case that cannot legitimately
+    // happen: the transaction is on chain at position 3, so a view reporting 2 has not seen it and
+    // is stale by definition. Reading "not greater" as "current" there would stamp this
+    // transaction's provenance from an observation that predates it.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: () => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: SEAL_MERKLE_ROOT,
+        rootCount: 2n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 150,
+      });
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '3' },
+      }),
+    })).rejects.toThrow(/behind the recovered transaction position/);
+  });
+
+  it('DEFERS on a behind view even when it names a DIFFERENT root [r14]', async () => {
+    // 3814016877 — the natural shape of a lagging view is a PREDECESSOR root, not a matching one,
+    // so gating the staleness test on "the roots matched" let exactly that case through: the
+    // recovered transaction looked superseded and the predecessor was materialized as current.
+    // The transaction is on chain at position 3; a view reporting 2 has not seen it, whatever root
+    // it names.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: () => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: `0x${'b2'.repeat(32)}`,
+        rootCount: 2n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 150,
+      });
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '3' },
+      }),
+    })).rejects.toThrow(/behind the recovered transaction position/);
+  });
+
+  it('DEFERS an update whose proof carries no history position [r15]', async () => {
+    // 3814317546 — the A -> B -> A case reached through a different door: evidence verified WITHOUT
+    // a position falls back to root bytes, and the first update's root equals the latest, so it
+    // would be recorded as current over the third. A create keeps the root comparison (its identity
+    // is minted once and never restored); an update without a position defers.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: () => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: SEAL_MERKLE_ROOT,
+        rootCount: 3n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 300,
+      });
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, operationKind: 'update' },
+      }),
+    })).rejects.toThrow(/carries no history position/);
+  });
+
+  it('a stalled chain read is CANCELLED by the pass deadline, and mutation never begins [r28]', async () => {
+    // 🔴 3821720957 / 🔴 3821721077 — the previous rows proved the publisher hands a signal to
+    // a stub that already honours it. The behaviour that matters is in THIS normalizer: it is the
+    // read-only half of recovery, it runs under the publisher's global claim lock, and a read that
+    // outlives the budget blocks claims, admission and clears for the graph.
+    const chain = seededChain();
+    let sawSignal: AbortSignal | undefined;
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: (kaId: bigint, o?: { signal?: AbortSignal }) => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = (_kaId, o) => new Promise((_resolve, reject) => {
+        sawSignal = o?.signal;
+        // Settles ONLY when the pass deadline fires — the stalled-endpoint shape.
+        o?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+
+    const controller = new AbortController();
+    const recovering = normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, operationKind: 'create' },
+      }),
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    // It RESOLVES (rejects) rather than hanging — the property the pass budget depends on.
+    await expect(recovering).rejects.toThrow();
+    // And the adapter was actually handed this pass's signal, not merely called.
+    expect(sawSignal).toBe(controller.signal);
+  });
+
+  it('a MARKED create with no coherent view DEFERS — A -> B -> A cannot be settled by root bytes [r21]', async () => {
+    // 🔴 3816769865 — the discriminating half of the row above. The no-view guard used to key
+    // off a persisted `merkleRootCount`, which a create never carries, so a marked create slipped
+    // through to the root-only comparison whenever the snapshot was briefly unavailable. The
+    // adapter here reports the LATEST root as the create's own root — the A -> B -> A history,
+    // where the current position is 3 — so the fallback would call the create current and stamp
+    // its old author and block over newer state. It must defer instead.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot?: unknown })
+      .readKnowledgeAssetVersionSnapshot = undefined;
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: {
+          merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, operationKind: 'create',
+        },
+      }),
+    })).rejects.toThrow(/single coherent chain view/);
+  });
+
+  it('the LEGACY path still works for an adapter with no coherent view [r15]', async () => {
+    // 3814317919 — the shared mock gained the snapshot capability, so every row exercises the new
+    // path and the retained compatibility path stopped being covered at all. A CREATE proof with no
+    // position, on an adapter that cannot produce a view, still resolves through the latest-root
+    // comparison exactly as it did before this PR.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot?: unknown })
+      .readKnowledgeAssetVersionSnapshot = undefined;
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4 },
+      }),
+    });
+
+    expect(result.materialization.superseded).toBe(false);
+    expect(result.materialization.merkleRoot).toBe(SEAL_MERKLE_ROOT);
+    expect(result.materialization.versionBlock).toBe(77);
+  });
+
+  it('a recovered CREATE is superseded when a later update restored its root [r16]', async () => {
+    // 3814609231 — minting the identity once does not keep the create's ROOT current: an
+    // A -> B -> A history restores it, and root equality would then record the create as the
+    // current version over the third write. A create's position is 1 by construction, so it gets
+    // the same comparison without needing an extra chain read.
+    const chain = seededChain();
+    (chain as unknown as { readKnowledgeAssetVersionSnapshot: () => Promise<unknown> })
+      .readKnowledgeAssetVersionSnapshot = async () => ({
+        latestRoot: SEAL_MERKLE_ROOT,
+        rootCount: 3n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 300,
+      });
+    (chain as unknown as { getBlockNumber: () => Promise<number> }).getBlockNumber = async () => 300;
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+        publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, operationKind: 'create' },
+      }),
+    });
+
+    expect(result.materialization.superseded).toBe(true);
+    expect(result.materialization.versionBlock).toBe(300);
+  });
+
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),
-      job: broadcastJob(),
+      queued: queuedTx(),
       recovery: recoveryEvidence(CONTRACT_RECEIPT_UAL),
       chain: seededChain(),
     });
@@ -217,7 +579,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     expect(checksummedUal).not.toBe(GRAPH_LOCAL_UAL); // differs only by case
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),
-      job: broadcastJob(),
+      queued: queuedTx(),
       recovery: recoveryEvidence(checksummedUal),
       chain: seededChain(),
     });
@@ -232,7 +594,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     const { chain, calls } = chainThatRejectsContractLookup();
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),
-      job: broadcastJob(),
+      queued: queuedTx(),
       recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
       chain,
     });
@@ -248,7 +610,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     await expect(
       normalizeRecoveredNamedKaPublish({
         request: baseRequest(),
-        job: broadcastJob(),
+        queued: queuedTx(),
         recovery: recoveryEvidence(CONTRACT_RECEIPT_UAL),
         chain,
       }),
@@ -385,7 +747,7 @@ describe('normalizeRecoveredNamedKaPublish — fail-closed boundary (GH#1966)', 
     await expect(
       normalizeRecoveredNamedKaPublish({
         request: request ?? baseRequest(),
-        job: broadcastJob(),
+        queued: queuedTx(),
         recovery,
         chain: seededChain(),
       }),

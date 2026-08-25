@@ -282,6 +282,24 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     this.#timeoutMs = timeoutMs;
   }
 
+  private async runBeforeAppliedHeadCommitV1(
+    plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+    signal: AbortSignal | undefined,
+    failureMessage: string,
+    rollback?: (cause: unknown) => Promise<void>,
+  ): Promise<void> {
+    const precommitSignal = signal ?? new AbortController().signal;
+    try {
+      throwIfAborted(precommitSignal);
+      await this.options.beforeAppliedHeadCommit?.(Object.freeze(plan), precommitSignal);
+      throwIfAborted(precommitSignal);
+    } catch (cause) {
+      await rollback?.(cause);
+      if (precommitSignal.aborted && cause === precommitSignal.reason) throw cause;
+      fail('catalog-native-receiver-activation', failureMessage, cause);
+    }
+  }
+
   async synchronizeOneBoundedPublicRootRow(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
@@ -495,6 +513,17 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     } catch (cause) {
       fail('catalog-native-receiver-catalog', 'verified genesis objects could not be staged', cause);
     }
+
+    await this.runBeforeAppliedHeadCommitV1(
+      Object.freeze({
+        catalogScope: trustedCatalogScope,
+        catalogHeadDigest: head.objectDigest as Digest32V1,
+        inventoryDigest,
+        rows: Object.freeze([]),
+      }),
+      signal,
+      'catalog applied-head precommit rejected the exact empty inventory',
+    );
 
     let appliedHeadStatus: 'applied' | 'existing';
     if (replay) {
@@ -879,6 +908,21 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     let completion!: ReturnType<typeof verifyRfc64PublicCatalogInventoryCompletenessV1>;
     let activatedTripleCount = 0;
     let semanticMutationAttempted = false;
+    const restoreExactPredecessorAfterFailure = async (
+      cause: unknown,
+      failureStage: 'semantic transition' | 'catalog applied-head precommit',
+    ): Promise<void> => {
+      if (!semanticMutationAttempted) return;
+      try {
+        await restoreSemanticTransitionV1(this.options.store, transitionJournal);
+      } catch (rollbackCause) {
+        fail(
+          'catalog-native-receiver-activation',
+          `${failureStage} failed and its exact predecessor rollback also failed`,
+          new AggregateError([cause, rollbackCause]),
+        );
+      }
+    };
     try {
       for (const removal of plannedRemovals) {
         throwIfAborted(signal);
@@ -929,17 +973,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         );
       }
     } catch (cause) {
-      if (semanticMutationAttempted) {
-        try {
-          await restoreSemanticTransitionV1(this.options.store, transitionJournal);
-        } catch (rollbackCause) {
-          fail(
-            'catalog-native-receiver-activation',
-            'semantic transition failed and its exact predecessor rollback also failed',
-            new AggregateError([cause, rollbackCause]),
-          );
-        }
-      }
+      await restoreExactPredecessorAfterFailure(cause, 'semantic transition');
       if (signal?.aborted && cause === signal.reason) throw cause;
       if (cause instanceof Rfc64PublicCatalogNativeReceiverErrorV1) throw cause;
       fail(
@@ -949,10 +983,8 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       );
     }
 
-    const precommitSignal = signal ?? new AbortController().signal;
-    try {
-      throwIfAborted(precommitSignal);
-      await this.options.beforeAppliedHeadCommit?.(Object.freeze({
+    await this.runBeforeAppliedHeadCommitV1(
+      Object.freeze({
         catalogScope: trustedCatalogScope,
         catalogHeadDigest: head.objectDigest as Digest32V1,
         inventoryDigest: completion.inventoryDigest,
@@ -960,16 +992,14 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           authorship: prepared.authorshipCapability,
           sealBinding: prepared.sealBindingCapability,
         }))),
-      }), precommitSignal);
-      throwIfAborted(precommitSignal);
-    } catch (cause) {
-      if (precommitSignal.aborted && cause === precommitSignal.reason) throw cause;
-      fail(
-        'catalog-native-receiver-activation',
-        'finalized VM precommit rejected the exact activated inventory',
+      }),
+      signal,
+      'catalog applied-head precommit rejected the exact activated inventory',
+      (cause) => restoreExactPredecessorAfterFailure(
         cause,
-      );
-    }
+        'catalog applied-head precommit',
+      ),
+    );
 
     let appliedHeadStatus: 'applied' | 'existing';
     if (historyDisposition === 'replay') {

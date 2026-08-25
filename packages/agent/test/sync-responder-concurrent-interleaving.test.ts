@@ -253,6 +253,40 @@ describe('sync responder pagination interleaving', () => {
     })).rejects.toThrow(/expected 2 rows, found 1/);
   });
 
+  it('uses a sentinel row to reject surplus data in page-only exact-graph mode', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'rootless-v2-surplus-page-only';
+    const manifest = graphScopedVmMeta({
+      cgId,
+      ual: 'did:dkg:base:8453/0x00000000000000000000000000000000000000ac/10',
+      publicTripleCount: 1,
+      status: 'confirmed',
+    });
+    await store.insert([
+      ...manifest.quads,
+      q(manifest.graph, 0),
+      q(manifest.graph, 1),
+    ]);
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 10,
+      snapshotBudget: {
+        maxRows: 1_000,
+        maxBytesEstimate: 1_000_000,
+        maxSnapshotRows: 0,
+        maxSnapshotBytesEstimate: 1_000_000,
+      },
+    });
+
+    await expect(cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 10,
+      syncSessionId: 'rootless-v2-surplus-page-only',
+    })).rejects.toThrow(/expected 1 total rows but found a surplus row/);
+  });
+
   it('fails closed instead of treating an incomplete V2 descriptor as legacy data', async () => {
     const store = new OxigraphStore();
     const cgId = 'rootless-v2-incomplete-manifest';
@@ -408,7 +442,7 @@ describe('sync responder pagination interleaving', () => {
     boundedQuery.assertObserved();
   });
 
-  it('preserves durable cursors beyond one million rows instead of replaying the clamp boundary', async () => {
+  it('preserves durable cursors beyond one million rows and fails closed on a short exact graph', async () => {
     const store = new OxigraphStore();
     const cgId = 'rootless-cursor-over-one-million';
     const manifest = graphScopedVmMeta({
@@ -444,7 +478,8 @@ describe('sync responder pagination interleaving', () => {
     };
 
     expect(linesFromNquads(await cap.invoke({ ...base, offset: 0 }))).toHaveLength(1);
-    expect(linesFromNquads(await cap.invoke({ ...base, offset: requestedDeepOffset }))).toHaveLength(0);
+    await expect(cap.invoke({ ...base, offset: requestedDeepOffset }))
+      .rejects.toThrow(/expected 1 rows at offset 1000005, found 0/);
     boundedQuery.assertObserved();
   });
 

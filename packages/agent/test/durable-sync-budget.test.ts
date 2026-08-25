@@ -6,9 +6,12 @@ import {
   createContextGraphSyncDeadline,
   createDurableMetaPhaseFetchDeadline,
   createDurableSyncBudget,
+  createDurableSyncFetchTimeoutMs,
   createGraphScopedAuthenticationDeadline,
+  DURABLE_SYNC_SETTLEMENT_HEADROOM_MS,
   DURABLE_DATA_PHASE_MIN_BUDGET_MS,
   DURABLE_META_PHASE_BUDGET_FRACTION,
+  EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS,
   type DurableSyncBudget,
 } from '../src/sync/requester/durable-sync-budget.js';
 import {
@@ -85,6 +88,7 @@ function requesterBudgetContext(options: {
   mapFetchResult?: (phase: 'data' | 'meta', page: SyncPageResult) => SyncPageResult;
   onVerify?: () => void;
   onVerifiedFullSnapshot?: DurableSyncContext['onVerifiedFullSnapshot'];
+  logWarn?: DurableSyncContext['logWarn'];
   emptyResponses?: number;
   storeInsert?: (request: DurableSyncStoreInsertRequest) => Promise<void>;
   storeGraphScopedAsset: (
@@ -139,7 +143,7 @@ function requesterBudgetContext(options: {
     deleteCheckpoint: () => {},
     setCheckpoint: () => {},
     logInfo: () => {},
-    logWarn: () => {},
+    logWarn: options.logWarn ?? (() => {}),
     logDebug: () => {},
   };
 }
@@ -197,6 +201,29 @@ describe('durable sync deadline budget', () => {
     ).toBe(1_120_000);
   });
 
+  it('reserves settlement headroom inside an explicit operation timeout', () => {
+    expect(createDurableSyncFetchTimeoutMs({ totalTimeoutMs: 299_000 }))
+      .toBe(299_000 - DURABLE_SYNC_SETTLEMENT_HEADROOM_MS);
+  });
+
+  it('gives a soft-sliced recovery the full maximum-size transfer window', () => {
+    expect(createDurableSyncFetchTimeoutMs({
+      totalTimeoutMs:
+        EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS + DURABLE_SYNC_SETTLEMENT_HEADROOM_MS,
+      extendedRecovery: true,
+    })).toBe(EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS);
+  });
+
+  it('keeps historical fetch-only budgets without an outer operation timeout', () => {
+    expect(createDurableSyncFetchTimeoutMs()).toBe(120_000);
+    expect(createDurableSyncFetchTimeoutMs({ exactRecovery: true })).toBe(600_000);
+  });
+
+  it('never removes the minimum usable fetch window from short operations', () => {
+    expect(createDurableSyncFetchTimeoutMs({ totalTimeoutMs: 30_000 }))
+      .toBe(10_000);
+  });
+
   it('uses a caller-supplied bounded graph-scoped authentication budget', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
 
@@ -235,6 +262,25 @@ describe('durable sync deadline budget', () => {
 
     expect(budget.fetchDeadline).toBe(1_800_000_030_000);
     now.mockReturnValue(1_800_000_029_000);
+    expect(budget.createGraphScopedAuthenticationDeadline())
+      .toBe(1_800_000_030_000);
+  });
+
+  it('stops network fetches at a soft boundary while authentication keeps the hard deadline', () => {
+    const now = vi.fn(() => 1_800_000_000_000);
+    const budget = createDurableSyncBudget({
+      fetchTimeoutMs: 60_000,
+      authenticationTimeoutMs: 60_000,
+      operationFetchDeadline: 1_800_000_020_000,
+      operationDeadline: 1_800_000_030_000,
+      now,
+    }).createContextGraphBudget({
+      contextGraphId,
+      remainingContextGraphs: 1,
+    });
+
+    expect(budget.fetchDeadline).toBe(1_800_000_020_000);
+    now.mockReturnValue(1_800_000_019_000);
     expect(budget.createGraphScopedAuthenticationDeadline())
       .toBe(1_800_000_030_000);
   });
@@ -693,6 +739,66 @@ describe('durable sync deadline budget', () => {
       failedPhases: 1,
     });
     expect(storeInsert).not.toHaveBeenCalled();
+  });
+
+  it('handles a default DOMException abort after a quarantined atomic store outcome', async () => {
+    const controller = new AbortController();
+    const logWarn = vi.fn<DurableSyncContext['logWarn']>();
+
+    const result = await runRequesterBudgetHarness({
+      durableSyncBudget: requesterBudget(() => Date.now() + 60_000),
+      signal: controller.signal,
+      storeGraphScopedAsset: async () => {
+        controller.abort();
+        return 'quarantined';
+      },
+      logWarn,
+    });
+
+    expect(controller.signal.reason).toBeInstanceOf(DOMException);
+    expect((controller.signal.reason as Error).name).toBe('AbortError');
+    expect(result).toMatchObject({
+      insertedTriples: 0,
+      complete: false,
+      failedPhases: 1,
+    });
+    const warnings = logWarn.mock.calls.map(([, message]) => message);
+    expect(warnings).toContain(
+      'Quarantined graph-scoped durable assertion did:dkg:otp:2043/0x1111111111111111111111111111111111111111/1 v1',
+    );
+    expect(warnings.some((message) => message.includes('oversized'))).toBe(false);
+    expect(warnings.some((message) => message.includes('only a getter'))).toBe(false);
+  });
+
+  it('handles an immutable non-abort Error reason without mutating it', async () => {
+    const controller = new AbortController();
+    const reason = Object.freeze(new Error('shutdown lifecycle fence'));
+    const logWarn = vi.fn<DurableSyncContext['logWarn']>();
+    const storeInsert = vi.fn(async (_request: DurableSyncStoreInsertRequest) => {});
+
+    const result = await runRequesterBudgetHarness({
+      durableSyncBudget: requesterBudget(() => Date.now() + 60_000),
+      signal: controller.signal,
+      graphScoped: false,
+      onVerify: () => controller.abort(reason),
+      storeInsert,
+      storeGraphScopedAsset: async () => 'applied',
+      logWarn,
+    });
+
+    expect(result).toMatchObject({
+      insertedTriples: 0,
+      complete: false,
+      failedPhases: 1,
+    });
+    expect(controller.signal.reason).toBe(reason);
+    expect(reason.name).toBe('Error');
+    expect(storeInsert).not.toHaveBeenCalled();
+    const warnings = logWarn.mock.calls.map(([, message]) => message);
+    expect(warnings.some((message) => message.includes('shutdown lifecycle fence'))).toBe(true);
+    expect(warnings.some((message) => message.includes('read only'))).toBe(false);
+    expect(warnings.some((message) => message.includes('read-only'))).toBe(false);
+    expect(warnings.some((message) => message.includes('only a getter'))).toBe(false);
   });
 });
 

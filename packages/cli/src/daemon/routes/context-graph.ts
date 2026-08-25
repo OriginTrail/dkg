@@ -446,7 +446,7 @@ function respondReconcileError(res: ServerResponse, err: unknown): void {
 /**
  * Refuse to mint a new catch-up job because the daemon is shutting down.
  *
- * Shaped after `respondIfApiQueryStoreBusy` — retryable 503 plus `Retry-After`
+ * Shaped after `respondIfStoreUnavailable` — retryable 503 plus `Retry-After`
  * — because that is what this is: the request is fine, the node just cannot
  * take on new work it will never drain. Returned from BOTH mint sites, which
  * is why I7's `result` vocabulary needed a seventh value; a 503 that clamped
@@ -1784,6 +1784,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         error: 'Invalid "syncMode" (expected "on-demand" or "always-on")',
       });
     }
+    // Operators can explicitly revisit an existing graph whose persisted
+    // readiness predates exact RFC-64 coverage. This is a one-shot admission
+    // control, not a durable mode: omission/false preserves the ready fast
+    // path, while true runs the normal bounded foreground catch-up scheduler.
+    const forceCatchup = parsed.forceCatchup ?? false;
+    if (typeof forceCatchup !== 'boolean') {
+      recordCatchupRequest('bad_request', shouldSyncSharedMemory);
+      return jsonResponse(res, 400, {
+        error: 'Invalid "forceCatchup" (expected boolean)',
+      });
+    }
     // #1102: accept `id` as an alias for `contextGraphId`.
     const contextGraphId = parsed.contextGraphId ?? parsed.id;
     if (!contextGraphId) {
@@ -1873,7 +1884,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         includeSharedMemory: shouldSyncSharedMemory,
         hasConfirmedMeta: hasConfirmedExistingMeta,
       });
-      if (existingReadiness.alreadyReady) {
+      if (existingReadiness.alreadyReady && !forceCatchup) {
         const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
         // Second mint site. Guard the MINT, not the read: the guard sits AFTER
         // `reusableDoneJob` is computed, so a replay of an existing completed
@@ -1969,7 +1980,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       syncMode: requestedSyncMode,
     }).syncMode;
     console.log(
-      `[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory} syncMode=${effectiveSyncMode}`,
+      `[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory} syncMode=${effectiveSyncMode} forceCatchup=${forceCatchup}`,
     );
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;

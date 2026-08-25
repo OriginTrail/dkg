@@ -64,12 +64,36 @@ function mixedPeerResult(verifiedDataPeers: number): CatchupJobResult {
   };
 }
 
+function durableMetaOnlyResult(): CatchupJobResult {
+  const result = mixedPeerResult(0);
+  result.dataSynced = 0;
+  result.denied = false;
+  result.deniedPeers = 0;
+  result.peersSucceeded = 1;
+  if (!result.diagnostics?.durable) {
+    throw new Error('durable diagnostics missing');
+  }
+  result.diagnostics.durable.fetchedDataTriples = 0;
+  result.diagnostics.durable.insertedDataTriples = 0;
+  result.diagnostics.durable.fetchedMetaTriples = 8;
+  result.diagnostics.durable.insertedMetaTriples = 8;
+  result.diagnostics.durable.metaOnlyResponses = 1;
+  result.diagnostics.durable.timedOutPhases = 0;
+  return result;
+}
+
 describe('context graph catch-up readiness classification', () => {
   const readinessBeforeCatchup = {
     version: 0,
     durableVerified: false,
     sharedMemoryVerified: false,
     updatedAt: 0,
+  };
+  const swmVerifiedReadinessBeforeCatchup = {
+    version: CONTEXT_GRAPH_READINESS_VERSION,
+    durableVerified: false,
+    sharedMemoryVerified: true,
+    updatedAt: 1,
   };
 
   it('uses a clean per-peer completion even when aggregate diagnostics contain denial and timeout', () => {
@@ -182,13 +206,126 @@ describe('context graph catch-up readiness classification', () => {
     });
 
     expect(classification).toMatchObject({
-      jobStatus: 'unreachable',
+      jobStatus: 'partial',
       readinessPatch: {
         durableVerified: false,
         sharedMemoryVerified: false,
       },
     });
     expect(classification.eventPayload).toBeUndefined();
+  });
+
+  it('does not let clean shared memory mask incomplete durable VM', () => {
+    const result = mixedPeerResult(0);
+    result.denied = false;
+    result.deniedPeers = 0;
+    result.peersSucceeded = 1;
+    result.sharedMemorySynced = 7;
+    result.cleanPlaneCompletions!.sharedMemory.verifiedDataPeers = 1;
+    result.diagnostics!.sharedMemory.fetchedDataTriples = 7;
+    result.diagnostics!.sharedMemory.insertedDataTriples = 7;
+    result.diagnostics!.sharedMemory.completedPhases = 1;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'partial',
+      statePatch: {
+        // The existing compatibility/write-readiness bit may be opened by a
+        // persisted usable plane; the terminal job verdict may not.
+        synced: true,
+        sharedMemorySynced: true,
+      },
+      readinessPatch: {
+        durableVerified: false,
+        sharedMemoryVerified: true,
+      },
+      eventPayload: {
+        dataSynced: 0,
+        sharedMemorySynced: 7,
+      },
+    });
+    expect(classification.error).toContain('incomplete plane remains unready');
+  });
+
+  it('accepts an explicit selected-SWM terminal proof with no new inserts', () => {
+    const result = mixedPeerResult(1);
+    result.denied = false;
+    result.deniedPeers = 0;
+    result.sharedMemorySynced = 0;
+    result.cleanPlaneCompletions!.sharedMemory.selectedScopeCompletePeers = 1;
+    // These remain raw telemetry from voluntary yields that the selected lane
+    // resolved before producing its terminal verdict. They must not be erased,
+    // and they must not override the stronger typed proof either.
+    result.diagnostics!.sharedMemory.failedPhases = 1;
+    result.diagnostics!.sharedMemory.timedOutPhases = 1;
+    result.diagnostics!.sharedMemory.emptyResponses = 1;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'done',
+      statePatch: {
+        synced: true,
+        sharedMemorySynced: true,
+      },
+      readinessPatch: {
+        durableVerified: true,
+        sharedMemoryVerified: true,
+      },
+      eventPayload: {
+        sharedMemorySynced: 0,
+      },
+    });
+  });
+
+  it('does not let previously verified shared memory mask a later durable-only request', () => {
+    const result = durableMetaOnlyResult();
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup: swmVerifiedReadinessBeforeCatchup,
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'unreachable',
+      statePatch: { synced: true, sharedMemorySynced: true },
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: true },
+    });
+  });
+
+  it('reports the private durable-VM shortfall when SWM was already verified', () => {
+    const result = durableMetaOnlyResult();
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      readinessBeforeCatchup: swmVerifiedReadinessBeforeCatchup,
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'unreachable',
+      error: 'Shared-memory context-graph data synchronized, but durable VM catch-up did not complete. Retry to finish finalized VM synchronization.',
+      statePatch: { synced: true, sharedMemorySynced: true },
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: true },
+    });
   });
 
   // Emptiness is only provable as a whole-round verdict: an empty response is
@@ -626,8 +763,8 @@ describe('T16 — terminal readiness strings are byte-identical', () => {
     r.diagnostics!.durable.insertedDataTriples = 5;
     r.diagnostics!.durable.timedOutPhases = 1;
     const c = classify(r);
-    expect(c.jobStatus).toBe('unreachable');
-    expect(c.error).toBe('Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.');
+    expect(c.jobStatus).toBe('partial');
+    expect(c.error).toBe('Verified data was inserted, but this bounded catch-up job ended before the requested plane was complete. The incomplete plane remains unready; graph-level synchronization may continue independently.');
   });
 
   it('pins the private missing-graph-proof string', () => {
@@ -723,7 +860,7 @@ describe('T16 — terminal readiness strings are byte-identical', () => {
  * the ones that reach it.
  */
 describe('T16b — the shared-memory shortfall clause (#2050)', () => {
-  const INCOMPLETE_PROGRESS = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.';
+  const INCOMPLETE_PROGRESS = 'Verified data was inserted, but this bounded catch-up job ended before the requested plane was complete. The incomplete plane remains unready; graph-level synchronization may continue independently.';
 
   const r26: SwmSnapshotCoverage = {
     contextGraphId: 'medical-research',
@@ -806,7 +943,7 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
       readinessBeforeCatchup: { version: 0, durableVerified: false, sharedMemoryVerified: false, updatedAt: 0 },
     });
 
-    expect(c.jobStatus).toBe('unreachable');
+    expect(c.jobStatus).toBe('partial');
     // Whole-string equality: the prefix pin in T16 cannot see the append.
     expect(c.error).toBe(INCOMPLETE_PROGRESS + swmShortfallClause(r26, 2));
     expect(c.error).toContain('178/250');
@@ -900,7 +1037,7 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
  */
 describe('T16b — the shortfall clause reaches the terminal message', () => {
   const before = { version: 0, durableVerified: false, sharedMemoryVerified: false, updatedAt: 0 };
-  const PREFIX = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.';
+  const PREFIX = 'Verified data was inserted, but this bounded catch-up job ended before the requested plane was complete. The incomplete plane remains unready; graph-level synchronization may continue independently.';
 
   /** The r26 shape: data inserted, plane unproven, coverage 72 short. */
   function shortfallResult(over: Partial<{

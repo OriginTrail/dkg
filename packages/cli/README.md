@@ -404,6 +404,13 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `GET /api/diagnostics/backpressure` — node-admin scheduler pressure snapshot
 - `GET /api/events` — Server-Sent Events stream for real-time notifications
 
+`GET /api/info` retains its legacy `chain.rpcUrl`, `chain.rpcUrls`, and
+`chain.hubAddress` keys for response-shape compatibility. RPC endpoint values
+are never returned (`rpcUrl` is `null`, `rpcUrls` is empty, and
+`rpcEndpointsRedacted` is `true`) because configured URLs can contain provider
+credentials. The public Hub contract address remains available, while
+`rpcEndpointCount` reports the number of configured endpoints.
+
 > The V9 `GET /api/apps` endpoint (and the `/apps/*` iframe host) was retired in
 > V10 along with the installable apps framework — the daemon now returns
 > `410 Gone` on those paths. See [Extending the Node](#extending-the-node) below.
