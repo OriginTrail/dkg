@@ -55,6 +55,9 @@ importers:
       esbench:
         specifier: ^0.8.1
         version: 0.8.1(esbuild@0.27.7)(playwright-core@1.59.1)(rollup@4.60.4)(sucrase@3.35.1)(typescript@5.9.3)(vite@7.3.2(@types/node@22.19.11)(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
+      is-number:
+        specifier: 7.0.0
+        version: 7.0.0
       knip:
         specifier: ^6.6.1
         version: 6.23.0
