@@ -14,3 +14,10 @@ Run from the repository root after all source changes are committed:
 ```sh
 pnpm run test:m2:rfc64-private-swm-vm-recovery
 ```
+
+Use the same product canary for the bounded 500/500 scale gate:
+
+```sh
+DKG_RFC64_PRIVATE_ASSET_COUNT=500 \
+  pnpm run test:m2:rfc64-private-swm-vm-recovery
+```

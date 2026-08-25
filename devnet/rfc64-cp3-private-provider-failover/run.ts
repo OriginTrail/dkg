@@ -1,4 +1,5 @@
-import { rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
 
@@ -40,82 +41,73 @@ import {
   assertGate2HarnessReadyV1,
   assertGate2HarnessSourceStateV1,
   connectGate2HarnessAgentsV1,
-  createGate2TwoAgentDataDirsV1,
   spawnGate2HarnessAgentV1,
 } from '../rfc64-gate2-multi-asset-completeness/two-agent-harness.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
-const ARTIFACT = process.env.DKG_RFC64_PRIVATE_CP2_ARTIFACT
-  ?? join(import.meta.dirname, 'artifacts/cp2-private-swm-vm-recovery.json');
+const ARTIFACT = process.env.DKG_RFC64_PRIVATE_CP3_ARTIFACT
+  ?? join(import.meta.dirname, 'artifacts/cp3-private-provider-failover.json');
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
 const CHAIN_ID = '20430' as DecimalU256V1;
 const ZERO_U64 = '0' as DecimalU64V1;
 const ZERO_U256 = '0' as DecimalU256V1;
 const CONTEXT_GRAPH_ID =
-  '0x1111111111111111111111111111111111111111/cp2-private-swm-vm' as ContextGraphIdV1;
-const ON_CHAIN_CONTEXT_GRAPH_ID = '14';
+  '0x1111111111111111111111111111111111111111/cp3-private-failover' as ContextGraphIdV1;
+const ON_CHAIN_CONTEXT_GRAPH_ID = '15';
 const CG_STORAGE = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
 const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
-const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
-const RECEIVER_WALLET = new ethers.Wallet(`0x${'65'.repeat(32)}`);
+const AUTHOR_WALLET = new ethers.Wallet(`0x${'74'.repeat(32)}`);
+const PROVIDER_A_WALLET = new ethers.Wallet(`0x${'75'.repeat(32)}`);
+const PROVIDER_B_WALLET = new ethers.Wallet(`0x${'76'.repeat(32)}`);
+const RECEIVER_WALLET = new ethers.Wallet(`0x${'77'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
+const PROVIDER_A = PROVIDER_A_WALLET.address.toLowerCase() as EvmAddressV1;
+const PROVIDER_B = PROVIDER_B_WALLET.address.toLowerCase() as EvmAddressV1;
 const RECEIVER = RECEIVER_WALLET.address.toLowerCase() as EvmAddressV1;
 const ASSET_COUNT = boundedAssetCount(
-  process.env.DKG_RFC64_PRIVATE_ASSET_COUNT,
+  process.env.DKG_RFC64_PRIVATE_FAILOVER_ASSET_COUNT,
   32,
 );
-const PROCESS_EVENT_TIMEOUT_MS = Math.max(90_000, ASSET_COUNT * 2_000);
-const FIRST_KA_NUMBER = 1_000n;
+const PROCESS_EVENT_TIMEOUT_MS = Math.max(120_000, ASSET_COUNT * 4_000);
+const PROVIDER_A_BUNDLE_DELAY_MS = 150;
+const PROVIDER_A_KILL_DELAY_MS = 750;
+const FIRST_KA_NUMBER = 2_000n;
 const ASSERTION_ROOT =
   '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f' as Digest32V1;
 const PROJECTION_NQUADS =
-  '<https://example.org/alice> <https://schema.org/age> '
-  + '"42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
-  + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n';
+  '<https://example.org/failover> <https://schema.org/name> "Release 3" .\n'
+  + '<https://example.org/failover> <https://schema.org/version> "3" .\n';
 const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: CHAIN_ID,
   assertedAtKav10Address: KAV10,
 });
 const POLICY = privateRegisteredPolicy();
-const POLICY_DIGEST = computeContextGraphPolicyObjectDigestV1(
-  unsignedPolicyEnvelope(POLICY),
-);
+const POLICY_DIGEST = computeContextGraphPolicyObjectDigestV1(unsignedPolicyEnvelope(POLICY));
 const ROSTER = privateRoster(POLICY_DIGEST);
 
 await execute();
 
 async function execute(): Promise<void> {
   const launch = consumeGate2RuntimeLaunchReceiptV1();
-  const head = assertGate2HarnessSourceStateV1(
-    REPO_ROOT,
-    launch.sourceCommit,
-    launch.manifest,
-  );
+  const head = assertGate2HarnessSourceStateV1(REPO_ROOT, launch.sourceCommit, launch.manifest);
   rmSync(ARTIFACT, { force: true });
-  const dataDirs = createGate2TwoAgentDataDirsV1('cp2-private');
+  const dataDirs = {
+    author: mkdtempSync(join(tmpdir(), 'dkg-rfc64-cp3-author-')),
+    providerA: mkdtempSync(join(tmpdir(), 'dkg-rfc64-cp3-provider-a-')),
+    providerB: mkdtempSync(join(tmpdir(), 'dkg-rfc64-cp3-provider-b-')),
+    receiver: mkdtempSync(join(tmpdir(), 'dkg-rfc64-cp3-receiver-')),
+  };
   const registry = new ChildProcessRegistry(20_000);
   let primaryFailure: unknown;
   let operationFailed = true;
   try {
-    const author = spawnGate2HarnessAgentV1({
-      role: 'author',
-      catalogLocalAgentAddress: AUTHOR,
-      dataDir: dataDirs.author,
-      eventTimeoutMs: PROCESS_EVENT_TIMEOUT_MS,
-      networkChainId: NETWORK_ID,
-      registry,
-      repoRoot: REPO_ROOT,
-      runtimeManifestDigest: launch.manifest.manifestDigest,
-      sourceCommit: head,
-    });
     const assets = await Promise.all(Array.from({ length: ASSET_COUNT }, async (_, index) => {
       const kaNumber = FIRST_KA_NUMBER + BigInt(index);
-      const seal = await authorSeal(kaNumber);
       return Object.freeze({
-        assertionCoordinate: `cp2-private-asset-${String(index).padStart(2, '0')}`,
+        assertionCoordinate: `cp3-private-asset-${String(index).padStart(3, '0')}`,
         projectionNQuads: PROJECTION_NQUADS,
-        seal,
+        seal: await authorSeal(kaNumber),
       });
     }));
     const finalizedVmConfigJson = JSON.stringify({
@@ -130,35 +122,85 @@ async function execute(): Promise<void> {
       nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase(),
       onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
     });
-    const receiver = spawnGate2HarnessAgentV1({
-      role: 'receiver',
-      catalogLocalAgentAddress: RECEIVER,
-      dataDir: dataDirs.receiver,
+    const common = {
       eventTimeoutMs: PROCESS_EVENT_TIMEOUT_MS,
-      finalizedVmConfigJson,
       networkChainId: NETWORK_ID,
       registry,
       repoRoot: REPO_ROOT,
       runtimeManifestDigest: launch.manifest.manifestDigest,
       sourceCommit: head,
+    } as const;
+    const author = spawnGate2HarnessAgentV1({
+      ...common,
+      role: 'author',
+      catalogLocalAgentAddress: AUTHOR,
+      dataDir: dataDirs.author,
     });
-    const [authorReady, receiverReady] = await Promise.all([
+    const providerA = spawnGate2HarnessAgentV1({
+      ...common,
+      role: 'receiver',
+      catalogLocalAgentAddress: PROVIDER_A,
+      dataDir: dataDirs.providerA,
+      finalizedVmConfigJson,
+      masterKeyHex: '3c'.repeat(32),
+      bundleServeDelayMs: PROVIDER_A_BUNDLE_DELAY_MS,
+    });
+    const providerB = spawnGate2HarnessAgentV1({
+      ...common,
+      role: 'receiver',
+      catalogLocalAgentAddress: PROVIDER_B,
+      dataDir: dataDirs.providerB,
+      finalizedVmConfigJson,
+      masterKeyHex: '4d'.repeat(32),
+    });
+    const receiver = spawnGate2HarnessAgentV1({
+      ...common,
+      role: 'receiver',
+      catalogLocalAgentAddress: RECEIVER,
+      dataDir: dataDirs.receiver,
+      finalizedVmConfigJson,
+    });
+    const [authorReady, providerAReady, providerBReady, receiverReady] = await Promise.all([
       author.waitFor('ready'),
+      providerA.waitFor('ready'),
+      providerB.waitFor('ready'),
       receiver.waitFor('ready'),
     ]);
     assertGate2HarnessReadyV1(authorReady, 'author', launch.manifest.manifestDigest);
-    assertGate2HarnessReadyV1(receiverReady, 'receiver', launch.manifest.manifestDigest);
-    exact(authorReady.finalizedVmRuntime, false, 'author finalized VM runtime');
-    exact(receiverReady.finalizedVmRuntime, true, 'receiver finalized VM runtime');
+    for (const ready of [providerAReady, providerBReady, receiverReady]) {
+      assertGate2HarnessReadyV1(ready, 'receiver', launch.manifest.manifestDigest);
+      exact(ready.finalizedVmRuntime, true, 'receiver finalized VM runtime');
+    }
     const authorPeerId = requiredString(authorReady.peerId, 'author peer ID');
+    const providerAPeerId = requiredString(providerAReady.peerId, 'provider A peer ID');
+    const providerBPeerId = requiredString(providerBReady.peerId, 'provider B peer ID');
     const receiverPeerId = requiredString(receiverReady.peerId, 'receiver peer ID');
-    if (authorPeerId === receiverPeerId) throw new Error('private canary peer IDs are equal');
-    await connectGate2HarnessAgentsV1(author, receiver, authorReady, receiverReady, 'cp2-private');
+    exact(new Set([authorPeerId, providerAPeerId, providerBPeerId, receiverPeerId]).size, 4,
+      'distinct peer count');
 
     await Promise.all([
+      connectGate2HarnessAgentsV1(author, providerA, authorReady, providerAReady, 'cp3-a'),
+      connectGate2HarnessAgentsV1(author, providerB, authorReady, providerBReady, 'cp3-b'),
+      connectGate2HarnessAgentsV1(providerA, receiver, providerAReady, receiverReady, 'cp3-ra'),
+      connectGate2HarnessAgentsV1(providerB, receiver, providerBReady, receiverReady, 'cp3-rb'),
+    ]);
+    await Promise.all([
       acceptPrivatePolicy(author, 'author-policy'),
+      acceptPrivatePolicy(providerA, 'provider-a-policy'),
+      acceptPrivatePolicy(providerB, 'provider-b-policy'),
       acceptPrivatePolicy(receiver, 'receiver-policy'),
     ]);
+    await Promise.all([
+      bindPeer(author, providerAPeerId, PROVIDER_A, 'author-bind-a'),
+      bindPeer(author, providerBPeerId, PROVIDER_B, 'author-bind-b'),
+      bindPeer(providerA, authorPeerId, AUTHOR, 'a-bind-author'),
+      bindPeer(providerB, authorPeerId, AUTHOR, 'b-bind-author'),
+      bindPeer(providerA, receiverPeerId, RECEIVER, 'a-bind-receiver'),
+      bindPeer(providerB, receiverPeerId, RECEIVER, 'b-bind-receiver'),
+      bindPeer(receiver, providerAPeerId, PROVIDER_A, 'receiver-bind-a'),
+      bindPeer(receiver, providerBPeerId, PROVIDER_B, 'receiver-bind-b'),
+    ]);
+
     const genesis = output(await author.request(
       'publishCatalogGenesis',
       'private-genesis',
@@ -166,9 +208,9 @@ async function execute(): Promise<void> {
       {
         scope: catalogScope(),
         authorPrivateKey: AUTHOR_WALLET.privateKey,
-        issuedAt: '1773900000000',
-        catalogIssuerDelegationEffectiveAt: '1773899999000',
-        catalogIssuerDelegationExpiresAt: '1774000000000',
+        issuedAt: '1774000000000',
+        catalogIssuerDelegationEffectiveAt: '1773999999000',
+        catalogIssuerDelegationExpiresAt: '1774100000000',
       },
     ), 'private genesis');
     let previousHead = stagedHead(genesis, 'private genesis');
@@ -184,120 +226,127 @@ async function execute(): Promise<void> {
           catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
           assets: assets.slice(0, index + 1),
           deployment: DEPLOYMENT,
-          issuedAt: String(1773900001000 + index),
+          issuedAt: String(1774000001000 + index),
         },
       ), `private successor ${index + 1}`);
       previousHead = stagedHead(publication, `private successor ${index + 1}`);
     }
     if (publication === null) throw new Error('private successor publication is missing');
     const announcement = record(publication.announcement, 'private successor announcement');
-    exact(announcement.policyDigest, POLICY_DIGEST, 'private announcement policy digest');
-
-    const denied = output(await author.request(
-      'announce',
-      'private-unbound-denial',
-      'operation-completed',
-      { announcement, peers: [receiverPeerId] },
-    ), 'unbound announcement denial');
-    exactJson(denied.announcedPeers, [], 'unbound announcement accepted peers');
-    exact(array(denied.failedPeers, 'unbound announcement failed peers').length, 1,
-      'unbound announcement failure count');
-
-    await Promise.all([
-      bindPeer(author, receiverPeerId, RECEIVER, 'author-bind-receiver'),
-      bindPeer(receiver, authorPeerId, AUTHOR, 'receiver-bind-author'),
-    ]);
-    const delivery = output(await author.request(
-      'announce',
-      'private-authorized-announce',
-      'operation-completed',
-      { announcement, peers: [receiverPeerId] },
-    ), 'authorized announcement');
-    exactJson(delivery.announcedPeers, [receiverPeerId], 'authorized announcement peers');
-    exactJson(delivery.failedPeers, [], 'authorized announcement failures');
-    await receiver.request('awaitReceiverIdle', 'private-receiver-idle', 'receiver-idle');
-
     const headDigest = requiredDigest(publication.headObjectDigest, 'private head digest');
-    const terminalFailure = await receiver.request(
+    const providerDelivery = output(await author.request(
+      'announce',
+      'private-provider-announce',
+      'operation-completed',
+      { announcement, peers: [providerAPeerId, providerBPeerId] },
+    ), 'private provider delivery');
+    exact(array(providerDelivery.announcedPeers, 'provider delivery peers').length, 2,
+      'provider delivery success count');
+    exact(array(providerDelivery.failedPeers, 'provider delivery failures').length, 0,
+      'provider delivery failure count');
+    await Promise.all([
+      providerA.request('awaitReceiverIdle', 'provider-a-idle', 'receiver-idle'),
+      providerB.request('awaitReceiverIdle', 'provider-b-idle', 'receiver-idle'),
+    ]);
+    for (const [label, child] of [['provider A', providerA], ['provider B', providerB]] as const) {
+      const evidence = output(await child.request(
+        'exactInventoryReadback',
+        `${label.replaceAll(' ', '-')}-inventory`,
+        'operation-completed',
+        { catalogHeadDigest: headDigest },
+      ), `${label} inventory`);
+      exact(evidence.inventoryRowCount, ASSET_COUNT, `${label} exact row count`);
+      exact(evidence.activatedTripleCount, ASSET_COUNT * 2, `${label} SWM triple count`);
+      exact(evidence.appliedHeadStatus, 'applied', `${label} applied head`);
+    }
+
+    const synchronizationPromise = receiver.request(
+      'synchronizeCatalogProviders',
+      'receiver-provider-failover',
+      'operation-completed',
+      { remotePeerIds: [providerAPeerId, providerBPeerId], scope: catalogScope() },
+    );
+    await delay(PROVIDER_A_KILL_DELAY_MS);
+    const providerAExit = await registry.terminateAndWait(providerA.tracked, 'SIGKILL');
+    exact(providerAExit.code, null, 'provider A exit code');
+    exact(providerAExit.signal, 'SIGKILL', 'provider A exit signal');
+    const synchronization = output(await synchronizationPromise, 'receiver failover sync');
+    exactJson(
+      synchronization.providerPeerIds,
+      [providerAPeerId, providerBPeerId],
+      'discovered exact-head providers',
+    );
+
+    const failure = await receiver.request(
       'terminalFailureReadback',
-      'private-terminal-failure',
+      'receiver-terminal-failure',
       'operation-completed',
       { catalogHeadDigest: headDigest },
     );
-    exact(terminalFailure.output, null, 'private terminal failure');
-    const synchronization = output(await receiver.request(
+    exact(failure.output, null, 'receiver terminal failure');
+    const finalInventory = output(await receiver.request(
       'exactInventoryReadback',
-      'private-inventory',
+      'receiver-final-inventory',
       'operation-completed',
       { catalogHeadDigest: headDigest },
-    ), 'private inventory');
-    const rows = array(synchronization.rows, 'private inventory rows');
-    exact(rows.length, ASSET_COUNT, 'private recovered SWM row count');
-    exact(synchronization.inventoryRowCount, ASSET_COUNT, 'private inventory row count');
-    exact(synchronization.activatedTripleCount, ASSET_COUNT * 2, 'private SWM triple count');
-    exact(synchronization.appliedHeadStatus, 'applied', 'private applied head status');
+    ), 'receiver exact inventory');
+    const rows = array(finalInventory.rows, 'receiver exact rows');
+    exact(rows.length, ASSET_COUNT, 'receiver SWM row count');
+    exact(finalInventory.inventoryRowCount, ASSET_COUNT, 'receiver inventory row count');
+    exact(finalInventory.activatedTripleCount, ASSET_COUNT * 2, 'receiver SWM triple count');
+    exact(finalInventory.appliedHeadStatus, 'applied', 'receiver applied head status');
 
-    let swmRecovered = 0;
     let vmRecovered = 0;
-    const recoveredChainOrdinals = new Set<number>();
+    const ordinals = new Set<number>();
     for (const [index, value] of rows.entries()) {
-      const row = record(value, `private row ${index}`);
-      const semantic = output(await receiver.request(
-        'semanticGraphReadback',
-        `private-semantic-${index}`,
-        'operation-completed',
-        { swmGraph: requiredString(row.swmGraph, `private row ${index} graph`) },
-      ), `private semantic ${index}`);
-      exact(semantic.projectionNQuads, PROJECTION_NQUADS, `private SWM ${index}`);
-      swmRecovered += 1;
-
-      const kaId = requiredString(row.kaId, `private row ${index} KA ID`);
+      const row = record(value, `receiver row ${index}`);
+      const kaId = requiredString(row.kaId, `receiver row ${index} KA ID`);
       const kaNumber = BigInt(kaId) & ((1n << 96n) - 1n);
       const ordinal = Number(kaNumber - FIRST_KA_NUMBER);
       if (!Number.isSafeInteger(ordinal) || ordinal < 0 || ordinal >= ASSET_COUNT) {
-        throw new Error(`private row ${index} has an unexpected finalized KA ordinal`);
+        throw new Error(`receiver row ${index} has an unexpected KA ordinal`);
       }
-      if (recoveredChainOrdinals.has(ordinal)) {
-        throw new Error(`private row ${index} duplicates finalized KA ordinal ${ordinal}`);
-      }
-      recoveredChainOrdinals.add(ordinal);
-      const ual = requiredString(row.kaUal, `private row ${index} KA UAL`);
-      const vmGraph = contextGraphLayerUri(
-        CONTEXT_GRAPH_ID,
-        MemoryLayer.VerifiableMemory,
-        AUTHOR,
-        Number(kaNumber),
-      );
+      if (ordinals.has(ordinal)) throw new Error(`receiver duplicated KA ordinal ${ordinal}`);
+      ordinals.add(ordinal);
       const vm = output(await receiver.request(
         'vmGraphReadback',
-        `private-vm-${index}`,
+        `receiver-vm-${index}`,
         'operation-completed',
-        { vmGraph, metaGraph: contextGraphMetaUri(CONTEXT_GRAPH_ID), ual },
-      ), `private VM ${index}`);
-      exact(vm.tripleCount, 2, `private VM ${index} triple count`);
-      exact(vm.projectionNQuads, PROJECTION_NQUADS, `private VM ${index} projection`);
-      const metadata = array(vm.metadataBindings, `private VM ${index} metadata`)
-        .map((item, metadataIndex) => record(item, `private VM ${index} metadata ${metadataIndex}`));
-      metadataObject(metadata, 'status', '"confirmed"');
-      metadataObject(
-        metadata,
-        'batchId',
-        `"${kaId}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
-      );
-      // The mock finalized snapshot places every KA at block 123, transaction index 0.
-      // The KA number above, not materializedVersion, proves the exact chain ordinal set.
-      metadataObject(metadata, 'materializedVersion', '"123:0"');
+        {
+          vmGraph: contextGraphLayerUri(
+            CONTEXT_GRAPH_ID,
+            MemoryLayer.VerifiableMemory,
+            AUTHOR,
+            Number(kaNumber),
+          ),
+          metaGraph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+          ual: requiredString(row.kaUal, `receiver row ${index} UAL`),
+        },
+      ), `receiver VM ${index}`);
+      exact(vm.tripleCount, 2, `receiver VM ${index} triple count`);
+      exact(vm.projectionNQuads, PROJECTION_NQUADS, `receiver VM ${index} projection`);
       vmRecovered += 1;
     }
-    exactJson(
-      [...recoveredChainOrdinals].sort((left, right) => left - right),
-      Array.from({ length: ASSET_COUNT }, (_, ordinal) => ordinal),
-      'private recovered finalized chain ordinal set',
-    );
+    exact(ordinals.size, ASSET_COUNT, 'receiver finalized ordinal count');
 
-    const [authorStopped, receiverStopped] = await Promise.all([
-      author.stop('private-author-stop'),
-      receiver.stop('private-receiver-stop'),
+    const stats = output(await receiver.request(
+      'catalogStats',
+      'receiver-catalog-stats',
+      'operation-completed',
+    ), 'receiver catalog stats');
+    const receiverStats = record(stats.receiver, 'receiver scheduler stats');
+    const resourceStats = record(stats.nativeReceiver, 'receiver resource stats');
+    atLeast(receiverStats.providerAttempts, 2, 'provider attempts');
+    atLeast(receiverStats.providerSwitches, 1, 'provider switches');
+    exact(receiverStats.providerSuccesses, 1, 'provider successes');
+    exact(receiverStats.failed, 0, 'receiver failures');
+    atLeast(resourceStats.kaBundleNetworkFetches, 1, 'bundle network fetches');
+    atLeast(resourceStats.kaBundleCacheHits, 1, 'bundle cache hits after failover');
+
+    const [authorStopped, providerBStopped, receiverStopped] = await Promise.all([
+      author.stop('author-stop'),
+      providerB.stop('provider-b-stop'),
+      receiver.stop('receiver-stop'),
     ]);
     const testedHeadCommit = assertGate2HarnessSourceStateV1(
       REPO_ROOT,
@@ -306,19 +355,31 @@ async function execute(): Promise<void> {
     );
     const artifact = Object.freeze({
       accessPolicy: 1,
-      policySource: 'finalized-chain',
       catalogTransport: 'private-v2-only',
-      chainExpectedAssets: ASSET_COUNT,
-      swm: { expected: ASSET_COUNT, recovered: swmRecovered },
+      providers: { configured: 2, discoveredExactHead: 2, terminatedDuringTransfer: 1 },
+      failover: {
+        providerAttempts: receiverStats.providerAttempts,
+        providerSwitches: receiverStats.providerSwitches,
+        providerSuccesses: receiverStats.providerSuccesses,
+      },
+      swm: { expected: ASSET_COUNT, recovered: rows.length },
       vm: { expected: ASSET_COUNT, recovered: vmRecovered },
+      resources: {
+        controlObjectCacheHits: resourceStats.controlObjectCacheHits,
+        controlObjectNetworkFetches: resourceStats.controlObjectNetworkFetches,
+        kaBundleCacheHits: resourceStats.kaBundleCacheHits,
+        kaBundleNetworkFetches: resourceStats.kaBundleNetworkFetches,
+      },
       processBoundary: {
         authorExitCode: authorStopped.exit.code,
+        providerAExitSignal: providerAExit.signal,
+        providerBExitCode: providerBStopped.exit.code,
         receiverExitCode: receiverStopped.exit.code,
       },
       policyDigest: POLICY_DIGEST,
       repository: { testedHeadCommit, trackedSourceClean: true },
       runtimeManifestDigest: launch.manifest.manifestDigest,
-      schemaVersion: 'dkg-rfc64-cp2-private-swm-vm-recovery-v1',
+      schemaVersion: 'dkg-rfc64-cp3-private-provider-failover-v1',
       status: 'PASS',
     });
     const receipt = atomicWriteExactBytes(
@@ -326,8 +387,9 @@ async function execute(): Promise<void> {
       new TextEncoder().encode(canonicalDocument(artifact as unknown as CanonicalValue)),
     );
     process.stdout.write(
-      `[rfc64-private-cp2] PASS swm=${swmRecovered}/${ASSET_COUNT} `
-      + `vm=${vmRecovered}/${ASSET_COUNT} artifact=${ARTIFACT} sha256=${receipt.sha256}\n`,
+      `[rfc64-private-cp3] PASS swm=${rows.length}/${ASSET_COUNT} `
+      + `vm=${vmRecovered}/${ASSET_COUNT} switches=${String(receiverStats.providerSwitches)} `
+      + `artifact=${ARTIFACT} sha256=${receipt.sha256}\n`,
     );
     operationFailed = false;
   } catch (error) {
@@ -337,12 +399,13 @@ async function execute(): Promise<void> {
       operationFailed,
       primaryFailure,
       cleanup: () => registry.terminateAllThenCleanup(() => {
-        rmSync(dataDirs.author, { recursive: true, force: true });
-        rmSync(dataDirs.receiver, { recursive: true, force: true });
+        for (const path of Object.values(dataDirs)) {
+          rmSync(path, { recursive: true, force: true });
+        }
       }),
       reportSecondaryFailure: (primary, secondary) => {
         process.stderr.write(
-          `[rfc64-private-cp2] cleanup failure after ${String(primary)}: ${String(secondary)}\n`,
+          `[rfc64-private-cp3] cleanup failure after ${String(primary)}: ${String(secondary)}\n`,
         );
       },
     });
@@ -369,11 +432,11 @@ function privateRegisteredPolicy(): ContextGraphPolicyV1 {
       kind: 'finalized-chain' as const,
       chainId: CHAIN_ID,
       contractAddress: CG_STORAGE,
-      blockNumber: '120' as DecimalU64V1,
-      blockHash: `0x${'76'.repeat(32)}` as Digest32V1,
+      blockNumber: '130' as DecimalU64V1,
+      blockHash: `0x${'86'.repeat(32)}` as Digest32V1,
     },
-    effectiveAt: '1773900000000' as DecimalU64V1,
-    issuedAt: '1773900000000' as DecimalU64V1,
+    effectiveAt: '1774000000000' as DecimalU64V1,
+    issuedAt: '1774000000000' as DecimalU64V1,
   });
 }
 
@@ -389,6 +452,8 @@ function privateRoster(policyDigest: Digest32V1): MemberRosterV1 {
     administrativeDelegationDigest: null,
     members: [
       { agentAddress: AUTHOR, roles: ['holder', 'provider'] as const },
+      { agentAddress: PROVIDER_A, roles: ['holder', 'provider'] as const },
+      { agentAddress: PROVIDER_B, roles: ['holder', 'provider'] as const },
       { agentAddress: RECEIVER, roles: ['holder'] as const },
     ].sort((left, right) => left.agentAddress.localeCompare(right.agentAddress)),
     issuedAt: ZERO_U64,
@@ -468,7 +533,7 @@ async function authorSeal(kaNumber: bigint): Promise<CanonicalGraphScopedAuthorS
     assertedAtChainId: CHAIN_ID,
     assertedAtKav10Address: KAV10,
     reservedKaId: kaId,
-    assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
+    assertionFinalizedAt: '2026-07-20T12:34:56.789Z',
     contentScopeVersion: '2',
     kaUal: `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`,
     assertionVersion: '1',
@@ -488,17 +553,6 @@ function stagedHead(value: Record<string, unknown>, label: string): Record<strin
       `${label} signature variant digest`,
     ),
   };
-}
-
-function metadataObject(
-  rows: readonly Record<string, unknown>[],
-  predicateSuffix: string,
-  expectedObject: string,
-): void {
-  const matching = rows.filter((row) =>
-    requiredString(row.p, `metadata ${predicateSuffix} predicate`).endsWith(predicateSuffix));
-  exact(matching.length, 1, `metadata ${predicateSuffix} row count`);
-  exact(matching[0]!.o, expectedObject, `metadata ${predicateSuffix} object`);
 }
 
 function output(event: Gate2AgentEvent, label: string): Record<string, unknown> {
@@ -535,13 +589,19 @@ function requiredDigest(value: unknown, label: string): Digest32V1 {
 function boundedAssetCount(value: string | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   if (!/^[1-9][0-9]{0,2}$/u.test(value)) {
-    throw new TypeError('DKG_RFC64_PRIVATE_ASSET_COUNT must be an integer from 1 to 500');
+    throw new TypeError('DKG_RFC64_PRIVATE_FAILOVER_ASSET_COUNT must be an integer from 2 to 128');
   }
   const count = Number(value);
-  if (!Number.isSafeInteger(count) || count < 1 || count > 500) {
-    throw new TypeError('DKG_RFC64_PRIVATE_ASSET_COUNT must be an integer from 1 to 500');
+  if (!Number.isSafeInteger(count) || count < 2 || count > 128) {
+    throw new TypeError('DKG_RFC64_PRIVATE_FAILOVER_ASSET_COUNT must be an integer from 2 to 128');
   }
   return count;
+}
+
+function atLeast(value: unknown, minimum: number, label: string): void {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum) {
+    throw new Error(`${label} is below ${minimum}: ${JSON.stringify(value)}`);
+  }
 }
 
 function exact(actual: unknown, expected: unknown, label: string): void {
@@ -554,4 +614,8 @@ function exactJson(actual: unknown, expected: unknown, label: string): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw new Error(`${label} mismatch: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
   }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }

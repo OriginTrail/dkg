@@ -62,6 +62,9 @@ const finalizedVmConfigInput = process.env.DKG_RFC64_GATE2_FINALIZED_VM_CONFIG;
 const networkChainIdInput = process.env.DKG_RFC64_GATE2_NETWORK_CHAIN_ID;
 const localCatalogAgentAddressInput =
   process.env.DKG_RFC64_GATE2_CATALOG_LOCAL_AGENT_ADDRESS;
+const bundleServeDelayMs = parseBoundedDelayMs(
+  process.env.DKG_RFC64_GATE2_BUNDLE_SERVE_DELAY_MS,
+);
 if (role !== 'author' && role !== 'receiver') throw new Error('adapter role is required');
 if (!dataDirInput) throw new Error('DKG_RFC64_GATE2_ADAPTER_DATA_DIR is required');
 if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
@@ -190,6 +193,9 @@ async function boot(): Promise<void> {
       ),
     }),
   });
+  if (bundleServeDelayMs > 0) {
+    installHarnessBundleServeDelay(created, bundleServeDelayMs);
+  }
   agent = created;
   await created.start();
   if (finalizedVmConfig !== null) {
@@ -211,6 +217,63 @@ async function boot(): Promise<void> {
     finalizedVmRuntime: finalizedVmConfig !== null,
     startupRepair: null,
   });
+}
+
+/**
+ * Install a harness-only delay after persistence opens and before the catalog
+ * service captures its provider read capability. This gives the parent a
+ * deterministic point at which to terminate provider A during bundle transfer.
+ */
+function installHarnessBundleServeDelay(created: DKGAgent, delayMs: number): void {
+  const surface = created as unknown as Record<string, unknown>;
+  const originalStart = surface.startRfc64PublicCatalogServiceV1;
+  if (typeof originalStart !== 'function') {
+    throw new Error('catalog service start hook is unavailable');
+  }
+  surface.startRfc64PublicCatalogServiceV1 = function delayedCatalogStart(
+    this: Record<string, unknown>,
+    context: unknown,
+  ): unknown {
+    const persistenceValue = this.rfc64PersistenceV1;
+    if (
+      persistenceValue === null
+      || typeof persistenceValue !== 'object'
+      || Array.isArray(persistenceValue)
+    ) {
+      throw new Error('open RFC-64 persistence is unavailable');
+    }
+    const persistence = persistenceValue as Record<string, unknown>;
+    const kaBundles = plainRecord(persistence.kaBundles, 'RFC-64 KA bundle operations');
+    const originalRead = kaBundles.readKaBundleByDigest;
+    if (typeof originalRead !== 'function') {
+      throw new Error('RFC-64 KA bundle reader is unavailable');
+    }
+    Object.defineProperty(persistence, 'kaBundles', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: Object.freeze({
+        ...kaBundles,
+        readKaBundleByDigest: async (digest: unknown) => {
+          await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delayMs));
+          return (originalRead as (value: unknown) => Promise<unknown>)(digest);
+        },
+      }),
+    });
+    return (originalStart as (this: unknown, value: unknown) => unknown).call(this, context);
+  };
+}
+
+function parseBoundedDelayMs(value: string | undefined): number {
+  if (value === undefined) return 0;
+  if (!/^(0|[1-9][0-9]{0,4})$/u.test(value)) {
+    throw new TypeError('DKG_RFC64_GATE2_BUNDLE_SERVE_DELAY_MS is invalid');
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 10_000) {
+    throw new TypeError('DKG_RFC64_GATE2_BUNDLE_SERVE_DELAY_MS must be 0-10000');
+  }
+  return parsed;
 }
 
 /** Model an already-durable subscription through the production restore boundary. */
@@ -366,6 +429,32 @@ async function handle(command: Command): Promise<void> {
     case 'receiverStats': {
       requireRole('receiver');
       emitOperationResult(command, currentAgent.rfc64PublicCatalogStatsV1()?.receiver ?? null);
+      return;
+    }
+    case 'catalogStats': {
+      requireRole('receiver');
+      emitOperationResult(command, currentAgent.rfc64PublicCatalogStatsV1() ?? null);
+      return;
+    }
+    case 'synchronizeCatalogProviders': {
+      requireRole('receiver');
+      const input = plainRecord(command.input, 'synchronizeCatalogProviders input');
+      const remotePeerIds = plainArray(
+        input.remotePeerIds,
+        'synchronizeCatalogProviders.remotePeerIds',
+      ).map((value, index) => requiredString(
+        value,
+        `synchronizeCatalogProviders.remotePeerIds[${index}]`,
+      ));
+      if (remotePeerIds.length < 1 || remotePeerIds.length > 8) {
+        throw new TypeError('synchronizeCatalogProviders requires 1-8 providers');
+      }
+      const scope = plainRecord(input.scope, 'synchronizeCatalogProviders.scope');
+      const output = await currentAgent.synchronizeRfc64CatalogFromProvidersV1({
+        remotePeerIds,
+        scope: scope as never,
+      });
+      emitOperationResult(command, output);
       return;
     }
     case 'semanticGraphReadback': {
@@ -852,6 +941,8 @@ function inspectGate2ProductCapabilities(currentAgent: DKGAgent): Record<string,
       typeof surface.publishAuthorCatalogExactSetSuccessorV1 === 'function',
     publishPolicyBoundGenesis:
       typeof surface.publishAuthorCatalogGenesisV1 === 'function',
+    synchronizeCatalogProviders:
+      typeof surface.synchronizeRfc64CatalogFromProvidersV1 === 'function',
     terminalFailureReadback:
       typeof surface.readRfc64PublicCatalogReconciliationFailureV1 === 'function',
   });
