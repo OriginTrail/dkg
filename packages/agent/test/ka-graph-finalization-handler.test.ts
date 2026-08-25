@@ -29,6 +29,7 @@ import {
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
+import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
 import {
   openSqliteFinalizationRecoveryStore,
   type SqliteFinalizationRecoveryStore,
@@ -3130,6 +3131,41 @@ describe('graph-scoped finalization handler', () => {
       versionBlock: 126,
       authorAddress: AUTHOR,
     }, createOperationContext('system'))).resolves.toBe('no-swm');
+  });
+
+  it('uses one confirmed VM resolver for absent, matching, and invalid metadata', async () => {
+    await expect(resolveConfirmedGraphScopedVm(store, {
+      contextGraphId: CG,
+      ual: UAL,
+      merkleRoot: new Uint8Array(32),
+      kaId: PACKED_KA_ID,
+    })).resolves.toEqual({ status: 'absent' });
+
+    const { message } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    await expect(resolveConfirmedGraphScopedVm(store, {
+      contextGraphId: CG,
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      kaId: PACKED_KA_ID,
+    })).resolves.toMatchObject({
+      status: 'verified',
+      envelope: { assertionVersion: VERSION, batchId: PACKED_KA_ID },
+      scope: { ual: UAL },
+    });
+
+    await store.insert([{
+      graph: `did:dkg:context-graph:${CG}/_meta`,
+      subject: UAL,
+      predicate: 'http://dkg.io/ontology/contentScopeVersion',
+      object: '"999"',
+    }]);
+    await expect(resolveConfirmedGraphScopedVm(store, {
+      contextGraphId: CG,
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      kaId: PACKED_KA_ID,
+    })).resolves.toEqual({ status: 'invalid', reason: 'metadata' });
   });
 
   it('settles a RECEIVED inbox row from exact receipt-backed VM after the workspace head is lost', async () => {

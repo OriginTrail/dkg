@@ -57,6 +57,15 @@ type FinalizationRecoveryReceiveOutcome =
   | { status: 'capacity' }
   | { status: 'rejected' };
 
+type EnsuredVerifiedReplayEntry =
+  | {
+      status: 'verified';
+      entry: FinalizationRecoveryEntry;
+      evidence: VerifiedGraphScopedFinalizationEvidence;
+    }
+  | { status: 'unverified'; entry: FinalizationRecoveryEntry }
+  | { status: 'invalid' };
+
 export type FinalizationRecoveryLiveAdmission =
   | {
     status: 'admitted';
@@ -147,7 +156,7 @@ export interface FinalizationRecoveryMaterializer<
     candidate: ParsedGraphScopedFinalization;
     evidence: VerifiedGraphScopedFinalizationEvidence;
   }): Promise<FinalizationRecoveryReplayMaterializationOutcome>;
-  recoverVerifiedEvidence?(input: {
+  recoverVerifiedEvidence(input: {
     replay: FinalizationRecoveryReplayInput;
     entry: FinalizationRecoveryEntry;
     candidate: ParsedGraphScopedFinalization;
@@ -1791,64 +1800,13 @@ export class FinalizationRecovery<
         );
       }
 
-      let replayEntry = entry;
-      if (
-        replayEntry.state !== 'VERIFIED'
-        && this.materializer.recoverVerifiedEvidence
-      ) {
-        const recoveredEvidence = await this.materializer.recoverVerifiedEvidence({
-          replay: input,
-          entry: replayEntry,
-          candidate,
-        });
-        if (recoveredEvidence) {
-          const recoveredEvidenceMatchesEnvelope = replayEntry.generation > 0
-            ? VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
-                recoveredEvidence,
-                candidate,
-                replayEntry,
-              )
-            : VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
-                recoveredEvidence,
-                candidate,
-                replayEntry,
-              );
-          if (!recoveredEvidenceMatchesEnvelope) {
-            this.log.warn(
-              `Finalization recovery ignored recovered evidence that does not match `
-                + `its envelope for ${replayEntry.ual}`,
-            );
-          } else {
-            replayEntry = await this.recordVerified(replayEntry, recoveredEvidence)
-              ?? replayEntry;
-          }
-        }
-      }
+      const ensured = await this.ensureVerifiedReplayEntry(entry, candidate, input);
+      if (ensured.status === 'invalid') return 'none' as const;
+      const replayEntry = ensured.entry;
 
       let outcome: FinalizationRecoveryApplyOutcome;
-      if (replayEntry.state === 'VERIFIED' && replayEntry.verifiedEvidence) {
-        const evidence = replayEntry.verifiedEvidence;
-        const evidenceMatchesEnvelope = replayEntry.generation > 0
-          ? VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
-              evidence,
-              candidate,
-              replayEntry,
-            )
-          : VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
-              evidence,
-              candidate,
-              replayEntry,
-            );
-        if (!evidenceMatchesEnvelope) {
-          this.log.warn(
-            `Finalization recovery evidence does not match its envelope for ${replayEntry.ual}`,
-          );
-          await this.rejectEntry(
-            replayEntry,
-            'verified evidence does not match immutable envelope',
-          );
-          return 'none' as const;
-        }
+      if (ensured.status === 'verified') {
+        const { evidence } = ensured;
         const receiptStatus = await this.verifyPersistedReceipt(
           candidate,
           evidence,
@@ -1894,15 +1852,16 @@ export class FinalizationRecovery<
             ? 'already-confirmed'
             : 'deferred';
       } else {
-        const recoverySourcePeerId = entry.trustedPublisherPeerId ?? entry.sourcePeerId;
+        const recoverySourcePeerId = replayEntry.trustedPublisherPeerId
+          ?? replayEntry.sourcePeerId;
         outcome = await this.materialize(
           {
-            rawMessage: entry.rawMessage,
-            contextGraphId: entry.contextGraphId,
+            rawMessage: replayEntry.rawMessage,
+            contextGraphId: replayEntry.contextGraphId,
             ...(recoverySourcePeerId ? { sourcePeerId: recoverySourcePeerId } : {}),
             candidate,
           },
-          { kind: 'recovery', entry },
+          { kind: 'recovery', entry: replayEntry },
         );
       }
 
@@ -1933,6 +1892,73 @@ export class FinalizationRecovery<
         ? 'none' as const
         : 'retry-pending' as const;
     }
+  }
+
+  /**
+   * Make evidence recovery one explicit replay transition. Persisted evidence
+   * is rejected on an envelope mismatch. Independently recovered evidence
+   * falls back to normal materialization when it is absent, mismatched, or
+   * cannot be committed.
+   */
+  private async ensureVerifiedReplayEntry(
+    entry: FinalizationRecoveryEntry,
+    candidate: ParsedGraphScopedFinalization,
+    replay: FinalizationRecoveryReplayInput,
+  ): Promise<EnsuredVerifiedReplayEntry> {
+    const evidence = entry.state === 'VERIFIED'
+      ? entry.verifiedEvidence
+      : await this.materializer.recoverVerifiedEvidence({
+          replay,
+          entry,
+          candidate,
+        });
+    if (!evidence) {
+      if (entry.state === 'VERIFIED') {
+        this.log.warn(
+          `Finalization recovery VERIFIED entry has no evidence for ${entry.ual}`,
+        );
+        await this.rejectEntry(entry, 'verified entry has no evidence');
+        return { status: 'invalid' };
+      }
+      return { status: 'unverified', entry };
+    }
+
+    const matchesEnvelope = entry.generation > 0
+      ? VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
+          evidence,
+          candidate,
+          entry,
+        )
+      : VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
+          evidence,
+          candidate,
+          entry,
+        );
+    if (!matchesEnvelope) {
+      if (entry.state === 'VERIFIED') {
+        this.log.warn(
+          `Finalization recovery evidence does not match its envelope for ${entry.ual}`,
+        );
+        await this.rejectEntry(
+          entry,
+          'verified evidence does not match immutable envelope',
+        );
+        return { status: 'invalid' };
+      }
+      this.log.warn(
+        `Finalization recovery ignored recovered evidence that does not match `
+          + `its envelope for ${entry.ual}`,
+      );
+      return { status: 'unverified', entry };
+    }
+
+    if (entry.state === 'VERIFIED') {
+      return { status: 'verified', entry, evidence };
+    }
+    const committed = await this.recordVerified(entry, evidence);
+    return committed
+      ? { status: 'verified', entry: committed, evidence }
+      : { status: 'unverified', entry };
   }
 
   private decodeEntry(

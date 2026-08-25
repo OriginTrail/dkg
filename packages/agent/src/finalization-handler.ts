@@ -43,7 +43,6 @@ import {
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
   generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata,
-  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad,
   insertBoundedAgentRegistryMeta,
   generateSubGraphRegistration,
@@ -102,6 +101,7 @@ import {
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 import { recoverReceiptBackedGraphScopedEvidence } from './receipt-backed-graph-scoped-evidence.js';
+import { resolveConfirmedGraphScopedVm } from './confirmed-graph-scoped-vm-resolver.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 /**
@@ -1445,60 +1445,26 @@ export class FinalizationHandler {
     versionBlock: number;
     subGraphName?: string;
   }, ctx: OperationContext): Promise<'already-confirmed' | 'no-swm' | undefined> {
-    const stored = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(this.store, {
+    const resolution = await resolveConfirmedGraphScopedVm(this.store, {
       contextGraphId: input.contextGraphId,
       ual: input.ual,
+      merkleRoot: input.merkleRoot,
+      kaId: input.kaId,
+      ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
     });
-    if (stored.state === 'absent') return undefined;
-    if (stored.state === 'invalid') {
-      this.log.warn(ctx, `Chain-reconcile: invalid confirmed graph-scoped metadata for ${input.ual}`);
-      return 'no-swm';
-    }
-
-    const { envelope } = stored;
-    let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-    try {
-      scope = createGraphKnowledgeAssetScope(input.ual, envelope.assertionVersion);
-    } catch {
-      return 'no-swm';
-    }
-    const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
-    if (
-      scope.ual !== input.ual
-      || packedKaId !== input.kaId
-      || envelope.batchId !== input.kaId
-      || !equalBytes(envelope.merkleRoot, input.merkleRoot)
-      || (input.subGraphName !== undefined && input.subGraphName !== envelope.subGraphName)
-    ) {
+    if (resolution.status === 'absent') return undefined;
+    if (resolution.status === 'invalid') {
       this.log.warn(
         ctx,
-        `Chain-reconcile: confirmed graph-scoped metadata does not match chain identity for ${input.ual}`,
-      );
-      return 'no-swm';
-    }
-
-    const verification = await this.verifyExactGraphScopedLayer({
-      contextGraphId: input.contextGraphId,
-      scope,
-      layer: MemoryLayer.VerifiableMemory,
-      publicTripleCount: envelope.publicTripleCount,
-      ...(envelope.privateMerkleRoot
-        ? { privateMerkleRoot: envelope.privateMerkleRoot }
-        : {}),
-      expectedMerkleRoot: input.merkleRoot,
-      ...(envelope.subGraphName ? { subGraphName: envelope.subGraphName } : {}),
-    });
-    if (verification.status !== 'verified') {
-      this.log.warn(
-        ctx,
-        `Chain-reconcile: confirmed metadata exists but exact VM content is invalid for ${input.ual}`,
+        `Chain-reconcile: confirmed graph-scoped VM is invalid for ${input.ual} `
+          + `(${resolution.reason})`,
       );
       return 'no-swm';
     }
 
     await this.advanceExactGraphScopedVersion({
       contextGraphId: input.contextGraphId,
-      scope,
+      scope: resolution.scope,
       materializedVersion: { blockNumber: input.versionBlock, txIndex: 0 },
     });
     this.log.info(
@@ -1520,14 +1486,28 @@ export class FinalizationHandler {
     candidate: ParsedGraphScopedFinalization;
   }): Promise<VerifiedGraphScopedFinalizationEvidence | undefined> {
     const { replay, candidate } = input;
-    const stored = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(this.store, {
+    let kaId: bigint;
+    let onChainContextGraphId: bigint;
+    try {
+      kaId = BigInt(replay.kaId);
+      onChainContextGraphId = BigInt(replay.onChainCgId);
+      if (kaId !== candidate.kaId || onChainContextGraphId <= 0n) return undefined;
+    } catch {
+      return undefined;
+    }
+
+    const resolution = await resolveConfirmedGraphScopedVm(this.store, {
       contextGraphId: replay.contextGraphId,
       ual: replay.ual,
+      merkleRoot: ethers.getBytes(replay.merkleRoot),
+      kaId,
+      ...(candidate.msg.subGraphName
+        ? { subGraphName: candidate.msg.subGraphName }
+        : {}),
     });
-    if (stored.state !== 'confirmed') return undefined;
+    if (resolution.status !== 'verified') return undefined;
 
-    const { envelope } = stored;
-    const messageSubGraphName = candidate.msg.subGraphName || undefined;
+    const { envelope } = resolution;
     if (
       envelope.transactionHash?.toLowerCase() !== candidate.msg.txHash.toLowerCase()
       || envelope.assertionVersion !== candidate.assertionVersion
@@ -1539,44 +1519,17 @@ export class FinalizationHandler {
         ? ethers.hexlify(candidate.privateMerkleRoot).toLowerCase()
         : undefined)
       || envelope.batchId !== candidate.batchId
-      || !equalBytes(envelope.merkleRoot, candidate.msg.kcMerkleRoot)
-      || messageSubGraphName !== envelope.subGraphName
     ) return undefined;
-
-    let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-    let kaId: bigint;
-    let onChainContextGraphId: bigint;
-    try {
-      scope = createGraphKnowledgeAssetScope(replay.ual, envelope.assertionVersion);
-      kaId = BigInt(replay.kaId);
-      onChainContextGraphId = BigInt(replay.onChainCgId);
-      if (kaId !== candidate.kaId || onChainContextGraphId <= 0n) return undefined;
-    } catch {
-      return undefined;
-    }
-
-    const verification = await this.verifyExactGraphScopedLayer({
-      contextGraphId: replay.contextGraphId,
-      scope,
-      layer: MemoryLayer.VerifiableMemory,
-      publicTripleCount: envelope.publicTripleCount,
-      ...(envelope.privateMerkleRoot
-        ? { privateMerkleRoot: envelope.privateMerkleRoot }
-        : {}),
-      expectedMerkleRoot: ethers.getBytes(replay.merkleRoot),
-      ...(envelope.subGraphName ? { subGraphName: envelope.subGraphName } : {}),
-    });
-    if (verification.status !== 'verified') return undefined;
 
     const recovery = await recoverReceiptBackedGraphScopedEvidence({
       store: this.store,
       chain: this.chain,
       contextGraphId: replay.contextGraphId,
-      scope,
+      scope: resolution.scope,
       head: {
         kaUal: replay.ual,
         assertionVersion: envelope.assertionVersion,
-        publicQuadsDigest: workspacePublicQuadsDigest(verification.quads),
+        publicQuadsDigest: resolution.publicQuadsDigest,
         publicTripleCount: envelope.publicTripleCount,
         ...(envelope.privateMerkleRoot
           ? { privateMerkleRoot: ethers.hexlify(envelope.privateMerkleRoot) }

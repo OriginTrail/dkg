@@ -114,6 +114,7 @@ function recoveryMaterializer() {
       allowedPeers: [],
     }),
     apply: async () => 'applied' as const,
+    recoverVerifiedEvidence: async () => undefined,
     replayVerified: async () => 'promoted' as const,
     invalidateVerified: async () => 'invalidated' as const,
     isRetryableError: (error: unknown) => error instanceof StoreSchedulerBusyError,
@@ -874,6 +875,54 @@ describe('graph-scoped finalization recovery admission', () => {
           publisherAddress: PUBLISHER,
         },
       }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves normal replay when evidence recovery is unavailable', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recover-noop-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      const recoverVerifiedEvidence = vi.fn(async () => undefined);
+      const prepare = vi.fn(recoveryMaterializer().prepare);
+      const apply = vi.fn(async () => 'applied' as const);
+      const replayVerified = vi.fn(async () => 'already-confirmed' as const);
+      const chain = recoveryChain();
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          prepare,
+          apply,
+          recoverVerifiedEvidence,
+          replayVerified,
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await expect(recovery.replayMatching({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('recovered');
+
+      expect(recoverVerifiedEvidence).toHaveBeenCalledOnce();
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(apply).toHaveBeenCalledOnce();
+      expect(replayVerified).not.toHaveBeenCalled();
+      expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
