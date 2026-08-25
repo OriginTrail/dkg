@@ -7,7 +7,9 @@ import type {
 
 import type { Rfc64PublicCatalogNativeFetchScopeV1 } from './public-catalog-native-transport-v1.js';
 
-declare const RFC64_SCOPED_READ_CAPABILITY_BRAND_V1: unique symbol;
+const RFC64_SCOPED_READ_CAPABILITY_BRAND_V1: unique symbol = Symbol(
+  'rfc64-catalog-native-scoped-read-capability-v1',
+);
 
 /** Process-local capability. It is not a serializable authority token. */
 export interface Rfc64CatalogNativeScopedReadCapabilityV1 {
@@ -21,26 +23,35 @@ export interface Rfc64CatalogNativeScopedReadCapabilityV1 {
   ) => Promise<Uint8Array | null>;
 }
 
-const MINTED_CAPABILITIES = new WeakSet<object>();
-
 export function mintRfc64CatalogNativeScopedReadCapabilityV1(input: {
   readonly scope: Rfc64PublicCatalogNativeFetchScopeV1;
   readonly readCatalogObjectByDigest: Rfc64CatalogNativeScopedReadCapabilityV1['readCatalogObjectByDigest'];
   readonly readKaBundleByDigest: Rfc64CatalogNativeScopedReadCapabilityV1['readKaBundleByDigest'];
 }): Rfc64CatalogNativeScopedReadCapabilityV1 {
+  if (typeof input.readCatalogObjectByDigest !== 'function') {
+    throw new TypeError('scoped catalog object reader must be callable');
+  }
+  if (typeof input.readKaBundleByDigest !== 'function') {
+    throw new TypeError('scoped KA bundle reader must be callable');
+  }
   const capability = Object.freeze({
+    [RFC64_SCOPED_READ_CAPABILITY_BRAND_V1]: true as const,
     scope: Object.freeze({ ...input.scope }),
     readCatalogObjectByDigest: input.readCatalogObjectByDigest,
     readKaBundleByDigest: input.readKaBundleByDigest,
-  }) as unknown as Rfc64CatalogNativeScopedReadCapabilityV1;
-  MINTED_CAPABILITIES.add(capability as object);
+  });
   return capability;
 }
 
 export function isMintedRfc64CatalogNativeScopedReadCapabilityV1(
   value: unknown,
 ): value is Rfc64CatalogNativeScopedReadCapabilityV1 {
-  return typeof value === 'object'
-    && value !== null
-    && MINTED_CAPABILITIES.has(value);
+  if (typeof value !== 'object' || value === null) return false;
+  try {
+    return (value as Record<PropertyKey, unknown>)[
+      RFC64_SCOPED_READ_CAPABILITY_BRAND_V1
+    ] === true;
+  } catch {
+    return false;
+  }
 }

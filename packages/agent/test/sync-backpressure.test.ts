@@ -1910,7 +1910,7 @@ describe('sync global backpressure', () => {
         syncGlobalQueueLimit: 6,
         rfc64PublicCatalogBootstrap: {
           acceptedPublicPolicies: [{
-            policyEnvelope: { payload: { contextGraphId: selectedCg } },
+            policyEnvelope: { payload: { contextGraphId: selectedCg, accessPolicy: 0 } },
             completeSwmProviders: ['12D3KooWSelectedProvider'],
           }],
         },
@@ -2113,7 +2113,7 @@ describe('sync global backpressure', () => {
         syncGlobalQueueLimit: 4,
         rfc64PublicCatalogBootstrap: {
           acceptedPublicPolicies: [{
-            policyEnvelope: { payload: { contextGraphId } },
+            policyEnvelope: { payload: { contextGraphId, accessPolicy: 0 } },
             completeSwmProviders: [],
           }],
         },
