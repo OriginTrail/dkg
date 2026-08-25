@@ -804,19 +804,30 @@ export function buildSkillMd(opts: {
     `- **Peer ID:** ${opts.peerId}`,
     `- **Node role:** ${opts.nodeRole}`,
     `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(", ") : "none (install markitdown to enable document conversion)"}`,
-    '',
-    'If the Node UI injects a target context graph for the turn, use that target directly. If no target is injected or configured, call `GET /api/context-graph/list` / `dkg_list_context_graphs`; agent tool surfaces default that list to the caller\'s created/joined context graphs, with `scope: "all"` for every graph the node knows about.',
   ].join("\n");
 
-  const staticPlaceholder =
-    "> This section is dynamically generated from node state at serve-time.\n\n" +
-    "- **Node version:** (dynamic)\n" +
-    "- **Base URL:** (dynamic)\n" +
-    "- **Peer ID:** (dynamic)\n" +
-    "- **Node role:** (dynamic — `core` or `edge`)\n" +
-    "- **Available extraction pipelines:** (dynamic)\n" +
-    "\n" +
-    "If the Node UI injects a target context graph for the turn, use that target directly. If no target is injected or configured, call `GET /api/context-graph/list` / `dkg_list_context_graphs`; agent tool surfaces default that list to the caller's created/joined context graphs, with `scope: \"all\"` for every graph the node knows about.";
+  // GH#1763 sibling / GH#1125 — match ONLY the bullet block. The template's
+  // trailing paragraph after the pipelines line is prose that has already
+  // drifted out of sync with this file once (the two `dkg_list_context_graphs`
+  // / `GET /api/context-graph/list` mentions are order-swapped in SKILL.md),
+  // and because `String.replace` with a literal needle fails silently, that
+  // one-word divergence meant the ENTIRE section was never substituted and the
+  // served doc shipped `(dynamic)` placeholders to every agent that read it.
+  // Anchoring on just the bullets keeps prose edits from breaking substitution.
+  const staticPlaceholder = [
+    "- **Node version:** (dynamic)",
+    "- **Base URL:** (dynamic)",
+    "- **Peer ID:** (dynamic)",
+    "- **Node role:** (dynamic — `core` or `edge`)",
+    "- **Available extraction pipelines:** (dynamic)",
+  ].join("\n");
+
+  if (!template.includes(staticPlaceholder)) {
+    // Fail loudly in dev rather than silently serving placeholders.
+    console.warn(
+      "[skill.md] dynamic Node Info block not found in SKILL.md — served doc will contain (dynamic) placeholders",
+    );
+  }
 
   return template.replace(staticPlaceholder, dynamicSection);
 }
