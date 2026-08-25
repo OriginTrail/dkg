@@ -1278,12 +1278,15 @@ lines.once('close', () => { void stop(0); });
 function boundedErrorChainMessage(error: unknown): string {
   const messages: string[] = [];
   const seen = new Set<unknown>();
-  let current = error;
-  while (current !== undefined && current !== null && messages.length < 4) {
-    if (seen.has(current)) break;
+  const pending: unknown[] = [error];
+  while (pending.length > 0 && messages.length < 6) {
+    const current = pending.shift();
+    if (current === undefined || current === null) continue;
+    if (seen.has(current)) continue;
     seen.add(current);
     messages.push(current instanceof Error ? current.message : String(current));
-    current = current instanceof Error ? current.cause : undefined;
+    if (current instanceof AggregateError) pending.push(...current.errors);
+    if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
   }
   return messages.join(' <- ').slice(0, 4_096);
 }
