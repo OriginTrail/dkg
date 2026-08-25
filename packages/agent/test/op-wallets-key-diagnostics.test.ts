@@ -40,7 +40,9 @@ describe('loadOpWallets — actionable key diagnostics (GH#1432)', () => {
     await writeWallets(dir, [{ address: '0x1111111111111111111111111111111111111111', privateKey: '0xdeadbeef' }]);
 
     await expect(loadOpWallets(dir)).rejects.toThrow(/wallets\[0\]/);
-    await expect(loadOpWallets(dir)).rejects.toThrow(/10 characters/);
+    // Reported in HEX characters (the `0x` is not counted), so the number
+    // lines up with the "expected 64" it is compared against.
+    await expect(loadOpWallets(dir)).rejects.toThrow(/is 8 hex characters \(expected 64/);
   });
 
   it('names the entry for a non-string key', async () => {
@@ -91,5 +93,89 @@ describe('loadOpWallets — actionable key diagnostics (GH#1432)', () => {
     const cfg = await loadOpWallets(dir);
     expect(cfg.wallets).toHaveLength(1);
     expect(cfg.wallets[0]!.privateKey).toBe(key);
+  });
+
+  // PR #2332 review — length alone is not discriminating: a regression to a
+  // simple 66-character check would leave the earlier cases green while
+  // same-length malformed keys fell through to the opaque ethers error.
+  it('names the entry for a same-length key containing non-hex characters', async () => {
+    const dir = await tempDir();
+    await writeWallets(dir, [
+      { address: '0x1111111111111111111111111111111111111111', privateKey: '0x' + 'z'.repeat(64) },
+    ]);
+
+    await expect(loadOpWallets(dir)).rejects.toThrow(/wallets\[0\]/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/non-hexadecimal/);
+    await expect(loadOpWallets(dir)).rejects.not.toThrow(/INVALID_ARGUMENT/);
+  });
+
+  // Correct shape, still refused by secp256k1. The old regex admitted these,
+  // so ethers produced the unactionable error the issue is about.
+  it('names the entry for an all-zero key (valid shape, invalid scalar)', async () => {
+    const dir = await tempDir();
+    await writeWallets(dir, [
+      { address: '0x1111111111111111111111111111111111111111', privateKey: '0x' + '0'.repeat(64) },
+    ]);
+
+    await expect(loadOpWallets(dir)).rejects.toThrow(/wallets\[0\]/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/out of range/);
+  });
+
+  it('names the entry for a key at the secp256k1 group order', async () => {
+    const dir = await tempDir();
+    // n itself is out of range (valid keys are 1 <= k < n).
+    const n = '0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141';
+    await writeWallets(dir, [{ address: '0x1111111111111111111111111111111111111111', privateKey: n }]);
+
+    await expect(loadOpWallets(dir)).rejects.toThrow(/wallets\[0\]/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/out of range/);
+  });
+
+  it('never echoes the rejected key material in the diagnostic', async () => {
+    const dir = await tempDir();
+    const secretish = '0x' + 'ab'.repeat(32) + 'ff';
+    await writeWallets(dir, [
+      { address: '0x1111111111111111111111111111111111111111', privateKey: secretish },
+    ]);
+    await expect(loadOpWallets(dir)).rejects.not.toThrow(new RegExp('ab'.repeat(8)));
+  });
+
+  // PR #2332 review — the diagnostic must describe what a later load ACTUALLY
+  // does. The loader never replenishes an entry, so promising provisioning
+  // would send an operator down a path that silently reduces wallet count.
+  it('describes the real recovery outcome for an operational entry', async () => {
+    const dir = await tempDir();
+    const good = '0x' + '11'.repeat(32);
+    const { Wallet } = await import('ethers');
+    await writeWallets(dir, [
+      { address: new Wallet(good).address, privateKey: good },
+      { address: '0x2222222222222222222222222222222222222222' },
+    ]);
+
+    await expect(loadOpWallets(dir)).rejects.toThrow(/wallets\[1\]/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/NOT provisioned on load/);
+
+    // And the promise holds: removing the entry yields one wallet, not two.
+    await writeWallets(dir, [{ address: new Wallet(good).address, privateKey: good }]);
+    const cfg = await loadOpWallets(dir);
+    expect(cfg.wallets).toHaveLength(1);
+  });
+
+  it('describes the real recovery outcome for the admin entry', async () => {
+    const dir = await tempDir();
+    const good = '0x' + '11'.repeat(32);
+    const { Wallet } = await import('ethers');
+    await writeFile(
+      join(dir, 'wallets.json'),
+      JSON.stringify({
+        adminWallet: { address: '0x2222222222222222222222222222222222222222' },
+        wallets: [{ address: new Wallet(good).address, privateKey: good }],
+      }),
+      'utf-8',
+    );
+
+    await expect(loadOpWallets(dir)).rejects.toThrow(/adminWallet/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/no admin wallet/);
+    await expect(loadOpWallets(dir)).rejects.toThrow(/NOT regenerated on load/);
   });
 });
