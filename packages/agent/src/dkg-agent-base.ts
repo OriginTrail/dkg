@@ -980,7 +980,11 @@ export class DKGAgentBase {
     Number(process.env['DKG_VM_RECONCILE_CONFIRMATION_DEPTH']) || 5;
 
   static readonly LIST_CONTEXT_GRAPHS_CACHE_TTL_MS =
-    readNonNegativeNumberEnv('DKG_LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', 5_000);
+    // A full catalogue scan enriches every globally known graph and is
+    // intentionally expensive. Keep repeat UI/CLI reads off the store for one
+    // minute by default; operators can still shorten the window or set it to
+    // zero through the existing environment override.
+    readNonNegativeNumberEnv('DKG_LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', 60_000);
   static readonly LIST_CONTEXT_GRAPHS_CACHE_MAX =
     Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_CACHE_MAX']) || 32);
   static readonly LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS =
