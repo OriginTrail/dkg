@@ -210,14 +210,49 @@ SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
 } ORDER BY DESC(?publishedAt) LIMIT 5000`;
 }
 
-/** Stable hash → palette index so a given agent always keeps the same
- *  colour across reloads, and two nearby agents don't collide on colour 0. */
+/** Stable hash → preferred palette slot, so a given agent keeps the same
+ *  colour across reloads and two nearby agents don't both land on colour 0. */
 function paletteIndex(agent: string): number {
   let h = 0;
   for (let i = 0; i < agent.length; i++) {
     h = (h * 31 + agent.charCodeAt(i)) | 0;
   }
   return Math.abs(h) % AGENT_PALETTE.length;
+}
+
+/**
+ * GH#1128 — assign every agent a DISTINCT colour.
+ *
+ * The hash above is stable but not injective: over an 8-slot palette, five
+ * agents collide with ~70% probability, and two agents rendering the same
+ * swatch defeats the only thing the attribution view exists to show. Worse,
+ * the legend and the graph tint each called `paletteIndex` independently, so
+ * there was no single place a collision could even be observed.
+ *
+ * Keep the hash as each agent's *preferred* slot (so colours stay stable when
+ * the agent set is unchanged) and linear-probe to the next free slot on a
+ * collision. Agents are processed in sorted order so the result is
+ * deterministic regardless of arrival order. Beyond AGENT_PALETTE.length
+ * agents reuse is unavoidable; we fall back to the raw hash so behaviour
+ * degrades to the old scheme rather than crowding everyone onto one colour.
+ */
+export function buildAgentColorMap(agents: Iterable<string>): Map<string, string> {
+  const distinct = [...new Set(agents)].sort();
+  const taken = new Set<number>();
+  const out = new Map<string, string>();
+  for (const agent of distinct) {
+    const preferred = paletteIndex(agent);
+    let slot = preferred;
+    if (distinct.length <= AGENT_PALETTE.length) {
+      for (let probe = 0; probe < AGENT_PALETTE.length; probe++) {
+        const candidate = (preferred + probe) % AGENT_PALETTE.length;
+        if (!taken.has(candidate)) { slot = candidate; break; }
+      }
+      taken.add(slot);
+    }
+    out.set(agent, AGENT_PALETTE[slot]!);
+  }
+  return out;
 }
 
 export function useSwmAttributions(contextGraphId: string | undefined): SwmAttributionsResult {
@@ -326,10 +361,13 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
           roots.add(root);
         }
 
+        // One map, built once from the full agent set, so the legend below and
+        // the graph tint in the `nodeColors` memo cannot disagree (GH#1128).
+        const colorByAgent = buildAgentColorMap(agentTotals.keys());
         const paletteEntries: AgentPaletteEntry[] = [...agentTotals.entries()]
           .map(([agent, roots]) => ({
             agent,
-            color: AGENT_PALETTE[paletteIndex(agent)]!,
+            color: colorByAgent.get(agent)!,
             label: agentLabel(agent),
             entityCount: roots.size,
           }))
@@ -363,13 +401,18 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
   const { nodeColors, conflicts } = useMemo(() => {
     const nc: Record<string, string> = {};
     const confl: string[] = [];
+    // GH#1128 — read the colour the legend actually rendered instead of
+    // recomputing it. Recomputing was the second half of the bug: a swatch and
+    // its graph nodes could resolve to different slots.
+    const colorByAgent = new Map(palette.map((entry) => [entry.agent, entry.color]));
     // A single-signer devnet will have one-element attribution arrays; the
     // conflict branch is dead code there but we keep it wired so the UI
     // "just works" the moment a second signer joins.
     for (const [uri, list] of attributions) {
       if (list.length === 0) continue;
       if (list.length === 1) {
-        nc[uri] = AGENT_PALETTE[paletteIndex(list[0]!.agent)]!;
+        const agent = list[0]!.agent;
+        nc[uri] = colorByAgent.get(agent) ?? AGENT_PALETTE[paletteIndex(agent)]!;
       } else {
         // Tag conflict nodes with a distinct warning colour — takes
         // priority over any single agent's palette slot so they're
@@ -379,7 +422,7 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
       }
     }
     return { nodeColors: nc, conflicts: confl };
-  }, [attributions]);
+  }, [attributions, palette]);
 
   const attributionPending = Boolean(contextGraphId && (loading || resolvedContextGraphId !== contextGraphId));
 
