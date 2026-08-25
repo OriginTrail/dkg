@@ -2543,6 +2543,11 @@ def _filter_context_graphs_for_scope(graphs: Any, scope: str) -> List[Any]:
 _ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
+# GH#1086 — one warning per process for a missing keccak backend; the
+# normalizer runs on every write and must not spam the operator log.
+_CHECKSUM_FALLBACK_WARNED = False
+
+
 def _normalize_wm_agent_address(agent_address: str) -> str:
     value = agent_address.strip()
     if value.startswith("did:dkg:agent:"):
@@ -2551,7 +2556,31 @@ def _normalize_wm_agent_address(agent_address: str) -> str:
         try:
             from eth_utils import to_checksum_address
             return to_checksum_address(value)
-        except Exception:
+        except Exception as exc:  # GH#1086
+            # eth-utils ships no keccak backend by default and the Hermes setup
+            # pip-installs nothing, so this path is reached routinely rather
+            # than exceptionally. Returning `value` unchanged silently emits a
+            # NON-CHECKSUMMED (usually all-lowercase) address as the on-chain
+            # author, which is a different string from the checksummed form
+            # every other surface writes — so attribution splits in two and the
+            # operator sees nothing explaining why.
+            #
+            # Still fail open: a lowercase address is a valid EIP-55-agnostic
+            # identifier and refusing the write would be a worse regression
+            # than a mixed-case mismatch. But say so, once, loudly enough to be
+            # actionable.
+            global _CHECKSUM_FALLBACK_WARNED
+            if not _CHECKSUM_FALLBACK_WARNED:
+                _CHECKSUM_FALLBACK_WARNED = True
+                logger.warning(
+                    "DKG: cannot checksum agent address %s (%s: %s). Emitting it "
+                    "unchanged, which will NOT match the checksummed form used "
+                    "elsewhere and will split author attribution. Install a keccak "
+                    "backend to fix: pip install 'eth-hash[pycryptodome]'",
+                    value,
+                    type(exc).__name__,
+                    exc,
+                )
             return value
     return value
 
