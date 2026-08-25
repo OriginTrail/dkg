@@ -437,18 +437,29 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       kaBundleNetworkBytes: fixture.secondRowBundle.bundleBytes.byteLength,
     });
 
+    await fixture.receiverPersistence.close();
+    const reopened = await openRfc64PersistenceV1(
+      fixture.receiverDirectory,
+      { yieldAfterPurgeBatch: async () => {} },
+    );
+    persistences.push(reopened);
     fixture.receiverBundleFetch.mockClear();
     const exactControlRead = vi.fn(
-      fixture.receiverPersistence.controlObjects.getVerifiedObject.bind(
-        fixture.receiverPersistence.controlObjects,
+      reopened.controlObjects.getVerifiedObject.bind(
+        reopened.controlObjects,
       ),
     );
     const restartedReceiver = fixture.createReceiver(
-      fixture.receiverPersistence.inventory,
+      reopened.inventory,
       {
-        ...fixture.receiverPersistence.controlObjects,
+        stageVerifiedObjects: reopened.controlObjects.stageVerifiedObjects,
+        getVerifiedObjectByDigest: reopened.controlObjects.getVerifiedObjectByDigest,
         getVerifiedObject: exactControlRead,
       },
+      undefined,
+      undefined,
+      undefined,
+      reopened.kaBundles,
     );
     await expect(fixture.synchronizeAny(
       fixture.multiAssetAnnouncement,

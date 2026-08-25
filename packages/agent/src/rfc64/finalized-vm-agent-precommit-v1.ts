@@ -49,18 +49,21 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
     plan,
     signal,
   ): Promise<void | Rfc64PublicCatalogNativePrecommitTransactionV1> => {
-    if (plan.catalogScope.subGraphName !== null) {
-      throw new FinalizedVmCompositionErrorV1(
-        'finalized-vm-composition-input',
-        'Release 2 private finalized VM recovery supports the root catalog only',
-      );
-    }
     const resolved = await resolveRfc64FinalizedPolicyAgentPrecommitV1(
       options,
       plan,
       signal,
     );
     if (resolved === null) return;
+    if (
+      resolved.acceptedPolicy.policy.accessPolicy === 1
+      && plan.catalogScope.subGraphName !== null
+    ) {
+      throw new FinalizedVmCompositionErrorV1(
+        'finalized-vm-composition-input',
+        'Release 2 private finalized VM recovery supports the root catalog only',
+      );
+    }
     const [knowledgeAssetStorageAddress, knowledgeAssetsLifecycleAddress] = await Promise.all([
       options.getKnowledgeAssetStorageAddress(),
       options.getKnowledgeAssetsLifecycleAddress(),

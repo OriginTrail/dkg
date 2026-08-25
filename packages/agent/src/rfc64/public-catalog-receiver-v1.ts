@@ -642,8 +642,9 @@ export class Rfc64PublicCatalogReceiverV1 {
 /**
  * Dedup key: the exact head identity (scope + both digests). Heads at a new
  * era/version or with a different object/signature digest are distinct work.
- * `policyDigest` is intentionally excluded — the head binds to scope, not to a
- * policy generation, and a stale policy fails the transport's own check.
+ * The policy digest is part of the work identity. A successor policy can
+ * authorize the same durable head, but private finalized recovery must run its
+ * accepted-current and chain precommit again for that new generation.
  */
 function headKey(a: Rfc64PublicCatalogHeadAnnouncementV1): string {
   return [
@@ -653,6 +654,7 @@ function headKey(a: Rfc64PublicCatalogHeadAnnouncementV1): string {
     a.authorAddress,
     a.catalogEra,
     a.catalogVersion,
+    a.policyDigest,
     a.catalogHeadObjectDigest,
     a.signatureVariantDigest,
   ].join('\n');

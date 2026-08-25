@@ -255,6 +255,14 @@ describe('RFC-64 finalized VM runtime', () => {
         + `GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
         + `<${rfc64VmUal(1n)}> ?p ?o } } ORDER BY ?p ?o`,
     );
+    await expect(store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
+        + `<${rfc64VmUal(1n)}> <http://dkg.io/ontology/accessPolicy> "public" } }`,
+    )).resolves.toEqual({ type: 'boolean', value: true });
+    await expect(store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
+        + `<${rfc64VmUal(1n)}> <http://dkg.io/ontology/accessPolicy> "ownerOnly" } }`,
+    )).resolves.toEqual({ type: 'boolean', value: false });
 
     const replay = await runtime(request(placement));
 
@@ -295,6 +303,43 @@ describe('RFC-64 finalized VM runtime', () => {
         materializedVersion: '"123:0"',
       }],
     });
+  });
+
+  it('persists private finalized VM access metadata as owner-only', async () => {
+    const store = new OxigraphStore();
+    const graphlessProjection: Quad[] = [
+      { subject: 'urn:rfc64:private', predicate: 'urn:rfc64:value', object: '"one"', graph: '' },
+    ];
+    const assertionRoot = ethers.hexlify(computeFlatKCRootV10(
+      graphlessProjection,
+      [],
+    )).toLowerCase() as Digest32V1;
+    const placement = await createRfc64FinalizedVmPlacementFixture({
+      assertionRoot,
+      publicTripleCount: graphlessProjection.length,
+    });
+    const swmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.SharedWorkingMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    await store.insert(graphlessProjection.map((quad) => ({ ...quad, graph: swmGraph })));
+    const runtime = createFinalizedVmRuntimeV1(runtimeConfig(
+      snapshotTransport({ accessPolicy: 1, assertionRoot }).snapshot,
+      createFinalizedVmStoreMaterializerV1({ store }),
+    ));
+
+    await expect(runtime(privateRequest(placement))).resolves.toBeDefined();
+
+    await expect(store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
+        + `<${rfc64VmUal(1n)}> <http://dkg.io/ontology/accessPolicy> "ownerOnly" } }`,
+    )).resolves.toEqual({ type: 'boolean', value: true });
+    await expect(store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
+        + `<${rfc64VmUal(1n)}> <http://dkg.io/ontology/accessPolicy> "public" } }`,
+    )).resolves.toEqual({ type: 'boolean', value: false });
   });
 
   it('restores the exact predecessor when the second private VM asset fails', async () => {

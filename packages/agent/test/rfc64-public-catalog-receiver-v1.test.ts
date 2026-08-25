@@ -199,7 +199,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(receiver.stats()).toMatchObject({ applied: 0, failed: 1 });
   });
 
-  it('retains a same-peer announcement under a rotated accepted policy', async () => {
+  it('reconciles the same durable head again under a rotated accepted policy', async () => {
     const oldPolicy = `0x${'71'.repeat(32)}`;
     const newPolicy = `0x${'72'.repeat(32)}`;
     const firstResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
@@ -218,7 +218,12 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     await receiver.whenIdle();
 
     expect(seenPolicies).toEqual([oldPolicy, newPolicy]);
-    expect(receiver.stats()).toMatchObject({ applied: 1, notFound: 0, failed: 0 });
+    expect(receiver.stats()).toMatchObject({
+      applied: 1,
+      notFound: 1,
+      failed: 0,
+      dedupedInFlight: 0,
+    });
   });
 
   it('caps retained providers for one exact head', async () => {
