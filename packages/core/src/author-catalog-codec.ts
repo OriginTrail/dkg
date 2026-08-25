@@ -17,6 +17,7 @@ import {
   assertCanonicalKaId,
   parseCanonicalDecimalU64,
   parseCanonicalDecimalU256,
+  type ChainIdV1,
   type CountV1,
   type DecimalU64V1,
   type Digest32V1,
@@ -97,10 +98,24 @@ const SCOPE_DOMAIN_BYTES = UTF8.encode(AUTHOR_CATALOG_SCOPE_DIGEST_DOMAIN_V1);
 const KEY_DOMAIN_BYTES = UTF8.encode(AUTHOR_CATALOG_KEY_DIGEST_DOMAIN_V1);
 const ROW_DOMAIN_BYTES = UTF8.encode(AUTHOR_CATALOG_ROW_DIGEST_DOMAIN_V1);
 
+/** Paired governance state committed by an author-catalog scope. */
+export type AuthorCatalogGovernanceV1 =
+  | {
+    readonly governanceChainId: null;
+    readonly governanceContractAddress: null;
+  }
+  | {
+    readonly governanceChainId: ChainIdV1;
+    readonly governanceContractAddress: EvmAddressV1;
+  };
+
 /** Exact nine-key scope committed by every author-catalog era. */
-export interface AuthorCatalogScopeV1 extends AuthorLaneScopeV1 {
+export type AuthorCatalogScopeV1 = Omit<
+  AuthorLaneScopeV1,
+  'governanceChainId' | 'governanceContractAddress'
+> & AuthorCatalogGovernanceV1 & {
   readonly bucketCount: CountV1;
-}
+};
 
 /** Exact seven-key live author-catalog row. */
 export interface AuthorCatalogRowV1 {

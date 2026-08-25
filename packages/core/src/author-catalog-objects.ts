@@ -572,16 +572,32 @@ function deriveScopeAfterHeadKeys(
 }
 
 function deriveScopeAfterHeadStructure(head: AuthorCatalogHeadV1): AuthorCatalogScopeV1 {
-  return {
+  const fields = {
     networkId: head.networkId,
     contextGraphId: head.contextGraphId,
-    governanceChainId: head.governanceChainId,
-    governanceContractAddress: head.governanceContractAddress,
     ownershipTransitionDigest: head.ownershipTransitionDigest,
     subGraphName: head.subGraphName,
     authorAddress: head.authorAddress,
     era: head.era,
     bucketCount: head.bucketCount,
+  };
+  if (head.governanceChainId === null) {
+    if (head.governanceContractAddress !== null) {
+      fail('catalog-object-schema', 'governance tuple must remain paired after validation');
+    }
+    return {
+      ...fields,
+      governanceChainId: null,
+      governanceContractAddress: null,
+    };
+  }
+  if (head.governanceContractAddress === null) {
+    fail('catalog-object-schema', 'governance tuple must remain paired after validation');
+  }
+  return {
+    ...fields,
+    governanceChainId: head.governanceChainId,
+    governanceContractAddress: head.governanceContractAddress,
   };
 }
 
