@@ -756,6 +756,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const resolveScopedReadCapability = createRfc64CatalogNativeScopedReadProviderV1({
       controlObjects: persistence.controlObjects,
       kaBundles: persistence.kaBundles,
+      resolveAcceptedPolicySnapshot: (networkId, contextGraphId) =>
+        this.requireRfc64PublicCatalogServiceV1().acceptedPolicySnapshot(
+          networkId,
+          contextGraphId,
+        ),
     });
     return Object.freeze({
       readCatalogObjectByDigest: async (objectDigest: Digest32V1) => {
