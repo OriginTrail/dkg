@@ -18,7 +18,6 @@ import {
   withoutSyncCheckpointResponderSession,
   type DurableManifestDigest,
   type DurableManifestPrefixDigest,
-  type LogLevel,
   type SyncCheckpointEntry,
 } from '@origintrail-official/dkg-core';
 import { LegacyRoutineLogCleanup } from './legacy-routine-log-cleanup.js';
@@ -3126,7 +3125,7 @@ export class DashboardDB {
 
   insertLog(entry: {
     ts: number;
-    level: LogLevel;
+    level: string;
     operation_name?: string | null;
     operation_id?: string | null;
     module: string;
@@ -3145,7 +3144,14 @@ export class DashboardDB {
     });
     if (entry.level !== 'warn' && entry.level !== 'error') {
       this.routineLogWritesSinceGuard += 1;
-      const guardInterval = Math.min(1_000, Math.max(1, this.routineLogRowCap));
+      // Each guard removes at most one configured batch, so its cadence must
+      // never admit more routine rows than that batch can remove. This keeps
+      // the deprecated compatibility writer bounded even with batchRows=1.
+      const guardInterval = Math.min(
+        1_000,
+        Math.max(1, this.routineLogRowCap),
+        this.legacyRoutineLogCleanupBatchRows,
+      );
       if (this.routineLogWritesSinceGuard >= guardInterval) {
         this.routineLogWritesSinceGuard = 0;
         this.enforceRoutineLogRowCap();
@@ -3433,6 +3439,8 @@ export class DashboardDB {
   }
 
   close(): void {
+    if (!this.db.open) return;
+    this.legacyRoutineLogCleanup.markWriterStopped();
     this.db.close();
   }
 }

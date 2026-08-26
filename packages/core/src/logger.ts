@@ -11,6 +11,12 @@ export function isDiagnosticLogLevel(level: string): level is DiagnosticLogLevel
   return level === 'warn' || level === 'error';
 }
 
+export function normalizeLogLevel(level: string): LogLevel {
+  return (LOG_LEVELS as readonly string[]).includes(level)
+    ? level as LogLevel
+    : 'info';
+}
+
 export interface OperationContext {
   operationId: string;
   operationName: OperationName;
@@ -25,7 +31,11 @@ export interface OperationContext {
  * Keep it stable — redaction and the exporters consume it.
  */
 export interface LogRecord {
-  level: LogLevel;
+  /**
+   * Kept string-typed for source compatibility with published callers and
+   * serialized records. Logger-created records use CanonicalLogRecord.
+   */
+  level: string;
   operationName: string;
   operationId: string;
   sourceOperationId?: string;
@@ -36,7 +46,11 @@ export interface LogRecord {
   spanId?: string;
 }
 
-export type LogSink = (entry: LogRecord) => void;
+export interface CanonicalLogRecord extends LogRecord {
+  level: LogLevel;
+}
+
+export type LogSink = (entry: CanonicalLogRecord) => void;
 
 /**
  * Structured logger that prefixes every message with a timestamp,

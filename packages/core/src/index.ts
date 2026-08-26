@@ -78,10 +78,12 @@ export {
   type OperationName,
   type LogSink,
   type LogRecord,
+  type CanonicalLogRecord,
   type LogLevel,
   type DiagnosticLogLevel,
   LOG_LEVELS,
   isDiagnosticLogLevel,
+  normalizeLogLevel,
 } from './logger.js';
 export {
   KA_LIFECYCLE_ROLES,

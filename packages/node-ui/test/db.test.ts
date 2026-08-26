@@ -465,9 +465,16 @@ describe('DashboardDB — retention', () => {
         'keep-warn',
         'keep-error',
       ]);
-      expect(volumeDb.db.prepare(
+      const cleanupRows = volumeDb.db.prepare(
         `SELECT key, value FROM settings WHERE key LIKE 'legacyRoutineLogCleanup%'`,
-      ).all()).toEqual([{ key: 'legacyRoutineLogCleanup.v2', value: 'complete' }]);
+      ).all() as Array<{ key: string; value: string }>;
+      expect(cleanupRows).toHaveLength(1);
+      expect(cleanupRows[0].key).toBe('legacyRoutineLogCleanup.v3');
+      expect(JSON.parse(cleanupRows[0].value)).toMatchObject({
+        version: 1,
+        pendingRanges: [],
+        writer: { status: 'active' },
+      });
     } finally {
       volumeDb.close();
       rmSync(volumeDir, { recursive: true, force: true });
@@ -516,6 +523,110 @@ describe('DashboardDB — retention', () => {
       expect(rows).toContainEqual({ level: 'warn', message: 'keep-warning' });
     } finally {
       volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps pace when the compatibility cleanup batch is smaller than the old guard cadence', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-small-compat-batch-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 100,
+      legacyRoutineLogCleanupBatchRows: 1,
+    });
+    try {
+      // Compile-time compatibility guard: published callers may still pass a
+      // string-typed value even when its runtime value is canonical.
+      const configuredLevel: string = 'info';
+      volumeDb.insertLog({
+        ts: Date.now(),
+        level: configuredLevel,
+        module: 'legacy-caller',
+        message: 'configured-level',
+      });
+      for (let i = 0; i < 500; i += 1) {
+        volumeDb.insertLog({
+          ts: Date.now() + i + 1,
+          level: 'info',
+          module: 'legacy-caller',
+          message: `routine-${i}`,
+        });
+      }
+      volumeDb.insertLog({
+        ts: Date.now() + 1_000,
+        level: 'warn',
+        module: 'legacy-caller',
+        message: 'keep-warning',
+      });
+
+      const counts = volumeDb.db.prepare(`
+        SELECT
+          SUM(CASE WHEN level NOT IN ('warn', 'error') THEN 1 ELSE 0 END) AS routine,
+          SUM(CASE WHEN level = 'warn' THEN 1 ELSE 0 END) AS warnings
+        FROM logs
+      `).get() as { routine: number; warnings: number };
+      expect(counts).toEqual({ routine: 100, warnings: 1 });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reopens cleanup for rollback-era rows without deleting compatibility rows from either cutover', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-rollback-cycle-'));
+    const dbPath = join(volumeDir, 'node-ui.db');
+    let volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      legacyRoutineLogCleanupBatchRows: 2,
+    });
+    try {
+      // Finish the first upgrade and write through the retained public API.
+      expect(volumeDb.runLegacyRoutineLogCleanupBatch().status).toBe('done');
+      volumeDb.insertLog({
+        ts: Date.now(),
+        level: 'info',
+        module: 'compatibility',
+        message: 'keep-before-rollback',
+      });
+      volumeDb.close();
+
+      // A supported rollback runs an older writer that does not know the v3
+      // marker. Direct SQL accurately models those legacy SQLite writes.
+      const rolledBackDb = new Database(dbPath);
+      const insert = rolledBackDb.prepare(
+        `INSERT INTO logs (ts, level, module, message) VALUES (?, ?, 'rolled-back-daemon', ?)`,
+      );
+      insert.run(Date.now() + 1, 'info', 'remove-rollback-info');
+      insert.run(Date.now() + 2, 'debug', 'remove-rollback-debug');
+      insert.run(Date.now() + 3, 'warn', 'keep-rollback-warning');
+      rolledBackDb.close();
+
+      volumeDb = new DashboardDB({
+        dataDir: volumeDir,
+        retentionDays: 365,
+        legacyRoutineLogCleanupBatchRows: 2,
+      });
+      volumeDb.insertLog({
+        ts: Date.now() + 4,
+        level: 'info',
+        module: 'compatibility',
+        message: 'keep-after-reupgrade',
+      });
+
+      expect(volumeDb.runLegacyRoutineLogCleanupBatch()).toEqual({ deleted: 2, status: 'more' });
+      expect(volumeDb.runLegacyRoutineLogCleanupBatch().status).toBe('done');
+      const rows = volumeDb.db.prepare(
+        `SELECT level, message FROM logs ORDER BY id`,
+      ).all() as Array<{ level: string; message: string }>;
+      expect(rows).toEqual([
+        { level: 'info', message: 'keep-before-rollback' },
+        { level: 'warn', message: 'keep-rollback-warning' },
+        { level: 'info', message: 'keep-after-reupgrade' },
+      ]);
+    } finally {
+      if (volumeDb.db.open) volumeDb.close();
       rmSync(volumeDir, { recursive: true, force: true });
     }
   });

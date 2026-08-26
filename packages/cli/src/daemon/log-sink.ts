@@ -7,7 +7,8 @@
  */
 import {
   isDiagnosticLogLevel,
-  type LogLevel,
+  type CanonicalLogRecord,
+  type DiagnosticLogLevel,
   type LogRecord,
 } from '@origintrail-official/dkg-core';
 
@@ -20,7 +21,7 @@ export interface DaemonLogSinkDeps {
   /** Persist a FULL (un-redacted) warning/error record to the local DB. */
   insertDiagnosticLog: (rec: {
     ts: number;
-    level: LogLevel;
+    level: DiagnosticLogLevel;
     operation_name?: string | null;
     operation_id?: string | null;
     module: string;
@@ -38,9 +39,9 @@ export interface DaemonLogSinkDeps {
  * Build the `Logger.setSink` callback. Forwards one redacted copy to the
  * selected shipper and does no redaction work when export is disabled.
  */
-export function createDaemonLogSink(deps: DaemonLogSinkDeps): (entry: LogRecord) => void {
+export function createDaemonLogSink(deps: DaemonLogSinkDeps): (entry: CanonicalLogRecord) => void {
   const now = deps.now ?? Date.now;
-  return (entry: LogRecord): void => {
+  return (entry: CanonicalLogRecord): void => {
     if (isDiagnosticLogLevel(entry.level)) {
       try {
         deps.insertDiagnosticLog({

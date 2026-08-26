@@ -177,7 +177,7 @@ describe('OtlpLogWorker — OTLP/HTTP log export', () => {
       workers.push(w);
       w.start();
 
-      w.push(rec({ level: 'notice' as LogRecord['level'], message: 'legacy-custom-level' }));
+      w.push(rec({ level: 'notice', message: 'legacy-custom-level' }));
       w.push(rec({ level: minLevel, message: `exported-${minLevel}` }));
       await waitFor(() => srv.received.length >= 1);
 
