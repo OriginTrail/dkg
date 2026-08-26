@@ -64,6 +64,14 @@ async function boot() {
   const manifest = JSON.parse(await readFile(MANIFEST_PATH, 'utf8'));
   agent = await createAgent(manifest, true);
   await agent.start();
+  if (ROLE === 'outsider') {
+    // The outsider knows the exact finalized policy and roster but is not a
+    // member. This lets its pull reach the provider and proves the provider's
+    // RFC-64 policy denial instead of mistaking missing local policy setup for
+    // remote access control.
+    const { policy, policyDigest, roster } = createPrivatePolicyAndRoster();
+    agent.acceptRfc64CatalogAccessSnapshotV1({ policy, policyDigest, roster });
+  }
   emit('ready', undefined, readyFields());
 }
 
