@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Logger } from '@origintrail-official/dkg-core';
-import { startDaemonLogController } from '../src/daemon/log-lifecycle.js';
+import {
+  createSerializedTelemetrySettings,
+  startDaemonLogController,
+} from '../src/daemon/log-lifecycle.js';
 
 describe('startDaemonLogController', () => {
   afterEach(() => {
@@ -13,18 +16,20 @@ describe('startDaemonLogController', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const persisted: string[] = [];
     const pushed: string[] = [];
-    const shutdown = vi.fn(async () => {});
+    const firstShutdown = vi.fn(async () => {});
+    const secondShutdown = vi.fn(async () => {});
+    const secondPushed: string[] = [];
     const controller = startDaemonLogController({
       insertDiagnosticLog: (record) => persisted.push(record.message),
       redact: (record) => ({ ...record, message: `redacted:${record.message}` }),
     });
     const factory = vi.fn(() => ({
       shipper: { push: (record: { message: string }) => pushed.push(record.message) },
-      shutdown,
+      shutdown: firstShutdown,
     }));
 
-    expect(controller.startExporter('otlp', factory)).toEqual({ ok: true });
-    expect(controller.startExporter('otlp', factory)).toEqual({ ok: true });
+    expect(controller.startExporter('otlp', factory)).toEqual({ ok: true, started: true });
+    expect(controller.startExporter('otlp', factory)).toEqual({ ok: true, started: false });
     expect(factory).toHaveBeenCalledTimes(1);
     expect(controller.startExporter('syslog', factory)).toEqual({
       ok: false,
@@ -45,7 +50,98 @@ describe('startDaemonLogController', () => {
       'diagnostic-after-disable',
     ]);
     expect(pushed).toHaveLength(2);
-    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(firstShutdown).toHaveBeenCalledTimes(1);
+
+    expect(controller.startExporter('otlp', () => ({
+      shipper: { push: (record: { message: string }) => secondPushed.push(record.message) },
+      shutdown: secondShutdown,
+    }))).toEqual({ ok: true, started: true });
+    logger.info(context, 'routine-after-re-enable');
+    expect(pushed).toHaveLength(2);
+    expect(secondPushed).toEqual(['redacted:routine-after-re-enable']);
+    await controller.stopExporter();
+    expect(firstShutdown).toHaveBeenCalledTimes(1);
+    expect(secondShutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes overlapping disable and enable transitions around the configured gate', async () => {
+    let configuredEnabled = true;
+    let exporterActive = true;
+    let releaseStop!: () => void;
+    let releaseDisabledSave!: () => void;
+    // Build the deferred stop without coupling the assertion to timer order.
+    let markStopStarted!: () => void;
+    const observedStop = new Promise<void>((resolve) => { markStopStarted = resolve; });
+    const stop = vi.fn(async () => {
+      exporterActive = false;
+      markStopStarted();
+      await new Promise<void>((resolve) => { releaseStop = resolve; });
+    });
+    let persistCalls = 0;
+    const settings = createSerializedTelemetrySettings({
+      setConfiguredEnabled: (enabled) => {
+        if (!enabled) expect(exporterActive).toBe(false);
+        configuredEnabled = enabled;
+      },
+      persist: async () => {
+        persistCalls += 1;
+        if (persistCalls === 1) {
+          await new Promise<void>((resolve) => { releaseDisabledSave = resolve; });
+        }
+      },
+      start: async () => {
+        expect(configuredEnabled).toBe(true);
+        exporterActive = true;
+        return { ok: true };
+      },
+      stop,
+    });
+
+    const disabling = settings.setEnabled(false);
+    await observedStop;
+    const enabling = settings.setEnabled(true);
+    expect(exporterActive).toBe(false);
+    expect(configuredEnabled).toBe(true);
+
+    releaseStop();
+    await vi.waitFor(() => expect(configuredEnabled).toBe(false));
+    expect(exporterActive).toBe(false);
+    releaseDisabledSave();
+    await disabling;
+    await enabling;
+
+    expect(configuredEnabled).toBe(true);
+    expect(exporterActive).toBe(true);
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not attach a replacement while runtime exporter shutdown is pending', async () => {
+    let releaseShutdown!: () => void;
+    const controller = startDaemonLogController({
+      insertDiagnosticLog: () => undefined,
+      redact: (record) => record,
+    });
+    expect(controller.startExporter('otlp', () => ({
+      shipper: { push: () => undefined },
+      shutdown: () => new Promise<void>((resolve) => { releaseShutdown = resolve; }),
+    }))).toEqual({ ok: true, started: true });
+
+    const stopping = controller.stopExporter();
+    expect(controller.startExporter('otlp', () => ({
+      shipper: { push: () => undefined },
+      shutdown: async () => undefined,
+    }))).toEqual({
+      ok: false,
+      error: 'Cannot start otlp while the previous exporter is shutting down',
+    });
+
+    releaseShutdown();
+    await stopping;
+    expect(controller.startExporter('otlp', () => ({
+      shipper: { push: () => undefined },
+      shutdown: async () => undefined,
+    }))).toEqual({ ok: true, started: true });
+    await controller.stopExporter();
   });
 
   it('detaches the sink synchronously and shuts the active exporter down once', async () => {

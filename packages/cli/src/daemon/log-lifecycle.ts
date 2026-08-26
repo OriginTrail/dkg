@@ -13,14 +13,81 @@ export interface DaemonLogExporter {
   shutdown: () => Promise<void>;
 }
 
+export type DaemonLogExporterStartResult =
+  | { ok: true; started: boolean }
+  | { ok: false; error: string };
+
 export interface DaemonLogController {
-  activeExporterMode(): DaemonLogExporterMode | null;
   startExporter(
     mode: DaemonLogExporterMode,
     factory: () => Omit<DaemonLogExporter, 'mode'>,
-  ): { ok: boolean; error?: string };
+  ): DaemonLogExporterStartResult;
   stopExporter(): Promise<DaemonLogExporterMode | null>;
   stop(): Promise<void>;
+}
+
+/**
+ * Serialize runtime telemetry toggles as complete state transitions. The
+ * configured master gate is raised before exporters start and lowered only
+ * after every exporter has stopped, so an active exporter can never coexist
+ * with `enabled: false` even when enable/disable requests overlap.
+ */
+export function createSerializedTelemetrySettings(opts: {
+  setConfiguredEnabled(enabled: boolean): void;
+  persist(): Promise<void>;
+  start(): Promise<{ ok: boolean; error?: string }>;
+  stop(): Promise<void>;
+}): {
+  setEnabled(enabled: boolean): Promise<{ ok: boolean; error?: string }>;
+} {
+  let transitionTail: Promise<void> = Promise.resolve();
+
+  const apply = async (enabled: boolean): Promise<{ ok: boolean; error?: string }> => {
+    if (!enabled) {
+      await opts.stop();
+      opts.setConfiguredEnabled(false);
+      await opts.persist();
+      return { ok: true };
+    }
+
+    // Raise the in-memory gate synchronously before any signal can start.
+    opts.setConfiguredEnabled(true);
+    let result: { ok: boolean; error?: string };
+    try {
+      result = await opts.start();
+    } catch (error) {
+      await opts.stop().catch(() => undefined);
+      opts.setConfiguredEnabled(false);
+      throw error;
+    }
+    if (!result.ok) {
+      await opts.stop();
+      opts.setConfiguredEnabled(false);
+      return result;
+    }
+    try {
+      await opts.persist();
+    } catch (error) {
+      // A failed save must not leave off-node export running while the durable
+      // configuration still says disabled.
+      await opts.stop();
+      opts.setConfiguredEnabled(false);
+      await opts.persist().catch(() => undefined);
+      throw error;
+    }
+    return { ok: true };
+  };
+
+  return {
+    setEnabled(enabled) {
+      const transition = transitionTail.then(
+        () => apply(enabled),
+        () => apply(enabled),
+      );
+      transitionTail = transition.then(() => undefined, () => undefined);
+      return transition;
+    },
+  };
 }
 
 /**
@@ -33,6 +100,7 @@ export function startDaemonLogController(opts: {
   redact: DaemonLogSinkDeps['redact'];
 }): DaemonLogController {
   let exporter: DaemonLogExporter | null = null;
+  let exporterShutdown: Promise<DaemonLogExporterMode | null> | null = null;
   let stopped = false;
   let stopPromise: Promise<void> | null = null;
 
@@ -43,20 +111,39 @@ export function startDaemonLogController(opts: {
   }));
 
   const stopExporter = async (): Promise<DaemonLogExporterMode | null> => {
+    if (exporterShutdown) return exporterShutdown;
     const current = exporter;
     if (!current) return null;
     // Detach before awaiting so no record can enter an exporter whose final
     // flush has started. Repeated calls observe the empty slot and are safe.
     exporter = null;
-    await current.shutdown();
-    return current.mode;
+    let shutdownWork: Promise<void>;
+    try {
+      // Invoke synchronously so stop()/stopExporter() starts teardown before it
+      // returns control, while still normalizing a synchronous throw.
+      shutdownWork = current.shutdown();
+    } catch (error) {
+      shutdownWork = Promise.reject(error);
+    }
+    const shutdown = shutdownWork
+      .then(() => current.mode)
+      .finally(() => {
+        if (exporterShutdown === shutdown) exporterShutdown = null;
+      });
+    exporterShutdown = shutdown;
+    return shutdown;
   };
 
   return {
-    activeExporterMode: () => exporter?.mode ?? null,
     startExporter(mode, factory) {
       if (stopped) return { ok: false, error: 'Daemon log controller is stopped' };
-      if (exporter?.mode === mode) return { ok: true };
+      if (exporterShutdown) {
+        return {
+          ok: false,
+          error: `Cannot start ${mode} while the previous exporter is shutting down`,
+        };
+      }
+      if (exporter?.mode === mode) return { ok: true, started: false };
       if (exporter) {
         return {
           ok: false,
@@ -65,7 +152,7 @@ export function startDaemonLogController(opts: {
       }
       try {
         exporter = { mode, ...factory() };
-        return { ok: true };
+        return { ok: true, started: true };
       } catch (error) {
         return {
           ok: false,

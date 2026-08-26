@@ -156,7 +156,10 @@ import {
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
-import { startDaemonLogController } from './log-lifecycle.js';
+import {
+  createSerializedTelemetrySettings,
+  startDaemonLogController,
+} from './log-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
@@ -2792,7 +2795,6 @@ export async function runDaemonInner(
     : "mainnet";
   const syslogEndpoint = TELEMETRY_ENDPOINTS[networkKey]?.syslog;
   function startLogExporter(mode: 'syslog' | 'otlp'): { ok: boolean; error?: string } {
-    if (daemonLogController.activeExporterMode() === mode) return { ok: true };
     if (mode === 'otlp') {
       // Resolve env-first, matching the traces/metrics precedence
       // (resolveOtelSignals): standard logs endpoint, base endpoint + /v1/logs,
@@ -2830,7 +2832,7 @@ export async function runDaemonInner(
           shutdown: () => worker.shutdown(),
         };
       });
-      if (result.ok) {
+      if (result.ok && result.started) {
         log(`Telemetry: OTLP log export enabled → ${endpoint} (level ≥ ${minLevel})`);
       }
       return result;
@@ -2867,7 +2869,7 @@ export async function runDaemonInner(
         shutdown: async () => worker.stop(),
       };
     });
-    if (result.ok) {
+    if (result.ok && result.started) {
       log(
         `Telemetry: log streaming enabled → ${syslogEndpoint.host}:${syslogEndpoint.port}`,
       );
@@ -3314,27 +3316,20 @@ export async function runDaemonInner(
     },
   };
 
+  const serializedTelemetrySettings = createSerializedTelemetrySettings({
+    setConfiguredEnabled: (enabled) => {
+      config.telemetry = { ...config.telemetry, enabled };
+    },
+    persist: () => saveConfig(config),
+    start: startTelemetry,
+    stop: stopTelemetry,
+  });
   const telemetrySettings = {
     getTelemetryEnabled: () => config.telemetry?.enabled ?? false,
     setTelemetryEnabled: async (
       enabled: boolean,
     ): Promise<{ ok: boolean; error?: string }> => {
-      if (enabled) {
-        const r = await startTelemetry();
-        if (!r.ok) {
-          // The OTel SDK may have started before the log exporter failed. Roll
-          // it back so we never leave traces/metrics exporting while we report
-          // failure and persist nothing — the API/UI state stays consistent
-          // (telemetry remains off) with what is actually running.
-          await stopTelemetry();
-          return r;
-        }
-      } else {
-        await stopTelemetry();
-      }
-      config.telemetry = { ...config.telemetry, enabled };
-      await saveConfig(config);
-      return { ok: true };
+      return serializedTelemetrySettings.setEnabled(enabled);
     },
   };
 
