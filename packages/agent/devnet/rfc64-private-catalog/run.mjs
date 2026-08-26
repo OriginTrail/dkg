@@ -58,7 +58,7 @@ export class AgentChild {
       if (!line.startsWith(marker)) return;
       const event = JSON.parse(line.slice(marker.length));
       this.events.push(event);
-      for (const waiter of [...this.waiters]) {
+      for (const waiter of this.waiters.slice()) {
         if (
           waiter.event === event.event
           && (waiter.requestId === undefined || waiter.requestId === event.requestId)
