@@ -52,16 +52,9 @@ const AUTHORITATIVE_PUBLIC_META_REQUIREMENTS: readonly PublicMetaRequirement[] =
  * data.
  */
 export function buildAuthoritativePublicMetaQuads(contextGraphId: string): Quad[] {
-  const graph = contextGraphMetaGraphUri(contextGraphId);
-  const subject = contextGraphDataGraphUri(contextGraphId);
-  return AUTHORITATIVE_PUBLIC_META_REQUIREMENTS.map((requirement) => ({
-    subject,
-    predicate: requirement.predicate,
-    object: requirement.object.kind === 'iri'
-      ? requirement.object.value
-      : `"${requirement.object.value}"`,
-    graph,
-  }));
+  return AUTHORITATIVE_PUBLIC_META_REQUIREMENTS.map((requirement) => (
+    materializeRequirement(contextGraphId, requirement)
+  ));
 }
 
 export interface AuthoritativePublicMetaInspection {
@@ -92,20 +85,35 @@ export function inspectAuthoritativePublicMetaDefinition(
   const projection = quads.filter((quad) => (
     quad.graph === metaGraph && quad.subject === contextGraphUri
   ));
-  const missing = buildAuthoritativePublicMetaQuads(contextGraphId).filter((canonicalQuad) => {
-    const requirement = AUTHORITATIVE_PUBLIC_META_REQUIREMENTS.find(
-      (candidate) => candidate.predicate === canonicalQuad.predicate,
-    );
-    return !requirement || !projection.some((quad) => (
+  const missing = AUTHORITATIVE_PUBLIC_META_REQUIREMENTS
+    .filter((requirement) => !projection.some((quad) => (
       quad.predicate === requirement.predicate
       && matchesRequirementObject(quad.object, requirement.object)
-    ));
-  });
+    )))
+    .map((requirement) => materializeRequirement(contextGraphId, requirement));
   const conflictingPolicy = projection.some((quad) => (
     quad.predicate === PUBLIC_ACCESS_POLICY_REQUIREMENT.predicate
-    && !matchesRequirementObject(quad.object, PUBLIC_ACCESS_POLICY_REQUIREMENT.object)
+    && isConflictingPublicPolicyObject(quad.object)
   ));
   return { missing, conflictingPolicy };
+}
+
+function materializeRequirement(
+  contextGraphId: string,
+  requirement: PublicMetaRequirement,
+): Quad {
+  return {
+    subject: contextGraphDataGraphUri(contextGraphId),
+    predicate: requirement.predicate,
+    object: requirement.object.kind === 'iri'
+      ? requirement.object.value
+      : `"${requirement.object.value}"`,
+    graph: contextGraphMetaGraphUri(contextGraphId),
+  };
+}
+
+function isConflictingPublicPolicyObject(value: string): boolean {
+  return !matchesRequirementObject(value, PUBLIC_ACCESS_POLICY_REQUIREMENT.object);
 }
 
 /** Evaluate a fetched root `_meta` snapshot against the canonical public proof. */
@@ -131,6 +139,25 @@ function renderRequirement(
     `      FILTER(isLiteral(${variable}) && LCASE(REPLACE(STR(${variable}), "^\\\\s+|\\\\s+$", "")) = ${sparqlString(requirement.object.value)})`;
 }
 
+function renderRequirementObject(requirement: PublicMetaRequirement): string {
+  return requirement.object.kind === 'iri'
+    ? `<${assertSafeIri(requirement.object.value)}>`
+    : sparqlString(requirement.object.value);
+}
+
+function renderConflictingPublicPolicyPattern(contextGraphUri: string): string {
+  const accessPolicyPredicate = assertSafeIri(PUBLIC_ACCESS_POLICY_REQUIREMENT.predicate);
+  const publicPolicy = PUBLIC_ACCESS_POLICY_REQUIREMENT.object;
+  if (publicPolicy.kind !== 'normalized-literal') {
+    throw new Error('Public access policy proof must use a normalized literal');
+  }
+  return `        <${assertSafeIri(contextGraphUri)}> <${accessPolicyPredicate}> ?conflictingAccessPolicy .
+        FILTER(
+          !isLiteral(?conflictingAccessPolicy) ||
+          LCASE(REPLACE(STR(?conflictingAccessPolicy), "^\\\\s+|\\\\s+$", "")) != ${sparqlString(publicPolicy.value)}
+        )`;
+}
+
 /** Build the store-side ASK query from the canonical public proof model. */
 export function buildAuthoritativePublicMetaAskQuery(contextGraphId: string): string {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
@@ -138,20 +165,11 @@ export function buildAuthoritativePublicMetaAskQuery(contextGraphId: string): st
   const requirements = AUTHORITATIVE_PUBLIC_META_REQUIREMENTS
     .map((requirement) => `      ${renderRequirement(contextGraphUri, requirement)}`)
     .join('\n');
-  const accessPolicyPredicate = assertSafeIri(PUBLIC_ACCESS_POLICY_REQUIREMENT.predicate);
-  const publicPolicy = PUBLIC_ACCESS_POLICY_REQUIREMENT.object;
-  if (publicPolicy.kind !== 'normalized-literal') {
-    throw new Error('Public access policy proof must use a normalized literal');
-  }
   return `ASK WHERE {
     GRAPH <${assertSafeIri(metaGraph)}> {
 ${requirements}
       FILTER NOT EXISTS {
-        <${assertSafeIri(contextGraphUri)}> <${accessPolicyPredicate}> ?conflictingAccessPolicy .
-        FILTER(
-          !isLiteral(?conflictingAccessPolicy) ||
-          LCASE(REPLACE(STR(?conflictingAccessPolicy), "^\\\\s+|\\\\s+$", "")) != ${sparqlString(publicPolicy.value)}
-        )
+${renderConflictingPublicPolicyPattern(contextGraphUri)}
       }
     }
   }`;
@@ -167,17 +185,10 @@ export function buildAuthoritativePublicMetaRepairUpdate(contextGraphId: string)
   const requiredFacts = AUTHORITATIVE_PUBLIC_META_REQUIREMENTS
     .map((requirement) => {
       const predicate = `<${assertSafeIri(requirement.predicate)}>`;
-      const object = requirement.object.kind === 'iri'
-        ? `<${assertSafeIri(requirement.object.value)}>`
-        : sparqlString(requirement.object.value);
+      const object = renderRequirementObject(requirement);
       return `      <${contextGraphUri}> ${predicate} ${object} .`;
     })
     .join('\n');
-  const accessPolicyPredicate = assertSafeIri(PUBLIC_ACCESS_POLICY_REQUIREMENT.predicate);
-  const publicPolicy = PUBLIC_ACCESS_POLICY_REQUIREMENT.object;
-  if (publicPolicy.kind !== 'normalized-literal') {
-    throw new Error('Public access policy proof must use a normalized literal');
-  }
   return `INSERT {
     GRAPH <${metaGraph}> {
 ${requiredFacts}
@@ -186,11 +197,7 @@ ${requiredFacts}
   WHERE {
     FILTER NOT EXISTS {
       GRAPH <${metaGraph}> {
-        <${contextGraphUri}> <${accessPolicyPredicate}> ?conflictingAccessPolicy .
-        FILTER(
-          !isLiteral(?conflictingAccessPolicy) ||
-          LCASE(REPLACE(STR(?conflictingAccessPolicy), "^\\\\s+|\\\\s+$", "")) != ${sparqlString(publicPolicy.value)}
-        )
+${renderConflictingPublicPolicyPattern(contextGraphUri)}
       }
     }
   }`;

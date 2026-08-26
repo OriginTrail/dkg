@@ -317,6 +317,97 @@ describe('configured context graph daemon bootstrap', () => {
     });
   });
 
+  it('does not let an inconclusive locked chain read erase a proven policy conflict', async () => {
+    const contextGraphId = '0x1234567890123456789012345678901234567890/inconclusive-conflict';
+    const fixture = createAgent(
+      {
+        [contextGraphId]: {
+          subscribed: true,
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+        },
+      },
+      {},
+      createStore(),
+      { [contextGraphId]: true },
+    );
+    fixture.repairActivePublicContextGraphMetadata
+      .mockResolvedValueOnce({ outcome: 'conflicting-policy' })
+      .mockResolvedValueOnce({ outcome: 'not-chain-attested' });
+
+    await bootstrapConfiguredContextGraphs({
+      agent: fixture.agent,
+      configuredContextGraphIds: [contextGraphId],
+      networkDefaultContextGraphIds: [],
+      log: vi.fn(),
+    });
+
+    expect(fixture.agent.hasConfirmedMetaState).not.toHaveBeenCalled();
+    expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
+    });
+  });
+
+  it('continues startup and resets stale readiness when both repair attempts reject', async () => {
+    const contextGraphId = '0x1234567890123456789012345678901234567890/repair-error';
+    let readiness = {
+      version: 1,
+      durableVerified: true,
+      sharedMemoryVerified: true,
+      updatedAt: Date.now(),
+    };
+    const readinessStore = {
+      getContextGraphReadinessProvenance: () => readiness,
+      setContextGraphReadinessProvenance: vi.fn((_id, next) => {
+        readiness = { ...next, updatedAt: Date.now() };
+      }),
+    };
+    const fixture = createAgent(
+      {
+        [contextGraphId]: {
+          subscribed: true,
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+        },
+      },
+      {},
+      createStore(),
+      { [contextGraphId]: false },
+    );
+    fixture.repairActivePublicContextGraphMetadata.mockRejectedValue(
+      new Error('simulated chain RPC failure'),
+    );
+    const log = vi.fn();
+
+    await expect(bootstrapConfiguredContextGraphs({
+      agent: fixture.agent,
+      configuredContextGraphIds: [contextGraphId],
+      networkDefaultContextGraphIds: [],
+      readinessStore,
+      log,
+    })).resolves.toBeUndefined();
+
+    expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledTimes(2);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(
+      `Context graph "${contextGraphId}" public metadata repair failed`,
+    ));
+    expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
+    });
+    expect(readiness).toMatchObject({
+      durableVerified: false,
+      sharedMemoryVerified: false,
+    });
+  });
+
   it('marks an unconfirmed creatorless configured graph pending without deleting RDF', async () => {
     const contextGraphId = '0x1234567890123456789012345678901234567890/unconfirmed';
     const store = createStore();

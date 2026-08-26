@@ -424,15 +424,23 @@ type ContextGraphSlotBindingOutcome =
   | { kind: 'unprovable' }
   | { kind: 'transportFailure'; error: unknown };
 
-type ContextGraphSlotBindingPolicy = 'legacy' | 'compatibilityStrict' | 'retryableStrict';
+export type ContextGraphSlotBindingMode =
+  | 'legacy-policy'
+  | 'chain-attested-repair'
+  | 'retryable-durable';
+
+type PublicPolicySlotBindingMode = Exclude<
+  ContextGraphSlotBindingMode,
+  'retryable-durable'
+>;
 
 function mapContextGraphSlotBindingOutcome(
   outcome: ContextGraphSlotBindingOutcome,
-  policy: ContextGraphSlotBindingPolicy,
+  mode: ContextGraphSlotBindingMode,
 ): boolean {
   if (outcome.kind === 'match') return true;
-  if (outcome.kind === 'unprovable') return policy === 'legacy';
-  if (outcome.kind === 'transportFailure' && policy === 'retryableStrict') {
+  if (outcome.kind === 'unprovable') return mode === 'legacy-policy';
+  if (outcome.kind === 'transportFailure' && mode === 'retryable-durable') {
     throw outcome.error;
   }
   return false;
@@ -917,7 +925,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async isContextGraphPublicOnChain(this: DKGAgent,
     contextGraphId: string,
     opCtx?: OperationContext,
-    options: { requireCommittedNameHashForLocalMapping?: boolean } = {},
+    options: { slotBindingMode?: PublicPolicySlotBindingMode } = {},
   ): Promise<boolean> {
     try {
       // DEFINITIVELY public iff the live-proven on-chain policy is `0`. Every
@@ -982,7 +990,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveOnChainAccessPolicyState(this: DKGAgent,
     contextGraphId: string,
     opCtx?: OperationContext,
-    options: { requireCommittedNameHashForLocalMapping?: boolean } = {},
+    options: { slotBindingMode?: PublicPolicySlotBindingMode } = {},
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
     const trimmed = contextGraphId.trim();
 
@@ -1045,7 +1053,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       contextGraphId,
       onChainId,
       opCtx,
-      { requireCommittedNameHash: options.requireCommittedNameHashForLocalMapping },
+      { bindingMode: options.slotBindingMode },
     ))) {
       return 'unknown';
     }
@@ -1081,36 +1089,34 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    *     hash-shaped cleartext id can't borrow a reused slot's commitment.
    * A genuinely reused slot commits a DIFFERENT name that matches neither.
    *
-   * The default legacy policy probe maps malformed/unprovable identifiers to
-   * `true`, but maps mismatches and transport failures to `false`. Its preserved
-   * `requireCommittedNameHash` option maps every non-match to `false`, including
-   * malformed ids and adapters without the getter. Durable sync uses the strict
-   * wrapper below, which additionally propagates transport failures so a bounded
-   * retry can perform a fresh read. The compatibility default preserves a
-   * numeric self-address; callers that require a committed name hash disable
-   * that shortcut after establishing that the id came from a local mapping.
+   * The explicit binding mode owns both numeric self-address handling and
+   * outcome mapping. `legacy-policy` preserves compatibility,
+   * `chain-attested-repair` requires a committed mapping proof, and
+   * `retryable-durable` additionally propagates transport failures so bounded
+   * durable verification can retry a fresh read.
    */
   async localCgMatchesOnChainSlot(this: DKGAgent,
     contextGraphId: string,
     onChainId: string,
     opCtx?: OperationContext,
-    options?: { requireCommittedNameHash?: boolean; signal?: AbortSignal },
+    options: {
+      bindingMode?: ContextGraphSlotBindingMode;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<boolean> {
+    const bindingMode = options.bindingMode ?? 'legacy-policy';
     const outcome = await evaluateContextGraphSlotBinding(
       this.chain,
       contextGraphId,
       onChainId,
       opCtx,
-      options?.signal,
-      options?.requireCommittedNameHash !== true,
+      options.signal,
+      bindingMode === 'legacy-policy',
       (localId) => this.isWireIdKeyedSubscription(localId),
       (ctx, message) => this.log.warn(ctx, message),
       (read) => this.raceChainPolicyRead(read),
     );
-    return mapContextGraphSlotBindingOutcome(
-      outcome,
-      options?.requireCommittedNameHash === true ? 'compatibilityStrict' : 'legacy',
-    );
+    return mapContextGraphSlotBindingOutcome(outcome, bindingMode);
   }
 
   /**
@@ -1124,18 +1130,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     opCtx?: OperationContext,
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
-    const outcome = await evaluateContextGraphSlotBinding(
-      this.chain,
+    return this.localCgMatchesOnChainSlot(
       contextGraphId,
       onChainId,
       opCtx,
-      options.signal,
-      true,
-      (localId) => this.isWireIdKeyedSubscription(localId),
-      (ctx, message) => this.log.warn(ctx, message),
-      (read) => this.raceChainPolicyRead(read),
+      { bindingMode: 'retryable-durable', signal: options.signal },
     );
-    return mapContextGraphSlotBindingOutcome(outcome, 'retryableStrict');
   }
 
   /**

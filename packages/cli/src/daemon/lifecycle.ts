@@ -1167,6 +1167,14 @@ export async function bootstrapConfiguredContextGraphs(input: {
             const liveRepair = await input.agent
               .repairActivePublicContextGraphMetadata(contextGraphId);
             if (liveRepair.outcome === 'conflicting-policy') return 'conflicting';
+            if (
+              chainMetadataConflict
+              && liveRepair.outcome === 'not-chain-attested'
+            ) {
+              // An inconclusive retry cannot erase the chain/root
+              // contradiction established by the first attested read.
+              return 'conflicting';
+            }
           } catch {
             return 'missing';
           }

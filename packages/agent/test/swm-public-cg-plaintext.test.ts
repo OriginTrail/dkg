@@ -164,7 +164,7 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
       cgId,
       'not-a-slot',
       undefined,
-      { requireCommittedNameHash: true },
+      { bindingMode: 'chain-attested-repair' },
     )).resolves.toBe(false);
 
     delete agentLike.chain.getContextGraphNameHash;
@@ -174,7 +174,7 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
       cgId,
       '5',
       undefined,
-      { requireCommittedNameHash: true },
+      { bindingMode: 'chain-attested-repair' },
     )).resolves.toBe(false);
 
     const transportError = Object.assign(new Error('name-hash RPC unavailable'), {
@@ -186,7 +186,7 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
       cgId,
       '5',
       undefined,
-      { requireCommittedNameHash: true },
+      { bindingMode: 'chain-attested-repair' },
     )).resolves.toBe(false);
     await expect(retryableStrictBinding.call(agentLike, cgId, '5'))
       .rejects.toBe(transportError);

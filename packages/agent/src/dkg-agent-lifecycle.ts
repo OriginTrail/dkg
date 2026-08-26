@@ -9659,7 +9659,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       () => this.isContextGraphPublicOnChain(
         contextGraphId,
         createOperationContext('init'),
-        { requireCommittedNameHashForLocalMapping: true },
+        { slotBindingMode: 'chain-attested-repair' },
       ),
     );
   }
