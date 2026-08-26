@@ -160,6 +160,12 @@ export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
 export {
+  Rfc64CatalogReconciliationTerminalErrorV1,
+  type Rfc64CatalogReconciliationFailureCompletionV1,
+  type Rfc64CatalogReconciliationFailureOutcomeV1,
+  type Rfc64CatalogReconciliationTerminalReasonV1,
+} from './rfc64/public-catalog-reconciliation-failure-v1.js';
+export {
   DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY,
   SYNC_ADMISSION_SOURCES,
   contextGraphPriority,

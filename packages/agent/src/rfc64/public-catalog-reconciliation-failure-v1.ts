@@ -9,15 +9,43 @@ import { Rfc64PublicCatalogNativeReceiverErrorV1 } from './public-catalog-native
 export type Rfc64CatalogReconciliationTerminalReasonV1 =
   | 'no-authorized-provider';
 
-/** Exact semantic failure returned by one scheduled reconciliation task. */
+export type Rfc64CatalogReconciliationFailureOutcomeV1 =
+  | 'staged-only'
+  | 'not-found'
+  | 'failed'
+  | 'dropped'
+  | 'closed';
+
+export interface Rfc64CatalogReconciliationFailureCompletionV1 {
+  readonly outcome: Rfc64CatalogReconciliationFailureOutcomeV1;
+  readonly error: unknown | null;
+}
+
+const FAILURE_OUTCOMES_V1 = new Set<Rfc64CatalogReconciliationFailureOutcomeV1>([
+  'staged-only',
+  'not-found',
+  'failed',
+  'dropped',
+  'closed',
+]);
+
+/** Exact, public semantic failure returned by one scheduled reconciliation task. */
 export class Rfc64CatalogReconciliationTerminalErrorV1 extends Error {
-  constructor(
-    readonly terminalReason: Rfc64CatalogReconciliationTerminalReasonV1 | null,
-    message: string,
-    cause: unknown | null,
-  ) {
-    super(message, cause === null ? {} : { cause });
+  readonly outcome: Rfc64CatalogReconciliationFailureOutcomeV1;
+  readonly terminalReason: Rfc64CatalogReconciliationTerminalReasonV1 | null;
+
+  constructor(completion: Rfc64CatalogReconciliationFailureCompletionV1) {
+    if (!FAILURE_OUTCOMES_V1.has(completion?.outcome)) {
+      throw new TypeError('RFC-64 reconciliation terminal error requires a non-success outcome');
+    }
+    const cause = completion.error;
+    super(
+      `RFC-64 current-head synchronization ended with ${completion.outcome}`,
+      cause === null ? {} : { cause },
+    );
     this.name = 'Rfc64CatalogReconciliationTerminalErrorV1';
+    this.outcome = completion.outcome;
+    this.terminalReason = classifyRfc64CatalogReconciliationTerminalReasonV1(cause);
   }
 }
 

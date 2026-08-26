@@ -15,6 +15,7 @@ import {
 import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from '@origintrail-official/dkg-chain';
 
 import {
+  assertAcceptedRfc64CatalogAuthorMembershipV1,
   assertAcceptedRfc64CatalogPolicyRosterV1,
   type AcceptedRfc64CatalogAccessSnapshotV1,
 } from './catalog-access-policy-v1.js';
@@ -86,6 +87,10 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
     assertAcceptedRfc64CatalogPolicyRosterV1(
       policy,
       untrustedAcceptedPolicy.policyDigest,
+      roster,
+    );
+    assertAcceptedRfc64CatalogAuthorMembershipV1(
+      policy,
       roster,
       plan.catalogScope.authorAddress,
     );
@@ -224,6 +229,10 @@ function assertPlanPolicyAndRosterCurrentV1(
   assertAcceptedRfc64CatalogPolicyRosterV1(
     policy,
     current.policyDigest,
+    roster,
+  );
+  assertAcceptedRfc64CatalogAuthorMembershipV1(
+    policy,
     roster,
     plan.catalogScope.authorAddress,
   );

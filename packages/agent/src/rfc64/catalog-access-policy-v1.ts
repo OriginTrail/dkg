@@ -74,7 +74,6 @@ export function assertAcceptedRfc64CatalogPolicyRosterV1(
   policy: Readonly<ContextGraphPolicyV1>,
   policyDigest: Digest32V1,
   roster: Readonly<MemberRosterV1> | null,
-  requiredMemberAddress?: EvmAddressV1,
 ): void {
   if (policy.accessPolicy === 0) {
     if (roster !== null) {
@@ -96,9 +95,20 @@ export function assertAcceptedRfc64CatalogPolicyRosterV1(
       + 'private recovery requires the exact current policy-bound roster',
     );
   }
+}
+
+/** Require one author to belong to an already-validated private access snapshot. */
+export function assertAcceptedRfc64CatalogAuthorMembershipV1(
+  policy: Readonly<ContextGraphPolicyV1>,
+  roster: Readonly<MemberRosterV1> | null,
+  requiredMemberAddress: EvmAddressV1,
+): void {
   if (
-    requiredMemberAddress !== undefined
-    && !roster.members.some((member) => member.agentAddress === requiredMemberAddress)
+    policy.accessPolicy === 1
+    && (
+      roster === null
+      || !roster.members.some((member) => member.agentAddress === requiredMemberAddress)
+    )
   ) {
     throw new Error(
       'private RFC-64 policy requires the exact current policy-bound roster and author membership',

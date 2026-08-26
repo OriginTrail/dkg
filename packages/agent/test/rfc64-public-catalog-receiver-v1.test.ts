@@ -630,6 +630,52 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(receiver.stats()).toMatchObject({ failed: 1, applied: 0 });
   });
 
+  it('keeps deprecated reconciliation lifecycle observers balanced', async () => {
+    let nextToken = 40;
+    const onReconciliationAttemptStart = vi.fn(() => ++nextToken);
+    const onReconciliationAttemptSuccess = vi.fn();
+    const onReconciliationAttemptEnd = vi.fn();
+    const onError = vi.fn();
+    const successfulHead = headWith(`0x${'d1'.repeat(32)}`);
+    const failedHead = headWith(`0x${'d2'.repeat(32)}`);
+    const failure = new Error('terminal provider failure');
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      if (head.catalogHeadObjectDigest === successfulHead.catalogHeadObjectDigest) {
+        return 'applied';
+      }
+      throw failure;
+    }), {
+      maxAttempts: 1,
+      retryBackoffMs: 0,
+      onError,
+      onReconciliationAttemptStart,
+      onReconciliationAttemptSuccess,
+      onReconciliationAttemptEnd,
+    });
+
+    await expect(receiver.scheduleManyAndWait([{
+      announcement: successfulHead,
+      remotePeerId: 'peer-success',
+    }])).resolves.toMatchObject({ outcome: 'applied' });
+    await expect(receiver.scheduleManyAndWait([{
+      announcement: failedHead,
+      remotePeerId: 'peer-failure',
+    }])).resolves.toMatchObject({ outcome: 'failed' });
+
+    expect(onReconciliationAttemptStart.mock.calls).toEqual([
+      [successfulHead],
+      [failedHead],
+    ]);
+    expect(onReconciliationAttemptSuccess).toHaveBeenCalledOnce();
+    expect(onReconciliationAttemptSuccess).toHaveBeenCalledWith(successfulHead, 41);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(failedHead, expect.any(Error), 42);
+    expect(onReconciliationAttemptEnd.mock.calls).toEqual([
+      [successfulHead, 41],
+      [failedHead, 42],
+    ]);
+  });
+
   it('starts a new semantic attempt only after the prior same-head task is terminal', async () => {
     const onAttemptStart = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(
