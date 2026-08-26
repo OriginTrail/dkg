@@ -47,6 +47,7 @@ import {
   classifyExactDurableFetch,
   filterExactAssetDurablePayload,
   mergeExactDurableFetchDisposition,
+  type ExactAssetCommitment,
   type ExactDurableFetchDisposition,
 } from './exact-durable-fetch.js';
 
@@ -223,6 +224,7 @@ function prepareDurableMeta(input: {
   readonly contextGraphId: string;
   readonly rawMetaResult: SyncPageResult;
   readonly exactAssetUals?: readonly string[];
+  readonly exactAssetCommitments?: readonly ExactAssetCommitment[];
   readonly buildsManifest: boolean;
 }): PreparedDurableMeta {
   const exact = input.exactAssetUals === undefined
@@ -231,6 +233,7 @@ function prepareDurableMeta(input: {
         [],
         input.rawMetaResult.quads,
         input.exactAssetUals,
+        input.exactAssetCommitments,
       );
   const metaForManifest = exact
     ? { ...input.rawMetaResult, quads: exact.metaQuads }
@@ -254,6 +257,7 @@ function prepareDurableVerificationPayload(input: {
   readonly rawMetaResult: SyncPageResult;
   readonly preparedMeta: PreparedDurableMeta;
   readonly exactAssetUals?: readonly string[];
+  readonly exactAssetCommitments?: readonly ExactAssetCommitment[];
 }): {
   readonly dataResult: SyncPageResult;
   readonly metaResult: SyncPageResult;
@@ -271,6 +275,7 @@ function prepareDurableVerificationPayload(input: {
     input.rawDataResult.quads,
     input.rawMetaResult.quads,
     input.exactAssetUals,
+    input.exactAssetCommitments,
   );
   const exactDataSet = new Set(exact.dataQuads);
   const exactDataRawOffsets = input.rawDataResult.quadRawOffsets?.filter(
@@ -323,6 +328,10 @@ export interface DurableSyncContext {
   sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
   /** Exact missing KAs for VM recovery; undefined retains normal full/delta sync. */
   exactAssetUalsFor?: (contextGraphId: string) => string[] | undefined;
+  /** Optional pinned commitments that exact descriptors must match before storage. */
+  exactAssetCommitmentsFor?: (
+    contextGraphId: string,
+  ) => readonly ExactAssetCommitment[] | undefined;
   /** Present only for the graph-owned bounded recovery runner. */
   durableMetaContinuation?: DurableMetaContinuation;
   stopOnBackoffWorthyFailure?: boolean;
@@ -535,6 +544,7 @@ async function runDurableSyncWithBudget(
     fetchSyncPages,
     sinceBatchIdFor,
     exactAssetUalsFor,
+    exactAssetCommitmentsFor,
     durableMetaContinuation,
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
@@ -704,6 +714,7 @@ async function runDurableSyncWithBudget(
         : deadline;
       const sinceBatchId = sinceBatchIdFor?.(pid);
       const exactAssetUals = exactAssetUalsFor?.(pid);
+      const exactAssetCommitments = exactAssetCommitmentsFor?.(pid);
       const rootlessVerifiedFullSnapshot = sinceBatchId === undefined
         && !isSystemContextGraph;
       if (exactAssetUals !== undefined) {
@@ -857,6 +868,7 @@ async function runDurableSyncWithBudget(
         contextGraphId: pid,
         rawMetaResult: metaResult,
         exactAssetUals,
+        exactAssetCommitments,
         buildsManifest,
       });
       const graphScopedManifest = preparedMeta.manifestPlan;
@@ -892,6 +904,7 @@ async function runDurableSyncWithBudget(
         rawMetaResult: metaResult,
         preparedMeta,
         exactAssetUals,
+        exactAssetCommitments,
       });
       const dataResult = preparedPayload.dataResult;
       const effectiveMetaResult = preparedPayload.metaResult;

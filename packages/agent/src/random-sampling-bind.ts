@@ -23,6 +23,7 @@ import {
   type ProofBuilder,
   type ProverLogger,
   type ProverLoopStatus,
+  type RandomSamplingProverDeps,
   type ProverWal,
   type TickOutcome,
 } from '@origintrail-official/dkg-random-sampling';
@@ -66,10 +67,7 @@ export interface RandomSamplingBindOptions {
    */
   onTick?: (outcome: TickOutcome) => void;
   /** Foreground exact-KA repair used by the prover's one-shot extraction retry. */
-  repairMissingKnowledgeAsset?: (input: {
-    kaId: bigint;
-    cgId: bigint;
-  }) => Promise<void>;
+  repairMissingKnowledgeAsset?: RandomSamplingProverDeps['repairMissingKnowledgeAsset'];
 }
 
 /**

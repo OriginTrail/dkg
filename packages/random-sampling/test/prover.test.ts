@@ -99,7 +99,7 @@ interface KCFixture {
   publicTriples: { subject: string; predicate: string; object: string }[];
 }
 
-async function seedKC(store: OxigraphStore, fixture: KCFixture): Promise<{ root: Uint8Array; leafCount: number }> {
+async function seedKCMetadata(store: OxigraphStore, fixture: KCFixture): Promise<void> {
   const cgIdStr = fixture.cgId.toString();
   // Mirror the agent's CG name → on-chain id mapping the extractor
   // looks up. `cg-<n>` is a synthetic name; in production the name is
@@ -114,7 +114,6 @@ async function seedKC(store: OxigraphStore, fixture: KCFixture): Promise<{ root:
     },
   ]);
   const metaGraph = contextGraphMetaUri(cgName, cgIdStr);
-  const dataGraph = contextGraphDataUri(cgName, cgIdStr);
 
   const metaQuads: Quad[] = [
     { subject: fixture.ual, predicate: `${DKG}batchId`, object: `"${fixture.kaId}"^^<${XSD}integer>`, graph: metaGraph },
@@ -127,6 +126,13 @@ async function seedKC(store: OxigraphStore, fixture: KCFixture): Promise<{ root:
     );
   }
   await store.insert(metaQuads);
+}
+
+async function seedKC(store: OxigraphStore, fixture: KCFixture): Promise<{ root: Uint8Array; leafCount: number }> {
+  await seedKCMetadata(store, fixture);
+  const cgIdStr = fixture.cgId.toString();
+  const cgName = `cg-${cgIdStr}`;
+  const dataGraph = contextGraphDataUri(cgName, cgIdStr);
   await store.insert(fixture.publicTriples.map((t) => ({ ...t, graph: dataGraph })));
 
   // PUBLIC path is structured: hashPair(publicRoot, privateDataHash). The fixture
@@ -1037,6 +1043,8 @@ describe('RandomSamplingProver — short-circuits', () => {
     expect(repairMissingKnowledgeAsset).toHaveBeenCalledWith({
       kaId: fixture.kaId,
       cgId: fixture.cgId,
+      expectedRoot: root,
+      expectedLeafCount: BigInt(leafCount),
     });
     expect(outcome).toMatchObject({
       kind: 'submitted',
@@ -1047,6 +1055,110 @@ describe('RandomSamplingProver — short-circuits', () => {
     expect((await wal.readAll()).map((entry) => entry.status)).toEqual([
       'challenge', 'extracted', 'built', 'submitted',
     ]);
+    await prover.close();
+  });
+
+  it('uses durable repair progress even when the transport hook ultimately rejects', async () => {
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kaId: 999n,
+      ual: 'did:dkg:hardhat:31337/0x0000000000000000000000000000000000000001/999',
+      rootEntities: ['urn:e:repair-progress'],
+      publicTriples: [
+        { subject: 'urn:e:repair-progress', predicate: 'urn:p:k', object: '"recovered"' },
+      ],
+    };
+    const { root, leafCount } = structuredKARootV10(
+      fixture.publicTriples.map((triple) =>
+        hashTripleV10(triple.subject, triple.predicate, triple.object)),
+      [],
+    );
+    const submitProof = vi.fn(async () => ({
+      hash: '0xpartial-progress', blockNumber: 1001, success: true,
+    }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    const repairMissingKnowledgeAsset = vi.fn(async () => {
+      await seedKC(store, fixture);
+      throw new Error('terminal response timed out after durable commit');
+    });
+    const prover = new RandomSamplingProver({
+      chain,
+      store,
+      identityId: IDENTITY_ID,
+      repairMissingKnowledgeAsset,
+    });
+
+    await expect(prover.tick()).resolves.toMatchObject({
+      kind: 'submitted',
+      txHash: '0xpartial-progress',
+    });
+    expect(repairMissingKnowledgeAsset).toHaveBeenCalledOnce();
+    await prover.close();
+  });
+
+  it('repairs a partially materialized KA whose metadata exists without payload data', async () => {
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kaId: 999n,
+      ual: 'did:dkg:hardhat:31337/0x0000000000000000000000000000000000000001/999',
+      rootEntities: ['urn:e:partial'],
+      publicTriples: [
+        { subject: 'urn:e:partial', predicate: 'urn:p:k', object: '"completed"' },
+      ],
+    };
+    await seedKCMetadata(store, fixture);
+    const { root, leafCount } = structuredKARootV10(
+      fixture.publicTriples.map((triple) =>
+        hashTripleV10(triple.subject, triple.predicate, triple.object)),
+      [],
+    );
+    const submitProof = vi.fn(async () => ({
+      hash: '0xpartial-data', blockNumber: 1001, success: true,
+    }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    const repairMissingKnowledgeAsset = vi.fn(async () => {
+      const cgId = fixture.cgId.toString();
+      await store.insert(fixture.publicTriples.map((triple) => ({
+        ...triple,
+        graph: contextGraphDataUri(`cg-${cgId}`, cgId),
+      })));
+    });
+    const prover = new RandomSamplingProver({
+      chain,
+      store,
+      identityId: IDENTITY_ID,
+      repairMissingKnowledgeAsset,
+    });
+
+    await expect(prover.tick()).resolves.toMatchObject({
+      kind: 'submitted',
+      txHash: '0xpartial-data',
+    });
+    expect(repairMissingKnowledgeAsset).toHaveBeenCalledOnce();
     await prover.close();
   });
 

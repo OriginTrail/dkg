@@ -5,8 +5,42 @@ import { stripLiteral } from '../../dkg-agent-utils.js';
 const DKG_NS = 'http://dkg.io/ontology/';
 const KA_UAL = `${DKG_NS}kaUal`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
+const MERKLE_ROOT = `${DKG_NS}merkleRoot`;
+const PUBLIC_TRIPLE_COUNT = `${DKG_NS}publicTripleCount`;
+const PRIVATE_TRIPLE_COUNT = `${DKG_NS}privateTripleCount`;
 
 export type ExactDurableFetchDisposition = 'found' | 'clean-absent' | 'incomplete';
+
+/** Challenge-pinned identity an exact fetch must match before materialization. */
+export interface ExactAssetCommitment {
+  readonly assetUal: string;
+  readonly merkleRootHex: string;
+  /** Structured V10 leaf count: public triples plus one private-root sibling. */
+  readonly merkleLeafCount: bigint;
+}
+
+function descriptorMatchesCommitment(
+  metaQuads: readonly Quad[],
+  commitment: ExactAssetCommitment,
+): boolean {
+  const rows = metaQuads.filter((quad) => quad.subject === commitment.assetUal);
+  const values = (predicate: string) => [...new Set(
+    rows.filter((quad) => quad.predicate === predicate).map((quad) => stripLiteral(quad.object)),
+  )];
+  const roots = values(MERKLE_ROOT).map((root) => root.toLowerCase());
+  const publicCounts = values(PUBLIC_TRIPLE_COUNT);
+  const privateCounts = values(PRIVATE_TRIPLE_COUNT);
+  if (roots.length !== 1 || publicCounts.length !== 1 || privateCounts.length !== 1) return false;
+  try {
+    const publicCount = BigInt(publicCounts[0]!);
+    const privateCount = BigInt(privateCounts[0]!);
+    const leafCount = publicCount + (privateCount > 0n ? 1n : 0n);
+    return roots[0] === commitment.merkleRootHex.toLowerCase()
+      && leafCount === commitment.merkleLeafCount;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Rolling-upgrade guard: an old responder may ignore the additive exact-asset
@@ -17,9 +51,17 @@ export function filterExactAssetDurablePayload(
   dataQuads: readonly Quad[],
   metaQuads: readonly Quad[],
   assetUals: readonly string[],
+  expectedCommitments?: readonly ExactAssetCommitment[],
 ): { dataQuads: Quad[]; metaQuads: Quad[]; descriptorCoverageComplete: boolean } {
   const exactUals = new Set(assetUals);
-  const exactMeta = metaQuads.filter((quad) => exactUals.has(quad.subject));
+  const commitments = new Map(
+    expectedCommitments?.map((commitment) => [commitment.assetUal, commitment]) ?? [],
+  );
+  const admittedUals = new Set([...exactUals].filter((ual) => {
+    const commitment = commitments.get(ual);
+    return commitment === undefined || descriptorMatchesCommitment(metaQuads, commitment);
+  }));
+  const exactMeta = metaQuads.filter((quad) => admittedUals.has(quad.subject));
   const returnedDescriptors = new Set(
     exactMeta
       .filter((quad) => (
@@ -36,7 +78,8 @@ export function filterExactAssetDurablePayload(
   return {
     metaQuads: exactMeta,
     dataQuads: dataQuads.filter((quad) => exactGraphs.has(quad.graph)),
-    descriptorCoverageComplete: returnedDescriptors.size === exactUals.size
+    descriptorCoverageComplete: admittedUals.size === exactUals.size
+      && returnedDescriptors.size === exactUals.size
       && [...exactUals].every((ual) => returnedDescriptors.has(ual)),
   };
 }

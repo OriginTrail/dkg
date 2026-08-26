@@ -55,6 +55,45 @@ describe('exact-asset rolling-upgrade filter', () => {
     });
   });
 
+  it('declines a live v2 descriptor that does not match the v1 challenge commitment', () => {
+    const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0x0000000000000000000000000000000000000001/7/2';
+    const metaGraph = 'did:dkg:context-graph:cg/_meta';
+    const meta = [
+      { subject: wanted, predicate: 'http://dkg.io/ontology/kaUal', object: wanted, graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/assertionGraph', object: graph, graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/merkleRoot', object: `0x${'22'.repeat(32)}`, graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/publicTripleCount', object: '1', graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/privateTripleCount', object: '0', graph: metaGraph },
+    ] as Quad[];
+    const data = [
+      { subject: 'urn:v2', predicate: 'urn:p', object: '"current"', graph },
+    ] as Quad[];
+
+    const filtered = filterExactAssetDurablePayload(data, meta, [wanted], [{
+      assetUal: wanted,
+      merkleRootHex: `0x${'11'.repeat(32)}`,
+      merkleLeafCount: 1n,
+    }]);
+
+    expect(filtered).toEqual({
+      dataQuads: [],
+      metaQuads: [],
+      descriptorCoverageComplete: false,
+    });
+
+    const matching = filterExactAssetDurablePayload(data, [
+      ...meta.filter((quad) => quad.predicate !== 'http://dkg.io/ontology/merkleRoot'),
+      { subject: wanted, predicate: 'http://dkg.io/ontology/merkleRoot', object: `0x${'11'.repeat(32)}`, graph: metaGraph },
+    ], [wanted], [{
+      assetUal: wanted,
+      merkleRootHex: `0x${'11'.repeat(32)}`,
+      merkleLeafCount: 1n,
+    }]);
+    expect(matching.dataQuads).toEqual(data);
+    expect(matching.descriptorCoverageComplete).toBe(true);
+  });
+
   it('threads exactAssetUalsFor into both fetch phases and filters an old-responder payload before verification', async () => {
     const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
     const extra = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';

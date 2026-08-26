@@ -92,6 +92,9 @@ export interface RandomSamplingProverDeps {
   repairMissingKnowledgeAsset?: (input: {
     kaId: bigint;
     cgId: bigint;
+    /** Immutable content identity captured by the active challenge. */
+    expectedRoot: Uint8Array;
+    expectedLeafCount: bigint;
   }) => Promise<void>;
 }
 
@@ -256,6 +259,70 @@ export class RandomSamplingProver {
       expectedRoot,
       material,
     };
+  }
+
+  private async extractPublicKnowledgeAssetWithRepair(input: {
+    kaId: bigint;
+    cgId: bigint;
+    expectedRoot: Uint8Array;
+    expectedLeafCount: bigint;
+    periodStartBlock: bigint;
+  }): Promise<Awaited<ReturnType<typeof extractV10KCFromStore>>> {
+    let initialError: KCNotFoundError | KCDataMissingError;
+    try {
+      return await extractV10KCFromStore(this.store, input.cgId, input.kaId);
+    } catch (error) {
+      if (!(error instanceof KCNotFoundError) && !(error instanceof KCDataMissingError)) {
+        throw error;
+      }
+      initialError = error;
+    }
+    if (!this.repairMissingKnowledgeAsset) throw initialError;
+
+    this.log.info('rs.tick.kc-repair-started', {
+      kaId: input.kaId.toString(),
+      cgId: input.cgId.toString(),
+      periodStart: input.periodStartBlock.toString(),
+      err: initialError.name,
+    });
+    let repairFailed = false;
+    try {
+      await this.repairMissingKnowledgeAsset({
+        kaId: input.kaId,
+        cgId: input.cgId,
+        expectedRoot: input.expectedRoot,
+        expectedLeafCount: input.expectedLeafCount,
+      });
+    } catch (repairError) {
+      repairFailed = true;
+      this.log.warn('rs.tick.kc-repair-failed', {
+        kaId: input.kaId.toString(),
+        cgId: input.cgId.toString(),
+        periodStart: input.periodStartBlock.toString(),
+        err: repairError instanceof Error
+          ? repairError.message.slice(0, 200)
+          : String(repairError).slice(0, 200),
+      });
+    }
+
+    // Durable exact sync can commit an authenticated asset and still reject a
+    // non-terminal response. Always re-read locally; transport disposition is
+    // not the proof-readiness authority.
+    try {
+      const extracted = await extractV10KCFromStore(this.store, input.cgId, input.kaId);
+      this.log.info('rs.tick.kc-repaired', {
+        kaId: input.kaId.toString(),
+        cgId: input.cgId.toString(),
+        periodStart: input.periodStartBlock.toString(),
+      });
+      return extracted;
+    } catch (retryError) {
+      if (
+        repairFailed
+        && (retryError instanceof KCNotFoundError || retryError instanceof KCDataMissingError)
+      ) throw initialError;
+      throw retryError;
+    }
   }
 
   private async tickImpl(): Promise<TickOutcome> {
@@ -460,46 +527,13 @@ export class RandomSamplingProver {
     } else {
       proofKind = 'public';
       try {
-        let extracted;
-        try {
-          extracted = await extractV10KCFromStore(this.store, cgId, kaId);
-        } catch (initialError) {
-          if (
-            !(initialError instanceof KCNotFoundError)
-            && !(initialError instanceof KCDataMissingError)
-          ) throw initialError;
-          if (!this.repairMissingKnowledgeAsset) throw initialError;
-
-          this.log.info('rs.tick.kc-repair-started', {
-            kaId: kaId.toString(),
-            cgId: cgId.toString(),
-            periodStart: periodKey.periodStartBlock.toString(),
-            err: initialError.name,
-          });
-          try {
-            await this.repairMissingKnowledgeAsset({ kaId, cgId });
-          } catch (repairError) {
-            this.log.warn('rs.tick.kc-repair-failed', {
-              kaId: kaId.toString(),
-              cgId: cgId.toString(),
-              periodStart: periodKey.periodStartBlock.toString(),
-              err: repairError instanceof Error
-                ? repairError.message.slice(0, 200)
-                : String(repairError).slice(0, 200),
-            });
-            throw initialError;
-          }
-
-          // The repair hook is deliberately transport-only. Re-run the same
-          // content-bound extractor so unverified or incomplete peer data can
-          // never proceed to proof construction.
-          extracted = await extractV10KCFromStore(this.store, cgId, kaId);
-          this.log.info('rs.tick.kc-repaired', {
-            kaId: kaId.toString(),
-            cgId: cgId.toString(),
-            periodStart: periodKey.periodStartBlock.toString(),
-          });
-        }
+        const extracted = await this.extractPublicKnowledgeAssetWithRepair({
+          kaId,
+          cgId,
+          expectedRoot,
+          expectedLeafCount: challenge.challengeLeafCount,
+          periodStartBlock: periodKey.periodStartBlock,
+        });
         // public structured path: contents = N-Triple bytes; private sub-roots -> sibling.
         contents = extracted.triples.map((t) => tripleContentV10(t.subject, t.predicate, t.object));
         privateRoots = extracted.privateRoots;
