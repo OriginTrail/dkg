@@ -119,10 +119,10 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
   // anchored regex with no nested quantifier — total work is O(n).
 
   // Wall time is sufficient for the absolute hang guards below. The scaling
-  // assertion uses current-process CPU time in a dedicated child so competing
-  // coverage workers cannot charge scheduler pauses to either input size. The
-  // child disables V8's optimizing tier, keeping the small sample above CPU
-  // timer granularity while avoiding host-specific optimization thresholds.
+  // assertion uses batched current-process CPU time in a dedicated child so
+  // competing coverage workers cannot charge scheduler pauses to either input
+  // size. The child disables V8's optimizing tier and requires >=50 ms median
+  // batches, avoiding both optimization thresholds and CPU timer granularity.
   const measure = (input: string) => {
     for (let i = 0; i < 2; i++) detectSparqlQueryForm(input);
     let fastestMs = Infinity;
