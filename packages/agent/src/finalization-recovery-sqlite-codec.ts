@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
   VerifiedGraphScopedFinalizationEvidenceCodec,
-  type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 import type {
   FinalizationRecoveryEntry,
@@ -146,11 +145,4 @@ export function finalizationRecoveryRowToEntry(
     createdAt: asSafeInteger(row.created_at, 'created_at'),
     updatedAt: asSafeInteger(row.updated_at, 'updated_at'),
   };
-}
-
-export function sameFinalizationRecoveryEvidence(
-  left: VerifiedGraphScopedFinalizationEvidence,
-  right: VerifiedGraphScopedFinalizationEvidence,
-): boolean {
-  return VerifiedGraphScopedFinalizationEvidenceCodec.same(left, right);
 }

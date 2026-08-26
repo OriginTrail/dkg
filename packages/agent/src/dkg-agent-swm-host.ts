@@ -3249,6 +3249,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           merkleRoot: item.merkleRoot,
           publisherAddress: item.publisherAddress,
           kaId: item.kaId,
+          batchId: item.batchId,
           versionBlock: item.versionBlock,
           authorAddress: item.authorAddress,
         }, ctx);
@@ -6220,6 +6221,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       merkleRoot,
       publisherAddress,
       kaId,
+      // V10 context-graph inventory stores one packed KA per batch.
+      batchId: kaId,
       versionBlock,
     };
 
