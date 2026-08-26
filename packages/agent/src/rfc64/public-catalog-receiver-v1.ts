@@ -749,17 +749,20 @@ export class Rfc64PublicCatalogReceiverV1 {
       const { provider, nextCursor } = selection;
       providerCursor = nextCursor;
       task.providerCursor = nextCursor;
-      this.#providerAttempts += 1;
-      task.providerAttempts = (task.providerAttempts ?? 0) + 1;
-      if (task.lastProviderKey !== undefined && task.lastProviderKey !== provider.key) {
-        this.#providerSwitches += 1;
-      }
-      task.lastProviderKey = provider.key;
       const hintRevision = provider.hintRevision;
       const providerAttempt = (attemptsByProvider.get(provider.key) ?? 0) + 1;
       attemptsByProvider.set(provider.key, providerAttempt);
+      const recordProviderAttempt = () => {
+        this.#providerAttempts += 1;
+        task.providerAttempts = (task.providerAttempts ?? 0) + 1;
+        if (task.lastProviderKey !== undefined && task.lastProviderKey !== provider.key) {
+          this.#providerSwitches += 1;
+        }
+        task.lastProviderKey = provider.key;
+      };
       try {
         if (await this.#reconciler.isHeadApplied(provider.announcement)) {
+          recordProviderAttempt();
           return { kind: 'already-applied', announcement: provider.announcement };
         }
         const result = await this.#reconciler.reconcileHead(
@@ -767,6 +770,7 @@ export class Rfc64PublicCatalogReceiverV1 {
           provider.announcement,
           this.#closing.signal,
         );
+        recordProviderAttempt();
         if (result === 'not-found') {
           notFoundProviderRevisions.set(provider.key, hintRevision);
           continue;
@@ -789,6 +793,7 @@ export class Rfc64PublicCatalogReceiverV1 {
           else attemptsByProvider.set(provider.key, providerAttempt - 1);
           return { kind: 'defer-admission' };
         }
+        recordProviderAttempt();
         lastError = error;
         if (this.#closing.signal.aborted) return { kind: 'aborted' };
         await this.#backoff(providerAttempt - 1);

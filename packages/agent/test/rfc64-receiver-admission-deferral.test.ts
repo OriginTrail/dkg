@@ -162,6 +162,59 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     await receiver.close();
   });
 
+  it('does not report admission deferrals as provider attempts or switches', async () => {
+    const peers: string[] = [];
+    let remainingDeferrals = 4;
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      {
+        isHeadApplied: async () => false,
+        reconcileHead: async (peerId: string) => {
+          peers.push(peerId);
+          if (remainingDeferrals > 0) {
+            remainingDeferrals -= 1;
+            throw saturationError();
+          }
+          return 'applied' as const;
+        },
+      } as never,
+      {
+        isDeferrableError: isFakeContention,
+        admissionDeferralMs: 30,
+        retryBackoffMs: 0,
+      },
+    );
+
+    const head = announcement('ab');
+    receiver.schedule(head, 'peer-a');
+    receiver.schedule(head, 'peer-b');
+    const deadline = Date.now() + 5_000;
+    while (
+      Date.now() < deadline
+      && (
+        receiver.stats().admissionDeferred < 4
+        || receiver.stats().deferred === 0
+      )
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    expect(new Set(peers)).toEqual(new Set(['peer-a', 'peer-b']));
+    expect(receiver.stats()).toMatchObject({
+      admissionDeferred: 4,
+      providerAttempts: 0,
+      providerSwitches: 0,
+    });
+
+    await receiver.whenIdle();
+    expect(receiver.stats()).toMatchObject({
+      applied: 1,
+      failed: 0,
+      providerAttempts: 1,
+      providerSwitches: 0,
+    });
+    await receiver.close();
+  });
+
   it('releases the concurrency slot and scope lock while waiting', async () => {
     // A deferral that kept the slot would block every other head on the node,
     // converting one busy chain lane into a stalled receiver.
