@@ -62,7 +62,6 @@ async function boot() {
     agent = await createAgent(undefined, false);
     await agent.start();
     emit('ready', undefined, readyFields());
-    await shutdown(0);
     return;
   }
   if (MODE !== 'run' || MANIFEST_PATH === undefined) {

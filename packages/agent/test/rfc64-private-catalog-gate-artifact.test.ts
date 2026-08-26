@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -274,6 +275,46 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     });
   });
 
+  it('rejects an untracked runtime source before build or execution', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-untracked-source-'));
+    temporaryRoots.push(root);
+    const artifactPath = join(root, 'artifacts', 'latest.json');
+    await mkdir(join(root, 'packages', 'agent', 'src'), { recursive: true });
+    await writeFile(join(root, 'packages', 'agent', 'package.json'), '{"name":"fixture"}\n');
+    execFileSync('git', ['init', '--quiet'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'rfc64-gate@example.invalid'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'RFC64 Gate Test'], { cwd: root });
+    execFileSync('git', ['add', 'packages/agent/package.json'], { cwd: root });
+    execFileSync('git', ['commit', '--quiet', '-m', 'fixture'], { cwd: root });
+    const sourceRevision = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: root,
+      encoding: 'utf8',
+    }).trim();
+    await writeFile(
+      join(root, 'packages', 'agent', 'src', 'injected.ts'),
+      'export const injected = true;\n',
+    );
+    const build = vi.fn();
+    const execute = vi.fn();
+
+    await expect(runRfc64PrivateGateFromCleanBuildV1({
+      artifactPath,
+      repoRoot: root,
+      execute,
+      dependencies: {
+        resolveSourceRevision: () => sourceRevision,
+        runCleanRuntimeBuild: build,
+      },
+    })).rejects.toThrow(/untracked runtime build inputs/u);
+
+    expect(build).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toMatchObject({
+      status: 'FAIL',
+      sourceRevision,
+    });
+  });
+
   it('publishes FAIL when runtime bytes change after child execution', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-stale-dist-'));
     temporaryRoots.push(root);
@@ -308,13 +349,12 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
 });
 
 describe('RFC-64 private release gate process and denial evidence', () => {
-  it('launches and gracefully seals one real provenance-bearing child', async () => {
+  it('launches and gracefully seals the production agent process', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-provenance-child-'));
     temporaryRoots.push(root);
     const sourceRevision = 'a'.repeat(40);
     const cleanBuild = buildGate2RuntimeManifestV1(REPO_ROOT, sourceRevision);
-    const child = new AgentChild('provenance-child', root, undefined, 'fixture', {
-      agentProcess: join(HERE, 'fixtures', 'rfc64-private-catalog-provenance-child.mjs'),
+    const child = new AgentChild('production-probe', root, undefined, 'probe', {
       runtimeProvenance: {
         runtimeManifestDigest: cleanBuild.manifestDigest,
         sourceRevision,
@@ -330,7 +370,7 @@ describe('RFC-64 private release gate process and denial evidence', () => {
       child.executedRuntimeManifest,
       cleanBuild,
     )).not.toThrow();
-  }, 30000);
+  }, 60000);
 
   it('rejects same-size SWM or VM semantic corruption', () => {
     const exactGraphCounts = [41, 42].map((kaNumber) => ({

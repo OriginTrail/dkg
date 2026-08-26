@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 
 import { readCleanRepositoryHead } from '../../../../devnet/rfc64-persistence-lifecycle/evidence.ts';
 import {
+  GATE2_RUNTIME_PACKAGE_CLOSURE,
   assertGate2RuntimeManifestEqualV1,
   buildGate2RuntimeManifestV1,
   runGate2CleanRuntimeBuildV1,
@@ -19,7 +20,7 @@ interface Rfc64PrivateGateCleanLaunchDependenciesV1 {
 
 const DEFAULT_DEPENDENCIES: Rfc64PrivateGateCleanLaunchDependenciesV1 = Object.freeze({
   buildRuntimeManifest: buildGate2RuntimeManifestV1,
-  readCleanSourceRevision: readCleanRepositoryHead,
+  readCleanSourceRevision: readCleanRuntimeBuildSourceRevisionV1,
   resolveSourceRevision: (repoRoot) => execFileSync('git', ['rev-parse', 'HEAD'], {
     cwd: repoRoot,
     encoding: 'utf8',
@@ -27,6 +28,16 @@ const DEFAULT_DEPENDENCIES: Rfc64PrivateGateCleanLaunchDependenciesV1 = Object.f
   }).trim(),
   runCleanRuntimeBuild: runGate2CleanRuntimeBuildV1,
 });
+
+const RUNTIME_BUILD_INPUT_PATHS = Object.freeze([
+  ...GATE2_RUNTIME_PACKAGE_CLOSURE.map(({ path }) => (
+    path.endsWith('/dist') ? path.slice(0, -'/dist'.length) : path
+  )),
+  'package.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  'tsconfig.json',
+]);
 
 /**
  * Invalidate stale evidence first, then bind one live run to clean source and
@@ -83,4 +94,27 @@ function assertExactSourceRevision(expected: string, actual: string): void {
   if (actual !== expected) {
     throw new Error('RFC-64 private gate source HEAD changed during the live run');
   }
+}
+
+/** Reject compiler inputs that cannot be reproduced from the claimed commit. */
+function readCleanRuntimeBuildSourceRevisionV1(repoRoot: string): string {
+  const sourceRevision = readCleanRepositoryHead(repoRoot);
+  const untrackedBuildInputs = execFileSync('git', [
+    'ls-files',
+    '--others',
+    '--exclude-standard',
+    '--',
+    ...RUNTIME_BUILD_INPUT_PATHS,
+  ], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
+  if (untrackedBuildInputs !== '') {
+    throw new Error(
+      'RFC-64 private gate refuses untracked runtime build inputs:\n'
+      + untrackedBuildInputs,
+    );
+  }
+  return sourceRevision;
 }

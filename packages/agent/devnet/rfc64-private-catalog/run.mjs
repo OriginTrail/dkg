@@ -229,11 +229,10 @@ export async function executeRfc64PrivateReleaseGateV1({
       });
       const ready = await child.waitFor('ready');
       assertReadyRuntimeManifest(ready, runtimeManifest.manifestDigest);
-      const stopped = await child.waitFor('stopping');
-      const exit = await child.exit;
+      const exit = await child.stop();
       if (exit.error !== null) throw exit.error;
       return [role, {
-        loaded: requiredExecutedRuntimeManifest(stopped, `${role} probe`),
+        loaded: requiredChildRuntimeManifest(child),
         ready,
       }];
     }));
