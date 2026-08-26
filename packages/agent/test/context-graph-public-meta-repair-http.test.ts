@@ -3,6 +3,7 @@ import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
   BlazegraphStore,
@@ -90,6 +91,49 @@ describe('creator-owned public metadata repair over SPARQL HTTP', () => {
 
       expect(repaired).toEqual({ outcome: 'projection-complete' });
       expect(proof).toEqual({ type: 'boolean', value: true });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('SPARQL HTTP / oxigraph-server leaves a conflicting private policy untouched', async () => {
+    endpoint = await startOxigraphSparqlEndpoint();
+    const store = new SparqlHttpStore({
+      queryEndpoint: endpoint.queryEndpoint,
+      updateEndpoint: endpoint.updateEndpoint,
+    });
+    const contextGraphId = 'chain-attested-http-private-conflict';
+    const subject = contextGraphDataGraphUri(contextGraphId);
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    try {
+      await store.insert([{
+        subject,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: metaGraph,
+      }]);
+
+      const repaired = await repairChainAttestedPublicMetaProjection(
+        store,
+        contextGraphId,
+        async () => true,
+      );
+      const facts = await store.query(`
+        SELECT ?predicate ?object WHERE {
+          GRAPH <${metaGraph}> {
+            <${subject}> ?predicate ?object .
+          }
+        }
+      `);
+
+      expect(repaired).toEqual({ outcome: 'conflicting-policy' });
+      expect(facts).toEqual({
+        type: 'bindings',
+        bindings: [{
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: '"private"',
+        }],
+      });
     } finally {
       await store.close();
     }
