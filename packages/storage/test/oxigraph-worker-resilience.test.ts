@@ -82,35 +82,93 @@ function abortDuringListenerRegistration(message: string): AbortSignal {
 const BUSY_QUERY = 'ASK { GRAPH <urn:test:g> { ?s ?p ?o } }';
 
 describe('OxigraphWorkerStore resilience', () => {
-  it('keeps worker mutation revisions unstable until the worker reply settles', async () => {
+  const GRAPH_A = 'urn:test:tracked:a';
+  const GRAPH_B = 'urn:test:tracked:b';
+  const GRAPH_C = 'urn:test:tracked:c';
+  const mutationCases: Array<{
+    name: string;
+    affected: string[];
+    invoke: (store: OxigraphWorkerStore) => Promise<unknown>;
+  }> = [
+    {
+      name: 'one-graph replace',
+      affected: [GRAPH_A],
+      invoke: (store) => store.replaceGraph(GRAPH_A, []),
+    },
+    {
+      name: 'two-graph atomic replace',
+      affected: [GRAPH_A, GRAPH_B],
+      invoke: (store) => store.replaceGraphAndSubject(
+        GRAPH_A,
+        [],
+        GRAPH_B,
+        'urn:test:metadata-subject',
+        [],
+      ),
+    },
+    {
+      name: 'unscoped raw update',
+      affected: [GRAPH_A, GRAPH_B, GRAPH_C],
+      invoke: (store) => store.update('CLEAR ALL'),
+    },
+  ];
+
+  it.each(mutationCases.flatMap((mutation) => [
+    { ...mutation, outcome: 'resolve' as const },
+    { ...mutation, outcome: 'reject' as const },
+  ]))('tracks $name through a worker $outcome', async ({ affected, invoke, outcome }) => {
     const store = makeStore({ operationTimeoutMs: 60_000 });
     const internals = store as unknown as {
       call(method: string, ...args: unknown[]): Promise<unknown>;
     };
     const originalCall = internals.call;
     let resolveCall!: () => void;
-    const pendingCall = new Promise<void>((resolve) => { resolveCall = resolve; });
+    let rejectCall!: (error: Error) => void;
+    const pendingCall = new Promise<void>((resolve, reject) => {
+      resolveCall = resolve;
+      rejectCall = reject;
+    });
     internals.call = () => pendingCall;
     try {
-      const graph = 'urn:test:pending-worker-write';
-      const before = store.getWriteRevision(graph);
-      const inserting = store.insert([{
-        subject: 'urn:test:s',
-        predicate: 'http://schema.org/name',
-        object: '"value"',
-        graph,
-      }]);
+      const prefixes = [GRAPH_A, GRAPH_B, GRAPH_C];
+      const before = new Map(prefixes.map((prefix) => [
+        prefix,
+        store.getWriteRevision(prefix),
+      ]));
+      const mutation = invoke(store);
 
-      const pending = store.getWriteRevision(graph);
-      expect(pending.generation).toBeGreaterThan(before.generation);
-      expect(pending.stable).toBe(false);
-      expect(store.getWriteRevision(graph)).toEqual(pending);
+      for (const prefix of prefixes) {
+        const pending = store.getWriteRevision(prefix);
+        const previous = before.get(prefix)!;
+        if (affected.includes(prefix)) {
+          expect(pending.generation).toBeGreaterThan(previous.generation);
+          expect(pending.stable).toBe(false);
+        } else {
+          expect(pending).toEqual(previous);
+        }
+      }
 
-      resolveCall();
-      await inserting;
-      const settled = store.getWriteRevision(graph);
-      expect(settled.generation).toBeGreaterThan(pending.generation);
-      expect(settled.stable).toBe(true);
+      if (outcome === 'resolve') {
+        resolveCall();
+        await expect(mutation).resolves.toBeUndefined();
+      } else {
+        rejectCall(new Error('worker mutation rejected'));
+        await expect(mutation).rejects.toThrow('worker mutation rejected');
+      }
+
+      for (const prefix of prefixes) {
+        const settled = store.getWriteRevision(prefix);
+        const previous = before.get(prefix)!;
+        if (affected.includes(prefix)) {
+          expect(settled.generation).toBeGreaterThan(previous.generation);
+        } else {
+          expect(settled.generation).toBe(previous.generation);
+        }
+        // A returned worker error is determinate: the atomic message settled,
+        // so rejection must release the active scope rather than poisoning the
+        // cache revision indefinitely.
+        expect(settled.stable).toBe(true);
+      }
     } finally {
       internals.call = originalCall;
       await closeQuietly(store);
