@@ -145,9 +145,19 @@ interface PoolReusableConnection {
  * handlers, so calling `peerId.toBytes()` from a handler works on
  * both wire variants (Codex PR #560 round-3).
  */
+/**
+ * Minimal structural contract for the remote peer on the pooled inbound path —
+ * the shape libp2p's `connection.remotePeer` always satisfies and the smallest
+ * thing tests must provide. Production objects carry more (`toMultihash()`,
+ * `equals()`, ...) and pass through untouched.
+ */
+export interface PooledRemotePeer {
+  toString(): string;
+}
+
 export type PooledStreamHandler = (
   requestData: Uint8Array,
-  peerId: unknown,
+  peerId: PooledRemotePeer,
   options?: { signal?: AbortSignal },
 ) => Promise<Uint8Array>;
 
@@ -213,25 +223,11 @@ export interface MessageStreamPoolOptions {
    *
    * When the pool is attached via `ProtocolRouter.enablePooling`, the router
    * installs this itself (keyed by the pool's LOGICAL protocol id, honoring
-   * `admissionExemptProtocols`) and overrides any caller-supplied value.
+   * `admissionExemptProtocols`); `ProtocolRouterPoolingOptions` omits the field
+   * so a caller cannot supply a value the router would have to discard. Direct
+   * `MessageStreamPool` constructions may configure it freely.
    */
   rejectInboundStream?: (peerIdStr: string) => boolean;
-}
-
-/**
- * Best-effort peer-id string for the pre-read gate. Pooled inbound handlers
- * tolerate minimal peer-like objects (see PooledStreamHandler doc), so the
- * gate does too: anything without a usable string form yields '', which a
- * conforming gate maps to "unsure" -> false -> normal read-then-probe path.
- */
-function peerIdStringOf(remotePeer: unknown): string {
-  try {
-    return typeof remotePeer === 'object' || typeof remotePeer === 'string'
-      ? String(remotePeer)
-      : '';
-  } catch {
-    return '';
-  }
 }
 
 interface PendingRequest {
@@ -1064,7 +1060,7 @@ export class MessageStreamPool {
     }
   }
 
-  private async handleInboundStream(stream: Stream, remotePeer: unknown): Promise<void> {
+  private async handleInboundStream(stream: Stream, remotePeer: PooledRemotePeer): Promise<void> {
     const handler = this.inboundHandler;
     if (!handler) {
       // No application handler registered yet — reject the stream
@@ -1082,9 +1078,12 @@ export class MessageStreamPool {
     // accepted stream; peers classified mid-stream are still refused by the
     // per-REQUEST admission check in the application handler below.
     if (this.rejectInboundStream) {
+      // Derived exactly once, from the typed boundary — the same string the
+      // full admission check sees later for this stream's requests.
+      const remotePeerId = remotePeer.toString();
       let rejected: boolean;
       try {
-        rejected = this.rejectInboundStream(peerIdStringOf(remotePeer));
+        rejected = this.rejectInboundStream(remotePeerId);
       } catch {
         // A throwing gate violates its contract; fail closed rather than
         // leaking an un-gated stream (see MessageStreamPoolOptions doc).

@@ -198,6 +198,25 @@ export interface ProtocolRegistrationOptions {
   maxReadBytes?: number;
 }
 
+/**
+ * The pooling options a ProtocolRouter caller may supply. `rejectInboundStream`
+ * is omitted: the router owns the pooled pre-read admission gate (installed in
+ * `enablePooling`, keyed by the logical protocol id so admission exemptions
+ * apply) and accepting a caller value it would have to discard makes the API
+ * lie. Construct a `MessageStreamPool` directly to configure the gate yourself.
+ */
+export type ProtocolRouterPoolingOptions = Omit<
+  Partial<MessageStreamPoolOptions>,
+  'rejectInboundStream'
+>;
+
+// Compile-time guard for the option surface above: fails the build if the
+// router-owned gate ever becomes caller-suppliable through enablePooling.
+type RouterPoolingOptionsOmitGate =
+  'rejectInboundStream' extends keyof ProtocolRouterPoolingOptions ? never : true;
+const _routerPoolingOptionsOmitGate: RouterPoolingOptionsOmitGate = true;
+void _routerPoolingOptionsOmitGate;
+
 export class QuietRetryableHandlerError extends Error {
   constructor(message: string) {
     super(message);
@@ -323,7 +342,7 @@ export class ProtocolRouter {
    */
   enablePooling(
     logicalProtocolId: string,
-    options: Partial<MessageStreamPoolOptions> = {},
+    options: ProtocolRouterPoolingOptions = {},
   ): void {
     const existing = this.pooledByLogical.get(logicalProtocolId);
     if (existing) {
@@ -383,10 +402,10 @@ export class ProtocolRouter {
         protocolId: wireProtocolId,
         maxFrameBytes: options.maxFrameBytes ?? this.maxReadBytes,
         primePeer,
-        // Router-owned, deliberately not caller-overridable: the pooled
-        // pre-read gate must be keyed by the LOGICAL protocol id (production
-        // admission exemptions are logical ids) and must consult the same
-        // cached-verdict predicate as the one-shot inbound path.
+        // Router-owned; `ProtocolRouterPoolingOptions` omits this field so a
+        // caller cannot supply a competing value. Keyed by the LOGICAL
+        // protocol id (production admission exemptions are logical ids) and
+        // consulting the same cached-verdict predicate as the one-shot path.
         rejectInboundStream: (peerIdStr: string) =>
           this.isKnownRejectedInboundPeer(peerIdStr, logicalProtocolId),
       },
