@@ -16,6 +16,25 @@ export interface TelemetryRuntime {
   shutdown(): Promise<void>;
 }
 
+export interface TelemetrySettings {
+  getTelemetryEnabled(): boolean;
+  setTelemetryEnabled(enabled: boolean): Promise<TelemetryTransitionResult>;
+}
+
+/**
+ * Keep the settings API wired to the same serialized runtime used at boot and
+ * shutdown. Exporting this small seam lets the runtime-enable path be tested
+ * with the production signal composition instead of a generic signal stub.
+ */
+export function createTelemetrySettings(
+  runtime: TelemetryRuntime,
+): TelemetrySettings {
+  return {
+    getTelemetryEnabled: () => runtime.isEnabled(),
+    setTelemetryEnabled: (enabled) => runtime.setEnabled(enabled),
+  };
+}
+
 /**
  * Canonical owner of the telemetry master gate. It serializes transitions,
  * starts/stops every signal through one adapter, persists config, rolls failed
