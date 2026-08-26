@@ -22,7 +22,7 @@ export interface OperationContext {
 /**
  * The canonical structured log record emitted on every Logger call. This is
  * the single shape that flows to any configured sink. The daemon uses it for
- * remote shippers (syslog, OTLP); local info/warn/error logs are file-backed.
+ * remote shippers (syslog, OTLP) and its file-backed local debug path.
  * Keep it stable — redaction and the exporters consume it.
  */
 export interface LogRecord {

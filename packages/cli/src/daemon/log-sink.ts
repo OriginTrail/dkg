@@ -1,9 +1,10 @@
 /**
  * The daemon log sink — the trust boundary where a REDACTED log record is
- * forwarded to the selected remote shipper (syslog or OTLP). The canonical local log is
- * already written to daemon.log; duplicating every routine record into SQLite
- * made high-volume sync/query logging block the event loop. Low-volume warning
- * and error records remain in SQLite for operation and dashboard diagnostics.
+ * forwarded to the selected remote shipper (syslog or OTLP). Info/warn/error
+ * already reach daemon.log through the stdout/stderr tee; this sink queues the
+ * otherwise-silent debug level to that file too. Duplicating routine records
+ * into SQLite made high-volume sync/query logging block the event loop, so only
+ * low-volume warning/error diagnostics remain in SQLite.
  */
 import {
   type CanonicalLogRecord,
@@ -25,6 +26,8 @@ export interface RemoteLogShipper {
 }
 
 export interface DaemonLogSinkDeps {
+  /** Queue an unredacted debug record for the local file-backed daemon log. */
+  writeLocalDebug: (record: CanonicalLogRecord) => void;
   /** Persist a FULL (un-redacted) warning/error record to the local DB. */
   insertDiagnosticLog: (rec: {
     ts: number;
@@ -42,6 +45,20 @@ export interface DaemonLogSinkDeps {
   now?: () => number;
 }
 
+/** Format the debug-only path that does not already pass through stdout/stderr. */
+export function formatDaemonDebugLog(
+  entry: CanonicalLogRecord,
+  now = Date.now(),
+): string {
+  const source = entry.sourceOperationId
+    ? ` [from:${entry.sourceOperationId}]`
+    : '';
+  return (
+    `[${new Date(now).toISOString()}] ${entry.operationName} `
+    + `${entry.operationId}${source} [${entry.module}] ${entry.message} [DEBUG]\n`
+  );
+}
+
 /**
  * Build the `Logger.setSink` callback. Forwards one redacted copy to the
  * selected shipper and does no redaction work when export is disabled.
@@ -49,6 +66,13 @@ export interface DaemonLogSinkDeps {
 export function createDaemonLogSink(deps: DaemonLogSinkDeps): (entry: CanonicalLogRecord) => void {
   const now = deps.now ?? Date.now;
   return (entry: CanonicalLogRecord): void => {
+    if (entry.level === 'debug') {
+      try {
+        deps.writeLocalDebug(entry);
+      } catch {
+        /* Local file logging must never break remote export. */
+      }
+    }
     if (shouldPersistDiagnostic(entry.level)) {
       try {
         deps.insertDiagnosticLog({

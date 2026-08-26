@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Logger } from '@origintrail-official/dkg-core';
 import { startDaemonLogController } from '../src/daemon/log-lifecycle.js';
+import { formatDaemonDebugLog } from '../src/daemon/log-sink.js';
 import type { DkgConfig } from '../src/config.js';
 import { createTelemetryRuntime } from '../src/daemon/telemetry-runtime.js';
 
@@ -19,6 +23,7 @@ describe('startDaemonLogController', () => {
     const secondShutdown = vi.fn(async () => {});
     const secondPushed: string[] = [];
     const controller = startDaemonLogController({
+      writeLocalDebug: () => undefined,
       insertDiagnosticLog: (record) => persisted.push(record.message),
       redact: (record) => ({ ...record, message: `redacted:${record.message}` }),
     });
@@ -66,6 +71,7 @@ describe('startDaemonLogController', () => {
   it('does not attach a replacement while runtime exporter shutdown is pending', async () => {
     let releaseShutdown!: () => void;
     const controller = startDaemonLogController({
+      writeLocalDebug: () => undefined,
       insertDiagnosticLog: () => undefined,
       redact: (record) => record,
     });
@@ -111,6 +117,7 @@ describe('startDaemonLogController', () => {
       markExporterShutdownStarted();
     }));
     const controller = startDaemonLogController({
+      writeLocalDebug: () => undefined,
       insertDiagnosticLog: (record) => persisted.push(record.message),
       redact: (record) => record,
     });
@@ -168,5 +175,36 @@ describe('startDaemonLogController', () => {
     controller.detachSink();
     await runtime.shutdown();
     expect(exporterShutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps debug records in the local file without routine SQLite persistence', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-debug-log-'));
+    const file = join(directory, 'daemon.log');
+    const writes: Array<Promise<void>> = [];
+    const persisted: string[] = [];
+    const controller = startDaemonLogController({
+      writeLocalDebug: (record) => {
+        writes.push(appendFile(file, formatDaemonDebugLog(record, 1234)));
+      },
+      insertDiagnosticLog: (record) => persisted.push(record.message),
+      redact: (record) => record,
+    });
+
+    try {
+      const logger = new Logger('debug-file-test');
+      logger.debug(
+        { operationId: 'op-debug', operationName: 'system' },
+        'discovery scan failed',
+      );
+      await Promise.all(writes);
+
+      expect(await readFile(file, 'utf8')).toContain(
+        'system op-debug [debug-file-test] discovery scan failed [DEBUG]',
+      );
+      expect(persisted).toEqual([]);
+    } finally {
+      controller.detachSink();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

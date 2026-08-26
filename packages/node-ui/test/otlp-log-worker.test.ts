@@ -188,6 +188,23 @@ describe('OtlpLogWorker — OTLP/HTTP log export', () => {
     },
   );
 
+  it('exports an unknown runtime level as INFO at the info threshold', async () => {
+    const srv = await startServer(() => ({ status: 200 }));
+    servers.push(srv.close);
+    const w = new OtlpLogWorker(baseOpts(srv.url, { minLevel: 'info' }));
+    workers.push(w);
+    w.start();
+
+    w.push(rec({ level: 'notice', message: 'legacy-custom-level' }));
+    await waitFor(() => srv.received.length >= 1);
+
+    const records = srv.received[0].body.resourceLogs[0].scopeLogs[0].logRecords;
+    expect(records).toHaveLength(1);
+    expect(records[0].body.stringValue).toBe('legacy-custom-level');
+    expect(records[0].severityNumber).toBe(9);
+    expect(records[0].severityText).toBe('INFO');
+  });
+
   it('sends Authorization bearer header when a token is configured', async () => {
     const srv = await startServer(() => ({ status: 200 }));
     servers.push(srv.close);

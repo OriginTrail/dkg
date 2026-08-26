@@ -32,6 +32,7 @@ export interface DaemonLogController {
  * Database maintenance lives in dashboard-log-volume-pruner.ts.
  */
 export function startDaemonLogController(opts: {
+  writeLocalDebug: DaemonLogSinkDeps['writeLocalDebug'];
   insertDiagnosticLog: DaemonLogSinkDeps['insertDiagnosticLog'];
   redact: DaemonLogSinkDeps['redact'];
 }): DaemonLogController {
@@ -40,6 +41,7 @@ export function startDaemonLogController(opts: {
   let sinkDetached = false;
 
   Logger.setSink(createDaemonLogSink({
+    writeLocalDebug: opts.writeLocalDebug,
     insertDiagnosticLog: opts.insertDiagnosticLog,
     redact: opts.redact,
     remoteShipper: () => exporter?.shipper,

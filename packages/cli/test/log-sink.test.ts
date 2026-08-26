@@ -21,6 +21,7 @@ describe('daemon log sink — diagnostics plus selected remote exporter', () => 
   it('ships one REDACTED copy to the selected shipper', () => {
     const otlp = shipper();
     const sink = createDaemonLogSink({
+      writeLocalDebug: () => {},
       insertDiagnosticLog: () => {},
       redact: createLogRedactor(['custom_secret']), // operator extra key honored
       remoteShipper: () => otlp,
@@ -38,6 +39,7 @@ describe('daemon log sink — diagnostics plus selected remote exporter', () => 
     let redactions = 0;
     const diagnostics: unknown[] = [];
     const sink = createDaemonLogSink({
+      writeLocalDebug: () => {},
       insertDiagnosticLog: (record) => diagnostics.push(record),
       redact: (record) => {
         redactions += 1;
@@ -53,6 +55,7 @@ describe('daemon log sink — diagnostics plus selected remote exporter', () => 
   it('persists full-fidelity warning and error diagnostics with operation context', () => {
     const diagnostics: unknown[] = [];
     const sink = createDaemonLogSink({
+      writeLocalDebug: () => {},
       insertDiagnosticLog: (record) => diagnostics.push(record),
       redact: createLogRedactor(),
       remoteShipper: () => null,
@@ -87,6 +90,7 @@ describe('daemon log sink — diagnostics plus selected remote exporter', () => 
     const otlp = shipper();
     let active: RemoteLogShipper | null = null;
     const sink = createDaemonLogSink({
+      writeLocalDebug: () => {},
       insertDiagnosticLog: () => {},
       redact: createLogRedactor(),
       remoteShipper: () => active,
@@ -107,6 +111,7 @@ describe('daemon log sink — diagnostics plus selected remote exporter', () => 
   it('still exports a diagnostic when local persistence throws', () => {
     const otlp = shipper();
     const sink = createDaemonLogSink({
+      writeLocalDebug: () => {},
       insertDiagnosticLog: () => { throw new Error('database locked'); },
       redact: createLogRedactor(),
       remoteShipper: () => otlp,

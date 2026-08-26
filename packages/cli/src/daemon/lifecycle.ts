@@ -166,6 +166,7 @@ import {
   startDaemonLogController,
   type DaemonLogExporterStartResult,
 } from './log-lifecycle.js';
+import { formatDaemonDebugLog } from './log-sink.js';
 import {
   createTelemetryRuntime,
   type TelemetryTransitionResult,
@@ -2597,14 +2598,17 @@ export async function runDaemonInner(
   chatDb = dashDb;
   log("Dashboard DB initialized at " + join(dkgDir(), "node-ui.db"));
 
-  // Redactor for the copy of each record that LEAVES the node. Local logs are
-  // already written to daemon.log and served by the dashboard's /api/node-log.
+  // Redactor for the copy of each record that LEAVES the node. The local path
+  // writes every level to daemon.log, served by the dashboard's /api/node-log.
   const redactForRemote = createLogRedactor(config.telemetry?.logs?.redact);
 
   // Avoid duplicating routine logs into SQLite on the event loop. Low-volume
   // warning/error records remain available to operation and dashboard views;
   // the controller owns sink attachment plus the one active remote exporter.
   const daemonLogController = startDaemonLogController({
+    writeLocalDebug: (record) => {
+      appendFile(logFile, formatDaemonDebugLog(record)).catch(() => {});
+    },
     insertDiagnosticLog: (record) => dashDb.insertLog(record),
     redact: redactForRemote,
   });
