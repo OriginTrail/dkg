@@ -12,6 +12,10 @@ import { assertGate2ExecutedRuntimeMatchesBuildV1 } from '../../../../devnet/rfc
 import { PROJECTION_DIGEST, roleAgentAddress } from './fixture.mjs';
 import { sanitizeGateFailureV1 } from './gate-artifact.mjs';
 import { isExpectedPrivateCatalogDenialResultV1 } from './denial-evidence.mjs';
+import {
+  RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
+  buildRfc64PrivateRuntimeProvenanceV1,
+} from './runtime-provenance.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENT_ROOT = join(HERE, '..', '..');
@@ -341,6 +345,10 @@ export async function executeRfc64PrivateReleaseGateV1({
     for (const processEvidence of runtimeProcesses) {
       assertGate2ExecutedRuntimeMatchesBuildV1(processEvidence.loaded, runtimeManifest);
     }
+    const sealedRuntimeProvenance = buildRfc64PrivateRuntimeProvenanceV1(
+      runtimeManifest,
+      runtimeProcesses,
+    );
 
     const checks = Object.freeze({
       fourStableUniqueDaemonIdentities:
@@ -379,7 +387,8 @@ export async function executeRfc64PrivateReleaseGateV1({
         && restartState.exactExpectedHead === true
         && restartState.inventoryRowCount === '2',
       restartPreservedExactSwmAndVm: hasExactMemoryContents(restartState),
-      allChildRuntimeBytesMatchCleanBuild: runtimeProcesses.length === 9,
+      allChildRuntimeBytesMatchCleanBuild:
+        runtimeProcesses.length === RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.length,
     });
     const status = Object.values(checks).every(Boolean) ? 'PASS' : 'FAIL';
     artifact = {
@@ -394,11 +403,7 @@ export async function executeRfc64PrivateReleaseGateV1({
         unauthorizedNode: safeRole(probed.outsider.ready),
       },
       runtimeManifestDigest: runtimeManifest.manifestDigest,
-      runtimeProvenance: {
-        schema: 'dkg-rfc64-private-runtime-provenance-v1',
-        sourceBuild: runtimeManifest,
-        processes: runtimeProcesses,
-      },
+      runtimeProvenance: sealedRuntimeProvenance,
       checks,
       catalog: {
         headObjectDigest: published.headObjectDigest,

@@ -45,13 +45,13 @@ export async function runRfc64PrivateGateFromCleanBuildV1(input: {
     ...DEFAULT_DEPENDENCIES,
     ...input.dependencies,
   });
-  // Resolving HEAD does not require cleanliness, so the lifecycle can replace
-  // any prior PASS before its execute phase checks the tracked tree.
-  const sourceRevision = dependencies.resolveSourceRevision(input.repoRoot);
   return runRfc64PrivateGateArtifactLifecycleV1({
     artifactPath: input.artifactPath,
-    sourceRevision,
-    execute: async () => {
+    resolveSourceRevision: () => dependencies.resolveSourceRevision(input.repoRoot),
+    execute: async ({ sourceRevision }: { sourceRevision: string | null }) => {
+      if (sourceRevision === null) {
+        throw new Error('RFC-64 private gate requires an exact source revision');
+      }
       assertExactSourceRevision(
         sourceRevision,
         dependencies.readCleanSourceRevision(input.repoRoot),

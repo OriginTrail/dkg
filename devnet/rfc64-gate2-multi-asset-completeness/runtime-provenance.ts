@@ -110,6 +110,20 @@ export interface Gate2RuntimeProvenanceV1 {
   readonly sourceBuild: Gate2RuntimeManifestV1;
 }
 
+export interface RuntimeProcessEvidenceV1<ProcessId extends string> {
+  readonly id: ProcessId;
+  readonly loaded: Gate2ExecutedRuntimeManifestV1;
+}
+
+export interface RuntimeProcessProvenanceV1<
+  ProcessId extends string,
+  Schema extends string,
+> {
+  readonly processes: readonly RuntimeProcessEvidenceV1<ProcessId>[];
+  readonly schema: Schema;
+  readonly sourceBuild: Gate2RuntimeManifestV1;
+}
+
 let pendingLaunchReceipt: Readonly<Gate2RuntimeLaunchReceiptV1> | undefined;
 
 /** Remove ignored outputs and rebuild the complete workspace runtime dependency closure. */
@@ -275,6 +289,68 @@ export function assertGate2ExecutedRuntimeMatchesBuildV1(
       throw new Error(`Gate 2 child did not load mandatory runtime entrypoint: ${mandatory}`);
     }
   }
+}
+
+/**
+ * Build provenance for an arbitrary fixed process topology using the same
+ * canonical clean-build and executed-runtime contracts as Gate 2.
+ */
+export function buildRuntimeProcessProvenanceV1<
+  ProcessId extends string,
+  Schema extends string,
+>(input: {
+  readonly expectedProcessIds: readonly ProcessId[];
+  readonly processes: readonly RuntimeProcessEvidenceV1<ProcessId>[];
+  readonly schema: Schema;
+  readonly sourceBuild: Gate2RuntimeManifestV1;
+}): Readonly<RuntimeProcessProvenanceV1<ProcessId, Schema>> {
+  const canonicalSourceBuild = buildGate2RuntimeManifestFromEntriesV1(
+    input.sourceBuild.sourceCommit,
+    input.sourceBuild.runtimeFiles,
+  );
+  assertGate2RuntimeManifestEqualV1(input.sourceBuild, canonicalSourceBuild);
+  if (input.processes.length !== input.expectedProcessIds.length) {
+    throw new Error('runtime provenance has an unexpected process count');
+  }
+  const processes = input.processes.map((processEvidence, index) => {
+    const expectedId = input.expectedProcessIds[index];
+    if (processEvidence.id !== expectedId) {
+      throw new Error(`runtime provenance process ${index} must be ${expectedId}`);
+    }
+    assertGate2ExecutedRuntimeMatchesBuildV1(processEvidence.loaded, canonicalSourceBuild);
+    return Object.freeze({ id: expectedId, loaded: processEvidence.loaded });
+  });
+  return Object.freeze({
+    schema: input.schema,
+    sourceBuild: canonicalSourceBuild,
+    processes: Object.freeze(processes),
+  });
+}
+
+/** Rebuild and byte-compare a persisted process-provenance object. */
+export function assertRuntimeProcessProvenanceV1<
+  ProcessId extends string,
+  Schema extends string,
+>(
+  actual: RuntimeProcessProvenanceV1<ProcessId, Schema>,
+  expected: {
+    readonly processIds: readonly ProcessId[];
+    readonly schema: Schema;
+  },
+): Readonly<RuntimeProcessProvenanceV1<ProcessId, Schema>> {
+  const rebuilt = buildRuntimeProcessProvenanceV1({
+    expectedProcessIds: expected.processIds,
+    processes: actual.processes,
+    schema: expected.schema,
+    sourceBuild: actual.sourceBuild,
+  });
+  if (
+    canonicalize(actual as unknown as CanonicalValue)
+    !== canonicalize(rebuilt as unknown as CanonicalValue)
+  ) {
+    throw new Error('runtime process provenance is not internally canonical');
+  }
+  return rebuilt;
 }
 
 export function buildGate2RuntimeProvenanceV1(

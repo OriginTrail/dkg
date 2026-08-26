@@ -2,10 +2,17 @@
 
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import {
+  assertGate2ExecutedRuntimeMatchesBuildV1,
+  buildGate2ExecutedRuntimeManifestV1,
+  buildGate2RuntimeManifestFromEntriesV1,
+  buildGate2RuntimeManifestV1,
+} from '../../../devnet/rfc64-gate2-multi-asset-completeness/runtime-provenance.js';
 
 import {
   Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1,
@@ -21,6 +28,10 @@ import {
 } from '../devnet/rfc64-private-catalog/gate-artifact.mjs';
 import { runRfc64PrivateGateFromCleanBuildV1 } from '../devnet/rfc64-private-catalog/clean-launch.js';
 import {
+  RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
+  buildRfc64PrivateRuntimeProvenanceV1,
+} from '../devnet/rfc64-private-catalog/runtime-provenance.mjs';
+import {
   AgentChild,
   hasExactMemoryContents,
 } from '../devnet/rfc64-private-catalog/run.mjs';
@@ -28,39 +39,25 @@ import { PROJECTION_DIGEST } from '../devnet/rfc64-private-catalog/fixture.mjs';
 
 const temporaryRoots: string[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
-const RUNTIME_MANIFEST_DIGEST = `0x${'d'.repeat(64)}`;
+const REPO_ROOT = resolve(HERE, '..', '..', '..');
+const RUNTIME_FILES = Object.freeze([
+  'packages/agent/dist/index.js',
+  'packages/chain/dist/index.js',
+  'packages/core/dist/index.js',
+  'packages/storage/dist/index.js',
+].map((path, index) => Object.freeze({
+  byteLength: index + 1,
+  path,
+  sha256: `0x${String(index + 1).repeat(64)}`,
+})));
 
 function runtimeProvenance(sourceRevision: string) {
-  const processIds = [
-    'probe-owner',
-    'probe-provider2',
-    'probe-receiver',
-    'probe-outsider',
-    'owner',
-    'provider2',
-    'receiver',
-    'outsider',
-    'receiver-restart',
-  ];
-  return {
-    schema: 'dkg-rfc64-private-runtime-provenance-v1',
-    sourceBuild: {
-      manifestDigest: RUNTIME_MANIFEST_DIGEST,
-      sourceCommit: sourceRevision,
-    },
-    processes: processIds.map((id) => ({
-      id,
-      loaded: {
-        manifestDigest: `0x${'e'.repeat(64)}`,
-        runtimeFiles: [{
-          byteLength: 1,
-          path: 'packages/agent/dist/index.js',
-          sha256: `0x${'f'.repeat(64)}`,
-        }],
-        sourceCommit: sourceRevision,
-      },
-    })),
-  };
+  const sourceBuild = buildGate2RuntimeManifestFromEntriesV1(sourceRevision, RUNTIME_FILES);
+  const loaded = buildGate2ExecutedRuntimeManifestV1(sourceRevision, RUNTIME_FILES);
+  return buildRfc64PrivateRuntimeProvenanceV1(
+    sourceBuild,
+    RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.map((id) => ({ id, loaded })),
+  );
 }
 
 function runtimeManifest(sourceRevision: string, marker: string) {
@@ -86,6 +83,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       new Date('2026-08-26T00:00:01.000Z'),
     ];
 
+    const provenance = runtimeProvenance('b'.repeat(40));
     const artifact = await runRfc64PrivateGateArtifactLifecycleV1({
       artifactPath,
       sourceRevision: 'b'.repeat(40),
@@ -94,8 +92,8 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
         schema: 'dkg-rfc64-private-release-gate-v1',
         status: 'PASS',
         checks: { strict: true },
-        runtimeManifestDigest: RUNTIME_MANIFEST_DIGEST,
-        runtimeProvenance: runtimeProvenance('b'.repeat(40)),
+        runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
+        runtimeProvenance: provenance,
       }),
     });
 
@@ -104,21 +102,22 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       startedAt: '2026-08-26T00:00:00.000Z',
       finishedAt: '2026-08-26T00:00:01.000Z',
       sourceRevision: 'b'.repeat(40),
-      runtimeManifestDigest: RUNTIME_MANIFEST_DIGEST,
+      runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
     });
     expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toEqual(artifact);
     expect(() => assertRfc64PrivateGatePassProvenanceV1(artifact)).not.toThrow();
   });
 
   it('rejects PASS provenance with a missing revision or invalid run interval', () => {
+    const provenance = runtimeProvenance('c'.repeat(40));
     const base = {
       schema: 'dkg-rfc64-private-release-gate-v1',
       status: 'PASS',
       startedAt: '2026-08-26T00:00:01.000Z',
       finishedAt: '2026-08-26T00:00:02.000Z',
       sourceRevision: 'c'.repeat(40),
-      runtimeManifestDigest: RUNTIME_MANIFEST_DIGEST,
-      runtimeProvenance: runtimeProvenance('c'.repeat(40)),
+      runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
+      runtimeProvenance: provenance,
     };
     expect(() => assertRfc64PrivateGatePassProvenanceV1({
       ...base,
@@ -135,6 +134,47 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     expect(() => assertRfc64PrivateGatePassProvenanceV1({
       ...base,
       runtimeProvenance: null,
+    })).toThrow(/runtime provenance is incomplete/u);
+  });
+
+  it('rejects non-canonical clean-build and executed-runtime hash claims', () => {
+    const sourceRevision = 'd'.repeat(40);
+    const provenance = runtimeProvenance(sourceRevision);
+    const base = {
+      schema: 'dkg-rfc64-private-release-gate-v1',
+      status: 'PASS',
+      startedAt: '2026-08-26T00:00:01.000Z',
+      finishedAt: '2026-08-26T00:00:02.000Z',
+      sourceRevision,
+      runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
+      runtimeProvenance: provenance,
+    };
+    expect(() => assertRfc64PrivateGatePassProvenanceV1({
+      ...base,
+      runtimeProvenance: {
+        ...provenance,
+        sourceBuild: {
+          ...provenance.sourceBuild,
+          runtimeFiles: provenance.sourceBuild.runtimeFiles.map((entry, index) => index === 0
+            ? { ...entry, sha256: `0x${'a'.repeat(64)}` }
+            : entry),
+        },
+      },
+    })).toThrow(/runtime provenance is incomplete/u);
+    expect(() => assertRfc64PrivateGatePassProvenanceV1({
+      ...base,
+      runtimeProvenance: {
+        ...provenance,
+        processes: provenance.processes.map((processEvidence, index) => index === 0
+          ? {
+              ...processEvidence,
+              loaded: {
+                ...processEvidence.loaded,
+                manifestDigest: `0x${'e'.repeat(64)}`,
+              },
+            }
+          : processEvidence),
+      },
     })).toThrow(/runtime provenance is incomplete/u);
   });
 
@@ -212,6 +252,28 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     });
   });
 
+  it('invalidates stale PASS before source revision resolution fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-head-failure-'));
+    temporaryRoots.push(root);
+    const artifactPath = join(root, 'artifacts', 'latest.json');
+    await mkdir(dirname(artifactPath), { recursive: true });
+    await writeFile(artifactPath, JSON.stringify({ status: 'PASS', stale: true }));
+
+    await expect(runRfc64PrivateGateFromCleanBuildV1({
+      artifactPath,
+      repoRoot: root,
+      execute: vi.fn(),
+      dependencies: {
+        resolveSourceRevision: () => { throw new Error('git metadata unavailable'); },
+      },
+    })).rejects.toThrow(/git metadata unavailable/u);
+
+    expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toMatchObject({
+      status: 'FAIL',
+      sourceRevision: null,
+    });
+  });
+
   it('publishes FAIL when runtime bytes change after child execution', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-stale-dist-'));
     temporaryRoots.push(root);
@@ -246,6 +308,30 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
 });
 
 describe('RFC-64 private release gate process and denial evidence', () => {
+  it('launches and gracefully seals one real provenance-bearing child', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-provenance-child-'));
+    temporaryRoots.push(root);
+    const sourceRevision = 'a'.repeat(40);
+    const cleanBuild = buildGate2RuntimeManifestV1(REPO_ROOT, sourceRevision);
+    const child = new AgentChild('provenance-child', root, undefined, 'fixture', {
+      agentProcess: join(HERE, 'fixtures', 'rfc64-private-catalog-provenance-child.mjs'),
+      runtimeProvenance: {
+        runtimeManifestDigest: cleanBuild.manifestDigest,
+        sourceRevision,
+      },
+    });
+    const ready = await child.waitFor('ready', { timeoutMs: 20_000 });
+    expect(ready.runtimeBuildManifestDigest).toBe(cleanBuild.manifestDigest);
+
+    const exit = await child.stop();
+    expect(exit).toMatchObject({ code: 0, error: null });
+    expect(child.executedRuntimeManifest).toBeDefined();
+    expect(() => assertGate2ExecutedRuntimeMatchesBuildV1(
+      child.executedRuntimeManifest,
+      cleanBuild,
+    )).not.toThrow();
+  }, 30000);
+
   it('rejects same-size SWM or VM semantic corruption', () => {
     const exactGraphCounts = [41, 42].map((kaNumber) => ({
       kaNumber,
