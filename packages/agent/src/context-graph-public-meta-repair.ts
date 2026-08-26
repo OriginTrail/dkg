@@ -26,12 +26,12 @@ export interface PublicMetaRepairResult {
   conflictingGraphs: string[];
 }
 
-export type ActivePublicContextGraphChainProof =
+type ActivePublicContextGraphChainProof =
   | { state: 'public' }
   | { state: 'not-public'; reason: 'private' | 'unregistered' }
   | { state: 'unknown'; reason: 'unprovable' | 'rpc-failure'; detail?: string };
 
-export type ChainAttestedPublicMetaRepairResult =
+type ChainAttestedPublicMetaRepairResult =
   | { outcome: 'already-complete'; chainProof: { state: 'not-requested' } }
   | {
       outcome: 'not-chain-attested';

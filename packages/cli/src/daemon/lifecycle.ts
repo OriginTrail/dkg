@@ -1101,17 +1101,19 @@ export async function bootstrapConfiguredContextGraphs(input: {
       input.log(
         `Context graph "${contextGraphId}" public metadata repair failed: ${reconciliation.repair.detail} — continuing fail-closed`,
       );
-    } else if (reconciliation.repair.result.outcome === 'projection-complete') {
+    } else if (reconciliation.repair.outcome === 'projection-complete') {
       input.log(
         `Completed chain-attested public metadata for configured context graph: ${contextGraphId}`,
       );
     } else if (
-      reconciliation.repair.result.outcome === 'not-chain-attested'
-      && reconciliation.repair.result.chainProof.state === 'unknown'
+      reconciliation.repair.outcome === 'not-chain-attested'
+      && (
+        reconciliation.repair.chainEvidence === 'unprovable'
+        || reconciliation.repair.chainEvidence === 'rpc-failure'
+      )
     ) {
-      const { chainProof } = reconciliation.repair.result;
       input.log(
-        `Context graph "${contextGraphId}" public chain proof is unavailable (${chainProof.reason}${chainProof.detail ? `: ${chainProof.detail}` : ''}) — continuing fail-closed`,
+        `Context graph "${contextGraphId}" public chain proof is unavailable (${reconciliation.repair.chainEvidence}${reconciliation.repair.detail ? `: ${reconciliation.repair.detail}` : ''}) — continuing fail-closed`,
       );
     }
     if (reconciliation.outcome === 'pending' && reconciliation.reason === 'conflicting-policy') {

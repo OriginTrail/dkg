@@ -1,6 +1,6 @@
 import type {
   CatchupPassDecisionReason,
-  ChainAttestedPublicMetaRepairResult,
+  ConfiguredContextGraphMetadataReconciliationResult,
   DKGAgent,
   SwmSnapshotCoverage,
 } from '@origintrail-official/dkg-agent';
@@ -726,17 +726,7 @@ async function withContextGraphReadinessMutationLock<T>(
   }
 }
 
-type PublicMetaRepairAttempt =
-  | { status: 'completed'; result: ChainAttestedPublicMetaRepairResult }
-  | { status: 'failed'; detail: string };
-
-export type ConfiguredContextGraphMetadataReconciliationResult =
-  | { outcome: 'authoritative'; repair: PublicMetaRepairAttempt }
-  | {
-      outcome: 'pending';
-      reason: 'conflicting-policy' | 'missing-metadata';
-      repair: PublicMetaRepairAttempt;
-    };
+export type { ConfiguredContextGraphMetadataReconciliationResult };
 
 /**
  * Repair, classify, and persist configured-graph readiness under one lock.
@@ -759,56 +749,24 @@ export async function reconcileConfiguredContextGraphMetadata(input: {
   }
 
   return withContextGraphReadinessMutationLock(input.agent, contextGraphId, async () => {
-    let repair: PublicMetaRepairAttempt;
-    try {
-      repair = {
-        status: 'completed',
-        result: await input.agent.repairActivePublicContextGraphMetadata(contextGraphId),
-      };
-    } catch (error) {
-      repair = {
-        status: 'failed',
-        detail: error instanceof Error ? error.message : String(error),
-      };
-    }
-
-    const conflictingPolicy = repair.status === 'completed'
-      && repair.result.outcome === 'conflicting-policy';
-    if (!conflictingPolicy) {
-      const locallyCurated = typeof input.agent.isCuratorOf === 'function'
-        ? await input.agent.isCuratorOf(contextGraphId).catch(() => false)
-        : false;
-      const chainProof = repair.status === 'completed'
-        && repair.result.chainProof.state !== 'not-requested'
-        ? repair.result.chainProof
-        : undefined;
-      const hasConfirmedMeta = await input.agent.hasConfirmedMetaState(
-        contextGraphId,
-        {
-          rejectUnregisteredPlaceholder: !locallyCurated,
-          activePublicChainProof: chainProof,
-        },
-      ).catch(() => false);
-      if (hasConfirmedMeta) {
-        const subscription = input.agent.getSubscribedContextGraphs().get(contextGraphId);
-        if (subscription?.metaSynced !== true || subscription.pendingMeta === true) {
-          input.agent.markContextGraphSubscriptionState(contextGraphId, {
-            metaSynced: true,
-            pendingMeta: false,
-          });
-        }
-        return { outcome: 'authoritative', repair };
+    const reconciliation = await input.agent.reconcileConfiguredContextGraphMetadata(
+      contextGraphId,
+    );
+    if (reconciliation.outcome === 'authoritative') {
+      const subscription = input.agent.getSubscribedContextGraphs().get(contextGraphId);
+      if (subscription?.metaSynced !== true || subscription.pendingMeta === true) {
+        input.agent.markContextGraphSubscriptionState(contextGraphId, {
+          metaSynced: true,
+          pendingMeta: false,
+        });
       }
+      return reconciliation;
     }
 
     const patches = missingMetadataReadinessPatches();
     input.agent.markContextGraphSubscriptionState(contextGraphId, patches.statePatch);
     writeContextGraphReadiness(input.store, contextGraphId, patches.readinessPatch);
-    return {
-      outcome: 'pending',
-      reason: conflictingPolicy ? 'conflicting-policy' : 'missing-metadata',
-      repair,
-    };
+    return reconciliation;
   });
 }
 

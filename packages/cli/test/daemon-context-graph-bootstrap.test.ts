@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type {
+  ConfiguredContextGraphMetadataReconciliationResult,
+  DKGAgent,
+} from '@origintrail-official/dkg-agent';
 import { DKGEvent, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   bootstrapConfiguredContextGraphs,
@@ -48,10 +51,18 @@ function createAgent(
       subscriptions.set(contextGraphId, { ...existing, ...patch });
     },
   );
-  const repairActivePublicContextGraphMetadata = vi.fn(async () => ({
-    outcome: 'not-chain-attested' as const,
-    chainProof: { state: 'not-public' as const, reason: 'unregistered' as const },
-  }));
+  const reconcileConfiguredContextGraphMetadata = vi.fn(
+    async (contextGraphId: string): Promise<ConfiguredContextGraphMetadataReconciliationResult> => {
+      const repair = {
+        status: 'completed' as const,
+        outcome: 'not-chain-attested' as const,
+        chainEvidence: 'unregistered' as const,
+      };
+      return confirmedMeta[contextGraphId] ?? Boolean(creators[contextGraphId])
+        ? { outcome: 'authoritative', repair }
+        : { outcome: 'pending', reason: 'missing-metadata', repair };
+    },
+  );
 
   return {
     agent: {
@@ -62,14 +73,14 @@ function createAgent(
         confirmedMeta[contextGraphId] ?? Boolean(creators[contextGraphId])),
       getSubscribedContextGraphs: () => subscriptions,
       subscribeToContextGraph,
-      repairActivePublicContextGraphMetadata,
+      reconcileConfiguredContextGraphMetadata,
       markContextGraphSubscriptionState,
       store,
     } as unknown as DKGAgent,
     ensureContextGraphLocal,
     markContextGraphSubscriptionState,
     subscribeToContextGraph,
-    repairActivePublicContextGraphMetadata,
+    reconcileConfiguredContextGraphMetadata,
     subscriptions,
     store,
   };
@@ -223,9 +234,13 @@ describe('configured context graph daemon bootstrap', () => {
       createStore(),
       { [contextGraphId]: true },
     );
-    fixture.repairActivePublicContextGraphMetadata.mockResolvedValue({
-      outcome: 'projection-complete',
-      chainProof: { state: 'public' },
+    fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
+      outcome: 'authoritative',
+      repair: {
+        status: 'completed',
+        outcome: 'projection-complete',
+        chainEvidence: 'public',
+      },
     });
     const log = vi.fn();
 
@@ -236,7 +251,7 @@ describe('configured context graph daemon bootstrap', () => {
       log,
     });
 
-    expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledWith(contextGraphId);
+    expect(fixture.reconcileConfiguredContextGraphMetadata).toHaveBeenCalledWith(contextGraphId);
     expect(log).toHaveBeenCalledWith(
       `Completed chain-attested public metadata for configured context graph: ${contextGraphId}`,
     );
@@ -261,9 +276,14 @@ describe('configured context graph daemon bootstrap', () => {
       createStore(),
       { [contextGraphId]: true },
     );
-    fixture.repairActivePublicContextGraphMetadata.mockResolvedValue({
-      outcome: 'conflicting-policy',
-      chainProof: { state: 'public' },
+    fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
+      outcome: 'pending',
+      reason: 'conflicting-policy',
+      repair: {
+        status: 'completed',
+        outcome: 'conflicting-policy',
+        chainEvidence: 'public',
+      },
     });
 
     await bootstrapConfiguredContextGraphs({
@@ -273,7 +293,7 @@ describe('configured context graph daemon bootstrap', () => {
       log: vi.fn(),
     });
 
-    expect(fixture.agent.hasConfirmedMetaState).not.toHaveBeenCalled();
+    expect(fixture.reconcileConfiguredContextGraphMetadata).toHaveBeenCalledTimes(1);
     expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
       synced: false,
       sharedMemorySynced: false,
@@ -297,14 +317,23 @@ describe('configured context graph daemon bootstrap', () => {
       createStore(),
       { [contextGraphId]: true },
     );
-    fixture.repairActivePublicContextGraphMetadata
+    fixture.reconcileConfiguredContextGraphMetadata
       .mockResolvedValueOnce({
-        outcome: 'conflicting-policy',
-        chainProof: { state: 'public' },
+        outcome: 'pending',
+        reason: 'conflicting-policy',
+        repair: {
+          status: 'completed',
+          outcome: 'conflicting-policy',
+          chainEvidence: 'public',
+        },
       })
       .mockResolvedValueOnce({
-        outcome: 'projection-complete',
-        chainProof: { state: 'public' },
+        outcome: 'authoritative',
+        repair: {
+          status: 'completed',
+          outcome: 'projection-complete',
+          chainEvidence: 'public',
+        },
       });
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -316,7 +345,7 @@ describe('configured context graph daemon bootstrap', () => {
       });
     }
 
-    expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledTimes(2);
+    expect(fixture.reconcileConfiguredContextGraphMetadata).toHaveBeenCalledTimes(2);
     expect(fixture.markContextGraphSubscriptionState).toHaveBeenCalledTimes(2);
     expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
       synced: false,
@@ -341,17 +370,20 @@ describe('configured context graph daemon bootstrap', () => {
       createStore(),
       { [contextGraphId]: true },
     );
-    let releaseRepair!: () => void;
-    const repairBlocked = new Promise<void>((resolve) => { releaseRepair = resolve; });
+    let releaseReconciliation!: () => void;
+    const reconciliationBlocked = new Promise<void>((resolve) => { releaseReconciliation = resolve; });
     let authoritative = false;
-    fixture.repairActivePublicContextGraphMetadata.mockImplementation(async () => {
-      await repairBlocked;
-      return {
-        outcome: 'not-chain-attested',
-        chainProof: { state: 'unknown', reason: 'unprovable' },
-      } as const;
+    fixture.reconcileConfiguredContextGraphMetadata.mockImplementation(async () => {
+      await reconciliationBlocked;
+      const repair = {
+        status: 'completed' as const,
+        outcome: 'not-chain-attested' as const,
+        chainEvidence: 'unprovable' as const,
+      };
+      return authoritative
+        ? { outcome: 'authoritative' as const, repair }
+        : { outcome: 'pending' as const, reason: 'missing-metadata' as const, repair };
     });
-    vi.mocked(fixture.agent.hasConfirmedMetaState).mockImplementation(async () => authoritative);
 
     const bootstrap = bootstrapConfiguredContextGraphs({
       agent: fixture.agent,
@@ -360,13 +392,13 @@ describe('configured context graph daemon bootstrap', () => {
       log: vi.fn(),
     });
     await vi.waitFor(() => {
-      expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledTimes(1);
+      expect(fixture.reconcileConfiguredContextGraphMetadata).toHaveBeenCalledTimes(1);
     });
     authoritative = true;
-    releaseRepair();
+    releaseReconciliation();
     await bootstrap;
 
-    expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledTimes(1);
+    expect(fixture.reconcileConfiguredContextGraphMetadata).toHaveBeenCalledTimes(1);
     expect(fixture.markContextGraphSubscriptionState).not.toHaveBeenCalledWith(
       contextGraphId,
       expect.objectContaining({ metaSynced: false }),
@@ -393,11 +425,13 @@ describe('configured context graph daemon bootstrap', () => {
       createStore(),
       { [contextGraphId]: false },
     );
-    fixture.repairActivePublicContextGraphMetadata.mockResolvedValue({
-      outcome: 'not-chain-attested',
-      chainProof: {
-        state: 'unknown',
-        reason: 'rpc-failure',
+    fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
+      outcome: 'pending',
+      reason: 'missing-metadata',
+      repair: {
+        status: 'completed',
+        outcome: 'not-chain-attested',
+        chainEvidence: 'rpc-failure',
         detail: 'temporary RPC outage',
       },
     });
@@ -409,16 +443,7 @@ describe('configured context graph daemon bootstrap', () => {
       log: vi.fn(),
     });
 
-    expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledTimes(1);
-    expect(fixture.agent.hasConfirmedMetaState).toHaveBeenCalledWith(
-      contextGraphId,
-      expect.objectContaining({
-        activePublicChainProof: expect.objectContaining({
-          state: 'unknown',
-          reason: 'rpc-failure',
-        }),
-      }),
-    );
+    expect(fixture.reconcileConfiguredContextGraphMetadata).toHaveBeenCalledTimes(1);
     expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
       synced: false,
       sharedMemorySynced: false,
@@ -454,9 +479,11 @@ describe('configured context graph daemon bootstrap', () => {
       createStore(),
       { [contextGraphId]: false },
     );
-    fixture.repairActivePublicContextGraphMetadata.mockRejectedValue(
-      new Error('simulated chain RPC failure'),
-    );
+    fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
+      outcome: 'pending',
+      reason: 'missing-metadata',
+      repair: { status: 'failed', detail: 'simulated chain RPC failure' },
+    });
     const log = vi.fn();
 
     await expect(bootstrapConfiguredContextGraphs({
@@ -467,7 +494,7 @@ describe('configured context graph daemon bootstrap', () => {
       log,
     })).resolves.toBeUndefined();
 
-    expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledTimes(1);
+    expect(fixture.reconcileConfiguredContextGraphMetadata).toHaveBeenCalledTimes(1);
     expect(log).toHaveBeenCalledWith(expect.stringContaining(
       `Context graph "${contextGraphId}" public metadata repair failed`,
     ));
@@ -580,6 +607,14 @@ describe('configured context graph daemon bootstrap', () => {
       }),
     };
     vi.mocked(fixture.agent.hasConfirmedMetaState).mockResolvedValue(true);
+    fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
+      outcome: 'authoritative',
+      repair: {
+        status: 'completed',
+        outcome: 'already-complete',
+        chainEvidence: 'not-requested',
+      },
+    });
     const readinessStore = {
       getContextGraphReadinessProvenance: () => readiness,
       setContextGraphReadinessProvenance: vi.fn((id, next) => {
@@ -639,14 +674,6 @@ describe('configured context graph daemon bootstrap', () => {
         metaSynced: true,
       },
     });
-    // Mirrors hasConfirmedMetaState's legacy-placeholder guard: the normal
-    // public ontology fallback says true, but the explicit remote proof must
-    // reject the same unregistered placeholder before migration reads it.
-    vi.mocked(fixture.agent.hasConfirmedMetaState).mockImplementation(async (
-      _id,
-      options?: { rejectUnregisteredPlaceholder?: boolean },
-    ) => options?.rejectUnregisteredPlaceholder !== true);
-
     await bootstrapConfiguredContextGraphs({
       agent: fixture.agent,
       configuredContextGraphIds: [contextGraphId],
@@ -654,17 +681,8 @@ describe('configured context graph daemon bootstrap', () => {
       log: vi.fn(),
     });
 
-    expect(fixture.agent.hasConfirmedMetaState).toHaveBeenCalledTimes(1);
-    expect(fixture.agent.hasConfirmedMetaState).toHaveBeenCalledWith(
-      contextGraphId,
-      {
-        rejectUnregisteredPlaceholder: true,
-        activePublicChainProof: {
-          state: 'not-public',
-          reason: 'unregistered',
-        },
-      },
-    );
+    expect(fixture.reconcileConfiguredContextGraphMetadata).toHaveBeenCalledTimes(1);
+    expect(fixture.reconcileConfiguredContextGraphMetadata).toHaveBeenCalledWith(contextGraphId);
     expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
       subscribed: true,
       synced: false,

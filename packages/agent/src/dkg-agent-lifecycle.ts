@@ -169,8 +169,6 @@ import { buildAuthoritativePublicMetaAskQuery } from './context-graph-public-met
 import {
   repairChainAttestedPublicMetaProjection,
   repairCreatorPublicMetaProjections,
-  type ActivePublicContextGraphChainProof,
-  type ChainAttestedPublicMetaRepairResult,
 } from './context-graph-public-meta-repair.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -633,6 +631,55 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
+
+const ACTIVE_PUBLIC_CHAIN_EVIDENCE = Symbol('activePublicChainEvidence');
+
+type ChainAttestedPublicMetaRepairResult = Awaited<
+  ReturnType<typeof repairChainAttestedPublicMetaProjection>
+>;
+type ActivePublicContextGraphChainProof = Awaited<
+  ReturnType<Parameters<typeof repairChainAttestedPublicMetaProjection>[2]>
+>;
+
+export type PublicMetaRepairDiagnostic =
+  | {
+      status: 'completed';
+      outcome: ChainAttestedPublicMetaRepairResult['outcome'];
+      chainEvidence:
+        | 'not-requested'
+        | 'public'
+        | 'private'
+        | 'unregistered'
+        | 'unprovable'
+        | 'rpc-failure';
+      detail?: string;
+    }
+  | { status: 'failed'; detail: string };
+
+export type ConfiguredContextGraphMetadataReconciliationResult =
+  | { outcome: 'authoritative'; repair: PublicMetaRepairDiagnostic }
+  | {
+      outcome: 'pending';
+      reason: 'conflicting-policy' | 'missing-metadata';
+      repair: PublicMetaRepairDiagnostic;
+    };
+
+function publicMetaRepairDiagnostic(
+  result: ChainAttestedPublicMetaRepairResult,
+): PublicMetaRepairDiagnostic {
+  const { chainProof } = result;
+  const chainEvidence = chainProof.state === 'not-requested' || chainProof.state === 'public'
+    ? chainProof.state
+    : chainProof.reason;
+  return {
+    status: 'completed',
+    outcome: result.outcome,
+    chainEvidence,
+    ...(chainProof.state === 'unknown' && chainProof.detail
+      ? { detail: chainProof.detail }
+      : {}),
+  };
+}
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import {
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
@@ -9646,46 +9693,90 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
-   * Repair the canonical public root metadata for a configured legacy graph.
-   * The existing on-chain resolver proves current-network name binding,
-   * liveness, and public access policy before the store can be changed.
+   * Reconcile configured-graph metadata entirely inside the agent boundary.
+   * A chain result obtained for repair is also the evidence used by metadata
+   * confirmation, so an unregistered placeholder cannot trigger a second
+   * chain resolution pass or observe a different slot state.
    */
-  async repairActivePublicContextGraphMetadata(
+  async reconcileConfiguredContextGraphMetadata(
     this: DKGAgent,
     contextGraphId: string,
-  ): Promise<ChainAttestedPublicMetaRepairResult> {
-    return repairChainAttestedPublicMetaProjection(
-      this.store,
-      contextGraphId,
-      async (): Promise<ActivePublicContextGraphChainProof> => {
-        try {
-          const state = await this.resolveOnChainAccessPolicyState(
-            contextGraphId,
-            createOperationContext('init'),
-            { slotBindingMode: 'chain-attested-repair' },
-          );
-          if (state === 0) return { state: 'public' };
-          if (state === 1) return { state: 'not-public', reason: 'private' };
-          if (state === 'unregistered') {
-            return { state: 'not-public', reason: 'unregistered' };
+  ): Promise<ConfiguredContextGraphMetadataReconciliationResult> {
+    const normalizedContextGraphId = contextGraphId.trim();
+    if (!normalizedContextGraphId) {
+      return {
+        outcome: 'pending',
+        reason: 'missing-metadata',
+        repair: { status: 'failed', detail: 'Context graph id is empty' },
+      };
+    }
+
+    let resolvedChainProof: ActivePublicContextGraphChainProof | undefined;
+    let repair: PublicMetaRepairDiagnostic;
+    try {
+      const repaired = await repairChainAttestedPublicMetaProjection(
+        this.store,
+        normalizedContextGraphId,
+        async (): Promise<ActivePublicContextGraphChainProof> => {
+          try {
+            const state = await this.resolveOnChainAccessPolicyState(
+              normalizedContextGraphId,
+              createOperationContext('init'),
+              { slotBindingMode: 'chain-attested-repair' },
+            );
+            resolvedChainProof = state === 0
+              ? { state: 'public' }
+              : state === 1
+                ? { state: 'not-public', reason: 'private' }
+                : state === 'unregistered'
+                  ? { state: 'not-public', reason: 'unregistered' }
+                  : { state: 'unknown', reason: 'unprovable' };
+          } catch (error) {
+            resolvedChainProof = {
+              state: 'unknown',
+              reason: 'rpc-failure',
+              detail: error instanceof Error ? error.message : String(error),
+            };
           }
-          return { state: 'unknown', reason: 'unprovable' };
-        } catch (error) {
-          return {
-            state: 'unknown',
-            reason: 'rpc-failure',
-            detail: error instanceof Error ? error.message : String(error),
-          };
-        }
+          return resolvedChainProof;
+        },
+      );
+      if (repaired.chainProof.state !== 'not-requested') {
+        resolvedChainProof = repaired.chainProof;
+      }
+      repair = publicMetaRepairDiagnostic(repaired);
+    } catch (error) {
+      repair = {
+        status: 'failed',
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    if (repair.status === 'completed' && repair.outcome === 'conflicting-policy') {
+      return { outcome: 'pending', reason: 'conflicting-policy', repair };
+    }
+
+    const locallyCurated = await this.isCuratorOf(normalizedContextGraphId).catch(() => false);
+    const hasConfirmedMeta = await this.hasConfirmedMetaState(
+      normalizedContextGraphId,
+      {
+        rejectUnregisteredPlaceholder: !locallyCurated,
+        ...(resolvedChainProof === undefined
+          ? {}
+          : { [ACTIVE_PUBLIC_CHAIN_EVIDENCE]: resolvedChainProof.state === 'public' }),
       },
-    );
+    ).catch(() => false);
+    if (hasConfirmedMeta) {
+      return { outcome: 'authoritative', repair };
+    }
+    return { outcome: 'pending', reason: 'missing-metadata', repair };
   }
 
   async hasConfirmedMetaState(this: DKGAgent,
     contextGraphId: string,
     options?: {
       rejectUnregisteredPlaceholder?: boolean;
-      activePublicChainProof?: ActivePublicContextGraphChainProof;
+      [ACTIVE_PUBLIC_CHAIN_EVIDENCE]?: boolean;
     },
   ): Promise<boolean> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
@@ -9709,10 +9800,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     const hasUnregisteredPlaceholder = unregisteredPlaceholderResult.type === 'boolean' &&
       unregisteredPlaceholderResult.value === true;
-    let hasActivePublicOnChainProof: boolean | undefined = options?.activePublicChainProof === undefined
-      ? undefined
-      : options.activePublicChainProof.state === 'public';
-    if (hasUnregisteredPlaceholder && options?.rejectUnregisteredPlaceholder === true) {
+    const hasResolvedActivePublicChainEvidence = options !== undefined &&
+      Object.prototype.hasOwnProperty.call(options, ACTIVE_PUBLIC_CHAIN_EVIDENCE);
+    let hasActivePublicOnChainProof: boolean | undefined = hasResolvedActivePublicChainEvidence
+      ? options[ACTIVE_PUBLIC_CHAIN_EVIDENCE]
+      : undefined;
+    if (
+      hasUnregisteredPlaceholder &&
+      options?.rejectUnregisteredPlaceholder === true &&
+      !hasResolvedActivePublicChainEvidence
+    ) {
       // Replicas do not rewrite the creator's local registrationStatus marker,
       // so a legitimately registered public CG can still say "unregistered".
       // Preserve that shape only on fresh positive chain proof (tracked
