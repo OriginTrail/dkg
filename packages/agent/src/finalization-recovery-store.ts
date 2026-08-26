@@ -1,5 +1,6 @@
-import type {
-  VerifiedGraphScopedFinalizationEvidence,
+import {
+  VerifiedGraphScopedFinalizationEvidenceCodec,
+  type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 
 export const FINALIZATION_INBOX_DATABASE_FILENAME = 'finalization-inbox-v1.sqlite3';
@@ -79,6 +80,71 @@ export type FinalizationRecoveryVerifiedEvidenceCommit =
       placement: 'canonical-moved';
       reason: string;
     };
+
+export interface FinalizationRecoveryVerifiedEvidenceUpdate {
+  state: 'VERIFIED';
+  verifiedEvidence: VerifiedGraphScopedFinalizationEvidence;
+  generation: number;
+  attemptCount: number;
+  nextAttemptAt: number | null;
+  lastError: string | null;
+}
+
+export type FinalizationRecoveryVerifiedEvidenceTransitionPlan =
+  | { status: 'update'; fields: FinalizationRecoveryVerifiedEvidenceUpdate }
+  | { status: 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'conflict' };
+
+/**
+ * Plans the domain transition before a store applies it atomically. Generation
+ * remains the compare-and-swap token; placement decides whether this commit
+ * preserves or advances it.
+ */
+export function planFinalizationRecoveryVerifiedEvidenceTransition(
+  current: FinalizationRecoveryEntry,
+  generation: number,
+  commit: FinalizationRecoveryVerifiedEvidenceCommit,
+): FinalizationRecoveryVerifiedEvidenceTransitionPlan {
+  const { evidence } = commit;
+  if (current.generation !== generation) return { status: 'conflict' };
+  if (current.verifiedEvidence) {
+    return VerifiedGraphScopedFinalizationEvidenceCodec.same(
+      current.verifiedEvidence,
+      evidence,
+    )
+      ? { status: 'existing', entry: current }
+      : { status: 'conflict' };
+  }
+  if (
+    (current.state !== 'RECEIVED' && current.state !== 'REORGED')
+    || (
+      commit.placement === 'canonical-moved'
+      && (current.state !== 'RECEIVED' || generation !== 0)
+    )
+    || current.txHash.toLowerCase() !== evidence.transactionHash.toLowerCase()
+    || current.assertionVersion !== evidence.assertionVersion
+  ) return { status: 'conflict' };
+
+  return {
+    status: 'update',
+    fields: {
+      state: 'VERIFIED',
+      verifiedEvidence: evidence,
+      generation: commit.placement === 'canonical-moved'
+        ? generation + 1
+        : generation,
+      attemptCount: commit.placement === 'canonical-moved'
+        ? 0
+        : current.attemptCount,
+      nextAttemptAt: commit.placement === 'canonical-moved'
+        ? null
+        : current.nextAttemptAt ?? null,
+      lastError: commit.placement === 'canonical-moved'
+        ? commit.reason
+        : current.lastError ?? null,
+    },
+  };
+}
 
 export type FinalizationRecoverySettledPublisherUpgradeResult =
   | { status: 'recorded' | 'existing'; entry: FinalizationRecoveryEntry }
