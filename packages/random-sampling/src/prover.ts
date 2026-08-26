@@ -22,6 +22,8 @@ import {
   type NodeChallenge,
 } from '@origintrail-official/dkg-chain';
 import {
+  keccak256,
+  structuredKARootV10,
   tripleContentV10,
   V10ProofChunkOutOfRangeError,
   V10ProofLeafCountMismatchError,
@@ -85,9 +87,9 @@ export interface RandomSamplingProverDeps {
   log?: ProverLogger;
   /**
    * Optional foreground repair invoked when the sampled public KA is absent
-   * from the local scoped store. The agent uses this seam to fetch that exact
-   * KA from a connected, authenticated provider; the prover then retries the
-   * local extraction once before recording a missed proof.
+   * or its live local version does not match the immutable challenge. The
+   * agent may return challenge-scoped proof input without changing durable VM
+   * state; otherwise the prover retries local extraction once.
    */
   repairMissingKnowledgeAsset?: (input: {
     kaId: bigint;
@@ -95,7 +97,13 @@ export interface RandomSamplingProverDeps {
     /** Immutable content identity captured by the active challenge. */
     expectedRoot: Uint8Array;
     expectedLeafCount: bigint;
-  }) => Promise<void>;
+  }) => Promise<RandomSamplingRepairMaterial | void>;
+}
+
+/** Challenge-scoped proof input returned without mutating the live KA view. */
+export interface RandomSamplingRepairMaterial {
+  readonly contents: readonly Uint8Array[];
+  readonly privateRoots: readonly Uint8Array[];
 }
 
 export interface ProverLogger {
@@ -267,32 +275,58 @@ export class RandomSamplingProver {
     expectedRoot: Uint8Array;
     expectedLeafCount: bigint;
     periodStartBlock: bigint;
-  }): Promise<Awaited<ReturnType<typeof extractV10KCFromStore>>> {
-    let initialError: KCNotFoundError | KCDataMissingError;
+  }): Promise<RandomSamplingRepairMaterial> {
+    const extractLocal = async (): Promise<RandomSamplingRepairMaterial> => {
+      const extracted = await extractV10KCFromStore(this.store, input.cgId, input.kaId);
+      return {
+        contents: extracted.triples.map((triple) => tripleContentV10(
+          triple.subject,
+          triple.predicate,
+          triple.object,
+        )),
+        privateRoots: extracted.privateRoots,
+      };
+    };
+    let initialError: KCNotFoundError | KCDataMissingError | undefined;
+    let localChallengeMismatch = false;
     try {
-      return await extractV10KCFromStore(this.store, input.cgId, input.kaId);
+      const local = await extractLocal();
+      if (repairMaterialMatchesChallenge(local, input.expectedRoot, input.expectedLeafCount)) {
+        return local;
+      }
+      localChallengeMismatch = true;
+      if (!this.repairMissingKnowledgeAsset) return local;
     } catch (error) {
       if (!(error instanceof KCNotFoundError) && !(error instanceof KCDataMissingError)) {
         throw error;
       }
       initialError = error;
     }
-    if (!this.repairMissingKnowledgeAsset) throw initialError;
+    if (!this.repairMissingKnowledgeAsset) throw initialError!;
 
     this.log.info('rs.tick.kc-repair-started', {
       kaId: input.kaId.toString(),
       cgId: input.cgId.toString(),
       periodStart: input.periodStartBlock.toString(),
-      err: initialError.name,
+      err: localChallengeMismatch ? 'ChallengeCommitmentMismatch' : initialError!.name,
     });
     let repairFailed = false;
     try {
-      await this.repairMissingKnowledgeAsset({
+      const repaired = await this.repairMissingKnowledgeAsset({
         kaId: input.kaId,
         cgId: input.cgId,
         expectedRoot: input.expectedRoot,
         expectedLeafCount: input.expectedLeafCount,
       });
+      if (repaired !== undefined) {
+        this.log.info('rs.tick.kc-repaired', {
+          kaId: input.kaId.toString(),
+          cgId: input.cgId.toString(),
+          periodStart: input.periodStartBlock.toString(),
+          challengeScoped: true,
+        });
+        return repaired;
+      }
     } catch (repairError) {
       repairFailed = true;
       this.log.warn('rs.tick.kc-repair-failed', {
@@ -309,7 +343,7 @@ export class RandomSamplingProver {
     // non-terminal response. Always re-read locally; transport disposition is
     // not the proof-readiness authority.
     try {
-      const extracted = await extractV10KCFromStore(this.store, input.cgId, input.kaId);
+      const extracted = await extractLocal();
       this.log.info('rs.tick.kc-repaired', {
         kaId: input.kaId.toString(),
         cgId: input.cgId.toString(),
@@ -320,6 +354,7 @@ export class RandomSamplingProver {
       if (
         repairFailed
         && (retryError instanceof KCNotFoundError || retryError instanceof KCDataMissingError)
+        && initialError
       ) throw initialError;
       throw retryError;
     }
@@ -535,8 +570,8 @@ export class RandomSamplingProver {
           periodStartBlock: periodKey.periodStartBlock,
         });
         // public structured path: contents = N-Triple bytes; private sub-roots -> sibling.
-        contents = extracted.triples.map((t) => tripleContentV10(t.subject, t.predicate, t.object));
-        privateRoots = extracted.privateRoots;
+        contents = [...extracted.contents];
+        privateRoots = [...extracted.privateRoots];
       } catch (err) {
         if (err instanceof KCNotFoundError || err instanceof KCDataMissingError) {
           this.log.warn('rs.tick.kc-not-synced', {
@@ -733,4 +768,17 @@ function uint8ArrayEquals(a: Uint8Array, b: Uint8Array): boolean {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+function repairMaterialMatchesChallenge(
+  material: RandomSamplingRepairMaterial,
+  expectedRoot: Uint8Array,
+  expectedLeafCount: bigint,
+): boolean {
+  const computed = structuredKARootV10(
+    material.contents.map((content) => keccak256(content)),
+    material.privateRoots,
+  );
+  return BigInt(computed.leafCount) === expectedLeafCount
+    && uint8ArrayEquals(computed.root, expectedRoot);
 }

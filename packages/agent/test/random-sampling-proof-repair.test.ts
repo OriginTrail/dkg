@@ -6,9 +6,14 @@ import { runRandomSamplingExactRepair } from '../src/sync/recovery/random-sampli
 describe('Random Sampling proof-time exact repair', () => {
   it('rotates through the bounded provider window until an exact asset is found', async () => {
     const peers = ['peer-0001', 'peer-0002', 'peer-0003', 'peer-0004'];
+    const proofMaterial = {
+      contents: [new Uint8Array([1])],
+      privateRoots: [],
+    };
     const syncExactKnowledgeAssetsFromPeerDetailed = vi.fn(async (peerId: string) => ({
       disposition: peerId === 'peer-0003' ? 'found' : 'clean-absent',
       result: { insertedTriples: peerId === 'peer-0003' ? 12 : 0 },
+      ...(peerId === 'peer-0003' ? { proofMaterial } : {}),
     }));
     const agentLike = {
       started: true,
@@ -33,10 +38,10 @@ describe('Random Sampling proof-time exact repair', () => {
     const expectedRoot = new Uint8Array(32).fill(0x11);
     const expectedUal = 'did:dkg:base:8453/0x0000000000000000000000000000000000001234/7';
 
-    await (LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
+    await expect((LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
       agentLike,
       { kaId, cgId: 1n, expectedRoot, expectedLeafCount: 12n },
-    );
+    )).resolves.toBe(proofMaterial);
 
     expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledTimes(3);
     expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
@@ -47,14 +52,16 @@ describe('Random Sampling proof-time exact repair', () => {
     );
     for (const call of syncExactKnowledgeAssetsFromPeerDetailed.mock.calls) {
       expect(call[1]).toBe('food-safety');
-      expect(call[2]).toEqual([expectedUal]);
-      expect(call[3]).toEqual(expect.objectContaining({
-        signal: expect.any(AbortSignal),
-        expectedCommitments: [{
+      expect(call[2]).toEqual({
+        kind: 'challenge-pinned',
+        commitments: [{
           assetUal: expectedUal,
-          merkleRootHex: `0x${'11'.repeat(32)}`,
+          merkleRootHex: '11'.repeat(32),
           merkleLeafCount: 12n,
         }],
+      });
+      expect(call[3]).toEqual(expect.objectContaining({
+        signal: expect.any(AbortSignal),
       }));
     }
     expect(agentLike.ensurePeerAdmittedForRecovery.mock.calls[0]?.[3])

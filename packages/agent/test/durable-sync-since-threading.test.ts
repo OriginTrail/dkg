@@ -1,9 +1,23 @@
 import { describe, it, expect } from 'vitest';
-import { createOperationContext, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import {
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  createOperationContext,
+  knowledgeAssetLayerGraphUri,
+  SYSTEM_CONTEXT_GRAPHS,
+} from '@origintrail-official/dkg-core';
+import { generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import {
   filterExactAssetDurablePayload,
   runDurableSync,
 } from '../src/sync/requester/durable-sync.js';
+import {
+  createChallengePinnedExactAssetSelection,
+  createUalOnlyExactAssetSelection,
+  exactAssetUalsForSelection,
+  requireExactAssetSelection,
+  type ExactAssetSelection,
+} from '../src/sync/exact-assets.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -19,6 +33,39 @@ interface FetchCall {
 }
 
 describe('exact-asset rolling-upgrade filter', () => {
+  it('keeps multi-asset challenge pins atomic and rejects duplicate or parallel identities', () => {
+    const first = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const second = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const commitment = (assetUal: string, rootByte: string) => ({
+      assetUal,
+      merkleRootHex: rootByte.repeat(64),
+      merkleLeafCount: 1n,
+    });
+
+    const selection = createChallengePinnedExactAssetSelection([
+      commitment(second, '2'),
+      { ...commitment(first, '1'), merkleRootHex: `0x${'1'.repeat(64)}` },
+    ]);
+    expect(exactAssetUalsForSelection(selection)).toEqual([first, second]);
+    expect(selection).toMatchObject({
+      kind: 'challenge-pinned',
+      commitments: [
+        { assetUal: first, merkleRootHex: '1'.repeat(64) },
+        { assetUal: second, merkleRootHex: '2'.repeat(64) },
+      ],
+    });
+
+    expect(() => createChallengePinnedExactAssetSelection([
+      commitment(first, '1'),
+      commitment(first, '2'),
+    ])).toThrow('Duplicate challenge commitment');
+    expect(() => requireExactAssetSelection({
+      kind: 'challenge-pinned',
+      assetUals: [first, second],
+      commitments: [commitment(first, '1')],
+    })).toThrow('cannot include a parallel UAL list');
+  });
+
   it('drops already-present KAs from an old responder full-CG response', () => {
     const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
     const existing = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
@@ -34,7 +81,11 @@ describe('exact-asset rolling-upgrade filter', () => {
       { subject: 'urn:existing', predicate: 'urn:p', object: '"existing"', graph: existingGraph },
     ] as Quad[];
 
-    const filtered = filterExactAssetDurablePayload(data, meta, [wanted]);
+    const filtered = filterExactAssetDurablePayload(
+      data,
+      meta,
+      createUalOnlyExactAssetSelection([wanted]),
+    );
 
     expect(filtered.metaQuads.map((quad) => quad.subject)).toEqual([wanted, wanted]);
     expect(filtered.dataQuads.map((quad) => quad.graph)).toEqual([wantedGraph]);
@@ -50,31 +101,45 @@ describe('exact-asset rolling-upgrade filter', () => {
       { subject: wanted, predicate: 'http://dkg.io/ontology/kaUal', object: wanted, graph: 'did:dkg:context-graph:cg/_meta' },
     ] as Quad[];
 
-    expect(filterExactAssetDurablePayload([], meta, [wanted, missing])).toMatchObject({
+    expect(filterExactAssetDurablePayload(
+      [],
+      meta,
+      createUalOnlyExactAssetSelection([wanted, missing]),
+    )).toMatchObject({
       descriptorCoverageComplete: false,
     });
   });
 
   it('declines a live v2 descriptor that does not match the v1 challenge commitment', () => {
     const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
-    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0x0000000000000000000000000000000000000001/7/2';
+    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0x0000000000000000000000000000000000000001/7';
     const metaGraph = 'did:dkg:context-graph:cg/_meta';
-    const meta = [
+    const descriptor = (root: string, privateTripleCount = 0) => [
       { subject: wanted, predicate: 'http://dkg.io/ontology/kaUal', object: wanted, graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/contentScopeVersion', object: '2', graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/assertionVersion', object: '2', graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/contextGraph', object: 'did:dkg:context-graph:cg', graph: metaGraph },
       { subject: wanted, predicate: 'http://dkg.io/ontology/assertionGraph', object: graph, graph: metaGraph },
-      { subject: wanted, predicate: 'http://dkg.io/ontology/merkleRoot', object: `0x${'22'.repeat(32)}`, graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/merkleRoot', object: root, graph: metaGraph },
       { subject: wanted, predicate: 'http://dkg.io/ontology/publicTripleCount', object: '1', graph: metaGraph },
-      { subject: wanted, predicate: 'http://dkg.io/ontology/privateTripleCount', object: '0', graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/privateTripleCount', object: String(privateTripleCount), graph: metaGraph },
+      ...(privateTripleCount > 0 ? [{
+        subject: wanted,
+        predicate: 'http://dkg.io/ontology/privateMerkleRoot',
+        object: '33'.repeat(32),
+        graph: metaGraph,
+      }] : []),
     ] as Quad[];
+    const meta = descriptor('22'.repeat(32));
     const data = [
       { subject: 'urn:v2', predicate: 'urn:p', object: '"current"', graph },
     ] as Quad[];
 
-    const filtered = filterExactAssetDurablePayload(data, meta, [wanted], [{
+    const filtered = filterExactAssetDurablePayload(data, meta, createChallengePinnedExactAssetSelection([{
       assetUal: wanted,
-      merkleRootHex: `0x${'11'.repeat(32)}`,
+      merkleRootHex: '11'.repeat(32),
       merkleLeafCount: 1n,
-    }]);
+    }]));
 
     expect(filtered).toEqual({
       dataQuads: [],
@@ -82,19 +147,35 @@ describe('exact-asset rolling-upgrade filter', () => {
       descriptorCoverageComplete: false,
     });
 
-    const matching = filterExactAssetDurablePayload(data, [
-      ...meta.filter((quad) => quad.predicate !== 'http://dkg.io/ontology/merkleRoot'),
-      { subject: wanted, predicate: 'http://dkg.io/ontology/merkleRoot', object: `0x${'11'.repeat(32)}`, graph: metaGraph },
-    ], [wanted], [{
+    const matching = filterExactAssetDurablePayload(data, descriptor('11'.repeat(32)), createChallengePinnedExactAssetSelection([{
       assetUal: wanted,
-      merkleRootHex: `0x${'11'.repeat(32)}`,
+      merkleRootHex: '11'.repeat(32),
       merkleLeafCount: 1n,
-    }]);
+    }]));
     expect(matching.dataQuads).toEqual(data);
     expect(matching.descriptorCoverageComplete).toBe(true);
+
+    expect(filterExactAssetDurablePayload(
+      data,
+      descriptor('11'.repeat(32)),
+      createChallengePinnedExactAssetSelection([{
+        assetUal: wanted,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 2n,
+      }]),
+    ).descriptorCoverageComplete).toBe(false);
+    expect(filterExactAssetDurablePayload(
+      data,
+      descriptor('11'.repeat(32), 1),
+      createChallengePinnedExactAssetSelection([{
+        assetUal: wanted,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 2n,
+      }]),
+    ).descriptorCoverageComplete).toBe(true);
   });
 
-  it('threads exactAssetUalsFor into both fetch phases and filters an old-responder payload before verification', async () => {
+  it('threads the exact selection into both fetch phases and filters an old-responder payload before verification', async () => {
     const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
     const extra = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
     const wantedGraph = 'did:dkg:context-graph:mfacts/_verifiable_memory/0x0000000000000000000000000000000000000001/7';
@@ -112,7 +193,7 @@ describe('exact-asset rolling-upgrade filter', () => {
       { subject: 'urn:extra', predicate: 'urn:p', object: '"extra"', graph: extraGraph },
     ] as Quad[];
     const { calls, context, processCalls } = makeContext({
-      exactAssetUalsFor: () => [wanted],
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([wanted]),
       pageQuads: { data, meta },
     });
 
@@ -130,7 +211,59 @@ describe('exact-asset rolling-upgrade filter', () => {
     expect(processCalls[0]!.dataCount).toBe(1);
   });
 
-  it('does not thread a filter when exactAssetUalsFor is not wired', async () => {
+  it('threads a challenge pin through runDurableSync before verification', async () => {
+    const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const scope = createGraphKnowledgeAssetScope(wanted, '1');
+    const graph = knowledgeAssetLayerGraphUri(
+      'mfacts',
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const data = [{
+      subject: 'urn:wanted',
+      predicate: 'urn:p',
+      object: '"wanted"',
+      graph,
+    }] as Quad[];
+    const root = new Uint8Array(32).fill(0x11);
+    const meta = generateGraphKnowledgeAssetMetadata({
+      ual: wanted,
+      contextGraphId: 'mfacts',
+      merkleRoot: root,
+      publisherPeerId: 'peer',
+      accessPolicy: 'public',
+      timestamp: new Date(0),
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      assertionGraph: graph,
+    }, { status: 'tentative' });
+    const selection = (byte: string): ExactAssetSelection =>
+      createChallengePinnedExactAssetSelection([{
+        assetUal: wanted,
+        merkleRootHex: byte.repeat(64),
+        merkleLeafCount: 1n,
+      }]);
+
+    const mismatch = makeContext({
+      exactAssetSelectionFor: () => selection('2'),
+      pageQuads: { data, meta },
+    });
+    await runDurableSync(mismatch.context);
+    expect(mismatch.calls.map((call) => call.phase)).toEqual(['meta']);
+    expect(mismatch.processCalls).toHaveLength(0);
+    expect(mismatch.insertedBatches).toHaveLength(0);
+
+    const matching = makeContext({
+      exactAssetSelectionFor: () => selection('1'),
+      pageQuads: { data, meta },
+    });
+    await runDurableSync(matching.context);
+    expect(matching.calls.map((call) => call.phase)).toEqual(['meta', 'data']);
+    expect(matching.processCalls).toHaveLength(1);
+  });
+
+  it('does not thread a filter when exactAssetSelectionFor is not wired', async () => {
     const { calls, context } = makeContext();
     await runDurableSync(context);
     expect(calls.every((c) => c.assetUals === undefined)).toBe(true);
@@ -139,7 +272,7 @@ describe('exact-asset rolling-upgrade filter', () => {
 
 function makeContext(options: {
   sinceBatchIdFor?: (cg: string) => string | undefined;
-  exactAssetUalsFor?: (cg: string) => string[] | undefined;
+  exactAssetSelectionFor?: (cg: string) => ExactAssetSelection | undefined;
   pageQuads?: { data: Quad[]; meta: Quad[] };
   contextGraphIds?: string[];
   syncAgentsMeta?: boolean;
@@ -202,7 +335,7 @@ function makeContext(options: {
         return page(phase);
       },
       sinceBatchIdFor: options.sinceBatchIdFor,
-      exactAssetUalsFor: options.exactAssetUalsFor,
+      exactAssetSelectionFor: options.exactAssetSelectionFor,
       processDurableBatchInWorker: async (
         dataQuads: Quad[],
         metaQuads: Quad[],

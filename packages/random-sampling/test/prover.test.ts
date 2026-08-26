@@ -32,6 +32,7 @@ import {
   contextGraphMetaUri,
   hashTripleV10,
   structuredKARootV10,
+  tripleContentV10,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { InMemoryProverWal, RandomSamplingProver } from '../src/index.js';
@@ -1055,6 +1056,73 @@ describe('RandomSamplingProver — short-circuits', () => {
     expect((await wal.readAll()).map((entry) => entry.status)).toEqual([
       'challenge', 'extracted', 'built', 'submitted',
     ]);
+    await prover.close();
+  });
+
+  it('proves an older pinned challenge ephemerally without downgrading live v2 state', async () => {
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kaId: 999n,
+      ual: 'did:dkg:hardhat:31337/0x0000000000000000000000000000000000000001/999',
+      rootEntities: ['urn:e:historical'],
+      publicTriples: [
+        { subject: 'urn:e:historical', predicate: 'urn:p:version', object: '"v2"' },
+      ],
+    };
+    await seedKC(store, fixture);
+    const historical = {
+      subject: 'urn:e:historical',
+      predicate: 'urn:p:version',
+      object: '"v1"',
+    };
+    const historicalContents = [tripleContentV10(
+      historical.subject,
+      historical.predicate,
+      historical.object,
+    )];
+    const { root, leafCount } = structuredKARootV10(
+      [hashTripleV10(historical.subject, historical.predicate, historical.object)],
+      [],
+    );
+    const submitProof = vi.fn(async () => ({
+      hash: '0xhistorical', blockNumber: 1001, success: true,
+    }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    const repairMissingKnowledgeAsset = vi.fn(async () => ({
+      contents: historicalContents,
+      privateRoots: [],
+    }));
+    const prover = new RandomSamplingProver({
+      chain,
+      store,
+      identityId: IDENTITY_ID,
+      repairMissingKnowledgeAsset,
+    });
+
+    await expect(prover.tick()).resolves.toMatchObject({
+      kind: 'submitted',
+      txHash: '0xhistorical',
+    });
+    expect(repairMissingKnowledgeAsset).toHaveBeenCalledOnce();
+    const liveGraph = contextGraphDataUri(`cg-${fixture.cgId}`, fixture.cgId.toString());
+    await expect(store.query(`ASK { GRAPH <${liveGraph}> {
+      <urn:e:historical> <urn:p:version> "v2" .
+    } }`)).resolves.toEqual({ type: 'boolean', value: true });
+    await expect(store.query(`ASK { GRAPH <${liveGraph}> {
+      <urn:e:historical> <urn:p:version> "v1" .
+    } }`)).resolves.toEqual({ type: 'boolean', value: false });
     await prover.close();
   });
 

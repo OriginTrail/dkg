@@ -47,9 +47,13 @@ import {
   classifyExactDurableFetch,
   filterExactAssetDurablePayload,
   mergeExactDurableFetchDisposition,
-  type ExactAssetCommitment,
   type ExactDurableFetchDisposition,
 } from './exact-durable-fetch.js';
+import {
+  exactAssetUalsForSelection,
+  requireExactAssetSelection,
+  type ExactAssetSelection,
+} from '../exact-assets.js';
 
 export {
   createContextGraphSyncDeadline,
@@ -223,17 +227,15 @@ interface PreparedDurableMeta {
 function prepareDurableMeta(input: {
   readonly contextGraphId: string;
   readonly rawMetaResult: SyncPageResult;
-  readonly exactAssetUals?: readonly string[];
-  readonly exactAssetCommitments?: readonly ExactAssetCommitment[];
+  readonly exactAssetSelection?: ExactAssetSelection;
   readonly buildsManifest: boolean;
 }): PreparedDurableMeta {
-  const exact = input.exactAssetUals === undefined
+  const exact = input.exactAssetSelection === undefined
     ? undefined
     : filterExactAssetDurablePayload(
         [],
         input.rawMetaResult.quads,
-        input.exactAssetUals,
-        input.exactAssetCommitments,
+        input.exactAssetSelection,
       );
   const metaForManifest = exact
     ? { ...input.rawMetaResult, quads: exact.metaQuads }
@@ -256,14 +258,13 @@ function prepareDurableVerificationPayload(input: {
   readonly rawDataResult: SyncPageResult;
   readonly rawMetaResult: SyncPageResult;
   readonly preparedMeta: PreparedDurableMeta;
-  readonly exactAssetUals?: readonly string[];
-  readonly exactAssetCommitments?: readonly ExactAssetCommitment[];
+  readonly exactAssetSelection?: ExactAssetSelection;
 }): {
   readonly dataResult: SyncPageResult;
   readonly metaResult: SyncPageResult;
   readonly exactDescriptorCoverageComplete: boolean;
 } {
-  if (input.exactAssetUals === undefined) {
+  if (input.exactAssetSelection === undefined) {
     return {
       dataResult: input.rawDataResult,
       metaResult: input.preparedMeta.metaForManifest,
@@ -274,8 +275,7 @@ function prepareDurableVerificationPayload(input: {
   const exact = filterExactAssetDurablePayload(
     input.rawDataResult.quads,
     input.rawMetaResult.quads,
-    input.exactAssetUals,
-    input.exactAssetCommitments,
+    input.exactAssetSelection,
   );
   const exactDataSet = new Set(exact.dataQuads);
   const exactDataRawOffsets = input.rawDataResult.quadRawOffsets?.filter(
@@ -326,12 +326,8 @@ export interface DurableSyncContext {
    * backed by a CONTIGUOUS watermark. Undefined ⇒ full scan (default today).
    */
   sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
-  /** Exact missing KAs for VM recovery; undefined retains normal full/delta sync. */
-  exactAssetUalsFor?: (contextGraphId: string) => string[] | undefined;
-  /** Optional pinned commitments that exact descriptors must match before storage. */
-  exactAssetCommitmentsFor?: (
-    contextGraphId: string,
-  ) => readonly ExactAssetCommitment[] | undefined;
+  /** Atomic exact selection for VM recovery; undefined retains normal full/delta sync. */
+  exactAssetSelectionFor?: (contextGraphId: string) => ExactAssetSelection | undefined;
   /** Present only for the graph-owned bounded recovery runner. */
   durableMetaContinuation?: DurableMetaContinuation;
   stopOnBackoffWorthyFailure?: boolean;
@@ -543,8 +539,7 @@ async function runDurableSyncWithBudget(
     signal,
     fetchSyncPages,
     sinceBatchIdFor,
-    exactAssetUalsFor,
-    exactAssetCommitmentsFor,
+    exactAssetSelectionFor,
     durableMetaContinuation,
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
@@ -713,8 +708,13 @@ async function runDurableSyncWithBudget(
         ? Math.min(contextGraphBudget.metaFetchDeadline ?? deadline, deadline)
         : deadline;
       const sinceBatchId = sinceBatchIdFor?.(pid);
-      const exactAssetUals = exactAssetUalsFor?.(pid);
-      const exactAssetCommitments = exactAssetCommitmentsFor?.(pid);
+      const exactAssetSelectionInput = exactAssetSelectionFor?.(pid);
+      const exactAssetSelection = exactAssetSelectionInput === undefined
+        ? undefined
+        : requireExactAssetSelection(exactAssetSelectionInput);
+      const exactAssetUals = exactAssetSelection === undefined
+        ? undefined
+        : exactAssetUalsForSelection(exactAssetSelection);
       const rootlessVerifiedFullSnapshot = sinceBatchId === undefined
         && !isSystemContextGraph;
       if (exactAssetUals !== undefined) {
@@ -867,10 +867,23 @@ async function runDurableSyncWithBudget(
       const preparedMeta = prepareDurableMeta({
         contextGraphId: pid,
         rawMetaResult: metaResult,
-        exactAssetUals,
-        exactAssetCommitments,
+        exactAssetSelection,
         buildsManifest,
       });
+      if (
+        exactAssetSelection !== undefined
+        && exactAssetSelection.kind === 'challenge-pinned'
+        && !preparedMeta.exactDescriptorCoverageComplete
+        && exactAssetUals!.some((assetUal) =>
+          metaResult.quads.some((quad) => quad.subject === assetUal))
+      ) {
+        throw Object.assign(
+          new Error(
+            `Exact durable response for "${pid}" does not match the requested selection`,
+          ),
+          { code: 'SYNC_EXACT_DESCRIPTOR_MISMATCH' },
+        );
+      }
       const graphScopedManifest = preparedMeta.manifestPlan;
       const rawDataResult = await fetchPhase(
         'data',
@@ -903,8 +916,7 @@ async function runDurableSyncWithBudget(
         rawDataResult,
         rawMetaResult: metaResult,
         preparedMeta,
-        exactAssetUals,
-        exactAssetCommitments,
+        exactAssetSelection,
       });
       const dataResult = preparedPayload.dataResult;
       const effectiveMetaResult = preparedPayload.metaResult;
@@ -1248,6 +1260,8 @@ async function runDurableSyncWithBudget(
             insertedMetaTriples: asset.metadataQuads.length,
             insertedTriples: asset.dataQuads.length + asset.metadataQuads.length,
           });
+        } else if (outcome === 'proof-ready') {
+          logDebug(ctx, `Prepared challenge-scoped proof material for ${asset.ual}`);
         } else if (outcome === 'stale') {
           logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
         } else {

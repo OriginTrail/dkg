@@ -1,5 +1,6 @@
+import type { RandomSamplingRepairMaterial } from '@origintrail-official/dkg-random-sampling';
 import { buildReconciledKnowledgeAssetUal } from '../../ka-identity.js';
-import type { ExactAssetCommitment } from '../requester/exact-durable-fetch.js';
+import type { ExactAssetCommitment } from '../exact-assets.js';
 
 export interface RandomSamplingExactRepairInput {
   readonly kaId: bigint;
@@ -11,6 +12,7 @@ export interface RandomSamplingExactRepairInput {
 export interface RandomSamplingExactRepairResult {
   readonly disposition: 'found' | 'clean-absent' | 'incomplete';
   readonly insertedTriples: number;
+  readonly proofMaterial?: RandomSamplingRepairMaterial;
 }
 
 export interface RandomSamplingExactRepairDependencies {
@@ -40,7 +42,7 @@ export interface RandomSamplingExactRepairDependencies {
 }
 
 function hex(bytes: Uint8Array): string {
-  return `0x${[...bytes].map((value) => value.toString(16).padStart(2, '0')).join('')}`;
+  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
 }
 
 function abortReason(signal: AbortSignal): Error {
@@ -52,12 +54,12 @@ function abortReason(signal: AbortSignal): Error {
 
 /**
  * Bounded proof-time recovery coordinator. The challenge commitment is applied
- * to the exact descriptor before durable sync is allowed to materialize it.
+ * to the exact descriptor before the peer payload can become ephemeral proof input.
  */
 export async function runRandomSamplingExactRepair(
   deps: RandomSamplingExactRepairDependencies,
   input: RandomSamplingExactRepairInput,
-): Promise<void> {
+): Promise<RandomSamplingRepairMaterial> {
   const localContextGraphId = deps.resolveLocalContextGraphId(input.cgId);
   if (!localContextGraphId) {
     throw new Error(`Random Sampling repair cannot resolve local CG ${input.cgId}`);
@@ -108,7 +110,9 @@ export async function runRandomSamplingExactRepair(
         `RS exact repair for ${assetUal} from ${peerId.slice(-8)}: `
           + `disposition=${result.disposition} inserted=${result.insertedTriples}`,
       );
-      if (result.disposition === 'found') return;
+      if (result.disposition === 'found' && result.proofMaterial !== undefined) {
+        return result.proofMaterial;
+      }
     } catch (error) {
       if (signal.aborted) throw abortReason(signal);
       deps.logInfo(

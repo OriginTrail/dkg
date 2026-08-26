@@ -423,13 +423,13 @@ describe('durable sync lifecycle chain binding', () => {
       agentLike as any,
       '12D3KooWExactRecoveryPeer',
       '0x1111111111111111111111111111111111111111/blackbox',
-      [exactUal],
+      { kind: 'ual-only', assetUals: [exactUal] },
       { signal: controller.signal },
     );
 
     expect(runLegacyDurableSyncDetailed).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
-      exactAssetUals: [exactUal],
+      exactAssetSelection: { kind: 'ual-only', assetUals: [exactUal] },
       stopOnBackoffWorthyFailure: true,
       priority: 1_000,
       // The admission SOURCE is what makes this show up as `durable:vm-recovery`
@@ -597,7 +597,7 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       undefined,
       {
-        exactAssetUals: [exactUal],
+        exactAssetSelection: { kind: 'ual-only', assetUals: [exactUal] },
         totalTimeoutMs: 30_000,
       },
     );
@@ -616,7 +616,7 @@ describe('durable sync lifecycle chain binding', () => {
       agentLike,
       'peer-internal-exact-recovery',
       contextGraphId,
-      [exactUal],
+      { kind: 'ual-only', assetUals: [exactUal] },
     );
     expect(mockedRunDurableSyncDetailed).toHaveBeenCalledTimes(1);
     expect(
@@ -658,7 +658,7 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       undefined,
       undefined,
-      { exactAssetUals: [exactUal] },
+      { exactAssetSelection: { kind: 'ual-only', assetUals: [exactUal] } },
     );
 
     expect(mockedRunDurableSyncDetailed).toHaveBeenCalledTimes(2);

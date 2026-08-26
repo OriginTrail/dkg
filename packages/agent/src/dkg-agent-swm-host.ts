@@ -262,6 +262,7 @@ import {
   type VmRecoveryUalDisposition,
 } from './vm-recovery-provider-policy.js';
 import {
+  createUalOnlyExactAssetSelection,
   encodeExactAssetUals,
   MAX_EXACT_SYNC_ASSETS,
 } from './sync/exact-assets.js';
@@ -5254,7 +5255,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const detailed = await this.syncExactKnowledgeAssetsFromPeerDetailed(
         peerId,
         localCgId,
-        attempts.map(({ entry }) => entry.target.ual),
+        createUalOnlyExactAssetSelection(
+          attempts.map(({ entry }) => entry.target.ual),
+        ),
         { signal, isCurrent: isRecoveryCurrent },
       );
       const { result } = detailed;

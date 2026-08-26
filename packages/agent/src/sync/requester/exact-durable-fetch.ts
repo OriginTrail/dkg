@@ -1,42 +1,30 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from './page-fetch.js';
 import { stripLiteral } from '../../dkg-agent-utils.js';
+import { parseGraphScopedDescriptor } from '../durable-integrity.js';
+import {
+  exactAssetCommitmentMatchesDescriptor,
+  exactAssetCommitmentsForSelection,
+  exactAssetUalsForSelection,
+  type ExactAssetSelection,
+} from '../exact-assets.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const KA_UAL = `${DKG_NS}kaUal`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
-const MERKLE_ROOT = `${DKG_NS}merkleRoot`;
-const PUBLIC_TRIPLE_COUNT = `${DKG_NS}publicTripleCount`;
-const PRIVATE_TRIPLE_COUNT = `${DKG_NS}privateTripleCount`;
 
 export type ExactDurableFetchDisposition = 'found' | 'clean-absent' | 'incomplete';
 
-/** Challenge-pinned identity an exact fetch must match before materialization. */
-export interface ExactAssetCommitment {
-  readonly assetUal: string;
-  readonly merkleRootHex: string;
-  /** Structured V10 leaf count: public triples plus one private-root sibling. */
-  readonly merkleLeafCount: bigint;
-}
-
 function descriptorMatchesCommitment(
   metaQuads: readonly Quad[],
-  commitment: ExactAssetCommitment,
+  commitment: NonNullable<ReturnType<typeof exactAssetCommitmentsForSelection>>[number],
 ): boolean {
   const rows = metaQuads.filter((quad) => quad.subject === commitment.assetUal);
-  const values = (predicate: string) => [...new Set(
-    rows.filter((quad) => quad.predicate === predicate).map((quad) => stripLiteral(quad.object)),
-  )];
-  const roots = values(MERKLE_ROOT).map((root) => root.toLowerCase());
-  const publicCounts = values(PUBLIC_TRIPLE_COUNT);
-  const privateCounts = values(PRIVATE_TRIPLE_COUNT);
-  if (roots.length !== 1 || publicCounts.length !== 1 || privateCounts.length !== 1) return false;
   try {
-    const publicCount = BigInt(publicCounts[0]!);
-    const privateCount = BigInt(privateCounts[0]!);
-    const leafCount = publicCount + (privateCount > 0n ? 1n : 0n);
-    return roots[0] === commitment.merkleRootHex.toLowerCase()
-      && leafCount === commitment.merkleLeafCount;
+    return exactAssetCommitmentMatchesDescriptor(
+      commitment,
+      parseGraphScopedDescriptor(commitment.assetUal, rows),
+    );
   } catch {
     return false;
   }
@@ -50,12 +38,13 @@ function descriptorMatchesCommitment(
 export function filterExactAssetDurablePayload(
   dataQuads: readonly Quad[],
   metaQuads: readonly Quad[],
-  assetUals: readonly string[],
-  expectedCommitments?: readonly ExactAssetCommitment[],
+  selection: ExactAssetSelection,
 ): { dataQuads: Quad[]; metaQuads: Quad[]; descriptorCoverageComplete: boolean } {
+  const assetUals = exactAssetUalsForSelection(selection);
   const exactUals = new Set(assetUals);
   const commitments = new Map(
-    expectedCommitments?.map((commitment) => [commitment.assetUal, commitment]) ?? [],
+    exactAssetCommitmentsForSelection(selection)
+      ?.map((commitment) => [commitment.assetUal, commitment]) ?? [],
   );
   const admittedUals = new Set([...exactUals].filter((ual) => {
     const commitment = commitments.get(ual);

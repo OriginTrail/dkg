@@ -96,13 +96,16 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  tripleContentV10,
   withRetry,
 } from '@origintrail-official/dkg-core';
+import type { RandomSamplingRepairMaterial } from '@origintrail-official/dkg-random-sampling';
 import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
 import {
+  authenticateChallengePinnedGraphScopedAsset,
   authenticateVerifiedGraphScopedAsset,
   materializeVerifiedGraphScopedAsset,
   type GraphScopedMaterializationOutcome,
@@ -265,9 +268,13 @@ import {
   type SyncPageResult,
 } from './sync/requester/page-fetch.js';
 import {
+  createChallengePinnedExactAssetSelection,
+  exactAssetCommitmentsForSelection,
+  exactAssetUalsForSelection,
   exactAssetFilterKey,
   exactSyncPhaseAccumulationLimits,
-  requireExactAssetUals,
+  requireExactAssetSelection,
+  type ExactAssetSelection,
 } from './sync/exact-assets.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
@@ -303,7 +310,6 @@ import {
 } from './sync/requester/durable-sync.js';
 import {
   mergeExactDurableFetchDisposition,
-  type ExactAssetCommitment,
   type ExactDurableFetchDisposition,
 } from './sync/requester/exact-durable-fetch.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
@@ -994,6 +1000,7 @@ function durableSyncSingleFlightKey(params: {
   hasSinceBatchIdResolver: boolean;
   hasSignal: boolean;
   hasCurrentFence: boolean;
+  hasChallengePinnedAssetCallback: boolean;
   exactAssetUals?: readonly string[];
   settlementSliceTimeoutMs?: number;
   priority?: number;
@@ -1005,6 +1012,7 @@ function durableSyncSingleFlightKey(params: {
     || params.hasSinceBatchIdResolver
     || params.hasSignal
     || params.hasCurrentFence
+    || params.hasChallengePinnedAssetCallback
   ) {
     return null;
   }
@@ -1365,10 +1373,13 @@ export type DurableSyncOptions = {
    * settlement boundary, not a generic progress callback.
    */
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
-  /** Internal VM-recovery filter; only these locally-missing KAs are stored. */
-  exactAssetUals?: string[];
-  /** Challenge-pinned identities exact descriptors must match before storage. */
-  exactAssetCommitments?: readonly ExactAssetCommitment[];
+  /** Atomic VM-recovery selection; challenge-pinned assets cannot omit their pins. */
+  exactAssetSelection?: ExactAssetSelection;
+  /** Internal proof-only sink; challenge-pinned historical assets are never materialized. */
+  onChallengePinnedAsset?: (
+    asset: VerifiedGraphScopedAsset,
+    privateRoots: readonly Uint8Array[],
+  ) => void;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Admission override for foreground VM recovery. */
@@ -1391,6 +1402,7 @@ export type DurableSyncOptions = {
 export interface ExactKnowledgeAssetSyncResult {
   readonly result: DurableSyncResult;
   readonly disposition: ExactDurableFetchDisposition;
+  readonly proofMaterial?: RandomSamplingRepairMaterial;
 }
 
 type PhysicalDurableSyncResult = {
@@ -1406,8 +1418,11 @@ type LegacyDurableContextGraphOptions = {
   stopOnBackoffWorthyFailure?: boolean;
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   fetchTimeoutMs?: number;
-  exactAssetUals?: string[];
-  exactAssetCommitments?: readonly ExactAssetCommitment[];
+  exactAssetSelection?: ExactAssetSelection;
+  onChallengePinnedAsset?: (
+    asset: VerifiedGraphScopedAsset,
+    privateRoots: readonly Uint8Array[],
+  ) => void;
   authenticationTimeoutMs?: number;
   operationFetchDeadline?: number;
   operationDeadline?: number;
@@ -4009,7 +4024,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async repairRandomSamplingKnowledgeAsset(
     this: DKGAgent,
     input: RandomSamplingExactRepairInput,
-  ): Promise<void> {
+  ): Promise<RandomSamplingRepairMaterial> {
     const ctx = createOperationContext('sync');
     return runRandomSamplingExactRepair({
       chainId: this.chain.chainId,
@@ -4038,23 +4053,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       fetchExactKnowledgeAsset: async (
         peerId,
         localCgId,
-        assetUal,
+        _assetUal,
         expectedCommitment,
         signal,
       ) => {
         const result = await this.syncExactKnowledgeAssetsFromPeerDetailed(
           peerId,
           localCgId,
-          [assetUal],
+          createChallengePinnedExactAssetSelection([expectedCommitment]),
           {
             signal,
             isCurrent: () => this.started && !signal.aborted,
-            expectedCommitments: [expectedCommitment],
           },
         );
         return {
           disposition: result.disposition,
           insertedTriples: result.result.insertedTriples,
+          ...(result.proofMaterial === undefined
+            ? {}
+            : { proofMaterial: result.proofMaterial }),
         };
       },
       logInfo: (message) => this.log.info(ctx, message),
@@ -5460,9 +5477,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<PhysicalDurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
-    const exactAssetUals = options?.exactAssetUals === undefined
+    const exactAssetSelection = options?.exactAssetSelection === undefined
       ? undefined
-      : requireExactAssetUals(options.exactAssetUals);
+      : requireExactAssetSelection(options.exactAssetSelection);
+    const exactAssetUals = exactAssetSelection === undefined
+      ? undefined
+      : exactAssetUalsForSelection(exactAssetSelection);
     const extendedRecovery = exactAssetUals !== undefined
       || options?.settlementSliceTimeoutMs !== undefined;
     const operationBoundary = createDurableSyncOperationBoundary({
@@ -5510,7 +5530,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 sinceBatchIdFor,
                 stopOnBackoffWorthyFailure,
                 fetchTimeoutMs,
-                exactAssetUals,
+                exactAssetSelection,
+                onChallengePinnedAsset: options?.onChallengePinnedAsset,
                 authenticationTimeoutMs,
                 operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
@@ -5604,6 +5625,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
       hasSignal: Boolean(operationBoundary.signal),
       hasCurrentFence: Boolean(options?.isCurrent),
+      hasChallengePinnedAssetCallback: Boolean(options?.onChallengePinnedAsset),
       exactAssetUals,
       settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
       priority: options?.priority,
@@ -5634,17 +5656,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async syncExactKnowledgeAssetsFromPeer(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
-    requestedAssetUals: string[],
+    selection: ExactAssetSelection,
     options: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
-      expectedCommitments?: readonly ExactAssetCommitment[];
     } = {},
   ): Promise<DurableSyncResult> {
     return (await this.syncExactKnowledgeAssetsFromPeerDetailed(
       remotePeerId,
       contextGraphId,
-      requestedAssetUals,
+      selection,
       options,
     )).result;
   }
@@ -5652,14 +5673,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
-    requestedAssetUals: string[],
+    selectionInput: ExactAssetSelection,
     options: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
-      expectedCommitments?: readonly ExactAssetCommitment[];
     } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
-    const assetUals = requireExactAssetUals(requestedAssetUals);
+    const selection = requireExactAssetSelection(selectionInput);
+    let proofMaterial: RandomSamplingRepairMaterial | undefined;
     const ctx = createOperationContext('sync');
     const detailed = await this.runLegacyDurableSyncDetailed(
       ctx,
@@ -5669,8 +5690,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       undefined,
       undefined,
       {
-        exactAssetUals: assetUals,
-        exactAssetCommitments: options.expectedCommitments,
+        exactAssetSelection: selection,
+        ...(selection.kind === 'challenge-pinned'
+          ? {
+              onChallengePinnedAsset: (
+                asset: VerifiedGraphScopedAsset,
+                privateRoots: readonly Uint8Array[],
+              ) => {
+                proofMaterial = Object.freeze({
+                  contents: Object.freeze(asset.dataQuads.map((quad) => tripleContentV10(
+                    quad.subject,
+                    quad.predicate,
+                    quad.object,
+                  ))),
+                  privateRoots: Object.freeze([...privateRoots]),
+                });
+              },
+            }
+          : {}),
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
         source: 'vm-recovery',
@@ -5681,6 +5718,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return {
       result: detailed.result,
       disposition: detailed.exactFetchDisposition ?? 'incomplete',
+      ...(proofMaterial === undefined ? {} : { proofMaterial }),
     };
   }
 
@@ -5717,8 +5755,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       stopOnBackoffWorthyFailure,
       onVerifiedFullSnapshot,
       fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
-      exactAssetUals,
-      exactAssetCommitments,
+      exactAssetSelection,
+      onChallengePinnedAsset,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationFetchDeadline,
       operationDeadline,
@@ -5727,6 +5765,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       isCurrent,
       durableMetaContinuation,
     } = options;
+    const challengeCommitments = new Map(
+      exactAssetSelection === undefined
+        ? []
+        : (exactAssetCommitmentsForSelection(exactAssetSelection) ?? [])
+            .map((commitment) => [commitment.assetUal, commitment]),
+    );
     const assertLifecycleCurrent = () => {
       if (isCurrent?.() === false) {
         throw asSyncFetchAbortError(new Error(
@@ -5775,7 +5819,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const contextGraphBudget = createDurableSyncBudget({
       fetchTimeoutMs,
       authenticationTimeoutMs,
-      exactRecovery: exactAssetUals !== undefined,
+      exactRecovery: exactAssetSelection !== undefined,
       operationFetchDeadline,
       extendedRecovery: settlementSliceTimeoutMs !== undefined,
       operationDeadline,
@@ -5833,16 +5877,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             manifestDigest,
             manifestPrefixDigestAtOffset,
             shouldStopAfterPage,
-            assetUals: exactAssetUals,
+            assetUals: exactAssetSelection === undefined
+              ? undefined
+              : exactAssetUalsForSelection(exactAssetSelection),
             returnAcceptedPrefixOnRetryableTransportFailure,
             requesterScope,
           },
         );
       },
       sinceBatchIdFor,
-      exactAssetUalsFor: exactAssetUals ? () => exactAssetUals : undefined,
-      exactAssetCommitmentsFor: exactAssetCommitments
-        ? () => exactAssetCommitments
+      exactAssetSelectionFor: exactAssetSelection
+        ? () => exactAssetSelection
         : undefined,
       durableMetaContinuation,
       stopOnBackoffWorthyFailure,
@@ -5875,6 +5920,33 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           )
         );
         const physicalStore = Promise.resolve().then(async (): Promise<GraphScopedMaterializationOutcome> => {
+          const challengeCommitment = challengeCommitments.get(asset.ual);
+          if (challengeCommitment !== undefined) {
+            if (Date.now() >= authenticationDeadline) {
+              throw createRpcTimeoutError(
+                `Challenge-pinned authentication for ${asset.ual} exceeded its deadline`,
+              );
+            }
+            const authenticated = await authenticateChallengePinnedGraphScopedAsset(
+              this.chain,
+              asset,
+              challengeCommitment,
+              verifyContextGraphBinding,
+              { signal: operationSignal },
+            );
+            if (operationSignal?.aborted) {
+              throw asSyncFetchAbortError(operationSignal.reason);
+            }
+            assertLifecycleCurrent();
+            if (this.graphScopedStoreClosed) throw shutdownError();
+            if (!bindingIsCurrent()) {
+              throw asSyncFetchAbortError(new Error(
+                `Context graph binding for ${asset.contextGraphId} changed during challenge authentication`,
+              ));
+            }
+            onChallengePinnedAsset?.(authenticated.asset, authenticated.privateRoots);
+            return 'proof-ready';
+          }
           const authentication = await authenticateDurableGraphScopedAsset({
             chain: this.chain,
             asset,
@@ -6030,7 +6102,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),
     };
-    if (exactAssetUals !== undefined) {
+    if (exactAssetSelection !== undefined) {
       return runDurableSyncDetailed(durableContext);
     }
     return { result: await runDurableSync(durableContext) };
