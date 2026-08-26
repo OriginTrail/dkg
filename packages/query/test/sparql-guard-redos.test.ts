@@ -116,9 +116,9 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
   // The scanner replacement consumes each declaration via a single
   // anchored regex with no nested quantifier — total work is O(n).
 
-  // Warm the parser, then measure process CPU time in batches large enough
-  // that sub-millisecond timer precision cannot dominate a call. CPU time is
-  // isolated from contention with Vitest's other worker processes; taking the
+  // Warm the parser, then measure current-thread CPU time in batches large
+  // enough that sub-millisecond timer precision cannot dominate a call. CPU
+  // time is isolated from contention with Vitest's other workers; taking the
   // fastest of three batches also filters GC without an additive allowance
   // that could mask superlinear growth.
   const measure = (input: string) => {
@@ -130,11 +130,11 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
       fastestBatchCpuMs = Infinity;
       let result = '';
       for (let sample = 0; sample < 3; sample++) {
-        const cpuStart = process.cpuUsage();
+        const cpuStart = process.threadCpuUsage();
         for (let i = 0; i < iterations; i++) {
           result = detectSparqlQueryForm(input);
         }
-        const cpu = process.cpuUsage(cpuStart);
+        const cpu = process.threadCpuUsage(cpuStart);
         fastestBatchCpuMs = Math.min(
           fastestBatchCpuMs,
           (cpu.user + cpu.system) / 1_000,
