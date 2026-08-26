@@ -279,7 +279,10 @@ async function execute(): Promise<void> {
       'terminalFailureReadback',
       'private-terminal-failure',
       'operation-completed',
-      { catalogHeadDigest: headDigest },
+      {
+        catalogHeadDigest: headDigest,
+        includeHarnessDiagnostic: true,
+      },
     );
     exact(terminalFailure.output, null, 'private terminal failure');
     const synchronization = output(await receiver.request(
