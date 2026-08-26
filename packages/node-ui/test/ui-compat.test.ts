@@ -419,7 +419,7 @@ describe('listAssertions query path', () => {
   const api = readFile('api.ts');
 
   it('uses executeQuery without view param (avoids agentAddress requirement)', () => {
-    expect(api).toMatch(/listAssertions[\s\S]*?executeQuery\(sparql, contextGraphId\)/);
+    expect(api).toMatch(/listAssertions[\s\S]*?executeQuery\(sparql, \{ contextGraphId \}\)/);
     expect(api).not.toMatch(/listAssertions[\s\S]*?view:\s*'working-memory'/);
   });
 });
