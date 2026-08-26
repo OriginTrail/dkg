@@ -23,13 +23,14 @@ export interface DaemonLogController {
     factory: () => Omit<DaemonLogExporter, 'mode'>,
   ): DaemonLogExporterStartResult;
   stopExporter(): Promise<DaemonLogExporterMode | null>;
-  stop(): Promise<void>;
+  detachSink(): void;
 }
 
 /**
- * Own the complete daemon log-sink lifecycle: sink attachment, the single
- * active remote exporter, exporter shutdown, and sink detachment. Database
- * volume maintenance deliberately lives in dashboard-log-volume-pruner.ts.
+ * Own the daemon Logger sink and the active shipper it reads. TelemetryRuntime
+ * is the sole caller that starts/stops the exporter; daemon shutdown calls
+ * detachSink() synchronously, then lets that runtime perform the final flush.
+ * Database maintenance lives in dashboard-log-volume-pruner.ts.
  */
 export function startDaemonLogController(opts: {
   insertDiagnosticLog: DaemonLogSinkDeps['insertDiagnosticLog'];
@@ -37,8 +38,7 @@ export function startDaemonLogController(opts: {
 }): DaemonLogController {
   let exporter: DaemonLogExporter | null = null;
   let exporterShutdown: Promise<DaemonLogExporterMode | null> | null = null;
-  let stopped = false;
-  let stopPromise: Promise<void> | null = null;
+  let sinkDetached = false;
 
   Logger.setSink(createDaemonLogSink({
     insertDiagnosticLog: opts.insertDiagnosticLog,
@@ -72,7 +72,7 @@ export function startDaemonLogController(opts: {
 
   return {
     startExporter(mode, factory) {
-      if (stopped) return { ok: false, error: 'Daemon log controller is stopped' };
+      if (sinkDetached) return { ok: false, error: 'Daemon log sink is detached' };
       if (exporterShutdown) {
         return {
           ok: false,
@@ -97,14 +97,13 @@ export function startDaemonLogController(opts: {
       }
     },
     stopExporter,
-    stop() {
-      if (stopPromise) return stopPromise;
-      stopped = true;
-      // This is synchronous with stop() invocation. A Logger call made while
-      // exporter shutdown is pending must not reach SQLite or that exporter.
+    detachSink() {
+      if (sinkDetached) return;
+      sinkDetached = true;
+      // Exporter teardown belongs to TelemetryRuntime. Detachment stays
+      // synchronous so no later Logger call reaches SQLite or the shipper
+      // while the runtime drains an in-flight settings transition.
       Logger.setSink(null);
-      stopPromise = stopExporter().then(() => undefined);
-      return stopPromise;
     },
   };
 }

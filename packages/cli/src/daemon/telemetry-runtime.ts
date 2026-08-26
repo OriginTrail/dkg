@@ -1,19 +1,18 @@
 import type { DkgConfig } from '../config.js';
 
-export interface TelemetryRuntimeStartResult {
-  ok: boolean;
-  error?: string;
-}
+export type TelemetryTransitionResult =
+  | { ok: true }
+  | { ok: false; error: string };
 
 export interface TelemetrySignalAdapter {
-  start(): Promise<TelemetryRuntimeStartResult>;
+  start(): Promise<TelemetryTransitionResult>;
   stop(): Promise<void>;
 }
 
 export interface TelemetryRuntime {
   isEnabled(): boolean;
   startConfiguredBestEffort(): Promise<void>;
-  setEnabled(enabled: boolean): Promise<TelemetryRuntimeStartResult>;
+  setEnabled(enabled: boolean): Promise<TelemetryTransitionResult>;
   shutdown(): Promise<void>;
 }
 
@@ -48,7 +47,7 @@ export function createTelemetryRuntime(opts: {
   };
   const applyEnabled = async (
     enabled: boolean,
-  ): Promise<TelemetryRuntimeStartResult> => {
+  ): Promise<TelemetryTransitionResult> => {
     if (!enabled) {
       await opts.signals.stop();
       setConfiguredEnabled(false);
@@ -59,7 +58,7 @@ export function createTelemetryRuntime(opts: {
     // Raise the in-memory gate before any signal starts. Disable lowers it only
     // after every signal stops, so false never coexists with active export.
     setConfiguredEnabled(true);
-    let result: TelemetryRuntimeStartResult;
+    let result: TelemetryTransitionResult;
     try {
       result = await opts.signals.start();
     } catch (error) {
@@ -86,7 +85,7 @@ export function createTelemetryRuntime(opts: {
         if (!opts.config.telemetry?.enabled) return;
         try {
           const result = await opts.signals.start();
-          if (!result.ok) opts.onBootStartFailure?.(result.error ?? 'unknown error');
+          if (!result.ok) opts.onBootStartFailure?.(result.error);
         } catch (error) {
           opts.onBootStartFailure?.(
             error instanceof Error ? error.message : String(error),

@@ -156,8 +156,14 @@ import {
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
-import { startDaemonLogController } from './log-lifecycle.js';
-import { createTelemetryRuntime } from './telemetry-runtime.js';
+import {
+  startDaemonLogController,
+  type DaemonLogExporterStartResult,
+} from './log-lifecycle.js';
+import {
+  createTelemetryRuntime,
+  type TelemetryTransitionResult,
+} from './telemetry-runtime.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
@@ -2792,7 +2798,9 @@ export async function runDaemonInner(
     ? "testnet"
     : "mainnet";
   const syslogEndpoint = TELEMETRY_ENDPOINTS[networkKey]?.syslog;
-  function startLogExporter(mode: 'syslog' | 'otlp'): { ok: boolean; error?: string } {
+  function startLogExporter(
+    mode: 'syslog' | 'otlp',
+  ): DaemonLogExporterStartResult {
     if (mode === 'otlp') {
       // Resolve env-first, matching the traces/metrics precedence
       // (resolveOtelSignals): standard logs endpoint, base endpoint + /v1/logs,
@@ -2940,7 +2948,7 @@ export async function runDaemonInner(
   // Await the SDK init first (it is dynamically imported) so traces/metrics are
   // fully registered before the log exporter result is returned — that ordering
   // lets the runtime-enable path roll the SDK back if the log exporter fails.
-  async function startTelemetry(): Promise<{ ok: boolean; error?: string }> {
+  async function startTelemetry(): Promise<TelemetryTransitionResult> {
     await startOtelSdk();
     // Dispatch to the configured log exporter. 'syslog' is the default when
     // unset (preserves prior behaviour); 'otlp' is the recommended path; 'none'
@@ -2982,11 +2990,10 @@ export async function runDaemonInner(
   // Daemon shutdown additionally detaches the Logger sink. Runtime telemetry
   // disable keeps the sink attached so warn/error diagnostics still persist.
   async function stopDaemonLogging(): Promise<void> {
-    // stop() detaches the Logger sink synchronously. Start both shutdown paths
-    // before awaiting so the runtime can drain any queued settings transition
-    // while the controller flushes the active log exporter.
-    const stopLogController = daemonLogController.stop();
-    await Promise.all([stopLogController, telemetryRuntime.shutdown()]);
+    // Detach synchronously, then use the one canonical telemetry shutdown path
+    // to drain transitions and flush the exporter plus OTel SDK exactly once.
+    daemonLogController.detachSink();
+    await telemetryRuntime.shutdown();
   }
 
   await telemetryRuntime.startConfiguredBestEffort();
@@ -3326,7 +3333,7 @@ export async function runDaemonInner(
     getTelemetryEnabled: () => telemetryRuntime.isEnabled(),
     setTelemetryEnabled: async (
       enabled: boolean,
-    ): Promise<{ ok: boolean; error?: string }> => {
+    ): Promise<TelemetryTransitionResult> => {
       return telemetryRuntime.setEnabled(enabled);
     },
   };

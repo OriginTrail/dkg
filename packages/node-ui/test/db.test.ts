@@ -530,6 +530,44 @@ describe('DashboardDB — retention', () => {
     }
   });
 
+  it('reports a committed insert as successful when inline retention fails', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-retention-failure-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 0,
+      logVolumePruneBatchRows: 1,
+    });
+    try {
+      volumeDb.db.exec(`
+        CREATE TRIGGER fail_inline_log_retention
+        BEFORE DELETE ON logs
+        BEGIN
+          SELECT RAISE(ABORT, 'forced retention failure');
+        END
+      `);
+
+      expect(() => volumeDb.insertLog({
+        ts: Date.now(),
+        level: 'info',
+        module: 'compatibility',
+        message: 'committed-before-maintenance',
+      })).not.toThrow();
+      expect(volumeDb.db.prepare(
+        `SELECT level, message FROM logs`,
+      ).all()).toEqual([
+        { level: 'info', message: 'committed-before-maintenance' },
+      ]);
+
+      volumeDb.db.exec('DROP TRIGGER fail_inline_log_retention');
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 1, status: 'more' });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 0, status: 'done' });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
   it('returns multi-megabyte free pages to the OS after the final volume batch', () => {
     const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-compact-'));
     const dbPath = join(volumeDir, 'node-ui.db');

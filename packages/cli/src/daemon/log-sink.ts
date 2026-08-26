@@ -6,11 +6,18 @@
  * and error records remain in SQLite for operation and dashboard diagnostics.
  */
 import {
-  isDiagnosticLogLevel,
   type CanonicalLogRecord,
-  type DiagnosticLogLevel,
+  type LogLevel,
   type LogRecord,
 } from '@origintrail-official/dkg-core';
+
+type PersistedDiagnosticLogLevel = Extract<LogLevel, 'warn' | 'error'>;
+
+function shouldPersistDiagnostic(
+  level: LogLevel,
+): level is PersistedDiagnosticLogLevel {
+  return level === 'warn' || level === 'error';
+}
 
 /** Minimal shape of a remote log shipper (LogPushWorker / OtlpLogWorker). */
 export interface RemoteLogShipper {
@@ -21,7 +28,7 @@ export interface DaemonLogSinkDeps {
   /** Persist a FULL (un-redacted) warning/error record to the local DB. */
   insertDiagnosticLog: (rec: {
     ts: number;
-    level: DiagnosticLogLevel;
+    level: PersistedDiagnosticLogLevel;
     operation_name?: string | null;
     operation_id?: string | null;
     module: string;
@@ -42,7 +49,7 @@ export interface DaemonLogSinkDeps {
 export function createDaemonLogSink(deps: DaemonLogSinkDeps): (entry: CanonicalLogRecord) => void {
   const now = deps.now ?? Date.now;
   return (entry: CanonicalLogRecord): void => {
-    if (isDiagnosticLogLevel(entry.level)) {
+    if (shouldPersistDiagnostic(entry.level)) {
       try {
         deps.insertDiagnosticLog({
           ts: now(),

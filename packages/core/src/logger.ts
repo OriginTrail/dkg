@@ -5,11 +5,6 @@ export type OperationName = 'publish' | 'update' | 'query' | 'resolve' | 'connec
 
 export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
 export type LogLevel = typeof LOG_LEVELS[number];
-export type DiagnosticLogLevel = 'warn' | 'error';
-
-export function isDiagnosticLogLevel(level: string): level is DiagnosticLogLevel {
-  return level === 'warn' || level === 'error';
-}
 
 export function normalizeLogLevel(level: string): LogLevel {
   return (LOG_LEVELS as readonly string[]).includes(level)

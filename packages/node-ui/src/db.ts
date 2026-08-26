@@ -70,7 +70,7 @@ class RoutineLogRetention {
     private readonly batchRows: number,
   ) {}
 
-  noteInsert(level: string): void {
+  noteCommittedInsert(level: string): void {
     if (!this.isRoutineLevel(level)) return;
     this.writesSinceGuard += 1;
     // Each guard removes at most one configured batch, so its cadence must
@@ -82,7 +82,14 @@ class RoutineLogRetention {
     );
     if (this.writesSinceGuard < guardInterval) return;
     this.writesSinceGuard = 0;
-    this.pruneOverflowBatch();
+    try {
+      this.pruneOverflowBatch();
+    } catch {
+      // The INSERT has already committed. Inline retention is therefore
+      // best-effort: surfacing this maintenance failure would falsely report
+      // the durable write as failed and invite duplicate retries. The
+      // independent volume pruner will retry the same bounded cleanup later.
+    }
   }
 
   hasOverflow(): boolean {
@@ -3142,7 +3149,7 @@ export class DashboardDB {
       module: entry.module,
       message: entry.message,
     });
-    this.routineLogRetention.noteInsert(entry.level);
+    this.routineLogRetention.noteCommittedInsert(entry.level);
   }
 
   /**

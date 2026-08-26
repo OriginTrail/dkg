@@ -110,6 +110,63 @@ describe('createTelemetryRuntime', () => {
     expect(persistedValues).toEqual([false]);
   });
 
+  it('stops export and durably disables after enabled-state persistence fails', async () => {
+    const config = configWithTelemetry(false);
+    const persistedValues: boolean[] = [];
+    let exporterActive = false;
+    let persistCalls = 0;
+    const stop = vi.fn(async () => { exporterActive = false; });
+    const runtime = createTelemetryRuntime({
+      config,
+      persist: vi.fn(async (current) => {
+        persistCalls += 1;
+        persistedValues.push(current.telemetry?.enabled ?? false);
+        if (persistCalls === 1) throw new Error('disk full');
+      }),
+      signals: {
+        start: vi.fn(async () => {
+          exporterActive = true;
+          return { ok: true };
+        }),
+        stop,
+      },
+    });
+
+    await expect(runtime.setEnabled(true)).rejects.toThrow('disk full');
+
+    expect(exporterActive).toBe(false);
+    expect(runtime.isEnabled()).toBe(false);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(persistedValues).toEqual([true, false]);
+  });
+
+  it('rolls back signal state and the durable gate when startup throws', async () => {
+    const config = configWithTelemetry(false);
+    const persistedValues: boolean[] = [];
+    let partialSignalActive = false;
+    const stop = vi.fn(async () => { partialSignalActive = false; });
+    const runtime = createTelemetryRuntime({
+      config,
+      persist: vi.fn(async (current) => {
+        persistedValues.push(current.telemetry?.enabled ?? false);
+      }),
+      signals: {
+        start: vi.fn(async () => {
+          partialSignalActive = true;
+          throw new Error('startup exploded');
+        }),
+        stop,
+      },
+    });
+
+    await expect(runtime.setEnabled(true)).rejects.toThrow('startup exploded');
+
+    expect(partialSignalActive).toBe(false);
+    expect(runtime.isEnabled()).toBe(false);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(persistedValues).toEqual([false]);
+  });
+
   it('drains an active transition before orderly shutdown', async () => {
     const config = configWithTelemetry(false);
     let releaseStart!: () => void;

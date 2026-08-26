@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Logger } from '@origintrail-official/dkg-core';
 import { startDaemonLogController } from '../src/daemon/log-lifecycle.js';
+import type { DkgConfig } from '../src/config.js';
+import { createTelemetryRuntime } from '../src/daemon/telemetry-runtime.js';
 
 describe('startDaemonLogController', () => {
   afterEach(() => {
@@ -90,35 +92,63 @@ describe('startDaemonLogController', () => {
     await controller.stopExporter();
   });
 
-  it('detaches the sink synchronously and shuts the active exporter down once', async () => {
+  it('lets the telemetry runtime exclusively flush once during daemon shutdown', async () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const persisted: string[] = [];
     const pushed: string[] = [];
-    let releaseShutdown!: () => void;
-    const shutdown = vi.fn(() => new Promise<void>((resolve) => {
-      releaseShutdown = resolve;
-    }));
+    let releaseStart!: () => void;
+    let markStartDispatched!: () => void;
+    const startDispatched = new Promise<void>((resolve) => {
+      markStartDispatched = resolve;
+    });
+    const exporterShutdown = vi.fn(async () => undefined);
     const controller = startDaemonLogController({
       insertDiagnosticLog: (record) => persisted.push(record.message),
       redact: (record) => record,
     });
-    controller.startExporter('syslog', () => ({
-      shipper: { push: (record) => pushed.push(record.message) },
-      shutdown,
-    }));
+    const config: DkgConfig = {
+      name: 'composed-telemetry-test',
+      apiPort: 0,
+      listenPort: 0,
+      nodeRole: 'edge',
+      telemetry: { enabled: false },
+    };
+    const runtime = createTelemetryRuntime({
+      config,
+      persist: vi.fn(async () => undefined),
+      signals: {
+        start: async () => {
+          const result = controller.startExporter('syslog', () => ({
+            shipper: { push: (record) => pushed.push(record.message) },
+            shutdown: exporterShutdown,
+          }));
+          markStartDispatched();
+          await new Promise<void>((resolve) => { releaseStart = resolve; });
+          return result.ok ? { ok: true } : result;
+        },
+        stop: async () => {
+          await controller.stopExporter();
+        },
+      },
+    });
 
     const logger = new Logger('controller-stop-test');
     const context = { operationId: 'op-2', operationName: 'system' as const };
+    const enabling = runtime.setEnabled(true);
+    await startDispatched;
     logger.warn(context, 'before-stop');
-    const stopping = controller.stop();
+    controller.detachSink();
+    const stopping = runtime.shutdown();
     logger.warn(context, 'after-stop');
 
     expect(persisted).toEqual(['before-stop']);
     expect(pushed).toEqual(['before-stop']);
-    expect(shutdown).toHaveBeenCalledTimes(1);
-    releaseShutdown();
+    expect(exporterShutdown).not.toHaveBeenCalled();
+    releaseStart();
+    await enabling;
     await stopping;
-    await controller.stop();
-    expect(shutdown).toHaveBeenCalledTimes(1);
+    controller.detachSink();
+    await runtime.shutdown();
+    expect(exporterShutdown).toHaveBeenCalledTimes(1);
   });
 });

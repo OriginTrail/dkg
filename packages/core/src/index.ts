@@ -80,9 +80,7 @@ export {
   type LogRecord,
   type CanonicalLogRecord,
   type LogLevel,
-  type DiagnosticLogLevel,
   LOG_LEVELS,
-  isDiagnosticLogLevel,
   normalizeLogLevel,
 } from './logger.js';
 export {
