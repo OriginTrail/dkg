@@ -178,6 +178,17 @@ describe('RFC-64 private release gate process and denial evidence', () => {
         { graphCounts: exactGraphCounts },
         expected,
       )).toBe(true);
+      expect(hasExactPrivateCatalogMemoryContents({
+        graphCounts: exactGraphCounts.map((entry, index) => index === 1
+          ? { ...entry, kaNumber: 43 }
+          : entry),
+      }, expected)).toBe(false);
+      expect(hasExactPrivateCatalogMemoryContents({
+        graphCounts: exactGraphCounts.map((entry) => ({ ...entry, kaNumber: 41 })),
+      }, expected)).toBe(false);
+      expect(hasExactPrivateCatalogMemoryContents({
+        graphCounts: exactGraphCounts.slice(0, 1),
+      }, expected)).toBe(false);
 
       await store.delete(original);
       await store.insert(projection('Mallory'));
