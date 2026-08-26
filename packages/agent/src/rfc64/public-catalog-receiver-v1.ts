@@ -19,6 +19,10 @@
 
 import { isFinalizedChainAdmissionContention } from '@origintrail-official/dkg-chain';
 
+import {
+  Rfc64CatalogProviderFailureAggregateV1,
+  type Rfc64CatalogProviderTerminalFailureV1,
+} from './public-catalog-reconciliation-failure-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
 export type Rfc64PublicCatalogReconcileResultV1 = 'applied' | 'not-found' | 'staged-only';
@@ -166,6 +170,8 @@ interface ReceiverTaskV1 {
    * attempts. Repeated contention multiplied retries without limit.
    */
   attemptsByProvider?: Map<string, number>;
+  /** Latest non-deferrable terminal error for each bounded provider. */
+  terminalFailuresByProvider?: Map<string, Rfc64CatalogProviderTerminalFailureV1>;
   /** Latest provider hint revision that returned not-found. */
   notFoundProviderRevisions?: Map<string, bigint>;
   providerCursor?: number;
@@ -707,12 +713,17 @@ export class Rfc64PublicCatalogReceiverV1 {
 
   async #runTask(task: ReceiverTaskV1): Promise<ReceiverTaskOutcomeV1> {
     this.#beginReconciliationAttempt(task);
-    let lastError: unknown;
     // Resumed, not reset: see `ReceiverTaskV1.attemptsByProvider`.
     const notFoundProviderRevisions = (
       task.notFoundProviderRevisions ??= new Map<string, bigint>()
     );
     const attemptsByProvider = (task.attemptsByProvider ??= new Map<string, number>());
+    const terminalFailuresByProvider = (
+      task.terminalFailuresByProvider ??= new Map<
+        string,
+        Rfc64CatalogProviderTerminalFailureV1
+      >()
+    );
     let providerCursor = task.providerCursor ?? 0;
     while (true) {
       if (this.#closing.signal.aborted) return { kind: 'aborted' };
@@ -738,8 +749,8 @@ export class Rfc64PublicCatalogReceiverV1 {
           kind: 'failed',
           taskRevision: task.revision,
           announcement: providers[0]!.announcement,
-          error: lastError !== undefined
-            ? lastError
+          error: terminalFailuresByProvider.size > 0
+            ? providerFailureV1(providers.length, terminalFailuresByProvider)
             : new Error(
               'RFC-64 receiver exhausted the per-provider attempt budget before '
               + 'reconciling the latest accepted provider hint',
@@ -772,6 +783,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         );
         recordProviderAttempt();
         if (result === 'not-found') {
+          terminalFailuresByProvider.delete(provider.key);
           notFoundProviderRevisions.set(provider.key, hintRevision);
           continue;
         }
@@ -794,7 +806,10 @@ export class Rfc64PublicCatalogReceiverV1 {
           return { kind: 'defer-admission' };
         }
         recordProviderAttempt();
-        lastError = error;
+        terminalFailuresByProvider.set(provider.key, Object.freeze({
+          providerPeerId: provider.peerId,
+          error,
+        }));
         if (this.#closing.signal.aborted) return { kind: 'aborted' };
         await this.#backoff(providerAttempt - 1);
       }
@@ -964,4 +979,14 @@ function receiverCompletion(
   error: unknown | null,
 ): Rfc64PublicCatalogReceiverCompletionV1 {
   return Object.freeze({ outcome, appliedProviderPeerId, providerAttempts, error });
+}
+
+function providerFailureV1(
+  attemptedProviderCount: number,
+  failuresByProvider: ReadonlyMap<string, Rfc64CatalogProviderTerminalFailureV1>,
+): unknown {
+  const failures = [...failuresByProvider.values()];
+  // Preserve the long-standing single-provider error identity and code.
+  if (attemptedProviderCount === 1 && failures.length === 1) return failures[0]!.error;
+  return new Rfc64CatalogProviderFailureAggregateV1(attemptedProviderCount, failures);
 }

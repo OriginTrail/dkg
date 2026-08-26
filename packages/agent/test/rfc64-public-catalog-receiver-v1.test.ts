@@ -6,6 +6,7 @@ import {
   type Rfc64PublicCatalogReconcileResultV1,
 } from '../src/rfc64/public-catalog-receiver-v1.js';
 import {
+  Rfc64CatalogProviderFailureAggregateV1,
   Rfc64PublicCatalogReconciliationFailureRegistryV1,
 } from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from '../src/rfc64/public-catalog-transport-v1.js';
@@ -443,7 +444,14 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
 
     expect(script.peers).toEqual(['peerA', 'peerB']);
     expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0]?.[1]).toBe(peerAError);
+    expect(onError.mock.calls[0]?.[1]).toBeInstanceOf(
+      Rfc64CatalogProviderFailureAggregateV1,
+    );
+    expect((onError.mock.calls[0]?.[1] as Rfc64CatalogProviderFailureAggregateV1))
+      .toMatchObject({
+        attemptedProviderCount: 2,
+        providerFailures: [{ providerPeerId: 'peerA', error: peerAError }],
+      });
     expect(receiver.stats()).toMatchObject({
       scheduled: 52,
       dedupedInFlight: 51,
@@ -493,6 +501,13 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     await receiver.whenIdle();
     expect(peers).toEqual(['peerA', 'peerB', 'peerA', 'peerB']);
     expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toMatchObject({
+      attemptedProviderCount: 2,
+      providerFailures: [
+        { providerPeerId: 'peerA' },
+        { providerPeerId: 'peerB' },
+      ],
+    });
     expect(receiver.stats()).toMatchObject({ applied: 0, failed: 1 });
   });
 

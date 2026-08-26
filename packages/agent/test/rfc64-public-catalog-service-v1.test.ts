@@ -31,6 +31,7 @@ import {
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
   parseRfc64PublicCatalogCurrentHeadQueryV1,
 } from '../src/rfc64/public-catalog-current-head-discovery-v1.js';
+import { Rfc64PublicCatalogNativeReceiverErrorV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import {
   RFC64_CATALOG_BUNDLE_FETCH_PROTOCOL_V2,
   RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2,
@@ -39,6 +40,10 @@ import {
   RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
 } from '../src/rfc64/public-catalog-native-transport-v1.js';
 import type { Rfc64PublicCatalogReceiverReconcilerV1 } from '../src/rfc64/public-catalog-receiver-v1.js';
+import {
+  Rfc64CatalogProviderFailureAggregateV1,
+  classifyRfc64CatalogReconciliationTerminalReasonV1,
+} from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
@@ -1130,6 +1135,82 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await service.close();
   });
 
+  it('classifies the complete provider failure set independently of provider order', async () => {
+    const incomplete = (peerId: string) => new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-incomplete',
+      `${peerId} does not have the signed bundle`,
+    );
+    const scenarios = [
+      {
+        errors: new Map<string, Error>([
+          ['peer-a', new Error('peer-a transport timeout')],
+          ['peer-b', incomplete('peer-b')],
+        ]),
+        terminalReason: null,
+      },
+      {
+        errors: new Map<string, Error>([
+          ['peer-a', incomplete('peer-a')],
+          ['peer-b', new Error('peer-b transport timeout')],
+        ]),
+        terminalReason: null,
+      },
+      {
+        errors: new Map<string, Error>([
+          ['peer-a', incomplete('peer-a')],
+          ['peer-b', incomplete('peer-b')],
+        ]),
+        terminalReason: 'no-authorized-provider',
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const router = new RecordingRouter();
+      const service = new Rfc64PublicCatalogServiceV1({
+        router: router.asProtocolRouter(),
+        controlObjects: controlObjects(),
+        accessPolicyAuthority: accessPolicyAuthority(),
+        receiver: { maxAttempts: 1, retryBackoffMs: 0 },
+        native: nativeOptions(() => ({
+          isHeadApplied: async () => false,
+          reconcileHead: async (peerId) => {
+            throw scenario.errors.get(peerId)!;
+          },
+        })),
+      });
+      const policy = acceptPolicy(service);
+      const current = announcement(policy.policyDigest);
+      vi.spyOn(service, 'discoverCurrentCatalogHead').mockResolvedValue(Object.freeze({
+        announcement: current,
+        head: {} as never,
+      }));
+
+      const rejection = await service.synchronizeCurrentCatalogHeadFromProviders({
+        remotePeerIds: ['peer-a', 'peer-b'],
+        scope: {
+          networkId: NETWORK_ID,
+          contextGraphId: CONTEXT_GRAPH_ID,
+          subGraphName: null,
+          authorAddress: AUTHOR,
+          era: '0',
+        },
+      }).then(() => null, (error: unknown) => error);
+      expect(rejection).toBeInstanceOf(Error);
+      const aggregate = (rejection as Error & { readonly cause: unknown }).cause;
+      expect(aggregate).toBeInstanceOf(Rfc64CatalogProviderFailureAggregateV1);
+      expect(aggregate).toMatchObject({
+        attemptedProviderCount: 2,
+        providerFailures: [
+          { providerPeerId: 'peer-a', error: scenario.errors.get('peer-a') },
+          { providerPeerId: 'peer-b', error: scenario.errors.get('peer-b') },
+        ],
+      });
+      expect(classifyRfc64CatalogReconciliationTerminalReasonV1(aggregate))
+        .toBe(scenario.terminalReason);
+      await service.close();
+    }
+  });
+
   it('keeps explicit provider completion separate from a same-head ambient provider', async () => {
     const router = new RecordingRouter();
     const ambientStarted = deferred<void>();
@@ -1244,13 +1325,24 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       announcement: { ...sameDurableHead, policyDigest: rotatedDigest },
       head: {} as never,
     }));
-    await expect(service.synchronizeCurrentCatalogHeadFromProviders({
+    const failedReplay = service.synchronizeCurrentCatalogHeadFromProviders({
       remotePeerIds: ['peer-a', 'peer-b'],
       scope,
-    })).rejects.toMatchObject({
-      message: 'RFC-64 current-head synchronization ended with failed',
-      cause: rejectedPrecommit,
     });
+    await expect(failedReplay).rejects.toMatchObject({
+      message: 'RFC-64 current-head synchronization ended with failed',
+      cause: {
+        attemptedProviderCount: 2,
+        providerFailures: [
+          { providerPeerId: 'peer-a', error: rejectedPrecommit },
+          { providerPeerId: 'peer-b', error: rejectedPrecommit },
+        ],
+      },
+    });
+    await expect(failedReplay).rejects.toHaveProperty(
+      'cause',
+      expect.any(Rfc64CatalogProviderFailureAggregateV1),
+    );
     await service.close();
   });
 

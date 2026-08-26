@@ -9,6 +9,42 @@ import { Rfc64PublicCatalogNativeReceiverErrorV1 } from './public-catalog-native
 export type Rfc64CatalogReconciliationTerminalReasonV1 =
   | 'no-authorized-provider';
 
+/** One bounded provider's terminal reconciliation result. */
+export interface Rfc64CatalogProviderTerminalFailureV1 {
+  readonly providerPeerId: string;
+  readonly error: unknown;
+}
+
+/**
+ * Bounded aggregate for one exact-head failover attempt.
+ *
+ * The receiver retains at most one terminal error for each of its at most eight
+ * selected providers. `attemptedProviderCount` also includes providers whose
+ * terminal result was `not-found`, so downstream classification can require a
+ * conclusive error from the complete provider set instead of trusting the last
+ * provider tried.
+ */
+export class Rfc64CatalogProviderFailureAggregateV1 extends AggregateError {
+  readonly attemptedProviderCount: number;
+  readonly providerFailures: readonly Readonly<Rfc64CatalogProviderTerminalFailureV1>[];
+
+  constructor(
+    attemptedProviderCount: number,
+    providerFailures: readonly Readonly<Rfc64CatalogProviderTerminalFailureV1>[],
+  ) {
+    const failures = Object.freeze(providerFailures.map(({ providerPeerId, error }) => (
+      Object.freeze({ providerPeerId, error })
+    )));
+    super(
+      failures.map(({ error }) => error),
+      'RFC-64 catalog reconciliation exhausted its selected providers',
+    );
+    this.name = 'Rfc64CatalogProviderFailureAggregateV1';
+    this.attemptedProviderCount = attemptedProviderCount;
+    this.providerFailures = failures;
+  }
+}
+
 /** Stable process-local evidence for one scheduler-terminal reconciliation failure. */
 export interface Rfc64PublicCatalogReconciliationFailureV1 {
   readonly catalogHeadDigest: Digest32V1;
@@ -205,6 +241,25 @@ function evictOldestWhenFullV1<T>(map: Map<Digest32V1, T>): void {
  * receiver boundary. No message parsing or recursive cause traversal is used.
  */
 export function classifyRfc64CatalogReconciliationTerminalReasonV1(
+  error: unknown,
+): Rfc64CatalogReconciliationTerminalReasonV1 | null {
+  if (error instanceof Rfc64CatalogProviderFailureAggregateV1) {
+    if (
+      error.attemptedProviderCount < 1
+      || error.providerFailures.length !== error.attemptedProviderCount
+    ) {
+      return null;
+    }
+    return error.providerFailures.every(({ error: providerError }) => (
+      classifySingleProviderTerminalReasonV1(providerError) === 'no-authorized-provider'
+    ))
+      ? 'no-authorized-provider'
+      : null;
+  }
+  return classifySingleProviderTerminalReasonV1(error);
+}
+
+function classifySingleProviderTerminalReasonV1(
   error: unknown,
 ): Rfc64CatalogReconciliationTerminalReasonV1 | null {
   if (
