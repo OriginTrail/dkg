@@ -187,3 +187,29 @@ export const OPERATIONAL_KEY_PURPOSE = 2;
  * native+TRAC balance read per wallet instead of re-reading on every iteration.
  */
 export const PUBLISHER_FUNDING_CACHE_TTL_MS = 15_000;
+
+/**
+ * GH#1574 — how long a caller may wait for, or hold, a per-wallet transaction
+ * lane before the serializer says so. Below this, same-wallet queueing is
+ * ordinary and uninteresting.
+ */
+export const TX_SERIALIZER_OBSERVE_AFTER_MS = 30_000;
+
+/**
+ * Repeat cadence once a wait or hold is being reported. Caps a two-hour wedge
+ * at roughly 120 lines per wallet — unmissable in a log, not a flood.
+ */
+export const TX_SERIALIZER_OBSERVE_INTERVAL_MS = 60_000;
+
+/**
+ * Multiple of the adapter's own receipt deadline beyond which a wait or hold
+ * is a STALL rather than queueing.
+ *
+ * Deliberately derived, not hardcoded: the critical section legitimately
+ * contains a full transaction round-trip (`ensureV10ApproveTrac` runs inside
+ * the lane and is bounded by `receiptTimeoutMs`), and the forced-reapprove
+ * path can do that twice. Deriving it keeps the threshold provably above every
+ * in-lane bound, and gives an operator who lowers `chain.receiptTimeoutMs` a
+ * proportionally tighter stall signal for free.
+ */
+export const TX_SERIALIZER_STALL_MULTIPLE = 2;

@@ -44,7 +44,11 @@ import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cu
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt,
+  TX_SERIALIZER_OBSERVE_AFTER_MS,
+  TX_SERIALIZER_OBSERVE_INTERVAL_MS,
+  TX_SERIALIZER_STALL_MULTIPLE,
+} from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
 
@@ -671,7 +675,11 @@ export class EVMChainAdapterBase {
    * `Nonce too low` (OriginTrail/dkg#953). Cross-wallet concurrency is
    * preserved.
    */
-  protected readonly signerTxSerializer = new KeyedSerializer();
+  /**
+   * GH#1574 — configured in the constructor once `receiptTimeoutMs` is known,
+   * so the stall threshold tracks the adapter's own in-lane bounds.
+   */
+  protected readonly signerTxSerializer: KeyedSerializer;
 
   /**
    * Lowercased addresses of operational wallets CONFIRMED registered on-chain
@@ -1087,6 +1095,11 @@ export class EVMChainAdapterBase {
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
     this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
+    this.signerTxSerializer = new KeyedSerializer({
+      observeAfterMs: TX_SERIALIZER_OBSERVE_AFTER_MS,
+      observeIntervalMs: TX_SERIALIZER_OBSERVE_INTERVAL_MS,
+      stallAfterMs: TX_SERIALIZER_STALL_MULTIPLE * this.receiptTimeoutMs,
+    });
     this.finalityConfirmations = resolveFinalityConfirmations(config.finalityConfirmations);
     this.maxFeePerGasWei = resolveMaxFeePerGasWei(config.maxFeePerGasWei);
     this.walletRpcUrls = Array.from(new Set(
@@ -1880,6 +1893,8 @@ export class EVMChainAdapterBase {
   protected async withSerializedSignerWrite<T>(
     signer: Wallet,
     fn: (ctx: SerializedSignerWriteContext) => Promise<T>,
+    /** Names the operation in serializer wait/hold diagnostics (GH#1574). */
+    writeLabel = 'signer write',
   ): Promise<T> {
     return this.signerTxSerializer.run(signer.address, () =>
       fn({
@@ -1892,6 +1907,7 @@ export class EVMChainAdapterBase {
           return this.sendContractTransactionUnlocked(contract, method, args, innerSigner, label, opts);
         },
       }),
+      writeLabel,
     );
   }
 
@@ -2296,9 +2312,21 @@ export class EVMChainAdapterBase {
     preferIdle: boolean,
   ): T {
     if (preferIdle && !this.idleAwareSelectionDisabled) {
+      // GH#953 — soft-prefer a wallet with no in-flight or queued write.
+      // GH#1574 — a lane whose holder is past the stall threshold is NOT idle,
+      // but it is also not healthy: routing new work behind it inherits the
+      // wedge invisibly, which is the failure this issue reports. Treat a
+      // stalled lane as the LEAST preferred rather than merely busy.
+      const stallAfterMs = TX_SERIALIZER_STALL_MULTIPLE * this.receiptTimeoutMs;
+      const isStalled = (address: string): boolean => {
+        const held = this.signerTxSerializer.holdElapsedMs(address);
+        return held !== undefined && held >= stallAfterMs;
+      };
       const idle = fundableIdx.find((index) =>
         !this.signerTxSerializer.isActive(candidates[index].address));
       if (idle !== undefined) return candidates[idle];
+      const notStalled = fundableIdx.find((index) => !isStalled(candidates[index].address));
+      if (notStalled !== undefined) return candidates[notStalled];
     }
     return candidates[fundableIdx[0]];
   }
