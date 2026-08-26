@@ -1102,17 +1102,37 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     opCtx?: OperationContext,
     options: {
       bindingMode?: ContextGraphSlotBindingMode;
+      /** @deprecated Use `bindingMode: 'chain-attested-repair'`. */
+      requireCommittedNameHash?: boolean;
       signal?: AbortSignal;
     } = {},
   ): Promise<boolean> {
-    const bindingMode = options.bindingMode ?? 'legacy-policy';
+    const compatibilityBindingMode = options.requireCommittedNameHash === undefined
+      ? undefined
+      : options.requireCommittedNameHash
+        ? 'chain-attested-repair'
+        : 'legacy-policy';
+    if (
+      compatibilityBindingMode !== undefined
+      && options.bindingMode !== undefined
+      && options.bindingMode !== compatibilityBindingMode
+    ) {
+      throw new TypeError(
+        'requireCommittedNameHash contradicts the explicit Context Graph binding mode',
+      );
+    }
+    const bindingMode = options.bindingMode ?? compatibilityBindingMode ?? 'legacy-policy';
     const outcome = await evaluateContextGraphSlotBinding(
       this.chain,
       contextGraphId,
       onChainId,
       opCtx,
       options.signal,
-      bindingMode !== 'chain-attested-repair',
+      // The deprecated strict option accepted a direct numeric self-address;
+      // preserve that exact compatibility while the new repair mode remains
+      // stricter for callers that opt into it directly.
+      options.requireCommittedNameHash === true
+        || bindingMode !== 'chain-attested-repair',
       (localId) => this.isWireIdKeyedSubscription(localId),
       (ctx, message) => this.log.warn(ctx, message),
       (read) => this.raceChainPolicyRead(read),

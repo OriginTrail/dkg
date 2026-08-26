@@ -174,8 +174,22 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
       cgId,
       '5',
       undefined,
+      { requireCommittedNameHash: true },
+    )).resolves.toBe(false);
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      '5',
+      undefined,
       { bindingMode: 'chain-attested-repair' },
     )).resolves.toBe(false);
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      '5',
+      undefined,
+      { requireCommittedNameHash: true, bindingMode: 'legacy-policy' },
+    )).rejects.toThrow(/contradicts/u);
 
     const transportError = Object.assign(new Error('name-hash RPC unavailable'), {
       code: 'RPC_ENDPOINTS_EXHAUSTED',
