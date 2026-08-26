@@ -116,33 +116,38 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
   // The scanner replacement consumes each declaration via a single
   // anchored regex with no nested quantifier — total work is O(n).
 
-  // Warm the parser, then measure current-thread CPU time in batches large
-  // enough that sub-millisecond timer precision cannot dominate a call. CPU
-  // time is isolated from contention with Vitest's other workers; taking the
-  // fastest of three batches also filters GC without an additive allowance
-  // that could mask superlinear growth.
+  // Measure current-thread CPU time across distinct-but-equivalent inputs.
+  // Varying the string prevents V8 from treating a repeated pure call as a
+  // loop-invariant expression, while batching above 20 ms keeps scheduler and
+  // timer granularity from dominating the ratio. The median filters occasional
+  // GC/JIT outliers without the under-counting risk of taking the fastest run.
   const measure = (input: string) => {
-    for (let i = 0; i < 5; i++) detectSparqlQueryForm(input);
+    const variants = Array.from(
+      { length: 16 },
+      (_, index) => `${input}# benchmark-${index}\n`,
+    );
+    const expectedResultLength = detectSparqlQueryForm(variants[0]).length;
+    for (const variant of variants) detectSparqlQueryForm(variant);
 
     let iterations = 1;
-    let fastestBatchCpuMs = Infinity;
     while (iterations <= 4_096) {
-      fastestBatchCpuMs = Infinity;
-      let result = '';
+      const batchCpuMs: number[] = [];
       for (let sample = 0; sample < 3; sample++) {
+        let resultLength = 0;
         const cpuStart = process.threadCpuUsage();
         for (let i = 0; i < iterations; i++) {
-          result = detectSparqlQueryForm(input);
+          resultLength += detectSparqlQueryForm(
+            variants[(i + sample) % variants.length],
+          ).length;
         }
         const cpu = process.threadCpuUsage(cpuStart);
-        fastestBatchCpuMs = Math.min(
-          fastestBatchCpuMs,
-          (cpu.user + cpu.system) / 1_000,
-        );
+        expect(resultLength).toBe(expectedResultLength * iterations);
+        batchCpuMs.push((cpu.user + cpu.system) / 1_000);
       }
-      expect(typeof result).toBe('string');
-      if (fastestBatchCpuMs >= 25 || iterations === 4_096) {
-        return fastestBatchCpuMs / iterations;
+      batchCpuMs.sort((a, b) => a - b);
+      const medianBatchCpuMs = batchCpuMs[Math.floor(batchCpuMs.length / 2)];
+      if (medianBatchCpuMs >= 20 || iterations === 4_096) {
+        return medianBatchCpuMs / iterations;
       }
       iterations *= 2;
     }
