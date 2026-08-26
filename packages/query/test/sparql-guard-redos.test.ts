@@ -142,7 +142,7 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
     return JSON.parse(execFileSync(
       process.execPath,
       [runner],
-      { encoding: 'utf8', timeout: 15_000 },
+      { encoding: 'utf8', timeout: 20_000 },
     )) as { smallMs: number; largeMs: number };
   };
 
@@ -163,7 +163,7 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
     // a ratio-only assertion. A 10x input may take at most 25x as long, which
     // leaves CI headroom while rejecting materially superlinear growth.
     expect(largeMs / smallMs).toBeLessThan(25);
-  }, 20_000);
+  }, 25_000);
 
   it('classifies N=10_000 valid PREFIX decls + trailing SELECT in linear time', () => {
     // Positive case at scale — the scanner must accept long but

@@ -19,49 +19,48 @@ function variantsFor(input) {
   );
 }
 
-function runBatch(variants, iterations, sample) {
-  const expectedLength = detect(variants[0]).length;
-  let resultLength = 0;
+function measureOne(input, expectedLength) {
   const startedAt = performance.now();
-  for (let index = 0; index < iterations; index++) {
-    resultLength += detect(variants[(index + sample) % variants.length]).length;
-  }
-  if (resultLength !== expectedLength * iterations) {
+  const resultLength = detect(input).length;
+  const elapsedMs = performance.now() - startedAt;
+  if (resultLength !== expectedLength) {
     throw new Error(
       `SPARQL benchmark result mismatch: expected ` +
-      `${expectedLength * iterations}, received ${resultLength}`,
+      `${expectedLength}, received ${resultLength}`,
     );
   }
-  return performance.now() - startedAt;
+  return elapsedMs;
 }
 
 export function measureSparqlRedosGrowth() {
   const smallVariants = variantsFor(inputFor(1_000));
   const largeVariants = variantsFor(inputFor(10_000));
   for (const variant of [...smallVariants, ...largeVariants]) detect(variant);
+  const smallExpectedLength = detect(smallVariants[0]).length;
+  const largeExpectedLength = detect(largeVariants[0]).length;
 
-  let iterations = 1;
-  while (iterations < 4_096 && runBatch(smallVariants, iterations, 0) < 10) {
-    iterations *= 2;
-  }
-
-  const smallSamples = [];
-  const largeSamples = [];
+  const iterations = 16;
+  const samples = [];
   for (let sample = 0; sample < 3; sample++) {
-    if (sample % 2 === 0) {
-      smallSamples.push(runBatch(smallVariants, iterations, sample));
-      largeSamples.push(runBatch(largeVariants, iterations, sample));
-    } else {
-      largeSamples.push(runBatch(largeVariants, iterations, sample));
-      smallSamples.push(runBatch(smallVariants, iterations, sample));
+    let smallTotalMs = 0;
+    let largeTotalMs = 0;
+    for (let index = 0; index < iterations; index++) {
+      const variant = (index + sample) % smallVariants.length;
+      if ((index + sample) % 2 === 0) {
+        smallTotalMs += measureOne(smallVariants[variant], smallExpectedLength);
+        largeTotalMs += measureOne(largeVariants[variant], largeExpectedLength);
+      } else {
+        largeTotalMs += measureOne(largeVariants[variant], largeExpectedLength);
+        smallTotalMs += measureOne(smallVariants[variant], smallExpectedLength);
+      }
     }
+    samples.push({
+      smallMs: smallTotalMs / iterations,
+      largeMs: largeTotalMs / iterations,
+    });
   }
-  smallSamples.sort((a, b) => a - b);
-  largeSamples.sort((a, b) => a - b);
-  return {
-    smallMs: smallSamples[1] / iterations,
-    largeMs: largeSamples[1] / iterations,
-  };
+  samples.sort((a, b) => (a.largeMs / a.smallMs) - (b.largeMs / b.smallMs));
+  return samples[1];
 }
 
 process.stdout.write(JSON.stringify(measureSparqlRedosGrowth()));
