@@ -413,8 +413,10 @@ describe('SparqlHttpStore (test server)', () => {
         updateEndpoint: 'http://example.test/update',
         timeout: 5,
       });
+      const graph = 'http://g';
+      const before = store.getWriteRevision(graph);
       await expect(store.insert([
-        { subject: 'http://s', predicate: 'http://p', object: '"o"', graph: 'http://g' },
+        { subject: 'http://s', predicate: 'http://p', object: '"o"', graph },
       ])).rejects.toMatchObject({
         name: 'TimeoutError',
         code: 'STORE_OPERATION_TIMEOUT',
@@ -424,6 +426,10 @@ describe('SparqlHttpStore (test server)', () => {
         timeoutMs: 5,
         outcome: 'indeterminate',
       });
+      const after = store.getWriteRevision(graph);
+      expect(after.generation).toBeGreaterThan(before.generation);
+      expect(after.stable).toBe(false);
+      expect(store.getWriteRevision(graph)).toEqual(after);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1261,6 +1267,108 @@ describe('SparqlHttpStore (test server)', () => {
       const settled = pendingStore.getWriteRevision(graph);
       expect(settled.generation).toBeGreaterThan(whilePending.generation);
       expect(settled.stable).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('begins a lifecycle before every public remote mutation dispatch', async () => {
+    const originalFetch = globalThis.fetch;
+    const graph = 'http://ex.org/tracked-dispatch';
+    const metaGraph = `${graph}/meta`;
+    const subject = 'http://ex.org/subject';
+    const quad = {
+      subject,
+      predicate: 'http://ex.org/p',
+      object: '"value"',
+      graph,
+    };
+    const cases: Array<{
+      name: string;
+      scope: string;
+      attempt(store: SparqlHttpStore): Promise<unknown>;
+    }> = [
+      { name: 'insert', scope: graph, attempt: (store) => store.insert([quad]) },
+      { name: 'delete', scope: graph, attempt: (store) => store.delete([quad]) },
+      {
+        name: 'deleteByPattern',
+        scope: graph,
+        attempt: (store) => store.deleteByPattern({ subject, graph }),
+      },
+      {
+        name: 'deleteBySubjectPrefix',
+        scope: graph,
+        attempt: (store) => store.deleteBySubjectPrefix(graph, subject),
+      },
+      {
+        name: 'update',
+        scope: graph,
+        attempt: (store) => store.update('DELETE WHERE { GRAPH ?g { ?s ?p ?o } }'),
+      },
+      {
+        name: 'replaceGraph',
+        scope: graph,
+        attempt: (store) => store.replaceGraph(graph, [quad]),
+      },
+      {
+        name: 'replaceGraphAndSubject',
+        scope: metaGraph,
+        attempt: (store) => store.replaceGraphAndSubject(
+          graph,
+          [quad],
+          metaGraph,
+          subject,
+          [{ ...quad, graph: metaGraph }],
+        ),
+      },
+      {
+        name: 'replaceSubject',
+        scope: graph,
+        attempt: (store) => store.replaceSubject(graph, subject, [quad]),
+      },
+      { name: 'dropGraph', scope: graph, attempt: (store) => store.dropGraph(graph) },
+    ];
+
+    try {
+      for (const testCase of cases) {
+        let markDispatched!: () => void;
+        let releaseResponse!: () => void;
+        const dispatched = new Promise<void>((resolve) => { markDispatched = resolve; });
+        const response = new Promise<Response>((resolve) => {
+          releaseResponse = () => resolve(new Response('', { status: 200 }));
+        });
+        globalThis.fetch = (async (input: string | URL | Request) => {
+          if (String(input).includes('/query')) {
+            return new Response(JSON.stringify({
+              head: { vars: ['c'] },
+              results: { bindings: [{ c: { type: 'literal', value: '1' } }] },
+            }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/sparql-results+json' },
+            });
+          }
+          markDispatched();
+          return response;
+        }) as typeof fetch;
+
+        const pendingStore = new SparqlHttpStore({
+          queryEndpoint: 'http://tracked.test/query',
+          updateEndpoint: 'http://tracked.test/update',
+          atomicUpdates: true,
+        });
+        const before = pendingStore.getWriteRevision(testCase.scope);
+        const mutation = testCase.attempt(pendingStore);
+        await dispatched;
+        const pending = pendingStore.getWriteRevision(testCase.scope);
+        expect(pending.generation, testCase.name).toBeGreaterThan(before.generation);
+        expect(pending.stable, testCase.name).toBe(false);
+
+        releaseResponse();
+        await mutation;
+        const settled = pendingStore.getWriteRevision(testCase.scope);
+        expect(settled.generation, testCase.name).toBeGreaterThan(pending.generation);
+        expect(settled.stable, testCase.name).toBe(true);
+      }
     } finally {
       globalThis.fetch = originalFetch;
     }

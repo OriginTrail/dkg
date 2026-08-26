@@ -4,7 +4,7 @@ import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
-import { GraphWriteGenTracker } from '../graph-write-gen.js';
+import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -629,16 +629,24 @@ export class OxigraphWorkerStore implements TripleStore {
   // head-of-line fairness should run on an external SPARQL server, not by
   // silently fragmenting this insert into non-atomic chunks.
   async insert(quads: Quad[]): Promise<void> {
-    await this.runTrackedWrite([...new Set(quads.map((q) => q.graph || ''))], () =>
-      this.call('insert', quads));
+    await this.runTrackedWrite(
+      { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
+      () => this.call('insert', quads),
+    );
   }
   async delete(quads: Quad[]): Promise<void> {
-    await this.runTrackedWrite([...new Set(quads.map((q) => q.graph || ''))], () =>
-      this.call('delete', quads));
+    await this.runTrackedWrite(
+      { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
+      () => this.call('delete', quads),
+    );
   }
   async deleteByPattern(pattern: Partial<Quad>): Promise<number> {
-    return this.runTrackedWrite(pattern.graph ? [pattern.graph] : null, () =>
-      this.call<number>('deleteByPattern', pattern));
+    return this.runTrackedWrite(
+      pattern.graph
+        ? { kind: 'graphs', graphs: [pattern.graph] }
+        : { kind: 'all' },
+      () => this.call<number>('deleteByPattern', pattern),
+    );
   }
   // Server-side SPARQL UPDATE forwarded to the worker's OxigraphStore (which
   // implements `update`); same atomic single-message contract as `insert`.
@@ -646,10 +654,13 @@ export class OxigraphWorkerStore implements TripleStore {
   async update(sparql: string, _options?: UpdateOptions): Promise<void> {
     // A raw UPDATE's write scope is not derivable at the call site
     // (`touchedGraphs` hints only membership changes) — unscoped lifecycle.
-    await this.runTrackedWrite(null, () => this.call('update', sparql));
+    await this.runTrackedWrite({ kind: 'all' }, () => this.call('update', sparql));
   }
   async replaceGraph(graphUri: string, quads: Quad[]): Promise<void> {
-    await this.runTrackedWrite([graphUri], () => this.call('replaceGraph', graphUri, quads));
+    await this.runTrackedWrite(
+      { kind: 'graphs', graphs: [graphUri] },
+      () => this.call('replaceGraph', graphUri, quads),
+    );
   }
   async replaceGraphAndSubject(
     graphUri: string,
@@ -658,20 +669,23 @@ export class OxigraphWorkerStore implements TripleStore {
     metadataSubject: string,
     metadataQuads: Quad[],
   ): Promise<void> {
-    await this.runTrackedWrite([graphUri, metaGraphUri], () => this.call(
-      'replaceGraphAndSubject',
-      graphUri,
-      graphQuads,
-      metaGraphUri,
-      metadataSubject,
-      metadataQuads,
-    ));
+    await this.runTrackedWrite(
+      { kind: 'graphs', graphs: [graphUri, metaGraphUri] },
+      () => this.call(
+        'replaceGraphAndSubject',
+        graphUri,
+        graphQuads,
+        metaGraphUri,
+        metadataSubject,
+        metadataQuads,
+      ),
+    );
   }
   async replaceSubject(graphUri: string, subject: string, quads: Quad[]): Promise<void> {
     // The worker dispatch is generic (`store[method](...args)`), so this routes
     // to the worker's embedded OxigraphStore.replaceSubject — one atomic
     // single-message commit, same contract as insert/replaceGraph.
-    await this.runTrackedWrite([graphUri], () =>
+    await this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>
       this.call('replaceSubject', graphUri, subject, quads));
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
@@ -682,13 +696,16 @@ export class OxigraphWorkerStore implements TripleStore {
   }
   async createGraph(graphUri: string): Promise<void> { return this.call('createGraph', graphUri); }
   async dropGraph(graphUri: string): Promise<void> {
-    await this.runTrackedWrite([graphUri], () => this.call('dropGraph', graphUri));
+    await this.runTrackedWrite(
+      { kind: 'graphs', graphs: [graphUri] },
+      () => this.call('dropGraph', graphUri),
+    );
   }
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs');
   }
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
-    return this.runTrackedWrite([graphUri], () =>
+    return this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>
       this.call<number>('deleteBySubjectPrefix', graphUri, prefix));
   }
 
@@ -701,12 +718,10 @@ export class OxigraphWorkerStore implements TripleStore {
   }
 
   private async runTrackedWrite<T>(
-    graphs: readonly string[] | null,
+    scope: GraphWriteScope,
     work: () => Promise<T>,
   ): Promise<T> {
-    const lifecycle = graphs === null
-      ? this.writeGen.beginUnscopedWrite()
-      : this.writeGen.beginGraphWrites(graphs);
+    const lifecycle = this.writeGen.beginWrite(scope);
     try {
       return await work();
     } finally {

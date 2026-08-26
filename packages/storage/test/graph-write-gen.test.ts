@@ -27,10 +27,10 @@ describe('GraphWriteGenTracker', () => {
     const tracker = new GraphWriteGenTracker();
     const before = tracker.getWriteGen(CG_PREFIX);
 
-    tracker.recordGraphWrites([OTHER_GRAPH]);
+    tracker.recordWrite({ kind: 'graphs', graphs: [OTHER_GRAPH] });
     expect(tracker.getWriteGen(CG_PREFIX)).toBe(before);
 
-    tracker.recordGraphWrites([SWM_GRAPH]);
+    tracker.recordWrite({ kind: 'graphs', graphs: [SWM_GRAPH] });
     const after = tracker.getWriteGen(CG_PREFIX);
     expect(after).toBeGreaterThan(before);
     // Stable while nothing else is written.
@@ -42,7 +42,7 @@ describe('GraphWriteGenTracker', () => {
     const cgBefore = tracker.getWriteGen(CG_PREFIX);
     const otherBefore = tracker.getWriteGen('did:dkg:context-graph:other-cg/');
 
-    tracker.recordUnscopedWrite();
+    tracker.recordWrite({ kind: 'all' });
     expect(tracker.getWriteGen(CG_PREFIX)).toBeGreaterThan(cgBefore);
     expect(tracker.getWriteGen('did:dkg:context-graph:other-cg/')).toBeGreaterThan(otherBefore);
   });
@@ -50,7 +50,7 @@ describe('GraphWriteGenTracker', () => {
   it('keeps default-graph writes invisible to named-graph prefixes', () => {
     const tracker = new GraphWriteGenTracker();
     const before = tracker.getWriteGen(CG_PREFIX);
-    tracker.recordGraphWrites(['']);
+    tracker.recordWrite({ kind: 'graphs', graphs: [''] });
     expect(tracker.getWriteGen(CG_PREFIX)).toBe(before);
     // ...but visible to the match-everything empty prefix.
     expect(tracker.getWriteGen('')).toBeGreaterThan(0);
@@ -60,18 +60,18 @@ describe('GraphWriteGenTracker', () => {
     const tracker = new GraphWriteGenTracker();
     const initial = tracker.getWriteGen('');
 
-    tracker.recordGraphWrites([SWM_GRAPH, OTHER_GRAPH]);
+    tracker.recordWrite({ kind: 'graphs', graphs: [SWM_GRAPH, OTHER_GRAPH] });
     const afterScoped = tracker.getWriteGen('');
     expect(afterScoped).toBeGreaterThan(initial);
     expect(tracker.getWriteGen('')).toBe(afterScoped);
 
-    tracker.recordUnscopedWrite();
+    tracker.recordWrite({ kind: 'all' });
     expect(tracker.getWriteGen('')).toBeGreaterThan(afterScoped);
   });
 
   it('reports an indeterminate remote scope as observably unstable without mutating reads', () => {
     const tracker = new GraphWriteGenTracker();
-    tracker.recordIndeterminateGraphWrites([SWM_GRAPH]);
+    tracker.beginWrite({ kind: 'graphs', graphs: [SWM_GRAPH] }).indeterminate();
 
     const firstScoped = tracker.getWriteRevision(CG_PREFIX);
     expect(firstScoped.stable).toBe(false);
@@ -89,7 +89,7 @@ describe('GraphWriteGenTracker', () => {
     const tracker = new GraphWriteGenTracker();
     const before = tracker.getWriteRevision(CG_PREFIX);
 
-    const lifecycle = tracker.beginGraphWrites([SWM_GRAPH]);
+    const lifecycle = tracker.beginWrite({ kind: 'graphs', graphs: [SWM_GRAPH] });
     const pending = tracker.getWriteRevision(CG_PREFIX);
     expect(pending.generation).toBeGreaterThan(before.generation);
     expect(pending.stable).toBe(false);
@@ -103,8 +103,8 @@ describe('GraphWriteGenTracker', () => {
 
   it('keeps overlapping scoped writes unstable until every lifecycle settles', () => {
     const tracker = new GraphWriteGenTracker();
-    const first = tracker.beginGraphWrites([SWM_GRAPH]);
-    const second = tracker.beginGraphWrites([SWM_GRAPH]);
+    const first = tracker.beginWrite({ kind: 'graphs', graphs: [SWM_GRAPH] });
+    const second = tracker.beginWrite({ kind: 'graphs', graphs: [SWM_GRAPH] });
 
     const bothPending = tracker.getWriteRevision(CG_PREFIX);
     expect(bothPending.stable).toBe(false);
@@ -121,14 +121,14 @@ describe('GraphWriteGenTracker', () => {
 
   it('makes every prefix unstable for unscoped pending and indeterminate writes', () => {
     const settledTracker = new GraphWriteGenTracker();
-    const pending = settledTracker.beginUnscopedWrite();
+    const pending = settledTracker.beginWrite({ kind: 'all' });
     expect(settledTracker.getWriteRevision(CG_PREFIX).stable).toBe(false);
     expect(settledTracker.getWriteRevision('did:dkg:context-graph:other/').stable).toBe(false);
     pending.settle();
     expect(settledTracker.getWriteRevision(CG_PREFIX).stable).toBe(true);
 
     const indeterminateTracker = new GraphWriteGenTracker();
-    const indeterminate = indeterminateTracker.beginUnscopedWrite();
+    const indeterminate = indeterminateTracker.beginWrite({ kind: 'all' });
     indeterminate.indeterminate();
     const revision = indeterminateTracker.getWriteRevision(CG_PREFIX);
     expect(revision.stable).toBe(false);
@@ -137,12 +137,12 @@ describe('GraphWriteGenTracker', () => {
 
   it('folds LRU-evicted graphs into the global floor (eviction can only force rescans)', () => {
     const tracker = new GraphWriteGenTracker();
-    tracker.recordGraphWrites([SWM_GRAPH]);
+    tracker.recordWrite({ kind: 'graphs', graphs: [SWM_GRAPH] });
     const observed = tracker.getWriteGen(CG_PREFIX);
 
     // Flood with enough distinct graphs to evict SWM_GRAPH from the LRU map.
     for (let i = 0; i < 8300; i++) {
-      tracker.recordGraphWrites([`urn:flood:${i}`]);
+      tracker.recordWrite({ kind: 'graphs', graphs: [`urn:flood:${i}`] });
     }
     // The evicted graph folded into the global floor: the prefix must NOT
     // keep reporting the old generation it can no longer prove unchanged —
@@ -168,15 +168,12 @@ describe('OxigraphStore write-generation capability', () => {
     expect(asGraphWriteGenSource(null)).toBeNull();
   });
 
-  it('preserves legacy getWriteGen-only adapters and normalizes revision discovery', () => {
+  it('preserves legacy getWriteGen discovery without fabricating a stable revision', () => {
     const legacy: GraphWriteGenSource = { getWriteGen: () => 42 };
     const decorated = { innerStore: { inner: legacy } };
 
     expect(asGraphWriteGenSource(decorated)?.getWriteGen(CG_PREFIX)).toBe(42);
-    expect(asGraphWriteRevisionSource(decorated)?.getWriteRevision(CG_PREFIX)).toEqual({
-      generation: 42,
-      stable: true,
-    });
+    expect(asGraphWriteRevisionSource(decorated)).toBeNull();
 
     const revisionOnly = { getWriteRevision: () => ({ generation: 7, stable: false }) };
     expect(asGraphWriteRevisionSource(revisionOnly)?.getWriteRevision(CG_PREFIX)).toEqual({

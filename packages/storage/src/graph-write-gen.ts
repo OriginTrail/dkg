@@ -43,7 +43,13 @@ export interface GraphWriteRevision {
   stable: boolean;
 }
 
-interface GraphWriteLifecycle {
+/** Explicit write ownership used by every adapter and lifecycle boundary. */
+export type GraphWriteScope =
+  | Readonly<{ kind: 'all' }>
+  | Readonly<{ kind: 'graphs'; graphs: readonly string[] }>;
+
+/** One dispatched-write lifecycle. Its terminal transition is idempotent. */
+export interface GraphWriteLifecycle {
   settle(): void;
   indeterminate(): void;
 }
@@ -71,8 +77,20 @@ export class GraphWriteGenTracker implements GraphWriteGenSource, GraphWriteRevi
   private readonly activeGraphs = new Map<string, number>();
   private activeGlobal = 0;
 
+  /** Record a synchronous write that has already settled. */
+  recordWrite(scope: GraphWriteScope): void {
+    if (scope.kind === 'all') this.recordUnscopedWrite();
+    else this.recordGraphWrites(scope.graphs);
+  }
+
+  /** Begin one dispatched write and return its named terminal boundary. */
+  beginWrite(scope: GraphWriteScope): GraphWriteLifecycle {
+    if (scope.kind === 'all') return this.beginUnscopedWrite();
+    return this.beginGraphWrites(scope.graphs);
+  }
+
   /** Record a write scoped to known graph URIs (`''` = the default graph). */
-  recordGraphWrites(graphs: Iterable<string>): void {
+  private recordGraphWrites(graphs: Iterable<string>): void {
     let gen: number | undefined;
     for (const graph of graphs) {
       gen ??= ++this.counter;
@@ -88,11 +106,11 @@ export class GraphWriteGenTracker implements GraphWriteGenSource, GraphWriteRevi
   }
 
   /** Record a write whose affected graphs are not derivable at the call site. */
-  recordUnscopedWrite(): void {
+  private recordUnscopedWrite(): void {
     this.globalFloor = ++this.counter;
   }
 
-  beginGraphWrites(graphs: Iterable<string>): GraphWriteLifecycle {
+  private beginGraphWrites(graphs: Iterable<string>): GraphWriteLifecycle {
     const affected = [...new Set(graphs)];
     this.recordGraphWrites(affected);
     for (const graph of affected) {
@@ -110,7 +128,7 @@ export class GraphWriteGenTracker implements GraphWriteGenSource, GraphWriteRevi
     );
   }
 
-  beginUnscopedWrite(): GraphWriteLifecycle {
+  private beginUnscopedWrite(): GraphWriteLifecycle {
     this.recordUnscopedWrite();
     this.activeGlobal += 1;
     return this.lifecycle(
@@ -131,7 +149,7 @@ export class GraphWriteGenTracker implements GraphWriteGenSource, GraphWriteRevi
    * an affected generation never stabilize, deliberately disabling generation-
    * keyed memoization until restart rather than certifying a stale snapshot.
    */
-  recordIndeterminateGraphWrites(graphs: Iterable<string>): void {
+  private recordIndeterminateGraphWrites(graphs: Iterable<string>): void {
     const affected = [...new Set(graphs)];
     if (affected.length === 0) return;
     this.recordGraphWrites(affected);
@@ -223,9 +241,9 @@ export function asGraphWriteGenSource(store: unknown): GraphWriteGenSource | nul
  * Recover the revision-aware capability from a store (typically a
  * `createTripleStore(...)` result behind the daemon's decorator chain), or
  * `null` when the backing adapter does not track write generations — callers
- * MUST fail open (always scan) on `null`. Legacy getWriteGen-only adapters are
- * normalized to their former stable-generation behavior, preserving the
- * public capability while newer adapters can report pending remote writes.
+ * MUST fail open (always scan) on `null`. A legacy getWriteGen-only adapter is
+ * deliberately not promoted: it cannot observe an in-flight write and must
+ * not masquerade as a native stable revision source.
  */
 export function asGraphWriteRevisionSource(store: unknown): GraphWriteRevisionSource | null {
   // Follow `.innerStore` (hand-rolled forwarders like the daemon's
@@ -236,7 +254,6 @@ export function asGraphWriteRevisionSource(store: unknown): GraphWriteRevisionSo
   let s = store as
     | {
       getWriteRevision?: unknown;
-      getWriteGen?: unknown;
       innerStore?: unknown;
       inner?: unknown;
     }
@@ -246,15 +263,6 @@ export function asGraphWriteRevisionSource(store: unknown): GraphWriteRevisionSo
     if (typeof s.getWriteRevision === 'function') {
       const source = s as { getWriteRevision(graphPrefix: string): GraphWriteRevision };
       return { getWriteRevision: (graphPrefix) => source.getWriteRevision(graphPrefix) };
-    }
-    if (typeof s.getWriteGen === 'function') {
-      const source = s as { getWriteGen(graphPrefix: string): number };
-      return {
-        getWriteRevision: (graphPrefix) => ({
-          generation: source.getWriteGen(graphPrefix),
-          stable: true,
-        }),
-      };
     }
     s = (s.innerStore ?? s.inner) as typeof s;
   }

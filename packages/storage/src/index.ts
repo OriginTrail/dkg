@@ -93,8 +93,10 @@ export {
   asGraphWriteGenSource,
   asGraphWriteRevisionSource,
   type GraphWriteGenSource,
+  type GraphWriteLifecycle,
   type GraphWriteRevision,
   type GraphWriteRevisionSource,
+  type GraphWriteScope,
 } from './graph-write-gen.js';
 export {
   ExactGraphReadError,
