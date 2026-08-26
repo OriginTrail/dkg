@@ -1,13 +1,15 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   analyzeSparqlOperation,
   classifySparqlOperation,
-  sparqlAnalysisCacheTestHooks,
 } from '../src/sparql-operation.js';
+import {
+  BoundedLruCache,
+  SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
+  SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
+} from '../src/bounded-lru-cache.js';
 
 describe('analyzeSparqlOperation memoization', () => {
-  beforeEach(() => sparqlAnalysisCacheTestHooks.reset());
-
   it('returns isolated mutable analyses while reusing the internal classification', () => {
     const sparql = `
       SELECT ?g WHERE {
@@ -18,13 +20,6 @@ describe('analyzeSparqlOperation memoization', () => {
 
     const first = analyzeSparqlOperation(sparql);
     const second = analyzeSparqlOperation(sparql);
-
-    expect(sparqlAnalysisCacheTestHooks.snapshot()).toEqual({
-      keys: [sparql],
-      hits: 1,
-      misses: 1,
-      bypasses: 0,
-    });
 
     expect(second).not.toBe(first);
     expect(second.operation).not.toBe(first.operation);
@@ -50,35 +45,40 @@ describe('analyzeSparqlOperation memoization', () => {
     const first = analyzeSparqlOperation(sparql);
     first.operation = { kind: 'unknown' };
     expect(analyzeSparqlOperation(sparql).operation).toEqual({ kind: 'read', form: 'SELECT' });
-    expect(sparqlAnalysisCacheTestHooks.snapshot()).toEqual({
-      keys: [],
-      hits: 0,
-      misses: 0,
-      bypasses: 2,
-    });
   });
 
-  it('refreshes LRU recency and evicts the oldest entry at the 256-entry cap', () => {
-    const query = (i: number) => `SELECT * WHERE { <urn:query:${i}> ?p ?o }`;
-    for (let i = 0; i < 256; i += 1) {
-      analyzeSparqlOperation(query(i));
-    }
-    expect(sparqlAnalysisCacheTestHooks.snapshot().keys).toHaveLength(256);
+  it('preserves a real mutating keyword on a cache hit', () => {
+    const sparql = 'SELECT * WHERE {} INSERT DATA { <urn:a> <urn:b> <urn:c> }';
+    expect(analyzeSparqlOperation(sparql).mutatingKeyword).toBe('INSERT');
+    expect(analyzeSparqlOperation(sparql).mutatingKeyword).toBe('INSERT');
+  });
+});
 
-    // A hit refreshes query 0 from the LRU head to the MRU tail.
-    analyzeSparqlOperation(query(0));
-    let snapshot = sparqlAnalysisCacheTestHooks.snapshot();
-    expect(snapshot.keys[0]).toBe(query(1));
-    expect(snapshot.keys.at(-1)).toBe(query(0));
-    expect(snapshot.hits).toBe(1);
+describe('bounded SPARQL analysis cache policy', () => {
+  const createCache = () => new BoundedLruCache<string, object>(
+    SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
+    (source) => source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
+  );
 
-    // The 257th distinct query evicts query 1, not the refreshed query 0.
-    analyzeSparqlOperation(query(256));
-    snapshot = sparqlAnalysisCacheTestHooks.snapshot();
-    expect(snapshot.keys).toHaveLength(256);
-    expect(snapshot.keys).not.toContain(query(1));
-    expect(snapshot.keys).toContain(query(0));
-    expect(snapshot.keys.at(-1)).toBe(query(256));
-    expect(snapshot.misses).toBe(257);
+  it('returns a cached value and refreshes it before bounded eviction', () => {
+    const cache = createCache();
+    const values = Array.from({ length: 257 }, () => ({}));
+    for (let i = 0; i < 256; i += 1) cache.set(`query-${i}`, values[i]);
+
+    expect(cache.get('query-0')).toBe(values[0]);
+    cache.set('query-256', values[256]);
+
+    expect(cache.size).toBe(256);
+    expect(cache.has('query-0')).toBe(true);
+    expect(cache.has('query-1')).toBe(false);
+    expect(cache.has('query-256')).toBe(true);
+  });
+
+  it('does not admit a source over 64 KiB', () => {
+    const cache = createCache();
+    const oversized = 'x'.repeat(SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH + 1);
+    cache.set(oversized, {});
+    expect(cache.size).toBe(0);
+    expect(cache.has(oversized)).toBe(false);
   });
 });

@@ -1,3 +1,9 @@
+import {
+  BoundedLruCache,
+  SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
+  SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
+} from './bounded-lru-cache.js';
+
 const SPARQL_READ_ONLY_OPERATIONS = ['SELECT', 'CONSTRUCT', 'ASK', 'DESCRIBE'] as const;
 const SPARQL_MUTATING_KEYWORDS = [
   'INSERT',
@@ -30,41 +36,10 @@ export interface SparqlOperationAnalysis {
 // once and also covers repeated scoring queries. Bound both cardinality and
 // source size so an untrusted query stream cannot turn this into an unbounded
 // retention surface.
-const SPARQL_ANALYSIS_CACHE_MAX_ENTRIES = 256;
-const SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH = 64 * 1024;
-const sparqlAnalysisCache = new Map<string, SparqlOperationAnalysis>();
-let sparqlAnalysisCacheHits = 0;
-let sparqlAnalysisCacheMisses = 0;
-let sparqlAnalysisCacheBypasses = 0;
-
-export interface SparqlAnalysisCacheTestSnapshot {
-  keys: string[];
-  hits: number;
-  misses: number;
-  bypasses: number;
-}
-
-/**
- * Narrow test-only observability for the bounded LRU policy. The returned keys
- * are a copy in least-to-most-recent order; callers cannot mutate cache state.
- * @internal
- */
-export const sparqlAnalysisCacheTestHooks = Object.freeze({
-  reset(): void {
-    sparqlAnalysisCache.clear();
-    sparqlAnalysisCacheHits = 0;
-    sparqlAnalysisCacheMisses = 0;
-    sparqlAnalysisCacheBypasses = 0;
-  },
-  snapshot(): SparqlAnalysisCacheTestSnapshot {
-    return {
-      keys: [...sparqlAnalysisCache.keys()],
-      hits: sparqlAnalysisCacheHits,
-      misses: sparqlAnalysisCacheMisses,
-      bypasses: sparqlAnalysisCacheBypasses,
-    };
-  },
-});
+const sparqlAnalysisCache = new BoundedLruCache<string, SparqlOperationAnalysis>(
+  SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
+  (source) => source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
+);
 
 const PREFIX_DECL = /\s*PREFIX\s+[^\s:]*:\s*(?:<[^<>"{}|^`\\\x00-\x20]*>)?/iy;
 const BASE_DECL = /\s*BASE\b\s*(?:<[^<>"{}|^`\\\x00-\x20]*>)?/iy;
@@ -217,20 +192,8 @@ function cloneSparqlOperationAnalysis(
 }
 
 export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis {
-  const cacheable = sparql.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH;
-  if (cacheable) {
-    const cached = sparqlAnalysisCache.get(sparql);
-    if (cached) {
-      sparqlAnalysisCacheHits++;
-      // Refresh insertion order to keep frequently repeated queries resident.
-      sparqlAnalysisCache.delete(sparql);
-      sparqlAnalysisCache.set(sparql, cached);
-      return cloneSparqlOperationAnalysis(cached);
-    }
-    sparqlAnalysisCacheMisses++;
-  } else {
-    sparqlAnalysisCacheBypasses++;
-  }
+  const cached = sparqlAnalysisCache.get(sparql);
+  if (cached) return cloneSparqlOperationAnalysis(cached);
 
   const stripped = stripSparqlLiteralsAndComments(sparql);
   const form = detectSparqlOperationFormFromStripped(stripped);
@@ -240,13 +203,7 @@ export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis 
     mutatingKeyword: match?.[1] ?? null,
   };
 
-  if (cacheable) {
-    sparqlAnalysisCache.set(sparql, analysis);
-    if (sparqlAnalysisCache.size > SPARQL_ANALYSIS_CACHE_MAX_ENTRIES) {
-      const oldest = sparqlAnalysisCache.keys().next().value;
-      if (oldest !== undefined) sparqlAnalysisCache.delete(oldest);
-    }
-  }
+  sparqlAnalysisCache.set(sparql, analysis);
   // Cache owns the canonical object. Public APIs historically returned mutable
   // data, so expose a fresh copy and prevent one caller from poisoning later
   // classifications shared across store layers.
