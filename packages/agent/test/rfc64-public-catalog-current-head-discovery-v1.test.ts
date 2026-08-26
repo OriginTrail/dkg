@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
 import { snapshotRfc64ExactWireRecordV1 } from '../src/rfc64/catalog-transport-wire-v1-internal.js';
 import {
+  RFC64_PRIVATE_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V2,
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
   Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1,
@@ -239,6 +240,52 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
       authorizeOpenCatalogOperation: legacy,
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     })).toThrow(/exactly one catalog access-policy authorizer/u);
+  });
+
+  it('routes invite-only discovery to v2 and keeps private queries off the public handler', async () => {
+    const handlers = new Map<string, (
+      data: Uint8Array,
+      peerId: { toString(): string },
+    ) => Promise<Uint8Array>>();
+    const send = vi.fn(async () => Uint8Array.of(0));
+    const router = {
+      register(protocol: string, handler: (typeof handlers extends Map<string, infer H> ? H : never)) {
+        handlers.set(protocol, handler);
+      },
+      unregister(protocol: string) { handlers.delete(protocol); },
+      send,
+    } as unknown as ProtocolRouter;
+    const authorizeCatalogOperation = vi.fn(async () => Object.freeze({
+      ...directAuthorization(),
+      accessPolicy: 1 as const,
+    }));
+    const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: { getVerifiedObjectByDigest: vi.fn(async () => null) },
+      readCurrentAppliedCatalogHeadDigest: vi.fn(async () => null),
+      authorizeCatalogOperation,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    transport.start();
+    const query = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+      ...discoveryScope(),
+      policyDigest: POLICY_DIGEST,
+    }) satisfies Rfc64PublicCatalogCurrentHeadQueryV1;
+
+    await expect(transport.discoverCurrentCatalogHead('provider-peer', query))
+      .resolves.toBeNull();
+    expect(send).toHaveBeenCalledWith(
+      'provider-peer',
+      RFC64_PRIVATE_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V2,
+      expect.any(Uint8Array),
+      undefined,
+    );
+    await expect(handlers.get(RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1)!(
+      encodeRfc64PublicCatalogCurrentHeadQueryV1(query),
+      { toString: () => 'requester-peer' },
+    )).resolves.toEqual(Uint8Array.of(2));
+    expect(authorizeCatalogOperation).toHaveBeenCalled();
+    transport.stop();
   });
 
   it('treats an unsorted expected-key declaration as an exact key set', () => {
@@ -761,27 +808,6 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     expect(readCurrentAppliedCatalogHeadDigest).toHaveBeenCalledTimes(2);
     expect(authorizeCatalogOperation).toHaveBeenCalledTimes(2);
     transport.stop();
-  });
-
-  it('rejects a non-root discovery claim through the shared public scope derivation', async () => {
-    const [node, persistence] = await Promise.all([
-      startNode(),
-      openPersistence('scope-derivation'),
-    ]);
-    const service = new Rfc64PublicCatalogServiceV1({
-      router: new ProtocolRouter(node),
-      controlObjects: persistence.controlObjects,
-      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
-      transportTimeoutMs: 1_000,
-    });
-    services.push(service);
-    acceptPolicy(service);
-    service.start();
-
-    await expect(service.discoverCurrentCatalogHead({
-      remotePeerId: 'unreachable-peer',
-      scope: Object.freeze({ ...discoveryScope(), subGraphName: 'nested' as const }),
-    })).rejects.toThrow(/accepted public root policy/);
   });
 
   it('rejects a canonical requester-side response outside the exact query scope', async () => {

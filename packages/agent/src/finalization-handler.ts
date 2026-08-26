@@ -43,7 +43,6 @@ import {
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
   generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata,
-  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad,
   insertBoundedAgentRegistryMeta,
   generateSubGraphRegistration,
@@ -53,7 +52,6 @@ import {
   withMaterializationLock,
   KnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
-  workspacePublicQuadsDigest,
   type MaterializedVersion,
   type KnowledgeAssetWorkspaceHead,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
@@ -102,6 +100,12 @@ import {
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 import { recoverReceiptBackedGraphScopedEvidence } from './receipt-backed-graph-scoped-evidence.js';
+import { resolveConfirmedGraphScopedVm } from './confirmed-graph-scoped-vm-resolver.js';
+import {
+  verifyExactGraphContent,
+  type ExactGraphContentVerification,
+  type VerifiedExactGraphContent,
+} from './exact-graph-content-verifier.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 /**
@@ -182,36 +186,8 @@ function sameBigIntLiteral(left: string | bigint | null | undefined, right: stri
   }
 }
 
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-  return left.length === right.length
-    && left.every((byte, index) => byte === right[index]);
-}
-
-type ExactGraphScopedLayerVerification =
-  | {
-      status: 'verified';
-      graphUri: string;
-      quads: Quad[];
-      merkleRoot: Uint8Array;
-    }
-  | {
-      status: 'count-mismatch';
-      graphUri: string;
-      actualCount: number;
-    }
-  | {
-      status: 'merkle-mismatch';
-      graphUri: string;
-    }
-  | {
-      status: 'head-mismatch';
-      graphUri: string;
-    };
-
-type VerifiedGraphScopedLayer = Extract<
-  ExactGraphScopedLayerVerification,
-  { status: 'verified' }
->;
+type ExactGraphScopedLayerVerification = ExactGraphContentVerification;
+type VerifiedGraphScopedLayer = VerifiedExactGraphContent;
 
 /**
  * Exact local content accepted by the receiptless public-finalization policy.
@@ -371,9 +347,12 @@ export interface ChainReconciledKCInput {
   contextGraphId: string;
   onChainCgId: string;
   ual: string;
+  /** Exact current chain rootCount when the caller has one coherent snapshot. */
+  assertionVersion?: bigint;
   merkleRoot: Uint8Array;
   publisherAddress: string;
   kaId: bigint;
+  batchId: bigint;
   versionBlock: number;
   authorAddress?: string;
   subGraphName?: string;
@@ -492,12 +471,16 @@ export class FinalizationHandler {
     const materializer: FinalizationRecoveryMaterializer<PreparedGraphScopedMaterialization> = {
       prepare: (input) => this.prepareGraphScopedMaterialization(input),
       apply: (input) => this.applyPreparedGraphScopedMaterialization(input),
+      recoverVerifiedEvidence: (input) => (
+        this.recoverVerifiedGraphScopedEvidenceFromConfirmedVm(input)
+      ),
       replayVerified: ({ replay, candidate, evidence }) => this.reconcileGraphScopedKC({
         contextGraphId: replay.contextGraphId,
         ual: replay.ual,
         merkleRoot: ethers.getBytes(replay.merkleRoot),
         publisherAddress: evidence.publisherAddress,
         kaId: BigInt(replay.kaId),
+        batchId: candidate.batchId,
         versionBlock: evidence.blockNumber,
         ...(evidence.authorAddress ? { authorAddress: evidence.authorAddress } : {}),
         ...(evidence.subGraphName ? { subGraphName: evidence.subGraphName } : {}),
@@ -1407,95 +1390,55 @@ export class FinalizationHandler {
       input.scope,
       input.subGraphName,
     );
-    const result = await this.store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(graphUri)}> { ?s ?p ?o } }`,
-      { source: 'agent.finalization.verifyExactLayer' },
-    );
-    const quads = result.type === 'quads'
-      ? result.quads.map((quad) => ({ ...quad, graph: '' }))
-      : [];
-    if (quads.length !== input.publicTripleCount) {
-      return { status: 'count-mismatch', graphUri, actualCount: quads.length };
-    }
-    const merkleRoot = computeFlatKCRoot(
-      quads,
-      input.privateMerkleRoot ? [input.privateMerkleRoot] : [],
-    );
-    if (!equalBytes(merkleRoot, input.expectedMerkleRoot)) {
-      return { status: 'merkle-mismatch', graphUri };
-    }
-    if (
-      input.expectedPublicQuadsDigest !== undefined
-      && workspacePublicQuadsDigest(quads) !== input.expectedPublicQuadsDigest
-    ) {
-      return { status: 'head-mismatch', graphUri };
-    }
-    return { status: 'verified', graphUri, quads, merkleRoot };
+    return verifyExactGraphContent(this.store, {
+      graphUri,
+      publicTripleCount: input.publicTripleCount,
+      ...(input.privateMerkleRoot
+        ? { privateMerkleRoot: input.privateMerkleRoot }
+        : {}),
+      expectedMerkleRoot: input.expectedMerkleRoot,
+      ...(input.expectedPublicQuadsDigest
+        ? { expectedPublicQuadsDigest: input.expectedPublicQuadsDigest }
+        : {}),
+      source: 'agent.finalization.verifyExactLayer',
+    });
   }
 
   /** Recognize exact confirmed VM state from surviving immutable metadata. */
   private async reconcileConfirmedGraphScopedVmWithoutWorkspaceHead(input: {
     contextGraphId: string;
     ual: string;
+    assertionVersion?: bigint;
     merkleRoot: Uint8Array;
     kaId: bigint;
+    batchId: bigint;
     versionBlock: number;
     subGraphName?: string;
   }, ctx: OperationContext): Promise<'already-confirmed' | 'no-swm' | undefined> {
-    const stored = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(this.store, {
+    const resolution = await resolveConfirmedGraphScopedVm(this.store, {
       contextGraphId: input.contextGraphId,
       ual: input.ual,
+      ...(input.assertionVersion === undefined
+        ? {}
+        : { assertionVersion: input.assertionVersion }),
+      merkleRoot: input.merkleRoot,
+      kaId: input.kaId,
+      batchId: input.batchId,
+      ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
     });
-    if (stored.state === 'absent') return undefined;
-    if (stored.state === 'invalid') {
-      this.log.warn(ctx, `Chain-reconcile: invalid confirmed graph-scoped metadata for ${input.ual}`);
-      return 'no-swm';
-    }
-
-    const { envelope } = stored;
-    let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-    try {
-      scope = createGraphKnowledgeAssetScope(input.ual, envelope.assertionVersion);
-    } catch {
-      return 'no-swm';
-    }
-    const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
-    if (
-      scope.ual !== input.ual
-      || packedKaId !== input.kaId
-      || envelope.batchId !== input.kaId
-      || !equalBytes(envelope.merkleRoot, input.merkleRoot)
-      || (input.subGraphName !== undefined && input.subGraphName !== envelope.subGraphName)
-    ) {
+    if (resolution.status === 'absent') return undefined;
+    if (resolution.status === 'invalid') {
       this.log.warn(
         ctx,
-        `Chain-reconcile: confirmed graph-scoped metadata does not match chain identity for ${input.ual}`,
-      );
-      return 'no-swm';
-    }
-
-    const verification = await this.verifyExactGraphScopedLayer({
-      contextGraphId: input.contextGraphId,
-      scope,
-      layer: MemoryLayer.VerifiableMemory,
-      publicTripleCount: envelope.publicTripleCount,
-      ...(envelope.privateMerkleRoot
-        ? { privateMerkleRoot: envelope.privateMerkleRoot }
-        : {}),
-      expectedMerkleRoot: input.merkleRoot,
-      ...(envelope.subGraphName ? { subGraphName: envelope.subGraphName } : {}),
-    });
-    if (verification.status !== 'verified') {
-      this.log.warn(
-        ctx,
-        `Chain-reconcile: confirmed metadata exists but exact VM content is invalid for ${input.ual}`,
+        `Chain-reconcile: confirmed graph-scoped VM is invalid for ${input.ual} `
+          + `(${resolution.reason})`,
       );
       return 'no-swm';
     }
 
     await this.advanceExactGraphScopedVersion({
       contextGraphId: input.contextGraphId,
-      scope,
+      scope: resolution.scope,
       materializedVersion: { blockNumber: input.versionBlock, txIndex: 0 },
     });
     this.log.info(
@@ -1503,6 +1446,79 @@ export class FinalizationHandler {
       `Chain-reconcile: exact confirmed VM state survives without a workspace head for ${input.ual}`,
     );
     return 'already-confirmed';
+  }
+
+  /** Recover canonical receipt evidence from an exact, receipt-backed VM assertion. */
+  private async recoverVerifiedGraphScopedEvidenceFromConfirmedVm(input: {
+    replay: {
+      contextGraphId: string;
+      onChainCgId: string;
+      ual: string;
+      merkleRoot: string;
+      kaId: string;
+    };
+    candidate: ParsedGraphScopedFinalization;
+  }): Promise<VerifiedGraphScopedFinalizationEvidence | undefined> {
+    const { replay, candidate } = input;
+    let kaId: bigint;
+    let onChainContextGraphId: bigint;
+    try {
+      kaId = BigInt(replay.kaId);
+      onChainContextGraphId = BigInt(replay.onChainCgId);
+      if (kaId !== candidate.kaId || onChainContextGraphId <= 0n) return undefined;
+    } catch {
+      return undefined;
+    }
+
+    const resolution = await resolveConfirmedGraphScopedVm(this.store, {
+      contextGraphId: replay.contextGraphId,
+      ual: replay.ual,
+      merkleRoot: ethers.getBytes(replay.merkleRoot),
+      kaId,
+      batchId: candidate.batchId,
+      ...(candidate.msg.subGraphName
+        ? { subGraphName: candidate.msg.subGraphName }
+        : {}),
+    });
+    if (resolution.status !== 'verified') return undefined;
+
+    const { envelope } = resolution;
+    if (
+      envelope.transactionHash?.toLowerCase() !== candidate.msg.txHash.toLowerCase()
+      || envelope.assertionVersion !== candidate.assertionVersion
+      || envelope.publicTripleCount !== candidate.publicTripleCount
+      || envelope.privateTripleCount !== candidate.privateTripleCount
+      || (envelope.privateMerkleRoot
+        ? ethers.hexlify(envelope.privateMerkleRoot).toLowerCase()
+        : undefined) !== (candidate.privateMerkleRoot
+        ? ethers.hexlify(candidate.privateMerkleRoot).toLowerCase()
+        : undefined)
+      || envelope.batchId !== candidate.batchId
+    ) return undefined;
+
+    const recovery = await recoverReceiptBackedGraphScopedEvidence({
+      store: this.store,
+      chain: this.chain,
+      contextGraphId: replay.contextGraphId,
+      scope: resolution.scope,
+      head: {
+        kaUal: replay.ual,
+        assertionVersion: envelope.assertionVersion,
+        publicQuadsDigest: resolution.publicQuadsDigest,
+        publicTripleCount: envelope.publicTripleCount,
+        ...(envelope.privateMerkleRoot
+          ? { privateMerkleRoot: ethers.hexlify(envelope.privateMerkleRoot) }
+          : {}),
+        privateTripleCount: envelope.privateTripleCount,
+      },
+      merkleRoot: envelope.merkleRoot,
+      publisherAddress: candidate.msg.publisherAddress,
+      kaId,
+      batchId: candidate.batchId,
+      onChainContextGraphId,
+      ...(envelope.subGraphName ? { subGraphName: envelope.subGraphName } : {}),
+    });
+    return recovery.status === 'recovered' ? recovery.evidence : undefined;
   }
 
   /**
@@ -1514,9 +1530,11 @@ export class FinalizationHandler {
     contextGraphId: string;
     onChainCgId?: string;
     ual: string;
+    assertionVersion?: bigint;
     merkleRoot: Uint8Array;
     publisherAddress: string;
     kaId: bigint;
+    batchId: bigint;
     versionBlock: number;
     authorAddress?: string;
     subGraphName?: string;
@@ -1533,9 +1551,11 @@ export class FinalizationHandler {
       contextGraphId,
       onChainCgId,
       ual,
+      assertionVersion,
       merkleRoot,
       publisherAddress,
       kaId,
+      batchId,
       versionBlock,
       authorAddress,
       subGraphName,
@@ -1577,8 +1597,10 @@ export class FinalizationHandler {
         return (await this.reconcileConfirmedGraphScopedVmWithoutWorkspaceHead({
           contextGraphId,
           ual,
+          assertionVersion,
           merkleRoot,
           kaId,
+          batchId,
           versionBlock,
           ...(subGraphName ? { subGraphName } : {}),
         }, ctx)) ?? 'no-swm';
@@ -1590,8 +1612,10 @@ export class FinalizationHandler {
       return this.reconcileConfirmedGraphScopedVmWithoutWorkspaceHead({
         contextGraphId,
         ual,
+        assertionVersion,
         merkleRoot,
         kaId,
+        batchId,
         versionBlock,
         ...(subGraphName ? { subGraphName } : {}),
       }, ctx);
@@ -1633,13 +1657,20 @@ export class FinalizationHandler {
       && BigInt(workspaceHead.assertionVersion)
         > BigInt(trustedAssertionEvidence.assertionVersion);
     const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
-    if (scope.ual !== ual || packedKaId !== kaId) {
+    if (
+      scope.ual !== ual
+      || packedKaId !== kaId
+      || (assertionVersion !== undefined
+        && !sameBigIntLiteral(scope.assertionVersion, assertionVersion))
+    ) {
       this.log.warn(
         ctx,
-        `Chain-reconcile: UAL-derived kaId ${packedKaId} does not match chain kaId ${kaId} for ${ual}`,
+        `Chain-reconcile: local graph-scoped identity or assertion version does not match `
+          + `current chain identity for ${ual}`,
       );
       return 'no-swm';
     }
+    const reconciliationBatchId = batchId;
     if (head.publicTripleCount === 0 && head.privateTripleCount === 0) {
       this.log.warn(ctx, `Chain-reconcile: empty graph-scoped content envelope for ${ual}`);
       return 'no-swm';
@@ -1677,7 +1708,7 @@ export class FinalizationHandler {
         scope,
         head,
         merkleRoot,
-        batchId: kaId,
+        batchId: reconciliationBatchId,
         expectedTxHash: trustedAssertionEvidence?.transactionHash,
         accessPolicy: access.accessPolicy,
         allowedPeers: access.allowedPeers,
@@ -1700,7 +1731,7 @@ export class FinalizationHandler {
           scope,
           head,
           merkleRoot,
-          batchId: kaId,
+          batchId: reconciliationBatchId,
           accessPolicy: 'ownerOnly',
           allowedPeers: [],
           confirmationKind: 'transaction',
@@ -1743,6 +1774,7 @@ export class FinalizationHandler {
           merkleRoot,
           publisherAddress,
           kaId,
+          batchId: reconciliationBatchId,
           onChainContextGraphId,
           subGraphName,
         });
@@ -1759,7 +1791,7 @@ export class FinalizationHandler {
             computedMerkleRoot: vmVerification.merkleRoot,
             evidence: recovery.evidence,
             privateMerkleRoot,
-            batchId: kaId,
+            batchId: reconciliationBatchId,
             preserveNewerWorkspaceLifecycle: false,
             ctx,
           });
@@ -1771,7 +1803,7 @@ export class FinalizationHandler {
           head,
           privateMerkleRoot,
           merkleRoot,
-          batchId: kaId,
+          batchId: reconciliationBatchId,
           versionBlock,
           subGraphName,
           verifiedLayer: {
@@ -1793,7 +1825,7 @@ export class FinalizationHandler {
         computedMerkleRoot: vmVerification.merkleRoot,
         evidence: trustedAssertionEvidence,
         privateMerkleRoot,
-        batchId: kaId,
+        batchId: reconciliationBatchId,
         preserveNewerWorkspaceLifecycle,
         ctx,
       });
@@ -1848,7 +1880,7 @@ export class FinalizationHandler {
         head,
         privateMerkleRoot,
         merkleRoot,
-        batchId: kaId,
+        batchId: reconciliationBatchId,
         versionBlock,
         subGraphName,
         verifiedLayer: {
@@ -1866,7 +1898,7 @@ export class FinalizationHandler {
       head,
       privateMerkleRoot,
       computedMerkleRoot: swmVerification.merkleRoot,
-      batchId: kaId,
+      batchId: reconciliationBatchId,
       authorAddress: evidenceAuthorAddress,
       confirmation: {
         kind: 'transaction',
@@ -3087,12 +3119,9 @@ export class FinalizationHandler {
     const input = resolvedInput;
     const {
       contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
-      kaId, versionBlock, authorAddress, subGraphName, trustedAssertionEvidence,
+      kaId, batchId, versionBlock, authorAddress, subGraphName,
+      trustedAssertionEvidence, assertionVersion,
     } = input;
-    const ctxGraphId = onChainCgId.length > 0 ? onChainCgId : undefined;
-    const targetMetaGraph = ctxGraphId
-      ? contextGraphMetaUri(contextGraphId, ctxGraphId)
-      : `did:dkg:context-graph:${contextGraphId}/_meta`;
 
     if (!(await this.verifyChainCgBinding(kaId, onChainCgId, ctx))) {
       this.log.info(
@@ -3103,10 +3132,13 @@ export class FinalizationHandler {
     }
 
     const journalReplay = await this.replayMatchingRecoveryEntries(input, ctx);
-    if (journalReplay === 'recovered') {
+    // The recovery index predates exact chain-rootCount evidence. Exact asset
+    // inspection must therefore verify the resulting local assertion version
+    // below instead of treating a same-root replay as sufficient on its own.
+    if (journalReplay === 'recovered' && assertionVersion === undefined) {
       return { outcome: 'already-confirmed', legacyEligible: false, input };
     }
-    if (journalReplay === 'retry-pending') {
+    if (journalReplay === 'retry-pending' && assertionVersion === undefined) {
       return { outcome: 'receipt-revalidation-pending', legacyEligible: false, input };
     }
     if (journalReplay === 'invalidated') {
@@ -3121,9 +3153,11 @@ export class FinalizationHandler {
       contextGraphId,
       onChainCgId,
       ual,
+      assertionVersion,
       merkleRoot,
       publisherAddress,
       kaId,
+      batchId,
       versionBlock,
       authorAddress,
       subGraphName,
@@ -3139,15 +3173,6 @@ export class FinalizationHandler {
       );
       return { outcome: 'no-swm', legacyEligible: false, input };
     }
-    if (await this.isAlreadyConfirmed(
-      ual,
-      targetMetaGraph,
-      `did:dkg:context-graph:${contextGraphId}/_meta`,
-    )) {
-      this.log.info(ctx, `Chain-reconcile: legacy ${ual} already confirmed in VM, skipping`);
-      return { outcome: 'already-confirmed', legacyEligible: false, input };
-    }
-
     this.log.info(
       ctx,
       `Chain-reconcile: exact graph-scoped state is absent for ${ual}; legacy scan is not part of the exact operation`,
@@ -3178,9 +3203,24 @@ export class FinalizationHandler {
     if (!exact.legacyEligible) return exact.outcome;
     const {
       contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
-      kaId, versionBlock, authorAddress, subGraphName,
+      kaId, batchId, versionBlock, authorAddress, subGraphName,
     } = exact.input;
     const ctxGraphId = onChainCgId.length > 0 ? onChainCgId : undefined;
+    const targetMetaGraph = ctxGraphId
+      ? contextGraphMetaUri(contextGraphId, ctxGraphId)
+      : `did:dkg:context-graph:${contextGraphId}/_meta`;
+
+    // The ordinary compatibility path may retain the historical confirmed
+    // marker shortcut. Exact RFC-64 fetch cannot use this marker because it
+    // proves neither the current assertion version nor the current chain root.
+    if (await this.isAlreadyConfirmed(
+      ual,
+      targetMetaGraph,
+      `did:dkg:context-graph:${contextGraphId}/_meta`,
+    )) {
+      this.log.info(ctx, `Chain-reconcile: legacy ${ual} already confirmed in VM, skipping`);
+      return 'already-confirmed';
+    }
 
     // Recover the published roots from the legacy local SWM snapshot. This is
     // the only operation that may scan historical workspace operations.
@@ -3206,9 +3246,6 @@ export class FinalizationHandler {
       resolvedSubGraphName,
     );
     const isDualWrite = keepRootCopyOnLabel === true && !!ctxGraphId && !resolvedSubGraphName;
-    const targetMetaGraph = ctxGraphId
-      ? contextGraphMetaUri(contextGraphId, ctxGraphId)
-      : `did:dkg:context-graph:${contextGraphId}/_meta`;
     const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
 
     const outcome = await this.applyVerifiedFinalization({
@@ -3221,7 +3258,7 @@ export class FinalizationHandler {
       blockNumber: versionBlock,
       startKAId: kaId,
       endKAId: kaId,
-      batchId: 0n,
+      batchId,
       ctxGraphId,
       subGraphName: resolvedSubGraphName,
       authorAddress,

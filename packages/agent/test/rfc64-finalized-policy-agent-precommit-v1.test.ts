@@ -1,4 +1,8 @@
-import type { ContextGraphPolicyV1 } from '@origintrail-official/dkg-core';
+import type {
+  ContextGraphPolicyV1,
+  Digest32V1,
+  MemberRosterV1,
+} from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -18,6 +22,7 @@ import {
   RFC64_VM_KA_STORAGE,
   RFC64_VM_NETWORK_ID,
   RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID,
+  RFC64_VM_POLICY_DIGEST,
 } from './support/rfc64-finalized-vm-placement-fixture.js';
 import {
   acceptedRfc64VmPolicySnapshot,
@@ -99,6 +104,50 @@ function acceptedPolicyWith(
   });
 }
 
+function privateOwnerSnapshot(policyDigest = RFC64_VM_POLICY_DIGEST) {
+  const accepted = acceptedRfc64VmPolicySnapshot();
+  const policy = Object.freeze({
+    ...accepted.policy,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    accessPolicy: 1 as const,
+    source: Object.freeze({
+      kind: 'owner-signed-unregistered' as const,
+      ownerAddress: RFC64_VM_AUTHOR,
+      ownerAuthorityEra: '0' as const,
+    }),
+  });
+  const roster = Object.freeze({
+    networkId: policy.networkId,
+    contextGraphId: policy.contextGraphId,
+    ownershipTransitionDigest: policy.ownershipTransitionDigest,
+    era: policy.era,
+    version: '0',
+    previousRosterDigest: null,
+    policyDigest,
+    administrativeDelegationDigest: policy.administrativeDelegationDigest,
+    members: Object.freeze([Object.freeze({
+      agentAddress: RFC64_VM_AUTHOR,
+      roles: Object.freeze(['provider'] as const),
+    })]),
+    issuedAt: '1700000000000',
+  }) satisfies MemberRosterV1;
+  return Object.freeze({ policy, policyDigest, roster });
+}
+
+function privateOwnerPlan(policyDigest = RFC64_VM_POLICY_DIGEST) {
+  const base = rfc64FinalizedVmPrecommitPlan();
+  return Object.freeze({
+    ...base,
+    policyDigest,
+    catalogScope: Object.freeze({
+      ...base.catalogScope,
+      governanceChainId: null,
+      governanceContractAddress: null,
+    }),
+  });
+}
+
 describe('RFC-64 finalized policy agent precommit', () => {
   it('accepts a chain-bound SWM catalog without invoking VM materialization', async () => {
     const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
@@ -161,12 +210,87 @@ describe('RFC-64 finalized policy agent precommit', () => {
       getEvmChainId,
     });
 
+    const finalizedPlan = rfc64FinalizedVmPrecommitPlan();
     await expect(handler(
-      rfc64FinalizedVmPrecommitPlan(),
+      Object.freeze({
+        ...finalizedPlan,
+        catalogScope: Object.freeze({
+          ...finalizedPlan.catalogScope,
+          governanceChainId: null,
+          governanceContractAddress: null,
+        }),
+      }),
       new AbortController().signal,
     )).resolves.toBeUndefined();
     expect(getOnChainContextGraphId).not.toHaveBeenCalled();
     expect(getEvmChainId).not.toHaveBeenCalled();
+  });
+
+  it('accepts a private unregistered SWM catalog only with its exact current roster', async () => {
+    const current = privateOwnerSnapshot();
+    const acceptedPolicySnapshotForCatalogScope = vi.fn(() => current);
+    const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
+    const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
+    const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...options(),
+      acceptedPolicySnapshotForCatalogScope,
+      getOnChainContextGraphId,
+      getEvmChainId,
+    });
+
+    await expect(handler(
+      privateOwnerPlan(),
+      new AbortController().signal,
+    )).resolves.toBeUndefined();
+    expect(acceptedPolicySnapshotForCatalogScope).toHaveBeenCalledTimes(2);
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
+    expect(getEvmChainId).not.toHaveBeenCalled();
+  });
+
+  it('rejects private SWM when the roster is missing or the policy changes before commit', async () => {
+    const exact = privateOwnerSnapshot();
+    const missingRoster = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...options(),
+      acceptedPolicySnapshotForCatalogScope: () => Object.freeze({
+        ...exact,
+        roster: null,
+      }),
+    });
+    await expect(missingRoster(
+      privateOwnerPlan(),
+      new AbortController().signal,
+    )).rejects.toThrow(/exact current policy-bound roster/u);
+
+    const successorDigest = `0x${'a7'.repeat(32)}` as Digest32V1;
+    const acceptedPolicySnapshotForCatalogScope = vi.fn()
+      .mockReturnValueOnce(exact)
+      .mockReturnValue(privateOwnerSnapshot(successorDigest));
+    const changed = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...options(),
+      acceptedPolicySnapshotForCatalogScope,
+    });
+    await expect(changed(
+      privateOwnerPlan(),
+      new AbortController().signal,
+    )).rejects.toThrow(/accepted policy changed/u);
+  });
+
+  it('accepts a registered private catalog with the exact roster and live chain policy', async () => {
+    const base = acceptedRfc64VmPolicySnapshot();
+    const privateFinalized = Object.freeze({
+      ...base,
+      policy: Object.freeze({ ...base.policy, accessPolicy: 1 as const }),
+      roster: privateOwnerSnapshot().roster,
+    });
+    const live = await liveOptions({ accessPolicy: 1 });
+    const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...live.options,
+      acceptedPolicySnapshotForCatalogScope: () => privateFinalized,
+    });
+    await expect(handler(
+      rfc64FinalizedVmPrecommitPlan(),
+      new AbortController().signal,
+    )).resolves.toBeUndefined();
   });
 
   it('rejects a missing CG mapping or a different live chain', async () => {
@@ -190,7 +314,6 @@ describe('RFC-64 finalized policy agent precommit', () => {
   });
 
   it.each([
-    ['non-public access', { accessPolicy: 1 }],
     ['missing governance', {
       governanceChainId: null,
       governanceContractAddress: null,

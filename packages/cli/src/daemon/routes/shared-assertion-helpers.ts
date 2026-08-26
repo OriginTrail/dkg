@@ -8,6 +8,7 @@
 
 import type { ServerResponse } from "node:http";
 import {
+  validateContextGraphId,
   validateSubGraphName,
   validateAssertionName,
   isSafeIri,
@@ -33,7 +34,6 @@ import {
   isNoFundedPublisherWalletLike,
   safeDecodeURIComponent,
   normalizeContextGraphIdOrUri,
-  isValidContextGraphId,
 } from '../http-utils.js';
 import { getExtractionStatusRecord } from '../../extraction-status.js';
 import type { RequestContext } from './context.js';
@@ -612,7 +612,7 @@ export async function resolveImportedArtifact(
   if (!contextGraphId) {
     throw new ImportArtifactRouteError(400, '"contextGraphId" is required');
   }
-  if (!isValidContextGraphId(contextGraphId)) {
+  if (!validateContextGraphId(contextGraphId).valid) {
     throw new ImportArtifactRouteError(400, 'Invalid contextGraphId');
   }
 

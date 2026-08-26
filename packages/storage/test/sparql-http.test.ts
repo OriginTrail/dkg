@@ -1,12 +1,15 @@
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
+  STORE_OPERATION_TIMEOUT_CODE,
   SparqlHttpStore,
   createTripleStore,
   getExternalStorePrioritySchedulerSnapshot,
+  isSparqlHttpResponseError,
   tryReplaceGraphAtomically,
   tryReplaceSubjectAtomically,
   type Quad,
+  type SparqlHttpResponseErrorLike,
   type SparqlHttpSlowQueryEvent,
 } from '../src/index.js';
 
@@ -710,7 +713,16 @@ describe('SparqlHttpStore (test server)', () => {
       expect(failure).toMatchObject({
         message: expect.stringContaining('SPARQL HTTP query failed (500)'),
       });
-      expect((failure as { code?: unknown }).code).toBeUndefined();
+      // GH#1758 — this used to assert `code === undefined` as a proxy for "the
+      // managed cancellation policy did not apply". Non-OK responses now carry
+      // a typed `SPARQL_HTTP_RESPONSE` discriminant so the daemon can classify
+      // malformed queries by upstream status, so assert the guarantee directly
+      // instead: it must NOT be the timeout the managed path produces, and it
+      // must not be tagged as an oxigraph-server backend failure.
+      expect((failure as { code?: unknown }).code).not.toBe(STORE_OPERATION_TIMEOUT_CODE);
+      expect((failure as { backend?: unknown }).backend).toBeUndefined();
+      expect(isSparqlHttpResponseError(failure)).toBe(true);
+      expect((failure as SparqlHttpResponseErrorLike).status).toBe(500);
     } finally {
       globalThis.fetch = originalFetch;
     }

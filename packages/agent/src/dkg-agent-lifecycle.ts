@@ -193,7 +193,7 @@ import {
   NetworkAdmissionCoordinator,
   NetworkAdmissionRejectedError,
 } from './p2p/network-admission-coordinator.js';
-import { createNetworkAdmissionProtocolCheck } from './p2p/network-admission-protocol-adapter.js';
+import { createNetworkAdmissionRouterPolicy } from './p2p/network-admission-protocol-adapter.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -579,6 +579,7 @@ import {
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
   type DKGAgentConfig,
+  type ResolvedDKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerProbe,
   type SyncReconcilerBackoff,
@@ -636,7 +637,7 @@ import {
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
 
-function resolveAgentSyncGlobalBackpressure(config: DKGAgentConfig) {
+function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   // `trackSyncContextGraph()` mutates this list when an Edge explicitly
   // subscribes or starts a foreground catch-up. Those operator-selected graphs
   // need the same admission guarantee as an RFC-64 pinned scope: otherwise a
@@ -653,7 +654,7 @@ function resolveAgentSyncGlobalBackpressure(config: DKGAgentConfig) {
     ...config,
     selectedRecoveryContextGraphIds: [...new Set([
       ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
-        config.rfc64PublicCatalogBootstrap,
+        config.rfc64CatalogBootstrap ?? config.rfc64PublicCatalogBootstrap,
       ),
       ...edgeSelectedContextGraphIds,
     ])],
@@ -2018,7 +2019,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     this.router = new ProtocolRouter(this.node, {
       peerResolver,
-      isPeerAccepted: createNetworkAdmissionProtocolCheck(this.networkAdmissionCoordinator),
+      // Both admission phases — the probing full check and the cached-verdict
+      // pre-read gate — installed as one policy from one coordinator; see
+      // createNetworkAdmissionRouterPolicy for why they must not be wired
+      // separately.
+      ...createNetworkAdmissionRouterPolicy(this.networkAdmissionCoordinator),
       admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
     });
     // Default to in-memory substrate stores when no durable stores
@@ -4223,7 +4228,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): readonly string[] {
     const selected = new Set(this.config.syncContextGraphs ?? []);
     return resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
-      this.config.rfc64PublicCatalogBootstrap,
+      this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
       remotePeer,
     ).filter((contextGraphId) => selected.has(contextGraphId));
   }
@@ -4457,10 +4462,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
     const prioritySharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
     const automaticPeerSweep = source === 'on-connect' || source === 'reconcile';
-    const remotePeerIsCompleteSwmProvider = this.config.rfc64PublicCatalogBootstrap
-      ?.acceptedPublicPolicies.some(
+    const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+      ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
+      ?? [];
+    const remotePeerIsCompleteSwmProvider = acceptedPolicies.some(
         ({ completeSwmProviders = [] }) => completeSwmProviders.includes(remotePeer),
-      ) ?? false;
+      );
     const getSharedMemorySyncPlan = (peerId: string): Promise<SharedMemorySyncContextGraphPlan> => {
       let plan = sharedMemorySyncPlans.get(peerId);
       if (!plan) {

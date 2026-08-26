@@ -5,7 +5,9 @@ on:
     branches:
       - main
   schedule:
-    - cron: '17 * * * *'
+    # Pushes to main are the primary trigger. This daily run is only a recovery
+    # net for a transient failed or missed push-triggered sync.
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 permissions: {}

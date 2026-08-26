@@ -5,6 +5,10 @@ import {
   type Rfc64PublicCatalogReceiverReconcilerV1,
   type Rfc64PublicCatalogReconcileResultV1,
 } from '../src/rfc64/public-catalog-receiver-v1.js';
+import {
+  Rfc64CatalogProviderFailureAggregateV1,
+  Rfc64PublicCatalogReconciliationFailureRegistryV1,
+} from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from '../src/rfc64/public-catalog-transport-v1.js';
 
 function announcement(
@@ -125,6 +129,93 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
 
     expect(peers).toEqual(['peerA', 'peerB']);
     expect(receiver.stats()).toMatchObject({ scheduled: 2, applied: 1, notFound: 0 });
+  });
+
+  it('retains a complete provider set before work and fails over immediately', async () => {
+    const peers: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      if (peerId === 'peerA') throw new Error('provider lost during transfer');
+      return 'applied';
+    }), { maxAttempts: 2, retryBackoffMs: 0 });
+
+    const completion = await receiver.scheduleManyAndWait([
+      { announcement: announcement(), remotePeerId: 'peerA' },
+      { announcement: announcement(), remotePeerId: 'peerB' },
+    ]);
+
+    expect(peers).toEqual(['peerA', 'peerB']);
+    expect(completion).toMatchObject({
+      outcome: 'applied',
+      appliedProviderPeerId: 'peerB',
+      providerAttempts: 2,
+      error: null,
+    });
+    expect(receiver.stats()).toMatchObject({
+      scheduled: 2,
+      applied: 1,
+      failed: 0,
+      providerAttempts: 2,
+      providerSwitches: 1,
+      providerSuccesses: 1,
+      providerBackoffMs: 0,
+    });
+  });
+
+  it('isolates an explicit provider set from pre-existing same-head ambient work', async () => {
+    const ambientStarted = deferred<void>();
+    const releaseAmbient = deferred<void>();
+    const peers: string[] = [];
+    let applied = false;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(
+      async (peerId) => {
+        peers.push(peerId);
+        if (peerId !== 'peerC') throw new Error('explicit provider must not be needed');
+        ambientStarted.resolve(undefined);
+        await releaseAmbient.promise;
+        applied = true;
+        return 'applied';
+      },
+      async () => applied,
+    ), { retryBackoffMs: 0 });
+
+    receiver.schedule(announcement(), 'peerC');
+    await ambientStarted.promise;
+    const explicit = receiver.scheduleManyAndWait([
+      { announcement: announcement(), remotePeerId: 'peerA' },
+      { announcement: announcement(), remotePeerId: 'peerB' },
+    ]);
+    releaseAmbient.resolve(undefined);
+
+    await expect(explicit).resolves.toMatchObject({
+      outcome: 'already-applied',
+      appliedProviderPeerId: null,
+    });
+    expect(peers).toEqual(['peerC']);
+    expect(receiver.stats()).toMatchObject({
+      scheduled: 3,
+      applied: 1,
+      dedupedAlreadyApplied: 1,
+    });
+    await receiver.close();
+  });
+
+  it('accounts positive provider retry backoff in the task result path', async () => {
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      if (peerId === 'peerA') throw new Error('provider lost');
+      return 'applied';
+    }), { maxAttempts: 1, retryBackoffMs: 4 });
+
+    const completion = await receiver.scheduleManyAndWait([
+      { announcement: announcement(), remotePeerId: 'peerA' },
+      { announcement: announcement(), remotePeerId: 'peerB' },
+    ]);
+    expect(completion).toMatchObject({
+      outcome: 'applied',
+      appliedProviderPeerId: 'peerB',
+      providerAttempts: 2,
+    });
+    expect(receiver.stats().providerBackoffMs).toBe(4);
   });
 
   it('never retries an authoritative not-found peer while a viable peer can retry', async () => {
@@ -353,7 +444,14 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
 
     expect(script.peers).toEqual(['peerA', 'peerB']);
     expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0]?.[1]).toBe(peerAError);
+    expect(onError.mock.calls[0]?.[1]).toBeInstanceOf(
+      Rfc64CatalogProviderFailureAggregateV1,
+    );
+    expect((onError.mock.calls[0]?.[1] as Rfc64CatalogProviderFailureAggregateV1))
+      .toMatchObject({
+        attemptedProviderCount: 2,
+        providerFailures: [{ providerPeerId: 'peerA', error: peerAError }],
+      });
     expect(receiver.stats()).toMatchObject({
       scheduled: 52,
       dedupedInFlight: 51,
@@ -403,6 +501,13 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     await receiver.whenIdle();
     expect(peers).toEqual(['peerA', 'peerB', 'peerA', 'peerB']);
     expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toMatchObject({
+      attemptedProviderCount: 2,
+      providerFailures: [
+        { providerPeerId: 'peerA' },
+        { providerPeerId: 'peerB' },
+      ],
+    });
     expect(receiver.stats()).toMatchObject({ applied: 0, failed: 1 });
   });
 
@@ -424,7 +529,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(receiver.stats()).toMatchObject({ applied: 0, failed: 1 });
   });
 
-  it('retains a same-peer announcement under a rotated accepted policy', async () => {
+  it('reconciles the same durable head again under a rotated accepted policy', async () => {
     const oldPolicy = `0x${'71'.repeat(32)}`;
     const newPolicy = `0x${'72'.repeat(32)}`;
     const firstResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
@@ -443,7 +548,12 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     await receiver.whenIdle();
 
     expect(seenPolicies).toEqual([oldPolicy, newPolicy]);
-    expect(receiver.stats()).toMatchObject({ applied: 1, notFound: 0, failed: 0 });
+    expect(receiver.stats()).toMatchObject({
+      applied: 1,
+      notFound: 1,
+      failed: 0,
+      dedupedInFlight: 0,
+    });
   });
 
   it('caps retained providers for one exact head', async () => {
@@ -482,14 +592,16 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
 
   it('drops distinct heads when the bounded queue is full', async () => {
     const gate = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const onAttemptStart = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(
       reconciler(async () => gate.promise),
-      { maxConcurrent: 1, maxQueue: 1 },
+      { maxConcurrent: 1, maxQueue: 1, onAttemptStart },
     );
     receiver.schedule(headWith(`0x${'a1'.repeat(32)}`), 'peer');
     receiver.schedule(headWith(`0x${'a2'.repeat(32)}`), 'peer');
     receiver.schedule(headWith(`0x${'a3'.repeat(32)}`), 'peer');
     expect(receiver.stats().droppedQueueFull).toBe(1);
+    expect(onAttemptStart).toHaveBeenCalledTimes(3);
     gate.resolve('not-found');
     await receiver.whenIdle();
   });
@@ -517,6 +629,112 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     await receiver.whenIdle();
     expect(onError).toHaveBeenCalledTimes(1);
     expect(receiver.stats()).toMatchObject({ failed: 1, applied: 0 });
+  });
+
+  it('starts a new semantic attempt only after the prior same-head task is terminal', async () => {
+    const onAttemptStart = vi.fn();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => { throw new Error('terminal'); }),
+      { maxAttempts: 1, retryBackoffMs: 0, onAttemptStart },
+    );
+    const head = announcement();
+    receiver.schedule(head, 'peerA');
+    receiver.schedule(head, 'peerB');
+    await receiver.whenIdle();
+    expect(onAttemptStart).toHaveBeenCalledTimes(1);
+
+    receiver.schedule(head, 'peerA');
+    await receiver.whenIdle();
+    expect(onAttemptStart).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retain an older failure after a queued rotated-policy attempt succeeds', async () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const olderStarted = deferred<void>();
+    const releaseOlder = deferred<void>();
+    const older = announcement({ policyDigest: `0x${'71'.repeat(32)}` });
+    const newer = announcement({ policyDigest: `0x${'72'.repeat(32)}` });
+    const reconciledPolicies: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      reconciledPolicies.push(head.policyDigest);
+      if (head.policyDigest === older.policyDigest) {
+        olderStarted.resolve(undefined);
+        await releaseOlder.promise;
+        throw Object.assign(new Error('older policy failed'), { code: 'older-policy-failed' });
+      }
+      return 'applied';
+    }), {
+      maxAttempts: 1,
+      retryBackoffMs: 0,
+      onReconciliationAttemptStart: (head) => (
+        registry.beginAttempt(head.catalogHeadObjectDigest)
+      ),
+      onReconciliationAttemptSuccess: (head, attemptToken) => {
+        registry.completeAttempt(head.catalogHeadObjectDigest, attemptToken);
+      },
+      onReconciliationAttemptEnd: (head, attemptToken) => {
+        registry.endAttempt(head.catalogHeadObjectDigest, attemptToken);
+      },
+      onError: (head, error, attemptToken) => {
+        registry.record(
+          head.catalogHeadObjectDigest,
+          error,
+          null,
+          attemptToken ?? undefined,
+        );
+      },
+    });
+
+    receiver.schedule(older, 'peer-old');
+    await olderStarted.promise;
+    receiver.schedule(newer, 'peer-new');
+    releaseOlder.resolve(undefined);
+    await receiver.whenIdle();
+
+    expect(reconciledPolicies).toEqual([older.policyDigest, newer.policyDigest]);
+    expect(receiver.stats()).toMatchObject({ failed: 1, applied: 1 });
+    expect(registry.readCurrentAttempt(older.catalogHeadObjectDigest)).toBeNull();
+  });
+
+  it('ends attempt tokens after terminal not-found and failed outcomes', async () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const notFoundHead = headWith(`0x${'a3'.repeat(32)}`);
+    const failedHead = headWith(`0x${'a4'.repeat(32)}`);
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      if (head.catalogHeadObjectDigest === notFoundHead.catalogHeadObjectDigest) {
+        return 'not-found';
+      }
+      throw Object.assign(new Error('terminal failure'), { code: 'terminal-failure' });
+    }), {
+      maxAttempts: 1,
+      retryBackoffMs: 0,
+      onReconciliationAttemptStart: (head) => (
+        registry.beginAttempt(head.catalogHeadObjectDigest)
+      ),
+      onReconciliationAttemptEnd: (head, attemptToken) => {
+        registry.endAttempt(head.catalogHeadObjectDigest, attemptToken);
+      },
+      onError: (head, error, attemptToken) => {
+        registry.record(
+          head.catalogHeadObjectDigest,
+          error,
+          null,
+          attemptToken ?? undefined,
+        );
+      },
+    });
+
+    receiver.schedule(notFoundHead, 'peer-not-found');
+    receiver.schedule(failedHead, 'peer-failed');
+    await receiver.whenIdle();
+
+    expect(receiver.stats()).toMatchObject({ notFound: 1, failed: 1 });
+    expect(registry.currentAttemptTokenSize).toBe(0);
+    expect(registry.currentAttemptFailureSize).toBe(1);
+    expect(registry.readCurrentAttempt(notFoundHead.catalogHeadObjectDigest)).toBeNull();
+    expect(registry.readCurrentAttempt(failedHead.catalogHeadObjectDigest)).toMatchObject({
+      errorCode: 'terminal-failure',
+    });
   });
 
   it('serializes different heads in one catalog scope', async () => {
