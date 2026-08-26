@@ -101,7 +101,15 @@ describe('startDaemonLogController', () => {
     const startDispatched = new Promise<void>((resolve) => {
       markStartDispatched = resolve;
     });
-    const exporterShutdown = vi.fn(async () => undefined);
+    let releaseExporterShutdown!: () => void;
+    let markExporterShutdownStarted!: () => void;
+    const exporterShutdownStarted = new Promise<void>((resolve) => {
+      markExporterShutdownStarted = resolve;
+    });
+    const exporterShutdown = vi.fn(() => new Promise<void>((resolve) => {
+      releaseExporterShutdown = resolve;
+      markExporterShutdownStarted();
+    }));
     const controller = startDaemonLogController({
       insertDiagnosticLog: (record) => persisted.push(record.message),
       redact: (record) => record,
@@ -138,7 +146,10 @@ describe('startDaemonLogController', () => {
     await startDispatched;
     logger.warn(context, 'before-stop');
     controller.detachSink();
-    const stopping = runtime.shutdown();
+    let shutdownSettled = false;
+    const stopping = runtime.shutdown().then(() => {
+      shutdownSettled = true;
+    });
     logger.warn(context, 'after-stop');
 
     expect(persisted).toEqual(['before-stop']);
@@ -146,7 +157,14 @@ describe('startDaemonLogController', () => {
     expect(exporterShutdown).not.toHaveBeenCalled();
     releaseStart();
     await enabling;
+    await exporterShutdownStarted;
+    await Promise.resolve();
+    await Promise.resolve();
+    const settledBeforeExporterFlush = shutdownSettled;
+    releaseExporterShutdown();
     await stopping;
+    expect(settledBeforeExporterFlush).toBe(false);
+    expect(shutdownSettled).toBe(true);
     controller.detachSink();
     await runtime.shutdown();
     expect(exporterShutdown).toHaveBeenCalledTimes(1);

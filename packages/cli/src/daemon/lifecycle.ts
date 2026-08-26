@@ -150,7 +150,12 @@ import {
   validateNetworkConfigReadiness,
 } from '../config.js';
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
-import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
+import {
+  resolveOtelSignals,
+  resolveLogExporterMode,
+  isUnknownLogExporter,
+  type ActiveLogExporterMode,
+} from '../telemetry-config.js';
 import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
@@ -2799,7 +2804,7 @@ export async function runDaemonInner(
     : "mainnet";
   const syslogEndpoint = TELEMETRY_ENDPOINTS[networkKey]?.syslog;
   function startLogExporter(
-    mode: 'syslog' | 'otlp',
+    mode: ActiveLogExporterMode,
   ): DaemonLogExporterStartResult {
     if (mode === 'otlp') {
       // Resolve env-first, matching the traces/metrics precedence

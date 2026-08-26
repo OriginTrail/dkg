@@ -1,14 +1,13 @@
 import { Logger } from '@origintrail-official/dkg-core';
+import type { ActiveLogExporterMode } from '../telemetry-config.js';
 import {
   createDaemonLogSink,
   type DaemonLogSinkDeps,
   type RemoteLogShipper,
 } from './log-sink.js';
 
-export type DaemonLogExporterMode = 'syslog' | 'otlp';
-
-export interface DaemonLogExporter {
-  mode: DaemonLogExporterMode;
+interface DaemonLogExporter {
+  mode: ActiveLogExporterMode;
   shipper: RemoteLogShipper;
   shutdown: () => Promise<void>;
 }
@@ -19,10 +18,10 @@ export type DaemonLogExporterStartResult =
 
 export interface DaemonLogController {
   startExporter(
-    mode: DaemonLogExporterMode,
+    mode: ActiveLogExporterMode,
     factory: () => Omit<DaemonLogExporter, 'mode'>,
   ): DaemonLogExporterStartResult;
-  stopExporter(): Promise<DaemonLogExporterMode | null>;
+  stopExporter(): Promise<ActiveLogExporterMode | null>;
   detachSink(): void;
 }
 
@@ -37,7 +36,7 @@ export function startDaemonLogController(opts: {
   redact: DaemonLogSinkDeps['redact'];
 }): DaemonLogController {
   let exporter: DaemonLogExporter | null = null;
-  let exporterShutdown: Promise<DaemonLogExporterMode | null> | null = null;
+  let exporterShutdown: Promise<ActiveLogExporterMode | null> | null = null;
   let sinkDetached = false;
 
   Logger.setSink(createDaemonLogSink({
@@ -46,7 +45,7 @@ export function startDaemonLogController(opts: {
     remoteShipper: () => exporter?.shipper,
   }));
 
-  const stopExporter = async (): Promise<DaemonLogExporterMode | null> => {
+  const stopExporter = async (): Promise<ActiveLogExporterMode | null> => {
     if (exporterShutdown) return exporterShutdown;
     const current = exporter;
     if (!current) return null;

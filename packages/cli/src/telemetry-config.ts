@@ -7,6 +7,7 @@ import type { DkgConfig } from './config.js';
  */
 
 export type LogExporterMode = 'none' | 'otlp' | 'syslog';
+export type ActiveLogExporterMode = Exclude<LogExporterMode, 'none'>;
 
 /**
  * Which log exporter the daemon should start. Only consulted when
