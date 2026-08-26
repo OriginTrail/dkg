@@ -234,7 +234,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,

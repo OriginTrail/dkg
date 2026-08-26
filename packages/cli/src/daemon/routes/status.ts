@@ -224,7 +224,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -701,7 +700,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   const contextGraphMembersMatch = path.match(/^\/api\/context-graph\/([^/]+)\/members$/);
   if (req.method === "GET" && contextGraphMembersMatch) {
     const contextGraphId = decodeURIComponent(contextGraphMembersMatch[1]);
-    if (!isValidContextGraphId(contextGraphId)) {
+    if (!validateContextGraphId(contextGraphId).valid) {
       return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     }
     return jsonResponse(res, 200, {
