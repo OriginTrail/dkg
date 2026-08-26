@@ -393,14 +393,15 @@ export async function startOxigraphServer(
     const reason = lifecycle.phase === 'recovering'
       ? lifecycle.reason
       : 'supervised recovery';
-    const candidate = spawnChild();
-    lifecycle = { phase: 'recovering', child: candidate, reason, generation };
     // GH#1400 — size THIS attempt, not the one at boot. The WAL grows during
     // the session, so a mid-life respawn (onClientTimeout, a crashed child)
     // faces a larger replay than the daemon ever measured at startup. Reusing
     // the boot value re-arms the exact ratchet: kill a healthy replaying
-    // child, leave the WAL, retry, kill it again.
+    // child, leave the WAL, retry, kill it again. Measured before the spawn,
+    // same as boot, so the child cannot delete segments underneath the scan.
     const reviveReady = nextReadyTimeout();
+    const candidate = spawnChild();
+    lifecycle = { phase: 'recovering', child: candidate, reason, generation };
     if (reviveReady.walBytes > 0) {
       log(
         `[oxigraph] restart: ${formatWalBytes(reviveReady.walBytes)} of retained write-ahead log ` +
@@ -702,10 +703,14 @@ export async function startOxigraphServer(
     childDied
       ? `Oxigraph server exited during startup on ${bind} ` +
         `(binary: ${opts.binaryPath}, location: ${opts.location}). ` +
+        `The port may already be in use by another process.` +
         (bootReady.walBytes > 0
-          ? `It was replaying ${formatWalBytes(bootReady.walBytes)} of retained write-ahead log, ` +
-            `so this may be an out-of-memory kill during recovery rather than a bound port.`
-          : `The port may already be in use by another process.`) +
+          // Every managed stop is a crash-stop to RocksDB, so some retained
+          // WAL is the NORM on a production node — the OOM hypothesis is
+          // additional context, never a replacement for the bind-failure one.
+          ? ` It was also replaying ${formatWalBytes(bootReady.walBytes)} of retained ` +
+            `write-ahead log, so an out-of-memory kill during recovery is possible too.`
+          : ``) +
         `${stderrHint}`
       : `Oxigraph server did not become ready on ${bind} within ${readyTimeoutMs}ms ` +
         `(binary: ${opts.binaryPath}, location: ${opts.location}).${stderrHint}`,

@@ -958,7 +958,7 @@ describe('startOxigraphServer OOM classification in the restart log', () => {
         location,
         port,
         log: (l: string) => lines.push(l),
-        autoReadyBaseTimeoutMs: 1_500,
+        autoReadyBaseTimeoutMs: 3_000,
         readyIntervalMs: 50,
         restartBackoffBaseMs: 100,
         restartBackoffMaxMs: 100,
@@ -975,11 +975,12 @@ describe('startOxigraphServer OOM classification in the restart log', () => {
         expect(spawns).toBe(1);
 
         // The session writes: 40 MiB now pending, ~10.5s of replay allowance
-        // on top of the 1.5s base. The respawned child then withholds listener
-        // ownership for 4s — comfortably past the boot deadline, comfortably
-        // inside the re-measured one.
+        // on top of the 3s base. The respawned child then withholds listener
+        // ownership for 8s — comfortably past the boot deadline, comfortably
+        // inside the re-measured one, with margins sized for a CI machine far
+        // slower than the machine this was written on.
         await seedWal(location, 41_943_040);
-        withholdUntil = Date.now() + 4_000;
+        withholdUntil = Date.now() + 8_000;
         process.kill(pid1, 'SIGKILL');
 
         // Wait on the SUPERVISOR's own view, not the raw port: the stand-in
@@ -997,8 +998,8 @@ describe('startOxigraphServer OOM classification in the restart log', () => {
         expect(healthy, 'supervisor never brought a new child to healthy').toBe(true);
 
         // ONE respawn. Under the reused boot deadline the supervisor would
-        // have SIGKILLed its own healthy replaying child at 1.5s and spawned
-        // again — repeatedly, for the whole 4s. That count, not the eventual
+        // have SIGKILLed its own healthy replaying child at 3s and spawned
+        // again — repeatedly, for the whole 8s. That count, not the eventual
         // success, is what separates the fix from the bug.
         expect(spawns, 'the supervisor killed and re-spawned a replaying child').toBe(2);
         expect(lines.join('\n')).toMatch(
