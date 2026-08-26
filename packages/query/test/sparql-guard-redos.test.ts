@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import {
   detectSparqlQueryForm,
   validateReadOnlySparql,
@@ -116,42 +117,69 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
   // The scanner replacement consumes each declaration via a single
   // anchored regex with no nested quantifier — total work is O(n).
 
-  // Measure current-thread CPU time across distinct-but-equivalent inputs.
-  // Varying the string prevents V8 from treating a repeated pure call as a
-  // loop-invariant expression, while batching above 20 ms keeps scheduler and
-  // timer granularity from dominating the ratio. The median filters occasional
-  // GC/JIT outliers without the under-counting risk of taking the fastest run.
+  // Wall time is sufficient for the absolute hang guards below. The scaling
+  // assertion uses an isolated process so its CPU accounting cannot include
+  // Vitest's other workers or inherit the runner's thread-timer granularity.
   const measure = (input: string) => {
-    const variants = Array.from(
-      { length: 16 },
-      (_, index) => `${input}# benchmark-${index}\n`,
-    );
-    const expectedResultLength = detectSparqlQueryForm(variants[0]).length;
-    for (const variant of variants) detectSparqlQueryForm(variant);
-
-    let iterations = 1;
-    while (iterations <= 4_096) {
-      const batchCpuMs: number[] = [];
-      for (let sample = 0; sample < 3; sample++) {
-        let resultLength = 0;
-        const cpuStart = process.threadCpuUsage();
-        for (let i = 0; i < iterations; i++) {
-          resultLength += detectSparqlQueryForm(
-            variants[(i + sample) % variants.length],
-          ).length;
-        }
-        const cpu = process.threadCpuUsage(cpuStart);
-        expect(resultLength).toBe(expectedResultLength * iterations);
-        batchCpuMs.push((cpu.user + cpu.system) / 1_000);
-      }
-      batchCpuMs.sort((a, b) => a - b);
-      const medianBatchCpuMs = batchCpuMs[Math.floor(batchCpuMs.length / 2)];
-      if (medianBatchCpuMs >= 20 || iterations === 4_096) {
-        return medianBatchCpuMs / iterations;
-      }
-      iterations *= 2;
+    for (let i = 0; i < 2; i++) detectSparqlQueryForm(input);
+    let fastestMs = Infinity;
+    for (let i = 0; i < 5; i++) {
+      const startedAt = performance.now();
+      const result = detectSparqlQueryForm(input);
+      fastestMs = Math.min(fastestMs, performance.now() - startedAt);
+      expect(typeof result).toBe('string');
     }
-    throw new Error('unreachable timing loop');
+    return fastestMs;
+  };
+
+  const measureGrowthInIsolatedProcess = () => {
+    const source = String.raw`
+      import { classifySparqlOperation } from '@origintrail-official/dkg-core';
+
+      const detect = (input) => {
+        const operation = classifySparqlOperation(input);
+        return operation.kind === 'read' ? operation.form : 'UNKNOWN';
+      };
+      const inputFor = (count) => Array.from(
+        { length: count },
+        (_, index) => 'PREFIX p' + index + ': <http://x.org/' + index + '/>',
+      ).join('\n') + '\n';
+      const measureCpu = (input) => {
+        const variants = Array.from(
+          { length: 16 },
+          (_, index) => input + '# benchmark-' + index + '\n',
+        );
+        const expectedLength = detect(variants[0]).length;
+        for (const variant of variants) detect(variant);
+
+        for (let iterations = 1; iterations <= 4096; iterations *= 2) {
+          const samples = [];
+          for (let sample = 0; sample < 3; sample++) {
+            let resultLength = 0;
+            const startedAt = process.cpuUsage();
+            for (let index = 0; index < iterations; index++) {
+              resultLength += detect(variants[(index + sample) % variants.length]).length;
+            }
+            if (resultLength !== expectedLength * iterations) process.exit(2);
+            const elapsed = process.cpuUsage(startedAt);
+            samples.push((elapsed.user + elapsed.system) / 1000);
+          }
+          samples.sort((a, b) => a - b);
+          const medianMs = samples[1];
+          if (medianMs >= 25 || iterations === 4096) return medianMs / iterations;
+        }
+        throw new Error('unreachable timing loop');
+      };
+
+      const smallMs = measureCpu(inputFor(1000));
+      const largeMs = measureCpu(inputFor(10000));
+      process.stdout.write(JSON.stringify({ smallMs, largeMs }));
+    `;
+    return JSON.parse(execFileSync(
+      process.execPath,
+      ['--input-type=module', '--eval', source],
+      { encoding: 'utf8', timeout: 15_000 },
+    )) as { smallMs: number; largeMs: number };
   };
 
   it('rejects N=1000 dangling PREFIX decls (no terminal form) in linear time', () => {
@@ -162,11 +190,7 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
   });
 
   it('rejects N=10_000 dangling PREFIX decls in bounded time (10x input → bounded growth)', () => {
-    const smallInput = Array.from({ length: 1_000 }, (_, i) => `PREFIX p${i}: <http://x.org/${i}/>`).join('\n') + '\n';
-    const largeInput = Array.from({ length: 10_000 }, (_, i) => `PREFIX p${i}: <http://x.org/${i}/>`).join('\n') + '\n';
-
-    const smallMs = measure(smallInput);
-    const largeMs = measure(largeInput);
+    const { smallMs, largeMs } = measureGrowthInIsolatedProcess();
 
     // Hang guard: 10k decls must reject in under a second. The buggy
     // regex took >>10s here in local repro.
@@ -175,7 +199,7 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
     // a ratio-only assertion. A 10x input may take at most 25x as long, which
     // leaves CI headroom while rejecting materially superlinear growth.
     expect(largeMs / smallMs).toBeLessThan(25);
-  });
+  }, 20_000);
 
   it('classifies N=10_000 valid PREFIX decls + trailing SELECT in linear time', () => {
     // Positive case at scale — the scanner must accept long but
