@@ -5,6 +5,17 @@ import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 const SCHEMA = 'dkg-rfc64-private-release-gate-v1';
+const RUNTIME_PROCESS_IDS = Object.freeze([
+  'probe-owner',
+  'probe-provider2',
+  'probe-receiver',
+  'probe-outsider',
+  'owner',
+  'provider2',
+  'receiver',
+  'outsider',
+  'receiver-restart',
+]);
 
 /**
  * Run one gate invocation with an artifact that can never retain an earlier
@@ -62,7 +73,7 @@ export async function runRfc64PrivateGateArtifactLifecycleV1({
   }
 }
 
-/** A committed PASS must name one exact source revision and bounded run. */
+/** A committed PASS must name one exact source revision, runtime build, and bounded run. */
 export function assertRfc64PrivateGatePassProvenanceV1(artifact) {
   if (artifact === null || typeof artifact !== 'object') {
     throw new TypeError('RFC-64 private gate PASS artifact must be an object');
@@ -80,6 +91,40 @@ export function assertRfc64PrivateGatePassProvenanceV1(artifact) {
     || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(artifact.sourceRevision)
   ) {
     throw new TypeError('RFC-64 private gate PASS requires an exact source revision');
+  }
+  if (
+    typeof artifact.runtimeManifestDigest !== 'string'
+    || !/^0x[0-9a-f]{64}$/u.test(artifact.runtimeManifestDigest)
+  ) {
+    throw new TypeError('RFC-64 private gate PASS requires an exact runtime manifest digest');
+  }
+  const provenance = artifact.runtimeProvenance;
+  if (
+    provenance === null
+    || typeof provenance !== 'object'
+    || Array.isArray(provenance)
+    || provenance.schema !== 'dkg-rfc64-private-runtime-provenance-v1'
+    || provenance.sourceBuild?.sourceCommit !== artifact.sourceRevision
+    || provenance.sourceBuild?.manifestDigest !== artifact.runtimeManifestDigest
+    || !Array.isArray(provenance.processes)
+    || provenance.processes.length !== RUNTIME_PROCESS_IDS.length
+  ) {
+    throw new TypeError('RFC-64 private gate PASS runtime provenance is incomplete');
+  }
+  for (const [index, processEvidence] of provenance.processes.entries()) {
+    if (
+      processEvidence === null
+      || typeof processEvidence !== 'object'
+      || Array.isArray(processEvidence)
+      || processEvidence.id !== RUNTIME_PROCESS_IDS[index]
+      || processEvidence.loaded?.sourceCommit !== artifact.sourceRevision
+      || typeof processEvidence.loaded?.manifestDigest !== 'string'
+      || !/^0x[0-9a-f]{64}$/u.test(processEvidence.loaded.manifestDigest)
+      || !Array.isArray(processEvidence.loaded.runtimeFiles)
+      || processEvidence.loaded.runtimeFiles.length < 1
+    ) {
+      throw new TypeError('RFC-64 private gate PASS child runtime provenance is incomplete');
+    }
   }
   return artifact;
 }

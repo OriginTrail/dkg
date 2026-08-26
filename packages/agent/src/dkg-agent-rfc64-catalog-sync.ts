@@ -74,15 +74,52 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     params: SynchronizeRfc64PublicCatalogFromProviderParamsV1,
   ): Promise<SynchronizeRfc64PublicCatalogFromProviderResultV1 | null> {
-    const synchronized = await this.synchronizeRfc64CatalogFromProvidersV1({
-      remotePeerIds: [params.remotePeerId],
+    const providerPeerId = params.remotePeerId;
+    const service = this.rfc64PublicCatalogServiceV1;
+    if (service === undefined) {
+      throw new Error('RFC-64 public catalog service is not started');
+    }
+    // Preserve the established single-provider contract: discovery failures
+    // propagate unchanged, and receiver failures are translated below from
+    // the durable reconciliation registry. The multi-provider API deliberately
+    // retains AggregateError/failover semantics instead.
+    const synchronized = await service.synchronizeCurrentCatalogHead({
+      remotePeerId: providerPeerId,
       scope: params.scope,
       ...(params.signal === undefined ? {} : { signal: params.signal }),
     });
     if (synchronized === null) return null;
+    const catalogScope = deriveAuthorCatalogScopeFromHeadV1(
+      synchronized.head.envelope.payload,
+    );
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(catalogScope);
+    const applied = this.rfc64PersistenceV1?.inventory.readAppliedCatalogHeadV1(
+      catalogScopeDigest,
+      synchronized.announcement.authorAddress,
+    ) ?? null;
+    if (
+      applied === null
+      || applied.currentCatalogHeadDigest
+        !== synchronized.announcement.catalogHeadObjectDigest
+      || applied.catalogVersion !== synchronized.announcement.catalogVersion
+    ) {
+      const failure = this.rfc64PublicCatalogReconciliationFailuresV1.readCurrentAttempt(
+        synchronized.announcement.catalogHeadObjectDigest,
+      );
+      if (failure !== null) {
+        throw new Rfc64CatalogSynchronizationErrorV1(
+          failure.terminalReason,
+          failure.errorCode,
+        );
+      }
+      throw new Error(
+        'RFC-64 current public catalog head did not reach its durable applied postcondition',
+      );
+    }
     return Object.freeze({
-      ...synchronized,
-      providerPeerId: params.remotePeerId,
+      ...applied,
+      providerPeerId,
+      signatureVariantDigest: synchronized.announcement.signatureVariantDigest,
     });
   }
 

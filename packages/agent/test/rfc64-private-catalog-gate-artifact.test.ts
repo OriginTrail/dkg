@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1,
@@ -19,10 +19,52 @@ import {
   assertRfc64PrivateGatePassProvenanceV1,
   runRfc64PrivateGateArtifactLifecycleV1,
 } from '../devnet/rfc64-private-catalog/gate-artifact.mjs';
+import { runRfc64PrivateGateFromCleanBuildV1 } from '../devnet/rfc64-private-catalog/clean-launch.js';
 import { AgentChild } from '../devnet/rfc64-private-catalog/run.mjs';
 
 const temporaryRoots: string[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
+const RUNTIME_MANIFEST_DIGEST = `0x${'d'.repeat(64)}`;
+
+function runtimeProvenance(sourceRevision: string) {
+  const processIds = [
+    'probe-owner',
+    'probe-provider2',
+    'probe-receiver',
+    'probe-outsider',
+    'owner',
+    'provider2',
+    'receiver',
+    'outsider',
+    'receiver-restart',
+  ];
+  return {
+    schema: 'dkg-rfc64-private-runtime-provenance-v1',
+    sourceBuild: {
+      manifestDigest: RUNTIME_MANIFEST_DIGEST,
+      sourceCommit: sourceRevision,
+    },
+    processes: processIds.map((id) => ({
+      id,
+      loaded: {
+        manifestDigest: `0x${'e'.repeat(64)}`,
+        runtimeFiles: [{
+          byteLength: 1,
+          path: 'packages/agent/dist/index.js',
+          sha256: `0x${'f'.repeat(64)}`,
+        }],
+        sourceCommit: sourceRevision,
+      },
+    })),
+  };
+}
+
+function runtimeManifest(sourceRevision: string, marker: string) {
+  return {
+    manifestDigest: `0x${marker.repeat(64)}`,
+    sourceCommit: sourceRevision,
+  } as never;
+}
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => (
@@ -48,6 +90,8 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
         schema: 'dkg-rfc64-private-release-gate-v1',
         status: 'PASS',
         checks: { strict: true },
+        runtimeManifestDigest: RUNTIME_MANIFEST_DIGEST,
+        runtimeProvenance: runtimeProvenance('b'.repeat(40)),
       }),
     });
 
@@ -56,6 +100,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       startedAt: '2026-08-26T00:00:00.000Z',
       finishedAt: '2026-08-26T00:00:01.000Z',
       sourceRevision: 'b'.repeat(40),
+      runtimeManifestDigest: RUNTIME_MANIFEST_DIGEST,
     });
     expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toEqual(artifact);
     expect(() => assertRfc64PrivateGatePassProvenanceV1(artifact)).not.toThrow();
@@ -68,6 +113,8 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       startedAt: '2026-08-26T00:00:01.000Z',
       finishedAt: '2026-08-26T00:00:02.000Z',
       sourceRevision: 'c'.repeat(40),
+      runtimeManifestDigest: RUNTIME_MANIFEST_DIGEST,
+      runtimeProvenance: runtimeProvenance('c'.repeat(40)),
     };
     expect(() => assertRfc64PrivateGatePassProvenanceV1({
       ...base,
@@ -77,6 +124,14 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       ...base,
       finishedAt: '2026-08-25T23:59:59.000Z',
     })).toThrow(/precedes/u);
+    expect(() => assertRfc64PrivateGatePassProvenanceV1({
+      ...base,
+      runtimeManifestDigest: null,
+    })).toThrow(/runtime manifest digest/u);
+    expect(() => assertRfc64PrivateGatePassProvenanceV1({
+      ...base,
+      runtimeProvenance: null,
+    })).toThrow(/runtime provenance is incomplete/u);
   });
 
   it('replaces a stale PASS before work and publishes sanitized FAIL on early failure', async () => {
@@ -124,6 +179,64 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
         failureClass: 'gate-execution-failed',
       },
       sourceRevision: 'a'.repeat(40),
+    });
+  });
+
+  it('invalidates stale PASS before rejecting a dirty tracked tree', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-dirty-'));
+    temporaryRoots.push(root);
+    const artifactPath = join(root, 'artifacts', 'latest.json');
+    await mkdir(dirname(artifactPath), { recursive: true });
+    await writeFile(artifactPath, JSON.stringify({ status: 'PASS', stale: true }));
+    const build = vi.fn();
+
+    await expect(runRfc64PrivateGateFromCleanBuildV1({
+      artifactPath,
+      repoRoot: root,
+      execute: vi.fn(),
+      dependencies: {
+        resolveSourceRevision: () => '1'.repeat(40),
+        readCleanSourceRevision: () => { throw new Error('tracked tree is dirty'); },
+        runCleanRuntimeBuild: build,
+      },
+    })).rejects.toThrow(/tracked tree is dirty/u);
+
+    expect(build).not.toHaveBeenCalled();
+    expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toMatchObject({
+      status: 'FAIL',
+      sourceRevision: '1'.repeat(40),
+    });
+  });
+
+  it('publishes FAIL when runtime bytes change after child execution', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-stale-dist-'));
+    temporaryRoots.push(root);
+    const artifactPath = join(root, 'artifacts', 'latest.json');
+    const sourceRevision = '2'.repeat(40);
+    const first = runtimeManifest(sourceRevision, '3');
+    const changed = runtimeManifest(sourceRevision, '4');
+    let manifestReads = 0;
+
+    await expect(runRfc64PrivateGateFromCleanBuildV1({
+      artifactPath,
+      repoRoot: root,
+      execute: async ({ runtimeManifest: cleanBuild }) => ({
+        schema: 'dkg-rfc64-private-release-gate-v1',
+        status: 'PASS',
+        runtimeManifestDigest: cleanBuild.manifestDigest,
+        runtimeProvenance: runtimeProvenance(sourceRevision),
+      }),
+      dependencies: {
+        resolveSourceRevision: () => sourceRevision,
+        readCleanSourceRevision: () => sourceRevision,
+        runCleanRuntimeBuild: () => {},
+        buildRuntimeManifest: () => (++manifestReads === 1 ? first : changed),
+      },
+    })).rejects.toThrow(/runtime manifest differs/u);
+
+    expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toMatchObject({
+      status: 'FAIL',
+      sourceRevision,
     });
   });
 });

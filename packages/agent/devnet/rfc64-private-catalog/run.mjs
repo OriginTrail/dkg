@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -8,17 +8,19 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
-import { roleAgentAddress } from './fixture.mjs';
-import {
-  runRfc64PrivateGateArtifactLifecycleV1,
-  sanitizeGateFailureV1,
-} from './gate-artifact.mjs';
+import { assertGate2ExecutedRuntimeMatchesBuildV1 } from '../../../../devnet/rfc64-gate2-multi-asset-completeness/runtime-provenance.ts';
 import { isExpectedPrivateCatalogDenialResultV1 } from './denial-evidence.mjs';
+import { roleAgentAddress } from './fixture.mjs';
+import { sanitizeGateFailureV1 } from './gate-artifact.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENT_ROOT = join(HERE, '..', '..');
 const AGENT_PROCESS = join(HERE, 'agent-process.mjs');
-const ARTIFACT = join(HERE, 'artifacts', 'latest.json');
+const RUNTIME_LOAD_HOOK = resolve(
+  HERE,
+  '../../../../devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts',
+);
+export const RFC64_PRIVATE_GATE_ARTIFACT_PATH = join(HERE, 'artifacts', 'latest.json');
 const ROLES = Object.freeze(['owner', 'provider2', 'receiver', 'outsider']);
 const RUN_TIMEOUT_MS = 90_000;
 
@@ -34,21 +36,40 @@ export class AgentChild {
     this.waiters = [];
     this.exited = false;
     this.stopTimeouts = Object.freeze({
-      handshake: options.stopHandshakeTimeoutMs ?? 5_000,
+      // The provenance-bearing acknowledgement is emitted only after the
+      // real agent and its bootstrap workers stop, which can include a
+      // bounded in-flight peer-resolution timeout.
+      handshake: options.stopHandshakeTimeoutMs ?? 30_000,
       gracefulExit: options.gracefulExitTimeoutMs ?? 10_000,
       sigtermExit: options.sigtermExitTimeoutMs ?? 5_000,
       sigkillExit: options.sigkillExitTimeoutMs ?? 5_000,
     });
-    this.proc = spawn(process.execPath, [options.agentProcess ?? AGENT_PROCESS], {
+    const runtimeProvenance = options.runtimeProvenance;
+    const childEnv = { ...process.env };
+    if (runtimeProvenance !== undefined) {
+      delete childEnv.NODE_OPTIONS;
+      delete childEnv.NODE_PATH;
+      delete childEnv.TSX_TSCONFIG_PATH;
+    }
+    const agentProcess = options.agentProcess ?? AGENT_PROCESS;
+    const args = runtimeProvenance === undefined
+      ? [agentProcess]
+      : ['--import', 'tsx', '--import', RUNTIME_LOAD_HOOK, agentProcess];
+    this.proc = spawn(process.execPath, args, {
       cwd: options.agentRoot ?? AGENT_ROOT,
       env: {
-        ...process.env,
+        ...childEnv,
         NODE_ENV: 'production',
         DKG_RFC64_PRIVATE_ROLE: role,
         DKG_RFC64_PRIVATE_MODE: mode,
         DKG_RFC64_PRIVATE_DATA_DIR: dataDir,
         ...(manifestPath === undefined ? {} : {
           DKG_RFC64_PRIVATE_MANIFEST: manifestPath,
+        }),
+        ...(runtimeProvenance === undefined ? {} : {
+          DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST:
+            runtimeProvenance.runtimeManifestDigest,
+          DKG_RFC64_GATE2_RUNTIME_SOURCE_COMMIT: runtimeProvenance.sourceRevision,
         }),
       },
       stdio: ['pipe', 'pipe', 'inherit'],
@@ -135,7 +156,12 @@ export class AgentChild {
     if (this.exited) return this.exit;
     let handshakeFailure = null;
     try {
-      await this.request({ cmd: 'stop' }, 'stopping', this.stopTimeouts.handshake);
+      const stopped = await this.request(
+        { cmd: 'stop' },
+        'stopping',
+        this.stopTimeouts.handshake,
+      );
+      this.executedRuntimeManifest = stopped.executedRuntimeManifest;
     } catch (error) {
       handshakeFailure = error;
     }
@@ -174,7 +200,17 @@ export class AgentChild {
   }
 }
 
-async function main() {
+export async function executeRfc64PrivateReleaseGateV1({
+  runtimeManifest,
+  sourceRevision,
+}) {
+  if (runtimeManifest?.sourceCommit !== sourceRevision) {
+    throw new Error('RFC-64 private gate runtime manifest does not bind its source revision');
+  }
+  const runtimeProvenance = Object.freeze({
+    runtimeManifestDigest: runtimeManifest.manifestDigest,
+    sourceRevision,
+  });
   const runRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-private-release-gate-'));
   const manifestPath = join(runRoot, 'manifest.json');
   const dataDirs = Object.fromEntries(ROLES.map((role) => [role, join(runRoot, role)]));
@@ -184,20 +220,31 @@ async function main() {
     await Promise.all(Object.values(dataDirs).map((path) => mkdir(path, { recursive: true })));
 
     const probeEntries = await Promise.all(ROLES.map(async (role) => {
-      const child = new AgentChild(role, dataDirs[role], undefined, 'probe');
+      const child = new AgentChild(role, dataDirs[role], undefined, 'probe', {
+        runtimeProvenance,
+      });
       const ready = await child.waitFor('ready');
+      assertReadyRuntimeManifest(ready, runtimeManifest.manifestDigest);
+      const stopped = await child.waitFor('stopping');
       const exit = await child.exit;
       if (exit.error !== null) throw exit.error;
-      return [role, ready];
+      return [role, {
+        loaded: requiredExecutedRuntimeManifest(stopped, `${role} probe`),
+        ready,
+      }];
     }));
     const probed = Object.fromEntries(probeEntries);
-    const peerIds = Object.fromEntries(ROLES.map((role) => [role, probed[role].peerId]));
+    const peerIds = Object.fromEntries(ROLES.map((role) => [role, probed[role].ready.peerId]));
     await writeFile(manifestPath, `${JSON.stringify({ peerIds }, null, 2)}\n`, { mode: 0o600 });
 
-    const owner = await startRole('owner', dataDirs, manifestPath, peerIds, active);
+    const owner = await startRole(
+      'owner', dataDirs, manifestPath, peerIds, active, runtimeProvenance,
+    );
     const published = await owner.request({ cmd: 'publish' }, 'published');
 
-    const provider2 = await startRole('provider2', dataDirs, manifestPath, peerIds, active);
+    const provider2 = await startRole(
+      'provider2', dataDirs, manifestPath, peerIds, active, runtimeProvenance,
+    );
     await connectBothWays(owner, provider2);
     const provider2Bootstrap = await provider2.request({
       cmd: 'wait-bootstrap',
@@ -230,7 +277,9 @@ async function main() {
       throw new Error('provider2: exact head, SWM, or VM changed after owner exit');
     }
 
-    const receiver = await startRole('receiver', dataDirs, manifestPath, peerIds, active);
+    const receiver = await startRole(
+      'receiver', dataDirs, manifestPath, peerIds, active, runtimeProvenance,
+    );
     await connectBothWays(provider2, receiver);
     const receiverBootstrap = await receiver.request({
       cmd: 'wait-bootstrap',
@@ -242,7 +291,9 @@ async function main() {
       expectedHeadDigest: published.headObjectDigest,
     }, 'inspection');
 
-    const outsider = await startRole('outsider', dataDirs, manifestPath, peerIds, active);
+    const outsider = await startRole(
+      'outsider', dataDirs, manifestPath, peerIds, active, runtimeProvenance,
+    );
     await dial(outsider, provider2);
     const outsiderDenial = await outsider.request({
       cmd: 'sync-denied',
@@ -267,16 +318,34 @@ async function main() {
       manifestPath,
       peerIds,
       active,
+      runtimeProvenance,
     );
     const restartState = await restartedReceiver.request({
       cmd: 'inspect',
       expectedHeadDigest: published.headObjectDigest,
     }, 'inspection');
 
+    await outsider.stop();
+    active.delete(outsider);
+    await restartedReceiver.stop();
+    active.delete(restartedReceiver);
+
+    const runtimeProcesses = [
+      ...ROLES.map((role) => ({ id: `probe-${role}`, loaded: probed[role].loaded })),
+      { id: 'owner', loaded: requiredChildRuntimeManifest(owner) },
+      { id: 'provider2', loaded: requiredChildRuntimeManifest(provider2) },
+      { id: 'receiver', loaded: requiredChildRuntimeManifest(receiver) },
+      { id: 'outsider', loaded: requiredChildRuntimeManifest(outsider) },
+      { id: 'receiver-restart', loaded: requiredChildRuntimeManifest(restartedReceiver) },
+    ];
+    for (const processEvidence of runtimeProcesses) {
+      assertGate2ExecutedRuntimeMatchesBuildV1(processEvidence.loaded, runtimeManifest);
+    }
+
     const checks = Object.freeze({
       fourStableUniqueDaemonIdentities:
         new Set(Object.values(peerIds)).size === 4
-        && ROLES.every((role) => probed[role].agentClass === 'DKGAgent'),
+        && ROLES.every((role) => probed[role].ready.agentClass === 'DKGAgent'),
       productionCatalogServiceOnAllRoles:
         [owner.ready, provider2.ready, receiver.ready, outsider.ready, restartedReceiver.ready]
           .every((ready) => ready.catalogServiceStarted === true),
@@ -310,6 +379,7 @@ async function main() {
         && restartState.exactExpectedHead === true
         && restartState.inventoryRowCount === '2',
       restartPreservedExactSwmAndVm: exactMemoryCounts(restartState),
+      allChildRuntimeBytesMatchCleanBuild: runtimeProcesses.length === 9,
     });
     const status = Object.values(checks).every(Boolean) ? 'PASS' : 'FAIL';
     artifact = {
@@ -318,10 +388,16 @@ async function main() {
       limitation:
         'Uses a deterministic finalized-chain adapter and loopback RPC, not scripts/devnet.sh Hardhat or the CLI daemon.',
       topology: {
-        ownerProvider: safeRole(probed.owner),
-        authorizedProviderReceiver: safeRole(probed.provider2),
-        authorizedReceiver: safeRole(probed.receiver),
-        unauthorizedNode: safeRole(probed.outsider),
+        ownerProvider: safeRole(probed.owner.ready),
+        authorizedProviderReceiver: safeRole(probed.provider2.ready),
+        authorizedReceiver: safeRole(probed.receiver.ready),
+        unauthorizedNode: safeRole(probed.outsider.ready),
+      },
+      runtimeManifestDigest: runtimeManifest.manifestDigest,
+      runtimeProvenance: {
+        schema: 'dkg-rfc64-private-runtime-provenance-v1',
+        sourceBuild: runtimeManifest,
+        processes: runtimeProcesses,
       },
       checks,
       catalog: {
@@ -363,14 +439,48 @@ async function main() {
   return artifact;
 }
 
-async function startRole(role, dataDirs, manifestPath, expectedPeerIds, active) {
-  const child = new AgentChild(role, dataDirs[role], manifestPath);
+async function startRole(
+  role,
+  dataDirs,
+  manifestPath,
+  expectedPeerIds,
+  active,
+  runtimeProvenance,
+) {
+  const child = new AgentChild(role, dataDirs[role], manifestPath, 'run', {
+    runtimeProvenance,
+  });
   active.add(child);
   child.ready = await child.waitFor('ready');
+  assertReadyRuntimeManifest(
+    child.ready,
+    runtimeProvenance.runtimeManifestDigest,
+  );
   if (child.ready.peerId !== expectedPeerIds[role]) {
     throw new Error(`${role}: persisted peer identity changed after probe`);
   }
   return child;
+}
+
+function assertReadyRuntimeManifest(ready, expectedDigest) {
+  if (ready.runtimeBuildManifestDigest !== expectedDigest) {
+    throw new Error(`${ready.role}: runtime build manifest differs from the clean build`);
+  }
+}
+
+function requiredExecutedRuntimeManifest(event, label) {
+  const manifest = event?.executedRuntimeManifest;
+  if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error(`${label}: child did not report executed runtime provenance`);
+  }
+  return manifest;
+}
+
+function requiredChildRuntimeManifest(child) {
+  return requiredExecutedRuntimeManifest(
+    { executedRuntimeManifest: child.executedRuntimeManifest },
+    child.role,
+  );
 }
 
 async function connectBothWays(left, right) {
@@ -419,18 +529,6 @@ function safeState(state, bootstrap) {
   };
 }
 
-function stableJson(value) {
-  return JSON.stringify(sortKeys(value), null, 2);
-}
-
-function sortKeys(value) {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortKeys(value[key])]));
-  }
-  return value;
-}
-
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -470,33 +568,9 @@ function parseTcpMultiaddr(value) {
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  runRfc64PrivateGateArtifactLifecycleV1({
-    artifactPath: ARTIFACT,
-    execute: main,
-    sourceRevision: resolveGateSourceRevisionV1(),
-  }).then((artifact) => {
-    process.stdout.write(`${stableJson(artifact)}\n`);
-    process.stdout.write(
-      `RFC-64 private Releases 1-3 four-process gate: ${artifact.status}\n`,
-    );
-  }).catch((error) => {
-    const failure = sanitizeGateFailureV1(error);
-    process.stderr.write(
-      `RFC-64 private release gate failed (${failure.failureClass})\n`,
-    );
-    process.exitCode = 1;
-  });
-}
-
-function resolveGateSourceRevisionV1() {
-  if (process.env.GITHUB_SHA !== undefined) return process.env.GITHUB_SHA;
-  try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: AGENT_ROOT,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-  } catch {
-    return null;
-  }
+  const failure = sanitizeGateFailureV1(new Error('clean-build launcher required'));
+  process.stderr.write(
+    `RFC-64 private release gate requires launch-live.ts (${failure.failureClass})\n`,
+  );
+  process.exitCode = 1;
 }

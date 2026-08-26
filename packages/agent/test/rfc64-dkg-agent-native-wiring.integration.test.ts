@@ -55,6 +55,7 @@ import {
 import {
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
 } from '../src/dkg-agent-rfc64-catalog-bootstrap.js';
+import { Rfc64CatalogSynchronizationErrorV1 } from '../src/dkg-agent-rfc64-catalog-sync.js';
 import {
   buildOpenOwnerContextGraphPolicyV1,
   unsignedOpenContextGraphPolicyEnvelopeV1,
@@ -66,12 +67,6 @@ import {
   type Rfc64CatalogActivationInputV1,
   type Rfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
-import {
-  Rfc64PublicCatalogNativeReceiverErrorV1,
-} from '../src/rfc64/public-catalog-native-receiver-v1.js';
-import {
-  classifyRfc64CatalogReconciliationTerminalReasonV1,
-} from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 import type {
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
@@ -2403,6 +2398,29 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   }, 60_000);
 
+  it('preserves a single-provider discovery error without aggregation', async () => {
+    class ProviderDiscoveryError extends Error {}
+    const discoveryFailure = new ProviderDiscoveryError('provider discovery failed');
+    const synchronizeCurrentCatalogHead = vi.fn().mockRejectedValue(discoveryFailure);
+    const agentLike = {
+      rfc64PublicCatalogServiceV1: { synchronizeCurrentCatalogHead },
+    };
+
+    await expect(DKGAgent.prototype.synchronizeRfc64PublicCatalogFromProviderV1.call(
+      agentLike as never,
+      {
+        remotePeerId: 'provider-peer',
+        scope: {
+          networkId: NETWORK_ID,
+          contextGraphId: CONTEXT_GRAPH_ID,
+          subGraphName: null,
+          authorAddress: AUTHOR,
+          catalogEra: '0',
+        },
+      },
+    )).rejects.toBe(discoveryFailure);
+  });
+
   it('cold-starts after publication from a provider current-head snapshot', async () => {
     const [author, provider] = await Promise.all([
       startNativeAgent('cold-author'),
@@ -2572,19 +2590,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           catalogEra: '0',
         },
       }).catch((error: unknown) => error);
+    expect(synchronizationFailure).toBeInstanceOf(Rfc64CatalogSynchronizationErrorV1);
     expect(synchronizationFailure).toMatchObject({
-      name: 'Error',
-      message: 'RFC-64 current-head synchronization ended with failed',
-      cause: expect.any(Rfc64PublicCatalogNativeReceiverErrorV1),
-    });
-    const activationFailure = (synchronizationFailure as Error).cause;
-    expect(activationFailure).toMatchObject({
-      name: 'Rfc64PublicCatalogNativeReceiverErrorV1',
+      terminalReason: null,
       code: 'catalog-native-receiver-activation',
     });
-    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(
-      activationFailure,
-    )).toBeNull();
     expect(replaceGraphAndSubject).toHaveBeenCalled();
     expect(cold.readRfc64PublicCatalogReconciliationFailureV1(
       successor.headObjectDigest,

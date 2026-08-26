@@ -137,7 +137,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       peers.push(peerId);
       if (peerId === 'peerA') throw new Error('provider lost during transfer');
       return 'applied';
-    }), { maxAttempts: 2, retryBackoffMs: 0 });
+    }), { maxAttempts: 2, maxProvidersPerHead: 1, retryBackoffMs: 0 });
 
     const completion = await receiver.scheduleManyAndWait([
       { announcement: announcement(), remotePeerId: 'peerA' },
@@ -177,7 +177,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
         return 'applied';
       },
       async () => applied,
-    ), { retryBackoffMs: 0 });
+    ), { maxProvidersPerHead: 1, retryBackoffMs: 0 });
 
     receiver.schedule(announcement(), 'peerC');
     await ambientStarted.promise;
