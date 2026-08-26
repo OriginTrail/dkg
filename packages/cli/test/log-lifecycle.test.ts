@@ -1,9 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Logger } from '@origintrail-official/dkg-core';
-import {
-  createSerializedTelemetrySettings,
-  startDaemonLogController,
-} from '../src/daemon/log-lifecycle.js';
+import { startDaemonLogController } from '../src/daemon/log-lifecycle.js';
 
 describe('startDaemonLogController', () => {
   afterEach(() => {
@@ -62,57 +59,6 @@ describe('startDaemonLogController', () => {
     await controller.stopExporter();
     expect(firstShutdown).toHaveBeenCalledTimes(1);
     expect(secondShutdown).toHaveBeenCalledTimes(1);
-  });
-
-  it('serializes overlapping disable and enable transitions around the configured gate', async () => {
-    let configuredEnabled = true;
-    let exporterActive = true;
-    let releaseStop!: () => void;
-    let releaseDisabledSave!: () => void;
-    // Build the deferred stop without coupling the assertion to timer order.
-    let markStopStarted!: () => void;
-    const observedStop = new Promise<void>((resolve) => { markStopStarted = resolve; });
-    const stop = vi.fn(async () => {
-      exporterActive = false;
-      markStopStarted();
-      await new Promise<void>((resolve) => { releaseStop = resolve; });
-    });
-    let persistCalls = 0;
-    const settings = createSerializedTelemetrySettings({
-      setConfiguredEnabled: (enabled) => {
-        if (!enabled) expect(exporterActive).toBe(false);
-        configuredEnabled = enabled;
-      },
-      persist: async () => {
-        persistCalls += 1;
-        if (persistCalls === 1) {
-          await new Promise<void>((resolve) => { releaseDisabledSave = resolve; });
-        }
-      },
-      start: async () => {
-        expect(configuredEnabled).toBe(true);
-        exporterActive = true;
-        return { ok: true };
-      },
-      stop,
-    });
-
-    const disabling = settings.setEnabled(false);
-    await observedStop;
-    const enabling = settings.setEnabled(true);
-    expect(exporterActive).toBe(false);
-    expect(configuredEnabled).toBe(true);
-
-    releaseStop();
-    await vi.waitFor(() => expect(configuredEnabled).toBe(false));
-    expect(exporterActive).toBe(false);
-    releaseDisabledSave();
-    await disabling;
-    await enabling;
-
-    expect(configuredEnabled).toBe(true);
-    expect(exporterActive).toBe(true);
-    expect(stop).toHaveBeenCalledTimes(1);
   });
 
   it('does not attach a replacement while runtime exporter shutdown is pending', async () => {

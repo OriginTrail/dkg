@@ -1,0 +1,113 @@
+import type { DkgConfig } from '../config.js';
+
+export interface TelemetryRuntimeStartResult {
+  ok: boolean;
+  error?: string;
+}
+
+export interface TelemetrySignalAdapter {
+  start(): Promise<TelemetryRuntimeStartResult>;
+  stop(): Promise<void>;
+}
+
+export interface TelemetryRuntime {
+  isEnabled(): boolean;
+  startConfiguredBestEffort(): Promise<void>;
+  setEnabled(enabled: boolean): Promise<TelemetryRuntimeStartResult>;
+  shutdown(): Promise<void>;
+}
+
+/**
+ * Canonical owner of the telemetry master gate. It serializes transitions,
+ * starts/stops every signal through one adapter, persists config, rolls failed
+ * runtime enables back durably, and drains pending transitions on shutdown.
+ * Logger sink attachment remains the log controller's separate responsibility.
+ */
+export function createTelemetryRuntime(opts: {
+  config: DkgConfig;
+  persist(config: DkgConfig): Promise<void>;
+  signals: TelemetrySignalAdapter;
+  onBootStartFailure?(error: string): void;
+}): TelemetryRuntime {
+  let transitionTail: Promise<void> = Promise.resolve();
+  let shuttingDown = false;
+  let shutdownPromise: Promise<void> | null = null;
+
+  const setConfiguredEnabled = (enabled: boolean): void => {
+    opts.config.telemetry = { ...opts.config.telemetry, enabled };
+  };
+  const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
+    const transition = transitionTail.then(work, work);
+    transitionTail = transition.then(() => undefined, () => undefined);
+    return transition;
+  };
+  const rollbackDisabled = async (): Promise<void> => {
+    await opts.signals.stop().catch(() => undefined);
+    setConfiguredEnabled(false);
+    await opts.persist(opts.config);
+  };
+  const applyEnabled = async (
+    enabled: boolean,
+  ): Promise<TelemetryRuntimeStartResult> => {
+    if (!enabled) {
+      await opts.signals.stop();
+      setConfiguredEnabled(false);
+      await opts.persist(opts.config);
+      return { ok: true };
+    }
+
+    // Raise the in-memory gate before any signal starts. Disable lowers it only
+    // after every signal stops, so false never coexists with active export.
+    setConfiguredEnabled(true);
+    let result: TelemetryRuntimeStartResult;
+    try {
+      result = await opts.signals.start();
+    } catch (error) {
+      await rollbackDisabled();
+      throw error;
+    }
+    if (!result.ok) {
+      await rollbackDisabled();
+      return result;
+    }
+    try {
+      await opts.persist(opts.config);
+    } catch (error) {
+      await rollbackDisabled().catch(() => undefined);
+      throw error;
+    }
+    return { ok: true };
+  };
+
+  return {
+    isEnabled: () => opts.config.telemetry?.enabled ?? false,
+    startConfiguredBestEffort() {
+      return enqueue(async () => {
+        if (!opts.config.telemetry?.enabled) return;
+        try {
+          const result = await opts.signals.start();
+          if (!result.ok) opts.onBootStartFailure?.(result.error ?? 'unknown error');
+        } catch (error) {
+          opts.onBootStartFailure?.(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      });
+    },
+    setEnabled(enabled) {
+      if (shuttingDown) {
+        return Promise.resolve({
+          ok: false,
+          error: 'Telemetry runtime is shutting down',
+        });
+      }
+      return enqueue(() => applyEnabled(enabled));
+    },
+    shutdown() {
+      if (shutdownPromise) return shutdownPromise;
+      shuttingDown = true;
+      shutdownPromise = enqueue(() => opts.signals.stop());
+      return shutdownPromise;
+    },
+  };
+}

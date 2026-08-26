@@ -156,10 +156,8 @@ import {
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
-import {
-  createSerializedTelemetrySettings,
-  startDaemonLogController,
-} from './log-lifecycle.js';
+import { startDaemonLogController } from './log-lifecycle.js';
+import { createTelemetryRuntime } from './telemetry-runtime.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
@@ -2967,23 +2965,31 @@ export async function runDaemonInner(
     await shutdownTelemetry().catch(() => {});
   }
 
+  const telemetryRuntime = createTelemetryRuntime({
+    config,
+    persist: saveConfig,
+    signals: {
+      start: startTelemetry,
+      stop: stopTelemetry,
+    },
+    onBootStartFailure: (error) => {
+      // Boot remains best-effort per signal: a failed log shipper must not
+      // disable independently registered traces/metrics or rewrite config.
+      log(`Telemetry: log exporter not started — ${error} (traces/metrics unaffected)`);
+    },
+  });
+
   // Daemon shutdown additionally detaches the Logger sink. Runtime telemetry
   // disable keeps the sink attached so warn/error diagnostics still persist.
   async function stopDaemonLogging(): Promise<void> {
-    await daemonLogController.stop();
-    await shutdownTelemetry().catch(() => {});
+    // stop() detaches the Logger sink synchronously. Start both shutdown paths
+    // before awaiting so the runtime can drain any queued settings transition
+    // while the controller flushes the active log exporter.
+    const stopLogController = daemonLogController.stop();
+    await Promise.all([stopLogController, telemetryRuntime.shutdown()]);
   }
 
-  if (config.telemetry?.enabled) {
-    const r = await startTelemetry();
-    if (!r.ok) {
-      // Log forwarding failed to start (e.g. mainnet syslog port 0). Disable
-      // ONLY the log signal — leave the master gate and any registered
-      // traces/metrics intact; they are independent signals. (Boot path:
-      // best-effort per signal; the runtime toggle below rolls back instead.)
-      log(`Telemetry: log exporter not started — ${r.error} (traces/metrics unaffected)`);
-    }
-  }
+  await telemetryRuntime.startConfiguredBestEffort();
   backpressureMonitor.start();
 
   const PRUNE_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
@@ -3316,20 +3322,12 @@ export async function runDaemonInner(
     },
   };
 
-  const serializedTelemetrySettings = createSerializedTelemetrySettings({
-    setConfiguredEnabled: (enabled) => {
-      config.telemetry = { ...config.telemetry, enabled };
-    },
-    persist: () => saveConfig(config),
-    start: startTelemetry,
-    stop: stopTelemetry,
-  });
   const telemetrySettings = {
-    getTelemetryEnabled: () => config.telemetry?.enabled ?? false,
+    getTelemetryEnabled: () => telemetryRuntime.isEnabled(),
     setTelemetryEnabled: async (
       enabled: boolean,
     ): Promise<{ ok: boolean; error?: string }> => {
-      return serializedTelemetrySettings.setEnabled(enabled);
+      return telemetryRuntime.setEnabled(enabled);
     },
   };
 
