@@ -1,3 +1,5 @@
+import { findTripleStoreCapability } from './triple-store.js';
+
 /**
  * Per-graph write-generation tracking (#1609).
  *
@@ -226,15 +228,14 @@ export class GraphWriteGenTracker implements GraphWriteGenSource, GraphWriteRevi
  * its published getWriteGen-only contract.
  */
 export function asGraphWriteGenSource(store: unknown): GraphWriteGenSource | null {
-  let s = store as
-    | { getWriteGen?: unknown; innerStore?: unknown; inner?: unknown }
-    | null
-    | undefined;
-  for (let depth = 0; s && depth < 8; depth++) {
-    if (typeof s.getWriteGen === 'function') return s as GraphWriteGenSource;
-    s = (s.innerStore ?? s.inner) as typeof s;
-  }
-  return null;
+  return findTripleStoreCapability(
+    store,
+    (candidate): candidate is GraphWriteGenSource => (
+      typeof candidate === 'object'
+      && candidate !== null
+      && typeof (candidate as Partial<GraphWriteGenSource>).getWriteGen === 'function'
+    ),
+  );
 }
 
 /**
@@ -246,25 +247,15 @@ export function asGraphWriteGenSource(store: unknown): GraphWriteGenSource | nul
  * not masquerade as a native stable revision source.
  */
 export function asGraphWriteRevisionSource(store: unknown): GraphWriteRevisionSource | null {
-  // Follow `.innerStore` (hand-rolled forwarders like the daemon's
-  // listContextGraphs-cache invalidator) and `.inner` (ChangelogStore,
-  // GraphSetIndexStore, SharedMemoryLiteralBlobStore) so the capability
-  // resolves through any decorator order — mirrors `asChangelogReader`.
-  // The depth bound guards a pathological/cyclic chain.
-  let s = store as
-    | {
-      getWriteRevision?: unknown;
-      innerStore?: unknown;
-      inner?: unknown;
-    }
-    | null
-    | undefined;
-  for (let depth = 0; s && depth < 8; depth++) {
-    if (typeof s.getWriteRevision === 'function') {
-      const source = s as { getWriteRevision(graphPrefix: string): GraphWriteRevision };
-      return { getWriteRevision: (graphPrefix) => source.getWriteRevision(graphPrefix) };
-    }
-    s = (s.innerStore ?? s.inner) as typeof s;
-  }
-  return null;
+  const source = findTripleStoreCapability(
+    store,
+    (candidate): candidate is GraphWriteRevisionSource => (
+      typeof candidate === 'object'
+      && candidate !== null
+      && typeof (candidate as Partial<GraphWriteRevisionSource>).getWriteRevision === 'function'
+    ),
+  );
+  return source
+    ? { getWriteRevision: (graphPrefix) => source.getWriteRevision(graphPrefix) }
+    : null;
 }

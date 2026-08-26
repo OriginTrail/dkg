@@ -16,6 +16,9 @@ import {
   type GraphWriteGenSource,
 } from '../src/graph-write-gen.js';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
+import { ChangelogStore } from '../src/changelog-store.js';
+import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
+import { SharedMemoryLiteralBlobStore } from '../src/shared-memory-literal-blob-store.js';
 
 const CG_PREFIX = 'did:dkg:context-graph:fun-facts/';
 const SWM_GRAPH = `${CG_PREFIX}_shared_memory`;
@@ -162,15 +165,28 @@ describe('OxigraphStore write-generation capability', () => {
   it('is recoverable via asGraphWriteGenSource on the bare adapter and through decorator chains', () => {
     const store = new OxigraphStore();
     expect(asGraphWriteGenSource(store)).not.toBeNull();
-    // `.innerStore` forwarder (daemon wrapper shape) and `.inner` decorator shape.
-    expect(asGraphWriteGenSource({ innerStore: { inner: store } })).not.toBeNull();
+    const decorated = new ChangelogStore(
+      new GraphSetIndexStore(
+        new SharedMemoryLiteralBlobStore(store, {
+          blobDir: 'unused-capability-test-dir',
+          thresholdBytes: 1024,
+        }),
+      ),
+    );
+    // The configured decorator order and the daemon's hand-rolled forwarder
+    // both expose the documented innerStore boundary.
+    const forwarded = { innerStore: decorated };
+    expect(asGraphWriteGenSource(forwarded)).not.toBeNull();
+    expect(asGraphWriteRevisionSource(forwarded)).not.toBeNull();
+    // Undocumented implementation fields are deliberately not traversed.
+    expect(asGraphWriteGenSource({ inner: store })).toBeNull();
     expect(asGraphWriteGenSource({})).toBeNull();
     expect(asGraphWriteGenSource(null)).toBeNull();
   });
 
   it('preserves legacy getWriteGen discovery without fabricating a stable revision', () => {
     const legacy: GraphWriteGenSource = { getWriteGen: () => 42 };
-    const decorated = { innerStore: { inner: legacy } };
+    const decorated = { innerStore: { innerStore: legacy } };
 
     expect(asGraphWriteGenSource(decorated)?.getWriteGen(CG_PREFIX)).toBe(42);
     expect(asGraphWriteRevisionSource(decorated)).toBeNull();

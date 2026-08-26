@@ -1,6 +1,7 @@
 export {
   type Quad,
   type TripleStore,
+  type TripleStoreDecorator,
   type QueryResult,
   type QueryOptions,
   type StoreWorkPriority,
@@ -14,6 +15,7 @@ export {
   type UpdateOptions,
   type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
+  findTripleStoreCapability,
   createTripleStore,
   tryUpdateWithTouchedGraphs,
   tryReplaceGraphAtomically,

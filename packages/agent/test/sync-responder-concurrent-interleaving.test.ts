@@ -1541,6 +1541,35 @@ describe('sync responder pagination interleaving', () => {
     expect(calls).toBe(4);
   });
 
+  it('shares one in-flight graph enumeration at an unstable revision without caching it', async () => {
+    const firstRead = deferred<string[]>();
+    const secondRead = deferred<string[]>();
+    let calls = 0;
+    const store = {
+      getWriteRevision: () => ({ generation: 7, stable: false }),
+      listGraphs: async () => {
+        calls += 1;
+        return calls === 1 ? firstRead.promise : secondRead.promise;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const first = memo.get({ refresh: true });
+    const simultaneous = memo.get({ refresh: true });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    firstRead.resolve(['urn:graph:b', 'urn:graph:a']);
+    await expect(first).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    await expect(simultaneous).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(1);
+
+    // Unstable completed results are never reused, even though simultaneous
+    // waiters may share the promise that produced them.
+    const later = memo.get({ refresh: true });
+    await vi.waitFor(() => expect(calls).toBe(2));
+    secondRead.resolve(['urn:graph:c']);
+    await expect(later).resolves.toEqual(['urn:graph:c']);
+  });
+
   it('supersedes an in-flight graph list when write generation changes', async () => {
     const oldGraphs = deferred<string[]>();
     const newGraphs = deferred<string[]>();

@@ -242,7 +242,7 @@ export function createResponderGraphListMemo(
     writeRevisionSource?.getWriteRevision('') ?? refreshGeneration;
   const isWriteRevision = (revision: Revision): revision is GraphWriteRevision =>
     typeof revision === 'object' && revision !== null;
-  const supersedes = (stored: Revision, current: Revision): boolean => {
+  const supersedesCompleted = (stored: Revision, current: Revision): boolean => {
     if (writeRevisionSource) {
       return !isWriteRevision(stored)
         || !isWriteRevision(current)
@@ -252,6 +252,14 @@ export function createResponderGraphListMemo(
     }
     // A deep-page read without a session generation joins/uses the current
     // snapshot; only an explicitly newer responder session supersedes it.
+    return current !== undefined && stored !== current;
+  };
+  const supersedesInflight = (stored: Revision, current: Revision): boolean => {
+    if (writeRevisionSource) {
+      return !isWriteRevision(stored)
+        || !isWriteRevision(current)
+        || stored.generation !== current.generation;
+    }
     return current !== undefined && stored !== current;
   };
   let cached: {
@@ -273,7 +281,10 @@ export function createResponderGraphListMemo(
       while (inflight) {
         const pending = inflight;
         const revision = currentRevision(options?.refreshGeneration);
-        if (!supersedes(pending.revision, revision)) {
+        // Stability controls completed-cache reuse, not single-flight
+        // identity. Concurrent reads at the same unstable generation share
+        // one enumeration; the result is simply discarded for later callers.
+        if (!supersedesInflight(pending.revision, revision)) {
           return [...(await raceAgainstAbort(pending.promise, options?.signal))];
         }
         try {
@@ -284,7 +295,7 @@ export function createResponderGraphListMemo(
       }
       const now = Date.now();
       const revision = currentRevision(options?.refreshGeneration);
-      if (cached && supersedes(cached.revision, revision)) cached = null;
+      if (cached && supersedesCompleted(cached.revision, revision)) cached = null;
       if (
         cached &&
         now - cached.cachedAt < ttlMs &&
