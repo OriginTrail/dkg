@@ -541,7 +541,7 @@ Profile RDF shape for writes:
   prof:inCatalog <urn:dkg:profile:PROJECT:catalog:CATALOG> ;
   prof:displayName "Saved query name" ;
   schema:description "What this query returns" ;
-  prof:sparqlQuery "SELECT ?uri WHERE { ?uri <urn:configuration> {{configurationId}} }" ;
+  prof:sparqlQuery "SELECT ?uri WHERE { ?uri <urn:configuration> {{literal:configurationId}} }" ;
   prof:queryParameters "[{\"name\":\"configurationId\",\"type\":\"string\",\"label\":\"Configuration ID\"}]" ;
   prof:executionView "verifiable-memory" ;
   prof:resultColumn "uri" ;
@@ -550,7 +550,7 @@ Profile RDF shape for writes:
 
 When composing saved SPARQL, keep it read-only (`SELECT`, `ASK`, `CONSTRUCT`,
 or `DESCRIBE`). Prefer returning a stable `?uri` column when the result should
-feed entity-list UI surfaces. A `{{name}}` placeholder represents one complete
+feed entity-list UI surfaces. A `{{literal:name}}` placeholder represents one complete
 SPARQL term and must have a matching `prof:queryParameters` definition. Runtime
 renderers escape `string` values and validate `integer`, `number`, `boolean`,
 and `iri` values before execution; do not quote placeholders inside the SPARQL

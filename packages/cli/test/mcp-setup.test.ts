@@ -6,6 +6,7 @@ import TOML from '@iarna/toml';
 import { SELECTABLE_SETUP_NETWORKS } from '@origintrail-official/dkg-core';
 import { mcpSetupAction, type McpSetupActionDeps } from '../src/mcp-setup.js';
 import { listBundledNetworkConfigNames, resolveKnownNetworkConfigName } from '../src/config.js';
+import { REQUIRED_SKILL_TOKENS } from '../src/skill-template.js';
 
 /**
  * NO MOCKS. `dkg mcp setup` is a pure CLI ORCHESTRATOR over (a) a real
@@ -3596,7 +3597,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
   // This asserts the file mcpSetupAction ACTUALLY writes. An earlier test
   // checked hermes-setup's loader instead and would have stayed green while
   // this path regressed, because mcp-setup carried its own private copy of it.
-  it('delivers a rendered SKILL.md to the client, never raw template tokens', async () => {
+  it('delivers a rendered SKILL.md to the client, never raw node template tokens', async () => {
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
 
     await mcpSetupAction({ verify: false, fund: false }, makeDeps());
@@ -3605,8 +3606,13 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect(existsSync(delivered)).toBe(true);
     const content = readFileSync(delivered, 'utf-8');
 
-    // The regression: no unsubstituted template syntax reaches the user.
-    expect(content).not.toMatch(/\{\{[a-zA-Z]+\}\}/);
+    // The regression: no unsubstituted node-metadata template syntax reaches
+    // the user. Query-catalog placeholders use the same doubled-brace shape,
+    // but are intentionally preserved through the explicit literal escape.
+    for (const token of REQUIRED_SKILL_TOKENS) {
+      expect(content).not.toContain(`{{${token}}}`);
+    }
+    expect(content).toContain('{{configurationId}}');
     // Nor the pre-token placeholder prose it replaced.
     expect(content).not.toContain('(dynamic)');
     // It carries the standalone guidance instead of live node values.

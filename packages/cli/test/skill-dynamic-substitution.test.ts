@@ -25,11 +25,17 @@ const OPTS = {
   extractionPipelines: ['markitdown'],
 };
 
+function expectNoUnresolvedSkillTemplateTokens(content: string): void {
+  for (const token of REQUIRED_SKILL_TOKENS) {
+    expect(content).not.toContain(`{{${token}}}`);
+  }
+}
+
 describe('buildSkillMd — dynamic Node Info substitution (GH#1125)', () => {
   it('leaves no unsubstituted token or legacy placeholder', () => {
     const md = buildSkillMd(OPTS);
     expect(md).not.toContain('(dynamic)');
-    expect(md).not.toMatch(/\{\{[a-zA-Z]+\}\}/);
+    expectNoUnresolvedSkillTemplateTokens(md);
   });
 
   it('substitutes the real node values', () => {
@@ -43,7 +49,7 @@ describe('buildSkillMd — dynamic Node Info substitution (GH#1125)', () => {
 
   it('reports no pipelines with actionable guidance rather than an empty value', () => {
     const md = buildSkillMd({ ...OPTS, extractionPipelines: [] });
-    expect(md).not.toMatch(/\{\{[a-zA-Z]+\}\}/);
+    expectNoUnresolvedSkillTemplateTokens(md);
     expect(md).toContain('none (install markitdown to enable document conversion)');
   });
 
@@ -70,7 +76,7 @@ describe('buildSkillMd — replacement tokens in node metadata are literal (GH#1
       expect(md).toContain(`- **Base URL:** ${baseUrl}`);
       expect(md.split(`- **Base URL:** ${baseUrl}`)).toHaveLength(2);
       expect(md).not.toContain('(dynamic)');
-      expect(md).not.toMatch(/\{\{[a-zA-Z]+\}\}/);
+      expectNoUnresolvedSkillTemplateTokens(md);
     });
   }
 
@@ -135,7 +141,7 @@ describe('SKILL.md template token contract (GH#1125 review)', () => {
       reworded,
     );
 
-    expect(rendered).not.toMatch(/\{\{[a-zA-Z]+\}\}/);
+    expectNoUnresolvedSkillTemplateTokens(rendered);
     expect(rendered).toContain('- **Node type:** edge');
     expect(rendered).toContain('- **Node version:** 10.0.14');
     expect(rendered).toContain('If the Node UI supplies');
@@ -149,9 +155,9 @@ describe('SKILL.md template token contract (GH#1125 review)', () => {
 // `{{token}}` syntax that meant shipping internal placeholders to end users —
 // a worse artifact than the `(dynamic)` prose it replaced.
 describe('standalone skill delivery renders too (GH#1125 review)', () => {
-  it('never delivers raw template syntax', () => {
+  it('never delivers unresolved node template syntax', () => {
     const delivered = renderStandaloneDkgNodeSkill();
-    expect(delivered).not.toMatch(/\{\{[a-zA-Z]+\}\}/);
+    expectNoUnresolvedSkillTemplateTokens(delivered);
     expect(delivered).not.toContain('(dynamic)');
   });
 
@@ -167,7 +173,7 @@ describe('standalone skill delivery renders too (GH#1125 review)', () => {
     // (PR #2331 review). The duplicate is deleted and mcp-setup calls the
     // shared renderer directly; `mcp-setup.test.ts` asserts the delivered file.
     const shipped = loadBundledDkgNodeSkill();
-    expect(shipped).not.toMatch(/\{\{[a-zA-Z]+\}\}/);
+    expectNoUnresolvedSkillTemplateTokens(shipped);
     expect(shipped).toBe(renderStandaloneDkgNodeSkill());
   });
 
@@ -195,6 +201,23 @@ describe('token contract has one source of truth (GH#1125 review)', () => {
     const drifted = loadSkillTemplate().replace('{{peerId}}', '{{networkId}}');
     expect(unknownSkillTokens(drifted)).toEqual(['networkId']);
     expect(missingSkillTokens(drifted)).toEqual(['peerId']);
+  });
+
+  it('preserves explicitly escaped placeholders from another template language', () => {
+    const template = '{{nodeVersion}} / {{literal:configuration_id}}';
+    const rendered = renderSkillTemplate(
+      {
+        nodeVersion: '10.0.14',
+        baseUrl: 'unused',
+        peerId: 'unused',
+        nodeRole: 'unused',
+        extractionPipelines: 'unused',
+      },
+      template,
+    );
+
+    expect(rendered).toBe('10.0.14 / {{configuration_id}}');
+    expect(unknownSkillTokens(template)).toEqual([]);
   });
 
   it('REQUIRED_SKILL_TOKENS is derived, not a parallel list', () => {
