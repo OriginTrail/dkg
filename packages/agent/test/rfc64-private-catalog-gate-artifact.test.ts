@@ -7,6 +7,10 @@ import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  MemoryLayer,
+  contextGraphLayerUri,
+} from '@origintrail-official/dkg-core';
 
 import {
   Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1,
@@ -20,14 +24,20 @@ import {
   assertRfc64PrivateGatePassProvenanceV1,
   runRfc64PrivateGateArtifactLifecycleV1,
 } from '../devnet/rfc64-private-catalog/gate-artifact.mjs';
-import { AgentChild } from '../devnet/rfc64-private-catalog/run.mjs';
+import {
+  AgentChild,
+  hasExactMemoryContents,
+} from '../devnet/rfc64-private-catalog/run.mjs';
 import {
   ASSET_NUMBERS,
+  CONTEXT_GRAPH_ID,
   PROJECTION_EVIDENCE,
+  roleAgentAddress,
 } from '../devnet/rfc64-private-catalog/fixture.mjs';
 import {
   hasExactPrivateCatalogMemoryContents,
   readExactGraphMemoryEvidence,
+  readPrivateCatalogGraphCountEvidence,
 } from '../devnet/rfc64-private-catalog/memory-evidence.mjs';
 
 const temporaryRoots: string[] = [];
@@ -138,6 +148,56 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
 });
 
 describe('RFC-64 private release gate process and denial evidence', () => {
+  it('feeds process-built SWM/VM evidence through the executable gate predicate', async () => {
+    const store = new OxigraphStore();
+    const authorAddress = roleAgentAddress('owner');
+    try {
+      for (const kaNumber of ASSET_NUMBERS) {
+        for (const layer of [MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiableMemory]) {
+          const graph = contextGraphLayerUri(
+            CONTEXT_GRAPH_ID,
+            layer,
+            authorAddress,
+            kaNumber,
+          );
+          await store.insert([
+            {
+              graph,
+              subject: 'https://example.org/alice',
+              predicate: 'https://schema.org/age',
+              object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+            },
+            {
+              graph,
+              subject: 'https://example.org/alice',
+              predicate: 'https://schema.org/name',
+              object: '"Alice"',
+            },
+          ]);
+        }
+      }
+
+      const graphCounts = await readPrivateCatalogGraphCountEvidence(store, {
+        assetNumbers: ASSET_NUMBERS,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorAddress,
+      });
+      expect(hasExactMemoryContents({ graphCounts })).toBe(true);
+      expect(hasExactMemoryContents({
+        graphCounts: graphCounts.map((entry, index) => index === 0
+          ? { ...entry, swmDigest: entry.vmDigest, vmDigest: '0'.repeat(64) }
+          : entry),
+      })).toBe(false);
+      expect(hasExactMemoryContents({
+        graphCounts: graphCounts.map((entry, index) => index === 1
+          ? { ...entry, kaNumber: 43 }
+          : entry),
+      })).toBe(false);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('hashes real graph contents and rejects same-size semantic corruption', async () => {
     const graph = 'urn:rfc64:private-gate:test-memory';
     const store = new OxigraphStore();

@@ -2094,20 +2094,11 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
     })),
   );
-  const stagedObjects: Array<{
-    readonly objectDigest: Digest32V1;
-    readonly signatureVariantDigest: Digest32V1;
-  }> = [];
   for (let offset = 0; offset < verifiedObjects.length; offset += 16) {
-    const stagedBatch = await authorPersistence.controlObjects.stageVerifiedObjects(
+    await authorPersistence.controlObjects.stageVerifiedObjects(
       verifiedObjects.slice(offset, offset + 16),
     );
-    stagedObjects.push(...stagedBatch.objects);
   }
-  const staged = { objects: stagedObjects };
-  const stagedKeysByObjectDigest = new Map(
-    staged.objects.map((keys) => [keys.objectDigest, keys]),
-  );
   const receivedAnnouncements: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
   const openPolicy = async () => Object.freeze({
     accessPolicy: 0 as const,
@@ -2228,42 +2219,32 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   receiverNativeTransport.start();
   const announcementFor = (
     head: Readonly<SignedAuthorCatalogHeadEnvelopeV1>,
-    base?: Readonly<Rfc64PublicCatalogHeadAnnouncementV1>,
-  ): Readonly<Rfc64PublicCatalogHeadAnnouncementV1> => {
-    const keys = stagedKeysByObjectDigest.get(head.objectDigest);
-    if (keys === undefined) throw new Error(`catalog head ${head.objectDigest} was not staged`);
-    return Object.freeze({
-      ...(base ?? {
-        kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
-        networkId: head.payload.networkId,
-        contextGraphId: head.payload.contextGraphId,
-        subGraphName: head.payload.subGraphName,
-        authorAddress: head.payload.authorAddress,
-        catalogEra: head.payload.era,
-        policyDigest: POLICY_DIGEST,
-      }),
-      catalogVersion: head.payload.version,
-      catalogHeadObjectDigest: keys.objectDigest,
-      signatureVariantDigest: keys.signatureVariantDigest,
-    });
-  };
+  ): Readonly<Rfc64PublicCatalogHeadAnnouncementV1> => Object.freeze({
+    kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+    networkId: head.payload.networkId,
+    contextGraphId: head.payload.contextGraphId,
+    subGraphName: head.payload.subGraphName,
+    authorAddress: head.payload.authorAddress,
+    catalogEra: head.payload.era,
+    policyDigest: POLICY_DIGEST,
+    catalogVersion: head.payload.version,
+    catalogHeadObjectDigest: head.objectDigest,
+    signatureVariantDigest: rfc64CatalogSignatureVariantDigestV1(head),
+  });
   const announcement = announcementFor(successor.head);
-  const genesisAnnouncement = announcementFor(genesis.head, announcement);
-  const multiAssetAnnouncement = announcementFor(multiAssetSuccessor.head, announcement);
-  const removalAnnouncement = announcementFor(removalSuccessor.head, announcement);
-  const replacementAnnouncement = announcementFor(replacementSuccessor.head, announcement);
-  const threeAssetAnnouncement = announcementFor(threeAssetSuccessor.head, announcement);
-  const competingAnnouncement = announcementFor(competingSuccessor.head, announcement);
-  const governedGenesisAnnouncement = announcementFor(governedGenesis.head, announcement);
-  const governedSuccessorAnnouncement = announcementFor(governedSuccessor.head, announcement);
-  const crossLaneAnnouncement = announcementFor(crossLaneHead, announcement);
-  const expiredAnnouncement = announcementFor(expiredHead, announcement);
-  const missingDelegationAnnouncement = announcementFor(missingDelegationHead, announcement);
-  const missingDelegationGenesisAnnouncement = announcementFor(
-    missingDelegationGenesisHead,
-    announcement,
-  );
-  const invalidGenesisAnnouncement = announcementFor(invalidGenesis.head, announcement);
+  const genesisAnnouncement = announcementFor(genesis.head);
+  const multiAssetAnnouncement = announcementFor(multiAssetSuccessor.head);
+  const removalAnnouncement = announcementFor(removalSuccessor.head);
+  const replacementAnnouncement = announcementFor(replacementSuccessor.head);
+  const threeAssetAnnouncement = announcementFor(threeAssetSuccessor.head);
+  const competingAnnouncement = announcementFor(competingSuccessor.head);
+  const governedGenesisAnnouncement = announcementFor(governedGenesis.head);
+  const governedSuccessorAnnouncement = announcementFor(governedSuccessor.head);
+  const crossLaneAnnouncement = announcementFor(crossLaneHead);
+  const expiredAnnouncement = announcementFor(expiredHead);
+  const missingDelegationAnnouncement = announcementFor(missingDelegationHead);
+  const missingDelegationGenesisAnnouncement = announcementFor(missingDelegationGenesisHead);
+  const invalidGenesisAnnouncement = announcementFor(invalidGenesis.head);
   await authorHeadTransport.announceCatalogHead(receiverNode.peerId, genesisAnnouncement);
   await authorHeadTransport.announceCatalogHead(receiverNode.peerId, announcement);
   expect(receivedAnnouncements).toEqual([genesisAnnouncement, announcement]);

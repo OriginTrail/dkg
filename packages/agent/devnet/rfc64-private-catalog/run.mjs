@@ -26,7 +26,7 @@ const AGENT_PROCESS = join(HERE, 'agent-process.mjs');
 const ARTIFACT = join(HERE, 'artifacts', 'latest.json');
 const ROLES = Object.freeze(['owner', 'provider2', 'receiver', 'outsider']);
 const RUN_TIMEOUT_MS = 90_000;
-const EXPECTED_MEMORY_CONTENTS = Object.freeze({
+export const EXPECTED_MEMORY_CONTENTS = Object.freeze({
   assetNumbers: ASSET_NUMBERS,
   projection: PROJECTION_EVIDENCE,
 });
@@ -394,7 +394,7 @@ async function dial(from, to) {
   }, 'dialed', 30_000);
 }
 
-const hasExactMemoryContents = (state) =>
+export const hasExactMemoryContents = (state) =>
   hasExactPrivateCatalogMemoryContents(state, EXPECTED_MEMORY_CONTENTS);
 
 function safeRole(ready) {

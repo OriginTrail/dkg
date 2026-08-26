@@ -6,10 +6,8 @@ import { createInterface } from 'node:readline';
 
 import { multiaddr } from '@multiformats/multiaddr';
 import {
-  MemoryLayer,
   computeAuthorCatalogScopeDigestV1,
   computeNetworkId,
-  contextGraphLayerUri,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -31,7 +29,7 @@ import {
   roleAgentAddress,
 } from './fixture.mjs';
 import { classifyExpectedPrivateCatalogDenialV1 } from './denial-evidence.mjs';
-import { readExactGraphMemoryEvidence } from './memory-evidence.mjs';
+import { readPrivateCatalogGraphCountEvidence } from './memory-evidence.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
@@ -291,32 +289,11 @@ async function inspect(expectedHeadDigest) {
     catalogScopeDigest: scopeDigest,
     authorAddress,
   });
-  const graphCounts = [];
-  for (const kaNumber of ASSET_NUMBERS) {
-    const swmGraph = contextGraphLayerUri(
-      CONTEXT_GRAPH_ID,
-      MemoryLayer.SharedWorkingMemory,
-      authorAddress,
-      kaNumber,
-    );
-    const vmGraph = contextGraphLayerUri(
-      CONTEXT_GRAPH_ID,
-      MemoryLayer.VerifiableMemory,
-      authorAddress,
-      kaNumber,
-    );
-    const [swm, vm] = await Promise.all([
-      readExactGraphMemoryEvidence(agent.store, swmGraph),
-      readExactGraphMemoryEvidence(agent.store, vmGraph),
-    ]);
-    graphCounts.push({
-      kaNumber,
-      swm: swm.count,
-      swmDigest: swm.digest,
-      vm: vm.count,
-      vmDigest: vm.digest,
-    });
-  }
+  const graphCounts = await readPrivateCatalogGraphCountEvidence(agent.store, {
+    assetNumbers: ASSET_NUMBERS,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    authorAddress,
+  });
   const outsiderResult = ROLE === 'outsider'
     ? null
     : await agent.query(

@@ -3,6 +3,10 @@
 import { createHash } from 'node:crypto';
 
 import {
+  MemoryLayer,
+  contextGraphLayerUri,
+} from '@origintrail-official/dkg-core';
+import {
   quadsToNQuads,
   readExactGraphPagedWithDiscoveredCount,
 } from '@origintrail-official/dkg-storage';
@@ -25,6 +29,39 @@ export async function readExactGraphMemoryEvidence(store, graph, options = {}) {
     count: quads.length,
     digest: createHash('sha256').update(canonicalNQuads, 'utf8').digest('hex'),
   });
+}
+
+/**
+ * Construct the flattened per-asset evidence emitted by the release-gate
+ * child. Each asset and both of its memory projections are independent, so all
+ * bounded graph reads begin together while the returned order stays stable.
+ */
+export async function readPrivateCatalogGraphCountEvidence(store, input) {
+  return Promise.all(input.assetNumbers.map(async (kaNumber) => {
+    const swmGraph = contextGraphLayerUri(
+      input.contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      input.authorAddress,
+      kaNumber,
+    );
+    const vmGraph = contextGraphLayerUri(
+      input.contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      input.authorAddress,
+      kaNumber,
+    );
+    const [swm, vm] = await Promise.all([
+      readExactGraphMemoryEvidence(store, swmGraph),
+      readExactGraphMemoryEvidence(store, vmGraph),
+    ]);
+    return Object.freeze({
+      kaNumber,
+      swm: swm.count,
+      swmDigest: swm.digest,
+      vm: vm.count,
+      vmDigest: vm.digest,
+    });
+  }));
 }
 
 /**
