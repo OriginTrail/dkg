@@ -37,6 +37,7 @@ import {
   produceEmptyAuthorCatalogGenesisV1,
 } from '../src/rfc64/author-catalog-producer.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from '../src/rfc64/catalog-native-scoped-read-provider-v1.js';
+import type { AcceptedRfc64CatalogAccessSnapshotV1 } from '../src/rfc64/catalog-access-policy-v1.js';
 import { produceDirectAuthorCatalogIssuerDelegationV1 } from '../src/rfc64/public-catalog-issuer-delegation-v1.js';
 import type { Rfc64PublicCatalogNativeFetchScopeV1 } from '../src/rfc64/public-catalog-native-transport-v1.js';
 
@@ -93,13 +94,22 @@ function acceptedPrivatePolicy(options: {
   return Object.freeze({ policy, policyDigest: POLICY_DIGEST, roster });
 }
 
+function acceptedPublicPolicy(): AcceptedRfc64CatalogAccessSnapshotV1 {
+  const privateSnapshot = acceptedPrivatePolicy();
+  return Object.freeze({
+    policy: Object.freeze({ ...privateSnapshot.policy, accessPolicy: 0 }),
+    policyDigest: privateSnapshot.policyDigest,
+    roster: null,
+  });
+}
+
 async function providerFixture(
-  accepted = acceptedPrivatePolicy(),
+  accepted: AcceptedRfc64CatalogAccessSnapshotV1 = acceptedPrivatePolicy(),
   verifyIssuerSignature: typeof verifyControlEnvelopeIssuerSignatureV1 =
     verifyControlEnvelopeIssuerSignatureV1,
   rowCount = 1,
-  resolveAcceptedPolicySnapshot: () => ReturnType<typeof acceptedPrivatePolicy> | null
-    | Promise<ReturnType<typeof acceptedPrivatePolicy> | null> = async () => accepted,
+  resolveAcceptedPolicySnapshot: () => AcceptedRfc64CatalogAccessSnapshotV1 | null
+    | Promise<AcceptedRfc64CatalogAccessSnapshotV1 | null> = async () => accepted,
   onAuthorCatalogBucketProof?: () => void,
 ) {
   const catalogScope = {
@@ -350,6 +360,23 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
     )).resolves.toBeNull();
   });
 
+  it('closes the same exact digest boundary for an accepted public catalog', async () => {
+    const fixture = await providerFixture(acceptedPublicPolicy());
+    const capability = await fixture.resolve(fixture.scope);
+    expect(capability).not.toBeNull();
+    await expect(capability?.readCatalogObjectByDigest(
+      fixture.successor.directoryPath[0]!.objectDigest as Digest32V1,
+    )).resolves.toEqual(fixture.successor.directoryPath[0]);
+    await expect(capability?.readKaBundleByDigest(fixture.bundle.blobDigest))
+      .resolves.toEqual(fixture.bundle.bundleBytes);
+    await expect(capability?.readCatalogObjectByDigest(
+      fixture.genesis.head.objectDigest as Digest32V1,
+    )).resolves.toBeNull();
+    await expect(capability?.readKaBundleByDigest(
+      `0x${'91'.repeat(32)}` as Digest32V1,
+    )).resolves.toBeNull();
+  });
+
   it.each([
     {
       label: 'context graph',
@@ -511,7 +538,7 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
     current = acceptedPrivatePolicy({ includeAuthor: false });
     await expect(fixture.resolve(fixture.scope)).resolves.toBeNull();
     await expect(capability?.readKaBundleByDigest(fixture.bundle.blobDigest))
-      .rejects.toThrow('requested private catalog scope is not accepted-current authority');
+      .rejects.toThrow('requested catalog scope is not accepted-current authority');
     expect(fixture.bundleRead).not.toHaveBeenCalled();
 
     current = acceptedPrivatePolicy();
