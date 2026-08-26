@@ -33,6 +33,7 @@ import {
   requiredHeadBlockForReceipt,
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
+  resolveTxSerializerStallAfterMs,
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS,
   RPC_RECEIPT_POLL_INTERVAL_MS,
@@ -56,6 +57,16 @@ it('defaults an omitted receipt deadline to ten minutes', () => {
 it('rejects an explicitly invalid receipt deadline at the adapter boundary', () => {
   expect(() => new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 999 })))
     .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
+});
+
+it('derives the signer-lane stall threshold from the full path and endpoint count', () => {
+  const a = new EVMChainAdapter(minimalConfig({
+    receiptTimeoutMs: 1_000,
+    rpcUrls: ['http://127.0.0.1:59997'],
+  }));
+  expect((a as any).signerTxSerializer.options.stallAfterMs).toBe(
+    resolveTxSerializerStallAfterMs(1_000, 2),
+  );
 });
 
 it('defaults mined-receipt finality to one confirmation', () => {
@@ -4750,12 +4761,19 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
       registerPool(a);
       // Drive the serializer's own clock so one lane can be aged past the
-      // derived stall threshold (2 x receiptTimeoutMs) while the other is not.
+      // derived complete-path stall threshold while the other is not.
       let clock = 0;
-      const stallAfterMs = 2 * (a as any).receiptTimeoutMs;
+      const stallAfterMs = resolveTxSerializerStallAfterMs(
+        (a as any).receiptTimeoutMs,
+        (a as any).rpcUrls.length,
+      );
       const Ctor = (a as any).signerTxSerializer.constructor;
       (a as any).signerTxSerializer = new Ctor({
-        stallAfterMs, now: () => clock, onObserve: () => {},
+        observeAfterMs: 30_000,
+        observeIntervalMs: 60_000,
+        stallAfterMs,
+        now: () => clock,
+        onObserve: () => {},
       });
 
       let releaseA!: () => void; let releaseB!: () => void;

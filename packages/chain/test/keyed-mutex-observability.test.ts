@@ -3,6 +3,10 @@ import {
   SignerTxSerializer,
   type SignerTxSerializerObservation,
 } from '../src/signer-tx-serializer.js';
+import {
+  resolveTxSerializerMaxLegitimateHoldMs,
+  resolveTxSerializerStallAfterMs,
+} from '../src/evm-adapter-constants.js';
 
 // GH#1574 — acquisition was structurally invisible: a bare promise-chain link
 // with no timer, counter or log. Three mainnet publishes logged "Submitting
@@ -20,8 +24,9 @@ const settle = async () => { await Promise.resolve(); await Promise.resolve(); }
 /** Deferred promise, so a test can hold a lane open deterministically. */
 function deferred<T = void>() {
   let resolve!: (v: T) => void;
-  const promise = new Promise<T>((res) => { resolve = res; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 }
 
 function harness(overrides: Partial<{
@@ -73,7 +78,7 @@ describe('SignerTxSerializer observability (GH#1574)', () => {
       expect(o.depth).toBe(2);
       expect(o.waiting).toBe(1);
       expect(o.oldestWaiterLabel).toBe('publish');
-      expect(o.stalled).toBe(false);
+      expect(o.state).toBe('busy');
 
       holder.resolve();
       await first; await second;
@@ -112,11 +117,11 @@ describe('SignerTxSerializer observability (GH#1574)', () => {
 
       tick(5_000);
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(seen.some((o) => o.stalled)).toBe(false);
+      expect(seen.some((o) => o.state === 'stalled')).toBe(false);
 
       tick(8_000);
       await vi.advanceTimersByTimeAsync(8_000);
-      expect(seen.some((o) => o.stalled)).toBe(true);
+      expect(seen.some((o) => o.state === 'stalled')).toBe(true);
 
       holder.resolve();
       await p;
@@ -209,6 +214,36 @@ describe('SignerTxSerializer observability (GH#1574)', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('does not transfer lane age to a newly acquired holder', async () => {
+    vi.useFakeTimers();
+    try {
+      const { s, seen, tick } = harness({
+        observeAfterMs: 30_000,
+        observeIntervalMs: 60_000,
+      });
+      const firstHolder = deferred();
+      const secondHolder = deferred();
+      const first = s.run('0xw', () => firstHolder.promise, 'approve');
+      const second = s.run('0xw', () => secondHolder.promise, 'publish');
+      await settle();
+
+      tick(20_000);
+      await vi.advanceTimersByTimeAsync(20_000);
+      firstHolder.resolve();
+      await first;
+      await settle();
+
+      // The lane is 30s old, but the CURRENT holder has held it for only 10s
+      // and no waiter remains. The lane timer must not manufacture a warning.
+      tick(10_000);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(seen).toHaveLength(0);
+
+      secondHolder.resolve();
+      await second;
+    } finally { vi.useRealTimers(); }
+  });
+
   it('goes quiet once a wedged lane finally settles', async () => {
     vi.useFakeTimers();
     try {
@@ -232,6 +267,34 @@ describe('SignerTxSerializer observability (GH#1574)', () => {
       expect(seen).toHaveLength(afterSettle);
       expect(s.isActive('0xw')).toBe(false);
       expect(s.activeKeyCount).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('cleans up state and timers after rejection, then accepts the next operation', async () => {
+    vi.useFakeTimers();
+    try {
+      const { s, seen, tick } = harness();
+      const holder = deferred();
+      const failed = s.run('0xw', () => holder.promise, 'publish');
+      await settle();
+
+      tick(2_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(seen.length).toBeGreaterThan(0);
+
+      holder.reject(new Error('broadcast failed'));
+      await expect(failed).rejects.toThrow('broadcast failed');
+      await settle();
+      const afterReject = seen.length;
+
+      expect(s.state('0xw')).toBe('idle');
+      expect(s.depth('0xw')).toBe(0);
+      expect(s.activeKeyCount).toBe(0);
+      tick(120_000);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(seen).toHaveLength(afterReject);
+      await expect(s.run('0xw', async () => 'recovered', 'update'))
+        .resolves.toBe('recovered');
     } finally { vi.useRealTimers(); }
   });
 });
@@ -296,5 +359,59 @@ describe('SignerTxSerializer lane state (GH#1574)', () => {
     await p;
     await settle();
     expect(s.state('0xw')).toBe('idle');
+  });
+
+  it('emits the exact same state immediately before and at the stall boundary', async () => {
+    vi.useFakeTimers();
+    try {
+      const { s, seen, tick } = harness({
+        observeAfterMs: 1,
+        observeIntervalMs: 1,
+        stallAfterMs: 10,
+      });
+      const holder = deferred();
+      const p = s.run('0xw', () => holder.promise, 'publish');
+      await settle();
+
+      tick(9);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(seen.at(-1)!.state).toBe('busy');
+      expect(seen.at(-1)!.state).toBe(s.state('0xw'));
+
+      tick(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(seen.at(-1)!.state).toBe('stalled');
+      expect(seen.at(-1)!.state).toBe(s.state('0xw'));
+
+      holder.resolve();
+      await p;
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps the complete bounded V10 path busy and stalls only beyond it', async () => {
+    const receiptTimeoutMs = 1_000;
+    const rpcEndpointCount = 3;
+    const maximumLegitimateHoldMs = resolveTxSerializerMaxLegitimateHoldMs(
+      receiptTimeoutMs,
+      rpcEndpointCount,
+    );
+    const stallAfterMs = resolveTxSerializerStallAfterMs(
+      receiptTimeoutMs,
+      rpcEndpointCount,
+    );
+    expect(stallAfterMs).toBe(maximumLegitimateHoldMs + 1);
+
+    const { s, tick } = harness({ stallAfterMs });
+    const holder = deferred();
+    const p = s.run('0xw', () => holder.promise, 'publish');
+    await settle();
+
+    tick(maximumLegitimateHoldMs);
+    expect(s.state('0xw')).toBe('busy');
+    tick(1);
+    expect(s.state('0xw')).toBe('stalled');
+
+    holder.resolve();
+    await p;
   });
 });

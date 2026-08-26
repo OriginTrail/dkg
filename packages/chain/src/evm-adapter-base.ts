@@ -25,7 +25,7 @@ import type {
   SignedTransactionEnvelope,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import { SignerTxSerializer } from './signer-tx-serializer.js';
+import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
@@ -47,7 +47,7 @@ import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
   TX_SERIALIZER_OBSERVE_INTERVAL_MS,
-  TX_SERIALIZER_STALL_MULTIPLE,
+  resolveTxSerializerStallAfterMs,
 } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
@@ -1098,7 +1098,10 @@ export class EVMChainAdapterBase {
     this.signerTxSerializer = new SignerTxSerializer({
       observeAfterMs: TX_SERIALIZER_OBSERVE_AFTER_MS,
       observeIntervalMs: TX_SERIALIZER_OBSERVE_INTERVAL_MS,
-      stallAfterMs: TX_SERIALIZER_STALL_MULTIPLE * this.receiptTimeoutMs,
+      stallAfterMs: resolveTxSerializerStallAfterMs(
+        this.receiptTimeoutMs,
+        this.rpcUrls.length,
+      ),
     });
     this.finalityConfirmations = resolveFinalityConfirmations(config.finalityConfirmations);
     this.maxFeePerGasWei = resolveMaxFeePerGasWei(config.maxFeePerGasWei);
@@ -1989,13 +1992,14 @@ export class EVMChainAdapterBase {
   ): Promise<void> {
     if (!this.contracts.token) return;
     const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
-    const currentAllowance: bigint = await this.readContract(
+    // This read is part of the serializer's derived maximum legitimate hold,
+    // so retain a hard cap even for a single-RPC deployment.
+    const currentAllowance = (await this.readContractWith(
       tokenWithSigner,
       'token.allowance',
-      'allowance',
-      signer.address,
-      kav10Address,
-    );
+      (c) => c.allowance(signer.address, kav10Address),
+      { policy: 'watchdogPointRead' },
+    )) as bigint;
     const { needsApprove, targetAllowance } = computeApprovalAction(
       this.approvalPolicy,
       tokenAmount,
@@ -2327,10 +2331,13 @@ export class EVMChainAdapterBase {
       // re-deriving the threshold here — two copies of that policy would
       // drift, and diagnostics could call a lane stalled while selection
       // still called it healthy.
-      const rank = (address: string): number => {
-        const state = this.signerTxSerializer.state(address);
-        return state === 'idle' ? 0 : state === 'busy' ? 1 : 2;
+      const laneRank: Record<SignerTxLaneState, number> = {
+        idle: 0,
+        busy: 1,
+        stalled: 2,
       };
+      const rank = (address: string): number =>
+        laneRank[this.signerTxSerializer.state(address)];
       let best: number | undefined;
       let bestRank = Number.POSITIVE_INFINITY;
       for (const index of fundableIdx) {

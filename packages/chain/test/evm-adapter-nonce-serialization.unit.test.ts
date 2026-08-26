@@ -466,7 +466,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     (a as any).contracts.token = {
       connect: recorder(() => tokenWithSigner),
     };
-    (a as any).readContract = recorder(async () => 0n);
+    (a as any).readContractWith = recorder(async () => 0n);
     const publicSend = recorder(async () => {
       throw new Error('public serializer re-entered');
     });
@@ -515,7 +515,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     (a as any).contracts.token = { connect: recorder(() => tokenWithSigner) };
     // Stale-zero allowance read triggers the approve; the #888 post-approve
     // confirmation poll sees the target immediately (separate read path).
-    (a as any).readContract = recorder(async () => 0n);
+    (a as any).readContractWith = recorder(async () => 0n);
     (a as any).confirmAllowanceVisible = recorder(async () => undefined);
     const publicSend = recorder(async () => {
       throw new Error('public serializer re-entered');

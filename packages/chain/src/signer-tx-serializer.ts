@@ -1,5 +1,3 @@
-import { KeyedSerializer } from './keyed-mutex.js';
-
 /** Health of one operational-wallet transaction lane. */
 export type SignerTxLaneState = 'idle' | 'busy' | 'stalled';
 
@@ -14,7 +12,8 @@ export interface SignerTxSerializerObservation {
   holdElapsedMs: number;
   oldestWaiterLabel?: string;
   oldestWaiterMs?: number;
-  stalled: boolean;
+  /** The same canonical verdict consumed by wallet selection. */
+  state: SignerTxLaneState;
 }
 
 export interface SignerTxSerializerOptions {
@@ -34,6 +33,8 @@ interface Waiter {
 }
 
 interface Lane {
+  /** Authoritative FIFO tail for this lane. It never rejects. */
+  tail: Promise<void>;
   /** Queued + running operations. */
   depth: number;
   holder?: { label: string; startedAt: number };
@@ -45,7 +46,7 @@ interface Lane {
 }
 
 /**
- * Transaction-specific monitoring around the generic FIFO serializer.
+ * Transaction-specific, monitored FIFO serializer.
  *
  * Acquisition intentionally has no timeout. A healthy critical section can
  * contain approval and broadcast work whose own bounds are much longer than a
@@ -54,7 +55,6 @@ interface Lane {
  * later after their predecessor eventually settles.
  */
 export class SignerTxSerializer {
-  private readonly queue = new KeyedSerializer();
   private readonly lanes = new Map<string, Lane>();
   private readonly now: () => number;
   private readonly onObserve: (observation: SignerTxSerializerObservation) => void;
@@ -71,7 +71,7 @@ export class SignerTxSerializer {
   run<T>(key: string, fn: () => Promise<T>, label: string): Promise<T> {
     let lane = this.lanes.get(key);
     if (!lane) {
-      lane = { depth: 0, waiters: new Set() };
+      lane = { tail: Promise.resolve(), depth: 0, waiters: new Set() };
       this.lanes.set(key, lane);
     }
     const currentLane = lane;
@@ -80,7 +80,7 @@ export class SignerTxSerializer {
     currentLane.waiters.add(waiter);
     this.ensureObserver(key, currentLane);
 
-    return this.queue.run(key, async () => {
+    const execute = async (): Promise<T> => {
       currentLane.waiters.delete(waiter);
       currentLane.holder = { label, startedAt: this.now() };
       try {
@@ -88,12 +88,28 @@ export class SignerTxSerializer {
       } finally {
         currentLane.holder = undefined;
         currentLane.depth -= 1;
-        if (currentLane.depth === 0 && this.lanes.get(key) === currentLane) {
-          this.clearObserver(currentLane);
-          this.lanes.delete(key);
-        }
+      }
+    };
+    // A rejected predecessor must neither skip nor wedge its successor.
+    const result = currentLane.tail.then(execute, execute);
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    currentLane.tail = tail;
+    void tail.then(() => {
+      // A call submitted between settlement and this cleanup microtask has
+      // replaced `tail`; it owns the lane and must keep its observer alive.
+      if (
+        currentLane.tail === tail
+        && currentLane.depth === 0
+        && this.lanes.get(key) === currentLane
+      ) {
+        this.clearObserver(currentLane);
+        this.lanes.delete(key);
       }
     });
+    return result;
   }
 
   /** True while `key` has an in-flight or queued transaction. */
@@ -112,9 +128,7 @@ export class SignerTxSerializer {
 
   /** Canonical health classification consumed by both logs and wallet choice. */
   state(key: string): SignerTxLaneState {
-    const holder = this.lanes.get(key)?.holder;
-    if (!holder) return this.lanes.has(key) ? 'busy' : 'idle';
-    return this.now() - holder.startedAt >= this.options.stallAfterMs ? 'stalled' : 'busy';
+    return classifyLaneState(this.lanes.get(key), this.now(), this.options.stallAfterMs);
   }
 
   private ensureObserver(key: string, lane: Lane): void {
@@ -146,7 +160,16 @@ export class SignerTxSerializer {
     const holder = lane.holder;
     if (!holder) return;
     const oldest = lane.waiters.values().next().value as Waiter | undefined;
-    const holdElapsedMs = this.now() - holder.startedAt;
+    const now = this.now();
+    const holdElapsedMs = now - holder.startedAt;
+    const oldestWaiterMs = oldest ? now - oldest.queuedAt : undefined;
+    // The observer belongs to the lane, whose lifetime can span many short
+    // holders. Do not transfer that age to a newly-acquired holder: report only
+    // when the CURRENT hold or CURRENT oldest wait is itself interesting.
+    if (
+      holdElapsedMs < this.options.observeAfterMs
+      && (oldestWaiterMs ?? 0) < this.options.observeAfterMs
+    ) return;
     this.onObserve({
       key,
       depth: lane.depth,
@@ -154,10 +177,21 @@ export class SignerTxSerializer {
       holderLabel: holder.label,
       holdElapsedMs,
       oldestWaiterLabel: oldest?.label,
-      oldestWaiterMs: oldest ? this.now() - oldest.queuedAt : undefined,
-      stalled: holdElapsedMs >= this.options.stallAfterMs,
+      oldestWaiterMs,
+      state: classifyLaneState(lane, now, this.options.stallAfterMs),
     });
   }
+}
+
+/** The only lane-health policy used by queries, observations, and routing. */
+function classifyLaneState(
+  lane: Lane | undefined,
+  now: number,
+  stallAfterMs: number,
+): SignerTxLaneState {
+  if (!lane) return 'idle';
+  if (!lane.holder) return 'busy';
+  return now - lane.holder.startedAt >= stallAfterMs ? 'stalled' : 'busy';
 }
 
 function defaultObserve(observation: SignerTxSerializerObservation): void {
@@ -169,7 +203,7 @@ function defaultObserve(observation: SignerTxSerializerObservation): void {
         : '')
     : ' nothing queued behind it';
   console.warn(
-    `[chain] tx serializer${observation.stalled ? ' STALL' : ''}: ` +
+    `[chain] tx serializer${observation.state === 'stalled' ? ' STALL' : ''}: ` +
       `${observation.holderLabel} has held the lane for ${observation.key} ` +
       `${Math.round(observation.holdElapsedMs / 1000)}s;${waiting}.`,
   );
