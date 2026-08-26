@@ -96,6 +96,13 @@ export interface MarketplaceConfig {
   /** the node's own loopback API base + token for lane self-calls (defaults
    *  derived at mount from ctx). */
   nodeToken?: string;
+  /** P5: dedicated PUBLIC storefront listener port (127.0.0.1). DKG ≥10.0.14
+   *  bearer-gates every daemon route including plugins, so the public
+   *  marketplace surface (offers/enroll/serve/gateway — each with its own
+   *  auth) moves to this listener; requests on it NEVER get local-operator
+   *  status, so operate/* and buyer loopback rails are unreachable through
+   *  it even from localhost proxies (tailscale serve). Absent ⇒ no listener. */
+  publicPort?: number;
 }
 
 const DEFAULTS: MarketplaceConfig = { enabled: false, offerings: [] };
@@ -118,6 +125,7 @@ export function loadMarketplaceConfig(dkgHome: string): MarketplaceConfig {
       // seating run when enroll rejected its own configured revenue wallet)
       revenueWallet: typeof raw.revenueWallet === "string" ? raw.revenueWallet : undefined,
       registryContextGraphId: typeof raw.registryContextGraphId === "string" ? raw.registryContextGraphId : undefined,
+      publicPort: typeof raw.publicPort === "number" && raw.publicPort > 0 ? raw.publicPort : undefined,
       confirmationDepth: typeof raw.confirmationDepth === "number" && raw.confirmationDepth >= 0 ? raw.confirmationDepth : undefined,
       subsCadence: raw.subsCadence && typeof raw.subsCadence === "object" ? raw.subsCadence as MarketplaceConfig["subsCadence"] : undefined,
       offerings: Array.isArray(raw.offerings) ? (raw.offerings as OfferingConfig[]) : [],

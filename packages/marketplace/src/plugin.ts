@@ -181,10 +181,48 @@ function send(res: Res, status: number, body: unknown): void {
   res.end(s);
 }
 function isLocalOrToken(ctx: RequestContext): boolean {
+  // Requests arriving over the dedicated PUBLIC storefront listener are never
+  // local-operator, even though a localhost proxy (tailscale serve) makes
+  // their socket look like 127.0.0.1. DKG ≥10.0.14 bearer-gates the daemon
+  // port, so the loopback-implies-operator shortcut below is only reachable
+  // by genuinely local callers again.
+  if ((ctx as { nsmPublicListener?: boolean }).nsmPublicListener === true) return false;
   const remote = ctx.req.socket.remoteAddress ?? "";
   if (remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1") return true;
   const bearer = String(ctx.req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
   return !!bearer && ctx.validTokens.has(bearer);
+}
+
+// ── P5 public storefront listener ──────────────────────────────────────────
+// The daemon's auth guard (10.0.14) 401s every route it serves, plugins
+// included; buyers hold no node tokens, so the public marketplace surface
+// binds its own loopback port and the reverse proxy maps to it instead.
+// Every request through here is handled by the SAME route function with
+// nsmPublicListener=true, so operator rails stay token/local-only.
+let publicServer: import("node:http").Server | null = null;
+let publicCtxBits: { validTokens: Set<string>; apiPortRef: { value: number } } | null = null;
+
+function ensurePublicListener(cfg: MarketplaceConfig, log: (l: string) => void): void {
+  if (!cfg.publicPort || publicServer) return;
+  void import("node:http").then((http) => {
+    if (publicServer) return;
+    publicServer = http.createServer((req, res) => {
+      const path = (() => { try { return new URL(req.url ?? "/", "http://localhost").pathname; } catch { return "/"; } })();
+      const pctx = {
+        req, res, path,
+        validTokens: publicCtxBits?.validTokens ?? new Set<string>(),
+        apiPortRef: publicCtxBits?.apiPortRef ?? { value: 0 },
+        nsmPublicListener: true,
+      } as unknown as RequestContext;
+      Promise.resolve(plugin.handle(pctx)).then(() => {
+        if (!res.writableEnded) { res.writeHead(404, { "content-type": "application/json" }); res.end('{"error":"Not found"}'); }
+      }).catch(() => {
+        if (!res.writableEnded) { res.writeHead(500, { "content-type": "application/json" }); res.end('{"error":"Internal error"}'); }
+      });
+    });
+    publicServer.listen(cfg.publicPort, "127.0.0.1", () => log(`public storefront listener on 127.0.0.1:${cfg.publicPort}`));
+    publicServer.on("error", (e) => { log(`public listener error: ${String(e).slice(0, 120)}`); publicServer = null; });
+  });
 }
 
 // seller-side enrollment store: which buyers subscribed this period
@@ -205,6 +243,12 @@ export const plugin: RoutePlugin = {
     if (!path.startsWith(BASE + "/")) return;
 
     const log = (line: string) => console.log(`[marketplace] ${line}`);
+    // daemon-served requests refresh the bits the public listener borrows;
+    // the listener itself never overwrites them (its ctx is synthetic)
+    if (!(ctx as { nsmPublicListener?: boolean }).nsmPublicListener) {
+      publicCtxBits = { validTokens: ctx.validTokens, apiPortRef: ctx.apiPortRef };
+      ensurePublicListener(cfg, log);
+    }
     const digestish = JSON.stringify([cfg.enabled, cfg.offerings.length, cfg.providerAddress ?? null, cfg.apiBase ?? null, subsCfgStamp()]);
     if (!mounted || mounted.configDigestish !== digestish) {
       // single-flight (v3.5 bug #11): parallel mounts each hashed multi-GB
