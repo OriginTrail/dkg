@@ -67,6 +67,8 @@ export interface Rfc64CatalogNativeScopedReadProviderOptionsV1 {
     contextGraphId: Rfc64PublicCatalogNativeFetchScopeV1['contextGraphId'],
   ) => AcceptedRfc64CatalogAccessSnapshotV1 | null
     | Promise<AcceptedRfc64CatalogAccessSnapshotV1 | null>;
+  /** Optional diagnostics hook after one successful whole-bucket proof. */
+  readonly onAuthorCatalogBucketProof?: () => void;
 }
 
 type Rfc64CatalogNativePrivateAuthorityScopeV1 = Pick<
@@ -94,6 +96,10 @@ export function createRfc64CatalogNativeScopedReadProviderV1(
     || typeof options?.kaBundles?.readKaBundleByDigest !== 'function'
     || typeof options?.verifyIssuerSignature !== 'function'
     || typeof options?.resolveAcceptedPolicySnapshot !== 'function'
+    || (
+      options.onAuthorCatalogBucketProof !== undefined
+      && typeof options.onAuthorCatalogBucketProof !== 'function'
+    )
   ) {
     throw new TypeError('RFC-64 scoped read provider dependencies are incomplete');
   }
@@ -241,6 +247,7 @@ async function resolveExactBoundedHeadCapability(
       catalogBucketSignature: storedBucket.issuerSignature,
       targetKaId: firstRow.kaId,
     });
+    options.onAuthorCatalogBucketProof?.();
     for (const row of bucket.payload.rows) {
       const byteLength = Number(BigInt(row.transfer.byteLength));
       const previous = allowedBundles.get(row.transfer.blobDigest);

@@ -63,6 +63,7 @@ describe('query caller-provided store labels', () => {
 });
 
 const RUNTIME_NETWORK_ID = 'otp:20430' as NetworkIdV1;
+const RUNTIME_GENESIS_NETWORK_ID = '7449c543ff04a550b2dafa999fe8ee577a00b212023bb4d4244e8d58a4792c7b';
 const RUNTIME_PRIVATE_CG = 'runtime-private-query' as ContextGraphIdV1;
 const RUNTIME_POLICY_DIGEST = `0x${'31'.repeat(32)}` as Digest32V1;
 const LOCAL_MEMBER = `0x${'11'.repeat(20)}` as EvmAddressV1;
@@ -104,7 +105,10 @@ function runtimePrivateQueryAgent(options: {
   });
   const agent = {
     config: {
-      networkIdentity: { networkId: RUNTIME_NETWORK_ID },
+      networkIdentity: {
+        networkId: RUNTIME_GENESIS_NETWORK_ID,
+        chainId: RUNTIME_NETWORK_ID,
+      },
       rfc64CatalogAccessPolicyAuthority: { localAgentAddress: LOCAL_MEMBER },
     },
     defaultAgentAddress: LOCAL_MEMBER,

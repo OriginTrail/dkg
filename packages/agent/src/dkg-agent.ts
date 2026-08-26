@@ -425,6 +425,7 @@ import {
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogControlsV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
+import { snapshotRfc64CatalogBootstrapConfigV1 } from './rfc64/catalog-authority-config-v1.js';
 import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
@@ -780,10 +781,14 @@ export function mergeRfc64CatalogBootstrapsV1(
     seen.add(key);
   }
   const retryIntervalMs = catalog?.retryIntervalMs ?? legacyPublic?.retryIntervalMs;
-  return Object.freeze({
-    acceptedPolicies: Object.freeze([...acceptedPolicies]),
+  const merged = snapshotRfc64CatalogBootstrapConfigV1({
+    acceptedPolicies,
     ...(retryIntervalMs === undefined ? {} : { retryIntervalMs }),
   });
+  if (merged === undefined) {
+    throw new TypeError('merged RFC-64 catalog bootstrap is unavailable');
+  }
+  return merged;
 }
 
 export class DKGAgent extends DKGAgentBase {

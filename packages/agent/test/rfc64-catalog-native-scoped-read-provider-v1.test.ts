@@ -100,6 +100,7 @@ async function providerFixture(
   rowCount = 1,
   resolveAcceptedPolicySnapshot: () => ReturnType<typeof acceptedPrivatePolicy> | null
     | Promise<ReturnType<typeof acceptedPrivatePolicy> | null> = async () => accepted,
+  onAuthorCatalogBucketProof?: () => void,
 ) {
   const catalogScope = {
     networkId: 'otp:20430',
@@ -202,6 +203,7 @@ async function providerFixture(
     kaBundles: { readKaBundleByDigest: bundleRead },
     verifyIssuerSignature,
     resolveAcceptedPolicySnapshot,
+    onAuthorCatalogBucketProof,
   });
   const scope = Object.freeze({
     networkId: successor.head.payload.networkId,
@@ -453,20 +455,25 @@ describe('RFC-64 catalog native scoped read provider v1', () => {
   });
 
   it('constructs and reuses one exact 500-row capability without rebuilding its closure', async () => {
+    const onAuthorCatalogBucketProof = vi.fn();
     const fixture = await providerFixture(
       acceptedPrivatePolicy(),
       verifyControlEnvelopeIssuerSignatureV1,
       500,
+      undefined,
+      onAuthorCatalogBucketProof,
     );
     const capability = await fixture.resolve(fixture.scope);
     expect(capability).not.toBeNull();
     expect(fixture.rows).toHaveLength(500);
     expect(fixture.controlRead).toHaveBeenCalledTimes(4);
+    expect(onAuthorCatalogBucketProof).toHaveBeenCalledTimes(1);
 
     for (let index = 0; index < 500; index += 1) {
       await expect(fixture.resolve(fixture.scope)).resolves.toBe(capability);
     }
     expect(fixture.controlRead).toHaveBeenCalledTimes(4);
+    expect(onAuthorCatalogBucketProof).toHaveBeenCalledTimes(1);
   }, 15_000);
 
   it('coalesces concurrent construction of the same exact scoped capability', async () => {

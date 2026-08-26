@@ -790,7 +790,10 @@ export class QueryMethods extends DKGAgentBase {
     contextGraphId: string,
   ): readonly string[] | null | undefined {
     const service = this.rfc64PublicCatalogServiceV1;
-    const activeNetworkId = this.config.networkIdentity?.networkId;
+    // RFC-64 policies are keyed by the effective namespaced chain network
+    // (for example `otp:20430`). `networkIdentity.networkId` is the DKG
+    // genesis hash and must never be used as catalog-policy authority.
+    const activeNetworkId = this.config.networkIdentity?.chainId;
     if (service !== undefined && activeNetworkId !== undefined) {
       let canonicalNetworkId: NetworkIdV1 | null = null;
       let canonicalContextGraphId: ContextGraphIdV1 | null = null;

@@ -1551,6 +1551,93 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     expect(rollback).not.toHaveBeenCalled();
   }, 30_000);
 
+  it('keeps target SWM and VM when the durable head CAS succeeds but precommit commit throws', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+    const commit = vi.fn(() => {
+      throw new Error('injected precommit commit failure after durable head CAS');
+    });
+    const rollback = vi.fn();
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      async () => {
+        await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
+        return {
+          commit,
+          rollback: async (cause) => {
+            rollback(cause);
+            await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+          },
+        };
+      },
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, receiver)).rejects.toThrow(
+      'injected precommit commit failure after durable head CAS',
+    );
+
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+    await expect(fixture.receiverStore.hasGraph(
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
+    )).resolves.toBe(true);
+    await expect(readTransactionTestVmGeneration(fixture.receiverStore))
+      .resolves.toBe('target');
+    expect(commit).toHaveBeenCalledOnce();
+    expect(rollback).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it('fences predecessor rollback when the head CAS and its reconciliation read both fail', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+    const durableRead =
+      fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      );
+    const readAppliedCatalogHeadV1 = vi.fn(durableRead);
+    readAppliedCatalogHeadV1.mockImplementationOnce(durableRead).mockImplementationOnce(() => {
+      throw new Error('injected applied-head reconciliation read failure');
+    });
+    const commit = vi.fn();
+    const rollback = vi.fn();
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1,
+      compareAndSwapAppliedCatalogHeadV1: () => {
+        throw new Error('injected indeterminate applied-head CAS failure');
+      },
+    }, undefined, undefined, fixture.receiverStore, async () => {
+      await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
+      return {
+        commit,
+        rollback: async (cause) => {
+          rollback(cause);
+          await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+        },
+      };
+    });
+
+    await expect(fixture.synchronize(fixture.announcement, receiver)).rejects.toMatchObject({
+      code: 'catalog-native-receiver-history',
+    });
+
+    expect(durableRead(fixture.scopeDigest, AUTHOR)?.currentCatalogHeadDigest)
+      .toBe(fixture.genesis.head.objectDigest);
+    await expect(fixture.receiverStore.hasGraph(
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
+    )).resolves.toBe(true);
+    await expect(readTransactionTestVmGeneration(fixture.receiverStore))
+      .resolves.toBe('target');
+    expect(commit).toHaveBeenCalledOnce();
+    expect(rollback).not.toHaveBeenCalled();
+  }, 30_000);
+
   it('reconciles a write-then-throw head CAS and keeps target SWM and VM aligned', async () => {
     const fixture = await setupLiveReceiver();
     await fixture.bootstrap();

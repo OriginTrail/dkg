@@ -20,6 +20,10 @@ import {
   resolveRfc64CatalogActivationsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import {
+  snapshotRfc64CatalogBootstrapConfigV1,
+  snapshotRfc64PublicCatalogBootstrapConfigV1,
+} from '../src/rfc64/catalog-authority-config-v1.js';
 import { mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
 
 const NETWORK = 'otp:20430' as NetworkIdV1;
@@ -410,5 +414,39 @@ describe('RFC-64 private catalog activation', () => {
         targets: [],
       }],
     })).toThrow(/configured twice/u);
+  });
+
+  it('enforces the policy limit in the daemon additive/legacy bootstrap merge', () => {
+    const catalog = snapshotRfc64CatalogBootstrapConfigV1({
+      acceptedPolicies: Array.from(
+        { length: 32 },
+        (_, index) => publicBootstrapPolicy(index),
+      ),
+      retryIntervalMs: 1_000,
+    })!;
+    const legacyPublic = snapshotRfc64PublicCatalogBootstrapConfigV1({
+      acceptedPublicPolicies: Array.from(
+        { length: 33 },
+        (_, index) => publicBootstrapPolicy(index + 32),
+      ),
+      retryIntervalMs: 1_000,
+    })!;
+
+    expect(() => mergeRfc64CatalogBootstrapsV1(catalog, legacyPublic))
+      .toThrow(/acceptedPolicies must contain at most 64 policies/u);
+  });
+
+  it('enforces the target limit in the daemon additive/legacy bootstrap merge', () => {
+    const catalog = snapshotRfc64CatalogBootstrapConfigV1({
+      acceptedPolicies: [publicBootstrapPolicy(0, 128)],
+      retryIntervalMs: 1_000,
+    })!;
+    const legacyPublic = snapshotRfc64PublicCatalogBootstrapConfigV1({
+      acceptedPublicPolicies: [publicBootstrapPolicy(1, 129)],
+      retryIntervalMs: 1_000,
+    })!;
+
+    expect(() => mergeRfc64CatalogBootstrapsV1(catalog, legacyPublic))
+      .toThrow(/targets must contain at most 256 catalogs/u);
   });
 });
