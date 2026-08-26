@@ -118,8 +118,9 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
   // anchored regex with no nested quantifier — total work is O(n).
 
   // Wall time is sufficient for the absolute hang guards below. The scaling
-  // assertion uses an isolated process so its CPU accounting cannot include
-  // Vitest's other workers or inherit the runner's thread-timer granularity.
+  // assertion uses paired, alternating batches in an isolated process so both
+  // input sizes see equivalent scheduler conditions without relying on the
+  // runner's coarse CPU accounting.
   const measure = (input: string) => {
     for (let i = 0; i < 2; i++) detectSparqlQueryForm(input);
     let fastestMs = Infinity;
@@ -144,35 +145,45 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
         { length: count },
         (_, index) => 'PREFIX p' + index + ': <http://x.org/' + index + '/>',
       ).join('\n') + '\n';
-      const measureCpu = (input) => {
-        const variants = Array.from(
-          { length: 16 },
-          (_, index) => input + '# benchmark-' + index + '\n',
-        );
+      const variantsFor = (input) => Array.from(
+        { length: 16 },
+        (_, index) => input + '# benchmark-' + index + '\n',
+      );
+      const runBatch = (variants, iterations, sample) => {
         const expectedLength = detect(variants[0]).length;
-        for (const variant of variants) detect(variant);
-
-        for (let iterations = 1; iterations <= 4096; iterations *= 2) {
-          const samples = [];
-          for (let sample = 0; sample < 3; sample++) {
-            let resultLength = 0;
-            const startedAt = process.cpuUsage();
-            for (let index = 0; index < iterations; index++) {
-              resultLength += detect(variants[(index + sample) % variants.length]).length;
-            }
-            if (resultLength !== expectedLength * iterations) process.exit(2);
-            const elapsed = process.cpuUsage(startedAt);
-            samples.push((elapsed.user + elapsed.system) / 1000);
-          }
-          samples.sort((a, b) => a - b);
-          const medianMs = samples[1];
-          if (medianMs >= 25 || iterations === 4096) return medianMs / iterations;
+        let resultLength = 0;
+        const startedAt = performance.now();
+        for (let index = 0; index < iterations; index++) {
+          resultLength += detect(variants[(index + sample) % variants.length]).length;
         }
-        throw new Error('unreachable timing loop');
+        if (resultLength !== expectedLength * iterations) process.exit(2);
+        return performance.now() - startedAt;
       };
 
-      const smallMs = measureCpu(inputFor(1000));
-      const largeMs = measureCpu(inputFor(10000));
+      const smallVariants = variantsFor(inputFor(1000));
+      const largeVariants = variantsFor(inputFor(10000));
+      for (const variant of [...smallVariants, ...largeVariants]) detect(variant);
+
+      let iterations = 1;
+      while (iterations < 4096 && runBatch(smallVariants, iterations, 0) < 25) {
+        iterations *= 2;
+      }
+
+      const smallSamples = [];
+      const largeSamples = [];
+      for (let sample = 0; sample < 3; sample++) {
+        if (sample % 2 === 0) {
+          smallSamples.push(runBatch(smallVariants, iterations, sample));
+          largeSamples.push(runBatch(largeVariants, iterations, sample));
+        } else {
+          largeSamples.push(runBatch(largeVariants, iterations, sample));
+          smallSamples.push(runBatch(smallVariants, iterations, sample));
+        }
+      }
+      smallSamples.sort((a, b) => a - b);
+      largeSamples.sort((a, b) => a - b);
+      const smallMs = smallSamples[1] / iterations;
+      const largeMs = largeSamples[1] / iterations;
       process.stdout.write(JSON.stringify({ smallMs, largeMs }));
     `;
     return JSON.parse(execFileSync(
