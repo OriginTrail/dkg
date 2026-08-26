@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  MAX_AUTO_READY_TIMEOUT_MS,
   WAL_REPLAY_FLOOR_BYTES_PER_MS,
   formatWalBytes,
   measureRetainedWalBytes,
@@ -79,40 +78,29 @@ describe('resolveWalAwareReadyTimeoutMs (GH#1400)', () => {
       .toBe(30_000 + Math.ceil(41_943_040 / WAL_REPLAY_FLOOR_BYTES_PER_MS));
   });
 
-  it('gives the reported worst case far more time than it actually needs', () => {
-    // The issue's worst observed retention was 3.7 GiB. At the deliberately
-    // pessimistic 4 MB/s floor that derives ~17 min, so the 15-min cap binds —
-    // which is fine, and this test asserts WHY rather than asserting the
-    // uncapped arithmetic.
-    //
-    // The guarantee that matters: the deadline must comfortably exceed REAL
-    // replay time. At the slowest throughput ever measured (30,000 B/ms, the
-    // issue's own 2.5 GB in 85s), 3.7 GiB replays in ~132s. The capped 900s
-    // deadline is ~6.8x that, and 30x the 30s that caused the outage.
+  it('does not truncate the reported worst case below the replay floor', () => {
+    // The issue's 3.7 GiB retention needs just over 15 minutes at the declared
+    // 4 MB/s floor. Capping the attempt at 15 minutes kills it before that
+    // floor-derived work can finish and recreates the restart ratchet.
     const worstCaseBytes = Math.round(3.7 * 1024 ** 3);
     const derived = resolveWalAwareReadyTimeoutMs({ baseMs: 30_000, walBytes: worstCaseBytes });
-    const realReplayMsAtSlowestMeasured = worstCaseBytes / 30_000;
-
-    expect(derived).toBe(MAX_AUTO_READY_TIMEOUT_MS);
-    expect(derived).toBeGreaterThan(realReplayMsAtSlowestMeasured * 5);
-    expect(derived).toBeGreaterThan(30_000 * 10);
+    expect(derived).toBe(
+      30_000 + Math.ceil(worstCaseBytes / WAL_REPLAY_FLOOR_BYTES_PER_MS),
+    );
+    expect(derived).toBeGreaterThan(900_000);
   });
 
-  it('does not cap the sizes that actually occur in the field', () => {
-    // Below ~3.5 GiB the derived deadline is the honest floor-based estimate,
-    // not the cap — so the cap is a backstop, not the normal path.
+  it('keeps the floor-derived allowance monotonic across field sizes', () => {
     const gib = 1024 ** 3;
     for (const bytes of [gib, 2 * gib, 3 * gib]) {
       expect(resolveWalAwareReadyTimeoutMs({ baseMs: 30_000, walBytes: bytes }))
-        .toBeLessThan(MAX_AUTO_READY_TIMEOUT_MS);
+        .toBe(30_000 + Math.ceil(bytes / WAL_REPLAY_FLOOR_BYTES_PER_MS));
     }
   });
 
-  it('caps the derived deadline', () => {
-    // A failed boot is retried up to 5x by the supervisor, so the SINGLE
-    // attempt must stay bounded or the amplified total becomes hours.
+  it('does not cap a finite large WAL below its modeled work', () => {
     expect(resolveWalAwareReadyTimeoutMs({ baseMs: 30_000, walBytes: 1024 ** 4 }))
-      .toBe(MAX_AUTO_READY_TIMEOUT_MS);
+      .toBe(30_000 + Math.ceil(1024 ** 4 / WAL_REPLAY_FLOOR_BYTES_PER_MS));
   });
 
   it('treats a negative or non-finite measurement as nothing pending', () => {

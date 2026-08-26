@@ -100,6 +100,8 @@ export interface StartOxigraphServerOptions {
    * which overrides the automatic sizing entirely.
    */
   autoReadyBaseTimeoutMs?: number;
+  /** Progress-log cadence while a retained WAL is opening. Test seam. */
+  progressLogIntervalMs?: number;
   /** Base delay for restart backoff after an unexpected crash. */
   restartBackoffBaseMs?: number;
   /** Cap for restart backoff. */
@@ -217,6 +219,7 @@ export async function startOxigraphServer(
     };
   };
   const readyIntervalMs = opts.readyIntervalMs ?? DEFAULT_READY_INTERVAL_MS;
+  const progressLogIntervalMs = normalizePositiveInteger(opts.progressLogIntervalMs) ?? 10_000;
   const stopGraceMs = opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const restartBase = opts.restartBackoffBaseMs ?? DEFAULT_RESTART_BASE_MS;
   const restartMax = opts.restartBackoffMaxMs ?? DEFAULT_RESTART_MAX_MS;
@@ -413,7 +416,10 @@ export async function startOxigraphServer(
     while (Date.now() < reviveDeadline) {
       // Same reasoning as the boot loop: RocksDB emits no progress records
       // during replay, so without this a multi-minute restart is silent.
-      if (reviveReady.walBytes > 0 && Date.now() - reviveProgressLog >= 10_000) {
+      if (
+        reviveReady.walBytes > 0
+        && Date.now() - reviveProgressLog >= progressLogIntervalMs
+      ) {
         reviveProgressLog = Date.now();
         log(
           `[oxigraph] restart still opening: ` +
@@ -644,7 +650,10 @@ export async function startOxigraphServer(
     // GH#1400 — RocksDB writes no progress records during replay, so this
     // daemon-side line is the only thing distinguishing "recovering" from
     // "hung" for an operator watching a multi-minute boot.
-    if (bootReady.walBytes > 0 && Date.now() - lastProgressLog >= 10_000) {
+    if (
+      bootReady.walBytes > 0
+      && Date.now() - lastProgressLog >= progressLogIntervalMs
+    ) {
       lastProgressLog = Date.now();
       log(
         `[oxigraph] still opening: ${Math.round((Date.now() - (deadline - readyTimeoutMs)) / 1000)}s ` +

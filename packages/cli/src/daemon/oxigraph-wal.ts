@@ -51,25 +51,6 @@ import { join } from 'node:path';
 export const WAL_REPLAY_FLOOR_BYTES_PER_MS = 4_000;
 
 /**
- * Hard ceiling on the automatically-derived deadline (15 minutes).
- *
- * Two forces set this. Upward: the issue's worst observed retention was
- * 3.7 GiB, which at the 4 MB/s floor derives ~17.1 min — so a cap below that
- * would re-arm the exact ratchet for the node that reported the bug. Except
- * that estimate is 7x pessimistic; at the slowest MEASURED throughput
- * (30,000 B/ms) that same 3.7 GiB replays in ~2.1 min, so 15 min is still ~7x
- * real worst-case headroom.
- *
- * Downward, and decisive: a failed boot exits non-zero, which the supervisor
- * treats as a crash and retries up to `maxCrashRestarts = 5`
- * (packages/cli/src/cli-supervisor.ts). The deadline is therefore multiplied
- * by five in the worst case. At 15 min that is ~75 minutes of retrying before
- * the supervisor gives up; at an hour it would be ~5 hours of a node that
- * looks hung. Bound the amplified total, not just the single attempt.
- */
-export const MAX_AUTO_READY_TIMEOUT_MS = 900_000;
-
-/**
  * RocksDB WAL segment names are zero-padded numerics with a `.log` suffix
  * (`000004.log`, `000043.log`). Deliberately anchored so it does NOT match the
  * text log `LOG`, its rotations `LOG.old.<epoch>`, table files `*.sst`, or
@@ -122,7 +103,11 @@ export function resolveWalAwareReadyTimeoutMs(input: {
   const { baseMs, walBytes } = input;
   if (!Number.isFinite(walBytes) || walBytes <= 0) return baseMs;
   const extension = Math.ceil(walBytes / WAL_REPLAY_FLOOR_BYTES_PER_MS);
-  return Math.min(MAX_AUTO_READY_TIMEOUT_MS, baseMs + extension);
+  // Do not truncate the floor-derived allowance. A per-attempt cap below the
+  // measured work estimate recreates GH#1400: kill a healthy replay, retain
+  // the same WAL, and repeat forever. A finite WAL size already yields a
+  // finite deadline; clamp only at JavaScript's numeric safety boundary.
+  return Math.min(Number.MAX_SAFE_INTEGER, baseMs + extension);
 }
 
 /** Human-readable byte size for operator-facing log lines. */

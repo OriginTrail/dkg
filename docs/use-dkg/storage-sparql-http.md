@@ -80,7 +80,7 @@ Managed Oxigraph accepts optional launch settings under `store.options`:
 }
 ```
 
-The daemon sizes the startup readiness wait automatically from the RocksDB write-ahead log retained in `location`. Oxigraph is not closed cleanly on shutdown (it installs no SIGTERM handler), so every start replays the previous session's log, and that replay is what a fixed deadline used to cut short. The derived wait assumes a pessimistic 4 MB/s replay floor and is capped at 15 minutes; when a replay is pending the daemon logs the size and the allowance, then reports progress every 10 seconds.
+The daemon sizes the startup readiness wait automatically from the RocksDB write-ahead log retained in `location`. Oxigraph is not closed cleanly on shutdown (it installs no SIGTERM handler), so every start replays the previous session's log, and that replay is what a fixed deadline used to cut short. The derived wait assumes a pessimistic 4 MB/s replay floor and is not truncated below that work allowance; when a replay is pending the daemon logs the size and the allowance, then reports progress every 10 seconds.
 
 `readyTimeoutMs` **overrides** that automatic sizing with an explicit maximum, used verbatim and never extended. It must be a positive integer; invalid values are ignored. You normally should not set it — if you configured it as a workaround for a node that would not start, remove it. When an explicit value is lower than the automatic estimate the daemon logs a warning naming both numbers, because that combination is what keeps a recovering node down.
 
