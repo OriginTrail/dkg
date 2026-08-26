@@ -72,13 +72,40 @@ export function startDaemonLogFileWriter(opts: {
   let overflowDroppedEntries = 0;
   let drainPromise: Promise<void> | null = null;
   let shutdownPromise: Promise<void> | null = null;
-  let diagnosticChain = Promise.resolve();
+  let diagnosticWork: Promise<void> | null = null;
+  let pendingDiagnostic: string | null = null;
+  let failedAppendBatches = 0;
+  let failedAppendEntries = 0;
+
+  const ensureDiagnosticWork = (): void => {
+    if (diagnosticWork || pendingDiagnostic === null) return;
+    diagnosticWork = (async () => {
+      while (pendingDiagnostic !== null) {
+        const message = pendingDiagnostic;
+        pendingDiagnostic = null;
+        await Promise.resolve()
+          .then(() => opts.onDiagnostic?.(message))
+          .catch(() => {});
+      }
+    })().finally(() => {
+      diagnosticWork = null;
+      ensureDiagnosticWork();
+    });
+  };
 
   const queueDiagnostic = (message: string): void => {
-    diagnosticChain = diagnosticChain
-      .then(() => opts.onDiagnostic?.(message))
-      .then(() => undefined)
-      .catch(() => undefined);
+    // One in-flight report plus one replaceable latest snapshot bounds pending
+    // work even if the fallback destination is slow or temporarily blocked.
+    pendingDiagnostic = message;
+    ensureDiagnosticWork();
+  };
+
+  const drainDiagnostics = async (): Promise<void> => {
+    while (diagnosticWork || pendingDiagnostic !== null) {
+      ensureDiagnosticWork();
+      const active = diagnosticWork;
+      if (active) await active;
+    }
   };
 
   const recordOverflowDrop = (classification: DaemonLogWriteClass): void => {
@@ -121,12 +148,19 @@ export function startDaemonLogFileWriter(opts: {
     }
 
     droppedEntries += batch.length;
+    failedAppendBatches += 1;
+    failedAppendEntries += batch.length;
     const detail = lastError instanceof Error ? lastError.message : String(lastError);
-    queueDiagnostic(
-      `append failed after ${maxAppendAttempts} attempt(s); discarded ` +
-      `${batch.length} accepted entr${batch.length === 1 ? 'y' : 'ies'}; ` +
-      `total dropped=${droppedEntries}: ${detail}`,
-    );
+    // Repeated permanent failures are reported logarithmically. Every report
+    // carries cumulative counts, so coalescing never loses the current loss
+    // total while sustained failure cannot create one diagnostic per batch.
+    if ((failedAppendBatches & (failedAppendBatches - 1)) === 0) {
+      queueDiagnostic(
+        `append failed after ${maxAppendAttempts} attempt(s); ` +
+        `failure batches=${failedAppendBatches}; discarded accepted entries=` +
+        `${failedAppendEntries}; total dropped=${droppedEntries}: ${detail}`,
+      );
+    }
   };
 
   const drain = async (): Promise<void> => {
@@ -225,7 +259,7 @@ export function startDaemonLogFileWriter(opts: {
           const activeDrain = drainPromise;
           if (activeDrain) await activeDrain;
         }
-        await diagnosticChain;
+        await drainDiagnostics();
       })();
       return shutdownPromise;
     },

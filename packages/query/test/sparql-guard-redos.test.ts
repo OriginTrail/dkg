@@ -1,6 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import {
   detectSparqlQueryForm,
   validateReadOnlySparql,
@@ -14,12 +12,10 @@ import {
  * to-exponential search-space growth on adversarial preambles like
  * "thousands of PREFIX decls followed by no terminal form".
  *
- * The fix replaced the monolithic regex with a small, anchored
- * declaration scanner that consumes O(n) characters total regardless
- * of preamble shape. These tests pin two properties:
- *   1. functional equivalence on the documented happy-path inputs;
- *   2. linear runtime on adversarial inputs the legacy regex spent
- *      polynomial time on.
+ * The fix replaced the monolithic regex with the core package's anchored
+ * declaration scanner. This query-package suite pins wrapper behaviour and
+ * absolute hang guards; core owns the isolated scaling benchmark beside the
+ * classifier implementation.
  *
  * Because this guard runs on operator-supplied SPARQL arriving over
  * HTTP, a regression here directly re-opens a CPU-DoS vector.
@@ -118,13 +114,8 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
   // The scanner replacement consumes each declaration via a single
   // anchored regex with no nested quantifier — total work is O(n).
 
-  // Wall time is sufficient for the absolute hang guards below. The scaling
-  // assertion uses long, alternating wall-time batches in a dedicated child.
-  // The child disables V8 JIT tiers and calibrates each size to >=250 ms, so
-  // optimization thresholds, timer granularity, and a single scheduler slice
-  // cannot dominate the ratio under the parallel coverage runner. Both ratio
-  // samples remain above V8's large-object allocation boundary so the
-  // comparison measures scanner growth rather than an allocator transition.
+  // Wall time is sufficient for these lightweight wrapper hang guards. The
+  // core package owns the long, isolated scaling assertion.
   const measure = (input: string) => {
     for (let i = 0; i < 2; i++) detectSparqlQueryForm(input);
     let fastestMs = Infinity;
@@ -137,44 +128,12 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
     return fastestMs;
   };
 
-  const measureGrowthInIsolatedProcess = () => {
-    const runner = fileURLToPath(new URL(
-      '../../core/test/fixtures/sparql-redos-benchmark.mjs',
-      import.meta.url,
-    ));
-    return JSON.parse(execFileSync(
-      process.execPath,
-      ['--jitless', runner],
-      {
-        encoding: 'utf8',
-        timeout: 20_000,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    )) as { smallMs: number; largeMs: number };
-  };
-
   it('rejects N=1000 dangling PREFIX decls (no terminal form) in linear time', () => {
     const decls = Array.from({ length: 1_000 }, (_, i) => `PREFIX p${i}: <http://x.org/${i}/>`).join('\n');
     const input = decls + '\n'; // no SELECT — adversarial tail
     const ms = measure(input);
     expect(ms).toBeLessThan(500);
   });
-
-  it('rejects N=10_000 dangling PREFIX decls in bounded time (4x input → bounded growth)', () => {
-    const { smallMs, largeMs } = measureGrowthInIsolatedProcess();
-
-    // Hang guard: 10k decls must reject in under a second. The buggy
-    // regex took >>10s here in local repro.
-    expect(largeMs).toBeLessThan(1000);
-    // Linearity guard: batching makes the small measurement stable enough for
-    // a ratio-only assertion. A 4x input may take at most 10x as long, which
-    // leaves CI headroom while rejecting quadratic/backtracking growth.
-    expect(
-      largeMs / smallMs,
-      `isolated scaling samples: small=${smallMs.toFixed(6)}ms ` +
-      `large=${largeMs.toFixed(6)}ms`,
-    ).toBeLessThan(10);
-  }, 25_000);
 
   it('classifies N=10_000 valid PREFIX decls + trailing SELECT in linear time', () => {
     // Positive case at scale — the scanner must accept long but

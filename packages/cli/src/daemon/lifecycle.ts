@@ -168,6 +168,7 @@ import {
   type DaemonLogExporterStartResult,
 } from './log-lifecycle.js';
 import { startDaemonLogFileWriter } from './daemon-log-file-writer.js';
+import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
 import {
   createTelemetryRuntime,
   type TelemetryTransitionResult,
@@ -1193,7 +1194,8 @@ export async function runDaemonInner(
     rotate: () => rotateDaemonLogIfNeeded(logFile),
     onDiagnostic: async (message) => {
       const line = `[${new Date().toISOString()}] ${message}\n`;
-      await appendFile(logWriterDiagnosticFile, line).catch(() => {});
+      await appendBoundedDaemonLogDiagnostic(logWriterDiagnosticFile, line)
+        .catch(() => {});
       if (foreground) origStderrWrite(`[daemon-log-writer] ${message}\n`);
     },
   });

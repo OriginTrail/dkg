@@ -11,6 +11,7 @@ import {
   startDaemonLogFileWriter,
   type DebugLogRecord,
 } from '../src/daemon/daemon-log-file-writer.js';
+import { appendBoundedDaemonLogDiagnostic } from '../src/daemon/daemon-log-diagnostics.js';
 import type { DkgConfig } from '../src/config.js';
 import { createTelemetryRuntime } from '../src/daemon/telemetry-runtime.js';
 
@@ -403,9 +404,73 @@ describe('startDaemonLogController', () => {
       expect(logFileWriter.pending()).toBe(0);
       expect(logFileWriter.dropped()).toBe(1);
       expect(await readFile(diagnosticFile, 'utf8')).toContain(
-        'discarded 1 accepted entry',
+        'discarded accepted entries=1',
       );
     } finally {
+      await logFileWriter.shutdown();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('coalesces repeated append failures and caps the diagnostic file', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-log-writer-bounded-diagnostic-'));
+    const diagnosticFile = join(directory, 'daemon-log-writer-errors.log');
+    let releaseFirstDiagnostic!: () => void;
+    let markFirstDiagnosticStarted!: () => void;
+    const firstDiagnosticStarted = new Promise<void>((resolve) => {
+      markFirstDiagnosticStarted = resolve;
+    });
+    const firstDiagnosticGate = new Promise<void>((resolve) => {
+      releaseFirstDiagnostic = resolve;
+    });
+    const diagnostics: string[] = [];
+    const logFileWriter = startDaemonLogFileWriter({
+      logFile: 'unused-in-injected-test',
+      rotate: noRotation,
+      maxQueuedEntries: 32,
+      maxBatchEntries: 1,
+      maxAppendAttempts: 1,
+      append: async () => {
+        throw new Error('daemon log is read-only');
+      },
+      onDiagnostic: async (message) => {
+        diagnostics.push(message);
+        if (diagnostics.length === 1) {
+          markFirstDiagnosticStarted();
+          await firstDiagnosticGate;
+        }
+        await appendBoundedDaemonLogDiagnostic(
+          diagnosticFile,
+          `${message}\n`,
+          180,
+        );
+      },
+    });
+
+    try {
+      for (let index = 0; index < 16; index++) {
+        expect(logFileWriter.push(`entry-${index}\n`)).toBe(true);
+      }
+      await firstDiagnosticStarted;
+      await vi.waitFor(() => {
+        expect(logFileWriter.dropped()).toBe(16);
+      });
+
+      // The blocked first report does not permit an unbounded promise chain;
+      // all later snapshots collapse into one replaceable pending report.
+      expect(diagnostics).toHaveLength(1);
+      const shutdown = logFileWriter.shutdown();
+      releaseFirstDiagnostic();
+      await shutdown;
+
+      expect(diagnostics).toHaveLength(2);
+      expect(diagnostics[1]).toContain('failure batches=16');
+      expect(diagnostics[1]).toContain('total dropped=16');
+      const persisted = await readFile(diagnosticFile);
+      expect(persisted.byteLength).toBeLessThanOrEqual(180);
+      expect(persisted.toString()).toContain('total dropped=16');
+    } finally {
+      releaseFirstDiagnostic?.();
       await logFileWriter.shutdown();
       await rm(directory, { recursive: true, force: true });
     }

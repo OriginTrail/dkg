@@ -9,15 +9,29 @@ import type { DkgConfig } from './config.js';
 export type LogExporterMode = 'none' | 'otlp' | 'syslog';
 export type ActiveLogExporterMode = Exclude<LogExporterMode, 'none'>;
 
+function resolveOtlpSignalEndpoint(opts: {
+  env: Readonly<Record<string, string | undefined>>;
+  signalEnvKey: string;
+  signalPath: string;
+  configuredEndpoint?: string;
+}): string | undefined {
+  const envBase = opts.env.OTEL_EXPORTER_OTLP_ENDPOINT?.replace(/\/+$/, '');
+  return opts.env[opts.signalEnvKey]
+    || (envBase ? `${envBase}${opts.signalPath}` : undefined)
+    || opts.configuredEndpoint;
+}
+
 /** Resolve OTLP logs with standard signal-specific > base > config precedence. */
 export function resolveOtlpLogEndpoint(
   telemetry: DkgConfig['telemetry'],
   env: Readonly<Record<string, string | undefined>>,
 ): string | undefined {
-  const envBase = env.OTEL_EXPORTER_OTLP_ENDPOINT?.replace(/\/+$/, '');
-  return env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
-    || (envBase ? `${envBase}/v1/logs` : undefined)
-    || telemetry?.logs?.endpoint;
+  return resolveOtlpSignalEndpoint({
+    env,
+    signalEnvKey: 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
+    signalPath: '/v1/logs',
+    configuredEndpoint: telemetry?.logs?.endpoint,
+  });
 }
 
 /**
@@ -59,15 +73,18 @@ export function resolveOtelSignals(
   telemetry: DkgConfig['telemetry'],
   env: Record<string, string | undefined> = process.env,
 ): ResolvedOtelSignals {
-  const base = env.OTEL_EXPORTER_OTLP_ENDPOINT?.replace(/\/$/, '');
-  const tracesEndpoint =
-    env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||
-    (base ? `${base}/v1/traces` : undefined) ||
-    telemetry?.traces?.endpoint;
-  const metricsEndpoint =
-    env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT ||
-    (base ? `${base}/v1/metrics` : undefined) ||
-    telemetry?.metrics?.endpoint;
+  const tracesEndpoint = resolveOtlpSignalEndpoint({
+    env,
+    signalEnvKey: 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',
+    signalPath: '/v1/traces',
+    configuredEndpoint: telemetry?.traces?.endpoint,
+  });
+  const metricsEndpoint = resolveOtlpSignalEndpoint({
+    env,
+    signalEnvKey: 'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT',
+    signalPath: '/v1/metrics',
+    configuredEndpoint: telemetry?.metrics?.endpoint,
+  });
   return {
     tracesEndpoint,
     metricsEndpoint,
