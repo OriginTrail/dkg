@@ -15,6 +15,41 @@ const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 
 export type ExactDurableFetchDisposition = 'found' | 'clean-absent' | 'incomplete';
 
+export type ExactAssetFetchSessionPolicy =
+  | Readonly<{
+      kind: 'durable-materialization';
+      forceFreshSession: false;
+      allowDurableCheckpoints: true;
+      requesterScope?: never;
+    }>
+  | Readonly<{
+      kind: 'ephemeral-challenge';
+      forceFreshSession: true;
+      allowDurableCheckpoints: false;
+      requesterScope: `challenge-exact:${string}`;
+    }>;
+
+/** Keep exact retrieval semantics next to filtering and completion policy. */
+export function exactAssetFetchSessionPolicy(
+  selection: ExactAssetSelection,
+): ExactAssetFetchSessionPolicy {
+  if (selection.kind === 'ual-only') {
+    return {
+      kind: 'durable-materialization',
+      forceFreshSession: false,
+      allowDurableCheckpoints: true,
+    };
+  }
+  return {
+    kind: 'ephemeral-challenge',
+    forceFreshSession: true,
+    allowDurableCheckpoints: false,
+    requesterScope: `challenge-exact:${selection.commitments
+      .map((commitment) => `${commitment.merkleRootHex}:${commitment.merkleLeafCount}`)
+      .join('.')}`,
+  };
+}
+
 function descriptorMatchesCommitment(
   metaQuads: readonly Quad[],
   commitment: NonNullable<ReturnType<typeof exactAssetCommitmentsForSelection>>[number],

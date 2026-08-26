@@ -55,6 +55,16 @@ export type ExactAssetSelection =
       readonly [EXACT_ASSET_SELECTION]: true;
     }>;
 
+export type UalOnlyExactAssetSelection = Extract<
+  ExactAssetSelection,
+  { readonly kind: 'ual-only' }
+>;
+
+export type ChallengePinnedExactAssetSelection = Extract<
+  ExactAssetSelection,
+  { readonly kind: 'challenge-pinned' }
+>;
+
 export function exactSyncPhaseAccumulationLimits(assetUals: readonly string[]): {
   maxBytes: number;
   maxQuads: number;

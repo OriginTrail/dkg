@@ -96,7 +96,6 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
-  tripleContentV10,
   withRetry,
 } from '@origintrail-official/dkg-core';
 import type { RandomSamplingRepairMaterial } from '@origintrail-official/dkg-random-sampling';
@@ -171,10 +170,8 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePrivateMetaAskQuery } from './context-graph-private-meta-proof.js';
 import { buildAuthoritativePublicMetaAskQuery } from './context-graph-public-meta-proof.js';
 import { repairCreatorPublicMetaProjections } from './context-graph-public-meta-repair.js';
-import {
-  runRandomSamplingExactRepair,
-  type RandomSamplingExactRepairInput,
-} from './sync/recovery/random-sampling-exact-repair.js';
+import type { RandomSamplingExactRepairInput } from './sync/recovery/random-sampling-exact-repair.js';
+import { repairRandomSamplingKnowledgeAssetWithAgent } from './sync/recovery/random-sampling-repair-adapter.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -269,7 +266,6 @@ import {
   type SyncPageResult,
 } from './sync/requester/page-fetch.js';
 import {
-  createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
   exactAssetUalsForSelection,
   exactAssetFilterKey,
@@ -301,13 +297,16 @@ import {
   normalizeDurableSyncTimeoutMs,
 } from './sync/requester/durable-sync-budget.js';
 import {
+  runChallengeExactAssetFetch,
   runDurableSync,
   runDurableSyncDetailed,
+  type ChallengeExactAssetFetchContext,
   type DetailedDurableSyncResult,
   type DurableMetaContinuation,
   type DurableSyncContext,
   type VerifiedFullSnapshot,
 } from './sync/requester/durable-sync.js';
+import { runGraphScopedPhysicalOperation } from './sync/requester/graph-scoped-operation-fence.js';
 import {
   mergeExactDurableFetchDisposition,
   type ExactDurableFetchDisposition,
@@ -4018,65 +4017,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     input: RandomSamplingExactRepairInput,
   ): Promise<RandomSamplingRepairMaterial> {
     const ctx = createOperationContext('sync');
-    return runRandomSamplingExactRepair({
-      chainId: this.chain.chainId,
-      maxPeers: DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
-      stopSignal: this.node.stopSignal,
-      resolveStorageAddress: () => this.chain.getDKGKnowledgeAssetsAddress
-        ? this.chain.getDKGKnowledgeAssetsAddress()
-        : this.chain.getKnowledgeAssetsLifecycleAddress(),
-      resolveLocalContextGraphId: (cgId) =>
-        this.resolveLocalCgIdByOnChainId(cgId) ?? undefined,
-      observedCandidatePeerIds: (localCgId) =>
-        this.vmReconcileObservedCandidatePeerIds(localCgId),
-      selectPeerWindow: (peerIds, options) => this.selectCatchupPeerWindow(
-        peerIds.map((peerId) => ({ toString: () => peerId })),
-        options,
-      ).map((peer) => peer.toString()),
-      ensurePeerAdmitted: (peerId, signal) => this.ensurePeerAdmittedForRecovery(
-        peerId,
-        ctx,
-        'Random Sampling exact repair peer',
-        signal,
-      ),
-      ensurePeerConnected: (peerId, signal) => this.ensurePeerConnected(peerId, { signal }),
-      waitForSyncProtocol: (peerId, signal) =>
-        this.waitForSyncProtocol({ toString: () => peerId }, signal),
-      fetchExactKnowledgeAsset: async (
-        peerId,
-        localCgId,
-        _assetUal,
-        expectedCommitment,
-        signal,
-      ) => {
-        const result = await this.syncExactKnowledgeAssetsFromPeerDetailed(
-          peerId,
-          localCgId,
-          createChallengePinnedExactAssetSelection([expectedCommitment]),
-          {
-            signal,
-            isCurrent: () => this.started && !signal.aborted,
-          },
-        );
-        const authenticated = result.authenticatedAssets?.find(
-          ({ asset }) => asset.ual === expectedCommitment.assetUal,
-        );
-        const proofMaterial = authenticated === undefined
-          ? undefined
-          : Object.freeze({
-              contents: Object.freeze(authenticated.asset.dataQuads.map((quad) => (
-                tripleContentV10(quad.subject, quad.predicate, quad.object)
-              ))),
-              privateRoots: Object.freeze([...authenticated.privateRoots]),
-            });
-        return {
-          disposition: result.disposition,
-          insertedTriples: result.result.insertedTriples,
-          ...(proofMaterial === undefined ? {} : { proofMaterial }),
-        };
-      },
-      logInfo: (message) => this.log.info(ctx, message),
-    }, input);
+    return repairRandomSamplingKnowledgeAssetWithAgent(
+      this,
+      ctx,
+      input,
+      DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
+    );
   }
 
   async tryStartRandomSamplingProver(this: DKGAgent,
@@ -5755,7 +5701,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     remainingContextGraphs: number,
     options: LegacyDurableContextGraphOptions = {},
-  ): Promise<DetailedDurableSyncResult> {
+  ): Promise<PhysicalDurableSyncResult> {
     const {
       onPhase,
       onAtomicCommitStarted,
@@ -5829,7 +5775,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       remainingContextGraphs,
     });
-    const durableContext: DurableSyncContext = {
+    const durableContext: DurableSyncContext & Partial<Pick<
+      ChallengeExactAssetFetchContext,
+      'authenticateChallengePinnedAsset'
+    >> = {
       ctx,
       remotePeerId,
       contextGraphIds: [contextGraphId],
@@ -5888,7 +5837,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
       },
       sinceBatchIdFor,
-      exactAssetSelectionFor: exactAssetSelection
+      exactAssetSelectionFor: exactAssetSelection?.kind === 'ual-only'
         ? () => exactAssetSelection
         : undefined,
       durableMetaContinuation,
@@ -5908,23 +5857,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               commitment,
               authenticationDeadline,
               signal: operationSignal,
-            }) => {
-              const shutdownError = () => asSyncFetchAbortError(new Error(
+            }) => runGraphScopedPhysicalOperation({
+              contextGraphId: asset.contextGraphId,
+              signal: operationSignal,
+              isClosed: () => this.graphScopedStoreClosed,
+              captureSubscription: () => this.subscribedContextGraphs.get(asset.contextGraphId),
+              captureBindingGeneration: () =>
+                this.contextGraphBindingState.capture(asset.contextGraphId),
+              isBindingGenerationCurrent: (generation) =>
+                this.contextGraphBindingState.isGenerationCurrent(asset.contextGraphId, generation),
+              assertLifecycleCurrent,
+              closedError: () => asSyncFetchAbortError(new Error(
                 `Challenge-pinned authentication for ${asset.ual} is closed for node shutdown`,
-              ));
-              if (this.graphScopedStoreClosed) {
-                return Promise.reject(shutdownError());
-              }
-              const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
-              const bindingGeneration = this.contextGraphBindingState.capture(asset.contextGraphId);
-              const bindingIsCurrent = () => (
-                this.subscribedContextGraphs.get(asset.contextGraphId) === subscription
-                && this.contextGraphBindingState.isGenerationCurrent(
-                  asset.contextGraphId,
-                  bindingGeneration,
-                )
-              );
-              const physicalAuthentication = Promise.resolve().then(async () => {
+              )),
+              bindingChangedError: () => asSyncFetchAbortError(new Error(
+                `Context graph binding for ${asset.contextGraphId} changed during challenge authentication`,
+              )),
+              asAbortError: asSyncFetchAbortError,
+              track: (run) => this.graphScopedStorePhysicalRuns.add(run),
+              untrack: (run) => this.graphScopedStorePhysicalRuns.delete(run),
+              operation: async ({ assertCurrent }) => {
                 if (Date.now() >= authenticationDeadline) {
                   throw createRpcTimeoutError(
                     `Challenge-pinned authentication for ${asset.ual} exceeded its deadline`,
@@ -5937,46 +5889,41 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   verifyContextGraphBinding,
                   { signal: operationSignal },
                 );
-                if (operationSignal?.aborted) {
-                  throw asSyncFetchAbortError(operationSignal.reason);
-                }
-                assertLifecycleCurrent();
-                if (this.graphScopedStoreClosed) throw shutdownError();
-                if (!bindingIsCurrent()) {
-                  throw asSyncFetchAbortError(new Error(
-                    `Context graph binding for ${asset.contextGraphId} changed during challenge authentication`,
-                  ));
-                }
+                assertCurrent();
                 return authenticated;
-              });
-              this.graphScopedStorePhysicalRuns.add(physicalAuthentication);
-              return physicalAuthentication.finally(() => {
-                this.graphScopedStorePhysicalRuns.delete(physicalAuthentication);
-              });
-            },
+              },
+            }),
           }
         : {}),
       storeGraphScopedAsset: ({
         asset,
         authenticationDeadline,
         signal: operationSignal,
-      }) => {
-        const shutdownError = () => asSyncFetchAbortError(new Error(
+      }) => runGraphScopedPhysicalOperation({
+        contextGraphId: asset.contextGraphId,
+        signal: operationSignal,
+        isClosed: () => this.graphScopedStoreClosed,
+        captureSubscription: () => this.subscribedContextGraphs.get(asset.contextGraphId),
+        captureBindingGeneration: () =>
+          this.contextGraphBindingState.capture(asset.contextGraphId),
+        isBindingGenerationCurrent: (generation) =>
+          this.contextGraphBindingState.isGenerationCurrent(asset.contextGraphId, generation),
+        assertLifecycleCurrent,
+        closedError: () => asSyncFetchAbortError(new Error(
           `Graph-scoped store for ${asset.ual} is closed for node shutdown`,
-        ));
-        if (this.graphScopedStoreClosed) {
-          return Promise.reject(shutdownError());
-        }
-        const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
-        let bindingGeneration = this.contextGraphBindingState.capture(asset.contextGraphId);
-        const bindingIsCurrent = () => (
-          this.subscribedContextGraphs.get(asset.contextGraphId) === subscription
-          && this.contextGraphBindingState.isGenerationCurrent(
-            asset.contextGraphId,
-            bindingGeneration,
-          )
-        );
-        const physicalStore = Promise.resolve().then(async (): Promise<GraphScopedMaterializationOutcome> => {
+        )),
+        bindingChangedError: () => asSyncFetchAbortError(new Error(
+          `Context graph binding for ${asset.contextGraphId} changed during graph-scoped store`,
+        )),
+        asAbortError: asSyncFetchAbortError,
+        track: (run) => this.graphScopedStorePhysicalRuns.add(run),
+        untrack: (run) => this.graphScopedStorePhysicalRuns.delete(run),
+        operation: async ({
+          subscription,
+          isBindingCurrent,
+          recaptureBindingGeneration,
+          assertCurrent,
+        }): Promise<GraphScopedMaterializationOutcome> => {
           const authentication = await authenticateDurableGraphScopedAsset({
             chain: this.chain,
             asset,
@@ -5992,18 +5939,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               );
             },
           });
-          if (operationSignal?.aborted) {
-            throw asSyncFetchAbortError(operationSignal.reason);
-          }
-          assertLifecycleCurrent();
-          if (this.graphScopedStoreClosed) throw shutdownError();
-          if (!bindingIsCurrent()) {
-            throw asSyncFetchAbortError(new Error(
-              `Context graph binding for ${asset.contextGraphId} changed during authentication`,
-            ));
-          }
+          assertCurrent();
           const verifiedOnChainId = authentication.onChainContextGraphId;
-          assertLifecycleCurrent();
           if (
             verifiedOnChainId
             && subscription?.onChainId
@@ -6023,37 +5960,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               asset.contextGraphId,
               { ...subscription, onChainId: verifiedOnChainId, lastReconciledOrdinal: 0 },
               undefined,
-              bindingIsCurrent,
+              isBindingCurrent,
             );
-            assertLifecycleCurrent();
-            if (!bindingIsCurrent()) {
-              throw asSyncFetchAbortError(new Error(
-                `Context graph binding for ${asset.contextGraphId} changed while its authenticated update was persisted`,
-              ));
-            }
+            assertCurrent();
             this.bindSubscriptionOnChainId(
               asset.contextGraphId,
               subscription,
               verifiedOnChainId,
             );
-            bindingGeneration = this.contextGraphBindingState.capture(asset.contextGraphId);
-            assertLifecycleCurrent();
+            recaptureBindingGeneration();
+            assertCurrent();
           }
-          if (operationSignal?.aborted) {
-            throw asSyncFetchAbortError(operationSignal.reason);
-          }
-          assertLifecycleCurrent();
-          if (!bindingIsCurrent()) {
-            throw asSyncFetchAbortError(new Error(
-              `Context graph binding for ${asset.contextGraphId} changed before materialization`,
-            ));
-          }
+          assertCurrent();
           onAtomicCommitStarted?.(asset.contextGraphId, asset.ual);
-          if (this.graphScopedStoreClosed) throw shutdownError();
+          assertCurrent();
           const outcome = await materializeVerifiedGraphScopedAsset({
             store: this.store,
             asset: authentication.asset,
-            isCurrent: () => (isCurrent?.() ?? true) && bindingIsCurrent(),
+            isCurrent: () => (isCurrent?.() ?? true) && isBindingCurrent(),
             shouldQuarantineCommitted: () => {
               const current = this.subscribedContextGraphs.get(asset.contextGraphId);
               return (subscription !== undefined && current === undefined)
@@ -6100,12 +6024,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
           }
           return outcome;
-        });
-        this.graphScopedStorePhysicalRuns.add(physicalStore);
-        return physicalStore.finally(() => {
-          this.graphScopedStorePhysicalRuns.delete(physicalStore);
-        });
-      },
+        },
+      }),
       onVerifiedFullSnapshot,
       deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
       setCheckpoint: (key, checkpoint) => {
@@ -6132,6 +6052,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),
     };
+    if (exactAssetSelection?.kind === 'challenge-pinned') {
+      const {
+        exactAssetSelectionFor: _exactAssetSelectionFor,
+        storeGraphScopedAsset: _storeGraphScopedAsset,
+        deleteCheckpoint: _deleteCheckpoint,
+        setCheckpoint: _setCheckpoint,
+        authenticateChallengePinnedAsset,
+        ...challengeContext
+      } = durableContext;
+      if (authenticateChallengePinnedAsset === undefined) {
+        throw new Error('Challenge-pinned exact fetch is missing its authentication consumer');
+      }
+      const fetched = await runChallengeExactAssetFetch({
+        ...challengeContext,
+        challengeSelectionFor: () => exactAssetSelection,
+        authenticateChallengePinnedAsset,
+      });
+      return {
+        result: fetched.result,
+        exactFetchDisposition: fetched.disposition,
+        authenticatedExactAssets: fetched.authenticatedAssets,
+      };
+    }
     if (exactAssetSelection !== undefined) {
       return runDurableSyncDetailed(durableContext);
     }

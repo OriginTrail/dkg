@@ -9,6 +9,7 @@ import {
 import { generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import {
   filterExactAssetDurablePayload,
+  runChallengeExactAssetFetch,
   runDurableSync,
   runDurableSyncDetailed,
   type DurableSyncChallengePinnedAuthenticationRequest,
@@ -18,7 +19,9 @@ import {
   createUalOnlyExactAssetSelection,
   exactAssetUalsForSelection,
   requireExactAssetSelection,
+  type ChallengePinnedExactAssetSelection,
   type ExactAssetSelection,
+  type UalOnlyExactAssetSelection,
 } from '../src/sync/exact-assets.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -32,6 +35,7 @@ interface FetchCall {
   snapshotRef: string | undefined;
   sinceBatchId: string | undefined;
   assetUals: string[] | undefined;
+  forceFreshSession: boolean | undefined;
 }
 
 describe('exact-asset rolling-upgrade filter', () => {
@@ -222,7 +226,7 @@ describe('exact-asset rolling-upgrade filter', () => {
     expect(processCalls[0]!.dataCount).toBe(1);
   });
 
-  it('threads a challenge pin through runDurableSync before verification', async () => {
+  it('threads a challenge pin through the proof-only entry point before verification', async () => {
     const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
     const scope = createGraphKnowledgeAssetScope(wanted, '1');
     const graph = knowledgeAssetLayerGraphUri(
@@ -257,19 +261,23 @@ describe('exact-asset rolling-upgrade filter', () => {
       }]);
 
     const mismatch = makeContext({
-      exactAssetSelectionFor: () => selection('2'),
       pageQuads: { data, meta },
     });
-    await runDurableSync(mismatch.context);
+    await runChallengeExactAssetFetch(challengeContext(
+      mismatch.context,
+      selection('2') as ChallengePinnedExactAssetSelection,
+    ));
     expect(mismatch.calls.map((call) => call.phase)).toEqual(['meta']);
     expect(mismatch.processCalls).toHaveLength(0);
     expect(mismatch.insertedBatches).toHaveLength(0);
 
     const matching = makeContext({
-      exactAssetSelectionFor: () => selection('1'),
       pageQuads: { data, meta },
     });
-    await runDurableSync(matching.context);
+    await runChallengeExactAssetFetch(challengeContext(
+      matching.context,
+      selection('1') as ChallengePinnedExactAssetSelection,
+    ));
     expect(matching.calls.map((call) => call.phase)).toEqual(['meta', 'data']);
     expect(matching.processCalls).toHaveLength(1);
   });
@@ -321,17 +329,22 @@ describe('exact-asset rolling-upgrade filter', () => {
         merkleLeafCount: 1n,
       },
     ]);
+    let failSecondAsset = true;
     const authenticateChallengePinnedAsset = vi.fn(async (
       request: DurableSyncChallengePinnedAuthenticationRequest,
-    ) => ({
-      asset: request.asset,
-      privateRoots: request.asset.ual === firstUal ? [privateRoot] : [],
-    }));
+    ) => {
+      if (request.asset.ual === secondUal && failSecondAsset) {
+        throw new Error('second challenge authentication timed out');
+      }
+      return {
+        asset: request.asset,
+        privateRoots: request.asset.ual === firstUal ? [privateRoot] : [],
+      };
+    });
     const storeGraphScopedAsset = vi.fn(async () => {
       throw new Error('challenge-pinned assets must not reach durable materialization');
     });
-    const { context } = makeContext({
-      exactAssetSelectionFor: () => selection,
+    const { context, calls } = makeContext({
       pageQuads: {
         data: [first.data, second.data],
         meta: [...first.meta, ...second.meta],
@@ -341,18 +354,60 @@ describe('exact-asset rolling-upgrade filter', () => {
         verifiedMeta: [...first.meta, ...second.meta],
         verifiedGraphScopedDataGraphs: [first.graph, second.graph],
       },
-      authenticateChallengePinnedAsset,
       storeGraphScopedAsset,
     });
+    // Model a responder session retained inside the page-fetch layer. Without
+    // forceFreshSession, a later invocation receives only the suffix after the
+    // previous cursor even though no proof bytes were durably retained.
+    const fetchPage = context.fetchSyncPages;
+    const responderOffsets = new Map<'data' | 'meta', number>();
+    context.fetchSyncPages = async (request) => {
+      if (request.forceFreshSession) responderOffsets.set(request.phase, 0);
+      const full = await fetchPage(request);
+      const resumedFromOffset = responderOffsets.get(request.phase) ?? 0;
+      responderOffsets.set(request.phase, full.nextOffset);
+      return {
+        ...full,
+        quads: full.quads.slice(resumedFromOffset),
+        resumedFromOffset,
+        rawResumedFromOffset: resumedFromOffset,
+        responderSessionStartedFresh: request.forceFreshSession === true,
+      };
+    };
 
-    const detailed = await runDurableSyncDetailed(context);
+    const firstAttempt = await runChallengeExactAssetFetch(challengeContext(
+      context,
+      selection,
+      authenticateChallengePinnedAsset,
+    ));
+    expect(firstAttempt.disposition).toBe('incomplete');
+    expect(firstAttempt.authenticatedAssets.map(({ asset }) => asset.ual)).toEqual([firstUal]);
 
-    expect(detailed.authenticatedExactAssets?.map(({ asset }) => asset.ual)).toEqual([
+    failSecondAsset = false;
+    const detailed = await runChallengeExactAssetFetch(challengeContext(
+      context,
+      selection,
+      authenticateChallengePinnedAsset,
+    ));
+
+    expect(detailed.authenticatedAssets.map(({ asset }) => asset.ual)).toEqual([
       firstUal,
       secondUal,
     ]);
-    expect(detailed.authenticatedExactAssets?.[0]?.privateRoots).toEqual([privateRoot]);
-    expect(authenticateChallengePinnedAsset).toHaveBeenCalledTimes(2);
+    expect(detailed.authenticatedAssets[0]?.privateRoots).toEqual([privateRoot]);
+    const repeated = await runChallengeExactAssetFetch(challengeContext(
+      context,
+      selection,
+      authenticateChallengePinnedAsset,
+    ));
+    expect(repeated.disposition).toBe('found');
+    expect(repeated.authenticatedAssets.map(({ asset }) => asset.ual)).toEqual([
+      firstUal,
+      secondUal,
+    ]);
+    expect(calls).toHaveLength(6);
+    expect(calls.every(({ forceFreshSession }) => forceFreshSession === true)).toBe(true);
+    expect(authenticateChallengePinnedAsset).toHaveBeenCalledTimes(6);
     expect(storeGraphScopedAsset).not.toHaveBeenCalled();
     expect(detailed.result.insertedTriples).toBe(0);
   });
@@ -366,7 +421,7 @@ describe('exact-asset rolling-upgrade filter', () => {
 
 function makeContext(options: {
   sinceBatchIdFor?: (cg: string) => string | undefined;
-  exactAssetSelectionFor?: (cg: string) => ExactAssetSelection | undefined;
+  exactAssetSelectionFor?: (cg: string) => UalOnlyExactAssetSelection | undefined;
   pageQuads?: { data: Quad[]; meta: Quad[] };
   contextGraphIds?: string[];
   syncAgentsMeta?: boolean;
@@ -377,9 +432,6 @@ function makeContext(options: {
     totalFetchedDataQuads?: number;
     totalFetchedMetaQuads?: number;
   };
-  authenticateChallengePinnedAsset?: (
-    request: DurableSyncChallengePinnedAuthenticationRequest,
-  ) => Promise<{ asset: import('../src/sync/requester/graph-scoped-materialization.js').VerifiedGraphScopedAsset; privateRoots: readonly Uint8Array[] }>;
   storeGraphScopedAsset?: () => Promise<never>;
 } = {}) {
   const calls: FetchCall[] = [];
@@ -424,6 +476,7 @@ function makeContext(options: {
         snapshotRef,
         sinceBatchId,
         exactAssetUals,
+        forceFreshSession,
       }) => {
         calls.push({
           contextGraphId,
@@ -432,6 +485,7 @@ function makeContext(options: {
           snapshotRef,
           sinceBatchId,
           assetUals: exactAssetUals,
+          forceFreshSession,
         });
         return page(phase);
       },
@@ -461,7 +515,6 @@ function makeContext(options: {
         };
       },
       storeInsert: async ({ quads }) => { insertedBatches.push(quads); },
-      authenticateChallengePinnedAsset: options.authenticateChallengePinnedAsset,
       storeGraphScopedAsset: options.storeGraphScopedAsset,
       deleteCheckpoint: (key: string) => { deletedCheckpoints.push(key); },
       setCheckpoint: () => undefined,
@@ -469,6 +522,30 @@ function makeContext(options: {
       logWarn: () => undefined,
       logDebug: () => undefined,
     },
+  };
+}
+
+function challengeContext(
+  context: ReturnType<typeof makeContext>['context'],
+  selection: ChallengePinnedExactAssetSelection,
+  authenticateChallengePinnedAsset: (
+    request: DurableSyncChallengePinnedAuthenticationRequest,
+  ) => Promise<{
+    asset: import('../src/sync/requester/graph-scoped-materialization.js').VerifiedGraphScopedAsset;
+    privateRoots: readonly Uint8Array[];
+  }> = async ({ asset }) => ({ asset, privateRoots: [] }),
+) {
+  const {
+    exactAssetSelectionFor: _exactAssetSelectionFor,
+    storeGraphScopedAsset: _storeGraphScopedAsset,
+    deleteCheckpoint: _deleteCheckpoint,
+    setCheckpoint: _setCheckpoint,
+    ...sharedContext
+  } = context;
+  return {
+    ...sharedContext,
+    challengeSelectionFor: () => selection,
+    authenticateChallengePinnedAsset,
   };
 }
 
