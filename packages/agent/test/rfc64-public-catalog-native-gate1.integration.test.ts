@@ -50,6 +50,8 @@ import {
   produceEmptyAuthorCatalogGenesisV1,
   produceSparseAuthorCatalogSuccessorV1,
 } from '../src/rfc64/author-catalog-producer.js';
+import { createRfc64CatalogNativeScopedReadProviderV1 } from '../src/rfc64/catalog-native-scoped-read-provider-v1.js';
+import type { AcceptedRfc64CatalogAccessSnapshotV1 } from '../src/rfc64/catalog-access-policy-v1.js';
 import {
   Rfc64PublicCatalogNativeReceiverV1,
   rfc64CatalogSignatureVariantDigestV1,
@@ -314,8 +316,15 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     }));
 
     expect(fixture.authorObjectRead.mock.calls.map(([digest]) => digest)).toEqual([
+      fixture.genesis.head.objectDigest,
       fixture.catalogIssuerDelegation.objectDigest,
       fixture.genesis.head.payload.directoryRootDigest,
+      fixture.catalogIssuerDelegation.objectDigest,
+      fixture.genesis.head.payload.directoryRootDigest,
+      fixture.successor.head.objectDigest,
+      fixture.catalogIssuerDelegation.objectDigest,
+      fixture.successor.head.payload.directoryRootDigest,
+      fixture.successor.bucket?.objectDigest,
       fixture.successor.head.payload.directoryRootDigest,
       fixture.successor.bucket?.objectDigest,
     ]);
@@ -971,7 +980,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await expect(fixture.synchronizeAny(
       announcement,
       observed.receiver,
-    )).rejects.toMatchObject({ code: 'catalog-native-receiver-slice' });
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-not-found' });
     expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
     expect(observed.stageVerifiedObjects).toHaveBeenCalled();
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
@@ -1009,7 +1018,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     const fixture = await setupLiveReceiver();
 
     await expect(fixture.bootstrap(fixture.invalidGenesisAnnouncement)).rejects.toMatchObject({
-      code: 'catalog-native-receiver-catalog',
+      code: 'catalog-native-receiver-not-found',
     });
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       fixture.scopeDigest,
@@ -1269,7 +1278,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     );
 
     await expect(fixture.synchronize(fixture.announcement, observed.receiver)).rejects.toMatchObject({
-      code: 'catalog-native-receiver-authorization',
+      code: 'catalog-native-receiver-not-found',
     });
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
@@ -1334,7 +1343,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.crossLaneAnnouncement,
       observed.receiver,
     )).rejects.toMatchObject({
-      code: 'catalog-native-receiver-authorization',
+      code: 'catalog-native-receiver-not-found',
     });
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
@@ -1355,7 +1364,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.expiredAnnouncement,
       observed.receiver,
     )).rejects.toMatchObject({
-      code: 'catalog-native-receiver-authorization',
+      code: 'catalog-native-receiver-not-found',
     });
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
@@ -2135,6 +2144,74 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     accessPolicy: 0 as const,
     policyDigest: POLICY_DIGEST,
   });
+  const acceptedPublicPolicy = (
+    selectedScope: Readonly<AuthorCatalogScopeV1>,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 => Object.freeze({
+    policy: Object.freeze({
+      networkId: selectedScope.networkId,
+      contextGraphId: selectedScope.contextGraphId,
+      governanceChainId: selectedScope.governanceChainId,
+      governanceContractAddress: selectedScope.governanceContractAddress,
+      ownershipTransitionDigest: selectedScope.ownershipTransitionDigest,
+      era: selectedScope.era,
+      version: '0',
+      previousPolicyDigest: null,
+      accessPolicy: 0,
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+      projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+      administrativeDelegationDigest: null,
+      source: selectedScope.governanceChainId === null
+        ? {
+            kind: 'owner-signed-unregistered',
+            ownerAddress: AUTHOR,
+            ownerAuthorityEra: selectedScope.era,
+          }
+        : {
+            kind: 'finalized-chain',
+            chainId: selectedScope.governanceChainId,
+            contractAddress: selectedScope.governanceContractAddress!,
+            blockNumber: '123',
+            blockHash: `0x${'77'.repeat(32)}` as Digest32V1,
+          },
+      effectiveAt: '1773900000000',
+      issuedAt: '1773900000000',
+    } satisfies ContextGraphPolicyV1),
+    policyDigest: POLICY_DIGEST,
+    roster: null,
+  });
+  const scopedControlObjects = {
+    getVerifiedObjectByDigest: async ({
+      objectDigest,
+      verifyIssuerSignature,
+    }: Parameters<Rfc64PersistenceV1['controlObjects']['getVerifiedObjectByDigest']>[0]) => {
+      const envelope = await authorObjectRead(objectDigest);
+      if (envelope === null) return null;
+      return Object.freeze({
+        envelope,
+        issuerSignature: await verifyIssuerSignature(envelope),
+      });
+    },
+  };
+  const createScopedProvider = (selectedScope: Readonly<AuthorCatalogScopeV1>) =>
+    createRfc64CatalogNativeScopedReadProviderV1({
+      controlObjects: scopedControlObjects,
+      kaBundles: { readKaBundleByDigest: authorBundleRead },
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      resolveAcceptedPolicySnapshot: async () => acceptedPublicPolicy(selectedScope),
+    });
+  const resolveUngovernedScopedRead = createScopedProvider(scope);
+  const resolveGovernedScopedRead = createScopedProvider(governedScope);
+  const governedHeadDigests = new Set([
+    governedGenesis.head.objectDigest,
+    governedSuccessor.head.objectDigest,
+  ]);
+  const resolveScopedReadCapability = async (
+    requestedScope: Parameters<typeof resolveUngovernedScopedRead>[0],
+  ) => (governedHeadDigests.has(requestedScope.catalogHeadObjectDigest)
+    ? resolveGovernedScopedRead(requestedScope)
+    : resolveUngovernedScopedRead(requestedScope));
   const authorHeadTransport = new Rfc64PublicCatalogTransportV1(
     new ProtocolRouter(authorNode),
     {
@@ -2160,6 +2237,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     {
       readCatalogObjectByDigest: authorObjectRead,
       readKaBundleByDigest: authorBundleRead,
+      resolveScopedReadCapability,
       authorizeOpenCatalogOperation: openPolicy,
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     },
