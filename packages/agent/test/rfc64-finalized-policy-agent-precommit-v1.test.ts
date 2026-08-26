@@ -104,7 +104,10 @@ function acceptedPolicyWith(
   });
 }
 
-function privateOwnerSnapshot(policyDigest = RFC64_VM_POLICY_DIGEST) {
+function privateOwnerSnapshot(
+  policyDigest = RFC64_VM_POLICY_DIGEST,
+  memberAddress = RFC64_VM_AUTHOR,
+) {
   const accepted = acceptedRfc64VmPolicySnapshot();
   const policy = Object.freeze({
     ...accepted.policy,
@@ -127,7 +130,7 @@ function privateOwnerSnapshot(policyDigest = RFC64_VM_POLICY_DIGEST) {
     policyDigest,
     administrativeDelegationDigest: policy.administrativeDelegationDigest,
     members: Object.freeze([Object.freeze({
-      agentAddress: RFC64_VM_AUTHOR,
+      agentAddress: memberAddress,
       roles: Object.freeze(['provider'] as const),
     })]),
     issuedAt: '1700000000000',
@@ -273,6 +276,50 @@ describe('RFC-64 finalized policy agent precommit', () => {
       privateOwnerPlan(),
       new AbortController().signal,
     )).rejects.toThrow(/accepted policy changed/u);
+  });
+
+  it('rejects an initially accepted private roster that excludes the catalog author', async () => {
+    const acceptedPolicySnapshotForCatalogScope = vi.fn(() => privateOwnerSnapshot(
+      RFC64_VM_POLICY_DIGEST,
+      `0x${'b1'.repeat(20)}`,
+    ));
+    const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
+    const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));
+    const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...options(),
+      acceptedPolicySnapshotForCatalogScope,
+      getOnChainContextGraphId,
+      getEvmChainId,
+    });
+
+    await expect(handler(
+      privateOwnerPlan(),
+      new AbortController().signal,
+    )).rejects.toThrow(/author membership/iu);
+    expect(acceptedPolicySnapshotForCatalogScope).toHaveBeenCalledOnce();
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
+    expect(getEvmChainId).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the second current snapshot drops the private catalog author', async () => {
+    const initiallyAccepted = privateOwnerSnapshot();
+    const authorExcluding = privateOwnerSnapshot(
+      RFC64_VM_POLICY_DIGEST,
+      `0x${'b2'.repeat(20)}`,
+    );
+    const acceptedPolicySnapshotForCatalogScope = vi.fn()
+      .mockReturnValueOnce(initiallyAccepted)
+      .mockReturnValue(authorExcluding);
+    const handler = createRfc64FinalizedPolicyAgentPrecommitV1({
+      ...options(),
+      acceptedPolicySnapshotForCatalogScope,
+    });
+
+    await expect(handler(
+      privateOwnerPlan(),
+      new AbortController().signal,
+    )).rejects.toThrow(/author membership/iu);
+    expect(acceptedPolicySnapshotForCatalogScope).toHaveBeenCalledTimes(2);
   });
 
   it('accepts a registered private catalog with the exact roster and live chain policy', async () => {
