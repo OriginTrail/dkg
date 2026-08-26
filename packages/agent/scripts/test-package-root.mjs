@@ -122,6 +122,8 @@ const publicRfc64Modules = [
 const blockedRfc64Modules = [
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
+  'catalog-native-scoped-read-capability-v1-internal.js',
+  'catalog-native-scoped-read-provider-v1.js',
   'catalog-peers-v1.js',
   'catalog-transport-authorization-v1.js',
   'catalog-transport-wire-v1-internal.js',

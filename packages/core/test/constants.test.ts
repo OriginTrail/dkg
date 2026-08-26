@@ -224,6 +224,25 @@ describe('validateContextGraphId', () => {
     expect(validateContextGraphId('user@domain').valid).toBe(true);
   });
 
+  it('rejects relative path segments while keeping dots inside a segment valid', () => {
+    // The character whitelist permits both `/` and `.` because URN/DID/URI-shaped
+    // IDs need them, which also admits `.`/`..` as whole segments. This mirrors
+    // the segment-aware check `isValidContextGraphId` already applies at the HTTP
+    // boundary, so the two validators agree rather than diverging in strictness.
+    expect(validateContextGraphId('victim/../secret').valid).toBe(false);
+    expect(validateContextGraphId('../secret').valid).toBe(false);
+    expect(validateContextGraphId('victim/./secret').valid).toBe(false);
+    expect(validateContextGraphId('..').valid).toBe(false);
+    expect(validateContextGraphId('.').valid).toBe(false);
+
+    // Dots WITHIN a segment are legitimate and must keep working — version
+    // markers and hostname-shaped identifiers both rely on them.
+    expect(validateContextGraphId('did:dkg:context-graph:acme.example/v1').valid).toBe(true);
+    expect(validateContextGraphId('graph/v1..2').valid).toBe(true);
+    expect(validateContextGraphId('a..b').valid).toBe(true);
+    expect(validateContextGraphId('my.graph').valid).toBe(true);
+  });
+
   it('reserves structural partition segments for new IDs without breaking legacy reads', () => {
     for (const id of [
       'victim/_meta',

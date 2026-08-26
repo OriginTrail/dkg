@@ -20,7 +20,9 @@ Thank you for your interest in contributing to the OriginTrail Decentralized Kno
 
 ## Development Workflow
 
-- Work is merged to `main` via pull requests.
+- Day-to-day work is merged to **`testnet-canary`** via pull requests, not to `main`.
+  `testnet-canary` is promoted to `main` in periodic release PRs (see
+  [Promoting `testnet-canary` to `main`](#promoting-testnet-canary-to-main)).
 - All PRs must pass CI checks (build + tests) before merging.
 - We use [Conventional Commits](https://www.conventionalcommits.org/) style messages:
   - `feat:` for new features
@@ -32,14 +34,58 @@ Thank you for your interest in contributing to the OriginTrail Decentralized Kno
 
 ## Pull Request Process
 
-1. Create a feature branch from `main`:
+1. Create a feature branch from `testnet-canary`:
    ```bash
-   git checkout -b feat/your-feature
+   git fetch origin
+   git checkout -b feat/your-feature origin/testnet-canary
    ```
 2. Make your changes, ensuring tests pass locally.
-3. Push and open a pull request against `main`.
+3. Push and open a pull request against `testnet-canary`.
 4. Fill in the PR template describing your changes.
 5. Wait for at least one approval from a maintainer.
+
+Keeping a long-lived branch current: **merge `testnet-canary` in, do not rebase.**
+Rebasing re-anchors the commits a review was written against and orphans the
+existing review threads.
+
+```bash
+git merge origin/testnet-canary
+```
+
+A branch that GitHub reports as `MERGEABLE / CLEAN` is only free of *textual*
+conflicts. If its checks last ran hundreds of commits ago, they say nothing
+about whether it still works — merge the base in and let CI re-run before
+trusting a green tick.
+
+## Promoting `testnet-canary` to `main`
+
+`main` is the repository's default branch, and **GitHub only honours closing
+keywords on a merge into the default branch.** A `Closes #123` in a PR that
+targets `testnet-canary` therefore never fires: the fix ships, the issue stays
+open, and nothing closes it retroactively when `testnet-canary` is later
+promoted.
+
+Left unattended this silently accumulates finished-but-open issues, which is
+indistinguishable from a backlog of real bugs.
+
+So the promotion PR body **must restate the closing keywords** for everything in
+the promoted range. Generate the block with:
+
+```bash
+git fetch origin
+pnpm run promotion:closes
+```
+
+Paste the output into the promotion PR description.
+
+Only issues that are still open are listed, so re-running it is safe. Any
+GitHub lookup failure — auth, rate limit, network — aborts with a non-zero exit
+rather than printing a short block that looks complete. Pass an explicit range
+as `node scripts/promotion-closes.mjs <base> <head>` to preview an older
+promotion.
+
+If a promotion has already merged without the block, close those issues by hand
+and link the PR that fixed them.
 
 ## Monorepo Structure
 

@@ -166,17 +166,23 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const selected = 'rfc64-selected-vm';
     const acceptedButUnselected = 'rfc64-accepted-only';
     const syncScopedButUnaccepted = 'rfc64-sync-only';
-    const serializedPolicy = (contextGraphId: string) => JSON.parse(JSON.stringify({
+    const privateSelected = 'rfc64-private-selected';
+    const serializedPolicy = (contextGraphId: string, accessPolicy = 0) => JSON.parse(JSON.stringify({
       policyEnvelope: {
-        payload: { accessPolicy: 0, contextGraphId },
+        payload: { accessPolicy, contextGraphId },
       },
       targets: [],
     }));
-    (internals as any).config.syncContextGraphs = [selected, syncScopedButUnaccepted];
-    (internals as any).config.rfc64PublicCatalogBootstrap = {
-      acceptedPublicPolicies: [
+    (internals as any).config.syncContextGraphs = [
+      selected,
+      syncScopedButUnaccepted,
+      privateSelected,
+    ];
+    (internals as any).config.rfc64CatalogBootstrap = {
+      acceptedPolicies: [
         serializedPolicy(selected),
         serializedPolicy(acceptedButUnselected),
+        serializedPolicy(privateSelected, 1),
       ],
     };
     // Discovery may leave a passive bookkeeping row. That row is not member

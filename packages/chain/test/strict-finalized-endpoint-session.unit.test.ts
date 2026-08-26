@@ -140,19 +140,24 @@ describe('origin identity, proven end-to-end through the config boundary', () =>
   const sel = (endpoints: readonly string[]) =>
     snapshotStrictCurrentFinalizedEvmConfigV1({ chainId: CHAIN, endpoints } as never).endpoints;
 
-  it('treats path/query/credential/case variants of one host as ONE provider', () => {
+  it('treats path/query/case variants of one host as ONE provider', () => {
     // Three elements so `endpoints` DISCRIMINATES: if these were three providers
     // the second slot would be the second variant, not `b`.
     //
-    // The CREDENTIAL variant is load-bearing and was missing at one point while
-    // this test's name still claimed it: `url.origin` excludes userinfo, so two
-    // tokens on one host are one provider. Without a credential-bearing URL here,
-    // an identity rule that folded userinfo in would pass green.
     expect(sel([
-      'https://token-a@a.example.com/rpc',
-      'https://token-b@A.EXAMPLE.COM/other?k=1',
+      'https://a.example.com/rpc',
+      'https://A.EXAMPLE.COM/other?k=1',
       'https://b.example.com',
-    ])).toEqual(['https://token-a@a.example.com/rpc', 'https://b.example.com/']);
+    ])).toEqual(['https://a.example.com/rpc', 'https://b.example.com/']);
+  });
+
+  it.each([
+    'https://user@a.example.com/rpc',
+    'https://:pass@a.example.com/rpc',
+    'https://user:pass@a.example.com/rpc',
+  ])('rejects credentialed URL %s before it reaches native fetch', (endpoint) => {
+    expect(() => sel([endpoint]))
+      .toThrow(/must not contain username or password credentials/);
   });
 
   it('collapses an explicit default port with the portless form', () => {

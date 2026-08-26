@@ -97,6 +97,20 @@ export {
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
 export {
+  ContextGraphAssetFetchConflictError,
+  ContextGraphAssetFetchValidationError,
+  ExactAssetFetchLifecycleClosedError,
+  MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+  runExactAssetFetch,
+  type ContextGraphAssetFetchItemResult,
+  type ContextGraphAssetFetchItemStatus,
+  type ContextGraphAssetFetchResult,
+  type ExactAssetChainSnapshot,
+  type ExactAssetFetchDependencies,
+  type ExactAssetFetchEvidence,
+  type ExactAssetLocalState,
+} from './sync/exact-asset-fetch.js';
+export {
   ContextGraphMembershipPersistQueueClosedError,
   ContextGraphMembershipPersistQueueFullError,
   ContextGraphMembershipPersistShutdownTimeoutError,
@@ -217,6 +231,8 @@ export {
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  type Rfc64CatalogBootstrapConfigV1,
+  type Rfc64CatalogBootstrapPolicyV1,
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
   type ContextGraphSyncMode,

@@ -57,6 +57,8 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, isPcaUnavailableError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
+  ContextGraphAssetFetchConflictError,
+  ContextGraphAssetFetchValidationError,
   ContextGraphNotFoundError,
   ContextGraphOnChainIdUnresolvedError,
   DKGAgent,
@@ -233,7 +235,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -428,10 +429,16 @@ function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: big
 
 function respondReconcileError(res: ServerResponse, err: unknown): void {
   const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof ContextGraphAssetFetchValidationError) {
+    return jsonResponse(res, 400, { error: message });
+  }
   if (err instanceof ContextGraphNotFoundError) {
     return jsonResponse(res, 404, { error: message });
   }
-  if (err instanceof ContextGraphOnChainIdUnresolvedError) {
+  if (
+    err instanceof ContextGraphOnChainIdUnresolvedError
+    || err instanceof ContextGraphAssetFetchConflictError
+  ) {
     return jsonResponse(res, 409, { error: message });
   }
   if (err instanceof VmReconcileQueueFullError) {
@@ -536,6 +543,62 @@ async function handleReconcileContextGraphRoute(
   }
 }
 
+async function handleFetchContextGraphAssetsRoute(
+  ctx: Pick<RequestContext, 'req' | 'res' | 'agent'>,
+  isNodeAdminCaller: boolean,
+): Promise<void> {
+  const { req, res, agent } = ctx;
+  if (!isNodeAdminCaller) {
+    return jsonResponse(res, 403, {
+      error: 'POST /api/context-graph/fetch-assets requires a node-level admin token',
+    });
+  }
+
+  const body = await readBody(req, SMALL_BODY_BYTES);
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(body || '{}') as Record<string, unknown>;
+  } catch {
+    return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+  }
+  if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') {
+    return jsonResponse(res, 400, { error: 'JSON body must be an object' });
+  }
+  const contextGraphId = parsed.contextGraphId ?? parsed.id;
+  if (typeof contextGraphId !== 'string' || contextGraphId.length === 0) {
+    return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
+  }
+  const uals = parsed.uals ?? parsed.assetUals;
+  if (!Array.isArray(uals) || uals.length === 0) {
+    return jsonResponse(res, 400, { error: '"uals" must contain at least one Knowledge Asset UAL' });
+  }
+  if (uals.some((ual) => typeof ual !== 'string')) {
+    return jsonResponse(res, 400, { error: 'Every "uals" entry must be a string' });
+  }
+  const rawPeerIds = parsed.peerIds ?? parsed.remotePeerIds;
+  const peerIds = rawPeerIds === undefined
+    ? typeof parsed.remotePeerId === 'string'
+      ? [parsed.remotePeerId]
+      : undefined
+    : rawPeerIds;
+  if (peerIds !== undefined && !Array.isArray(peerIds)) {
+    return jsonResponse(res, 400, { error: '"peerIds" must be an array of peer IDs' });
+  }
+  if (peerIds?.some((peerId) => typeof peerId !== 'string')) {
+    return jsonResponse(res, 400, { error: 'Every "peerIds" entry must be a string' });
+  }
+  try {
+    const result = await agent.fetchContextGraphAssets(
+      contextGraphId,
+      uals as string[],
+      peerIds === undefined ? {} : { peerIds: peerIds as string[] },
+    );
+    return jsonResponse(res, 200, result);
+  } catch (err) {
+    return respondReconcileError(res, err);
+  }
+}
+
 export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -619,7 +682,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const id = parsed.id ?? parsed.contextGraphId;
     if (!id || !name)
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
-    if (!isValidContextGraphId(id))
+    if (!validateContextGraphId(id).valid)
       return jsonResponse(res, 400, { error: "Invalid context graph id" });
     const parsedPcaAccountId = parseOptionalPcaAccountId(parsed);
     if (parsedPcaAccountId.error) {
@@ -1715,6 +1778,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // VM-reconcile lane, ahead of the periodic all-CG safety sweep.
   if (req.method === "POST" && path === "/api/context-graph/reconcile") {
     return handleReconcileContextGraphRoute(
+      { req, res, agent },
+      isNodeAdminCaller(),
+    );
+  }
+
+  // POST /api/context-graph/fetch-assets
+  //
+  // Fetch 1-10 exact RFC64 Knowledge Assets. This does not start the
+  // background reconciler, scan the whole graph, replace the graph, or advance
+  // its ordinal watermark.
+  if (req.method === "POST" && path === "/api/context-graph/fetch-assets") {
+    return handleFetchContextGraphAssetsRoute(
       { req, res, agent },
       isNodeAdminCaller(),
     );

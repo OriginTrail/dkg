@@ -131,7 +131,7 @@ import {
   resolveNetworkDefaultContextGraphs,
   isPublisherRuntimeEnabled,
   resolvePublisherRetryTuning,
-  resolveRfc64PublicCatalogActivation,
+  resolveRfc64CatalogActivations,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveSharedMemoryTtlMs,
   resolveStorageAckTiming,
@@ -292,7 +292,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -1352,15 +1351,17 @@ export async function runDaemonInner(
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
   const chainBase = resolveChainConfig(config, network);
-  const rfc64PublicCatalog = resolveRfc64PublicCatalogActivation(
+  const rfc64CatalogActivations = resolveRfc64CatalogActivations(
     config,
     resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
   );
+  const rfc64Catalog = rfc64CatalogActivations.catalog;
+  const rfc64PublicCatalog = rfc64CatalogActivations.publicCatalog;
   const syncContextGraphs = [
     ...new Set([
       ...resolveContextGraphs(config),
       ...resolveNetworkDefaultContextGraphs(network),
-      ...rfc64PublicCatalog.selectedContextGraphs,
+      ...rfc64Catalog.selectedPublicContextGraphs,
     ]),
   ];
 
@@ -1804,6 +1805,11 @@ export async function runDaemonInner(
       ? undefined
       : rfc64PublicCatalog.enabled
         ? config.rfc64PublicCatalog
+        : { enabled: false },
+    rfc64CatalogActivation: config.rfc64Catalog === undefined
+      ? undefined
+      : rfc64Catalog.enabled
+        ? config.rfc64Catalog
         : { enabled: false },
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
     contextGraphSubscriptionRehydrationEnabled,
@@ -3706,6 +3712,7 @@ export async function runDaemonInner(
         publisherControl,
         publisherState,
         config,
+        rfc64Catalog,
         rfc64PublicCatalog,
         startedAt,
         dashDb,

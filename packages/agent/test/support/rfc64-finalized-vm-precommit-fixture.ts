@@ -52,6 +52,7 @@ Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1> {
       era: '0',
       bucketCount: '1',
     } satisfies AuthorCatalogScopeV1),
+    policyDigest: RFC64_VM_POLICY_DIGEST,
     catalogHeadDigest: RFC64_VM_CATALOG_HEAD_DIGEST,
     inventoryDigest: RFC64_VM_INVENTORY_DIGEST,
     rows: Object.freeze([]),

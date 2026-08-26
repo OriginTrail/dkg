@@ -387,6 +387,28 @@ describe('author catalog selected directory paths', () => {
     )).toThrow(/child rowCount/);
   });
 
+  it('rejects head-to-root binding mismatches (directoryRootDigest and totalRows)', () => {
+    const fixture = twoLevelFixture(300n);
+
+    // (1) head commits a directoryRootDigest that does not match the signed root.
+    // A regression dropping the root-digest binding check would accept this.
+    expect(() => verifyAuthorCatalogDirectoryPathV1(
+      signedHeadEnvelope({ ...fixture.head.payload, directoryRootDigest: digest(42) }),
+      fixture.path,
+      '300',
+    )).toThrow(/directoryRootDigest/);
+
+    // (2) head.totalRows disagrees with the signed root's entry row sum, with the
+    // real root left intact so the directoryRootDigest check still passes and the
+    // totalRows binding is exercised in isolation.
+    const bumpedTotalRows = (BigInt(fixture.head.payload.totalRows) + 1n).toString();
+    expect(() => verifyAuthorCatalogDirectoryPathV1(
+      signedHeadEnvelope({ ...fixture.head.payload, totalRows: bumpedTotalRows }),
+      fixture.path,
+      '300',
+    )).toThrow(/totalRows/);
+  });
+
   it('mints an opaque exact-head capability and rejects every structural forgery', () => {
     const fixture = twoLevelFixture(300n);
     const verifiedPath = verifyAuthorCatalogDirectoryPathV1(

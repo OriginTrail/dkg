@@ -533,6 +533,82 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
     expect(promoted.type === 'boolean' && promoted.value).toBe(true);
   });
 
+  it('does not enter the legacy workspace scan during an exact RFC64 check', async () => {
+    const store = new OxigraphStore();
+    const sharedMemoryReads: QueryOptions[] = [];
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: QueryOptions) => {
+      if (options?.source === 'agent.finalization.sharedMemorySlice') {
+        sharedMemoryReads.push(options);
+      }
+      return originalQuery(sparql, options);
+    }) as typeof store.query;
+    const handler = new FinalizationHandler(store, makeBindingChain(42n));
+
+    const outcome = await handler.handleExactChainReconciledKC(
+      input(new Uint8Array(32).fill(9)),
+      createOperationContext('system'),
+    );
+
+    expect(outcome).toBe('no-swm');
+    expect(sharedMemoryReads).toHaveLength(0);
+  });
+
+  it('does not accept a stale legacy VM v1 marker for the current chain v2 root', async () => {
+    const store = new OxigraphStore();
+    const handler = new FinalizationHandler(store, makeBindingChain(42n));
+    const vmGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${ON_CHAIN_CG}`;
+    const metaGraph = `${vmGraph}/_meta`;
+    const staleRoot = computeFlatKCRootV10([{
+      subject: ENTITY,
+      predicate: 'http://schema.org/name',
+      object: '"Version one"',
+      graph: '',
+    }], []);
+    const currentRoot = computeFlatKCRootV10([{
+      subject: ENTITY,
+      predicate: 'http://schema.org/name',
+      object: '"Version two"',
+      graph: '',
+    }], []);
+    await store.insert([
+      {
+        subject: ENTITY,
+        predicate: 'http://schema.org/name',
+        object: '"Version one"',
+        graph: vmGraph,
+      },
+      {
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/status',
+        object: '"confirmed"',
+        graph: metaGraph,
+      },
+      {
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/assertionVersion',
+        object: '"1"',
+        graph: metaGraph,
+      },
+      {
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/merkleRoot',
+        object: `"${ethers.hexlify(staleRoot)}"`,
+        graph: metaGraph,
+      },
+    ]);
+
+    await expect(handler.handleExactChainReconciledKC(
+      input(currentRoot),
+      createOperationContext('system'),
+    )).resolves.toBe('no-swm');
+
+    const staleVmStillPresent = await store.query(
+      `ASK { GRAPH <${vmGraph}> { <${ENTITY}> <http://schema.org/name> "Version one" } }`,
+    );
+    expect(staleVmStillPresent.type === 'boolean' && staleVmStillPresent.value).toBe(true);
+  });
+
   it('chain-reconcile regenerates generated private-CG catalog floor for merkle match without adding it as a root', async () => {
     const store = new OxigraphStore();
     await seedSwmSnapshot(store);
