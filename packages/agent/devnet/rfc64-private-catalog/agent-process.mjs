@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -13,11 +12,7 @@ import {
   contextGraphLayerUri,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
-import {
-  OxigraphStore,
-  quadsToNQuads,
-  readExactGraphPagedWithDiscoveredCount,
-} from '@origintrail-official/dkg-storage';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
 import {
   Rfc64PrivateDevnetChainAdapter,
@@ -36,6 +31,7 @@ import {
   roleAgentAddress,
 } from './fixture.mjs';
 import { classifyExpectedPrivateCatalogDenialV1 } from './denial-evidence.mjs';
+import { readExactGraphMemoryEvidence } from './memory-evidence.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
@@ -309,10 +305,16 @@ async function inspect(expectedHeadDigest) {
       authorAddress,
       kaNumber,
     );
+    const [swm, vm] = await Promise.all([
+      readExactGraphMemoryEvidence(agent.store, swmGraph),
+      readExactGraphMemoryEvidence(agent.store, vmGraph),
+    ]);
     graphCounts.push({
       kaNumber,
-      ...(await exactGraphEvidence(swmGraph, 'swm')),
-      ...(await exactGraphEvidence(vmGraph, 'vm')),
+      swm: swm.count,
+      swmDigest: swm.digest,
+      vm: vm.count,
+      vmDigest: vm.digest,
     });
   }
   const outsiderResult = ROLE === 'outsider'
@@ -368,19 +370,6 @@ async function proveDenied(command, requestId) {
       ...denial,
     });
   }
-}
-
-async function exactGraphEvidence(graph, prefix) {
-  const quads = await readExactGraphPagedWithDiscoveredCount(agent.store, graph, {
-    maxQuadCount: 16,
-    maxNQuadsBytes: 64 * 1024,
-    outputGraph: '',
-  });
-  const canonical = quadsToNQuads(quads).split('\n').sort().join('\n');
-  return {
-    [prefix]: quads.length,
-    [`${prefix}Digest`]: createHash('sha256').update(canonical, 'utf8').digest('hex'),
-  };
 }
 
 function seededSubscriptionStore(contextGraphId) {

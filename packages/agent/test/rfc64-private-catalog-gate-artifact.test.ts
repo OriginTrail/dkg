@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
 import {
   Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1,
@@ -19,11 +20,15 @@ import {
   assertRfc64PrivateGatePassProvenanceV1,
   runRfc64PrivateGateArtifactLifecycleV1,
 } from '../devnet/rfc64-private-catalog/gate-artifact.mjs';
+import { AgentChild } from '../devnet/rfc64-private-catalog/run.mjs';
 import {
-  AgentChild,
-  hasExactMemoryContents,
-} from '../devnet/rfc64-private-catalog/run.mjs';
-import { PROJECTION_DIGEST } from '../devnet/rfc64-private-catalog/fixture.mjs';
+  ASSET_NUMBERS,
+  PROJECTION_EVIDENCE,
+} from '../devnet/rfc64-private-catalog/fixture.mjs';
+import {
+  hasExactPrivateCatalogMemoryContents,
+  readExactGraphMemoryEvidence,
+} from '../devnet/rfc64-private-catalog/memory-evidence.mjs';
 
 const temporaryRoots: string[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -133,20 +138,64 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
 });
 
 describe('RFC-64 private release gate process and denial evidence', () => {
-  it('rejects same-size SWM or VM semantic corruption', () => {
-    const exactGraphCounts = [41, 42].map((kaNumber) => ({
-      kaNumber,
-      swm: 2,
-      swmDigest: PROJECTION_DIGEST,
-      vm: 2,
-      vmDigest: PROJECTION_DIGEST,
-    }));
-    expect(hasExactMemoryContents({ graphCounts: exactGraphCounts })).toBe(true);
-    expect(hasExactMemoryContents({
-      graphCounts: exactGraphCounts.map((entry, index) => index === 0
-        ? { ...entry, vmDigest: '0'.repeat(64) }
-        : entry),
-    })).toBe(false);
+  it('hashes real graph contents and rejects same-size semantic corruption', async () => {
+    const graph = 'urn:rfc64:private-gate:test-memory';
+    const store = new OxigraphStore();
+    const projection = (name: string) => [
+      {
+        graph,
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/age',
+        object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      },
+      {
+        graph,
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/name',
+        object: `"${name}"`,
+      },
+    ];
+    try {
+      // Reverse fixture order: canonicalization, not insertion order, defines
+      // the digest used by the process gate.
+      const original = projection('Alice').reverse();
+      await store.insert(original);
+      const exact = await readExactGraphMemoryEvidence(store, graph);
+      expect(exact).toEqual(PROJECTION_EVIDENCE);
+
+      const exactGraphCounts = ASSET_NUMBERS.map((kaNumber) => ({
+        kaNumber,
+        swm: exact.count,
+        swmDigest: exact.digest,
+        vm: exact.count,
+        vmDigest: exact.digest,
+      }));
+      const expected = {
+        assetNumbers: ASSET_NUMBERS,
+        projection: PROJECTION_EVIDENCE,
+      };
+      expect(hasExactPrivateCatalogMemoryContents(
+        { graphCounts: exactGraphCounts },
+        expected,
+      )).toBe(true);
+
+      await store.delete(original);
+      await store.insert(projection('Mallory'));
+      const corrupted = await readExactGraphMemoryEvidence(store, graph);
+      expect(corrupted.count).toBe(PROJECTION_EVIDENCE.count);
+      expect(corrupted.digest).not.toBe(PROJECTION_EVIDENCE.digest);
+      expect(hasExactPrivateCatalogMemoryContents({
+        graphCounts: exactGraphCounts.map((entry, index) => index === 0
+          ? {
+              ...entry,
+              vm: corrupted.count,
+              vmDigest: corrupted.digest,
+            }
+          : entry),
+      }, expected)).toBe(false);
+    } finally {
+      await store.close();
+    }
   });
 
   it('reaps a child that ignores the stop command and SIGTERM', async () => {

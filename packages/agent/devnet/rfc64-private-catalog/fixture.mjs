@@ -44,6 +44,10 @@ export const PROJECTION_NQUADS = new TextDecoder().decode(PROJECTION)
 export const PROJECTION_DIGEST = createHash('sha256')
   .update(PROJECTION_NQUADS, 'utf8')
   .digest('hex');
+export const PROJECTION_EVIDENCE = Object.freeze({
+  count: PROJECTION_NQUADS.length === 0 ? 0 : PROJECTION_NQUADS.split('\n').length,
+  digest: PROJECTION_DIGEST,
+});
 export const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: CHAIN_ID,
