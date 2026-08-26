@@ -264,7 +264,6 @@ describe('RFC-64 finalized VM placement composition', () => {
         ...request.finalizedContextGraph,
         accessPolicy: 1,
       },
-      requireCompleteAuthorSet: true,
     })).toThrow(/known-incomplete: no-authorized-provider/u);
   });
 });
@@ -295,7 +294,6 @@ function requestFor(
     },
     inventory: inventory(),
     placements: [...placements],
-    requireCompleteAuthorSet: false,
   };
 }
 
