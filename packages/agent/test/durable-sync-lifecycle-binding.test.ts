@@ -461,10 +461,31 @@ describe('durable sync lifecycle chain binding', () => {
     expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledWith(
       '12D3KooWExactProjectionPeer',
       contextGraphId,
-      requestedAssetUals,
+      { kind: 'ual-only', assetUals: requestedAssetUals },
       {},
     );
     expect(projected).toBe(result);
+
+    const challengePinnedSelection = {
+      kind: 'challenge-pinned' as const,
+      commitments: [{
+        assetUal: ual,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 1n,
+      }],
+    };
+    await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeer.call(
+      { syncExactKnowledgeAssetsFromPeerDetailed } as any,
+      '12D3KooWExactProjectionPeer',
+      contextGraphId,
+      challengePinnedSelection,
+    );
+    expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenLastCalledWith(
+      '12D3KooWExactProjectionPeer',
+      contextGraphId,
+      expect.objectContaining({ kind: 'challenge-pinned' }),
+      {},
+    );
   });
 
   it.each([

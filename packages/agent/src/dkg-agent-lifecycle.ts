@@ -269,6 +269,7 @@ import {
 } from './sync/requester/page-fetch.js';
 import {
   createChallengePinnedExactAssetSelection,
+  createUalOnlyExactAssetSelection,
   exactAssetCommitmentsForSelection,
   exactAssetUalsForSelection,
   exactAssetFilterKey,
@@ -5653,15 +5654,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * descriptors. Other legacy responses remain incomplete, fail closed, and
    * rotate to another candidate instead of being verified or stored.
    */
-  async syncExactKnowledgeAssetsFromPeer(this: DKGAgent,
+  syncExactKnowledgeAssetsFromPeer(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: string,
+    assetUals: readonly string[],
+    options?: {
+      signal?: AbortSignal;
+      isCurrent?: () => boolean;
+    },
+  ): Promise<DurableSyncResult>;
+  syncExactKnowledgeAssetsFromPeer(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
     selection: ExactAssetSelection,
+    options?: {
+      signal?: AbortSignal;
+      isCurrent?: () => boolean;
+    },
+  ): Promise<DurableSyncResult>;
+  async syncExactKnowledgeAssetsFromPeer(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: string,
+    selectionInput: ExactAssetSelection | readonly string[],
     options: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
     } = {},
   ): Promise<DurableSyncResult> {
+    const selection = Array.isArray(selectionInput)
+      ? createUalOnlyExactAssetSelection(selectionInput)
+      : requireExactAssetSelection(selectionInput);
     return (await this.syncExactKnowledgeAssetsFromPeerDetailed(
       remotePeerId,
       contextGraphId,
