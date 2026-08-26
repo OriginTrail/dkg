@@ -32,9 +32,6 @@ import { DKGAgent } from '../src/dkg-agent.js';
 const REJECTED_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 
 type AdmissionHandler = (stream: unknown, connection: unknown) => unknown;
-type AdmissionCoordinator = {
-  ensureAdmitted: (...args: unknown[]) => Promise<boolean>;
-};
 
 class CountingInboundStream extends EventTarget {
   sent: Uint8Array | null = null;
@@ -105,9 +102,7 @@ async function startAdmissionWiringFixture(name: string) {
 
   return {
     admission: agent.networkAdmission,
-    coordinator: (
-      agent as unknown as { networkAdmissionCoordinator: AdmissionCoordinator }
-    ).networkAdmissionCoordinator,
+    coordinator: agent.networkAdmissionCoordinator,
     handler(protocol: string): AdmissionHandler {
       const handler = captured.get(protocol);
       if (handler === undefined) {
