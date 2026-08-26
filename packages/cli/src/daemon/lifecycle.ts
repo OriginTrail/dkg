@@ -1096,15 +1096,23 @@ export async function bootstrapConfiguredContextGraphs(input: {
     let chainMetadataConflict = false;
     try {
       const repair = await input.agent.repairActivePublicContextGraphMetadata(contextGraphId);
-      chainMetadataConflict = repair.conflictingPolicy;
-      if (repair.repaired) {
-        input.log(
-          `Repaired chain-attested public metadata for configured context graph: ${contextGraphId} (${repair.insertedTriples} triples)`,
-        );
-      } else if (repair.conflictingPolicy) {
-        input.log(
-          `Context graph "${contextGraphId}" has public on-chain policy but conflicting root metadata — leaving it pending`,
-        );
+      switch (repair.outcome) {
+        case 'projection-complete':
+          input.log(
+            `Completed chain-attested public metadata for configured context graph: ${contextGraphId}`,
+          );
+          break;
+        case 'conflicting-policy':
+          chainMetadataConflict = true;
+          input.log(
+            `Context graph "${contextGraphId}" has public on-chain policy but conflicting root metadata — leaving it pending`,
+          );
+          break;
+        case 'already-complete':
+        case 'not-chain-attested':
+          break;
+        default:
+          repair satisfies never;
       }
     } catch (err) {
       input.log(
@@ -1150,7 +1158,27 @@ export async function bootstrapConfiguredContextGraphs(input: {
         agent: input.agent,
         store: input.readinessStore ?? {},
         contextGraphId,
-        forceReset: chainMetadataConflict,
+        revalidateMetadata: async () => {
+          // The first repair/classification happened before this readiness
+          // lock. Re-run both the chain/root contradiction check and the
+          // authoritative-metadata proof here so a resolved conflict or a
+          // concurrent PROJECT_SYNCED proof cannot be overwritten.
+          try {
+            const liveRepair = await input.agent
+              .repairActivePublicContextGraphMetadata(contextGraphId);
+            if (liveRepair.outcome === 'conflicting-policy') return 'conflicting';
+          } catch {
+            return 'missing';
+          }
+          const liveLocallyCurated = await input.agent
+            .isCuratorOf(contextGraphId)
+            .catch(() => false);
+          const liveAuthoritative = await input.agent.hasConfirmedMetaState(
+            contextGraphId,
+            { rejectUnregisteredPlaceholder: !liveLocallyCurated },
+          ).catch(() => false);
+          return liveAuthoritative ? 'authoritative' : 'missing';
+        },
       });
       // PROJECT_SYNCED persistence shares the same readiness lock and may
       // have proved this graph while bootstrap was working from `existing`.

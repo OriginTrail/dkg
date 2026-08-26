@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
@@ -7,6 +7,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { buildAuthoritativePublicMetaAskQuery } from '../src/context-graph-public-meta-proof.js';
+import { DKGAgent } from '../src/dkg-agent.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   repairChainAttestedPublicMetaProjection,
   repairCreatorPublicMetaProjections,
@@ -169,6 +171,81 @@ describe('creator-owned public metadata projection repair', () => {
 });
 
 describe('chain-attested public metadata projection repair', () => {
+  it('wires lifecycle repair to the exact graph chain attestation before mutation', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = '0x1234567890123456789012345678901234567890/lifecycle-wiring';
+    const isContextGraphPublicOnChain = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const agentLike = { store, isContextGraphPublicOnChain };
+    try {
+      const first = await LifecycleSyncMethods.prototype
+        .repairActivePublicContextGraphMetadata.call(agentLike as never, contextGraphId);
+      expect(first).toEqual({ outcome: 'not-chain-attested' });
+      expect(await hasPublicProof(store, contextGraphId)).toBe(false);
+
+      const second = await LifecycleSyncMethods.prototype
+        .repairActivePublicContextGraphMetadata.call(agentLike as never, contextGraphId);
+      expect(second).toEqual({ outcome: 'projection-complete' });
+      expect(await hasPublicProof(store, contextGraphId)).toBe(true);
+      expect(isContextGraphPublicOnChain.mock.calls.map(([id]) => id)).toEqual([
+        contextGraphId,
+        contextGraphId,
+      ]);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('requires name-hash proof for a numeric local mapping but preserves raw-slot addressing', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = '42';
+    const getContextGraphNameHash = vi.fn(async () => (
+      '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    ));
+    const getContextGraphAccessPolicy = vi.fn(async () => 0 as const);
+    const agentLike: any = {
+      store,
+      chain: {
+        getContextGraphNameHash,
+        getContextGraphAccessPolicy,
+        isContextGraphActiveOnChain: vi.fn(async () => true),
+      },
+      getContextGraphOnChainId: vi.fn()
+        .mockResolvedValueOnce('42')
+        .mockResolvedValueOnce(null),
+      contextGraphExists: vi.fn(async () => false),
+      subscribedContextGraphs: new Map(),
+      wireIdToLocalCgId: new Map(),
+      onChainAccessPolicyCache: new Map(),
+      log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    agentLike.isContextGraphPublicOnChain = DKGAgent.prototype.isContextGraphPublicOnChain;
+    agentLike.resolveOnChainAccessPolicyState = DKGAgent.prototype.resolveOnChainAccessPolicyState;
+    agentLike.localCgMatchesOnChainSlot = DKGAgent.prototype.localCgMatchesOnChainSlot;
+    agentLike.isWireIdKeyedSubscription = DKGAgent.prototype.isWireIdKeyedSubscription;
+    agentLike.readLiveOnChainAccessPolicy = DKGAgent.prototype.readLiveOnChainAccessPolicy;
+    agentLike.raceChainPolicyRead = DKGAgent.prototype.raceChainPolicyRead;
+    try {
+      const repaired = await LifecycleSyncMethods.prototype
+        .repairActivePublicContextGraphMetadata.call(agentLike, contextGraphId);
+
+      expect(repaired).toEqual({ outcome: 'not-chain-attested' });
+      expect(getContextGraphNameHash).toHaveBeenCalledWith(42n);
+      expect(getContextGraphAccessPolicy).not.toHaveBeenCalled();
+      expect(await hasPublicProof(store, contextGraphId)).toBe(false);
+
+      const rawSlotRepair = await LifecycleSyncMethods.prototype
+        .repairActivePublicContextGraphMetadata.call(agentLike, contextGraphId);
+      expect(rawSlotRepair).toEqual({ outcome: 'projection-complete' });
+      expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
+      expect(getContextGraphAccessPolicy).toHaveBeenCalledWith(42n);
+      expect(await hasPublicProof(store, contextGraphId)).toBe(true);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('backfills creatorless legacy metadata after exact active-public chain proof', async () => {
     const store = new OxigraphStore();
     const contextGraphId = '0x1234567890123456789012345678901234567890/legacy-public';
@@ -184,18 +261,8 @@ describe('chain-attested public metadata projection repair', () => {
         async () => true,
       );
 
-      expect(first).toEqual({
-        chainAttested: true,
-        repaired: true,
-        insertedTriples: 2,
-        conflictingPolicy: false,
-      });
-      expect(second).toEqual({
-        chainAttested: false,
-        repaired: false,
-        insertedTriples: 0,
-        conflictingPolicy: false,
-      });
+      expect(first).toEqual({ outcome: 'projection-complete' });
+      expect(second).toEqual({ outcome: 'already-complete' });
       expect(await hasPublicProof(store, contextGraphId)).toBe(true);
     } finally {
       await store.close();
@@ -212,12 +279,7 @@ describe('chain-attested public metadata projection repair', () => {
         async () => false,
       );
 
-      expect(repaired).toEqual({
-        chainAttested: false,
-        repaired: false,
-        insertedTriples: 0,
-        conflictingPolicy: false,
-      });
+      expect(repaired).toEqual({ outcome: 'not-chain-attested' });
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
     } finally {
       await store.close();
@@ -241,13 +303,40 @@ describe('chain-attested public metadata projection repair', () => {
         async () => true,
       );
 
-      expect(repaired).toEqual({
-        chainAttested: true,
-        repaired: false,
-        insertedTriples: 0,
-        conflictingPolicy: true,
-      });
+      expect(repaired).toEqual({ outcome: 'conflicting-policy' });
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('does not insert stale public facts when private policy arrives during chain proof', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'chain-public-concurrent-private-conflict';
+    try {
+      const repaired = await repairChainAttestedPublicMetaProjection(
+        store,
+        contextGraphId,
+        async () => {
+          await store.insert([{
+            subject: contextGraphDataGraphUri(contextGraphId),
+            predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+            object: '"private"',
+            graph: contextGraphMetaGraphUri(contextGraphId),
+          }]);
+          return true;
+        },
+      );
+
+      expect(repaired).toEqual({ outcome: 'conflicting-policy' });
+      expect(await hasPublicProof(store, contextGraphId)).toBe(false);
+      const typeResult = await store.query(`ASK WHERE {
+        GRAPH <${contextGraphMetaGraphUri(contextGraphId)}> {
+          <${contextGraphDataGraphUri(contextGraphId)}> <${DKG_ONTOLOGY.RDF_TYPE}>
+            <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+        }
+      }`);
+      expect(typeResult).toEqual({ type: 'boolean', value: false });
     } finally {
       await store.close();
     }

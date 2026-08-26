@@ -444,6 +444,7 @@ async function evaluateContextGraphSlotBinding(
   onChainId: string,
   opCtx: OperationContext | undefined,
   signal: AbortSignal | undefined,
+  allowNumericSelfAddress: boolean,
   isWireIdKeyedSubscription: (localId: string) => boolean,
   warn: (ctx: OperationContext, message: string) => void,
   raceRead: <T>(read: Promise<T>) => Promise<T | typeof TIMEOUT_SENTINEL>,
@@ -457,7 +458,11 @@ async function evaluateContextGraphSlotBinding(
   if (numericId <= 0n) return { kind: 'unprovable' };
 
   const trimmed = contextGraphId.trim();
-  if (/^\d+$/.test(trimmed) && trimmed === numericId.toString()) {
+  if (
+    allowNumericSelfAddress
+    && /^\d+$/.test(trimmed)
+    && trimmed === numericId.toString()
+  ) {
     return { kind: 'match' };
   }
   const getNameHash = chain.getContextGraphNameHash;
@@ -912,6 +917,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async isContextGraphPublicOnChain(this: DKGAgent,
     contextGraphId: string,
     opCtx?: OperationContext,
+    options: { requireCommittedNameHashForLocalMapping?: boolean } = {},
   ): Promise<boolean> {
     try {
       // DEFINITIVELY public iff the live-proven on-chain policy is `0`. Every
@@ -922,7 +928,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // resolver collapses unknown↔not-public ONLY for this boolean predicate;
       // the publish-inline probe consumes the tri-state directly so it can
       // REFUSE (rather than choose plaintext) on a genuine UNKNOWN.
-      return (await this.resolveOnChainAccessPolicyState(contextGraphId, opCtx)) === 0;
+      return (await this.resolveOnChainAccessPolicyState(
+        contextGraphId,
+        opCtx,
+        options,
+      )) === 0;
     } catch (err) {
       // Fail closed (curated/encrypted) on any lookup failure, but not
       // silently — surface WHY the public override was skipped so operators
@@ -972,6 +982,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveOnChainAccessPolicyState(this: DKGAgent,
     contextGraphId: string,
     opCtx?: OperationContext,
+    options: { requireCommittedNameHashForLocalMapping?: boolean } = {},
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
     const trimmed = contextGraphId.trim();
 
@@ -1030,7 +1041,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // to re-bind.) An affirmative name-hash mismatch is a STALE mapping → treat
     // as 'unknown' (fail closed), not 'unregistered' (which would re-enable the
     // plaintext default for a graph we just proved we can't trust).
-    if (resolvedFromLocalCg && !(await this.localCgMatchesOnChainSlot(contextGraphId, onChainId, opCtx))) {
+    if (resolvedFromLocalCg && !(await this.localCgMatchesOnChainSlot(
+      contextGraphId,
+      onChainId,
+      opCtx,
+      { requireCommittedNameHash: options.requireCommittedNameHashForLocalMapping },
+    ))) {
       return 'unknown';
     }
 
@@ -1070,8 +1086,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * `requireCommittedNameHash` option maps every non-match to `false`, including
    * malformed ids and adapters without the getter. Durable sync uses the strict
    * wrapper below, which additionally propagates transport failures so a bounded
-   * retry can perform a fresh read. All modes accept a canonical direct numeric
-   * self-address because it names the slot rather than a cleartext remapping.
+   * retry can perform a fresh read. The compatibility default preserves a
+   * numeric self-address; callers that require a committed name hash disable
+   * that shortcut after establishing that the id came from a local mapping.
    */
   async localCgMatchesOnChainSlot(this: DKGAgent,
     contextGraphId: string,
@@ -1085,6 +1102,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       onChainId,
       opCtx,
       options?.signal,
+      options?.requireCommittedNameHash !== true,
       (localId) => this.isWireIdKeyedSubscription(localId),
       (ctx, message) => this.log.warn(ctx, message),
       (read) => this.raceChainPolicyRead(read),
@@ -1112,6 +1130,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       onChainId,
       opCtx,
       options.signal,
+      true,
       (localId) => this.isWireIdKeyedSubscription(localId),
       (ctx, message) => this.log.warn(ctx, message),
       (read) => this.raceChainPolicyRead(read),

@@ -14,7 +14,10 @@ import {
   type OxigraphSparqlEndpoint,
 } from '../../storage/test/helpers/oxigraph-sparql-endpoint.js';
 import { buildAuthoritativePublicMetaAskQuery } from '../src/context-graph-public-meta-proof.js';
-import { repairCreatorPublicMetaProjections } from '../src/context-graph-public-meta-repair.js';
+import {
+  repairChainAttestedPublicMetaProjection,
+  repairCreatorPublicMetaProjections,
+} from '../src/context-graph-public-meta-repair.js';
 
 describe('creator-owned public metadata repair over SPARQL HTTP', () => {
   let endpoint: OxigraphSparqlEndpoint | undefined;
@@ -64,6 +67,28 @@ describe('creator-owned public metadata repair over SPARQL HTTP', () => {
 
       expect(repaired.repairedGraphs).toBe(1);
       expect(repaired.insertedTriples).toBe(2);
+      expect(proof).toEqual({ type: 'boolean', value: true });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('SPARQL HTTP / oxigraph-server applies the chain-attested repair as a conditional update', async () => {
+    endpoint = await startOxigraphSparqlEndpoint();
+    const store = new SparqlHttpStore({
+      queryEndpoint: endpoint.queryEndpoint,
+      updateEndpoint: endpoint.updateEndpoint,
+    });
+    const contextGraphId = 'legacy-chain-attested-sparql-http';
+    try {
+      const repaired = await repairChainAttestedPublicMetaProjection(
+        store,
+        contextGraphId,
+        async () => true,
+      );
+      const proof = await store.query(buildAuthoritativePublicMetaAskQuery(contextGraphId));
+
+      expect(repaired).toEqual({ outcome: 'projection-complete' });
       expect(proof).toEqual({ type: 'boolean', value: true });
     } finally {
       await store.close();

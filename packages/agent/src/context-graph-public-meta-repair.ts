@@ -7,9 +7,15 @@ import {
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
-import { stripLiteral } from './dkg-agent-utils.js';
+import {
+  tryUpdateWithTouchedGraphs,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
+import {
+  buildAuthoritativePublicMetaRepairUpdate,
+  inspectAuthoritativePublicMetaDefinition,
+} from './context-graph-public-meta-proof.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 
@@ -20,12 +26,11 @@ export interface PublicMetaRepairResult {
   conflictingGraphs: string[];
 }
 
-export interface ChainAttestedPublicMetaRepairResult {
-  chainAttested: boolean;
-  repaired: boolean;
-  insertedTriples: number;
-  conflictingPolicy: boolean;
-}
+export type ChainAttestedPublicMetaRepairResult =
+  | { outcome: 'already-complete' }
+  | { outcome: 'not-chain-attested' }
+  | { outcome: 'conflicting-policy' }
+  | { outcome: 'projection-complete' };
 
 async function inspectPublicMetaProjection(
   store: TripleStore,
@@ -37,35 +42,17 @@ async function inspectPublicMetaProjection(
     SELECT ?predicate ?object WHERE {
       GRAPH <${metaGraph}> {
         <${subject}> ?predicate ?object .
-        FILTER(?predicate IN (
-          <${DKG_ONTOLOGY.RDF_TYPE}>,
-          <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}>
-        ))
       }
     }
   `);
-  const existing = existingResult.type === 'bindings'
-    ? existingResult.bindings
+  const existing: Quad[] = existingResult.type === 'bindings'
+    ? existingResult.bindings.flatMap((row) => (
+        row['predicate'] && row['object']
+          ? [{ subject, predicate: row['predicate'], object: row['object'], graph: metaGraph }]
+          : []
+      ))
     : [];
-  const policies = existing
-    .filter((row) => row['predicate'] === DKG_ONTOLOGY.DKG_ACCESS_POLICY)
-    .map((row) => row['object']);
-  const conflictingPolicy = policies.some((value) => (
-    !value?.startsWith('"') || stripLiteral(value).trim().toLowerCase() !== 'public'
-  ));
-  const hasType = existing.some((row) => (
-    row['predicate'] === DKG_ONTOLOGY.RDF_TYPE
-    && row['object'] === DKG_ONTOLOGY.DKG_CONTEXT_GRAPH
-  ));
-  const hasPublicPolicy = policies.some((value) => (
-    value?.startsWith('"') && stripLiteral(value).trim().toLowerCase() === 'public'
-  ));
-  return {
-    conflictingPolicy,
-    missing: buildAuthoritativePublicMetaQuads(contextGraphId).filter((quad) => (
-      quad.predicate === DKG_ONTOLOGY.RDF_TYPE ? !hasType : !hasPublicPolicy
-    )),
-  };
+  return inspectAuthoritativePublicMetaDefinition(contextGraphId, existing);
 }
 
 /**
@@ -165,47 +152,29 @@ export async function repairChainAttestedPublicMetaProjection(
   // normal restarts cheap once a legacy graph has been healed.
   const inspection = await inspectPublicMetaProjection(store, contextGraphId);
   if (!inspection.conflictingPolicy && inspection.missing.length === 0) {
-    return {
-      chainAttested: false,
-      repaired: false,
-      insertedTriples: 0,
-      conflictingPolicy: false,
-    };
+    return { outcome: 'already-complete' };
   }
 
   const chainAttested = await proveActivePublicBinding();
   if (!chainAttested) {
-    return {
-      chainAttested: false,
-      repaired: false,
-      insertedTriples: 0,
-      conflictingPolicy: false,
-    };
+    return { outcome: 'not-chain-attested' };
   }
 
-  if (inspection.conflictingPolicy) {
-    return {
-      chainAttested: true,
-      repaired: false,
-      insertedTriples: 0,
-      conflictingPolicy: true,
-    };
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const updated = await tryUpdateWithTouchedGraphs(
+    store,
+    buildAuthoritativePublicMetaRepairUpdate(contextGraphId),
+    [metaGraph],
+    { source: 'agent.chainAttestedPublicMetaRepair' },
+  );
+  if (!updated) {
+    throw new Error('Triple store does not support atomic public metadata repair');
   }
-  if (inspection.missing.length === 0) {
-    return {
-      chainAttested: true,
-      repaired: false,
-      insertedTriples: 0,
-      conflictingPolicy: false,
-    };
-  }
-
-  await store.insert(inspection.missing, { source: 'agent.chainAttestedPublicMetaRepair' });
   await store.flush?.();
-  return {
-    chainAttested: true,
-    repaired: true,
-    insertedTriples: inspection.missing.length,
-    conflictingPolicy: false,
-  };
+  const finalInspection = await inspectPublicMetaProjection(store, contextGraphId);
+  if (finalInspection.conflictingPolicy) return { outcome: 'conflicting-policy' };
+  if (finalInspection.missing.length > 0) {
+    throw new Error('Atomic public metadata repair completed without the canonical proof');
+  }
+  return { outcome: 'projection-complete' };
 }

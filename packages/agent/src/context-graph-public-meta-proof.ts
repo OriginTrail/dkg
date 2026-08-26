@@ -64,6 +64,11 @@ export function buildAuthoritativePublicMetaQuads(contextGraphId: string): Quad[
   }));
 }
 
+export interface AuthoritativePublicMetaInspection {
+  missing: Quad[];
+  conflictingPolicy: boolean;
+}
+
 function matchesRequirementObject(
   value: string,
   requirement: PublicMetaObjectRequirement,
@@ -77,26 +82,39 @@ function matchesRequirementObject(
   }
 }
 
+/** Classify a fetched root `_meta` snapshot using the canonical public-proof model. */
+export function inspectAuthoritativePublicMetaDefinition(
+  contextGraphId: string,
+  quads: readonly Quad[],
+): AuthoritativePublicMetaInspection {
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  const projection = quads.filter((quad) => (
+    quad.graph === metaGraph && quad.subject === contextGraphUri
+  ));
+  const missing = buildAuthoritativePublicMetaQuads(contextGraphId).filter((canonicalQuad) => {
+    const requirement = AUTHORITATIVE_PUBLIC_META_REQUIREMENTS.find(
+      (candidate) => candidate.predicate === canonicalQuad.predicate,
+    );
+    return !requirement || !projection.some((quad) => (
+      quad.predicate === requirement.predicate
+      && matchesRequirementObject(quad.object, requirement.object)
+    ));
+  });
+  const conflictingPolicy = projection.some((quad) => (
+    quad.predicate === PUBLIC_ACCESS_POLICY_REQUIREMENT.predicate
+    && !matchesRequirementObject(quad.object, PUBLIC_ACCESS_POLICY_REQUIREMENT.object)
+  ));
+  return { missing, conflictingPolicy };
+}
+
 /** Evaluate a fetched root `_meta` snapshot against the canonical public proof. */
 export function hasAuthoritativePublicMetaDefinition(
   contextGraphId: string,
   quads: readonly Quad[],
 ): boolean {
-  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-  const hasRequiredFacts = AUTHORITATIVE_PUBLIC_META_REQUIREMENTS.every((requirement) => quads.some((quad) => (
-    quad.graph === metaGraph
-      && quad.subject === contextGraphUri
-      && quad.predicate === requirement.predicate
-      && matchesRequirementObject(quad.object, requirement.object)
-  )));
-  const hasConflictingPolicy = quads.some((quad) => (
-    quad.graph === metaGraph
-      && quad.subject === contextGraphUri
-      && quad.predicate === PUBLIC_ACCESS_POLICY_REQUIREMENT.predicate
-      && !matchesRequirementObject(quad.object, PUBLIC_ACCESS_POLICY_REQUIREMENT.object)
-  ));
-  return hasRequiredFacts && !hasConflictingPolicy;
+  const inspection = inspectAuthoritativePublicMetaDefinition(contextGraphId, quads);
+  return inspection.missing.length === 0 && !inspection.conflictingPolicy;
 }
 
 function renderRequirement(
@@ -130,6 +148,45 @@ export function buildAuthoritativePublicMetaAskQuery(contextGraphId: string): st
 ${requirements}
       FILTER NOT EXISTS {
         <${assertSafeIri(contextGraphUri)}> <${accessPolicyPredicate}> ?conflictingAccessPolicy .
+        FILTER(
+          !isLiteral(?conflictingAccessPolicy) ||
+          LCASE(REPLACE(STR(?conflictingAccessPolicy), "^\\\\s+|\\\\s+$", "")) != ${sparqlString(publicPolicy.value)}
+        )
+      }
+    }
+  }`;
+}
+
+/**
+ * Build an atomic repair that inserts the canonical proof only while no
+ * contradictory access policy exists in the target root `_meta` graph.
+ */
+export function buildAuthoritativePublicMetaRepairUpdate(contextGraphId: string): string {
+  const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+  const contextGraphUri = assertSafeIri(contextGraphDataGraphUri(contextGraphId));
+  const requiredFacts = AUTHORITATIVE_PUBLIC_META_REQUIREMENTS
+    .map((requirement) => {
+      const predicate = `<${assertSafeIri(requirement.predicate)}>`;
+      const object = requirement.object.kind === 'iri'
+        ? `<${assertSafeIri(requirement.object.value)}>`
+        : sparqlString(requirement.object.value);
+      return `      <${contextGraphUri}> ${predicate} ${object} .`;
+    })
+    .join('\n');
+  const accessPolicyPredicate = assertSafeIri(PUBLIC_ACCESS_POLICY_REQUIREMENT.predicate);
+  const publicPolicy = PUBLIC_ACCESS_POLICY_REQUIREMENT.object;
+  if (publicPolicy.kind !== 'normalized-literal') {
+    throw new Error('Public access policy proof must use a normalized literal');
+  }
+  return `INSERT {
+    GRAPH <${metaGraph}> {
+${requiredFacts}
+    }
+  }
+  WHERE {
+    FILTER NOT EXISTS {
+      GRAPH <${metaGraph}> {
+        <${contextGraphUri}> <${accessPolicyPredicate}> ?conflictingAccessPolicy .
         FILTER(
           !isLiteral(?conflictingAccessPolicy) ||
           LCASE(REPLACE(STR(?conflictingAccessPolicy), "^\\\\s+|\\\\s+$", "")) != ${sparqlString(publicPolicy.value)}

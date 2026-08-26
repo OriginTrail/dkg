@@ -31,6 +31,7 @@ export default defineConfig({
       "test/query-source-labels.test.ts",
       "test/query-source-coverage.test.ts",
       "test/context-graph-on-chain-id-source-labels.test.ts",
+      "test/context-graph-public-meta-proof.test.ts",
       "test/context-graph-public-meta-repair.test.ts",
       "test/context-graph-public-meta-repair-http.test.ts",
       "test/list-context-graphs-cache-config.test.ts",

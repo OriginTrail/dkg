@@ -734,14 +734,21 @@ export async function resetContextGraphReadinessForMissingMetadata(input: {
   agent: DKGAgent;
   store: Partial<ContextGraphReadinessStore>;
   contextGraphId: string;
-  /** Skip the live-positive race check when current metadata is contradictory. */
-  forceReset?: boolean;
+  /**
+   * Optional full classifier for callers that must distinguish a live
+   * chain/root contradiction from ordinary missing metadata. It is invoked
+   * after acquiring the same lock used by PROJECT_SYNCED persistence.
+   */
+  revalidateMetadata?: () => Promise<'authoritative' | 'conflicting' | 'missing'>;
 }): Promise<boolean> {
   const contextGraphId = input.contextGraphId.trim();
   if (!contextGraphId) return false;
 
   return withContextGraphReadinessMutationLock(input.agent, contextGraphId, async () => {
-    if (!input.forceReset) {
+    if (input.revalidateMetadata) {
+      const state = await input.revalidateMetadata().catch(() => 'missing' as const);
+      if (state === 'authoritative') return false;
+    } else {
       const locallyCurated = typeof input.agent.isCuratorOf === 'function'
         ? await input.agent.isCuratorOf(contextGraphId).catch(() => false)
         : false;
