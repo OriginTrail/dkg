@@ -167,7 +167,11 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
     // Linearity guard: batching makes the small measurement stable enough for
     // a ratio-only assertion. A 10x input may take at most 25x as long, which
     // leaves CI headroom while rejecting materially superlinear growth.
-    expect(largeMs / smallMs).toBeLessThan(25);
+    expect(
+      largeMs / smallMs,
+      `isolated scaling samples: small=${smallMs.toFixed(6)}ms ` +
+      `large=${largeMs.toFixed(6)}ms`,
+    ).toBeLessThan(25);
   }, 25_000);
 
   it('classifies N=10_000 valid PREFIX decls + trailing SELECT in linear time', () => {
