@@ -142,6 +142,62 @@ describe('buildAtomicSubjectReplaceUpdate', () => {
     expect(mutations[0]).toContain('INSERT DATA');
   });
 
+  it('OxigraphStore.replaceSubjects commits a multi-subject catalog replacement together', async () => {
+    const store = new OxigraphStore();
+    const subjectB = 'urn:dkg:profile:test:query:b';
+    await store.insert([
+      quad(SUBJECT_A, 'urn:dkg:profile:sparql', '"old-a"'),
+      quad(subjectB, 'urn:dkg:profile:sparql', '"old-b"'),
+    ]);
+
+    await store.replaceSubjects!(GRAPH, [
+      {
+        subject: SUBJECT_A,
+        quads: [quad(SUBJECT_A, 'urn:dkg:profile:sparql', '"new-a"')],
+      },
+      {
+        subject: subjectB,
+        quads: [quad(subjectB, 'urn:dkg:profile:sparql', '"new-b"')],
+      },
+    ]);
+
+    const rows = await store.query(
+      `SELECT ?s ?o WHERE { GRAPH <${GRAPH}> { ?s <urn:dkg:profile:sparql> ?o } } ORDER BY ?s`,
+    );
+    expect(rows.type === 'bindings' ? rows.bindings : []).toEqual([
+      { s: subjectB, o: '"new-b"' },
+      { s: SUBJECT_A, o: '"new-a"' },
+    ]);
+  });
+
+  it('rejects an invalid multi-subject payload before changing any subject', async () => {
+    const store = new OxigraphStore();
+    const subjectB = 'urn:dkg:profile:test:query:b';
+    await store.insert([
+      quad(SUBJECT_A, 'urn:dkg:profile:sparql', '"old-a"'),
+      quad(subjectB, 'urn:dkg:profile:sparql', '"old-b"'),
+    ]);
+
+    await expect(store.replaceSubjects!(GRAPH, [
+      {
+        subject: SUBJECT_A,
+        quads: [quad(SUBJECT_A, 'urn:dkg:profile:sparql', '"new-a"')],
+      },
+      {
+        subject: subjectB,
+        quads: [quad(subjectB, 'urn:dkg:profile:sparql', '_:unsafe')],
+      },
+    ])).rejects.toThrow('blank node');
+
+    const rows = await store.query(
+      `SELECT ?s ?o WHERE { GRAPH <${GRAPH}> { ?s <urn:dkg:profile:sparql> ?o } } ORDER BY ?s`,
+    );
+    expect(rows.type === 'bindings' ? rows.bindings : []).toEqual([
+      { s: subjectB, o: '"old-b"' },
+      { s: SUBJECT_A, o: '"old-a"' },
+    ]);
+  });
+
   it('returns a bare DELETE when the insert set is empty', () => {
     const sparql = buildAtomicSubjectReplaceUpdate(GRAPH, SUBJECT_A, []);
     expect(sparql).toBe(`DELETE WHERE { GRAPH <${GRAPH}> { <${SUBJECT_A}> ?p ?o } }`);

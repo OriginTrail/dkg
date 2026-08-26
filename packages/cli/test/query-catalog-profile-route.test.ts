@@ -126,6 +126,57 @@ describe('/api/profile/query-catalog/read', () => {
 });
 
 describe('/api/profile/query-catalog/write', () => {
+  it('fails closed without an atomic batch capability and preserves the existing subject', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const contextGraphId = 'kamstrup-testnet';
+    const graph = `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
+    const query = `urn:dkg:profile:${contextGraphId}:query:configuration-trace`;
+    const sparql = 'http://dkg.io/ontology/profile/sparqlQuery';
+    await store.insert([{
+      subject: query,
+      predicate: sparql,
+      object: '"SELECT \\"old\\" WHERE {}"',
+      graph,
+    }]);
+
+    const insert = vi.fn(store.insert.bind(store));
+    const deleteByPattern = vi.fn(store.deleteByPattern.bind(store));
+    const unsupportedStore = new Proxy(store, {
+      get(target, property, receiver) {
+        if (property === 'replaceSubjects') return undefined;
+        if (property === 'insert') return insert;
+        if (property === 'deleteByPattern') return deleteByPattern;
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+
+    try {
+      const write = queryCatalogWriteContext(unsupportedStore, {
+        contextGraphId,
+        mode: 'upsert',
+        quads: [{
+          subject: query,
+          predicate: sparql,
+          object: '"SELECT \\"new\\" WHERE {}"',
+          graph: '',
+        }],
+      });
+      await handleMemoryRoutes(write.context);
+
+      expect(write.response.statusCode).toBe(501);
+      expect(JSON.parse(write.response.body)).toMatchObject({
+        code: 'QUERY_CATALOG_ATOMIC_UPSERT_UNSUPPORTED',
+      });
+      expect(insert).not.toHaveBeenCalled();
+      expect(deleteByPattern).not.toHaveBeenCalled();
+      expect(await ask(store, graph, query, sparql, 'SELECT "old" WHERE {}')).toBe(true);
+      expect(await ask(store, graph, query, sparql, 'SELECT "new" WHERE {}')).toBe(false);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('upserts incoming catalog/query subjects and preserves unrelated saved queries', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const contextGraphId = 'kamstrup-testnet';

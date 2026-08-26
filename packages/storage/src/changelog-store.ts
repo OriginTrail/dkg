@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import type {
   Quad,
+  SubjectReplacement,
   QueryOptions,
   QueryResult,
   TripleStore,
@@ -13,6 +14,7 @@ import {
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
   isReplaceSubjectCapabilityRefusal,
+  isReplaceSubjectsCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 
@@ -432,6 +434,28 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
           throw error;
         }
         this.flagReconcile('replaceSubject(indeterminate-failure)');
+        throw error;
+      }
+      await this.markPostMutation([graphUri], options);
+    });
+  }
+
+  async replaceSubjects(
+    graphUri: string,
+    replacements: SubjectReplacement[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceSubjects !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubjects', 'ChangelogStore');
+    }
+    if (!this.enabled) return this.inner.replaceSubjects(graphUri, replacements, options);
+    this.assertNotReserved(graphUri, 'replaceSubjects');
+    await this.runExclusive(async () => {
+      try {
+        await this.inner.replaceSubjects!(graphUri, replacements, options);
+      } catch (error) {
+        if (isReplaceSubjectsCapabilityRefusal(error)) throw error;
+        this.flagReconcile('replaceSubjects(indeterminate-failure)');
         throw error;
       }
       await this.markPostMutation([graphUri], options);

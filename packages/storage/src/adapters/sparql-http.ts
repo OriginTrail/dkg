@@ -24,6 +24,7 @@
 import type {
   TripleStore,
   Quad as DKGQuad,
+  SubjectReplacement,
   QueryOptions,
   UpdateOptions,
   QueryResult,
@@ -45,6 +46,7 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
+  buildAtomicSubjectsReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
@@ -630,6 +632,33 @@ export class SparqlHttpStore implements TripleStore {
       // first row or removed its last). Invalidate the graph-list cache before
       // rethrowing so a direct managed caller never serves stale membership —
       // mirrors replaceGraph / replaceGraphAndSubject.
+      this.invalidateListGraphsCache();
+      throw error;
+    }
+    this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites([graphUri]);
+  }
+
+  async replaceSubjects(
+    graphUri: string,
+    replacements: SubjectReplacement[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.atomicUpdates) {
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubjects', 'SparqlHttpStore');
+    }
+    const quads = replacements.flatMap((replacement) => replacement.quads);
+    assertQuadLiteralsMutf8Safe(quads, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'SparqlHttpStore.replaceSubjects',
+    });
+    try {
+      await this.postUpdate(
+        buildAtomicSubjectsReplaceUpdate(graphUri, replacements),
+        { ...options, source: options?.source ?? 'sparql-http.replaceSubjects' },
+        'replaceSubjects',
+      );
+    } catch (error) {
       this.invalidateListGraphsCache();
       throw error;
     }

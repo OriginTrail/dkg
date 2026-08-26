@@ -6,6 +6,7 @@ import { dirname } from 'node:path';
 import type {
   TripleStore,
   Quad as DKGQuad,
+  SubjectReplacement,
   QueryResult,
   SelectResult,
   ConstructResult,
@@ -23,6 +24,7 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
+  buildAtomicSubjectsReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
@@ -403,6 +405,25 @@ export class OxigraphStore implements TripleStore {
     // subject transiently empty. No staging graph / cleanup: a failed request
     // rolls the whole thing back.
     this.store.update(buildAtomicSubjectReplaceUpdate(graphUri, subject, quads));
+    this.scheduleFlush();
+    this.writeGen.recordGraphWrites([graphUri]);
+  }
+
+  async replaceSubjects(
+    graphUri: string,
+    replacements: SubjectReplacement[],
+  ): Promise<void> {
+    const quads = replacements.flatMap((replacement) => replacement.quads);
+    const guarded = quads.filter(
+      (q) => !(q.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(q.graph)),
+    );
+    if (guarded.length > 0) {
+      assertQuadLiteralsMutf8Safe(guarded, {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'OxigraphStore.replaceSubjects',
+      });
+    }
+    this.store.update(buildAtomicSubjectsReplaceUpdate(graphUri, replacements));
     this.scheduleFlush();
     this.writeGen.recordGraphWrites([graphUri]);
   }

@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
+import type { TripleStore, Quad, SubjectReplacement, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 
@@ -677,6 +677,10 @@ export class OxigraphWorkerStore implements TripleStore {
     // to the worker's embedded OxigraphStore.replaceSubject — one atomic
     // single-message commit, same contract as insert/replaceGraph.
     await this.call('replaceSubject', graphUri, subject, quads);
+    this.writeGen.recordGraphWrites([graphUri]);
+  }
+  async replaceSubjects(graphUri: string, replacements: SubjectReplacement[]): Promise<void> {
+    await this.call('replaceSubjects', graphUri, replacements);
     this.writeGen.recordGraphWrites([graphUri]);
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {

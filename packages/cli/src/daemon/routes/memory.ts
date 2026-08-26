@@ -64,11 +64,10 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import {
-  assertSubjectReplacementPayload,
-  tryReplaceSubjectAtomically,
-  type Quad,
-  type TripleStore,
-} from '@origintrail-official/dkg-storage';
+  QUERY_CATALOG_ATOMIC_UPSERT_UNSUPPORTED,
+  writeQueryCatalog,
+  type QueryCatalogWriteMode,
+} from '../query-catalog-store.js';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
   DashboardDB,
@@ -487,87 +486,6 @@ function uniquePeerIds(peerIds: readonly string[]): string[] {
   return out;
 }
 
-type QueryCatalogWriteMode = 'insert' | 'upsert';
-
-// Serialize complete catalog-write requests per reserved profile graph. The
-// storage capability below is atomic per subject, while this lock prevents two
-// concurrent multi-subject reinjections from interleaving their subject order.
-const queryCatalogWriteLocks = new Map<string, Promise<void>>();
-
-async function withQueryCatalogWriteLock<T>(
-  graph: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const previous = queryCatalogWriteLocks.get(graph) ?? Promise.resolve();
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  const safePrevious = previous.catch(() => undefined);
-  const current = safePrevious.then(() => gate);
-  queryCatalogWriteLocks.set(graph, current);
-  await safePrevious;
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (queryCatalogWriteLocks.get(graph) === current) {
-      queryCatalogWriteLocks.delete(graph);
-    }
-  }
-}
-
-function assertManagedQueryCatalogSubject(subject: string, contextGraphId: string): void {
-  const base = `urn:dkg:profile:${encodeURIComponent(contextGraphId)}:`;
-  const catalogPrefix = `${base}catalog:`;
-  const queryPrefix = `${base}query:`;
-  if (
-    (subject.startsWith(catalogPrefix) && subject.length > catalogPrefix.length)
-    || (subject.startsWith(queryPrefix) && subject.length > queryPrefix.length)
-  ) {
-    return;
-  }
-  throw new Error(
-    `Query catalog upsert subject must belong to context graph "${contextGraphId}" `
-      + `and use ${catalogPrefix}<slug> or ${queryPrefix}<slug>: ${subject}`,
-  );
-}
-
-async function upsertQueryCatalogSubjects(
-  store: TripleStore,
-  graph: string,
-  contextGraphId: string,
-  quads: Quad[],
-): Promise<number> {
-  const bySubject = new Map<string, Quad[]>();
-  for (const quad of quads) {
-    assertManagedQueryCatalogSubject(quad.subject, contextGraphId);
-    const subjectQuads = bySubject.get(quad.subject) ?? [];
-    subjectQuads.push(quad);
-    bySubject.set(quad.subject, subjectQuads);
-  }
-
-  for (const [subject, subjectQuads] of bySubject) {
-    // Run the same strict single-subject/graph/blank-node guard on both the
-    // atomic capability and the bounded compatibility fallback.
-    assertSubjectReplacementPayload(graph, subject, subjectQuads);
-    const replaced = await tryReplaceSubjectAtomically(
-      store,
-      graph,
-      subject,
-      subjectQuads,
-      { source: 'daemon.profile.queryCatalog.upsert' },
-    );
-    if (replaced) continue;
-    await store.deleteByPattern(
-      { graph, subject },
-      { source: 'daemon.profile.queryCatalog.upsertFallback.delete' },
-    );
-    await store.insert(subjectQuads, {
-      source: 'daemon.profile.queryCatalog.upsertFallback.insert',
-    });
-  }
-  return bySubject.size;
-}
-
 export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -680,21 +598,13 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
 
       const literalSize = validateWritableQuadLiteralSizes("quads", normalized);
       if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
-      let subjectsUpserted = 0;
-      await withQueryCatalogWriteLock(graph, async () => {
-        if (mode === 'upsert') {
-          subjectsUpserted = await upsertQueryCatalogSubjects(
-            agent.store,
-            graph,
-            resolvedContextGraphId,
-            normalized,
-          );
-        } else {
-          await agent.store.insert(normalized, {
-            source: 'daemon.profile.queryCatalog.insert',
-          });
-        }
-      });
+      const { subjectsUpserted } = await writeQueryCatalog(
+        agent.store,
+        graph,
+        resolvedContextGraphId,
+        normalized,
+        mode,
+      );
       return jsonResponse(res, 200, {
         ok: true,
         contextGraphId: resolvedContextGraphId,
@@ -704,6 +614,9 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         triplesWritten: normalized.length,
       });
     } catch (err: any) {
+      if (err?.code === QUERY_CATALOG_ATOMIC_UPSERT_UNSUPPORTED) {
+        return jsonResponse(res, 501, { error: err.message, code: err.code });
+      }
       return jsonResponse(res, 400, {
         error: err?.message ?? "Invalid query catalog write",
       });

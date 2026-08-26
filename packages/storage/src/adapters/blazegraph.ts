@@ -2,6 +2,7 @@ import { performance } from 'node:perf_hooks';
 import type {
   TripleStore,
   Quad as DKGQuad,
+  SubjectReplacement,
   QueryOptions,
   UpdateOptions,
   StorePressureSnapshot,
@@ -30,6 +31,7 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
+  buildAtomicSubjectsReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { quadToNQuad } from '../bounded-rdf.js';
@@ -453,6 +455,23 @@ export class BlazegraphStore implements TripleStore {
       buildAtomicSubjectReplaceUpdate(graphUri, subject, quads),
       { ...options, source: options?.source ?? 'blazegraph.replaceSubject' },
       'replaceSubject',
+    );
+  }
+
+  async replaceSubjects(
+    graphUri: string,
+    replacements: SubjectReplacement[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    const quads = replacements.flatMap((replacement) => replacement.quads);
+    assertQuadLiteralsMutf8Safe(quads, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'BlazegraphStore.replaceSubjects',
+    });
+    await this.sparqlUpdate(
+      buildAtomicSubjectsReplaceUpdate(graphUri, replacements),
+      { ...options, source: options?.source ?? 'blazegraph.replaceSubjects' },
+      'replaceSubjects',
     );
   }
 

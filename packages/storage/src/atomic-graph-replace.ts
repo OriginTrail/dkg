@@ -3,7 +3,7 @@ import {
   assertSafeIri,
   assertSafeRdfTerm,
 } from '@origintrail-official/dkg-core';
-import type { Quad } from './triple-store.js';
+import type { Quad, SubjectReplacement } from './triple-store.js';
 
 /** Never expose these operation-internal graphs through graph enumeration. */
 export const ATOMIC_GRAPH_REPLACE_STAGING_PREFIX =
@@ -156,6 +156,40 @@ export function buildAtomicSubjectReplaceUpdate(
   const del = `DELETE WHERE { GRAPH <${target}> { <${safeSubject}> ?p ?o } }`;
   if (insertQuads.length === 0) return del;
   return `${del};\nINSERT DATA {\n${formatGraphBlock(target, insertQuads)}\n}`;
+}
+
+/**
+ * Build one SPARQL Update operation that replaces several subjects under one
+ * transaction boundary. Unlike a sequence of `replaceSubject` calls, a later
+ * failure cannot leave the earlier subjects committed.
+ */
+export function buildAtomicSubjectsReplaceUpdate(
+  graphUri: string,
+  replacements: readonly SubjectReplacement[],
+): string {
+  const target = assertSafeIri(graphUri);
+  if (replacements.length === 0) {
+    throw new Error('Atomic subject batch replacement requires at least one subject');
+  }
+
+  const seen = new Set<string>();
+  const subjects: string[] = [];
+  const insertQuads: Quad[] = [];
+  for (const replacement of replacements) {
+    const safeSubject = assertSafeIri(replacement.subject);
+    if (seen.has(safeSubject)) {
+      throw new Error(`Atomic subject batch replacement contains duplicate subject "${replacement.subject}"`);
+    }
+    seen.add(safeSubject);
+    subjects.push(`<${safeSubject}>`);
+    assertSubjectReplacementPayload(graphUri, replacement.subject, replacement.quads);
+    insertQuads.push(...replacement.quads);
+  }
+
+  const where = `WHERE {\n  VALUES ?targetSubject { ${subjects.join(' ')} }\n  OPTIONAL { GRAPH <${target}> { ?targetSubject ?p ?o } }\n}`;
+  const del = `DELETE { GRAPH <${target}> { ?targetSubject ?p ?o } }`;
+  if (insertQuads.length === 0) return `${del}\n${where}`;
+  return `${del}\nINSERT {\n${formatGraphBlock(target, insertQuads)}\n}\n${where}`;
 }
 
 function assertReplacementPayload(graphUri: string, quads: readonly Quad[]): void {
