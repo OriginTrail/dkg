@@ -49,6 +49,85 @@ const LOGS_VACUUM_DELETE_THRESHOLD = 10_000;
 // V15 FTS-drop reclamation immediately on the next prune.
 const VACUUM_FREE_PAGE_THRESHOLD = 1_000;
 
+interface RoutineLogPruneBatch {
+  deleted: number;
+  hadOverflow: boolean;
+  filledBatch: boolean;
+}
+
+/**
+ * Owns the complete count-based retention policy for routine log rows.
+ * Warning/error classification, guard cadence, overflow selection, and the
+ * bounded deletion statement live together so compatibility writes and the
+ * background pruner cannot drift onto different retention rules.
+ */
+class RoutineLogRetention {
+  private writesSinceGuard = 0;
+
+  constructor(
+    private readonly db: Database.Database,
+    private readonly rowCap: number,
+    private readonly batchRows: number,
+  ) {}
+
+  noteInsert(level: string): void {
+    if (!this.isRoutineLevel(level)) return;
+    this.writesSinceGuard += 1;
+    // Each guard removes at most one configured batch, so its cadence must
+    // never admit more routine rows than that batch can remove.
+    const guardInterval = Math.min(
+      1_000,
+      Math.max(1, this.rowCap),
+      this.batchRows,
+    );
+    if (this.writesSinceGuard < guardInterval) return;
+    this.writesSinceGuard = 0;
+    this.pruneOverflowBatch();
+  }
+
+  hasOverflow(): boolean {
+    return this.overflowCutoff() !== null;
+  }
+
+  pruneOverflowBatch(): RoutineLogPruneBatch {
+    const cutoff = this.overflowCutoff();
+    if (cutoff === null) {
+      return { deleted: 0, hadOverflow: false, filledBatch: false };
+    }
+    const deleted = this.db.prepare(`
+      DELETE FROM logs
+      WHERE id IN (
+        SELECT id
+        FROM logs
+        WHERE id <= @cutoff
+          AND level NOT IN ('warn', 'error')
+        ORDER BY id ASC
+        LIMIT @batchRows
+      )
+    `).run({ cutoff, batchRows: this.batchRows }).changes;
+    return {
+      deleted,
+      hadOverflow: true,
+      filledBatch: deleted === this.batchRows,
+    };
+  }
+
+  private overflowCutoff(): number | null {
+    const row = this.db.prepare(`
+      SELECT id
+      FROM logs
+      WHERE level NOT IN ('warn', 'error')
+      ORDER BY id DESC
+      LIMIT 1 OFFSET ?
+    `).get(this.rowCap) as { id: number } | undefined;
+    return row?.id ?? null;
+  }
+
+  private isRoutineLevel(level: string): boolean {
+    return level !== 'warn' && level !== 'error';
+  }
+}
+
 /**
  * Rolling window for `assertion_activity` digest collapse (V16
  * notifications-pane redesign). Atomic activity rows are persisted at
@@ -229,25 +308,28 @@ export class DashboardDB {
   readonly dataDir: string;
   private retentionDays: number;
   private readonly explicitRetentionDays: boolean;
-  private readonly routineLogRowCap: number;
-  private readonly logVolumePruneBatchRows: number;
-  private routineLogWritesSinceGuard = 0;
+  private readonly routineLogRetention: RoutineLogRetention;
 
   constructor(opts: DashboardDBOptions) {
     this.dataDir = opts.dataDir;
     this.explicitRetentionDays = opts.retentionDays !== undefined;
     this.retentionDays = opts.retentionDays ?? DEFAULT_RETENTION_DAYS;
-    this.routineLogRowCap = Math.max(
+    const routineLogRowCap = Math.max(
       0,
       Math.floor(opts.routineLogRowCap ?? DEFAULT_ROUTINE_LOG_ROW_CAP),
     );
-    this.logVolumePruneBatchRows = Math.max(
+    const logVolumePruneBatchRows = Math.max(
       1,
       Math.floor(opts.logVolumePruneBatchRows ?? DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS),
     );
     this._memoTtlMs = resolveCacheTtlMs(opts.cacheTtlMs);
     const dbPath = join(opts.dataDir, 'node-ui.db');
     this.db = new Database(dbPath);
+    this.routineLogRetention = new RoutineLogRetention(
+      this.db,
+      routineLogRowCap,
+      logVolumePruneBatchRows,
+    );
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     // Cap the persisted WAL file. A PASSIVE autocheckpoint resets WAL
@@ -1352,8 +1434,8 @@ export class DashboardDB {
    * VACUUM returns the accumulated free pages to the OS and the file shrinks.
    */
   pruneLogVolumeBatch(): LogVolumePruneResult {
-    const overflowCutoff = this.routineLogOverflowCutoff();
-    if (overflowCutoff === null) {
+    const batch = this.routineLogRetention.pruneOverflowBatch();
+    if (!batch.hadOverflow) {
       const reclaim = this.reclaimFreePagesIfNeeded(false);
       if (!reclaim.reclaimPending) this.truncateWal('log-volume prune');
       return {
@@ -1366,25 +1448,10 @@ export class DashboardDB {
       };
     }
 
-    const deleted = this.db.prepare(`
-      DELETE FROM logs
-      WHERE id IN (
-        SELECT id
-        FROM logs
-        WHERE id <= @cutoff
-          AND level NOT IN ('warn', 'error')
-        ORDER BY id ASC
-        LIMIT @batchRows
-      )
-    `).run({
-      cutoff: overflowCutoff,
-      batchRows: this.logVolumePruneBatchRows,
-    }).changes;
-
     // If the batch filled, conservatively schedule another tick. An exact-size
     // final batch costs one extra cheap probe before compaction, which is safer
     // than running a second million-row count after every deletion.
-    const hasMore = deleted === this.logVolumePruneBatchRows;
+    const { deleted, filledBatch: hasMore } = batch;
     const reclaim = hasMore
       ? { compacted: false, reclaimPending: false }
       : this.reclaimFreePagesIfNeeded(deleted > LOGS_VACUUM_DELETE_THRESHOLD);
@@ -1401,35 +1468,8 @@ export class DashboardDB {
     };
   }
 
-  private routineLogOverflowCutoff(): number | null {
-    const row = this.db.prepare(`
-      SELECT id
-      FROM logs
-      WHERE level NOT IN ('warn', 'error')
-      ORDER BY id DESC
-      LIMIT 1 OFFSET ?
-    `).get(this.routineLogRowCap) as { id: number } | undefined;
-    return row?.id ?? null;
-  }
-
   private hasRoutineLogOverflow(): boolean {
-    return this.routineLogOverflowCutoff() !== null;
-  }
-
-  private enforceRoutineLogRowCap(): void {
-    const cutoff = this.routineLogOverflowCutoff();
-    if (cutoff === null) return;
-    this.db.prepare(`
-      DELETE FROM logs
-      WHERE id IN (
-        SELECT id
-        FROM logs
-        WHERE id <= ?
-          AND level NOT IN ('warn', 'error')
-        ORDER BY id ASC
-        LIMIT ?
-      )
-    `).run(cutoff, this.logVolumePruneBatchRows);
+    return this.routineLogRetention.hasOverflow();
   }
 
   private reclaimFreePagesIfNeeded(force: boolean): {
@@ -3102,21 +3142,7 @@ export class DashboardDB {
       module: entry.module,
       message: entry.message,
     });
-    if (entry.level !== 'warn' && entry.level !== 'error') {
-      this.routineLogWritesSinceGuard += 1;
-      // Each guard removes at most one configured batch, so its cadence must
-      // never admit more routine rows than that batch can remove. This keeps
-      // the published compatibility writer bounded even with batchRows=1.
-      const guardInterval = Math.min(
-        1_000,
-        Math.max(1, this.routineLogRowCap),
-        this.logVolumePruneBatchRows,
-      );
-      if (this.routineLogWritesSinceGuard >= guardInterval) {
-        this.routineLogWritesSinceGuard = 0;
-        this.enforceRoutineLogRowCap();
-      }
-    }
+    this.routineLogRetention.noteInsert(entry.level);
   }
 
   /**
