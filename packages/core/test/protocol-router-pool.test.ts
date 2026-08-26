@@ -900,6 +900,43 @@ describe('ProtocolRouter pooled inbound handler', () => {
     await fixture.close();
   });
 
+  it('fails closed when the pooled gate itself throws', async () => {
+    // The gate's contract says it must not throw; this pins what happens when
+    // that contract is violated anyway. Failing open would silently disable
+    // the protection, and propagating the throw would leak the stream
+    // un-aborted through the accept path's logger — so a throwing gate must
+    // produce exactly the same pre-read abort as a rejected verdict.
+    let handlerCalls = 0;
+    let probeCalls = 0;
+    const fixture = makePooledInboundFixture({
+      isPeerAccepted: () => {
+        probeCalls += 1;
+        return true;
+      },
+      isPeerKnownRejected: () => {
+        throw new Error('cache unavailable');
+      },
+    });
+    fixture.register(async () => {
+      handlerCalls += 1;
+      return new TextEncoder().encode('should-not-run');
+    });
+
+    const stream = new FakeStream();
+    const run = fixture.invoke(stream);
+    await flush();
+    stream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    await flush();
+
+    expect(stream.reads).toBe(0);
+    expect(handlerCalls).toBe(0);
+    expect(probeCalls).toBe(0);
+    expect(stream.sent.length).toBe(0);
+    expect(stream.writeStatus).toBe('closed');
+    await run;
+    await fixture.close();
+  });
+
   it('never consults the pooled gate for admission-exempt logical protocols', async () => {
     // Exemptions are keyed by the LOGICAL protocol id — the same id the
     // pooled full-admission check uses — not the wire id the pool listens on.

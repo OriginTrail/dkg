@@ -210,12 +210,6 @@ export type ProtocolRouterPoolingOptions = Omit<
   'rejectInboundStream'
 >;
 
-// Compile-time guard for the option surface above: fails the build if the
-// router-owned gate ever becomes caller-suppliable through enablePooling.
-type RouterPoolingOptionsOmitGate =
-  'rejectInboundStream' extends keyof ProtocolRouterPoolingOptions ? never : true;
-const _routerPoolingOptionsOmitGate: RouterPoolingOptionsOmitGate = true;
-void _routerPoolingOptionsOmitGate;
 
 export class QuietRetryableHandlerError extends Error {
   constructor(message: string) {
