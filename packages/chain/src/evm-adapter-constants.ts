@@ -201,82 +201,22 @@ export const TX_SERIALIZER_OBSERVE_AFTER_MS = 30_000;
  */
 export const TX_SERIALIZER_OBSERVE_INTERVAL_MS = 60_000;
 
-const TX_SERIALIZER_MAX_APPROVAL_WRITES = 2;
-const TX_SERIALIZER_MAX_V10_PREPARATION_CYCLES = 2;
-const TX_SERIALIZER_MAX_ALLOWANCE_READS = 2;
-const TX_SERIALIZER_MAX_ALLOWANCE_VISIBILITY_READS = 6;
-const TX_SERIALIZER_ALLOWANCE_VISIBILITY_BACKOFF_MS = 250 + 500 + 750 + 1_000 + 1_250;
-
-function maxPreparationRetryBackoffMs(): number {
-  let total = 0;
-  for (let pass = 0; pass < RPC_PREPARATION_ENDPOINT_SET_RETRIES; pass += 1) {
-    const base = Math.min(
-      RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS,
-      RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS * 2 ** pass,
-    );
-    // Runtime jitter is floor(random * base / 2), hence strictly below this.
-    total += Math.ceil(base * 1.5);
-  }
-  return total;
-}
-
 /**
- * Conservative upper bound for every bounded phase that can run sequentially
- * inside one V10 signer lane.
- *
- * The worst recovery can perform two approval writes (each with a receipt
- * wait), two complete V10 preparation cycles, eight allowance reads/polls, and
- * three broadcasts. Per-endpoint budgets include validation plus the request;
- * preparation additionally allows population, optional buffered estimation,
- * and signing. This deliberately over-approximates paths where a failed
- * endpoint cannot consume every stage, making false STALL verdicts impossible
- * while those documented budgets are still in force.
+ * Minimum silence interval before routing treats a signer lane as stalled.
+ * This is an observation policy, not a transaction deadline: it neither
+ * cancels the holder nor changes any RPC timeout. Meaningful write-stage
+ * progress refreshes the interval, so this value does not duplicate the V10
+ * retry/poll topology.
  */
-export function resolveTxSerializerMaxLegitimateHoldMs(
-  receiptTimeoutMs: number,
-  rpcEndpointCount: number,
-): number {
-  const endpoints = Math.max(1, Math.floor(rpcEndpointCount));
-
-  const preparationEndpointBudgetMs = 4 * RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS;
-  const preparationPasses =
-    TX_SERIALIZER_MAX_APPROVAL_WRITES
-    + TX_SERIALIZER_MAX_V10_PREPARATION_CYCLES
-      * (RPC_PREPARATION_ENDPOINT_SET_RETRIES + 1);
-  const preparationBudgetMs = preparationPasses * endpoints * preparationEndpointBudgetMs;
-  const preparationBackoffBudgetMs =
-    TX_SERIALIZER_MAX_V10_PREPARATION_CYCLES * maxPreparationRetryBackoffMs();
-
-  const broadcastEndpointBudgetMs = 2 * RPC_BROADCAST_ATTEMPT_TIMEOUT_MS;
-  const broadcastCount = TX_SERIALIZER_MAX_APPROVAL_WRITES + 1; // final V10 write
-  const broadcastPasses = broadcastCount * (RPC_ENDPOINT_SET_RETRIES + 1);
-  const broadcastBudgetMs = broadcastPasses * endpoints * broadcastEndpointBudgetMs;
-  const broadcastBackoffBudgetMs =
-    broadcastCount * RPC_ENDPOINT_SET_RETRIES * RPC_ENDPOINT_SET_RETRY_BACKOFF_MS;
-
-  const allowanceReadBudgetMs = (
-    TX_SERIALIZER_MAX_ALLOWANCE_READS
-    + TX_SERIALIZER_MAX_ALLOWANCE_VISIBILITY_READS
-  ) * endpoints * RPC_READ_STALL_TIMEOUT_MS;
-
-  return (
-    TX_SERIALIZER_MAX_APPROVAL_WRITES * receiptTimeoutMs
-    + preparationBudgetMs
-    + preparationBackoffBudgetMs
-    + broadcastBudgetMs
-    + broadcastBackoffBudgetMs
-    + allowanceReadBudgetMs
-    + TX_SERIALIZER_ALLOWANCE_VISIBILITY_BACKOFF_MS
-  );
-}
+export const TX_SERIALIZER_NO_PROGRESS_STALL_AFTER_MS = 10 * 60 * 1_000;
 
 /**
- * First millisecond that is outside every legitimate bounded in-lane phase.
- * The `+ 1` keeps a hold busy at the inclusive upper bound itself.
+ * Keep a receipt wait healthy through its configured inclusive deadline while
+ * retaining a useful minimum for adapters configured with a very short receipt
+ * timeout. The `+ 1` makes the boundary unambiguous.
  */
 export function resolveTxSerializerStallAfterMs(
   receiptTimeoutMs: number,
-  rpcEndpointCount: number,
 ): number {
-  return resolveTxSerializerMaxLegitimateHoldMs(receiptTimeoutMs, rpcEndpointCount) + 1;
+  return Math.max(receiptTimeoutMs, TX_SERIALIZER_NO_PROGRESS_STALL_AFTER_MS) + 1;
 }

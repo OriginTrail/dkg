@@ -4,7 +4,6 @@ import {
   type SignerTxSerializerObservation,
 } from '../src/signer-tx-serializer.js';
 import {
-  resolveTxSerializerMaxLegitimateHoldMs,
   resolveTxSerializerStallAfterMs,
 } from '../src/evm-adapter-constants.js';
 
@@ -388,30 +387,31 @@ describe('SignerTxSerializer lane state (GH#1574)', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it('keeps the complete bounded V10 path busy and stalls only beyond it', async () => {
-    const receiptTimeoutMs = 1_000;
-    const rpcEndpointCount = 3;
-    const maximumLegitimateHoldMs = resolveTxSerializerMaxLegitimateHoldMs(
-      receiptTimeoutMs,
-      rpcEndpointCount,
-    );
-    const stallAfterMs = resolveTxSerializerStallAfterMs(
-      receiptTimeoutMs,
-      rpcEndpointCount,
-    );
-    expect(stallAfterMs).toBe(maximumLegitimateHoldMs + 1);
-
-    const { s, tick } = harness({ stallAfterMs });
+  it('classifies health from last progress rather than total transaction age', async () => {
+    const { s, tick } = harness({ stallAfterMs: 10 });
     const holder = deferred();
-    const p = s.run('0xw', () => holder.promise, 'publish');
+    let markProgress!: () => void;
+    const p = s.run('0xw', (mark) => {
+      markProgress = mark;
+      return holder.promise;
+    }, 'publish');
     await settle();
 
-    tick(maximumLegitimateHoldMs);
+    tick(9);
+    expect(s.state('0xw')).toBe('busy');
+    markProgress();
+    tick(9);
+    // The holder is 18ms old, but made progress only 9ms ago.
     expect(s.state('0xw')).toBe('busy');
     tick(1);
     expect(s.state('0xw')).toBe('stalled');
 
     holder.resolve();
     await p;
+  });
+
+  it('bases the production threshold on canonical receipt policy, not V10 loop counts', () => {
+    expect(resolveTxSerializerStallAfterMs(1_000)).toBe(600_001);
+    expect(resolveTxSerializerStallAfterMs(900_000)).toBe(900_001);
   });
 });

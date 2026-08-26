@@ -65,6 +65,8 @@ type ContractWriteSender = (
 
 type SerializedSignerWriteContext = {
   sendContractTransaction: ContractWriteSender;
+  /** Refresh the lane-health clock after a meaningful write-stage boundary. */
+  markProgress: () => void;
 };
 
 /**
@@ -676,8 +678,9 @@ export class EVMChainAdapterBase {
    * preserved.
    */
   /**
-   * GH#1574 — configured in the constructor once `receiptTimeoutMs` is known,
-   * so the stall threshold tracks the adapter's own in-lane bounds.
+   * GH#1574 — configured in the constructor once `receiptTimeoutMs` is known.
+   * Health is based on time since meaningful progress; the receipt deadline is
+   * only a floor for the observational threshold and never cancels the holder.
    */
   protected readonly signerTxSerializer: SignerTxSerializer;
 
@@ -1098,10 +1101,7 @@ export class EVMChainAdapterBase {
     this.signerTxSerializer = new SignerTxSerializer({
       observeAfterMs: TX_SERIALIZER_OBSERVE_AFTER_MS,
       observeIntervalMs: TX_SERIALIZER_OBSERVE_INTERVAL_MS,
-      stallAfterMs: resolveTxSerializerStallAfterMs(
-        this.receiptTimeoutMs,
-        this.rpcUrls.length,
-      ),
+      stallAfterMs: resolveTxSerializerStallAfterMs(this.receiptTimeoutMs),
     });
     this.finalityConfirmations = resolveFinalityConfirmations(config.finalityConfirmations);
     this.maxFeePerGasWei = resolveMaxFeePerGasWei(config.maxFeePerGasWei);
@@ -1793,6 +1793,7 @@ export class EVMChainAdapterBase {
   ): Promise<ethers.TransactionReceipt> {
     const prepared = await this.withSerializedSignerWrite(signer, async (ctx) => {
       const { signedTx, txHash: preBroadcastTxHash, nonce } = await buildSignedTx(ctx);
+      ctx.markProgress();
       // GH#2270 PR-3 — the WAL checkpoint also carries the signed NONCE. A null transaction
       // lookup is point-in-time, backend-local evidence: a broadcast whose response timed out can
       // still be accepted and mined later, so "the node does not have it" is not absence. The
@@ -1804,6 +1805,7 @@ export class EVMChainAdapterBase {
       // fail-closed; nothing is re-derived here.
       try {
         await onBroadcast?.({ txHash: preBroadcastTxHash, nonce });
+        ctx.markProgress();
       } catch (hookErr) {
         throw new Error(
           `chain:writeahead hook failed before ${label} broadcast: ` +
@@ -1820,6 +1822,7 @@ export class EVMChainAdapterBase {
         preBroadcastTxHash,
         `V10 ${label}`,
       );
+      ctx.markProgress();
       try {
         await onBroadcastAccepted?.({ txHash: preBroadcastTxHash, nonce });
       } catch (hookErr) {
@@ -1906,15 +1909,25 @@ export class EVMChainAdapterBase {
      */
     writeLabel: string,
   ): Promise<T> {
-    return this.signerTxSerializer.run(signer.address, () =>
+    return this.signerTxSerializer.run(signer.address, (markProgress) =>
       fn({
-        sendContractTransaction: (contract, method, args, innerSigner, label, opts) => {
+        markProgress,
+        sendContractTransaction: async (contract, method, args, innerSigner, label, opts) => {
           if (ethers.getAddress(innerSigner.address) !== ethers.getAddress(signer.address)) {
             throw new Error(
               `chain: scoped signer write for ${signer.address} cannot send with ${innerSigner.address}`,
             );
           }
-          return this.sendContractTransactionUnlocked(contract, method, args, innerSigner, label, opts);
+          const receipt = await this.sendContractTransactionUnlocked(
+            contract,
+            method,
+            args,
+            innerSigner,
+            label,
+            opts,
+          );
+          markProgress();
+          return receipt;
         },
       }),
       writeLabel,
@@ -1992,13 +2005,15 @@ export class EVMChainAdapterBase {
   ): Promise<void> {
     if (!this.contracts.token) return;
     const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
-    // This read is part of the serializer's derived maximum legitimate hold,
-    // so retain a hard cap even for a single-RPC deployment.
+    // Foreground transaction reads preserve the established single-RPC
+    // behaviour: with no alternate endpoint to fail over to, a slow healthy
+    // allowance read may finish after the multi-RPC stall timeout. Serializer
+    // health is observational and must not create a transaction deadline.
     const currentAllowance = (await this.readContractWith(
       tokenWithSigner,
       'token.allowance',
       (c) => c.allowance(signer.address, kav10Address),
-      { policy: 'watchdogPointRead' },
+      { policy: 'pointRead' },
     )) as bigint;
     const { needsApprove, targetAllowance } = computeApprovalAction(
       this.approvalPolicy,

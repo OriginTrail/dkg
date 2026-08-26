@@ -10,6 +10,8 @@ export interface SignerTxSerializerObservation {
   waiting: number;
   holderLabel: string;
   holdElapsedMs: number;
+  /** Time since the holder last completed a meaningful write-stage boundary. */
+  progressElapsedMs: number;
   oldestWaiterLabel?: string;
   oldestWaiterMs?: number;
   /** The same canonical verdict consumed by wallet selection. */
@@ -21,7 +23,7 @@ export interface SignerTxSerializerOptions {
   observeAfterMs: number;
   /** Cadence of subsequent observations. */
   observeIntervalMs: number;
-  /** Hold duration after which the canonical lane state becomes stalled. */
+  /** No-progress duration after which the canonical lane state becomes stalled. */
   stallAfterMs: number;
   now?: () => number;
   onObserve?: (observation: SignerTxSerializerObservation) => void;
@@ -37,7 +39,7 @@ interface Lane {
   tail: Promise<void>;
   /** Queued + running operations. */
   depth: number;
-  holder?: { label: string; startedAt: number };
+  holder?: { label: string; startedAt: number; lastProgressAt: number };
   /** Insertion-ordered, so the first entry is the longest-waiting. */
   waiters: Set<Waiter>;
   /** Exactly one observer lifecycle per wallet lane. */
@@ -68,7 +70,7 @@ export class SignerTxSerializer {
    * Serialize one named operation on `key`. The label is required so every
    * production diagnostic identifies the operation holding or waiting.
    */
-  run<T>(key: string, fn: () => Promise<T>, label: string): Promise<T> {
+  run<T>(key: string, fn: (markProgress: () => void) => Promise<T>, label: string): Promise<T> {
     let lane = this.lanes.get(key);
     if (!lane) {
       lane = { tail: Promise.resolve(), depth: 0, waiters: new Set() };
@@ -82,9 +84,16 @@ export class SignerTxSerializer {
 
     const execute = async (): Promise<T> => {
       currentLane.waiters.delete(waiter);
-      currentLane.holder = { label, startedAt: this.now() };
+      const startedAt = this.now();
+      const holder = { label, startedAt, lastProgressAt: startedAt };
+      currentLane.holder = holder;
+      const markProgress = () => {
+        // Ignore a late callback from a holder that has already released the
+        // lane; it must never refresh the health of its successor.
+        if (currentLane.holder === holder) holder.lastProgressAt = this.now();
+      };
       try {
-        return await fn();
+        return await fn(markProgress);
       } finally {
         currentLane.holder = undefined;
         currentLane.depth -= 1;
@@ -162,6 +171,7 @@ export class SignerTxSerializer {
     const oldest = lane.waiters.values().next().value as Waiter | undefined;
     const now = this.now();
     const holdElapsedMs = now - holder.startedAt;
+    const progressElapsedMs = now - holder.lastProgressAt;
     const oldestWaiterMs = oldest ? now - oldest.queuedAt : undefined;
     // The observer belongs to the lane, whose lifetime can span many short
     // holders. Do not transfer that age to a newly-acquired holder: report only
@@ -176,6 +186,7 @@ export class SignerTxSerializer {
       waiting: lane.waiters.size,
       holderLabel: holder.label,
       holdElapsedMs,
+      progressElapsedMs,
       oldestWaiterLabel: oldest?.label,
       oldestWaiterMs,
       state: classifyLaneState(lane, now, this.options.stallAfterMs),
@@ -191,7 +202,7 @@ function classifyLaneState(
 ): SignerTxLaneState {
   if (!lane) return 'idle';
   if (!lane.holder) return 'busy';
-  return now - lane.holder.startedAt >= stallAfterMs ? 'stalled' : 'busy';
+  return now - lane.holder.lastProgressAt >= stallAfterMs ? 'stalled' : 'busy';
 }
 
 function defaultObserve(observation: SignerTxSerializerObservation): void {
@@ -205,6 +216,7 @@ function defaultObserve(observation: SignerTxSerializerObservation): void {
   console.warn(
     `[chain] tx serializer${observation.state === 'stalled' ? ' STALL' : ''}: ` +
       `${observation.holderLabel} has held the lane for ${observation.key} ` +
-      `${Math.round(observation.holdElapsedMs / 1000)}s;${waiting}.`,
+      `${Math.round(observation.holdElapsedMs / 1000)}s ` +
+      `(last progress ${Math.round(observation.progressElapsedMs / 1000)}s ago);${waiting}.`,
   );
 }

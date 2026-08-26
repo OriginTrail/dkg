@@ -59,13 +59,13 @@ it('rejects an explicitly invalid receipt deadline at the adapter boundary', () 
     .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
 });
 
-it('derives the signer-lane stall threshold from the full path and endpoint count', () => {
+it('derives the signer-lane no-progress threshold from the receipt deadline', () => {
   const a = new EVMChainAdapter(minimalConfig({
     receiptTimeoutMs: 1_000,
     rpcUrls: ['http://127.0.0.1:59997'],
   }));
   expect((a as any).signerTxSerializer.options.stallAfterMs).toBe(
-    resolveTxSerializerStallAfterMs(1_000, 2),
+    resolveTxSerializerStallAfterMs(1_000),
   );
 });
 
@@ -4761,7 +4761,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
       registerPool(a);
       // Drive the serializer's own clock so one lane can be aged past the
-      // derived complete-path stall threshold while the other is not.
+      // canonical no-progress threshold while the other is not.
       let clock = 0;
       const stallAfterMs = resolveTxSerializerStallAfterMs(
         (a as any).receiptTimeoutMs,
@@ -4970,6 +4970,36 @@ function makeV10AdapterWithAllowanceSequence(values: bigint[]) {
 }
 
 describe('ensureV10ApproveTrac — forced re-approve + visibility poll (#888)', () => {
+
+  it('allows a healthy single-RPC allowance read to finish after the failover stall interval', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = new EVMChainAdapter(minimalConfig());
+      const signer = new ethers.Wallet(DEPLOYER_PK);
+      const tokenWithSigner = connectable({
+        allowance: recorder(() => new Promise<bigint>((resolve) => {
+          setTimeout(() => resolve(1n), RPC_READ_STALL_TIMEOUT_MS + 100);
+        })),
+        approve: recorder(() => undefined),
+      });
+      (a as any).contracts.token = { connect: () => tokenWithSigner };
+
+      const approval = (a as any).ensureV10ApproveTrac(
+        signer,
+        V10_KA_ADDRESS,
+        0n,
+        'approve V10 publish TRAC',
+      );
+      await flushAsyncWork();
+      await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 100);
+
+      await expect(approval).resolves.toBeUndefined();
+      expect(tokenWithSigner.allowance.calls).toHaveLength(1);
+      expect(tokenWithSigner.approve.calls).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('force=true re-approves even when the gating read says the allowance is already sufficient (stale-high skip)', async () => {
     // The "stale-high" sub-race: the per-publish 1-wei floor consumed by
