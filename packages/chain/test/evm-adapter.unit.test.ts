@@ -4707,7 +4707,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
-      void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+      void (a as any).signerTxSerializer.run(walletA.address, () => gate, 'test hold');
       try {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletA.address); // registered pool[0], despite gas-poor + busy
@@ -4721,7 +4721,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       // Both funded (helper default). Hold walletA (the round-robin head) busy.
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
-      void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+      void (a as any).signerTxSerializer.run(walletA.address, () => gate, 'test hold');
       try {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletB.address); // idle wallet preferred over the busy head
@@ -4734,8 +4734,8 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       let releaseA!: () => void; let releaseB!: () => void;
       const gA = new Promise<void>((r) => { releaseA = r; });
       const gB = new Promise<void>((r) => { releaseB = r; });
-      void (a as any).signerTxSerializer.run(walletA.address, () => gA);
-      void (a as any).signerTxSerializer.run(walletB.address, () => gB);
+      void (a as any).signerTxSerializer.run(walletA.address, () => gA, 'test hold A');
+      void (a as any).signerTxSerializer.run(walletB.address, () => gB, 'test hold B');
       try {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletA.address); // both busy → first funded (head), not excluded
@@ -4876,7 +4876,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
         registerPool(a);
         let release!: () => void;
         const gate = new Promise<void>((r) => { release = r; });
-        void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+        void (a as any).signerTxSerializer.run(walletA.address, () => gate, 'test hold');
         try {
           const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
           expect(chosen.address).toBe(walletA.address); // idle bias disabled → busy head still chosen

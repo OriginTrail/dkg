@@ -11,9 +11,10 @@
  * via `as any`, the same convention the rest of evm-adapter.unit.test.ts uses)
  * so deleting the `signerTxSerializer.run(...)` wrap turns the suite red.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { SignerTxSerializer } from '../src/signer-tx-serializer.js';
 import { connectable } from './connectable.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -23,6 +24,12 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
     return impl(...args);
   };
   return Object.assign(fn, { calls });
+}
+
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
 }
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -109,6 +116,62 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     // polling no longer occupies the nonce lane.
     expect(events.indexOf('build:b')).toBeGreaterThan(events.indexOf('accepted:tx-a'));
     expect(events.indexOf('build:b')).toBeLessThan(events.indexOf('done:0xa'));
+  });
+
+  it('logs the real publish holder and update waiter through the adapter boundary', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const a = new EVMChainAdapter(minimalConfig());
+      const signer = new ethers.Wallet(DEPLOYER_PK);
+      (a as any).signerTxSerializer = new SignerTxSerializer({
+        observeAfterMs: 1_000,
+        observeIntervalMs: 1_000,
+        stallAfterMs: 2_000,
+      });
+      (a as any).broadcastSignedTransactionWithRetries = recorder(async () => undefined);
+      (a as any).waitForReceiptWithFailover = recorder(
+        async (txHash: string) => fakeReceipt(txHash),
+      );
+
+      const holdPublish = deferred();
+      const publish = (a as any).dispatchSerializedV10Write(
+        signer,
+        'publish',
+        undefined,
+        async () => {
+          await holdPublish.promise;
+          return { signedTx: 'publish', txHash: '0xpublish' };
+        },
+        neverNull,
+      );
+      const update = (a as any).dispatchSerializedV10Write(
+        signer,
+        'update',
+        undefined,
+        async () => ({ signedTx: 'update', txHash: '0xupdate' }),
+        neverNull,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      const first = warn.mock.calls.at(-1)!.join(' ');
+      expect(first).toContain('tx serializer');
+      expect(first).toContain('publish');
+      expect(first).toContain('update');
+      expect(first).not.toContain('STALL');
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(warn.mock.calls.at(-1)!.join(' ')).toContain('STALL');
+
+      holdPublish.resolve();
+      await Promise.all([publish, update]);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('runs writes to DIFFERENT wallets concurrently', async () => {

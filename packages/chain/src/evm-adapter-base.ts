@@ -25,7 +25,7 @@ import type {
   SignedTransactionEnvelope,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import { KeyedSerializer } from './keyed-mutex.js';
+import { SignerTxSerializer } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
@@ -679,7 +679,7 @@ export class EVMChainAdapterBase {
    * GH#1574 — configured in the constructor once `receiptTimeoutMs` is known,
    * so the stall threshold tracks the adapter's own in-lane bounds.
    */
-  protected readonly signerTxSerializer: KeyedSerializer;
+  protected readonly signerTxSerializer: SignerTxSerializer;
 
   /**
    * Lowercased addresses of operational wallets CONFIRMED registered on-chain
@@ -1095,7 +1095,7 @@ export class EVMChainAdapterBase {
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
     this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
-    this.signerTxSerializer = new KeyedSerializer({
+    this.signerTxSerializer = new SignerTxSerializer({
       observeAfterMs: TX_SERIALIZER_OBSERVE_AFTER_MS,
       observeIntervalMs: TX_SERIALIZER_OBSERVE_INTERVAL_MS,
       stallAfterMs: TX_SERIALIZER_STALL_MULTIPLE * this.receiptTimeoutMs,
@@ -1671,7 +1671,7 @@ export class EVMChainAdapterBase {
     // it propagates up here. The latch is never reset per endpoint, so at most
     // ONE forced approve fires per publish regardless of endpoints tried. Only the
     // one returned signed tx is broadcast; the whole thing runs inside the
-    // per-wallet `KeyedSerializer` (#953), strictly pre-broadcast / pre-WAL.
+    // per-wallet `SignerTxSerializer` (#953), strictly pre-broadcast / pre-WAL.
     let forcedReapprove = false;
     for (;;) {
       try {

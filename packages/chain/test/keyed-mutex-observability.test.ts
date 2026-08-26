@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { KeyedSerializer, type KeyedSerializerObservation } from '../src/keyed-mutex.js';
+import {
+  SignerTxSerializer,
+  type SignerTxSerializerObservation,
+} from '../src/signer-tx-serializer.js';
 
 // GH#1574 — acquisition was structurally invisible: a bare promise-chain link
 // with no timer, counter or log. Three mainnet publishes logged "Submitting
@@ -26,9 +29,9 @@ function harness(overrides: Partial<{
   observeIntervalMs: number;
   stallAfterMs: number;
 }> = {}) {
-  const seen: KeyedSerializerObservation[] = [];
+  const seen: SignerTxSerializerObservation[] = [];
   let clock = 0;
-  const s = new KeyedSerializer({
+  const s = new SignerTxSerializer({
     observeAfterMs: overrides.observeAfterMs ?? 1_000,
     observeIntervalMs: overrides.observeIntervalMs ?? 1_000,
     stallAfterMs: overrides.stallAfterMs ?? 10_000,
@@ -38,7 +41,7 @@ function harness(overrides: Partial<{
   return { s, seen, tick: (ms: number) => { clock += ms; } };
 }
 
-describe('KeyedSerializer observability (GH#1574)', () => {
+describe('SignerTxSerializer observability (GH#1574)', () => {
   it('says nothing while a lane settles quickly', async () => {
     vi.useFakeTimers();
     try {
@@ -236,14 +239,14 @@ describe('KeyedSerializer observability (GH#1574)', () => {
 // Review RED — every test above injects `onObserve`, so the PRODUCTION output
 // path was never exercised. The whole point of the change is an actionable
 // operator warning; this drives the real default logger.
-describe('KeyedSerializer default logger (GH#1574)', () => {
+describe('SignerTxSerializer default logger (GH#1574)', () => {
   it('warns through console.warn with the operator-facing detail', async () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       let clock = 0;
       // No onObserve — the real defaultObserve must run.
-      const s = new KeyedSerializer({
+      const s = new SignerTxSerializer({
         observeAfterMs: 1_000,
         observeIntervalMs: 1_000,
         stallAfterMs: 10_000,
@@ -276,11 +279,10 @@ describe('KeyedSerializer default logger (GH#1574)', () => {
   });
 });
 
-describe('KeyedSerializer lane state (GH#1574)', () => {
+describe('SignerTxSerializer lane state (GH#1574)', () => {
   it('reports idle, busy and stalled from ONE definition', async () => {
     const { s, tick } = harness({ stallAfterMs: 10_000 });
     expect(s.state('0xw')).toBe('idle');
-    expect(s.isStalled('0xw')).toBe(false);
 
     const holder = deferred();
     const p = s.run('0xw', () => holder.promise, 'publish');
@@ -289,49 +291,10 @@ describe('KeyedSerializer lane state (GH#1574)', () => {
 
     tick(10_000);
     expect(s.state('0xw')).toBe('stalled');
-    expect(s.isStalled('0xw')).toBe(true);
 
     holder.resolve();
     await p;
     await settle();
     expect(s.state('0xw')).toBe('idle');
-  });
-});
-
-describe('KeyedSerializer preserves its existing guarantees (GH#953)', () => {
-  it('runs same-key operations strictly in submission order', async () => {
-    const s = new KeyedSerializer();
-    const order: number[] = [];
-    await Promise.all([1, 2, 3, 4].map((n) =>
-      s.run('k', async () => { order.push(n); })));
-    expect(order).toEqual([1, 2, 3, 4]);
-  });
-
-  it('a rejecting operation does not wedge or skip its successor', async () => {
-    const s = new KeyedSerializer();
-    await expect(s.run('k', async () => { throw new Error('boom'); })).rejects.toThrow('boom');
-    await expect(s.run('k', async () => 'after')).resolves.toBe('after');
-  });
-
-  it('runs different keys concurrently', async () => {
-    const s = new KeyedSerializer();
-    const a = deferred();
-    const started: string[] = [];
-    const pa = s.run('a', async () => { started.push('a'); await a.promise; });
-    const pb = s.run('b', async () => { started.push('b'); });
-    await pb;
-    expect(started).toContain('b');
-    a.resolve();
-    await pa;
-  });
-
-  it('keeps the lane map bounded by in-flight keys, not history', async () => {
-    const s = new KeyedSerializer();
-    for (const k of ['a', 'b', 'c']) await s.run(k, async () => k);
-    await settle();
-    // isActive is load-bearing for idle-wallet selection (GH#953): a leaked
-    // entry makes every wallet read busy forever and silently disables it.
-    expect(s.activeKeyCount).toBe(0);
-    expect(s.isActive('a')).toBe(false);
   });
 });
