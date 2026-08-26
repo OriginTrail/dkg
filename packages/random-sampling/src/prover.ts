@@ -88,8 +88,8 @@ export interface RandomSamplingProverDeps {
   /**
    * Optional foreground repair invoked when the sampled public KA is absent
    * or its live local version does not match the immutable challenge. The
-   * agent may return challenge-scoped proof input without changing durable VM
-   * state; otherwise the prover retries local extraction once.
+   * result is explicit challenge-scoped proof input; durable storage mutation
+   * is not a second implicit success channel.
    */
   repairMissingKnowledgeAsset?: (input: {
     kaId: bigint;
@@ -97,7 +97,7 @@ export interface RandomSamplingProverDeps {
     /** Immutable content identity captured by the active challenge. */
     expectedRoot: Uint8Array;
     expectedLeafCount: bigint;
-  }) => Promise<RandomSamplingRepairMaterial | void>;
+  }) => Promise<RandomSamplingRepairMaterial>;
 }
 
 /** Challenge-scoped proof input returned without mutating the live KA view. */
@@ -287,30 +287,43 @@ export class RandomSamplingProver {
         privateRoots: extracted.privateRoots,
       };
     };
-    let initialError: KCNotFoundError | KCDataMissingError | undefined;
-    let localChallengeMismatch = false;
-    try {
-      const local = await extractLocal();
-      if (repairMaterialMatchesChallenge(local, input.expectedRoot, input.expectedLeafCount)) {
-        return local;
+    type LocalOutcome =
+      | { kind: 'ready'; material: RandomSamplingRepairMaterial }
+      | { kind: 'challenge-mismatch'; material: RandomSamplingRepairMaterial }
+      | { kind: 'missing'; error: KCNotFoundError | KCDataMissingError };
+    const readLocalOutcome = async (): Promise<LocalOutcome> => {
+      try {
+        const material = await extractLocal();
+        return repairMaterialMatchesChallenge(
+          material,
+          input.expectedRoot,
+          input.expectedLeafCount,
+        )
+          ? { kind: 'ready', material }
+          : { kind: 'challenge-mismatch', material };
+      } catch (error) {
+        if (!(error instanceof KCNotFoundError) && !(error instanceof KCDataMissingError)) {
+          throw error;
+        }
+        return { kind: 'missing', error };
       }
-      localChallengeMismatch = true;
-      if (!this.repairMissingKnowledgeAsset) return local;
-    } catch (error) {
-      if (!(error instanceof KCNotFoundError) && !(error instanceof KCDataMissingError)) {
-        throw error;
-      }
-      initialError = error;
+    };
+
+    const local = await readLocalOutcome();
+    if (local.kind === 'ready') return local.material;
+    if (!this.repairMissingKnowledgeAsset) {
+      if (local.kind === 'missing') throw local.error;
+      return local.material;
     }
-    if (!this.repairMissingKnowledgeAsset) throw initialError!;
 
     this.log.info('rs.tick.kc-repair-started', {
       kaId: input.kaId.toString(),
       cgId: input.cgId.toString(),
       periodStart: input.periodStartBlock.toString(),
-      err: localChallengeMismatch ? 'ChallengeCommitmentMismatch' : initialError!.name,
+      err: local.kind === 'challenge-mismatch'
+        ? 'ChallengeCommitmentMismatch'
+        : local.error.name,
     });
-    let repairFailed = false;
     try {
       const repaired = await this.repairMissingKnowledgeAsset({
         kaId: input.kaId,
@@ -318,17 +331,14 @@ export class RandomSamplingProver {
         expectedRoot: input.expectedRoot,
         expectedLeafCount: input.expectedLeafCount,
       });
-      if (repaired !== undefined) {
-        this.log.info('rs.tick.kc-repaired', {
-          kaId: input.kaId.toString(),
-          cgId: input.cgId.toString(),
-          periodStart: input.periodStartBlock.toString(),
-          challengeScoped: true,
-        });
-        return repaired;
-      }
+      this.log.info('rs.tick.kc-repaired', {
+        kaId: input.kaId.toString(),
+        cgId: input.cgId.toString(),
+        periodStart: input.periodStartBlock.toString(),
+        challengeScoped: true,
+      });
+      return repaired;
     } catch (repairError) {
-      repairFailed = true;
       this.log.warn('rs.tick.kc-repair-failed', {
         kaId: input.kaId.toString(),
         cgId: input.cgId.toString(),
@@ -337,26 +347,12 @@ export class RandomSamplingProver {
           ? repairError.message.slice(0, 200)
           : String(repairError).slice(0, 200),
       });
-    }
-
-    // Durable exact sync can commit an authenticated asset and still reject a
-    // non-terminal response. Always re-read locally; transport disposition is
-    // not the proof-readiness authority.
-    try {
-      const extracted = await extractLocal();
-      this.log.info('rs.tick.kc-repaired', {
-        kaId: input.kaId.toString(),
-        cgId: input.cgId.toString(),
-        periodStart: input.periodStartBlock.toString(),
-      });
-      return extracted;
-    } catch (retryError) {
-      if (
-        repairFailed
-        && (retryError instanceof KCNotFoundError || retryError instanceof KCDataMissingError)
-        && initialError
-      ) throw initialError;
-      throw retryError;
+      // Preserve the local semantic outcome: a missing asset remains a normal
+      // kc-not-synced result, while a local mismatch continues to the existing
+      // root/count classifier. A rejected hook is never treated as success via
+      // an undocumented storage side effect.
+      if (local.kind === 'missing') throw local.error;
+      return local.material;
     }
   }
 

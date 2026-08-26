@@ -1026,9 +1026,14 @@ describe('RandomSamplingProver — short-circuits', () => {
       cgIdForKc: fixture.cgId,
       submitProof,
     });
-    const repairMissingKnowledgeAsset = vi.fn(async () => {
-      await seedKC(store, fixture);
-    });
+    const repairMissingKnowledgeAsset = vi.fn(async () => ({
+      contents: fixture.publicTriples.map((triple) => tripleContentV10(
+        triple.subject,
+        triple.predicate,
+        triple.object,
+      )),
+      privateRoots: [],
+    }));
     const wal = new InMemoryProverWal();
     const prover = new RandomSamplingProver({
       chain,
@@ -1126,7 +1131,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     await prover.close();
   });
 
-  it('uses durable repair progress even when the transport hook ultimately rejects', async () => {
+  it('keeps a missing local asset unsynced when the explicit repair result rejects', async () => {
     const fixture: KCFixture = {
       cgId: 11n,
       kaId: 999n,
@@ -1158,21 +1163,32 @@ describe('RandomSamplingProver — short-circuits', () => {
       submitProof,
     });
     const repairMissingKnowledgeAsset = vi.fn(async () => {
-      await seedKC(store, fixture);
-      throw new Error('terminal response timed out after durable commit');
+      throw new Error('terminal response timed out');
     });
+    const log = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
     const prover = new RandomSamplingProver({
       chain,
       store,
       identityId: IDENTITY_ID,
       repairMissingKnowledgeAsset,
+      log,
     });
 
     await expect(prover.tick()).resolves.toMatchObject({
-      kind: 'submitted',
-      txHash: '0xpartial-progress',
+      kind: 'kc-not-synced',
+      kaId: fixture.kaId,
+      cgId: fixture.cgId,
     });
     expect(repairMissingKnowledgeAsset).toHaveBeenCalledOnce();
+    expect(submitProof).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(
+      'rs.tick.kc-repair-failed',
+      expect.objectContaining({ err: 'terminal response timed out' }),
+    );
     await prover.close();
   });
 
@@ -1208,13 +1224,14 @@ describe('RandomSamplingProver — short-circuits', () => {
       cgIdForKc: fixture.cgId,
       submitProof,
     });
-    const repairMissingKnowledgeAsset = vi.fn(async () => {
-      const cgId = fixture.cgId.toString();
-      await store.insert(fixture.publicTriples.map((triple) => ({
-        ...triple,
-        graph: contextGraphDataUri(`cg-${cgId}`, cgId),
-      })));
-    });
+    const repairMissingKnowledgeAsset = vi.fn(async () => ({
+      contents: fixture.publicTriples.map((triple) => tripleContentV10(
+        triple.subject,
+        triple.predicate,
+        triple.object,
+      )),
+      privateRoots: [],
+    }));
     const prover = new RandomSamplingProver({
       chain,
       store,

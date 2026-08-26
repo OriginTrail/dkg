@@ -170,9 +170,18 @@ describe('exact-asset rolling-upgrade filter', () => {
       createChallengePinnedExactAssetSelection([{
         assetUal: wanted,
         merkleRootHex: '11'.repeat(32),
-        merkleLeafCount: 2n,
+        merkleLeafCount: 1n,
       }]),
     ).descriptorCoverageComplete).toBe(true);
+    expect(filterExactAssetDurablePayload(
+      data,
+      descriptor('11'.repeat(32), 1),
+      createChallengePinnedExactAssetSelection([{
+        assetUal: wanted,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 2n,
+      }]),
+    ).descriptorCoverageComplete).toBe(false);
   });
 
   it('threads the exact selection into both fetch phases and filters an old-responder payload before verification', async () => {

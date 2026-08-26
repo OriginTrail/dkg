@@ -192,8 +192,10 @@ export function exactAssetCommitmentMatchesDescriptor(
   return descriptor.ual === commitment.assetUal
     && normalizeExactAssetMerkleRootHex(descriptor.claimedRootHex)
       === commitment.merkleRootHex
-    && BigInt(descriptor.publicTripleCount + (descriptor.privateTripleCount > 0 ? 1 : 0))
-      === commitment.merkleLeafCount;
+    // V10 challenges index public triple leaves only. The collapsed private
+    // root participates in structuredKARootV10, but is not an extra
+    // challengeable leaf.
+    && BigInt(descriptor.publicTripleCount) === commitment.merkleLeafCount;
 }
 
 /** Stable identity for checkpoints, single-flight keys, and responder plans. */
