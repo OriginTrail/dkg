@@ -1089,6 +1089,95 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads[0]).toContain('TO GRAPH <http://ex.org/g1>');
   });
 
+  it('dispatches staging cleanup after failed atomic graph replacements and preserves the original error', async () => {
+    const originalFetch = globalThis.fetch;
+    const graph = 'http://ex.org/cleanup-target';
+    const metaGraph = `${graph}/metadata`;
+    const subject = 'http://ex.org/cleanup-subject';
+    const quad = {
+      subject,
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph,
+    };
+    const cases: Array<{
+      name: string;
+      expectedStagingGraphs: number;
+      affected: string[];
+      attempt(store: SparqlHttpStore): Promise<void>;
+    }> = [
+      {
+        name: 'replaceGraph',
+        expectedStagingGraphs: 1,
+        affected: [graph],
+        attempt: (candidate) => candidate.replaceGraph(graph, [quad]),
+      },
+      {
+        name: 'replaceGraphAndSubject',
+        expectedStagingGraphs: 2,
+        affected: [graph, metaGraph],
+        attempt: (candidate) => candidate.replaceGraphAndSubject(
+          graph,
+          [quad],
+          metaGraph,
+          subject,
+          [{ ...quad, graph: metaGraph }],
+        ),
+      },
+    ];
+
+    try {
+      for (const testCase of cases) {
+        const requests: string[] = [];
+        globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+          requests.push(String(init?.body ?? ''));
+          return requests.length === 1
+            ? new Response('primary mutation failed', { status: 500 })
+            : new Response('', { status: 200 });
+        }) as typeof fetch;
+        const failedStore = new SparqlHttpStore({
+          queryEndpoint: 'http://cleanup.test/query',
+          updateEndpoint: 'http://cleanup.test/update',
+          atomicUpdates: true,
+        });
+        const before = new Map(testCase.affected.map((scope) => [
+          scope,
+          failedStore.getWriteRevision(scope),
+        ]));
+
+        const error = await testCase.attempt(failedStore).then(
+          () => undefined,
+          (reason: unknown) => reason,
+        );
+        expect(error, testCase.name).toBeInstanceOf(Error);
+        expect((error as Error).message, testCase.name)
+          .toContain('primary mutation failed');
+        expect(requests, testCase.name).toHaveLength(2);
+
+        const stagingGraphs = Array.from(new Set(
+          Array.from(requests[0].matchAll(
+            /<(urn:dkg:internal:atomic-graph-replace:[^>]+)>/gu,
+          ), (match) => match[1]),
+        ));
+        expect(stagingGraphs, testCase.name).toHaveLength(testCase.expectedStagingGraphs);
+        expect(requests[1], testCase.name).toBe(
+          stagingGraphs.map((stagingGraph) => (
+            `DROP SILENT GRAPH <${stagingGraph}>`
+          )).join(';\n'),
+        );
+
+        for (const scope of testCase.affected) {
+          const revision = failedStore.getWriteRevision(scope);
+          expect(revision.generation, testCase.name)
+            .toBeGreaterThan(before.get(scope)!.generation);
+          expect(revision.stable, testCase.name).toBe(false);
+        }
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('replaceGraph fails closed for endpoints without a declared atomicity guarantee', async () => {
     // SPARQL 1.1 only RECOMMENDS whole-request atomicity: a generic endpoint
     // could apply the staged DROP/INSERT/MOVE partially and strand the target

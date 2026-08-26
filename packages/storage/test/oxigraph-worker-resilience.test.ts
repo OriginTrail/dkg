@@ -85,11 +85,37 @@ describe('OxigraphWorkerStore resilience', () => {
   const GRAPH_A = 'urn:test:tracked:a';
   const GRAPH_B = 'urn:test:tracked:b';
   const GRAPH_C = 'urn:test:tracked:c';
+  const quadFor = (graph: string): Quad => ({
+    subject: `urn:test:subject:${graph}`,
+    predicate: 'urn:test:predicate',
+    object: '"value"',
+    graph,
+  });
   const mutationCases: Array<{
     name: string;
     affected: string[];
     invoke: (store: OxigraphWorkerStore) => Promise<unknown>;
   }> = [
+    {
+      name: 'multi-graph insert',
+      affected: [GRAPH_A, GRAPH_B],
+      invoke: (store) => store.insert([quadFor(GRAPH_A), quadFor(GRAPH_B)]),
+    },
+    {
+      name: 'multi-graph delete',
+      affected: [GRAPH_A, GRAPH_B],
+      invoke: (store) => store.delete([quadFor(GRAPH_A), quadFor(GRAPH_B)]),
+    },
+    {
+      name: 'scoped pattern delete',
+      affected: [GRAPH_A],
+      invoke: (store) => store.deleteByPattern({ graph: GRAPH_A }),
+    },
+    {
+      name: 'unscoped pattern delete',
+      affected: [GRAPH_A, GRAPH_B, GRAPH_C],
+      invoke: (store) => store.deleteByPattern({ predicate: 'urn:test:predicate' }),
+    },
     {
       name: 'one-graph replace',
       affected: [GRAPH_A],
@@ -105,6 +131,21 @@ describe('OxigraphWorkerStore resilience', () => {
         'urn:test:metadata-subject',
         [],
       ),
+    },
+    {
+      name: 'subject replace',
+      affected: [GRAPH_A],
+      invoke: (store) => store.replaceSubject(GRAPH_A, 'urn:test:subject', []),
+    },
+    {
+      name: 'graph drop',
+      affected: [GRAPH_A],
+      invoke: (store) => store.dropGraph(GRAPH_A),
+    },
+    {
+      name: 'subject-prefix delete',
+      affected: [GRAPH_A],
+      invoke: (store) => store.deleteBySubjectPrefix(GRAPH_A, 'urn:test:subject:'),
     },
     {
       name: 'unscoped raw update',
