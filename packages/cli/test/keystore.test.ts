@@ -131,9 +131,10 @@ describe('decryptKeystore error handling', () => {
   });
 
   it('accepts a KDF memory cost exactly at the declared ceiling', async () => {
-    // Proves the ceiling is inclusive without allocating it: dklen is validated
-    // after the cost policy, so an invalid dklen stops execution before scrypt.
-    // The error text discriminates — a memory rejection would name the cost.
+    // Cheap acceptance-policy half: dklen is validated after the cost policy,
+    // so an invalid dklen stops execution before scrypt. The error text
+    // discriminates — a memory rejection would name the cost. The execution
+    // half — that OpenSSL actually serves this cost — is the test below.
     const { maxWorkingSetBytes } = SCRYPT_KDF_POLICY;
     const workingSetBytes = SCRYPT_KDF_POLICY.workingSetBytes.bind(SCRYPT_KDF_POLICY);
     const atN = maxWorkingSetBytes / (128 * 8);
@@ -143,6 +144,35 @@ describe('decryptKeystore error handling', () => {
     ks.crypto.kdfparams.r = 8;
     ks.crypto.kdfparams.dklen = 16;
     await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(/dklen/);
+  });
+
+  it('executes real scrypt at the exact accepted ceiling', async () => {
+    // The policy promises every accepted cost is executable; this reaches
+    // OpenSSL at the maximum accepted working set. The keystore is encrypted
+    // cheaply, then re-advertises the at-ceiling parameters: derivation now
+    // produces a WRONG key, so reaching the AES tag check ("Decryption
+    // failed") proves scrypt ran the full 512 MiB cost under
+    // `executionMaxmemBytes`. An insufficient overhead allowance fails
+    // differently and fails this test — OpenSSL raises
+    // ERR_CRYPTO_INVALID_SCRYPT_PARAMS before any key exists. One expensive
+    // derivation total; vitest runs same-file tests serially, so the
+    // allocation never overlaps the production round-trip below.
+    const { maxWorkingSetBytes } = SCRYPT_KDF_POLICY;
+    const atN = maxWorkingSetBytes / (128 * 8);
+    const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
+    ks.crypto.kdfparams.n = atN;
+    ks.crypto.kdfparams.r = 8;
+    await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(/Decryption failed/);
+  }, 120000);
+
+  it('pins the intended ceilings as literals, independent of the implementation', () => {
+    // Every other assertion reads the policy object; if the object itself
+    // drifted (512 MiB quietly becoming 512 GiB), those would follow it.
+    // These are the review-approved numbers, restated as literals.
+    expect(SCRYPT_KDF_POLICY.maxWorkingSetBytes).toBe(512 * 1024 * 1024);
+    expect(SCRYPT_KDF_POLICY.maxP).toBe(16);
+    expect(SCRYPT_KDF_POLICY.production).toEqual({ n: 2 ** 18, r: 8, p: 1 });
+    expect(SCRYPT_KDF_POLICY.minN).toBe(2 ** 15);
   });
 
   it('accepts p at the ceiling and rejects p one above it', async () => {
