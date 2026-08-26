@@ -26,7 +26,6 @@ import {
 } from "./metrics-queries.js";
 import { createMetricsPresence } from "./metrics-presence.js";
 import {
-  appendFile,
   chmod,
   copyFile,
   mkdir,
