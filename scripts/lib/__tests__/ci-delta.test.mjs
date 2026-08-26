@@ -622,12 +622,12 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(workflow.includes('shard: [1, 2, 3, 4, 5, 6, 7]'));
   assert.ok(workflow.includes('playwright test --shard=${{ matrix.shard }}/7'));
 
-  for (const packageName of [
-    '@origintrail-official/dkg-rdf-utils',
-    '@origintrail-official/dkg-okf',
-    '@origintrail-official/dkg-demo',
+  for (const [packageName, invocation] of [
+    ['@origintrail-official/dkg-rdf-utils', '--lane rdf-utils'],
+    ['@origintrail-official/dkg-okf', '--filter @origintrail-official/dkg-okf'],
+    ['@origintrail-official/dkg-demo', '--filter @origintrail-official/dkg-demo'],
   ]) {
-    assert.ok(workflow.includes(`--filter ${packageName}`), `${packageName} tests must stay in CI`);
+    assert.ok(workflow.includes(invocation), `${packageName} tests must stay in CI`);
   }
 
   const evmWorkflow = fs.readFileSync(

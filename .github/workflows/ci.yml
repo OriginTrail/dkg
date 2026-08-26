@@ -222,6 +222,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Lint source and repository tooling
+        run: pnpm lint
+
       - name: Validate npm metadata points to v10
         run: pnpm check:npm-metadata
 
@@ -272,6 +275,11 @@ jobs:
           # the code has already cleared branch-protection review.
           TURBO_TOKEN: ${{ github.event_name == 'push' && secrets.TURBO_TOKEN || '' }}
           TURBO_TEAM: ${{ github.event_name == 'push' && secrets.TURBO_TEAM || '' }}
+
+      - name: Verify the publishable CLI tarball
+        run: |
+          pnpm release:build-info --dist-tag ci --commit "${GITHUB_SHA}" --ci-run "${GITHUB_RUN_ID}"
+          pnpm release:verify-pack
 
       - name: Test repository scripts
         run: pnpm run test:scripts
@@ -443,9 +451,12 @@ jobs:
       - name: Core, RDF utilities, and storage tests
         if: matrix.suite == 'core'
         run: |
-          pnpm --filter @origintrail-official/dkg-core test
-          pnpm --filter @origintrail-official/dkg-rdf-utils test
-          pnpm --filter @origintrail-official/dkg-storage test
+          node scripts/ci/run-vitest-junit.mjs \
+            --lane core
+          node scripts/ci/run-vitest-junit.mjs \
+            --lane rdf-utils
+          node scripts/ci/run-vitest-junit.mjs \
+            --lane storage
       - name: "Chain tests (shard ${{ matrix.shard }}/3)"
         if: matrix.suite == 'chain'
         env:
@@ -454,7 +465,15 @@ jobs:
           set -euo pipefail
           mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs chain "$SHARD_ID")
           test "${#SHARD_FILES[@]}" -gt 0
-          pnpm --filter @origintrail-official/dkg-chain exec vitest run "${SHARD_FILES[@]}"
+          node scripts/ci/run-vitest-junit.mjs \
+            --lane chain --shard "${SHARD_ID}" \
+            -- "${SHARD_FILES[@]}"
+
+      - name: Upload Vitest JUnit report
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-tornado-core-${{ matrix.suite }}-${{ matrix.shard }}
 
   # ------------------------------------------------------------------
   # Tornado Blazegraph integration lane — runs the storage adapter's
@@ -580,7 +599,15 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "Publisher tests (shard ${{ matrix.shard }}/4)"
-        run: pnpm --filter @origintrail-official/dkg-publisher exec vitest run --shard=${{ matrix.shard }}/4
+        run: |
+          node scripts/ci/run-vitest-junit.mjs \
+            --lane publisher --shard ${{ matrix.shard }} \
+            -- --shard=${{ matrix.shard }}/4
+      - name: Upload Vitest JUnit report
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-publisher-${{ matrix.shard }}-of-4
 
   # ------------------------------------------------------------------
   # Tornado agent lane — the slowest Node suite, sharded across 10 runners.
@@ -642,7 +669,14 @@ jobs:
           echo "::group::Agent shard ${{ matrix.shard }}/10 — ${#SHARD_FILES[@]} files"
           printf '  %s\n' "${SHARD_FILES[@]}"
           echo "::endgroup::"
-          pnpm exec vitest run "${SHARD_FILES[@]}"
+          node ../../scripts/ci/run-vitest-junit.mjs \
+            --lane agent --shard ${{ matrix.shard }} \
+            -- "${SHARD_FILES[@]}"
+      - name: Upload Vitest JUnit report
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-agent-${{ matrix.shard }}-of-10
 
   # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
@@ -698,7 +732,14 @@ jobs:
           set -euo pipefail
           mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs cli "$SHARD_ID")
           test "${#SHARD_FILES[@]}" -gt 0
-          pnpm --filter @origintrail-official/dkg exec vitest run "${SHARD_FILES[@]}"
+          node scripts/ci/run-vitest-junit.mjs \
+            --lane cli --shard "${SHARD_ID}" \
+            -- "${SHARD_FILES[@]}"
+      - name: Upload Vitest JUnit report
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-cli-${{ matrix.shard }}-of-4
 
   bura-blazegraph-arm64:
     name: "Bura: Blazegraph arm64 image (native)"
