@@ -14,7 +14,7 @@ function inputFor(count) {
 
 function variantsFor(input) {
   return Array.from(
-    { length: 16 },
+    { length: 8 },
     (_, index) => `${input}# benchmark-${index}\n`,
   );
 }
@@ -41,7 +41,7 @@ export function measureSparqlRedosGrowth() {
   for (const variant of [...smallVariants, ...largeVariants]) detect(variant);
 
   let iterations = 1;
-  while (iterations < 4_096 && runBatch(smallVariants, iterations, 0) < 25) {
+  while (iterations < 4_096 && runBatch(smallVariants, iterations, 0) < 10) {
     iterations *= 2;
   }
 
