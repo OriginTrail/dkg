@@ -79,11 +79,8 @@ export {
   type LogSink,
   type LogRecord,
   type LogLevel,
-  type LogPersistenceClass,
   type DiagnosticLogLevel,
   LOG_LEVELS,
-  LOG_LEVEL_PERSISTENCE_CLASS,
-  DIAGNOSTIC_LOG_LEVELS,
   isDiagnosticLogLevel,
 } from './logger.js';
 export {

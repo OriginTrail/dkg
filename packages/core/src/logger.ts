@@ -5,25 +5,10 @@ export type OperationName = 'publish' | 'update' | 'query' | 'resolve' | 'connec
 
 export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
 export type LogLevel = typeof LOG_LEVELS[number];
-export type LogPersistenceClass = 'routine' | 'diagnostic';
-export const LOG_LEVEL_PERSISTENCE_CLASS = {
-  debug: 'routine',
-  info: 'routine',
-  warn: 'diagnostic',
-  error: 'diagnostic',
-} as const satisfies Record<LogLevel, LogPersistenceClass>;
-export type DiagnosticLogLevel = {
-  [Level in LogLevel]: typeof LOG_LEVEL_PERSISTENCE_CLASS[Level] extends 'diagnostic'
-    ? Level
-    : never;
-}[LogLevel];
-export const DIAGNOSTIC_LOG_LEVELS = LOG_LEVELS.filter(
-  (level): level is DiagnosticLogLevel => LOG_LEVEL_PERSISTENCE_CLASS[level] === 'diagnostic',
-);
+export type DiagnosticLogLevel = 'warn' | 'error';
 
 export function isDiagnosticLogLevel(level: string): level is DiagnosticLogLevel {
-  return level in LOG_LEVEL_PERSISTENCE_CLASS
-    && LOG_LEVEL_PERSISTENCE_CLASS[level as LogLevel] === 'diagnostic';
+  return level === 'warn' || level === 'error';
 }
 
 export interface OperationContext {

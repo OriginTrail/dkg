@@ -421,22 +421,11 @@ describe('DashboardDB — retention', () => {
         message: 'keep-error',
       });
 
-      // Simulate upgrading from the first patchset, whose narrower cleanup had
-      // already declared completion while missing every operation-tagged row.
-      // V2 must reuse its original high-water mark and run the corrected policy.
-      const highWaterId = (volumeDb.db.prepare(
-        `SELECT MAX(id) AS id FROM logs`,
-      ).get() as { id: number }).id;
+      // Simulate the first released startup containing this migration: its
+      // immutable cutoff is captured only after the legacy rows already exist.
       volumeDb.db.prepare(
         `DELETE FROM settings WHERE key LIKE 'legacyRoutineLogCleanup%'`,
       ).run();
-      volumeDb.db.prepare(
-        `INSERT INTO settings (key, value) VALUES (?, ?), (?, '1')`,
-      ).run(
-        'legacyRoutineLogCleanupHighWater.v1',
-        String(highWaterId),
-        'legacyRoutineLogCleanupComplete.v1',
-      );
       volumeDb.close();
       volumeDb = new DashboardDB({
         dataDir: volumeDir,
@@ -479,6 +468,52 @@ describe('DashboardDB — retention', () => {
       expect(volumeDb.db.prepare(
         `SELECT key, value FROM settings WHERE key LIKE 'legacyRoutineLogCleanup%'`,
       ).all()).toEqual([{ key: 'legacyRoutineLogCleanup.v2', value: 'complete' }]);
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('bounds routine compatibility writes after the legacy migration completes', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-compat-cap-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 2,
+      // Deprecated option remains a source/runtime-compatible alias.
+      logVolumePruneBatchRows: 10,
+    });
+    try {
+      const rawInsert = volumeDb.db.prepare(
+        `INSERT INTO logs (ts, level, module, message) VALUES (?, 'info', 'legacy-caller', ?)`,
+      );
+      rawInsert.run(Date.now(), 'preexisting-0');
+      rawInsert.run(Date.now() + 1, 'preexisting-1');
+      rawInsert.run(Date.now() + 2, 'preexisting-2');
+      expect(volumeDb.pruneLogVolumeBatch()).toMatchObject({ deleted: 1, status: 'done' });
+      for (let i = 0; i < 6; i += 1) {
+        volumeDb.insertLog({
+          ts: Date.now() + i,
+          level: 'info',
+          module: 'compatibility',
+          message: `routine-${i}`,
+        });
+      }
+      volumeDb.insertLog({
+        ts: Date.now() + 10,
+        level: 'warn',
+        module: 'compatibility',
+        message: 'keep-warning',
+      });
+
+      const rows = volumeDb.db.prepare(
+        `SELECT level, message FROM logs ORDER BY id ASC`,
+      ).all() as Array<{ level: string; message: string }>;
+      expect(rows.filter((row) => row.level === 'info')).toEqual([
+        { level: 'info', message: 'routine-4' },
+        { level: 'info', message: 'routine-5' },
+      ]);
+      expect(rows).toContainEqual({ level: 'warn', message: 'keep-warning' });
     } finally {
       volumeDb.close();
       rmSync(volumeDir, { recursive: true, force: true });

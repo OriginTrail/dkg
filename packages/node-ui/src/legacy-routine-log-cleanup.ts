@@ -1,9 +1,6 @@
 import type Database from 'better-sqlite3';
-import { DIAGNOSTIC_LOG_LEVELS } from '@origintrail-official/dkg-core';
 
 const STATE_KEY = 'legacyRoutineLogCleanup.v2';
-const LEGACY_HIGH_WATER_KEY = 'legacyRoutineLogCleanupHighWater.v1';
-const LEGACY_COMPLETE_KEY = 'legacyRoutineLogCleanupComplete.v1';
 const COMPLETE = 'complete';
 
 export type LegacyRoutineLogCleanupState =
@@ -26,9 +23,6 @@ export interface LegacyRoutineLogDeleteBatchResult {
  * operation IDs are drained.
  */
 export class LegacyRoutineLogCleanup {
-  private readonly warningLevel = DIAGNOSTIC_LOG_LEVELS[0];
-  private readonly errorLevel = DIAGNOSTIC_LOG_LEVELS[1];
-
   constructor(
     private readonly db: Database.Database,
     private readonly batchRows: number,
@@ -58,7 +52,7 @@ export class LegacyRoutineLogCleanup {
       FROM logs AS candidate
       WHERE ${this.candidatePredicate()}
       LIMIT 1
-    `).get(this.params(state.highWaterId)) !== undefined;
+    `).get({ highWaterId: state.highWaterId }) !== undefined;
   }
 
   deleteBatch(): LegacyRoutineLogDeleteBatchResult {
@@ -74,7 +68,7 @@ export class LegacyRoutineLogCleanup {
         LIMIT @batchRows
       )
     `).run({
-      ...this.params(state.highWaterId),
+      highWaterId: state.highWaterId,
       batchRows: this.batchRows,
     }).changes;
     return { deleted, hasMore: deleted === this.batchRows };
@@ -92,34 +86,18 @@ export class LegacyRoutineLogCleanup {
     ).get(STATE_KEY);
     if (current !== undefined) return;
 
-    // Smoothly collapse the short-lived v1 two-key representation if a node
-    // tested an earlier candidate build of this PR before upgrading again.
-    const oldHighWater = this.db.prepare(
-      `SELECT value FROM settings WHERE key = ?`,
-    ).get(LEGACY_HIGH_WATER_KEY) as { value: string } | undefined;
     const maxRow = this.db.prepare(
       `SELECT COALESCE(MAX(id), 0) AS id FROM logs`,
     ).get() as { id: number };
-    const parsedOldHighWater = Number(oldHighWater?.value);
-    const highWaterId = Number.isSafeInteger(parsedOldHighWater) && parsedOldHighWater >= 0
-      ? parsedOldHighWater
-      : maxRow.id;
-
-    const initialize = this.db.transaction(() => {
-      this.db.prepare(
-        `INSERT INTO settings (key, value) VALUES (?, ?)`,
-      ).run(STATE_KEY, `pending:${highWaterId}`);
-      this.db.prepare(
-        `DELETE FROM settings WHERE key IN (?, ?)`,
-      ).run(LEGACY_HIGH_WATER_KEY, LEGACY_COMPLETE_KEY);
-    });
-    initialize();
+    this.db.prepare(
+      `INSERT INTO settings (key, value) VALUES (?, ?)`,
+    ).run(STATE_KEY, `pending:${maxRow.id}`);
   }
 
   private candidatePredicate(): string {
     return `
       candidate.id <= @highWaterId
-      AND candidate.level NOT IN (@warningLevel, @errorLevel)
+      AND candidate.level IN ('debug', 'info')
       AND (
         candidate.operation_id IS NULL
         OR NOT EXISTS (
@@ -133,21 +111,10 @@ export class LegacyRoutineLogCleanup {
           WHERE newer.operation_id = candidate.operation_id
             AND newer.id > candidate.id
             AND newer.id <= @highWaterId
-            AND newer.level NOT IN (@warningLevel, @errorLevel)
+            AND newer.level IN ('debug', 'info')
         )
       )
     `;
   }
 
-  private params(highWaterId: number): {
-    highWaterId: number;
-    warningLevel: string;
-    errorLevel: string;
-  } {
-    return {
-      highWaterId,
-      warningLevel: this.warningLevel,
-      errorLevel: this.errorLevel,
-    };
-  }
 }

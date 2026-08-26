@@ -161,7 +161,8 @@ export class OtlpLogWorker {
 
   /** Append a record. Filters below minLevel; never awaits the network. */
   push(record: LogRecord): void {
-    if (LEVEL_RANK[record.level] < this.minRank) return;
+    const rank = LEVEL_RANK[record.level] ?? LEVEL_RANK.info;
+    if (rank < this.minRank) return;
     if (this.buffer.length >= this.maxBuffer) this.buffer.shift();
     this.buffer.push({ r: record, tsMs: Date.now() });
   }

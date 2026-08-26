@@ -43,6 +43,7 @@ export const SCHEMA_VERSION = 34;
 // rows while warning/error rows keep the operator-selected time window.
 const DEFAULT_RETENTION_DAYS = 14;
 const LEGACY_IMPLICIT_RETENTION_DAYS = 90;
+const DEFAULT_ROUTINE_LOG_ROW_CAP = 1_000_000;
 const DEFAULT_LEGACY_ROUTINE_LOG_CLEANUP_BATCH_ROWS = 25_000;
 const LEGACY_ROUTINE_LOG_VACUUM_DELETE_THRESHOLD = 10_000;
 // SQLite reports reusable-but-not-yet-reclaimed pages via freelist_count.
@@ -124,12 +125,19 @@ export interface DashboardDBOptions {
   cacheTtlMs?: number;
   /** Maximum legacy routine rows removed by one bounded cleanup tick. */
   legacyRoutineLogCleanupBatchRows?: number;
+  /** @deprecated Maximum retained info/debug/unknown log rows for compatibility writers. */
+  routineLogRowCap?: number;
+  /** @deprecated Maximum oldest routine rows removed by one compatibility prune tick. */
+  logVolumePruneBatchRows?: number;
 }
 
 export interface LegacyRoutineLogCleanupResult {
   deleted: number;
   status: 'more' | 'reclaim-pending' | 'done' | 'done-compacted';
 }
+
+/** @deprecated Use LegacyRoutineLogCleanupResult. */
+export type LogVolumePruneResult = LegacyRoutineLogCleanupResult;
 
 export type StoredContextGraphJoinPolicy = ContextGraphJoinPolicyRecord;
 
@@ -229,17 +237,24 @@ export class DashboardDB {
   readonly dataDir: string;
   private retentionDays: number;
   private readonly explicitRetentionDays: boolean;
+  private readonly routineLogRowCap: number;
   private readonly legacyRoutineLogCleanupBatchRows: number;
   private readonly legacyRoutineLogCleanup: LegacyRoutineLogCleanup;
+  private routineLogWritesSinceGuard = 0;
 
   constructor(opts: DashboardDBOptions) {
     this.dataDir = opts.dataDir;
     this.explicitRetentionDays = opts.retentionDays !== undefined;
     this.retentionDays = opts.retentionDays ?? DEFAULT_RETENTION_DAYS;
+    this.routineLogRowCap = Math.max(
+      0,
+      Math.floor(opts.routineLogRowCap ?? DEFAULT_ROUTINE_LOG_ROW_CAP),
+    );
     this.legacyRoutineLogCleanupBatchRows = Math.max(
       1,
       Math.floor(
         opts.legacyRoutineLogCleanupBatchRows
+          ?? opts.logVolumePruneBatchRows
           ?? DEFAULT_LEGACY_ROUTINE_LOG_CLEANUP_BATCH_ROWS,
       ),
     );
@@ -1377,6 +1392,85 @@ export class DashboardDB {
             ? 'done-compacted'
             : 'done',
     };
+  }
+
+  /**
+   * Preserve the pre-migration cap API for third-party `insertLog` callers.
+   * The daemon no longer uses this loop; its immutable historical migration is
+   * deliberately separate in `runLegacyRoutineLogCleanupBatch`.
+   * @deprecated Routine daemon logs are no longer persisted.
+   */
+  pruneLogVolumeBatch(): LogVolumePruneResult {
+    const overflowCutoff = this.routineLogOverflowCutoff();
+    if (overflowCutoff === null) {
+      const reclaim = this.reclaimFreePagesIfNeeded(false);
+      if (!reclaim.reclaimPending) this.truncateWal('log-volume prune');
+      return {
+        deleted: 0,
+        status: reclaim.reclaimPending
+          ? 'reclaim-pending'
+          : reclaim.compacted
+            ? 'done-compacted'
+            : 'done',
+      };
+    }
+
+    const deleted = this.db.prepare(`
+      DELETE FROM logs
+      WHERE id IN (
+        SELECT id
+        FROM logs
+        WHERE id <= @cutoff
+          AND level NOT IN ('warn', 'error')
+        ORDER BY id ASC
+        LIMIT @batchRows
+      )
+    `).run({
+      cutoff: overflowCutoff,
+      batchRows: this.legacyRoutineLogCleanupBatchRows,
+    }).changes;
+    const hasMore = deleted === this.legacyRoutineLogCleanupBatchRows;
+    const reclaim = hasMore
+      ? { compacted: false, reclaimPending: false }
+      : this.reclaimFreePagesIfNeeded(deleted > LEGACY_ROUTINE_LOG_VACUUM_DELETE_THRESHOLD);
+    if (!hasMore && !reclaim.reclaimPending) this.truncateWal('log-volume prune');
+    return {
+      deleted,
+      status: hasMore
+        ? 'more'
+        : reclaim.reclaimPending
+          ? 'reclaim-pending'
+          : reclaim.compacted
+            ? 'done-compacted'
+            : 'done',
+    };
+  }
+
+  private routineLogOverflowCutoff(): number | null {
+    const row = this.db.prepare(`
+      SELECT id
+      FROM logs
+      WHERE level NOT IN ('warn', 'error')
+      ORDER BY id DESC
+      LIMIT 1 OFFSET ?
+    `).get(this.routineLogRowCap) as { id: number } | undefined;
+    return row?.id ?? null;
+  }
+
+  private enforceRoutineLogRowCap(): void {
+    const cutoff = this.routineLogOverflowCutoff();
+    if (cutoff === null) return;
+    this.db.prepare(`
+      DELETE FROM logs
+      WHERE id IN (
+        SELECT id
+        FROM logs
+        WHERE id <= ?
+          AND level NOT IN ('warn', 'error')
+        ORDER BY id ASC
+        LIMIT ?
+      )
+    `).run(cutoff, this.legacyRoutineLogCleanupBatchRows);
   }
 
   private reclaimFreePagesIfNeeded(force: boolean): {
@@ -3049,6 +3143,14 @@ export class DashboardDB {
       module: entry.module,
       message: entry.message,
     });
+    if (entry.level !== 'warn' && entry.level !== 'error') {
+      this.routineLogWritesSinceGuard += 1;
+      const guardInterval = Math.min(1_000, Math.max(1, this.routineLogRowCap));
+      if (this.routineLogWritesSinceGuard >= guardInterval) {
+        this.routineLogWritesSinceGuard = 0;
+        this.enforceRoutineLogRowCap();
+      }
+    }
   }
 
   /**

@@ -168,6 +168,26 @@ describe('OtlpLogWorker — OTLP/HTTP log export', () => {
     expect(bodies).not.toContain('noisy');
   });
 
+  it.each(['warn', 'error'] as const)(
+    'treats an unknown runtime level as info at the %s threshold',
+    async (minLevel) => {
+      const srv = await startServer(() => ({ status: 200 }));
+      servers.push(srv.close);
+      const w = new OtlpLogWorker(baseOpts(srv.url, { minLevel }));
+      workers.push(w);
+      w.start();
+
+      w.push(rec({ level: 'notice' as LogRecord['level'], message: 'legacy-custom-level' }));
+      w.push(rec({ level: minLevel, message: `exported-${minLevel}` }));
+      await waitFor(() => srv.received.length >= 1);
+
+      const records = srv.received[0].body.resourceLogs[0].scopeLogs[0].logRecords;
+      expect(records.map((record: any) => record.body.stringValue)).toEqual([
+        `exported-${minLevel}`,
+      ]);
+    },
+  );
+
   it('sends Authorization bearer header when a token is configured', async () => {
     const srv = await startServer(() => ({ status: 200 }));
     servers.push(srv.close);

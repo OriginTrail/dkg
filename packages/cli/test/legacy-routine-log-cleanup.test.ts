@@ -5,7 +5,7 @@ import { startLegacyRoutineLogCleanup } from '../src/daemon/legacy-routine-log-c
 describe('startLegacyRoutineLogCleanup', () => {
   afterEach(() => vi.useRealTimers());
 
-  it('starts after the boot delay, catches up quickly, logs compaction, and stops cleanly', () => {
+  it('starts after the boot delay, catches up quickly, and ends after compaction', () => {
     vi.useFakeTimers();
     const results: LegacyRoutineLogCleanupResult[] = [
       { deleted: 25_000, status: 'more' },
@@ -44,6 +44,27 @@ describe('startLegacyRoutineLogCleanup', () => {
     vi.advanceTimersByTime(5_000);
     expect(calls).toHaveLength(2);
     handle.stop();
+  });
+
+  it('stop cancels a pending catch-up batch', () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const handle = startLegacyRoutineLogCleanup({
+      dashDb: {
+        runLegacyRoutineLogCleanupBatch: () => {
+          calls += 1;
+          return { deleted: 10, status: 'more' };
+        },
+      },
+      log: () => {},
+      intervals: { initialDelayMs: 10, catchupIntervalMs: 20 },
+    });
+
+    vi.advanceTimersByTime(10);
+    expect(calls).toBe(1);
+    handle.stop();
+    vi.advanceTimersByTime(1_000);
+    expect(calls).toBe(1);
   });
 
   it('retries reclaim-pending and thrown maintenance steps on the retry cadence', () => {
