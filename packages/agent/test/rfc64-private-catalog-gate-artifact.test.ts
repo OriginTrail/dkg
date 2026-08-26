@@ -178,6 +178,8 @@ describe('RFC-64 private release gate process and denial evidence', () => {
         { graphCounts: exactGraphCounts },
         expected,
       )).toBe(true);
+      // Identity substitution, multiplicity, and omission are independent
+      // failures even when every surviving projection digest is authentic.
       expect(hasExactPrivateCatalogMemoryContents({
         graphCounts: exactGraphCounts.map((entry, index) => index === 1
           ? { ...entry, kaNumber: 43 }
