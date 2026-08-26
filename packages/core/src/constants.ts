@@ -584,8 +584,12 @@ export function contextGraphCatalogUri(contextGraphId: string): string {
   return `did:dkg:context-graph:${contextGraphId}/_catalog`;
 }
 
-export function validateContextGraphId(id: string): { valid: boolean; reason?: string } {
-  if (!id || id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
+export function validateContextGraphId(id: unknown): { valid: boolean; reason?: string } {
+  // Accepts `unknown` so route handlers can pass JSON-derived values straight
+  // through: the type boundary is part of the ONE canonical policy rather than
+  // living in per-caller adapters that each restate it.
+  if (typeof id !== 'string') return { valid: false, reason: 'Context graph ID must be a string' };
+  if (id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
   if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };
   if (!/^[\w:/.@\-]+$/.test(id)) return { valid: false, reason: 'Context graph ID contains disallowed characters (allowed: alphanumeric, _, :, /, ., @, -)' };
   // The character class above permits both `/` and `.`, because legitimate IDs

@@ -165,6 +165,23 @@ describe('decryptKeystore error handling', () => {
     await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(/Decryption failed/);
   }, 120000);
 
+  it.each([
+    ['r', 8.5, /r must be an integer/],
+    ['r', Number.NaN, /r must be an integer/],
+    ['p', 1.5, /p must be an integer/],
+    ['p', Number.POSITIVE_INFINITY, /p must be an integer/],
+  ] as const)(
+    'rejects non-integer numeric kdf %s=%s at the policy boundary',
+    async (field, value, message) => {
+      // JSON admits fractional numbers; 8.5 and 1.5 satisfy every >=/<= bound
+      // and previously reached OpenSSL, which rejects them with an opaque
+      // ERR_OUT_OF_RANGE instead of a diagnosable keystore error.
+      const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
+      ks.crypto.kdfparams[field] = value;
+      await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(message);
+    },
+  );
+
   it('pins the intended ceilings as literals, independent of the implementation', () => {
     // Every other assertion reads the policy object; if the object itself
     // drifted (512 MiB quietly becoming 512 GiB), those would follow it.

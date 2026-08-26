@@ -114,6 +114,21 @@ export const SCRYPT_KDF_POLICY: ScryptKdfPolicy = Object.freeze({
         `Refusing to load keystore: scrypt N must be a power of two (got n=${n}).`,
       );
     }
+    // JSON admits fractional numbers, and `8.5` passes every >=/<= comparison
+    // below while OpenSSL rejects it with an opaque ERR_OUT_OF_RANGE. Integer
+    // checks here keep the whole contract at this boundary: nothing reaches
+    // scrypt that can only fail inside it. (`n` is covered by the power-of-two
+    // check above, which implies a safe integer.)
+    if (!Number.isSafeInteger(r)) {
+      throw new Error(
+        `Refusing to load keystore: scrypt r must be an integer (got r=${r}).`,
+      );
+    }
+    if (!Number.isSafeInteger(p)) {
+      throw new Error(
+        `Refusing to load keystore: scrypt p must be an integer (got p=${p}).`,
+      );
+    }
     const workingSetBytes = SCRYPT_KDF_POLICY.workingSetBytes(n, r);
     if (!Number.isSafeInteger(workingSetBytes) || workingSetBytes > SCRYPT_KDF_POLICY.maxWorkingSetBytes) {
       throw new Error(

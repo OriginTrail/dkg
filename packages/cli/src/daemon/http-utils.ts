@@ -1620,7 +1620,6 @@ export function readBodyBuffer(
 
 // ─── CORS / rate-limit / validation helpers ───────────────────────────
 
-
 export function buildCorsAllowlist(
   config: DkgConfig,
   boundPort: number,
@@ -1926,21 +1925,6 @@ export function isLoopbackRateLimitExemptPath(pathname: string): boolean {
 
 export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: string): boolean {
   return isLoopbackClientIp(ip) && isLoopbackRateLimitExemptPath(pathname);
-}
-
-/**
- * Boolean adapter over the single context-graph ID policy in
- * `@origintrail-official/dkg-core`. This deliberately holds no rules of its own:
- * it previously carried a second copy (length limit, character whitelist and the
- * segment-aware traversal check described in CLI-16), which drifted from the
- * core validator — core was missing the segment check while 26 route call sites
- * reached it via `validateRequiredContextGraphId`. Keeping the boolean shape for
- * existing callers, but `validateContextGraphId` now owns the policy, so a
- * future change to the character set or the length cap has exactly one home.
- */
-export function isValidContextGraphId(id: string): boolean {
-  if (typeof id !== "string") return false;
-  return validateContextGraphId(id).valid;
 }
 
 /**
