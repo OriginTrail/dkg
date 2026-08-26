@@ -115,7 +115,7 @@ export interface PoolNode {
     getConnections?: () => ReadonlyArray<PoolReusableConnection>;
     handle: (
       protocolId: string,
-      handler: (stream: Stream, connection: { remotePeer: { toString: () => string } }) => void,
+      handler: (stream: Stream, connection: { remotePeer: PooledRemotePeerSource }) => void,
       opts?: { runOnLimitedConnection?: boolean },
     ) => void;
     unhandle: (protocolId: string) => void;
@@ -146,18 +146,49 @@ interface PoolReusableConnection {
  * both wire variants (Codex PR #560 round-3).
  */
 /**
- * Minimal structural contract for the remote peer on the pooled inbound path —
- * the shape libp2p's `connection.remotePeer` always satisfies and the smallest
- * thing tests must provide. Production objects carry more (`toMultihash()`,
- * `equals()`, ...) and pass through untouched.
+ * Canonical peer identity handed to pooled application handlers — the exact
+ * `{ toString, toBytes }` shape the one-shot path provides. Normalized ONCE
+ * from libp2p's `connection.remotePeer` at stream accept
+ * (`normalizePooledPeerId`); nothing downstream re-discovers the shape with
+ * casts, and the pre-read gate reads the same identity string the handler and
+ * the full admission check see.
  */
-export interface PooledRemotePeer {
+export interface PooledPeerId {
   toString(): string;
+  toBytes(): Uint8Array;
+}
+
+/**
+ * What libp2p actually hands us at the transport boundary. Production
+ * `PeerId`s carry `toMultihash()`; minimal test doubles may carry only
+ * `toString()` — normalization preserves that tolerance by deferring the
+ * capability error to first `toBytes()` use, exactly as the previous
+ * router-side wrap did.
+ */
+export interface PooledRemotePeerSource {
+  toString(): string;
+  toMultihash?: () => { bytes: Uint8Array };
+  toBytes?: () => Uint8Array;
+}
+
+export function normalizePooledPeerId(remote: PooledRemotePeerSource): PooledPeerId {
+  return {
+    toString: () => remote.toString(),
+    toBytes: () => {
+      if (typeof remote.toMultihash === 'function') {
+        return remote.toMultihash().bytes;
+      }
+      if (typeof remote.toBytes === 'function') {
+        return remote.toBytes();
+      }
+      throw new Error('peerId.toBytes not available on pooled handler');
+    },
+  };
 }
 
 export type PooledStreamHandler = (
   requestData: Uint8Array,
-  peerId: PooledRemotePeer,
+  peerId: PooledPeerId,
   options?: { signal?: AbortSignal },
 ) => Promise<Uint8Array>;
 
@@ -568,7 +599,7 @@ export class MessageStreamPool {
         // on the one-shot path. Codex PR #560 round-3 caught this:
         // previously only `.toString()` was threaded, which meant
         // pooled traffic broke handlers that worked on one-shot.
-        this.handleInboundStream(stream, connection.remotePeer).catch((err) => {
+        this.handleInboundStream(stream, normalizePooledPeerId(connection.remotePeer)).catch((err) => {
           // eslint-disable-next-line no-console
           console.error(
             `[MessageStreamPool] inbound stream error on ${this.protocolId}:`,
@@ -1060,7 +1091,7 @@ export class MessageStreamPool {
     }
   }
 
-  private async handleInboundStream(stream: Stream, remotePeer: PooledRemotePeer): Promise<void> {
+  private async handleInboundStream(stream: Stream, remotePeer: PooledPeerId): Promise<void> {
     const handler = this.inboundHandler;
     if (!handler) {
       // No application handler registered yet — reject the stream
@@ -1078,8 +1109,8 @@ export class MessageStreamPool {
     // accepted stream; peers classified mid-stream are still refused by the
     // per-REQUEST admission check in the application handler below.
     if (this.rejectInboundStream) {
-      // Derived exactly once, from the typed boundary — the same string the
-      // full admission check sees later for this stream's requests.
+      // The same normalized identity the application handler and the full
+      // admission check receive for this stream's requests.
       const remotePeerId = remotePeer.toString();
       let rejected: boolean;
       try {

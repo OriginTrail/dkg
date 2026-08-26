@@ -427,40 +427,18 @@ export class ProtocolRouter {
       if (!handler) {
         throw new Error(`no application handler for ${logicalProtocolId}`);
       }
-      // Wrap into the exact same `{ toString, toBytes }` shape the
-      // one-shot register() path passes to application handlers
-      // (see `register()` ~30 lines below). The pool now threads
-      // the REAL `connection.remotePeer` through, so on production
-      // traffic this exposes `.toMultihash().bytes` just like
-      // one-shot. Tests can pass minimal peer-like objects with
-      // only `.toString()` and the wrap still works (toBytes()
-      // surfaces a typed error rather than silently corrupting).
-      // Codex PR #560 round-3.
-      const remote = peerId as {
-        toString: () => string;
-        toMultihash?: () => { bytes: Uint8Array };
-        toBytes?: () => Uint8Array;
-      };
-      const wrappedPeerId = {
-        toString: () => remote.toString(),
-        toBytes: () => {
-          if (typeof remote.toMultihash === 'function') {
-            return remote.toMultihash().bytes;
-          }
-          if (typeof remote.toBytes === 'function') {
-            return remote.toBytes();
-          }
-          throw new Error('peerId.toBytes not available on pooled handler');
-        },
-      };
+      // `peerId` is already the canonical `{ toString, toBytes }` model — the
+      // pool normalizes libp2p's `connection.remotePeer` exactly once at
+      // stream accept (`normalizePooledPeerId`), the same shape the one-shot
+      // register() path provides. No shape re-discovery here.
       const handlerSignalScope = composeAbortSignalsScoped(options?.signal, this.node.stopSignal);
       const handlerSignal = handlerSignalScope.signal;
       try {
         if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
-        await this.requirePeerAccepted(remote.toString(), logicalProtocolId, 'inbound', {
+        await this.requirePeerAccepted(peerId.toString(), logicalProtocolId, 'inbound', {
           signal: handlerSignal,
         });
-        const responseData = await handler(requestData, wrappedPeerId, { signal: handlerSignal });
+        const responseData = await handler(requestData, peerId, { signal: handlerSignal });
         if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
         return responseData;
       } finally {
