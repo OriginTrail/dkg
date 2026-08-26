@@ -472,11 +472,9 @@ Use this decision order:
 5. If the user asks which saved queries exist, call `dkg_query_catalog_list`
    with the selected `context_graph_id` and present the useful candidates.
 6. If the user explicitly asks to run a saved query, call
-   `dkg_query_catalog_run` with the selected `context_graph_id` and the saved
-   query slug or exact display name. Include its declared runtime values in
-   `parameters`. If required values are unknown, ask for them; never substitute
-   example identifiers. If the name is ambiguous, list first and ask/choose by
-   slug.
+   `dkg_query_catalog_run` with the selected `context_graph_id`, saved-query slug
+   or exact name, and declared runtime `parameters`. Ask for missing
+   required values; never use examples. If ambiguous, list first and ask/choose.
 7. If the user asks to save the current/query/SPARQL, call
    `dkg_query_catalog_save` with the selected `context_graph_id`, a concise
    `name`, optional `description`, and the exact read-only SPARQL text. If the
@@ -491,13 +489,10 @@ Use this decision order:
 OpenClaw tool path:
 
 - `dkg_query_catalog_list` input: `{ "context_graph_id": "<contextGraphId>" }`
-- `dkg_query_catalog_run` input:
-  `{ "context_graph_id": "<contextGraphId>", "query": "<slug-or-exact-name>", "parameters"?: { "<name>": "<runtime-value>" } }`
-- `dkg_query_catalog_save` input:
-  `{ "context_graph_id": "<contextGraphId>", "name": "<display-name>", "sparql": "<read-only-sparql>", "description"?: "...", "result_column"?: "uri" }`
+- `dkg_query_catalog_run` input: `{ "context_graph_id": "<contextGraphId>", "query": "<slug-or-exact-name>", "parameters"?: { "<name>": "<runtime-value>" } }`
+- `dkg_query_catalog_save` input: `{ "context_graph_id": "<contextGraphId>", "name": "<display-name>", "sparql": "<read-only-sparql>", "description"?: "...", "result_column"?: "uri" }`
   Optional advanced fields: `sub_graph` (defaults to `__context_graph`),
-  `catalog_slug`, `catalog_name`, `catalog_description`, `parameters`, and
-  `execution_view`.
+  `catalog_slug`, `catalog_name`, `catalog_description`, `parameters`, `execution_view`.
 
 CLI fallback:
 
@@ -508,18 +503,15 @@ dkg query-catalog run <context-graph> <query-slug-or-exact-name> --param name=va
 
 HTTP fallback:
 
-- `POST /api/profile/query-catalog/read`
-  Body: `{ "contextGraphId": "<contextGraphId>" }`
-  Returns bindings with `q`, `subGraph`, `catalog`, `name`, `description`,
-  `sparql`, `queryParameters`, `executionView`, `rank`, `catalogName`,
-  `catalogDescription`, and `catalogRank`.
-- `POST /api/profile/query-catalog/write`
-  Body: `{ "contextGraphId": "<contextGraphId>", "mode": "upsert", "quads": [...] }`
-  The daemon stores these triples in
-  `did:dkg:context-graph:<contextGraphId>/meta/query-catalog` regardless of
-  the incoming quad `graph` field. `upsert` atomically replaces each complete
-  query/catalog subject and preserves unrelated subjects, making reinjection
-  idempotent. Omitting `mode` retains the legacy append-only `insert` behavior.
+- `POST /api/profile/query-catalog/read`: body `{ "contextGraphId": "<contextGraphId>" }`;
+  returns saved-query and
+  catalog bindings, including `queryParameters` and `executionView`.
+- `POST /api/profile/query-catalog/write`: body
+  `{ "contextGraphId": "<contextGraphId>", "mode": "upsert", "quads": [...] }`.
+  Stores triples in `did:dkg:context-graph:<contextGraphId>/meta/query-catalog`
+  regardless of incoming `graph`. `upsert` atomically replaces each complete
+  query/catalog subject, preserves unrelated subjects, and is idempotent;
+  omitting `mode` retains legacy append-only `insert` behavior.
   Prefer `dkg_query_catalog_save` for normal user-requested saves.
 
 Profile RDF shape for writes:
@@ -529,13 +521,11 @@ Profile RDF shape for writes:
 @prefix schema: <http://schema.org/> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-
 <urn:dkg:profile:PROJECT:catalog:CATALOG> rdf:type prof:QueryCatalog ;
   prof:forSubGraph "SUBGRAPH" ;
   prof:displayName "Catalog name" ;
   schema:description "Catalog description" ;
   prof:rank "50"^^xsd:integer .
-
 <urn:dkg:profile:PROJECT:query:QUERY> rdf:type prof:SavedQuery ;
   prof:forSubGraph "SUBGRAPH" ;
   prof:inCatalog <urn:dkg:profile:PROJECT:catalog:CATALOG> ;
@@ -550,11 +540,10 @@ Profile RDF shape for writes:
 
 When composing saved SPARQL, keep it read-only (`SELECT`, `ASK`, `CONSTRUCT`,
 or `DESCRIBE`). Prefer returning a stable `?uri` column when the result should
-feed entity-list UI surfaces. A `{{literal:name}}` placeholder represents one complete
-SPARQL term and must have a matching `prof:queryParameters` definition. Runtime
-renderers escape `string` values and validate `integer`, `number`, `boolean`,
-and `iri` values before execution; do not quote placeholders inside the SPARQL
-template and do not perform raw replacement yourself.
+feed entity-list UI surfaces. A `{{literal:name}}` placeholder is one complete
+SPARQL term and must match `prof:queryParameters`. Renderers escape `string`
+values and validate `integer`, `number`, `boolean`, and `iri`; do not quote
+placeholders or interpolate parameter values yourself.
 
 ### Operational constraints
 
