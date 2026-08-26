@@ -1170,11 +1170,6 @@ describe('SparqlHttpStore (test server)', () => {
   });
 
   it('advances write generation when an atomic replace has an indeterminate remote failure', async () => {
-    const failedStore = new SparqlHttpStore({
-      queryEndpoint: queryUrl,
-      updateEndpoint: updateUrl.replace('/update', '/error-update'),
-      atomicUpdates: true,
-    });
     const graph = 'http://ex.org/possibly-committed';
     const metaGraph = 'http://ex.org/possibly-committed/meta';
     const subject = 'http://ex.org/job';
@@ -1184,28 +1179,51 @@ describe('SparqlHttpStore (test server)', () => {
       object: '"new"',
       graph,
     }];
-    const attempts: Array<() => Promise<void>> = [
-      () => failedStore.replaceGraph(graph, replacement),
-      () => failedStore.replaceGraphAndSubject(
-        graph,
-        replacement,
-        metaGraph,
-        subject,
-        [{ ...replacement[0], graph: metaGraph }],
-      ),
-      () => failedStore.replaceSubject(graph, subject, replacement),
+    const cases: Array<{
+      affected: string[];
+      attempt(store: SparqlHttpStore): Promise<void>;
+    }> = [
+      {
+        affected: [graph],
+        attempt: (store) => store.replaceGraph(graph, replacement),
+      },
+      {
+        affected: [graph, metaGraph],
+        attempt: (store) => store.replaceGraphAndSubject(
+          graph,
+          replacement,
+          metaGraph,
+          subject,
+          [{ ...replacement[0], graph: metaGraph }],
+        ),
+      },
+      {
+        affected: [graph],
+        attempt: (store) => store.replaceSubject(graph, subject, replacement),
+      },
     ];
 
-    for (const attempt of attempts) {
-      const before = failedStore.getWriteGen('');
-      await expect(attempt()).rejects.toThrow();
-      const after = failedStore.getWriteGen('');
-      expect(after).toBeGreaterThan(before);
-      expect(failedStore.getWriteGen('')).toBeGreaterThan(after);
+    for (const testCase of cases) {
+      // A fresh store per method proves each mutation independently marks all
+      // of its own scopes; an earlier indeterminate failure cannot make a later
+      // assertion vacuous.
+      const failedStore = new SparqlHttpStore({
+        queryEndpoint: queryUrl,
+        updateEndpoint: updateUrl.replace('/update', '/error-update'),
+        atomicUpdates: true,
+      });
+      const before = failedStore.getWriteRevision('');
+      await expect(testCase.attempt(failedStore)).rejects.toThrow();
+      for (const scope of testCase.affected) {
+        const after = failedStore.getWriteRevision(scope);
+        expect(after.generation).toBeGreaterThan(before.generation);
+        expect(after.stable).toBe(false);
+        expect(failedStore.getWriteRevision(scope)).toEqual(after);
+      }
     }
   });
 
-  it('advances generation at both dispatch and successful remote settlement', async () => {
+  it('brackets an insert at dispatch and successful remote settlement', async () => {
     const originalFetch = globalThis.fetch;
     let releaseResponse!: () => void;
     let markDispatched!: () => void;
@@ -1224,21 +1242,51 @@ describe('SparqlHttpStore (test server)', () => {
         atomicUpdates: true,
       });
       const graph = 'http://ex.org/pending-commit';
-      const replacement = [{
+      const quads = [{
         subject: 'http://ex.org/s',
         predicate: 'http://ex.org/p',
         object: '"new"',
         graph,
       }];
-      const before = pendingStore.getWriteGen('');
-      const replacing = pendingStore.replaceSubject(graph, replacement[0].subject, replacement);
+      const before = pendingStore.getWriteRevision(graph);
+      const inserting = pendingStore.insert(quads);
       await dispatched;
-      const whilePending = pendingStore.getWriteGen('');
-      expect(whilePending).toBeGreaterThan(before);
+      const whilePending = pendingStore.getWriteRevision(graph);
+      expect(whilePending.generation).toBeGreaterThan(before.generation);
+      expect(whilePending.stable).toBe(false);
+      expect(pendingStore.getWriteRevision(graph)).toEqual(whilePending);
 
       releaseResponse();
-      await replacing;
-      expect(pendingStore.getWriteGen('')).toBeGreaterThan(whilePending);
+      await inserting;
+      const settled = pendingStore.getWriteRevision(graph);
+      expect(settled.generation).toBeGreaterThan(whilePending.generation);
+      expect(settled.stable).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('keeps a write stable when managed recovery rejects it before dispatch', async () => {
+    let fetchCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      const graph = 'http://ex.org/not-started';
+      const recoveringStore = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        updateEndpoint: 'http://managed-oxigraph.test/update',
+        managedOxigraph: true,
+        atomicUpdates: true,
+        getRecoveryState: () => ({ recovering: true, generation: 1 }),
+      });
+      const before = recoveringStore.getWriteRevision(graph);
+      await expect(recoveringStore.replaceSubject(graph, 'http://ex.org/s', [])).rejects
+        .toMatchObject({ outcome: 'not_started' });
+      expect(recoveringStore.getWriteRevision(graph)).toEqual(before);
+      expect(fetchCalls).toBe(0);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1366,6 +1414,68 @@ describe('SparqlHttpStore (test server)', () => {
         }));
 
         await expect(second).resolves.toEqual(['http://ex.org/g1']);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('invalidates a managed listGraphs refresh at mutation dispatch and settlement', async () => {
+      const originalFetch = globalThis.fetch;
+      let visibleGraphs = ['http://ex.org/old'];
+      let queryCalls = 0;
+      let markUpdateDispatched!: () => void;
+      let resolveUpdate!: () => void;
+      const updateDispatched = new Promise<void>((resolve) => {
+        markUpdateDispatched = resolve;
+      });
+      const updateResponse = new Promise<Response>((resolve) => {
+        resolveUpdate = () => resolve(new Response('', { status: 200 }));
+      });
+      globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+        const body = String(init?.body ?? '');
+        if (body.includes('GRAPH ?g {}')) {
+          queryCalls += 1;
+          return new Response(JSON.stringify({
+            head: { vars: ['g'] },
+            results: {
+              bindings: visibleGraphs.map((value) => ({ g: { type: 'uri', value } })),
+            },
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/sparql-results+json' },
+          });
+        }
+        markUpdateDispatched();
+        return updateResponse;
+      }) as typeof fetch;
+      try {
+        const managedStore = new SparqlHttpStore({
+          queryEndpoint: 'http://managed.test/query',
+          updateEndpoint: 'http://managed.test/update',
+          managedByDkg: true,
+        });
+        await expect(managedStore.listGraphs()).resolves.toEqual(['http://ex.org/old']);
+        expect(queryCalls).toBe(1);
+
+        const inserting = managedStore.insert([{
+          subject: 'http://ex.org/s',
+          predicate: 'http://ex.org/p',
+          object: '"v"',
+          graph: 'http://ex.org/new',
+        }]);
+        await updateDispatched;
+
+        // The dispatch invalidates the pre-write cache. This refresh still
+        // sees the old backend state and must be invalidated again at settle.
+        await expect(managedStore.listGraphs()).resolves.toEqual(['http://ex.org/old']);
+        expect(queryCalls).toBe(2);
+
+        visibleGraphs = ['http://ex.org/new'];
+        resolveUpdate();
+        await inserting;
+
+        await expect(managedStore.listGraphs()).resolves.toEqual(['http://ex.org/new']);
+        expect(queryCalls).toBe(3);
       } finally {
         globalThis.fetch = originalFetch;
       }

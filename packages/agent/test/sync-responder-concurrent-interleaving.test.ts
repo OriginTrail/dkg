@@ -1485,12 +1485,13 @@ describe('sync responder pagination interleaving', () => {
 
   it('does not retain a graph list read while a remote mutation is pending', async () => {
     let generation = 0;
+    let stable = true;
     let calls = 0;
     let graphs = ['urn:graph:b', 'urn:graph:a', 'urn:graph:b'];
     const store = {
-      getWriteGen: (prefix: string) => {
+      getWriteRevision: (prefix: string) => {
         expect(prefix).toBe('');
-        return generation;
+        return { generation, stable };
       },
       listGraphs: async () => {
         calls++;
@@ -1512,6 +1513,7 @@ describe('sync responder pagination interleaving', () => {
     // Dispatch: the endpoint has not committed yet, so a refresh can still
     // observe and memoize the old graph set at this intermediate generation.
     generation++;
+    stable = false;
     await expect(memo.get({
       refresh: true,
       refreshGeneration: 'pending-mutation',
@@ -1522,6 +1524,7 @@ describe('sync responder pagination interleaving', () => {
     // graph list that was read while the mutation was in flight.
     graphs = ['urn:graph:c', 'urn:graph:a'];
     generation++;
+    stable = true;
     await expect(memo.get({
       refresh: true,
       refreshGeneration: 'session-3',
@@ -1535,7 +1538,7 @@ describe('sync responder pagination interleaving', () => {
     let generation = 0;
     let calls = 0;
     const store = {
-      getWriteGen: () => generation,
+      getWriteRevision: () => ({ generation, stable: true }),
       listGraphs: async () => {
         calls++;
         return calls === 1 ? oldGraphs.promise : newGraphs.promise;
@@ -1558,7 +1561,7 @@ describe('sync responder pagination interleaving', () => {
   it('retains the TTL backstop for writers outside the tracked store process', async () => {
     let calls = 0;
     const store = {
-      getWriteGen: () => 0,
+      getWriteRevision: () => ({ generation: 0, stable: true }),
       listGraphs: async () => {
         calls++;
         return ['urn:graph:a'];

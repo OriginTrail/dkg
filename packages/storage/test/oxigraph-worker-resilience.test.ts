@@ -82,6 +82,41 @@ function abortDuringListenerRegistration(message: string): AbortSignal {
 const BUSY_QUERY = 'ASK { GRAPH <urn:test:g> { ?s ?p ?o } }';
 
 describe('OxigraphWorkerStore resilience', () => {
+  it('keeps worker mutation revisions unstable until the worker reply settles', async () => {
+    const store = makeStore({ operationTimeoutMs: 60_000 });
+    const internals = store as unknown as {
+      call(method: string, ...args: unknown[]): Promise<unknown>;
+    };
+    const originalCall = internals.call;
+    let resolveCall!: () => void;
+    const pendingCall = new Promise<void>((resolve) => { resolveCall = resolve; });
+    internals.call = () => pendingCall;
+    try {
+      const graph = 'urn:test:pending-worker-write';
+      const before = store.getWriteRevision(graph);
+      const inserting = store.insert([{
+        subject: 'urn:test:s',
+        predicate: 'http://schema.org/name',
+        object: '"value"',
+        graph,
+      }]);
+
+      const pending = store.getWriteRevision(graph);
+      expect(pending.generation).toBeGreaterThan(before.generation);
+      expect(pending.stable).toBe(false);
+      expect(store.getWriteRevision(graph)).toEqual(pending);
+
+      resolveCall();
+      await inserting;
+      const settled = store.getWriteRevision(graph);
+      expect(settled.generation).toBeGreaterThan(pending.generation);
+      expect(settled.stable).toBe(true);
+    } finally {
+      internals.call = originalCall;
+      await closeQuietly(store);
+    }
+  });
+
   it('rejects a READ queued behind a busy worker after operationTimeoutMs', async () => {
     // 50k inserts take hundreds of ms; a 5ms bound on the queued read must
     // reject well before the worker frees up.

@@ -7,12 +7,13 @@
  * scan — otherwise a KA whose SWM arrives later (gossip receive, publish
  * share, active fetch) would finalize late or never. Adapters bump this
  * counter at exactly the choke points that already invalidate the managed
- * `listGraphs()` cache (every local mutation), so "generation unchanged"
- * is a proof of "no local write since".
+ * `listGraphs()` cache (every local mutation). A stable, unchanged revision
+ * is a proof of "no local write since"; active or indeterminate remote writes
+ * make revisions unstable and therefore ineligible for cache reuse.
  *
  * Consumers recover the capability with {@link asGraphWriteGenSource} (the
  * `asChangelogReader` pattern — no `instanceof`/decorator-order assumption)
- * and compare {@link GraphWriteGenSource.getWriteGen} snapshots. Every
+ * and compare {@link GraphWriteGenSource.getWriteRevision} snapshots. Every
  * imprecision is fail-open: writes whose graph scope is unknowable at the
  * call site (raw SPARQL UPDATE, pattern deletes without a graph) bump a
  * global floor that invalidates every prefix, and LRU eviction folds the
@@ -25,9 +26,24 @@ export interface GraphWriteGenSource {
   /**
    * Monotonic generation for "any local write that may have touched a graph
    * whose URI starts with `graphPrefix`". Two equal snapshots bracket a
-   * window with no such write; the value has no meaning beyond equality.
+   * window with no such write only when both accompanying revisions are
+   * stable; the value has no meaning beyond equality.
+   * @deprecated Use `getWriteRevision`; a generation alone cannot represent
+   * an active or indeterminate remote write.
    */
   getWriteGen(graphPrefix: string): number;
+  /** The same observational generation plus whether it is safe to memoize. */
+  getWriteRevision(graphPrefix: string): GraphWriteRevision;
+}
+
+export interface GraphWriteRevision {
+  generation: number;
+  stable: boolean;
+}
+
+export interface GraphWriteLifecycle {
+  settle(): void;
+  indeterminate(): void;
 }
 
 /**
@@ -50,6 +66,8 @@ export class GraphWriteGenTracker implements GraphWriteGenSource {
    */
   private readonly indeterminateGraphs = new Set<string>();
   private indeterminateGlobal = false;
+  private readonly activeGraphs = new Map<string, number>();
+  private activeGlobal = 0;
 
   /** Record a write scoped to known graph URIs (`''` = the default graph). */
   recordGraphWrites(graphs: Iterable<string>): void {
@@ -72,6 +90,40 @@ export class GraphWriteGenTracker implements GraphWriteGenSource {
     this.globalFloor = ++this.counter;
   }
 
+  beginGraphWrites(graphs: Iterable<string>): GraphWriteLifecycle {
+    const affected = [...new Set(graphs)];
+    this.recordGraphWrites(affected);
+    for (const graph of affected) {
+      this.activeGraphs.set(graph, (this.activeGraphs.get(graph) ?? 0) + 1);
+    }
+    return this.lifecycle(
+      () => {
+        this.releaseActiveGraphs(affected);
+        this.recordGraphWrites(affected);
+      },
+      () => {
+        this.releaseActiveGraphs(affected);
+        this.recordIndeterminateGraphWrites(affected);
+      },
+    );
+  }
+
+  beginUnscopedWrite(): GraphWriteLifecycle {
+    this.recordUnscopedWrite();
+    this.activeGlobal += 1;
+    return this.lifecycle(
+      () => {
+        this.activeGlobal -= 1;
+        this.recordUnscopedWrite();
+      },
+      () => {
+        this.activeGlobal -= 1;
+        this.indeterminateGlobal = true;
+        this.recordUnscopedWrite();
+      },
+    );
+  }
+
   /**
    * Record a remotely dispatched write whose final state is unknown. Reads of
    * an affected generation never stabilize, deliberately disabling generation-
@@ -90,28 +142,62 @@ export class GraphWriteGenTracker implements GraphWriteGenSource {
   }
 
   getWriteGen(graphPrefix: string): number {
-    let indeterminate = this.indeterminateGlobal
-      || (graphPrefix === '' && this.indeterminateGraphs.size > 0);
-    if (!indeterminate) {
-      for (const graph of this.indeterminateGraphs) {
-        if (graph.startsWith(graphPrefix)) {
-          indeterminate = true;
-          break;
-        }
-      }
-    }
-    if (indeterminate) {
-      return ++this.counter;
-    }
+    return this.getWriteRevision(graphPrefix).generation;
+  }
+
+  getWriteRevision(graphPrefix: string): GraphWriteRevision {
     // Every graph URI starts with the empty prefix, so the tracker counter is
     // the exact answer without scanning the bounded per-graph LRU. Responder
     // graph-list caches use this global generation on every page/session.
-    if (graphPrefix === '') return this.counter;
+    if (graphPrefix === '') {
+      return {
+        generation: this.counter,
+        stable: !this.indeterminateGlobal
+          && this.indeterminateGraphs.size === 0
+          && this.activeGlobal === 0
+          && this.activeGraphs.size === 0,
+      };
+    }
     let gen = this.globalFloor;
     for (const [graph, graphGen] of this.byGraph) {
       if (graphGen > gen && graph.startsWith(graphPrefix)) gen = graphGen;
     }
-    return gen;
+    return { generation: gen, stable: !this.isPrefixUnstable(graphPrefix) };
+  }
+
+  private isPrefixUnstable(graphPrefix: string): boolean {
+    if (this.indeterminateGlobal || this.activeGlobal > 0) return true;
+    for (const graph of this.indeterminateGraphs) {
+      if (graph.startsWith(graphPrefix)) return true;
+    }
+    for (const graph of this.activeGraphs.keys()) {
+      if (graph.startsWith(graphPrefix)) return true;
+    }
+    return false;
+  }
+
+  private releaseActiveGraphs(graphs: readonly string[]): void {
+    for (const graph of graphs) {
+      const count = this.activeGraphs.get(graph) ?? 0;
+      if (count <= 1) this.activeGraphs.delete(graph);
+      else this.activeGraphs.set(graph, count - 1);
+    }
+  }
+
+  private lifecycle(
+    settle: () => void,
+    indeterminate: () => void,
+  ): GraphWriteLifecycle {
+    let finished = false;
+    const finish = (action: () => void): void => {
+      if (finished) return;
+      finished = true;
+      action();
+    };
+    return {
+      settle: () => finish(settle),
+      indeterminate: () => finish(indeterminate),
+    };
   }
 }
 
@@ -128,11 +214,11 @@ export function asGraphWriteGenSource(store: unknown): GraphWriteGenSource | nul
   // resolves through any decorator order — mirrors `asChangelogReader`.
   // The depth bound guards a pathological/cyclic chain.
   let s = store as
-    | { getWriteGen?: unknown; innerStore?: unknown; inner?: unknown }
+    | { getWriteRevision?: unknown; innerStore?: unknown; inner?: unknown }
     | null
     | undefined;
   for (let depth = 0; s && depth < 8; depth++) {
-    if (typeof s.getWriteGen === 'function') return s as GraphWriteGenSource;
+    if (typeof s.getWriteRevision === 'function') return s as GraphWriteGenSource;
     s = (s.innerStore ?? s.inner) as typeof s;
   }
   return null;

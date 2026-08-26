@@ -4265,8 +4265,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const rootDataGraph = candidateNamespaces[0]?.dataGraph ?? '';
       const swmSuffix = rootDataGraph.indexOf('/_shared_memory');
       const graphPrefix = swmSuffix >= 0 ? `${rootDataGraph.slice(0, swmSuffix)}/` : rootDataGraph;
-      const writeGen = asGraphWriteGenSource(this.store)?.getWriteGen(graphPrefix);
-      if (writeGen !== undefined) parts.push(`writeGen:${writeGen}`);
+      const writeRevision = asGraphWriteGenSource(this.store)?.getWriteRevision(graphPrefix);
+      // A remote mutation can still commit after this fingerprint's reads.
+      // Never turn such an in-flight/indeterminate observation into a stable
+      // negative-cache key.
+      if (writeRevision && !writeRevision.stable) return null;
+      if (writeRevision) parts.push(`writeGen:${writeRevision.generation}`);
       return parts.join('|');
     } catch {
       // Probe failures are not a stable SWM generation. Callers must not cache

@@ -58,7 +58,10 @@ import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { AbortableStoreWorkLifecycle, composeAbortSignals } from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
-import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
+import {
+  isStoreOperationTimeoutError,
+  StoreOperationTimeoutError,
+} from '../store-operation-timeout.js';
 import { readSparqlResponseText } from './sparql-response-policy.js';
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
@@ -181,7 +184,7 @@ export class SparqlHttpStore implements TripleStore {
   private listGraphsInFlight: Promise<string[]> | null = null;
   // #1609: per-graph write generations, bumped at the same choke points that
   // invalidate the listGraphs cache (every local mutation). Feeds the chain-
-  // reconcile negative memo via `asGraphWriteGenSource` / `getWriteGen`.
+  // reconcile negative memo via `asGraphWriteGenSource` / `getWriteRevision`.
   private readonly writeGen = new GraphWriteGenTracker();
 
   constructor(options: SparqlHttpStoreOptions) {
@@ -293,6 +296,10 @@ export class SparqlHttpStore implements TripleStore {
     return this.writeGen.getWriteGen(graphPrefix);
   }
 
+  getWriteRevision(graphPrefix: string) {
+    return this.writeGen.getWriteRevision(graphPrefix);
+  }
+
   private async postQuery<T>(
     sparql: string,
     accept: string,
@@ -358,6 +365,7 @@ export class SparqlHttpStore implements TripleStore {
     update: string,
     options?: QueryOptions,
     operation = 'update',
+    onDispatch?: () => void,
   ): Promise<void> {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
@@ -374,6 +382,8 @@ export class SparqlHttpStore implements TripleStore {
       // without it a Jetty-backed store corrupts non-ASCII INSERT DATA
       // literals and DELETE DATA patterns silently stop matching.
       try {
+        throwIfAborted(signal);
+        onDispatch?.();
         const res = await fetch(this.updateEndpoint, {
           method: 'POST',
           headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
@@ -434,12 +444,13 @@ export class SparqlHttpStore implements TripleStore {
       }
     }
     const update = `INSERT DATA {\n  ${parts.join('\n  ')}\n}`;
-    await this.postUpdate(update, {
-      ...options,
-      source: options?.source ?? 'sparql-http.insert',
-    }, 'insert');
-    this.invalidateListGraphsCache();
-    this.writeGen.recordGraphWrites(byGraph.keys());
+    await this.runRemoteGraphMutation({
+      graphs: [...byGraph.keys()],
+      mutate: (onDispatch) => this.postUpdate(update, {
+        ...options,
+        source: options?.source ?? 'sparql-http.insert',
+      }, 'insert', onDispatch),
+    });
   }
 
   async delete(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
@@ -453,12 +464,13 @@ export class SparqlHttpStore implements TripleStore {
     // structure over the SPARQL protocol. See the helper for details.
     const update = buildBlankNodeSafeDelete(quads);
     if (!update) return;
-    await this.postUpdate(update, {
-      ...options,
-      source: options?.source ?? 'sparql-http.delete',
-    }, 'delete');
-    this.invalidateListGraphsCache();
-    this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
+    await this.runRemoteGraphMutation({
+      graphs: [...new Set(quads.map((q) => q.graph || ''))],
+      mutate: (onDispatch) => this.postUpdate(update, {
+        ...options,
+        source: options?.source ?? 'sparql-http.delete',
+      }, 'delete', onDispatch),
+    });
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
@@ -479,13 +491,13 @@ export class SparqlHttpStore implements TripleStore {
       // is a syntax error that a spec-compliant endpoint rejects with HTTP 400.
       update = `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`;
     }
-    await this.postUpdate(update, {
-      ...options,
-      source: options?.source ?? 'sparql-http.deleteByPattern',
-    }, 'deleteByPattern');
-    this.invalidateListGraphsCache();
-    if (graphUri) this.writeGen.recordGraphWrites([graphUri]);
-    else this.writeGen.recordUnscopedWrite();
+    await this.runRemoteGraphMutation({
+      graphs: graphUri ? [graphUri] : null,
+      mutate: (onDispatch) => this.postUpdate(update, {
+        ...options,
+        source: options?.source ?? 'sparql-http.deleteByPattern',
+      }, 'deleteByPattern', onDispatch),
+    });
     const after = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteByPattern.countAfter',
@@ -500,12 +512,13 @@ export class SparqlHttpStore implements TripleStore {
     });
     const escapedPrefix = escapeString(prefix);
     const update = `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapedPrefix}")) } }`;
-    await this.postUpdate(update, {
-      ...options,
-      source: options?.source ?? 'sparql-http.deleteBySubjectPrefix',
-    }, 'deleteBySubjectPrefix');
-    this.invalidateListGraphsCache();
-    this.writeGen.recordGraphWrites([graphUri]);
+    await this.runRemoteGraphMutation({
+      graphs: [graphUri],
+      mutate: (onDispatch) => this.postUpdate(update, {
+        ...options,
+        source: options?.source ?? 'sparql-http.deleteBySubjectPrefix',
+      }, 'deleteBySubjectPrefix', onDispatch),
+    });
     const after = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countAfter',
@@ -519,14 +532,15 @@ export class SparqlHttpStore implements TripleStore {
    * so terms stay byte-identical (no JS round-trip). See {@link TripleStore.update}.
    */
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    await this.postUpdate(sparql, {
-      ...options,
-      source: options?.source ?? 'sparql-http.update',
-    }, 'update');
-    this.invalidateListGraphsCache();
-    // `touchedGraphs` hints only membership changes, not every graph whose
-    // CONTENT a raw UPDATE mutates — an unscoped bump is the only sound scope.
-    this.writeGen.recordUnscopedWrite();
+    await this.runRemoteGraphMutation({
+      // `touchedGraphs` hints only membership changes, not every graph whose
+      // CONTENT a raw UPDATE mutates — an unscoped lifecycle is the only sound scope.
+      graphs: null,
+      mutate: (onDispatch) => this.postUpdate(sparql, {
+        ...options,
+        source: options?.source ?? 'sparql-http.update',
+      }, 'update', onDispatch),
+    });
   }
 
   async replaceGraph(
@@ -546,12 +560,20 @@ export class SparqlHttpStore implements TripleStore {
       label: 'SparqlHttpStore.replaceGraph',
     });
     const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
-    const execute = async (update: string, source: string): Promise<void> => {
-      await this.postUpdate(update, { ...options, source }, 'replaceGraph');
+    const execute = async (
+      update: string,
+      source: string,
+      onDispatch?: () => void,
+    ): Promise<void> => {
+      await this.postUpdate(update, { ...options, source }, 'replaceGraph', onDispatch);
     };
     await this.runRemoteGraphMutation({
       graphs: [graphUri],
-      mutate: () => execute(plan.update, options?.source ?? 'sparql-http.replaceGraph'),
+      mutate: (onDispatch) => execute(
+        plan.update,
+        options?.source ?? 'sparql-http.replaceGraph',
+        onDispatch,
+      ),
       cleanup: plan.cleanup
         ? () => execute(plan.cleanup!, 'sparql-http.replaceGraph.cleanup')
         : undefined,
@@ -583,14 +605,24 @@ export class SparqlHttpStore implements TripleStore {
       metadataSubject,
       metadataQuads,
     );
-    const execute = async (update: string, source: string): Promise<void> => {
-      await this.postUpdate(update, { ...options, source }, 'replaceGraphAndSubject');
+    const execute = async (
+      update: string,
+      source: string,
+      onDispatch?: () => void,
+    ): Promise<void> => {
+      await this.postUpdate(
+        update,
+        { ...options, source },
+        'replaceGraphAndSubject',
+        onDispatch,
+      );
     };
     await this.runRemoteGraphMutation({
       graphs: [graphUri, metaGraphUri],
-      mutate: () => execute(
+      mutate: (onDispatch) => execute(
         plan.update,
         options?.source ?? 'sparql-http.replaceGraphAndSubject',
+        onDispatch,
       ),
       cleanup: () => execute(
         plan.cleanup,
@@ -618,10 +650,11 @@ export class SparqlHttpStore implements TripleStore {
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
     await this.runRemoteGraphMutation({
       graphs: [graphUri],
-      mutate: () => this.postUpdate(
+      mutate: (onDispatch) => this.postUpdate(
         update,
         { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
         'replaceSubject',
+        onDispatch,
       ),
     });
   }
@@ -634,23 +667,35 @@ export class SparqlHttpStore implements TripleStore {
    * scopes permanently unstable for generation-keyed caches in this process.
    */
   private async runRemoteGraphMutation(opts: {
-    graphs: readonly string[];
-    mutate: () => Promise<void>;
+    graphs: readonly string[] | null;
+    mutate: (onDispatch: () => void) => Promise<void>;
     cleanup?: () => Promise<void>;
   }): Promise<void> {
-    const graphs = [...new Set(opts.graphs)];
-    this.writeGen.recordGraphWrites(graphs);
-    this.invalidateListGraphsCache();
+    const graphs = opts.graphs === null ? null : [...new Set(opts.graphs)];
+    let lifecycle: ReturnType<GraphWriteGenTracker['beginGraphWrites']> | undefined;
+    const onDispatch = (): void => {
+      if (lifecycle) return;
+      lifecycle = graphs === null
+        ? this.writeGen.beginUnscopedWrite()
+        : this.writeGen.beginGraphWrites(graphs);
+      this.invalidateListGraphsCache();
+    };
     try {
-      await opts.mutate();
+      await opts.mutate(onDispatch);
     } catch (error) {
       await opts.cleanup?.().catch(() => undefined);
-      this.writeGen.recordIndeterminateGraphWrites(graphs);
-      this.invalidateListGraphsCache();
+      if (lifecycle) {
+        if (isStoreOperationTimeoutError(error) && error.outcome === 'not_started') {
+          lifecycle.settle();
+        } else {
+          lifecycle.indeterminate();
+        }
+        this.invalidateListGraphsCache();
+      }
       throw error;
     }
-    this.writeGen.recordGraphWrites(graphs);
-    this.invalidateListGraphsCache();
+    lifecycle?.settle();
+    if (lifecycle) this.invalidateListGraphsCache();
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
@@ -756,12 +801,13 @@ export class SparqlHttpStore implements TripleStore {
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
     const update = `DROP SILENT GRAPH <${escapeUri(graphUri)}>`;
-    await this.postUpdate(update, {
-      ...options,
-      source: options?.source ?? 'sparql-http.dropGraph',
-    }, 'dropGraph');
-    this.invalidateListGraphsCache();
-    this.writeGen.recordGraphWrites([graphUri]);
+    await this.runRemoteGraphMutation({
+      graphs: [graphUri],
+      mutate: (onDispatch) => this.postUpdate(update, {
+        ...options,
+        source: options?.source ?? 'sparql-http.dropGraph',
+      }, 'dropGraph', onDispatch),
+    });
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {

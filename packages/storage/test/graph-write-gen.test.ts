@@ -1,7 +1,7 @@
 /**
  * Per-graph write-generation tracking (#1609) — the storage half of the
  * chain-reconcile negative memo. The memo suppresses a reconcile rescan ONLY
- * while `getWriteGen(cgPrefix)` is unchanged, so the contract under test is
+ * while a stable `getWriteRevision(cgPrefix)` is unchanged, so the contract under test is
  * fail-open: every write that MAY touch a prefix must be visible to it
  * (scoped writes to matching graphs, unscoped bumps for raw UPDATEs and
  * pattern deletes without a graph, LRU-eviction folding), while writes to
@@ -64,17 +64,36 @@ describe('GraphWriteGenTracker', () => {
     expect(tracker.getWriteGen('')).toBeGreaterThan(afterScoped);
   });
 
-  it('never stabilizes affected generations after an indeterminate remote write', () => {
+  it('reports an indeterminate remote scope as observably unstable without mutating reads', () => {
     const tracker = new GraphWriteGenTracker();
     tracker.recordIndeterminateGraphWrites([SWM_GRAPH]);
 
-    const firstScoped = tracker.getWriteGen(CG_PREFIX);
-    expect(tracker.getWriteGen(CG_PREFIX)).toBeGreaterThan(firstScoped);
-    const firstGlobal = tracker.getWriteGen('');
-    expect(tracker.getWriteGen('')).toBeGreaterThan(firstGlobal);
+    const firstScoped = tracker.getWriteRevision(CG_PREFIX);
+    expect(firstScoped.stable).toBe(false);
+    expect(tracker.getWriteRevision(CG_PREFIX)).toEqual(firstScoped);
+    const firstGlobal = tracker.getWriteRevision('');
+    expect(firstGlobal.stable).toBe(false);
+    expect(tracker.getWriteRevision('')).toEqual(firstGlobal);
 
-    const unrelated = tracker.getWriteGen('did:dkg:context-graph:unrelated/');
-    expect(tracker.getWriteGen('did:dkg:context-graph:unrelated/')).toBe(unrelated);
+    const unrelated = tracker.getWriteRevision('did:dkg:context-graph:unrelated/');
+    expect(unrelated.stable).toBe(true);
+    expect(tracker.getWriteRevision('did:dkg:context-graph:unrelated/')).toEqual(unrelated);
+  });
+
+  it('brackets an active remote write with stable generation changes', () => {
+    const tracker = new GraphWriteGenTracker();
+    const before = tracker.getWriteRevision(CG_PREFIX);
+
+    const lifecycle = tracker.beginGraphWrites([SWM_GRAPH]);
+    const pending = tracker.getWriteRevision(CG_PREFIX);
+    expect(pending.generation).toBeGreaterThan(before.generation);
+    expect(pending.stable).toBe(false);
+    expect(tracker.getWriteRevision(CG_PREFIX)).toEqual(pending);
+
+    lifecycle.settle();
+    const settled = tracker.getWriteRevision(CG_PREFIX);
+    expect(settled.generation).toBeGreaterThan(pending.generation);
+    expect(settled.stable).toBe(true);
   });
 
   it('folds LRU-evicted graphs into the global floor (eviction can only force rescans)', () => {

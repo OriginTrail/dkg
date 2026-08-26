@@ -16,6 +16,7 @@ import {
   type TripleStore,
   type ChangelogReader,
   type ChangeOp,
+  type GraphWriteRevision,
 } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
@@ -80,46 +81,6 @@ export interface GraphListMemo {
     refreshGeneration?: string;
     signal?: AbortSignal;
   }): Promise<readonly string[]>;
-}
-
-type GraphListRevision =
-  | { kind: 'write-generation'; value: number }
-  | { kind: 'session-generation'; value: string };
-
-interface GraphListRevisionPolicy {
-  current(refreshGeneration: string | undefined): GraphListRevision | null;
-  supersedes(
-    stored: GraphListRevision | null,
-    current: GraphListRevision | null,
-  ): boolean;
-  permitsReuseOnExplicitRefresh: boolean;
-}
-
-function createGraphListRevisionPolicy(store: TripleStore): GraphListRevisionPolicy {
-  const writeGenerationSource = asGraphWriteGenSource(store);
-  if (writeGenerationSource) {
-    return {
-      current: () => ({
-        kind: 'write-generation',
-        value: writeGenerationSource.getWriteGen(''),
-      }),
-      supersedes: (stored, current) =>
-        stored?.kind !== 'write-generation'
-        || current?.kind !== 'write-generation'
-        || stored.value !== current.value,
-      permitsReuseOnExplicitRefresh: true,
-    };
-  }
-  return {
-    current: (refreshGeneration) => refreshGeneration === undefined
-      ? null
-      : { kind: 'session-generation', value: refreshGeneration },
-    // A deep-page read without a session generation joins/uses the current
-    // snapshot; only an explicitly newer responder session supersedes it.
-    supersedes: (stored, current) => current?.kind === 'session-generation'
-      && (stored?.kind !== 'session-generation' || stored.value !== current.value),
-    permitsReuseOnExplicitRefresh: false,
-  };
 }
 
 export interface SubGraphNameMemo {
@@ -275,15 +236,32 @@ export function createResponderGraphListMemo(
   store: TripleStore,
   ttlMs = 10_000,
 ): GraphListMemo {
-  const revisionPolicy = createGraphListRevisionPolicy(store);
+  const writeRevisionSource = asGraphWriteGenSource(store);
+  type Revision = GraphWriteRevision | string | undefined;
+  const currentRevision = (refreshGeneration: string | undefined): Revision =>
+    writeRevisionSource?.getWriteRevision('') ?? refreshGeneration;
+  const isWriteRevision = (revision: Revision): revision is GraphWriteRevision =>
+    typeof revision === 'object' && revision !== null;
+  const supersedes = (stored: Revision, current: Revision): boolean => {
+    if (writeRevisionSource) {
+      return !isWriteRevision(stored)
+        || !isWriteRevision(current)
+        || !stored.stable
+        || !current.stable
+        || stored.generation !== current.generation;
+    }
+    // A deep-page read without a session generation joins/uses the current
+    // snapshot; only an explicitly newer responder session supersedes it.
+    return current !== undefined && stored !== current;
+  };
   let cached: {
     value: readonly string[];
     cachedAt: number;
-    revision: GraphListRevision | null;
+    revision: Revision;
   } | null = null;
   let inflight: {
     promise: Promise<readonly string[]>;
-    revision: GraphListRevision | null;
+    revision: Revision;
   } | null = null;
   return {
     async get(options?: {
@@ -294,8 +272,8 @@ export function createResponderGraphListMemo(
       throwIfAborted(options?.signal);
       while (inflight) {
         const pending = inflight;
-        const currentRevision = revisionPolicy.current(options?.refreshGeneration);
-        if (!revisionPolicy.supersedes(pending.revision, currentRevision)) {
+        const revision = currentRevision(options?.refreshGeneration);
+        if (!supersedes(pending.revision, revision)) {
           return [...(await raceAgainstAbort(pending.promise, options?.signal))];
         }
         try {
@@ -305,12 +283,12 @@ export function createResponderGraphListMemo(
         }
       }
       const now = Date.now();
-      const currentRevision = revisionPolicy.current(options?.refreshGeneration);
-      if (cached && revisionPolicy.supersedes(cached.revision, currentRevision)) cached = null;
+      const revision = currentRevision(options?.refreshGeneration);
+      if (cached && supersedes(cached.revision, revision)) cached = null;
       if (
         cached &&
         now - cached.cachedAt < ttlMs &&
-        (revisionPolicy.permitsReuseOnExplicitRefresh || !options?.refresh)
+        (!options?.refresh || (writeRevisionSource !== null && isWriteRevision(revision) && revision.stable))
       ) return [...cached.value];
       // This load is shared by concurrent responders. Do not bind it to the
       // first stream's abort signal; waiters race their own abort locally via
@@ -321,7 +299,7 @@ export function createResponderGraphListMemo(
           cached = {
             value: sorted,
             cachedAt: Date.now(),
-            revision: currentRevision,
+            revision,
           };
           return sorted;
         })
@@ -330,7 +308,7 @@ export function createResponderGraphListMemo(
         });
       inflight = {
         promise: load,
-        revision: currentRevision,
+        revision,
       };
       const graphs = await load;
       throwIfAborted(options?.signal);

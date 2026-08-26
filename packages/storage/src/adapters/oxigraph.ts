@@ -44,7 +44,7 @@ export class OxigraphStore implements TripleStore {
   // #1609: per-graph write generations, bumped on every local mutation (the
   // same choke points the sparql-http adapter pairs with its listGraphs-cache
   // invalidation). Feeds the chain-reconcile negative memo via
-  // `asGraphWriteGenSource` / `getWriteGen`.
+  // `asGraphWriteGenSource` / `getWriteRevision`.
   private readonly writeGen = new GraphWriteGenTracker();
 
   /**
@@ -318,6 +318,10 @@ export class OxigraphStore implements TripleStore {
   /** {@link GraphWriteGenSource} capability (#1609) — see graph-write-gen.ts. */
   getWriteGen(graphPrefix: string): number {
     return this.writeGen.getWriteGen(graphPrefix);
+  }
+
+  getWriteRevision(graphPrefix: string) {
+    return this.writeGen.getWriteRevision(graphPrefix);
   }
 
   async dropGraph(graphUri: string): Promise<void> {
