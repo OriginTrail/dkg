@@ -18,6 +18,11 @@ import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js
 import type {
   Rfc64PublicCatalogCurrentHeadScopeV1,
 } from './rfc64/public-catalog-current-head-discovery-v1.js';
+
+/** @deprecated Retained for compatibility; terminal errors extend this class. */
+export {
+  Rfc64CatalogSynchronizationErrorV1,
+} from './rfc64/catalog-synchronization-error-v1.js';
 /** Explicit provider + independently accepted public-root scope for a cold pull. */
 export interface SynchronizeRfc64PublicCatalogFromProviderParamsV1 {
   readonly remotePeerId: string;

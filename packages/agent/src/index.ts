@@ -166,6 +166,14 @@ export {
   type Rfc64CatalogReconciliationTerminalReasonV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 export {
+  Rfc64CatalogSynchronizationErrorV1,
+} from './rfc64/catalog-synchronization-error-v1.js';
+export {
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1,
+  type Rfc64PublicCatalogReceiverCompletionOutcomeV1,
+  type Rfc64PublicCatalogReceiverCompletionV1,
+} from './rfc64/public-catalog-reconciliation-outcome-v1.js';
+export {
   DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY,
   SYNC_ADMISSION_SOURCES,
   contextGraphPriority,

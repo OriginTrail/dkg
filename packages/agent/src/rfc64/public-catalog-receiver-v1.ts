@@ -23,7 +23,16 @@ import {
   Rfc64CatalogProviderFailureAggregateV1,
   type Rfc64CatalogProviderTerminalFailureV1,
 } from './public-catalog-reconciliation-failure-v1.js';
+import type {
+  Rfc64PublicCatalogReceiverCompletionOutcomeV1,
+  Rfc64PublicCatalogReceiverCompletionV1,
+} from './public-catalog-reconciliation-outcome-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
+
+export type {
+  Rfc64PublicCatalogReceiverCompletionOutcomeV1,
+  Rfc64PublicCatalogReceiverCompletionV1,
+} from './public-catalog-reconciliation-outcome-v1.js';
 
 export type Rfc64PublicCatalogReconcileResultV1 = 'applied' | 'not-found' | 'staged-only';
 
@@ -126,23 +135,6 @@ export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly providerSwitches: number;
   readonly providerSuccesses: number;
   readonly providerBackoffMs: number;
-}
-
-export type Rfc64PublicCatalogReceiverCompletionOutcomeV1 =
-  | 'already-applied'
-  | 'applied'
-  | 'staged-only'
-  | 'not-found'
-  | 'failed'
-  | 'dropped'
-  | 'closed';
-
-/** Exact terminal result for one scheduled head, separate from global idleness. */
-export interface Rfc64PublicCatalogReceiverCompletionV1 {
-  readonly outcome: Rfc64PublicCatalogReceiverCompletionOutcomeV1;
-  readonly appliedProviderPeerId: string | null;
-  readonly providerAttempts: number;
-  readonly error: unknown | null;
 }
 
 interface ReceiverTaskV1 {

@@ -62,11 +62,13 @@ import {
 } from './catalog-access-policy-v1.js';
 import {
   Rfc64PublicCatalogReceiverV1,
-  type Rfc64PublicCatalogReceiverCompletionOutcomeV1,
   type Rfc64PublicCatalogReceiverReconcilerV1,
   type Rfc64PublicCatalogReceiverOptionsV1,
   type Rfc64PublicCatalogReceiverStatsV1,
 } from './public-catalog-receiver-v1.js';
+import type {
+  Rfc64PublicCatalogReceiverCompletionOutcomeV1,
+} from './public-catalog-reconciliation-outcome-v1.js';
 import {
   Rfc64CatalogReconciliationTerminalErrorV1,
 } from './public-catalog-reconciliation-failure-v1.js';
