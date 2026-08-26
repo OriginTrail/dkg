@@ -174,24 +174,57 @@ describe('chain-attested public metadata projection repair', () => {
   it('wires lifecycle repair to the exact graph chain attestation before mutation', async () => {
     const store = new OxigraphStore();
     const contextGraphId = '0x1234567890123456789012345678901234567890/lifecycle-wiring';
-    const isContextGraphPublicOnChain = vi.fn()
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true);
-    const agentLike = { store, isContextGraphPublicOnChain };
+    const resolveOnChainAccessPolicyState = vi.fn()
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(0);
+    const agentLike = { store, resolveOnChainAccessPolicyState };
     try {
       const first = await LifecycleSyncMethods.prototype
         .repairActivePublicContextGraphMetadata.call(agentLike as never, contextGraphId);
-      expect(first).toEqual({ outcome: 'not-chain-attested' });
+      expect(first).toEqual({
+        outcome: 'not-chain-attested',
+        chainProof: { state: 'not-public', reason: 'private' },
+      });
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
 
       const second = await LifecycleSyncMethods.prototype
         .repairActivePublicContextGraphMetadata.call(agentLike as never, contextGraphId);
-      expect(second).toEqual({ outcome: 'projection-complete' });
+      expect(second).toEqual({
+        outcome: 'projection-complete',
+        chainProof: { state: 'public' },
+      });
       expect(await hasPublicProof(store, contextGraphId)).toBe(true);
-      expect(isContextGraphPublicOnChain.mock.calls.map(([id]) => id)).toEqual([
+      expect(resolveOnChainAccessPolicyState.mock.calls.map(([id]) => id)).toEqual([
         contextGraphId,
         contextGraphId,
       ]);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('preserves an RPC rejection as an unknown chain proof', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = '0x1234567890123456789012345678901234567890/rpc-failure';
+    const resolveOnChainAccessPolicyState = vi.fn(async () => {
+      throw new Error('temporary RPC outage');
+    });
+    try {
+      const repaired = await LifecycleSyncMethods.prototype
+        .repairActivePublicContextGraphMetadata.call(
+          { store, resolveOnChainAccessPolicyState } as never,
+          contextGraphId,
+        );
+
+      expect(repaired).toEqual({
+        outcome: 'not-chain-attested',
+        chainProof: {
+          state: 'unknown',
+          reason: 'rpc-failure',
+          detail: 'temporary RPC outage',
+        },
+      });
+      expect(await hasPublicProof(store, contextGraphId)).toBe(false);
     } finally {
       await store.close();
     }
@@ -230,14 +263,20 @@ describe('chain-attested public metadata projection repair', () => {
       const repaired = await LifecycleSyncMethods.prototype
         .repairActivePublicContextGraphMetadata.call(agentLike, contextGraphId);
 
-      expect(repaired).toEqual({ outcome: 'not-chain-attested' });
+      expect(repaired).toEqual({
+        outcome: 'not-chain-attested',
+        chainProof: { state: 'unknown', reason: 'unprovable' },
+      });
       expect(getContextGraphNameHash).toHaveBeenCalledWith(42n);
       expect(getContextGraphAccessPolicy).not.toHaveBeenCalled();
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
 
       const rawSlotRepair = await LifecycleSyncMethods.prototype
         .repairActivePublicContextGraphMetadata.call(agentLike, contextGraphId);
-      expect(rawSlotRepair).toEqual({ outcome: 'projection-complete' });
+      expect(rawSlotRepair).toEqual({
+        outcome: 'projection-complete',
+        chainProof: { state: 'public' },
+      });
       expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
       expect(getContextGraphAccessPolicy).toHaveBeenCalledWith(42n);
       expect(await hasPublicProof(store, contextGraphId)).toBe(true);
@@ -253,16 +292,22 @@ describe('chain-attested public metadata projection repair', () => {
       const first = await repairChainAttestedPublicMetaProjection(
         store,
         contextGraphId,
-        async () => true,
+        async () => ({ state: 'public' }),
       );
       const second = await repairChainAttestedPublicMetaProjection(
         store,
         contextGraphId,
-        async () => true,
+        async () => ({ state: 'public' }),
       );
 
-      expect(first).toEqual({ outcome: 'projection-complete' });
-      expect(second).toEqual({ outcome: 'already-complete' });
+      expect(first).toEqual({
+        outcome: 'projection-complete',
+        chainProof: { state: 'public' },
+      });
+      expect(second).toEqual({
+        outcome: 'already-complete',
+        chainProof: { state: 'not-requested' },
+      });
       expect(await hasPublicProof(store, contextGraphId)).toBe(true);
     } finally {
       await store.close();
@@ -276,10 +321,13 @@ describe('chain-attested public metadata projection repair', () => {
       const repaired = await repairChainAttestedPublicMetaProjection(
         store,
         contextGraphId,
-        async () => false,
+        async () => ({ state: 'not-public', reason: 'unregistered' }),
       );
 
-      expect(repaired).toEqual({ outcome: 'not-chain-attested' });
+      expect(repaired).toEqual({
+        outcome: 'not-chain-attested',
+        chainProof: { state: 'not-public', reason: 'unregistered' },
+      });
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
     } finally {
       await store.close();
@@ -300,10 +348,13 @@ describe('chain-attested public metadata projection repair', () => {
       const repaired = await repairChainAttestedPublicMetaProjection(
         store,
         contextGraphId,
-        async () => true,
+        async () => ({ state: 'public' }),
       );
 
-      expect(repaired).toEqual({ outcome: 'conflicting-policy' });
+      expect(repaired).toEqual({
+        outcome: 'conflicting-policy',
+        chainProof: { state: 'public' },
+      });
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
     } finally {
       await store.close();
@@ -324,11 +375,14 @@ describe('chain-attested public metadata projection repair', () => {
             object: '"private"',
             graph: contextGraphMetaGraphUri(contextGraphId),
           }]);
-          return true;
+          return { state: 'public' } as const;
         },
       );
 
-      expect(repaired).toEqual({ outcome: 'conflicting-policy' });
+      expect(repaired).toEqual({
+        outcome: 'conflicting-policy',
+        chainProof: { state: 'public' },
+      });
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
       const typeResult = await store.query(`ASK WHERE {
         GRAPH <${contextGraphMetaGraphUri(contextGraphId)}> {

@@ -1,5 +1,6 @@
 import type {
   CatchupPassDecisionReason,
+  ChainAttestedPublicMetaRepairResult,
   DKGAgent,
   SwmSnapshotCoverage,
 } from '@origintrail-official/dkg-agent';
@@ -725,44 +726,89 @@ async function withContextGraphReadinessMutationLock<T>(
   }
 }
 
+type PublicMetaRepairAttempt =
+  | { status: 'completed'; result: ChainAttestedPublicMetaRepairResult }
+  | { status: 'failed'; detail: string };
+
+export type ConfiguredContextGraphMetadataReconciliationResult =
+  | { outcome: 'authoritative'; repair: PublicMetaRepairAttempt }
+  | {
+      outcome: 'pending';
+      reason: 'conflicting-policy' | 'missing-metadata';
+      repair: PublicMetaRepairAttempt;
+    };
+
 /**
- * Revalidate live metadata and invalidate subscription/provenance together.
- * Returns false when authoritative metadata arrived before this reset acquired
- * the readiness lock, in which case newer PROJECT_SYNCED proof is preserved.
+ * Repair, classify, and persist configured-graph readiness under one lock.
+ * PROJECT_SYNCED persistence uses the same lock, so a newer authoritative
+ * proof either wins before this operation classifies live state or runs after
+ * its reset and restores readiness.
  */
-export async function resetContextGraphReadinessForMissingMetadata(input: {
+export async function reconcileConfiguredContextGraphMetadata(input: {
   agent: DKGAgent;
   store: Partial<ContextGraphReadinessStore>;
   contextGraphId: string;
-  /**
-   * Optional full classifier for callers that must distinguish a live
-   * chain/root contradiction from ordinary missing metadata. It is invoked
-   * after acquiring the same lock used by PROJECT_SYNCED persistence.
-   */
-  revalidateMetadata?: () => Promise<'authoritative' | 'conflicting' | 'missing'>;
-}): Promise<boolean> {
+}): Promise<ConfiguredContextGraphMetadataReconciliationResult> {
   const contextGraphId = input.contextGraphId.trim();
-  if (!contextGraphId) return false;
+  if (!contextGraphId) {
+    return {
+      outcome: 'pending',
+      reason: 'missing-metadata',
+      repair: { status: 'failed', detail: 'Context graph id is empty' },
+    };
+  }
 
   return withContextGraphReadinessMutationLock(input.agent, contextGraphId, async () => {
-    if (input.revalidateMetadata) {
-      const state = await input.revalidateMetadata().catch(() => 'missing' as const);
-      if (state === 'authoritative') return false;
-    } else {
+    let repair: PublicMetaRepairAttempt;
+    try {
+      repair = {
+        status: 'completed',
+        result: await input.agent.repairActivePublicContextGraphMetadata(contextGraphId),
+      };
+    } catch (error) {
+      repair = {
+        status: 'failed',
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    const conflictingPolicy = repair.status === 'completed'
+      && repair.result.outcome === 'conflicting-policy';
+    if (!conflictingPolicy) {
       const locallyCurated = typeof input.agent.isCuratorOf === 'function'
         ? await input.agent.isCuratorOf(contextGraphId).catch(() => false)
         : false;
+      const chainProof = repair.status === 'completed'
+        && repair.result.chainProof.state !== 'not-requested'
+        ? repair.result.chainProof
+        : undefined;
       const hasConfirmedMeta = await input.agent.hasConfirmedMetaState(
         contextGraphId,
-        { rejectUnregisteredPlaceholder: !locallyCurated },
+        {
+          rejectUnregisteredPlaceholder: !locallyCurated,
+          activePublicChainProof: chainProof,
+        },
       ).catch(() => false);
-      if (hasConfirmedMeta) return false;
+      if (hasConfirmedMeta) {
+        const subscription = input.agent.getSubscribedContextGraphs().get(contextGraphId);
+        if (subscription?.metaSynced !== true || subscription.pendingMeta === true) {
+          input.agent.markContextGraphSubscriptionState(contextGraphId, {
+            metaSynced: true,
+            pendingMeta: false,
+          });
+        }
+        return { outcome: 'authoritative', repair };
+      }
     }
 
     const patches = missingMetadataReadinessPatches();
     input.agent.markContextGraphSubscriptionState(contextGraphId, patches.statePatch);
     writeContextGraphReadiness(input.store, contextGraphId, patches.readinessPatch);
-    return true;
+    return {
+      outcome: 'pending',
+      reason: conflictingPolicy ? 'conflicting-policy' : 'missing-metadata',
+      repair,
+    };
   });
 }
 

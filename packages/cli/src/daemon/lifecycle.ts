@@ -164,8 +164,8 @@ import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
   migrateLegacyContextGraphReadiness,
+  reconcileConfiguredContextGraphMetadata,
   registerProjectSyncedReadinessPersistence,
-  resetContextGraphReadinessForMissingMetadata,
   writeContextGraphReadiness,
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
@@ -1090,111 +1090,37 @@ export async function bootstrapConfiguredContextGraphs(input: {
       continue;
     }
 
-    const existing = input.agent.getSubscribedContextGraphs().get(contextGraphId);
     input.agent.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
 
-    let chainMetadataConflict = false;
-    try {
-      const repair = await input.agent.repairActivePublicContextGraphMetadata(contextGraphId);
-      switch (repair.outcome) {
-        case 'projection-complete':
-          input.log(
-            `Completed chain-attested public metadata for configured context graph: ${contextGraphId}`,
-          );
-          break;
-        case 'conflicting-policy':
-          chainMetadataConflict = true;
-          input.log(
-            `Context graph "${contextGraphId}" has public on-chain policy but conflicting root metadata — leaving it pending`,
-          );
-          break;
-        case 'already-complete':
-        case 'not-chain-attested':
-          break;
-        default:
-          repair satisfies never;
-      }
-    } catch (err) {
+    const reconciliation = await reconcileConfiguredContextGraphMetadata({
+      agent: input.agent,
+      store: input.readinessStore ?? {},
+      contextGraphId,
+    });
+    if (reconciliation.repair.status === 'failed') {
       input.log(
-        `Context graph "${contextGraphId}" public metadata repair failed: ${err instanceof Error ? err.message : String(err)} — continuing fail-closed`,
+        `Context graph "${contextGraphId}" public metadata repair failed: ${reconciliation.repair.detail} — continuing fail-closed`,
+      );
+    } else if (reconciliation.repair.result.outcome === 'projection-complete') {
+      input.log(
+        `Completed chain-attested public metadata for configured context graph: ${contextGraphId}`,
+      );
+    } else if (
+      reconciliation.repair.result.outcome === 'not-chain-attested'
+      && reconciliation.repair.result.chainProof.state === 'unknown'
+    ) {
+      const { chainProof } = reconciliation.repair.result;
+      input.log(
+        `Context graph "${contextGraphId}" public chain proof is unavailable (${chainProof.reason}${chainProof.detail ? `: ${chainProof.detail}` : ''}) — continuing fail-closed`,
+      );
+    }
+    if (reconciliation.outcome === 'pending' && reconciliation.reason === 'conflicting-policy') {
+      input.log(
+        `Context graph "${contextGraphId}" has public on-chain policy but conflicting root metadata — leaving it pending`,
       );
     }
 
-    let hasAuthoritativeMetadata = false;
-    let locallyCurated = false;
-    if (existing?.metaSynced === true) {
-      try {
-        locallyCurated = await input.agent.isCuratorOf(contextGraphId);
-      } catch (err) {
-        input.log(
-          `Context graph "${contextGraphId}" ownership check failed: ${err instanceof Error ? err.message : String(err)} — treating it as remote`,
-        );
-      }
-    }
-
-    if (existing?.metaSynced === true && !chainMetadataConflict) {
-      try {
-        // Explicit local ownership is the only safe exception to rejecting an
-        // unregistered placeholder. createContextGraph() stamps ownership;
-        // the legacy configured-graph shadow created by
-        // ensureContextGraphLocal() deliberately has no creator/curator.
-        hasAuthoritativeMetadata = await input.agent.hasConfirmedMetaState(
-          contextGraphId,
-          { rejectUnregisteredPlaceholder: !locallyCurated },
-        );
-      } catch (err) {
-        input.log(
-          `Context graph "${contextGraphId}" metadata check failed: ${err instanceof Error ? err.message : String(err)} — treating metadata as pending`,
-        );
-      }
-    }
-
-    if (!hasAuthoritativeMetadata) {
-      // Legacy ensureContextGraphLocal() shadows contain an `unregistered`
-      // marker and stale metaSynced=true. The explicit remote proof above
-      // rejects that marker without depending on mutable subscription state;
-      // only now do we persist the fail-closed bootstrap classification.
-      const reset = await resetContextGraphReadinessForMissingMetadata({
-        agent: input.agent,
-        store: input.readinessStore ?? {},
-        contextGraphId,
-        revalidateMetadata: async () => {
-          // The first repair/classification happened before this readiness
-          // lock. Re-run both the chain/root contradiction check and the
-          // authoritative-metadata proof here so a resolved conflict or a
-          // concurrent PROJECT_SYNCED proof cannot be overwritten.
-          try {
-            const liveRepair = await input.agent
-              .repairActivePublicContextGraphMetadata(contextGraphId);
-            if (liveRepair.outcome === 'conflicting-policy') return 'conflicting';
-            if (
-              chainMetadataConflict
-              && liveRepair.outcome === 'not-chain-attested'
-            ) {
-              // An inconclusive retry cannot erase the chain/root
-              // contradiction established by the first attested read.
-              return 'conflicting';
-            }
-          } catch {
-            return 'missing';
-          }
-          const liveLocallyCurated = await input.agent
-            .isCuratorOf(contextGraphId)
-            .catch(() => false);
-          const liveAuthoritative = await input.agent.hasConfirmedMetaState(
-            contextGraphId,
-            { rejectUnregisteredPlaceholder: !liveLocallyCurated },
-          ).catch(() => false);
-          return liveAuthoritative ? 'authoritative' : 'missing';
-        },
-      });
-      // PROJECT_SYNCED persistence shares the same readiness lock and may
-      // have proved this graph while bootstrap was working from `existing`.
-      // Its live metadata revalidation wins over the stale snapshot.
-      if (!reset) hasAuthoritativeMetadata = true;
-    }
-
-    if (hasAuthoritativeMetadata) {
+    if (reconciliation.outcome === 'authoritative') {
       input.log(`Subscribed to configured context graph: ${contextGraphId} (metadata already confirmed)`);
       continue;
     }

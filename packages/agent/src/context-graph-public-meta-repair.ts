@@ -26,11 +26,19 @@ export interface PublicMetaRepairResult {
   conflictingGraphs: string[];
 }
 
+export type ActivePublicContextGraphChainProof =
+  | { state: 'public' }
+  | { state: 'not-public'; reason: 'private' | 'unregistered' }
+  | { state: 'unknown'; reason: 'unprovable' | 'rpc-failure'; detail?: string };
+
 export type ChainAttestedPublicMetaRepairResult =
-  | { outcome: 'already-complete' }
-  | { outcome: 'not-chain-attested' }
-  | { outcome: 'conflicting-policy' }
-  | { outcome: 'projection-complete' };
+  | { outcome: 'already-complete'; chainProof: { state: 'not-requested' } }
+  | {
+      outcome: 'not-chain-attested';
+      chainProof: Exclude<ActivePublicContextGraphChainProof, { state: 'public' }>;
+    }
+  | { outcome: 'conflicting-policy'; chainProof: { state: 'public' } }
+  | { outcome: 'projection-complete'; chainProof: { state: 'public' } };
 
 async function inspectPublicMetaProjection(
   store: TripleStore,
@@ -146,18 +154,18 @@ export async function repairCreatorPublicMetaProjections(
 export async function repairChainAttestedPublicMetaProjection(
   store: TripleStore,
   contextGraphId: string,
-  proveActivePublicBinding: () => Promise<boolean>,
+  resolveActivePublicBinding: () => Promise<ActivePublicContextGraphChainProof>,
 ): Promise<ChainAttestedPublicMetaRepairResult> {
   // Canonical metadata needs no repair and therefore no chain RPC. This keeps
   // normal restarts cheap once a legacy graph has been healed.
   const inspection = await inspectPublicMetaProjection(store, contextGraphId);
   if (!inspection.conflictingPolicy && inspection.missing.length === 0) {
-    return { outcome: 'already-complete' };
+    return { outcome: 'already-complete', chainProof: { state: 'not-requested' } };
   }
 
-  const chainAttested = await proveActivePublicBinding();
-  if (!chainAttested) {
-    return { outcome: 'not-chain-attested' };
+  const chainProof = await resolveActivePublicBinding();
+  if (chainProof.state !== 'public') {
+    return { outcome: 'not-chain-attested', chainProof };
   }
 
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
@@ -172,9 +180,11 @@ export async function repairChainAttestedPublicMetaProjection(
   }
   await store.flush?.();
   const finalInspection = await inspectPublicMetaProjection(store, contextGraphId);
-  if (finalInspection.conflictingPolicy) return { outcome: 'conflicting-policy' };
+  if (finalInspection.conflictingPolicy) {
+    return { outcome: 'conflicting-policy', chainProof };
+  }
   if (finalInspection.missing.length > 0) {
     throw new Error('Atomic public metadata repair completed without the canonical proof');
   }
-  return { outcome: 'projection-complete' };
+  return { outcome: 'projection-complete', chainProof };
 }

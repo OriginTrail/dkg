@@ -50,6 +50,7 @@ function createAgent(
   );
   const repairActivePublicContextGraphMetadata = vi.fn(async () => ({
     outcome: 'not-chain-attested' as const,
+    chainProof: { state: 'not-public' as const, reason: 'unregistered' as const },
   }));
 
   return {
@@ -224,6 +225,7 @@ describe('configured context graph daemon bootstrap', () => {
     );
     fixture.repairActivePublicContextGraphMetadata.mockResolvedValue({
       outcome: 'projection-complete',
+      chainProof: { state: 'public' },
     });
     const log = vi.fn();
 
@@ -261,6 +263,7 @@ describe('configured context graph daemon bootstrap', () => {
     );
     fixture.repairActivePublicContextGraphMetadata.mockResolvedValue({
       outcome: 'conflicting-policy',
+      chainProof: { state: 'public' },
     });
 
     await bootstrapConfiguredContextGraphs({
@@ -279,7 +282,7 @@ describe('configured context graph daemon bootstrap', () => {
     });
   });
 
-  it('preserves newer readiness when a chain/root conflict resolves before locked reset', async () => {
+  it('accepts a conflict resolved before the next locked reconciliation without sticky state', async () => {
     const contextGraphId = '0x1234567890123456789012345678901234567890/resolved-conflict';
     const fixture = createAgent(
       {
@@ -295,30 +298,36 @@ describe('configured context graph daemon bootstrap', () => {
       { [contextGraphId]: true },
     );
     fixture.repairActivePublicContextGraphMetadata
-      .mockResolvedValueOnce({ outcome: 'conflicting-policy' })
-      .mockResolvedValueOnce({ outcome: 'already-complete' });
+      .mockResolvedValueOnce({
+        outcome: 'conflicting-policy',
+        chainProof: { state: 'public' },
+      })
+      .mockResolvedValueOnce({
+        outcome: 'projection-complete',
+        chainProof: { state: 'public' },
+      });
 
-    await bootstrapConfiguredContextGraphs({
-      agent: fixture.agent,
-      configuredContextGraphIds: [contextGraphId],
-      networkDefaultContextGraphIds: [],
-      log: vi.fn(),
-    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await bootstrapConfiguredContextGraphs({
+        agent: fixture.agent,
+        configuredContextGraphIds: [contextGraphId],
+        networkDefaultContextGraphIds: [],
+        log: vi.fn(),
+      });
+    }
 
     expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledTimes(2);
-    expect(fixture.markContextGraphSubscriptionState).not.toHaveBeenCalledWith(
-      contextGraphId,
-      expect.objectContaining({ metaSynced: false }),
-    );
+    expect(fixture.markContextGraphSubscriptionState).toHaveBeenCalledTimes(2);
     expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
-      synced: true,
-      sharedMemorySynced: true,
+      synced: false,
+      sharedMemorySynced: false,
       metaSynced: true,
+      pendingMeta: false,
     });
   });
 
-  it('does not let an inconclusive locked chain read erase a proven policy conflict', async () => {
-    const contextGraphId = '0x1234567890123456789012345678901234567890/inconclusive-conflict';
+  it('preserves authoritative metadata that arrives during the single locked reconciliation', async () => {
+    const contextGraphId = '0x1234567890123456789012345678901234567890/late-authoritative';
     const fixture = createAgent(
       {
         [contextGraphId]: {
@@ -332,9 +341,66 @@ describe('configured context graph daemon bootstrap', () => {
       createStore(),
       { [contextGraphId]: true },
     );
-    fixture.repairActivePublicContextGraphMetadata
-      .mockResolvedValueOnce({ outcome: 'conflicting-policy' })
-      .mockResolvedValueOnce({ outcome: 'not-chain-attested' });
+    let releaseRepair!: () => void;
+    const repairBlocked = new Promise<void>((resolve) => { releaseRepair = resolve; });
+    let authoritative = false;
+    fixture.repairActivePublicContextGraphMetadata.mockImplementation(async () => {
+      await repairBlocked;
+      return {
+        outcome: 'not-chain-attested',
+        chainProof: { state: 'unknown', reason: 'unprovable' },
+      } as const;
+    });
+    vi.mocked(fixture.agent.hasConfirmedMetaState).mockImplementation(async () => authoritative);
+
+    const bootstrap = bootstrapConfiguredContextGraphs({
+      agent: fixture.agent,
+      configuredContextGraphIds: [contextGraphId],
+      networkDefaultContextGraphIds: [],
+      log: vi.fn(),
+    });
+    await vi.waitFor(() => {
+      expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledTimes(1);
+    });
+    authoritative = true;
+    releaseRepair();
+    await bootstrap;
+
+    expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledTimes(1);
+    expect(fixture.markContextGraphSubscriptionState).not.toHaveBeenCalledWith(
+      contextGraphId,
+      expect.objectContaining({ metaSynced: false }),
+    );
+    expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+    });
+  });
+
+  it('preserves a transient chain-proof failure as unknown and fails closed', async () => {
+    const contextGraphId = '0x1234567890123456789012345678901234567890/transient-chain-proof';
+    const fixture = createAgent(
+      {
+        [contextGraphId]: {
+          subscribed: true,
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+        },
+      },
+      {},
+      createStore(),
+      { [contextGraphId]: false },
+    );
+    fixture.repairActivePublicContextGraphMetadata.mockResolvedValue({
+      outcome: 'not-chain-attested',
+      chainProof: {
+        state: 'unknown',
+        reason: 'rpc-failure',
+        detail: 'temporary RPC outage',
+      },
+    });
 
     await bootstrapConfiguredContextGraphs({
       agent: fixture.agent,
@@ -343,7 +409,16 @@ describe('configured context graph daemon bootstrap', () => {
       log: vi.fn(),
     });
 
-    expect(fixture.agent.hasConfirmedMetaState).not.toHaveBeenCalled();
+    expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledTimes(1);
+    expect(fixture.agent.hasConfirmedMetaState).toHaveBeenCalledWith(
+      contextGraphId,
+      expect.objectContaining({
+        activePublicChainProof: expect.objectContaining({
+          state: 'unknown',
+          reason: 'rpc-failure',
+        }),
+      }),
+    );
     expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
       synced: false,
       sharedMemorySynced: false,
@@ -352,7 +427,7 @@ describe('configured context graph daemon bootstrap', () => {
     });
   });
 
-  it('continues startup and resets stale readiness when both repair attempts reject', async () => {
+  it('continues startup and resets stale readiness when the locked repair rejects', async () => {
     const contextGraphId = '0x1234567890123456789012345678901234567890/repair-error';
     let readiness = {
       version: 1,
@@ -392,7 +467,7 @@ describe('configured context graph daemon bootstrap', () => {
       log,
     })).resolves.toBeUndefined();
 
-    expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledTimes(2);
+    expect(fixture.repairActivePublicContextGraphMetadata).toHaveBeenCalledTimes(1);
     expect(log).toHaveBeenCalledWith(expect.stringContaining(
       `Context graph "${contextGraphId}" public metadata repair failed`,
     ));
@@ -579,12 +654,16 @@ describe('configured context graph daemon bootstrap', () => {
       log: vi.fn(),
     });
 
-    // The stale-snapshot classification and the locked pre-reset
-    // revalidation must both reject the legacy placeholder.
-    expect(fixture.agent.hasConfirmedMetaState).toHaveBeenCalledTimes(2);
+    expect(fixture.agent.hasConfirmedMetaState).toHaveBeenCalledTimes(1);
     expect(fixture.agent.hasConfirmedMetaState).toHaveBeenCalledWith(
       contextGraphId,
-      { rejectUnregisteredPlaceholder: true },
+      {
+        rejectUnregisteredPlaceholder: true,
+        activePublicChainProof: {
+          state: 'not-public',
+          reason: 'unregistered',
+        },
+      },
     );
     expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
       subscribed: true,

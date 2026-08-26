@@ -169,6 +169,7 @@ import { buildAuthoritativePublicMetaAskQuery } from './context-graph-public-met
 import {
   repairChainAttestedPublicMetaProjection,
   repairCreatorPublicMetaProjections,
+  type ActivePublicContextGraphChainProof,
   type ChainAttestedPublicMetaRepairResult,
 } from './context-graph-public-meta-repair.js';
 
@@ -9656,17 +9657,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return repairChainAttestedPublicMetaProjection(
       this.store,
       contextGraphId,
-      () => this.isContextGraphPublicOnChain(
-        contextGraphId,
-        createOperationContext('init'),
-        { slotBindingMode: 'chain-attested-repair' },
-      ),
+      async (): Promise<ActivePublicContextGraphChainProof> => {
+        try {
+          const state = await this.resolveOnChainAccessPolicyState(
+            contextGraphId,
+            createOperationContext('init'),
+            { slotBindingMode: 'chain-attested-repair' },
+          );
+          if (state === 0) return { state: 'public' };
+          if (state === 1) return { state: 'not-public', reason: 'private' };
+          if (state === 'unregistered') {
+            return { state: 'not-public', reason: 'unregistered' };
+          }
+          return { state: 'unknown', reason: 'unprovable' };
+        } catch (error) {
+          return {
+            state: 'unknown',
+            reason: 'rpc-failure',
+            detail: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
     );
   }
 
   async hasConfirmedMetaState(this: DKGAgent,
     contextGraphId: string,
-    options?: { rejectUnregisteredPlaceholder?: boolean },
+    options?: {
+      rejectUnregisteredPlaceholder?: boolean;
+      activePublicChainProof?: ActivePublicContextGraphChainProof;
+    },
   ): Promise<boolean> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return true;
@@ -9689,7 +9709,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     const hasUnregisteredPlaceholder = unregisteredPlaceholderResult.type === 'boolean' &&
       unregisteredPlaceholderResult.value === true;
-    let hasActivePublicOnChainProof: boolean | undefined;
+    let hasActivePublicOnChainProof: boolean | undefined = options?.activePublicChainProof === undefined
+      ? undefined
+      : options.activePublicChainProof.state === 'public';
     if (hasUnregisteredPlaceholder && options?.rejectUnregisteredPlaceholder === true) {
       // Replicas do not rewrite the creator's local registrationStatus marker,
       // so a legitimately registered public CG can still say "unregistered".

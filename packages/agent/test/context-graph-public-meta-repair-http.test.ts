@@ -85,11 +85,14 @@ describe('creator-owned public metadata repair over SPARQL HTTP', () => {
       const repaired = await repairChainAttestedPublicMetaProjection(
         store,
         contextGraphId,
-        async () => true,
+        async () => ({ state: 'public' }),
       );
       const proof = await store.query(buildAuthoritativePublicMetaAskQuery(contextGraphId));
 
-      expect(repaired).toEqual({ outcome: 'projection-complete' });
+      expect(repaired).toEqual({
+        outcome: 'projection-complete',
+        chainProof: { state: 'public' },
+      });
       expect(proof).toEqual({ type: 'boolean', value: true });
     } finally {
       await store.close();
@@ -116,7 +119,7 @@ describe('creator-owned public metadata repair over SPARQL HTTP', () => {
       const repaired = await repairChainAttestedPublicMetaProjection(
         store,
         contextGraphId,
-        async () => true,
+        async () => ({ state: 'public' }),
       );
       const facts = await store.query(`
         SELECT ?predicate ?object WHERE {
@@ -126,7 +129,10 @@ describe('creator-owned public metadata repair over SPARQL HTTP', () => {
         }
       `);
 
-      expect(repaired).toEqual({ outcome: 'conflicting-policy' });
+      expect(repaired).toEqual({
+        outcome: 'conflicting-policy',
+        chainProof: { state: 'public' },
+      });
       expect(facts).toEqual({
         type: 'bindings',
         bindings: [{

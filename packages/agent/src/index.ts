@@ -150,6 +150,10 @@ export {
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
 export type {
+  ActivePublicContextGraphChainProof,
+  ChainAttestedPublicMetaRepairResult,
+} from './context-graph-public-meta-repair.js';
+export type {
   AcceptRfc64CatalogAccessSnapshotParamsV1,
   PublishAuthorCatalogExactSetSuccessorParamsV1,
   PublishAuthorCatalogExactSetSuccessorResultV1,
