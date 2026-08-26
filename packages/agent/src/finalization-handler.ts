@@ -356,6 +356,7 @@ export interface ChainReconciledKCInput {
   merkleRoot: Uint8Array;
   publisherAddress: string;
   kaId: bigint;
+  batchId: bigint;
   versionBlock: number;
   authorAddress?: string;
   subGraphName?: string;
@@ -3108,7 +3109,7 @@ export class FinalizationHandler {
     const input = resolvedInput;
     const {
       contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
-      kaId, versionBlock, authorAddress, subGraphName, trustedAssertionEvidence,
+      kaId, batchId, versionBlock, authorAddress, subGraphName, trustedAssertionEvidence,
     } = input;
     const ctxGraphId = onChainCgId.length > 0 ? onChainCgId : undefined;
     const targetMetaGraph = ctxGraphId
@@ -3145,7 +3146,7 @@ export class FinalizationHandler {
       merkleRoot,
       publisherAddress,
       kaId,
-      batchId: kaId,
+      batchId,
       versionBlock,
       authorAddress,
       subGraphName,
@@ -3200,7 +3201,7 @@ export class FinalizationHandler {
     if (!exact.legacyEligible) return exact.outcome;
     const {
       contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
-      kaId, versionBlock, authorAddress, subGraphName,
+      kaId, batchId, versionBlock, authorAddress, subGraphName,
     } = exact.input;
     const ctxGraphId = onChainCgId.length > 0 ? onChainCgId : undefined;
 
@@ -3243,7 +3244,7 @@ export class FinalizationHandler {
       blockNumber: versionBlock,
       startKAId: kaId,
       endKAId: kaId,
-      batchId: 0n,
+      batchId,
       ctxGraphId,
       subGraphName: resolvedSubGraphName,
       authorAddress,

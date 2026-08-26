@@ -1,9 +1,13 @@
-import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  ExactGraphReadError,
+  readExactGraphPaged,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 
 export type ExactGraphContentVerification =
   | {
@@ -43,19 +47,26 @@ export async function verifyExactGraphContent(
     source: string;
   },
 ): Promise<ExactGraphContentVerification> {
-  const result = await store.query(
-    `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(input.graphUri)}> { ?s ?p ?o } }`,
-    { source: input.source },
-  );
-  const quads = result.type === 'quads'
-    ? result.quads.map((quad) => ({ ...quad, graph: '' }))
-    : [];
-  if (quads.length !== input.publicTripleCount) {
-    return {
-      status: 'count-mismatch',
-      graphUri: input.graphUri,
-      actualCount: quads.length,
-    };
+  let quads: Quad[];
+  try {
+    quads = await readExactGraphPaged(store, input.graphUri, {
+      expectedQuadCount: input.publicTripleCount,
+      outputGraph: '',
+      queryOptions: { source: input.source },
+    });
+  } catch (error) {
+    if (
+      error instanceof ExactGraphReadError
+      && error.code === 'QUAD_COUNT_MISMATCH'
+      && typeof error.actual === 'number'
+    ) {
+      return {
+        status: 'count-mismatch',
+        graphUri: input.graphUri,
+        actualCount: error.actual,
+      };
+    }
+    throw error;
   }
   const merkleRoot = computeFlatKCRootV10(
     quads,

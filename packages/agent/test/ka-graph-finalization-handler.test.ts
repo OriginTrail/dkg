@@ -13,9 +13,12 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
+  ExactGraphReadError,
   OxigraphStore,
   StoreSchedulerBusyError,
   type Quad,
+  type QueryResult,
+  type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -396,6 +399,7 @@ describe('graph-scoped finalization handler', () => {
       merkleRoot: message.kcMerkleRoot,
       publisherAddress: PUBLISHER,
       kaId: PACKED_KA_ID,
+      batchId: message.batchId,
       versionBlock: 123,
       authorAddress: AUTHOR,
       ...overrides,
@@ -3054,6 +3058,7 @@ describe('graph-scoped finalization handler', () => {
       merkleRoot: message.kcMerkleRoot,
       publisherAddress: PUBLISHER,
       kaId: PACKED_KA_ID,
+      batchId: PACKED_KA_ID,
       versionBlock: 123,
       authorAddress: AUTHOR,
     }, createOperationContext('system'))).resolves.toBe('already-confirmed');
@@ -3063,7 +3068,9 @@ describe('graph-scoped finalization handler', () => {
   });
 
   it('recognizes only exact confirmed Verifiable Memory metadata after the workspace head is lost', async () => {
-    const { message, vmGraph } = await stageGraph();
+    const staged = await stageGraph();
+    const message = { ...staged.message, batchId: 42n };
+    const { vmGraph } = staged;
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
     await store.deleteByPattern({
@@ -3089,6 +3096,7 @@ describe('graph-scoped finalization handler', () => {
       merkleRoot: message.kcMerkleRoot,
       publisherAddress: PUBLISHER,
       kaId: PACKED_KA_ID,
+      batchId: 42n,
       versionBlock: 124,
       authorAddress: AUTHOR,
     }, createOperationContext('system'))).resolves.toBe('already-confirmed');
@@ -3109,6 +3117,7 @@ describe('graph-scoped finalization handler', () => {
       merkleRoot: message.kcMerkleRoot,
       publisherAddress: PUBLISHER,
       kaId: PACKED_KA_ID,
+      batchId: 42n,
       versionBlock: 125,
       authorAddress: AUTHOR,
     }, createOperationContext('system'))).rejects.toThrow('injected confirmed metadata outage');
@@ -3130,6 +3139,7 @@ describe('graph-scoped finalization handler', () => {
       merkleRoot: message.kcMerkleRoot,
       publisherAddress: PUBLISHER,
       kaId: PACKED_KA_ID,
+      batchId: 42n,
       versionBlock: 126,
       authorAddress: AUTHOR,
     }, createOperationContext('system'))).resolves.toBe('no-swm');
@@ -3206,6 +3216,45 @@ describe('graph-scoped finalization handler', () => {
       ...base,
       expectedPublicQuadsDigest: workspacePublicQuadsDigest(matching.quads),
     })).resolves.toMatchObject({ status: 'verified' });
+  });
+
+  it('preserves typed invalid-result failures from the bounded exact graph reader', async () => {
+    const invalidStore = {
+      query: async (sparql: string): Promise<QueryResult> => sparql.includes('COUNT(*)')
+        ? { type: 'bindings', bindings: [{ count: '"1"' }] }
+        : { type: 'boolean', value: false },
+    } as Pick<TripleStore, 'query'> as TripleStore;
+
+    const error = await verifyExactGraphContent(invalidStore, {
+      graphUri: 'urn:test:invalid-exact-graph-result',
+      publicTripleCount: 1,
+      expectedMerkleRoot: new Uint8Array(32),
+      source: 'agent.test.verifyExactGraphContent.invalid-result',
+    }).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ExactGraphReadError);
+    expect(error).toMatchObject({ code: 'INVALID_QUERY_RESULT' });
+  });
+
+  it('keeps exact graph verification reads page-bounded', async () => {
+    let pageQuery = '';
+    const boundedStore = {
+      query: async (sparql: string): Promise<QueryResult> => {
+        if (sparql.includes('COUNT(*)')) {
+          return { type: 'bindings', bindings: [{ count: '"5000"' }] };
+        }
+        pageQuery = sparql;
+        return { type: 'bindings', bindings: [] };
+      },
+    } as Pick<TripleStore, 'query'> as TripleStore;
+
+    await expect(verifyExactGraphContent(boundedStore, {
+      graphUri: 'urn:test:bounded-exact-graph-read',
+      publicTripleCount: 5000,
+      expectedMerkleRoot: new Uint8Array(32),
+      source: 'agent.test.verifyExactGraphContent.bounded',
+    })).resolves.toMatchObject({ status: 'count-mismatch', actualCount: 0 });
+    expect(pageQuery).toMatch(/LIMIT 256\s+OFFSET 0/);
   });
 
   it('settles a RECEIVED inbox row after the workspace head is lost and its receipt moves', async () => {
@@ -3360,6 +3409,7 @@ describe('graph-scoped finalization handler', () => {
       merkleRoot: message.kcMerkleRoot,
       publisherAddress: PUBLISHER,
       kaId: PACKED_KA_ID,
+      batchId: PACKED_KA_ID,
       versionBlock: 124,
       authorAddress: AUTHOR,
     }, createOperationContext('system')))
@@ -3416,6 +3466,7 @@ describe('graph-scoped finalization handler', () => {
         merkleRoot: message.kcMerkleRoot,
         publisherAddress: PUBLISHER,
         kaId: PACKED_KA_ID,
+        batchId: PACKED_KA_ID,
         versionBlock,
         authorAddress: AUTHOR,
       }, createOperationContext('system'))).resolves.toBe('already-confirmed');
