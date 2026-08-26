@@ -762,8 +762,10 @@ export class SparqlHttpStore implements TripleStore {
           });
           if (!res.ok) {
             const text = await res.text().catch(() => '');
-            throw new Error(
-              `SPARQL HTTP ${opts.operation} failed (${res.status}): ${text.slice(0, 300)}`,
+            throw new SparqlHttpResponseError(
+              opts.operation,
+              res.status,
+              text.slice(0, 300),
             );
           }
         } catch (error) {
