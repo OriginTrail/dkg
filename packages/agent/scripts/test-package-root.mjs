@@ -19,6 +19,15 @@ const expectedRfc64PolicyCells = [
   'private-open',
   'private-curated',
 ];
+const expectedRfc64PublicCatalogReconciliationOutcomes = [
+  'already-applied',
+  'applied',
+  'staged-only',
+  'not-found',
+  'failed',
+  'dropped',
+  'closed',
+];
 
 if (
   typeof root.DKGAgent !== 'function'
@@ -101,6 +110,25 @@ if (
   )
 ) {
   throw new Error('package root did not expose the closed RFC-64 policy-cell list');
+}
+if (
+  !Array.isArray(root.RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1)
+  || !Object.isFrozen(root.RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1)
+  || root.RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1.length
+    !== expectedRfc64PublicCatalogReconciliationOutcomes.length
+  || root.RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1.some(
+    (outcome, index) => outcome !== expectedRfc64PublicCatalogReconciliationOutcomes[index]
+  )
+) {
+  throw new Error('package root did not expose the closed RFC-64 reconciliation outcome list');
+}
+if (
+  typeof root.isRfc64CatalogReconciliationSuccessOutcomeV1 !== 'function'
+  || typeof root.isRfc64CatalogReconciliationFailureOutcomeV1 !== 'function'
+  || typeof root.isRfc64PublicCatalogReceiverSuccessCompletionV1 !== 'function'
+  || typeof root.isRfc64PublicCatalogReceiverFailureCompletionV1 !== 'function'
+) {
+  throw new Error('package root did not expose RFC-64 reconciliation outcome guards');
 }
 if (packageManifest.name !== '@origintrail-official/dkg-agent') {
   throw new Error('historical package.json subpath no longer resolves');

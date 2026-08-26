@@ -24,7 +24,6 @@ import {
   type Rfc64CatalogProviderTerminalFailureV1,
 } from './public-catalog-reconciliation-failure-v1.js';
 import type {
-  Rfc64PublicCatalogReceiverCompletionOutcomeV1,
   Rfc64PublicCatalogReceiverCompletionV1,
 } from './public-catalog-reconciliation-outcome-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
@@ -374,7 +373,12 @@ export class Rfc64PublicCatalogReceiverV1 {
     exactCompletionProviderKeys?: ReadonlySet<string>,
   ): void {
     if (this.#closed) {
-      completion?.(receiverCompletion('closed', null, 0, null));
+      completion?.(receiverCompletion({
+        outcome: 'closed',
+        appliedProviderPeerId: null,
+        providerAttempts: 0,
+        error: null,
+      }));
       return;
     }
     if (completion !== undefined && exactCompletionProviderKeys !== undefined) {
@@ -421,7 +425,12 @@ export class Rfc64PublicCatalogReceiverV1 {
       if (this.#queue.length >= this.#maxQueue) {
         this.#droppedQueueFull += 1;
         if (!completionAttached && completion !== undefined) {
-          completion(receiverCompletion('dropped', null, 0, null));
+          completion(receiverCompletion({
+            outcome: 'dropped',
+            appliedProviderPeerId: null,
+            providerAttempts: 0,
+            error: null,
+          }));
           completionAttached = true;
         }
         continue;
@@ -468,7 +477,12 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));
     if (this.#queue.length >= this.#maxQueue) {
       this.#droppedQueueFull += 1;
-      completion(receiverCompletion('dropped', null, 0, null));
+      completion(receiverCompletion({
+        outcome: 'dropped',
+        appliedProviderPeerId: null,
+        providerAttempts: 0,
+        error: null,
+      }));
       return;
     }
     const providers = new Map<string, ReceiverProviderV1>();
@@ -519,17 +533,23 @@ export class Rfc64PublicCatalogReceiverV1 {
     for (const timer of this.#deferralTimers) clearTimeout(timer);
     this.#deferralTimers.clear();
     for (const task of this.#deferred) {
-      this.#finishTask(task, receiverCompletion(
-        'closed', null, task.providerAttempts ?? 0, null,
-      ));
+      this.#finishTask(task, receiverCompletion({
+        outcome: 'closed',
+        appliedProviderPeerId: null,
+        providerAttempts: task.providerAttempts ?? 0,
+        error: null,
+      }));
       this.#pendingByKey.delete(task.key);
     }
     this.#deferred.clear();
     const abandoned = this.#queue.splice(0);
     for (const task of abandoned) {
-      this.#finishTask(task, receiverCompletion(
-        'closed', null, task.providerAttempts ?? 0, null,
-      ));
+      this.#finishTask(task, receiverCompletion({
+        outcome: 'closed',
+        appliedProviderPeerId: null,
+        providerAttempts: task.providerAttempts ?? 0,
+        error: null,
+      }));
       this.#pendingByKey.delete(task.key);
     }
     this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
@@ -592,9 +612,12 @@ export class Rfc64PublicCatalogReceiverV1 {
           case 'already-applied':
             this.#dedupedAlreadyApplied += 1;
             this.#finishSuccessfulReconciliationAttempt(task, outcome.announcement);
-            this.#finishTask(task, receiverCompletion(
-              'already-applied', null, task.providerAttempts ?? 0, null,
-            ));
+            this.#finishTask(task, receiverCompletion({
+              outcome: 'already-applied',
+              appliedProviderPeerId: null,
+              providerAttempts: task.providerAttempts ?? 0,
+              error: null,
+            }));
             break;
           case 'applied':
             this.#applied += 1;
@@ -604,21 +627,30 @@ export class Rfc64PublicCatalogReceiverV1 {
               outcome.peerId,
             ));
             this.#finishSuccessfulReconciliationAttempt(task, outcome.announcement);
-            this.#finishTask(task, receiverCompletion(
-              'applied', outcome.peerId, task.providerAttempts ?? 0, null,
-            ));
+            this.#finishTask(task, receiverCompletion({
+              outcome: 'applied',
+              appliedProviderPeerId: outcome.peerId,
+              providerAttempts: task.providerAttempts ?? 0,
+              error: null,
+            }));
             break;
           case 'staged-only':
             this.#stagedOnly += 1;
-            this.#finishTask(task, receiverCompletion(
-              'staged-only', null, task.providerAttempts ?? 0, null,
-            ));
+            this.#finishTask(task, receiverCompletion({
+              outcome: 'staged-only',
+              appliedProviderPeerId: null,
+              providerAttempts: task.providerAttempts ?? 0,
+              error: null,
+            }));
             break;
           case 'not-found':
             this.#notFound += 1;
-            this.#finishTask(task, receiverCompletion(
-              'not-found', null, task.providerAttempts ?? 0, null,
-            ));
+            this.#finishTask(task, receiverCompletion({
+              outcome: 'not-found',
+              appliedProviderPeerId: null,
+              providerAttempts: task.providerAttempts ?? 0,
+              error: null,
+            }));
             break;
           case 'failed':
             this.#failed += 1;
@@ -627,15 +659,21 @@ export class Rfc64PublicCatalogReceiverV1 {
               outcome.error,
               task.reconciliationAttemptToken ?? null,
             ));
-            this.#finishTask(task, receiverCompletion(
-              'failed', null, task.providerAttempts ?? 0, outcome.error,
-            ));
+            this.#finishTask(task, receiverCompletion({
+              outcome: 'failed',
+              appliedProviderPeerId: null,
+              providerAttempts: task.providerAttempts ?? 0,
+              error: outcome.error,
+            }));
             break;
           case 'aborted':
           case 'defer-admission':
-            this.#finishTask(task, receiverCompletion(
-              'closed', null, task.providerAttempts ?? 0, null,
-            ));
+            this.#finishTask(task, receiverCompletion({
+              outcome: 'closed',
+              appliedProviderPeerId: null,
+              providerAttempts: task.providerAttempts ?? 0,
+              error: null,
+            }));
             break;
         }
         this.#pendingByKey.delete(task.key);
@@ -670,12 +708,12 @@ export class Rfc64PublicCatalogReceiverV1 {
         new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
         task.reconciliationAttemptToken ?? null,
       ));
-      this.#finishTask(task, receiverCompletion(
-        'failed',
-        null,
-        task.providerAttempts ?? 0,
-        new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
-      ));
+      this.#finishTask(task, receiverCompletion({
+        outcome: 'failed',
+        appliedProviderPeerId: null,
+        providerAttempts: task.providerAttempts ?? 0,
+        error: new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
+      }));
       if (this.#isIdle()) this.#resolveIdle();
       return;
     }
@@ -686,9 +724,12 @@ export class Rfc64PublicCatalogReceiverV1 {
       this.#deferralTimers.delete(timer);
       this.#deferred.delete(task);
       if (this.#closed || this.#closing.signal.aborted) {
-        this.#finishTask(task, receiverCompletion(
-          'closed', null, task.providerAttempts ?? 0, null,
-        ));
+        this.#finishTask(task, receiverCompletion({
+          outcome: 'closed',
+          appliedProviderPeerId: null,
+          providerAttempts: task.providerAttempts ?? 0,
+          error: null,
+        }));
         this.#pendingByKey.delete(task.key);
         if (this.#isIdle()) this.#resolveIdle();
         return;
@@ -963,12 +1004,9 @@ function nonNegativeInt(value: number | undefined, fallback: number): number {
 }
 
 function receiverCompletion(
-  outcome: Rfc64PublicCatalogReceiverCompletionOutcomeV1,
-  appliedProviderPeerId: string | null,
-  providerAttempts: number,
-  error: unknown | null,
+  completion: Rfc64PublicCatalogReceiverCompletionV1,
 ): Rfc64PublicCatalogReceiverCompletionV1 {
-  return Object.freeze({ outcome, appliedProviderPeerId, providerAttempts, error });
+  return Object.freeze(completion);
 }
 
 function providerFailureV1(

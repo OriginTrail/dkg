@@ -6,8 +6,14 @@ import { Rfc64CatalogSynchronizationErrorV1 } from '../src/dkg-agent-rfc64-catal
 import { Rfc64CatalogReconciliationTerminalErrorV1 } from
   '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 import {
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_OUTCOMES_V1,
   RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1,
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_SUCCESS_OUTCOMES_V1,
   isRfc64CatalogReconciliationFailureOutcomeV1,
+  isRfc64CatalogReconciliationSuccessOutcomeV1,
+  isRfc64PublicCatalogReceiverFailureCompletionV1,
+  isRfc64PublicCatalogReceiverSuccessCompletionV1,
+  type Rfc64PublicCatalogReceiverCompletionV1,
 } from '../src/rfc64/public-catalog-reconciliation-outcome-v1.js';
 
 describe('RFC-64 canonical reconciliation outcome v1', () => {
@@ -22,10 +28,47 @@ describe('RFC-64 canonical reconciliation outcome v1', () => {
       'closed',
     ]);
     expect(Object.isFrozen(RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1)).toBe(true);
+    expect(RFC64_PUBLIC_CATALOG_RECONCILIATION_SUCCESS_OUTCOMES_V1).toEqual([
+      'already-applied',
+      'applied',
+    ]);
+    expect(RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_OUTCOMES_V1).toEqual([
+      'staged-only',
+      'not-found',
+      'failed',
+      'dropped',
+      'closed',
+    ]);
+    expect(Object.isFrozen(RFC64_PUBLIC_CATALOG_RECONCILIATION_SUCCESS_OUTCOMES_V1)).toBe(true);
+    expect(Object.isFrozen(RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_OUTCOMES_V1)).toBe(true);
+    expect(RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1.map(
+      isRfc64CatalogReconciliationSuccessOutcomeV1,
+    )).toEqual([true, true, false, false, false, false, false]);
     expect(RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1.map(
       isRfc64CatalogReconciliationFailureOutcomeV1,
     )).toEqual([false, false, true, true, true, true, true]);
+    expect(isRfc64CatalogReconciliationSuccessOutcomeV1('unknown')).toBe(false);
     expect(isRfc64CatalogReconciliationFailureOutcomeV1('unknown')).toBe(false);
+  });
+
+  it('narrows complete success and failure payloads through the discriminant', () => {
+    const success: Rfc64PublicCatalogReceiverCompletionV1 = {
+      outcome: 'applied',
+      appliedProviderPeerId: 'provider-peer',
+      providerAttempts: 1,
+      error: null,
+    };
+    const failure: Rfc64PublicCatalogReceiverCompletionV1 = {
+      outcome: 'failed',
+      appliedProviderPeerId: null,
+      providerAttempts: 2,
+      error: new Error('receiver failed'),
+    };
+
+    expect(isRfc64PublicCatalogReceiverSuccessCompletionV1(success)).toBe(true);
+    expect(isRfc64PublicCatalogReceiverFailureCompletionV1(success)).toBe(false);
+    expect(isRfc64PublicCatalogReceiverSuccessCompletionV1(failure)).toBe(false);
+    expect(isRfc64PublicCatalogReceiverFailureCompletionV1(failure)).toBe(true);
   });
 
   it('keeps modern terminal errors compatible with the historical class and fields', () => {
