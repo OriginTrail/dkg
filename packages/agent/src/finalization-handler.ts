@@ -52,7 +52,6 @@ import {
   withMaterializationLock,
   KnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
-  workspacePublicQuadsDigest,
   type MaterializedVersion,
   type KnowledgeAssetWorkspaceHead,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
@@ -185,11 +184,6 @@ function sameBigIntLiteral(left: string | bigint | null | undefined, right: stri
   } catch {
     return false;
   }
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-  return left.length === right.length
-    && left.every((byte, index) => byte === right[index]);
 }
 
 type ExactGraphScopedLayerVerification = ExactGraphContentVerification;
