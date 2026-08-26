@@ -12,7 +12,6 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
-import { Rfc64CatalogSynchronizationErrorV1 } from './dkg-agent-rfc64-catalog-sync.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type {
   Rfc64CatalogBootstrapConfigV1,
@@ -22,7 +21,7 @@ import type {
 } from './dkg-agent-types.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import {
-  classifyRfc64CatalogReconciliationTerminalReasonV1,
+  Rfc64CatalogReconciliationTerminalErrorV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 
 const MAX_STATUS_ERROR_BYTES_V1 = 1024;
@@ -81,28 +80,8 @@ export function classifyRfc64CatalogBootstrapFailureV1(
 }
 
 function hasNoAuthorizedProviderTerminalReasonV1(error: unknown): boolean {
-  let current: unknown = error;
-  const seen = new Set<unknown>();
-  for (let depth = 0; current !== null && depth < 8 && !seen.has(current); depth += 1) {
-    seen.add(current);
-    if (
-      current instanceof Rfc64CatalogSynchronizationErrorV1
-      && current.terminalReason === 'no-authorized-provider'
-    ) {
-      return true;
-    }
-    if (classifyRfc64CatalogReconciliationTerminalReasonV1(current)
-      === 'no-authorized-provider') {
-      return true;
-    }
-    if (typeof current !== 'object') return false;
-    try {
-      current = (current as { readonly cause?: unknown }).cause ?? null;
-    } catch {
-      return false;
-    }
-  }
-  return false;
+  return error instanceof Rfc64CatalogReconciliationTerminalErrorV1
+    && error.terminalReason === 'no-authorized-provider';
 }
 
 interface MutableTargetStatusV1 {

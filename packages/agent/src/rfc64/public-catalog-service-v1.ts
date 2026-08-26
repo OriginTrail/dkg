@@ -68,6 +68,10 @@ import {
   type Rfc64PublicCatalogReceiverStatsV1,
 } from './public-catalog-receiver-v1.js';
 import {
+  Rfc64CatalogReconciliationTerminalErrorV1,
+  classifyRfc64CatalogReconciliationTerminalReasonV1,
+} from './public-catalog-reconciliation-failure-v1.js';
+import {
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
   Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1,
   type Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
@@ -767,9 +771,10 @@ export class Rfc64PublicCatalogServiceV1 {
       );
     }
     if (completion.outcome !== 'applied' && completion.outcome !== 'already-applied') {
-      throw new Error(
+      throw new Rfc64CatalogReconciliationTerminalErrorV1(
+        classifyRfc64CatalogReconciliationTerminalReasonV1(completion.error),
         `RFC-64 current-head synchronization ended with ${completion.outcome}`,
-        completion.error === null ? {} : { cause: completion.error },
+        completion.error,
       );
     }
     return Object.freeze({

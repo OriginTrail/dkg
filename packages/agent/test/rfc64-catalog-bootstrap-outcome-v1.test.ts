@@ -3,12 +3,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { classifyRfc64CatalogBootstrapFailureV1 } from '../src/dkg-agent-rfc64-catalog-bootstrap.js';
-import { Rfc64CatalogSynchronizationErrorV1 } from '../src/dkg-agent-rfc64-catalog-sync.js';
 import { FinalizedVmCompositionErrorV1 } from '../src/rfc64/finalized-vm-composer-v1.js';
 import { Rfc64PublicCatalogNativeReceiverErrorV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import {
   Rfc64CatalogProviderFailureAggregateV1,
-  Rfc64PublicCatalogReconciliationFailureRegistryV1,
+  Rfc64CatalogReconciliationTerminalErrorV1,
   classifyRfc64CatalogReconciliationTerminalReasonV1,
 } from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 
@@ -22,9 +21,10 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
       outcome: 'failed',
       completionReason: null,
     });
-    const knownIncomplete = new Rfc64CatalogSynchronizationErrorV1(
+    const knownIncomplete = new Rfc64CatalogReconciliationTerminalErrorV1(
       'no-authorized-provider',
-      'catalog-native-receiver-activation',
+      'current private finalized reconciliation is incomplete',
+      null,
     );
     expect(classifyRfc64CatalogBootstrapFailureV1(false, knownIncomplete)).toEqual({
       outcome: 'failed',
@@ -37,8 +37,6 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
   });
 
   it('propagates the typed VM terminal reason without exception-depth inspection', () => {
-    const headDigest = `0x${'12'.repeat(32)}` as never;
-    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
     const compositionFailure = new FinalizedVmCompositionErrorV1(
       'finalized-vm-composition-incomplete',
       'one private finalized placement is absent',
@@ -48,17 +46,10 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
       'the exact precommit failed',
       { cause: compositionFailure },
     );
-    const attemptToken = registry.beginAttempt(headDigest);
-    registry.record(
-      headDigest,
-      receiverFailure,
+    const synchronizationFailure = new Rfc64CatalogReconciliationTerminalErrorV1(
       classifyRfc64CatalogReconciliationTerminalReasonV1(receiverFailure),
-      attemptToken,
-    );
-    const attempt = registry.readCurrentAttempt(headDigest)!;
-    const synchronizationFailure = new Rfc64CatalogSynchronizationErrorV1(
-      attempt.terminalReason,
-      attempt.errorCode,
+      'current private finalized reconciliation failed',
+      receiverFailure,
     );
 
     expect(classifyRfc64CatalogBootstrapFailureV1(true, synchronizationFailure)).toEqual({
@@ -73,9 +64,10 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
       'the authorized provider does not have the bundle named by the signed row',
     );
     const terminalReason = classifyRfc64CatalogReconciliationTerminalReasonV1(receiverFailure);
-    const synchronizationFailure = new Rfc64CatalogSynchronizationErrorV1(
+    const synchronizationFailure = new Rfc64CatalogReconciliationTerminalErrorV1(
       terminalReason,
-      receiverFailure.code,
+      'current private finalized reconciliation failed',
+      receiverFailure,
     );
 
     expect(classifyRfc64CatalogBootstrapFailureV1(true, synchronizationFailure)).toEqual({
@@ -101,9 +93,10 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
       const aggregate = new Rfc64CatalogProviderFailureAggregateV1(2, providerErrors.map(
         (error, index) => ({ providerPeerId: `peer-${index}`, error }),
       ));
-      const serviceFailure = new Error(
+      const serviceFailure = new Rfc64CatalogReconciliationTerminalErrorV1(
+        classifyRfc64CatalogReconciliationTerminalReasonV1(aggregate),
         'RFC-64 current-head synchronization ended with failed',
-        { cause: aggregate },
+        aggregate,
       );
       expect(classifyRfc64CatalogReconciliationTerminalReasonV1(aggregate)).toBeNull();
       expect(classifyRfc64CatalogBootstrapFailureV1(true, serviceFailure)).toEqual({
@@ -121,9 +114,10 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
         'the authorized provider does not have the signed bundle',
       ),
     })));
-    const serviceFailure = new Error(
+    const serviceFailure = new Rfc64CatalogReconciliationTerminalErrorV1(
+      classifyRfc64CatalogReconciliationTerminalReasonV1(aggregate),
       'RFC-64 current-head synchronization ended with failed',
-      { cause: aggregate },
+      aggregate,
     );
     expect(classifyRfc64CatalogReconciliationTerminalReasonV1(aggregate))
       .toBe('no-authorized-provider');

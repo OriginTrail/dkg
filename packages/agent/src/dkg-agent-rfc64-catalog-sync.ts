@@ -18,23 +18,6 @@ import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js
 import type {
   Rfc64PublicCatalogCurrentHeadScopeV1,
 } from './rfc64/public-catalog-current-head-discovery-v1.js';
-import type {
-  Rfc64CatalogReconciliationTerminalReasonV1,
-} from './rfc64/public-catalog-reconciliation-failure-v1.js';
-
-export class Rfc64CatalogSynchronizationErrorV1 extends Error {
-  constructor(
-    readonly terminalReason: Rfc64CatalogReconciliationTerminalReasonV1 | null,
-    readonly code: string | null,
-  ) {
-    super(
-      'RFC-64 current catalog head reconciliation failed'
-      + ` (${terminalReason ?? code ?? 'unknown'})`,
-    );
-    this.name = 'Rfc64CatalogSynchronizationErrorV1';
-  }
-}
-
 /** Explicit provider + independently accepted public-root scope for a cold pull. */
 export interface SynchronizeRfc64PublicCatalogFromProviderParamsV1 {
   readonly remotePeerId: string;
@@ -126,15 +109,6 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
         !== synchronized.current.announcement.catalogHeadObjectDigest
       || applied.catalogVersion !== synchronized.current.announcement.catalogVersion
     ) {
-      const failure = this.rfc64PublicCatalogReconciliationFailuresV1.readCurrentAttempt(
-        synchronized.current.announcement.catalogHeadObjectDigest,
-      );
-      if (failure !== null) {
-        throw new Rfc64CatalogSynchronizationErrorV1(
-          failure.terminalReason,
-          failure.errorCode,
-        );
-      }
       throw new Error(
         'RFC-64 current public catalog head did not reach its durable applied postcondition',
       );
