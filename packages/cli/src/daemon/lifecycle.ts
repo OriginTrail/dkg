@@ -166,7 +166,7 @@ import {
   startDaemonLogController,
   type DaemonLogExporterStartResult,
 } from './log-lifecycle.js';
-import { formatDaemonDebugLog } from './log-sink.js';
+import { startDaemonDebugLogWriter } from './daemon-debug-log-writer.js';
 import {
   createTelemetryRuntime,
   type TelemetryTransitionResult,
@@ -2605,9 +2605,20 @@ export async function runDaemonInner(
   // Avoid duplicating routine logs into SQLite on the event loop. Low-volume
   // warning/error records remain available to operation and dashboard views;
   // the controller owns sink attachment plus the one active remote exporter.
+  const debugLogWriter = startDaemonDebugLogWriter({
+    logFile,
+    onError: (message) => {
+      origStderrWrite(`[daemon-debug-log] append failed: ${message}\n`);
+    },
+    onDrop: (dropped) => {
+      origStderrWrite(
+        `[daemon-debug-log] queue full; dropped ${dropped} oldest record(s)\n`,
+      );
+    },
+  });
   const daemonLogController = startDaemonLogController({
     writeLocalDebug: (record) => {
-      appendFile(logFile, formatDaemonDebugLog(record)).catch(() => {});
+      debugLogWriter.push(record);
     },
     insertDiagnosticLog: (record) => dashDb.insertLog(record),
     redact: redactForRemote,
@@ -2993,10 +3004,14 @@ export async function runDaemonInner(
   // Daemon shutdown additionally detaches the Logger sink. Runtime telemetry
   // disable keeps the sink attached so warn/error diagnostics still persist.
   async function stopDaemonLogging(): Promise<void> {
-    // Detach synchronously, then use the one canonical telemetry shutdown path
-    // to drain transitions and flush the exporter plus OTel SDK exactly once.
+    // Detach synchronously, then drain both independently owned paths. No new
+    // debug record can enter the bounded writer after detachment, and runtime
+    // telemetry remains the one exporter/OTel shutdown owner.
     daemonLogController.detachSink();
-    await telemetryRuntime.shutdown();
+    await Promise.all([
+      telemetryRuntime.shutdown(),
+      debugLogWriter.shutdown(),
+    ]);
   }
 
   await telemetryRuntime.startConfiguredBestEffort();

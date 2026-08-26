@@ -38,7 +38,7 @@ export interface DaemonLogSinkDeps {
     message: string;
   }) => void;
   /** Redactor applied to the copy that leaves the node. */
-  redact: (record: LogRecord) => LogRecord;
+  redact: (record: CanonicalLogRecord) => CanonicalLogRecord;
   /** The currently selected shipper, evaluated per record for runtime toggles. */
   remoteShipper: () => RemoteLogShipper | null | undefined;
   /** Clock, injectable for tests. Defaults to Date.now. */

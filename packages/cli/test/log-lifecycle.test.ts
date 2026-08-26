@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Logger } from '@origintrail-official/dkg-core';
 import { startDaemonLogController } from '../src/daemon/log-lifecycle.js';
-import { formatDaemonDebugLog } from '../src/daemon/log-sink.js';
+import { startDaemonDebugLogWriter } from '../src/daemon/daemon-debug-log-writer.js';
 import type { DkgConfig } from '../src/config.js';
 import { createTelemetryRuntime } from '../src/daemon/telemetry-runtime.js';
 
@@ -180,11 +180,11 @@ describe('startDaemonLogController', () => {
   it('keeps debug records in the local file without routine SQLite persistence', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-debug-log-'));
     const file = join(directory, 'daemon.log');
-    const writes: Array<Promise<void>> = [];
     const persisted: string[] = [];
+    const debugWriter = startDaemonDebugLogWriter({ logFile: file });
     const controller = startDaemonLogController({
       writeLocalDebug: (record) => {
-        writes.push(appendFile(file, formatDaemonDebugLog(record, 1234)));
+        debugWriter.push(record);
       },
       insertDiagnosticLog: (record) => persisted.push(record.message),
       redact: (record) => record,
@@ -196,7 +196,8 @@ describe('startDaemonLogController', () => {
         { operationId: 'op-debug', operationName: 'system' },
         'discovery scan failed',
       );
-      await Promise.all(writes);
+      controller.detachSink();
+      await debugWriter.shutdown();
 
       expect(await readFile(file, 'utf8')).toContain(
         'system op-debug [debug-file-test] discovery scan failed [DEBUG]',
@@ -204,7 +205,66 @@ describe('startDaemonLogController', () => {
       expect(persisted).toEqual([]);
     } finally {
       controller.detachSink();
+      await debugWriter.shutdown();
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('bounds queued debug writes and waits for accepted records on shutdown', async () => {
+    let releaseAppend!: () => void;
+    let markAppendStarted!: () => void;
+    const appendStarted = new Promise<void>((resolve) => {
+      markAppendStarted = resolve;
+    });
+    const appendGate = new Promise<void>((resolve) => {
+      releaseAppend = resolve;
+    });
+    const appended: string[] = [];
+    let concurrentAppends = 0;
+    let maxConcurrentAppends = 0;
+    const debugWriter = startDaemonDebugLogWriter({
+      logFile: 'unused-in-injected-test',
+      maxQueuedEntries: 4,
+      maxBatchEntries: 1,
+      append: async (data) => {
+        concurrentAppends += 1;
+        maxConcurrentAppends = Math.max(maxConcurrentAppends, concurrentAppends);
+        markAppendStarted();
+        await appendGate;
+        appended.push(data);
+        concurrentAppends -= 1;
+      },
+    });
+    const record = (index: number) => ({
+      level: 'debug' as const,
+      operationName: 'system',
+      operationId: `op-${index}`,
+      module: 'queue-test',
+      message: `message-${index}`,
+    });
+
+    debugWriter.push(record(0));
+    await appendStarted;
+    for (let index = 1; index <= 20; index++) debugWriter.push(record(index));
+
+    expect(debugWriter.pending()).toBe(5); // one active + four bounded queued
+    expect(debugWriter.dropped()).toBe(16);
+    let shutdownSettled = false;
+    const shutdown = debugWriter.shutdown().then(() => {
+      shutdownSettled = true;
+    });
+    await Promise.resolve();
+    const settledBeforeRelease = shutdownSettled;
+    releaseAppend();
+    await shutdown;
+    expect(settledBeforeRelease).toBe(false);
+    expect(maxConcurrentAppends).toBe(1);
+    expect(debugWriter.pending()).toBe(0);
+    expect(debugWriter.push(record(21))).toBe(false);
+    expect(appended.join('')).toContain('message-0');
+    for (const index of [17, 18, 19, 20]) {
+      expect(appended.join('')).toContain(`message-${index}`);
+    }
+    expect(appended.join('')).not.toContain('message-16');
   });
 });

@@ -25,12 +25,12 @@ export interface OperationContext {
  * remote shippers (syslog, OTLP) and its file-backed local debug path.
  * Keep it stable — redaction and the exporters consume it.
  */
-export interface LogRecord {
+export interface LogRecord<Level extends string = string> {
   /**
    * Kept string-typed for source compatibility with published callers and
    * serialized records. Logger-created records use CanonicalLogRecord.
    */
-  level: string;
+  level: Level;
   operationName: string;
   operationId: string;
   sourceOperationId?: string;
@@ -41,9 +41,7 @@ export interface LogRecord {
   spanId?: string;
 }
 
-export interface CanonicalLogRecord extends LogRecord {
-  level: LogLevel;
-}
+export type CanonicalLogRecord = LogRecord<LogLevel>;
 
 export type LogSink = (entry: CanonicalLogRecord) => void;
 
