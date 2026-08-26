@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path';
 
 import { readCleanRepositoryHead } from '../rfc64-persistence-lifecycle/evidence.js';
 import { buildGate2RuntimeManifestV1 } from
-  '../rfc64-gate2-multi-asset-completeness/runtime-provenance.ts';
+  '../rfc64-runtime-provenance.mts';
 import { verifyCp1PublicSwmParity } from './verifier.ts';
 
 const repoRoot = resolve(import.meta.dirname, '../..');

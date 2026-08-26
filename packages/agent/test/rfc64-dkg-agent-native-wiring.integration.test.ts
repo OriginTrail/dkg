@@ -2469,7 +2469,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     ];
 
     for (const applied of staleAppliedSnapshots) {
-      const readCurrentAttempt = vi.fn(() => null);
       const agentLike = {
         rfc64PublicCatalogServiceV1: {
           synchronizeCurrentCatalogHead: vi.fn().mockResolvedValue(synchronized),
@@ -2477,7 +2476,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         rfc64PersistenceV1: {
           inventory: { readAppliedCatalogHeadV1: vi.fn(() => applied) },
         },
-        rfc64PublicCatalogReconciliationFailuresV1: { readCurrentAttempt },
       };
 
       await expect(DKGAgent.prototype.synchronizeRfc64PublicCatalogFromProviderV1.call(
@@ -2493,7 +2491,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           },
         },
       )).rejects.toThrow(/durable applied postcondition/u);
-      expect(readCurrentAttempt).toHaveBeenCalledWith(selectedHeadDigest);
+      expect(agentLike.rfc64PublicCatalogServiceV1.synchronizeCurrentCatalogHead)
+        .toHaveBeenCalledOnce();
     }
   });
 

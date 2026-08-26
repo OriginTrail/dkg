@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  assertRuntimeProcessProvenanceV1,
+  assertPersistedRuntimeProcessProvenanceV1,
   buildRuntimeProcessProvenanceV1,
-} from '../../../../devnet/rfc64-gate2-multi-asset-completeness/runtime-provenance.ts';
+} from '../../../../devnet/rfc64-runtime-provenance.mts';
 
 export const RFC64_PRIVATE_RUNTIME_PROVENANCE_SCHEMA_V1 =
   'dkg-rfc64-private-runtime-provenance-v1';
@@ -65,7 +65,7 @@ export function createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild) {
 }
 
 export function assertRfc64PrivateRuntimeProvenanceV1(provenance) {
-  return assertRuntimeProcessProvenanceV1(provenance, {
+  return assertPersistedRuntimeProcessProvenanceV1(provenance, {
     processIds: RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
     schema: RFC64_PRIVATE_RUNTIME_PROVENANCE_SCHEMA_V1,
   });

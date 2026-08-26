@@ -30,6 +30,7 @@ import {
 import { runRfc64PrivateGateFromCleanBuildV1 } from '../devnet/rfc64-private-catalog/clean-launch.js';
 import {
   RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
+  assertRfc64PrivateRuntimeProvenanceV1,
   buildRfc64PrivateRuntimeProvenanceV1,
   createRfc64PrivateRuntimeEvidenceCollectorV1,
 } from '../devnet/rfc64-private-catalog/runtime-provenance.mjs';
@@ -76,6 +77,18 @@ afterEach(async () => {
 });
 
 describe('RFC-64 private release gate artifact lifecycle', () => {
+  it('rejects persisted runtime provenance before admitting the typed model', () => {
+    expect(() => assertRfc64PrivateRuntimeProvenanceV1(null))
+      .toThrow(/must be an object/u);
+    expect(() => assertRfc64PrivateRuntimeProvenanceV1([]))
+      .toThrow(/must be an object/u);
+    expect(() => assertRfc64PrivateRuntimeProvenanceV1({
+      schema: 'dkg-rfc64-private-runtime-provenance-v1',
+      processes: [],
+      sourceBuild: null,
+    })).toThrow(/invalid envelope/u);
+  });
+
   it('writes a successful PASS with exact run and source provenance', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-artifact-'));
     temporaryRoots.push(root);

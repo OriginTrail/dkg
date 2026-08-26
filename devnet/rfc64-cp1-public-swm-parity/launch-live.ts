@@ -5,7 +5,7 @@ import {
   buildGate2RuntimeManifestV1,
   installGate2RuntimeLaunchReceiptV1,
   runGate2CleanRuntimeBuildV1,
-} from '../rfc64-gate2-multi-asset-completeness/runtime-provenance.ts';
+} from '../rfc64-runtime-provenance.mts';
 
 const repoRoot = resolve(import.meta.dirname, '../..');
 const sourceCommit = readCleanRepositoryHead(repoRoot);
@@ -16,4 +16,3 @@ if (readCleanRepositoryHead(repoRoot) !== sourceCommit) {
 const manifest = buildGate2RuntimeManifestV1(repoRoot, sourceCommit);
 installGate2RuntimeLaunchReceiptV1({ manifest, sourceCommit });
 await import('./run.ts');
-
