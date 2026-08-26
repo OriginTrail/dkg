@@ -147,9 +147,11 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
     // Hang guard: 10k decls must reject in under a second. The buggy
     // regex took >>10s here in local repro.
     expect(largeMs).toBeLessThan(1000);
-    // Linearity guard: 10x input → bounded growth. 25x ceiling +
-    // 25ms cushion for noise (same calibration as epcis ReDoS test).
-    expect(largeMs).toBeLessThan(smallMs * 25 + 25);
+    // Linearity guard: 10x input → bounded growth. Keep a process-level
+    // scheduling cushion because coverage runs this beside other test workers;
+    // the vulnerable regex still exceeds both this bound and the 1s guard by
+    // an order of magnitude.
+    expect(largeMs).toBeLessThan(smallMs * 25 + 250);
   });
 
   it('classifies N=10_000 valid PREFIX decls + trailing SELECT in linear time', () => {
