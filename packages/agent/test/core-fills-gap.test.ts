@@ -76,7 +76,7 @@ interface AgentInternals {
   recoverVmReconcileBatch(
     localCgId: string,
     onChainCgId: bigint,
-    targets: readonly Array<{
+    targets: ReadonlyArray<{
       localCgId: string;
       onChainCgId: string;
       ordinal: number;
@@ -2218,7 +2218,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).recoverVmReconcileBatch = async (
       _lcg: string,
       _ocg: bigint,
-      targets: readonly Array<{ ordinal: number }>,
+      targets: ReadonlyArray<{ ordinal: number }>,
     ) => {
       recoveryBatches.push(targets.map((target) => target.ordinal));
       return {

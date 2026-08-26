@@ -129,6 +129,10 @@ export {
   type SparqlHttpStoreOptions,
   type SparqlHttpQueryOptions,
   type SparqlHttpSlowQueryEvent,
+  SparqlHttpResponseError,
+  isSparqlHttpResponseError,
+  SPARQL_HTTP_RESPONSE_ERROR_CODE,
+  type SparqlHttpResponseErrorLike,
 } from './adapters/sparql-http.js';
 export {
   ContextGraphManager,

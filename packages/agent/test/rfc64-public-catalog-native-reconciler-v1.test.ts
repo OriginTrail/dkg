@@ -208,6 +208,23 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
     }), ACCEPTED_POLICY)).toThrow('accepted null-governance owner policy');
   });
 
+  it('forces a durable private finalized head through the current-policy precommit', async () => {
+    const current = announcement('1');
+    const readAppliedCatalogHeadV1 = vi.fn(() => snapshot(current));
+    const requiresAppliedHeadPrecommit = vi.fn(() => true);
+    const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+      nativeReceiver: receiver(vi.fn()),
+      inventory: { readAppliedCatalogHeadV1 },
+      resolveTrustedCatalogScope,
+      resolveDeployment: async () => DEPLOYMENT,
+      requiresAppliedHeadPrecommit,
+    });
+
+    await expect(reconciler.isHeadApplied(current)).resolves.toBe(false);
+    expect(requiresAppliedHeadPrecommit).toHaveBeenCalledWith(current);
+    expect(readAppliedCatalogHeadV1).not.toHaveBeenCalled();
+  });
+
   it('derives a multi-row dedupe count only from the exact staged head variant', async () => {
     const successor = announcement('1');
     const readStagedCatalogHead = vi.fn(async () => stagedHead(successor, '2'));

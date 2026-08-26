@@ -65,6 +65,7 @@ async function requestStatusWithAgent(
   configOverrides: Record<string, unknown> = {},
   requestPath = '/api/status',
   networkOverride: RequestContext['network'] = null,
+  rfc64CatalogOverride?: RequestContext['rfc64Catalog'],
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -86,6 +87,9 @@ async function requestStatusWithAgent(
         config as never,
         resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
       ),
+      ...(rfc64CatalogOverride === undefined
+        ? {}
+        : { rfc64Catalog: rfc64CatalogOverride }),
       startedAt: Date.now(),
       agent: {
         peerId: 'peer-status-test',
@@ -115,6 +119,198 @@ async function requestStatusWithAgent(
     });
   }
 }
+
+describe('/api/status RFC-64 private recovery privacy', () => {
+  it('reports aggregate telemetry for a private-only catalog activation', async () => {
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/private-only-telemetry';
+    const response = await requestStatusWithAgent(
+      {
+        rfc64PublicCatalogStatsV1: () => ({
+          started: true,
+          acceptedPolicies: 1,
+          receiver: {
+            providerAttempts: 2,
+            providerSwitches: 1,
+            providerSuccesses: 1,
+            providerBackoffMs: 4,
+          },
+          nativeReceiver: {
+            controlObjectCacheHits: 3,
+            controlObjectNetworkFetches: 5,
+            kaBundleCacheHits: 7,
+            kaBundleNetworkFetches: 11,
+            kaBundleCacheBytes: 13,
+            kaBundleNetworkBytes: 17,
+          },
+        }),
+      },
+      {},
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [privateContextGraph],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [privateContextGraph],
+        accessPolicyAuthority: {
+          localAgentAddress: '0x3333333333333333333333333333333333333333',
+          peerAgentBindings: [],
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64PublicCatalog.enabled).toBe(false);
+    expect(response.body.rfc64Catalog.resourceTelemetry).toEqual({
+      providerAttempts: 2,
+      providerSwitches: 1,
+      providerSuccesses: 1,
+      providerBackoffMs: 4,
+      controlObjectCacheHits: 3,
+      controlObjectNetworkFetches: 5,
+      kaBundleCacheHits: 7,
+      kaBundleNetworkFetches: 11,
+      kaBundleCacheBytes: 13,
+      kaBundleNetworkBytes: 17,
+    });
+    expect(JSON.stringify(response.body)).not.toContain('peerAgentBindings');
+  });
+
+  it('reports only aggregate private recovery state and hides provider identities', async () => {
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/private-release-2';
+    const privateProvider = '12D3KooPrivateProviderMustNotLeak';
+    const publicContextGraph = 'public-compatibility-surface';
+    const publicProvider = '12D3KooPublicProviderMayAppear';
+    const response = await requestStatusWithAgent(
+      {
+        rfc64PublicCatalogStatsV1: () => ({
+          started: true,
+          acceptedPolicies: 1,
+          receiver: {
+            providerAttempts: 3,
+            providerSwitches: 1,
+            providerSuccesses: 1,
+            providerBackoffMs: 20,
+          },
+          nativeReceiver: {
+            controlObjectCacheHits: 4,
+            controlObjectNetworkFetches: 5,
+            kaBundleCacheHits: 6,
+            kaBundleNetworkFetches: 7,
+            kaBundleCacheBytes: 800,
+            kaBundleNetworkBytes: 900,
+          },
+        }),
+        readRfc64PublicCatalogBootstrapStatusV1: () => ({
+          running: false,
+          pass: 1,
+          retryIntervalMs: 1_000,
+          lastPassStartedAtMs: 1,
+          lastPassCompletedAtMs: 2,
+          targets: [{
+            scope: {
+              networkId: 'otp:20430',
+              contextGraphId: privateContextGraph,
+              subGraphName: null,
+              authorAddress: '0x2222222222222222222222222222222222222222',
+              catalogEra: '0',
+            },
+            providers: [privateProvider],
+            outcome: 'known-incomplete',
+            completionReason: 'no-authorized-provider',
+            attempts: 1,
+            providerPeerId: privateProvider,
+            appliedHeadDigest: null,
+            catalogVersion: null,
+            inventoryRowCount: null,
+            lastError: `provider ${privateProvider} failed`,
+            updatedAtMs: 2,
+          }, {
+            scope: {
+              networkId: 'otp:20430',
+              contextGraphId: publicContextGraph,
+              subGraphName: null,
+              authorAddress: '0x4444444444444444444444444444444444444444',
+              catalogEra: '0',
+            },
+            providers: [publicProvider],
+            outcome: 'applied',
+            completionReason: null,
+            attempts: 1,
+            providerPeerId: publicProvider,
+            appliedHeadDigest: `0x${'55'.repeat(32)}`,
+            catalogVersion: '1',
+            inventoryRowCount: '1',
+            lastError: null,
+            updatedAtMs: 2,
+          }],
+        }),
+      },
+      {
+        rfc64PublicCatalog: {
+          enabled: true,
+          bootstrap: {
+            acceptedPublicPolicies: [rfc64PublicCatalogPolicy(publicContextGraph)],
+          },
+        },
+      },
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [publicContextGraph, privateContextGraph],
+        selectedPublicContextGraphs: [publicContextGraph],
+        selectedPrivateContextGraphs: [privateContextGraph],
+        accessPolicyAuthority: {
+          localAgentAddress: '0x3333333333333333333333333333333333333333',
+          peerAgentBindings: [],
+        },
+        bootstrap: {
+          acceptedPolicies: [rfc64PublicCatalogPolicy(publicContextGraph), {
+            policyEnvelope: {
+              payload: {
+                contextGraphId: privateContextGraph,
+                accessPolicy: 1,
+                source: { kind: 'finalized-chain' },
+              },
+            },
+          }],
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.privateRecovery).toEqual([{
+      contextGraphId: privateContextGraph,
+      vmRequired: true,
+      targetCount: 1,
+      outcomeCounts: { 'known-incomplete': 1 },
+      completionReasons: ['no-authorized-provider'],
+    }]);
+    expect(response.body.rfc64Catalog.resourceTelemetry).toEqual({
+      providerAttempts: 3,
+      providerSwitches: 1,
+      providerSuccesses: 1,
+      providerBackoffMs: 20,
+      controlObjectCacheHits: 4,
+      controlObjectNetworkFetches: 5,
+      kaBundleCacheHits: 6,
+      kaBundleNetworkFetches: 7,
+      kaBundleCacheBytes: 800,
+      kaBundleNetworkBytes: 900,
+    });
+    expect(response.body.rfc64PublicCatalog.bootstrap.targets).toHaveLength(1);
+    expect(response.body.rfc64PublicCatalog.bootstrap.targets[0]).toMatchObject({
+      scope: { contextGraphId: publicContextGraph },
+      providers: [publicProvider],
+      providerPeerId: publicProvider,
+    });
+    expect(JSON.stringify(response.body)).toContain(publicProvider);
+    expect(JSON.stringify(response.body)).not.toContain(privateProvider);
+  });
+});
 
 describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => {
   let daemon: LiveDaemon;

@@ -5113,6 +5113,9 @@ export class PublishMethods extends DKGAgentBase {
       merkleRoot: ethers.getBytes(recovered.materialization.merkleRoot),
       publisherAddress: recovered.materialization.publisherAddress,
       kaId: recovered.reservedKaId,
+      // Named-KA recovery rejects any receipt whose batch differs from this
+      // reserved packed KA id before it reaches materialization.
+      batchId: recovered.reservedKaId,
       versionBlock: recovered.materialization.versionBlock,
       authorAddress: recovered.materialization.authorAddress,
       subGraphName: request.subGraphName,

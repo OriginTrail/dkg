@@ -76,6 +76,7 @@ describe('exact asset fetch service', () => {
     expect(result.items.map((item) => item.ual)).toEqual([UALS[1], UALS[0]]);
     expect(inspect).toHaveBeenCalledTimes(2);
     for (const [evidence] of inspect.mock.calls) {
+      expect(evidence.assertionVersion).toBe(2n);
       expect(evidence.merkleRoot).toEqual(new Uint8Array(32).fill(0xcd));
       expect(evidence.authorAddress).toBe(
         '0x00000000000000000000000000000000000000a2',
@@ -129,5 +130,48 @@ describe('exact asset fetch service', () => {
         { ual: UALS[1], status: 'fetched' },
       ],
     });
+  });
+
+  it('accounts for and flushes durable prefix progress when a peer fetch rejects', async () => {
+    const present = new Set<string>();
+    const fetchCalls: Array<[string, readonly string[]]> = [];
+    const flush = vi.fn(async () => undefined);
+    const log = vi.fn();
+    const result = await runExactAssetFetch({
+      contextGraphId: CONTEXT_GRAPH,
+      requestedUals: UALS,
+      peerIds: ['peer-partial', 'peer-fallback'],
+    }, baseDependencies({
+      inspectLocal: async (evidence) => present.has(evidence.ual) ? 'present' : 'missing',
+      fetchFromPeer: async (peerId, uals) => {
+        fetchCalls.push([peerId, [...uals]]);
+        if (peerId === 'peer-partial') {
+          present.add(UALS[0]);
+          throw new Error('peer rejected after persisting the first asset');
+        }
+        present.add(UALS[1]);
+      },
+      flush,
+      log,
+    }));
+
+    expect(fetchCalls).toEqual([
+      ['peer-partial', [UALS[0], UALS[1]]],
+      ['peer-fallback', [UALS[1]]],
+    ]);
+    expect(result).toMatchObject({
+      status: 'complete',
+      peerAttempts: 2,
+      fetchedAssets: 2,
+      unresolvedAssets: 0,
+      items: [
+        { ual: UALS[0], status: 'fetched' },
+        { ual: UALS[1], status: 'fetched' },
+      ],
+    });
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(
+      'peer rejected after persisting the first asset',
+    ));
   });
 });

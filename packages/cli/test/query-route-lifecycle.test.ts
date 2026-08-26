@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  SparqlHttpResponseError,
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
@@ -373,5 +374,60 @@ describe('/api/query request lifecycle', () => {
     });
     expect(busyTracker.cancel).toHaveBeenCalledTimes(1);
     expect(busyTracker.fail).not.toHaveBeenCalled();
+  });
+
+  // GH#1758 / PR #2330 review — the adapter, the engine marker and the
+  // classifier are each covered, but nothing proved `/api/query` USES the
+  // marker. Reverting the route to inline message matching would leave all of
+  // those green while a malformed caller query escaped as HTTP 500 again.
+  it('renders a marked caller-SPARQL rejection as HTTP 400', async () => {
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    // Structurally complete marker — what DKGQueryEngine throws when the store
+    // rejects caller-supplied SPARQL with 400/422.
+    const marked = Object.assign(
+      new Error('SPARQL HTTP query failed (400): error at 1:15: expected one of REDUCED'),
+      { code: 'CALLER_SPARQL_REJECTED', status: 400 },
+    );
+
+    await handleQueryRoutes(queryRouteContext(req, res, {
+      query: vi.fn(async () => { throw marked; }),
+    }, tracker));
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toMatchObject({ error: marked.message });
+  });
+
+  it('does NOT render an UNMARKED typed store rejection as a caller error', async () => {
+    // The converse: an engine-generated query rejected by the backend is an
+    // integration fault and must stay a server error, even at 400 and even
+    // when its body reads like a legacy client-error family.
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    const unmarked = new SparqlHttpResponseError('query', 400, 'Query must start with SELECT');
+
+    await expect(handleQueryRoutes(queryRouteContext(req, res, {
+      query: vi.fn(async () => { throw unmarked; }),
+    }, tracker))).rejects.toBe(unmarked);
+
+    expect(res.statusCode).not.toBe(400);
   });
 });

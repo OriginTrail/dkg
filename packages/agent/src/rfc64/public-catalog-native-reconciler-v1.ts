@@ -68,6 +68,14 @@ export interface Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1 {
    * Optional only for Gate-1 compatibility; a multi-row lane must provide it.
    */
   readonly readStagedCatalogHead?: Rfc64BoundedPublicRootCatalogStagedHeadReaderV1;
+  /**
+   * Force an exact durable replay through the native receiver's precommit.
+   * Private finalized catalogs use this to recheck the accepted policy/roster
+   * generation and current chain truth even when the head digest is unchanged.
+   */
+  readonly requiresAppliedHeadPrecommit?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ) => boolean;
 }
 
 export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
@@ -84,6 +92,10 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
         options?.readStagedCatalogHead !== undefined
         && typeof options.readStagedCatalogHead !== 'function'
       )
+      || (
+        options?.requiresAppliedHeadPrecommit !== undefined
+        && typeof options.requiresAppliedHeadPrecommit !== 'function'
+      )
     ) {
       throw new TypeError('RFC-64 bounded public root native reconciler dependencies are incomplete');
     }
@@ -92,6 +104,9 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
   async isHeadApplied(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ): Promise<boolean> {
+    if (this.options.requiresAppliedHeadPrecommit?.(announcement) === true) {
+      return false;
+    }
     const trustedCatalogScope = this.options.resolveTrustedCatalogScope(announcement);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(
       trustedCatalogScope,

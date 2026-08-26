@@ -59,6 +59,9 @@ import {
 
 export const RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1 =
   '/dkg/catalog/1/author-head/current' as const;
+/** Accepted-current, member-authorized discovery for invite-only catalogs. */
+export const RFC64_PRIVATE_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V2 =
+  '/dkg/catalog/2/author-head-availability' as const;
 export const RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1 =
   'rfc64-author-catalog-current-head-query-v1' as const;
 
@@ -232,12 +235,19 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
       this.router.register(
         RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
         async (data, peerId, handlerOptions) =>
-          this.handleQuery(data, peerId.toString(), handlerOptions?.signal),
+          this.handleQuery(data, peerId.toString(), false, handlerOptions?.signal),
+        { maxReadBytes: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_MAX_BYTES_V1 },
+      );
+      this.router.register(
+        RFC64_PRIVATE_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V2,
+        async (data, peerId, handlerOptions) =>
+          this.handleQuery(data, peerId.toString(), true, handlerOptions?.signal),
         { maxReadBytes: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_MAX_BYTES_V1 },
       );
     } catch (cause) {
       this.#started = false;
       this.router.unregister(RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1);
+      this.router.unregister(RFC64_PRIVATE_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V2);
       throw cause;
     }
   }
@@ -246,6 +256,7 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     if (!this.#started) return;
     this.#started = false;
     this.router.unregister(RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1);
+    this.router.unregister(RFC64_PRIVATE_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V2);
   }
 
   async discoverCurrentCatalogHead(
@@ -256,15 +267,22 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     this.requireStarted();
     const remotePeerId = snapshotPeerId(remotePeerIdInput);
     const query = parseQuery(encodeQuery(queryInput));
-    await this.requireOpenPolicy('current-head-discovery-outbound', remotePeerId, query);
+    const authorization = await this.requireCurrentPolicy(
+      'current-head-discovery-outbound',
+      remotePeerId,
+      query,
+    );
+    const protocol = authorization.accessPolicy === 0
+      ? RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1
+      : RFC64_PRIVATE_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V2;
     const response = await this.router.send(
       remotePeerId,
-      RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
+      protocol,
       encodeQuery(query),
       sendOptions,
     );
     const announcement = parseResponse(response);
-    await this.requireOpenPolicy('current-head-discovery-outbound', remotePeerId, query);
+    await this.requireCurrentPolicy('current-head-discovery-outbound', remotePeerId, query);
     if (announcement === null) return null;
     assertAnnouncementMatchesQuery(announcement, query);
     return announcement;
@@ -273,6 +291,7 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
   private async handleQuery(
     data: Uint8Array,
     remotePeerIdInput: string,
+    allowPrivate: boolean,
     signal?: AbortSignal,
   ): Promise<Uint8Array> {
     throwIfAborted(signal);
@@ -280,10 +299,11 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     const remotePeerId = snapshotPeerId(remotePeerIdInput);
     const query = parseQuery(data);
     for (let attempt = 0; attempt < CURRENT_HEAD_SNAPSHOT_MAX_ATTEMPTS; attempt += 1) {
-      const authorization = await this.openPolicyOrNull(
+      const authorization = await this.currentPolicyOrNull(
         'current-head-discovery-inbound',
         remotePeerId,
         query,
+        allowPrivate,
       );
       if (authorization === null) {
         return Uint8Array.of(CURRENT_HEAD_DENIED);
@@ -309,10 +329,11 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
       throwIfAborted(signal);
       if (confirmedDigest !== currentDigest) continue;
 
-      if (await this.openPolicyOrNull(
+      if (await this.currentPolicyOrNull(
         'current-head-discovery-inbound',
         remotePeerId,
         query,
+        allowPrivate,
       ) === null) {
         return Uint8Array.of(CURRENT_HEAD_DENIED);
       }
@@ -383,13 +404,15 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     return announcementFromHead(envelope, query.policyDigest);
   }
 
-  private async openPolicyOrNull(
+  private async currentPolicyOrNull(
     operation: Rfc64PublicCatalogCurrentHeadDiscoveryOperationV1,
     remotePeerId: string,
     query: Rfc64PublicCatalogCurrentHeadQueryV1,
+    allowPrivate: boolean,
   ): Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null> {
     try {
-      return await this.requireOpenPolicy(operation, remotePeerId, query);
+      const authorization = await this.requireCurrentPolicy(operation, remotePeerId, query);
+      return !allowPrivate && authorization.accessPolicy === 1 ? null : authorization;
     } catch (cause) {
       if (
         cause instanceof Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1
@@ -399,7 +422,7 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     }
   }
 
-  private async requireOpenPolicy(
+  private async requireCurrentPolicy(
     operation: Rfc64PublicCatalogCurrentHeadDiscoveryOperationV1,
     remotePeerId: string,
     query: Rfc64PublicCatalogCurrentHeadQueryV1,
@@ -419,10 +442,13 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     try {
       authorization = await this.#authorizeCatalogOperation(input);
     } catch (cause) {
-      fail('catalog-discovery-policy-denied', 'public catalog discovery authorization failed', cause);
+      fail('catalog-discovery-policy-denied', 'catalog discovery authorization failed', cause);
     }
-    if (authorization === null || authorization.accessPolicy !== 0) {
-      fail('catalog-discovery-policy-denied', 'current-head discovery is not authorized by public policy');
+    if (
+      authorization === null
+      || (authorization.accessPolicy !== 0 && authorization.accessPolicy !== 1)
+    ) {
+      fail('catalog-discovery-policy-denied', 'current-head discovery is not access-policy authorized');
     }
     try {
       assertCanonicalDigest(authorization.policyDigest, 'authorized policyDigest');

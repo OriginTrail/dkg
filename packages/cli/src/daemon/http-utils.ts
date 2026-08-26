@@ -1620,7 +1620,6 @@ export function readBodyBuffer(
 
 // ─── CORS / rate-limit / validation helpers ───────────────────────────
 
-
 export function buildCorsAllowlist(
   config: DkgConfig,
   boundPort: number,
@@ -1926,30 +1925,6 @@ export function isLoopbackRateLimitExemptPath(pathname: string): boolean {
 
 export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: string): boolean {
   return isLoopbackClientIp(ip) && isLoopbackRateLimitExemptPath(pathname);
-}
-
-export function isValidContextGraphId(id: string): boolean {
-  if (!id || typeof id !== "string") return false;
-  if (id.length > 256) return false;
-  // CLI-16 (
-  // reject path-traversal patterns where it actually matters — i.e.
-  // segments that the OS / URL resolver will interpret as the
-  // parent / current directory. The character whitelist below
-  // allows `.` and `/` because URNs / DIDs / URLs legitimately
-  // contain version markers like `v1..2`, schema fragments like
-  // `https://example.com/a..b`, etc.
-  //
-  // The earlier blanket `id.includes('..')` check broke those
-  // legitimate identifiers without adding any defence-in-depth: a
-  // segment-aware check is both stricter (still rejects every real
-  // traversal) and tighter (does not produce false-positive 4xx
-  // for valid context-graph IDs that happen to contain `..` inside
-  // a single segment).
-  for (const seg of id.split("/")) {
-    if (seg === "." || seg === "..") return false;
-  }
-  // Allow URNs, DIDs, simple slug-like identifiers, and URIs
-  return /^[\w:/.@\-]+$/.test(id);
 }
 
 /**

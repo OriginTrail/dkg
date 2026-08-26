@@ -17,6 +17,7 @@ import type {
 } from '@origintrail-official/dkg-node-ui';
 import type {
   DkgConfig,
+  ResolvedRfc64CatalogActivationConfig,
   ResolvedRfc64PublicCatalogActivationConfig,
   loadNetworkConfig,
 } from '../../config.js';
@@ -68,6 +69,8 @@ export interface RequestContext {
   publisherState: PublisherState;
   config: DkgConfig;
   /** Immutable RFC-64 activation resolved once during daemon startup. */
+  rfc64Catalog?: ResolvedRfc64CatalogActivationConfig;
+  /** Compatibility projection for the selected-public operator surface. */
   rfc64PublicCatalog: ResolvedRfc64PublicCatalogActivationConfig;
   startedAt: number;
   dashDb: DashboardDB;
