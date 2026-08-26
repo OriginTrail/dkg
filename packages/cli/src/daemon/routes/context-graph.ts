@@ -235,7 +235,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -683,7 +682,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const id = parsed.id ?? parsed.contextGraphId;
     if (!id || !name)
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
-    if (!isValidContextGraphId(id))
+    if (!validateContextGraphId(id).valid)
       return jsonResponse(res, 400, { error: "Invalid context graph id" });
     const parsedPcaAccountId = parseOptionalPcaAccountId(parsed);
     if (parsedPcaAccountId.error) {

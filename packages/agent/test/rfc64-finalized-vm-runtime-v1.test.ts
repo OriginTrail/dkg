@@ -342,6 +342,7 @@ describe('RFC-64 finalized VM runtime', () => {
         + `<${rfc64VmUal(1n)}> <http://dkg.io/ontology/accessPolicy> "public" } }`,
     )).resolves.toEqual({ type: 'boolean', value: false });
   });
+
   it('restores exact non-empty predecessors when the second post-write snapshot fails', async () => {
     const store = new OxigraphStore();
     const graphlessProjection: Quad[] = [

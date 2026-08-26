@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    // Existing correctness debt is a diagnostic-fingerprint ratchet. The lint
+    // command keeps output quiet but rejects any warning not in the ledger.
+    "correctness": "warn"
+  },
+  "ignorePatterns": [
+    // Generated build/test output and checked-in historical experiments are
+    // not maintained source. Everything else, including tests, devnet tools,
+    // package-local scripts, demos, and benchmarks, is linted from repo root.
+    "**/node_modules/**",
+    "**/.turbo/**",
+    "**/dist/**",
+    "**/dist-ui/**",
+    "**/coverage/**",
+    "**/test-results/**",
+    "**/artifacts/**",
+    "**/cache/**",
+    "**/playwright-report/**",
+    "docs/archive/**",
+    "packages/cli/assets/**",
+    "third_party/**",
+    "vendor/**"
+  ]
+}

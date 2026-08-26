@@ -17,6 +17,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { isClientQueryFailure } from "./query-error.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -221,7 +222,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -698,33 +698,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       }
       tracker.fail(ctx, err);
       const msg = err?.message ?? "";
-      if (
-        msg.startsWith("SPARQL rejected:") ||
-        msg.startsWith("Parse error") ||
-        // #889: oxigraph surfaces SPARQL syntax errors as
-        // `error at <line>:<col>: expected one of ...` (e.g. a missing
-        // closing brace or an incomplete triple). These are client input
-        // errors, not server faults — classify them as 400 to match the
-        // existing `SPARQL rejected:` / `must start with ...` handling
-        // instead of letting them fall through to a 500.
-        /^error at \d+:\d+:/.test(msg) ||
-        /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
-        msg.includes("was removed in V10") ||
-        msg.includes("agentAddress is required") ||
-        msg.includes("requires a contextGraphId") ||
-        msg.includes("cannot be combined with") ||
-        msg.startsWith("Scoped query violation:") ||
-        // A-1 review: DKGAgent.query throws these when the caller sends
-        // a non-string `agentAddress` / `callerAgentAddress` in the
-        // body. Classify as 400 so malformed input is a clean client
-        // error instead of a 500.
-        msg.startsWith("query: 'agentAddress' must be a string") ||
-        msg.startsWith("query: 'callerAgentAddress' must be a string") ||
-        // P-13 review: `resolveViewGraphs` validates `minTrust` now,
-        // so direct callers that forward a string / out-of-range
-        // value get a 400 instead of a 500.
-        msg.startsWith("Invalid minTrust")
-      ) {
+      // #1758 — one classifier: a typed upstream status decides, otherwise
+      // legacy message families apply. See ./query-error.ts.
+      if (isClientQueryFailure(err)) {
         return jsonResponse(res, 400, { error: msg });
       }
       throw err;

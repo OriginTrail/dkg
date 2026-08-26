@@ -1005,7 +1005,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     )).rejects.toMatchObject({ code: 'catalog-native-receiver-slice' });
     expect(fixture.receiverObjectFetch).not.toHaveBeenCalled();
     expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
-    expect(observed.stageVerifiedObjects).toHaveBeenCalled();
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       fixture.scopeDigest,
@@ -1324,7 +1324,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       observed.receiver,
     )).rejects.toMatchObject({ code: 'catalog-native-receiver-authorization' });
     expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
-    expect(observed.stageVerifiedObjects).toHaveBeenCalled();
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       fixture.scopeDigest,
@@ -1381,12 +1381,20 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     fixture.authorBundleRead.mockClear();
     const observed = fixture.createCasObservedReceiver();
 
-    await expect(fixture.synchronize(
-      fixture.missingDelegationAnnouncement,
-      observed.receiver,
-    )).rejects.toMatchObject({
-      code: 'catalog-native-receiver-not-found',
-    });
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      await expect(fixture.synchronize(
+        fixture.missingDelegationAnnouncement,
+        observed.receiver,
+      )).rejects.toMatchObject({
+        code: 'catalog-native-receiver-not-found',
+      });
+    }
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    await expect(fixture.receiverPersistence.controlObjects.getVerifiedObject({
+      objectDigest: fixture.missingDelegationAnnouncement.catalogHeadObjectDigest,
+      signatureVariantDigest: fixture.missingDelegationAnnouncement.signatureVariantDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    })).resolves.toBeNull();
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       fixture.scopeDigest,

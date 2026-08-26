@@ -9,9 +9,9 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { assertGate2ExecutedRuntimeMatchesBuildV1 } from '../../../../devnet/rfc64-gate2-multi-asset-completeness/runtime-provenance.ts';
-import { isExpectedPrivateCatalogDenialResultV1 } from './denial-evidence.mjs';
-import { roleAgentAddress } from './fixture.mjs';
+import { PROJECTION_DIGEST, roleAgentAddress } from './fixture.mjs';
 import { sanitizeGateFailureV1 } from './gate-artifact.mjs';
+import { isExpectedPrivateCatalogDenialResultV1 } from './denial-evidence.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENT_ROOT = join(HERE, '..', '..');
@@ -272,7 +272,7 @@ export async function executeRfc64PrivateReleaseGateV1({
     }, 'inspection');
     if (
       provider2StateAfterOwnerExit.exactExpectedHead !== true
-      || !exactMemoryCounts(provider2StateAfterOwnerExit)
+      || !hasExactMemoryContents(provider2StateAfterOwnerExit)
     ) {
       throw new Error('provider2: exact head, SWM, or VM changed after owner exit');
     }
@@ -356,7 +356,7 @@ export async function executeRfc64PrivateReleaseGateV1({
         provider2Bootstrap.appliedHeadDigest === published.headObjectDigest
         && provider2State.exactExpectedHead === true
         && provider2State.inventoryRowCount === '2',
-      provider2HasExactSwmAndVm: exactMemoryCounts(provider2State),
+      provider2HasExactSwmAndVm: hasExactMemoryContents(provider2State),
       receiverUsedProvider2AfterOwnerStopped:
         receiverBootstrap.appliedHeadDigest === published.headObjectDigest
         && receiverBootstrap.providerPeerId === peerIds.provider2,
@@ -365,7 +365,7 @@ export async function executeRfc64PrivateReleaseGateV1({
         && ownerListenerClosed
         && provider2ListenerDialable
         && owner.exitSequence < receiver.spawnSequence,
-      receiverHasExactSwmAndVm: exactMemoryCounts(receiverState),
+      receiverHasExactSwmAndVm: hasExactMemoryContents(receiverState),
       finalizedChainPathExecuted:
         provider2State.rpcCalls > 0 && receiverState.rpcCalls > 0,
       outsiderDeniedBeforeApplication:
@@ -378,7 +378,7 @@ export async function executeRfc64PrivateReleaseGateV1({
         restartedReceiver.ready.peerId === peerIds.receiver
         && restartState.exactExpectedHead === true
         && restartState.inventoryRowCount === '2',
-      restartPreservedExactSwmAndVm: exactMemoryCounts(restartState),
+      restartPreservedExactSwmAndVm: hasExactMemoryContents(restartState),
       allChildRuntimeBytesMatchCleanBuild: runtimeProcesses.length === 9,
     });
     const status = Object.values(checks).every(Boolean) ? 'PASS' : 'FAIL';
@@ -495,9 +495,14 @@ async function dial(from, to) {
   }, 'dialed', 30_000);
 }
 
-function exactMemoryCounts(state) {
+export function hasExactMemoryContents(state) {
   return state.graphCounts.length === 2
-    && state.graphCounts.every(({ swm, vm }) => swm === 2 && vm === 2);
+    && state.graphCounts.every(({ swm, swmDigest, vm, vmDigest }) => (
+      swm === 2
+      && vm === 2
+      && swmDigest === PROJECTION_DIGEST
+      && vmDigest === PROJECTION_DIGEST
+    ));
 }
 
 function safeRole(ready) {

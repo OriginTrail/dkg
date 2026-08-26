@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -12,7 +13,11 @@ import {
   contextGraphLayerUri,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  quadsToNQuads,
+  readExactGraphPagedWithDiscoveredCount,
+} from '@origintrail-official/dkg-storage';
 
 import {
   Rfc64PrivateDevnetChainAdapter,
@@ -308,8 +313,8 @@ async function inspect(expectedHeadDigest) {
     );
     graphCounts.push({
       kaNumber,
-      swm: await exactGraphCount(swmGraph),
-      vm: await exactGraphCount(vmGraph),
+      ...(await exactGraphEvidence(swmGraph, 'swm')),
+      ...(await exactGraphEvidence(vmGraph, 'vm')),
     });
   }
   const outsiderResult = ROLE === 'outsider'
@@ -367,13 +372,17 @@ async function proveDenied(command, requestId) {
   }
 }
 
-async function exactGraphCount(graph) {
-  const result = await agent.store.query(
-    `SELECT (COUNT(*) AS ?count) WHERE { GRAPH <${graph}> { ?s ?p ?o } }`,
-  );
-  const value = result?.bindings?.[0]?.count ?? '0';
-  const match = String(value).match(/-?[0-9]+/u);
-  return match === null ? 0 : Number(match[0]);
+async function exactGraphEvidence(graph, prefix) {
+  const quads = await readExactGraphPagedWithDiscoveredCount(agent.store, graph, {
+    maxQuadCount: 16,
+    maxNQuadsBytes: 64 * 1024,
+    outputGraph: '',
+  });
+  const canonical = quadsToNQuads(quads).split('\n').sort().join('\n');
+  return {
+    [prefix]: quads.length,
+    [`${prefix}Digest`]: createHash('sha256').update(canonical, 'utf8').digest('hex'),
+  };
 }
 
 function seededSubscriptionStore(contextGraphId) {
