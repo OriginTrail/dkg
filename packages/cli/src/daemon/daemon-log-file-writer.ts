@@ -1,9 +1,29 @@
 import { appendFile } from 'node:fs/promises';
+import type { CanonicalLogRecord } from '@origintrail-official/dkg-core';
 
 export type DaemonLogWriteClass = 'standard' | 'debug';
+export type DebugLogRecord = CanonicalLogRecord & { level: 'debug' };
+
+export function isDebugLogRecord(record: CanonicalLogRecord): record is DebugLogRecord {
+  return record.level === 'debug';
+}
+
+export function formatDaemonDebugLog(
+  entry: DebugLogRecord,
+  now = Date.now(),
+): string {
+  const source = entry.sourceOperationId
+    ? ` [from:${entry.sourceOperationId}]`
+    : '';
+  return (
+    `[${new Date(now).toISOString()}] ${entry.operationName} `
+    + `${entry.operationId}${source} [${entry.module}] ${entry.message} [DEBUG]\n`
+  );
+}
 
 export interface DaemonLogFileWriter {
-  push(data: string, options?: { classification?: DaemonLogWriteClass }): boolean;
+  push(data: string): boolean;
+  pushDebug(record: DebugLogRecord): boolean;
   flush(): Promise<void>;
   runExclusive<T>(operation: () => Promise<T>): Promise<T>;
   shutdown(): Promise<void>;
@@ -161,25 +181,27 @@ export function startDaemonLogFileWriter(opts: {
     });
   };
 
-  return {
-    push(data, options = {}) {
-      if (!accepting) return false;
-      const classification = options.classification ?? 'standard';
-      if (queuedAppends >= maxQueuedEntries) {
-        // Debug output is intentionally the first thing sacrificed. A new
-        // debug entry cannot evict standard output when no debug is queued.
-        const removedDebug = removeOldestQueuedAppend('debug');
-        if (!removedDebug && classification === 'debug') {
-          recordOverflowDrop('debug');
-          return false;
-        }
-        if (!removedDebug) removeOldestQueuedAppend();
+  const push = (data: string, classification: DaemonLogWriteClass): boolean => {
+    if (!accepting) return false;
+    if (queuedAppends >= maxQueuedEntries) {
+      // Debug output is intentionally the first thing sacrificed. A new
+      // debug entry cannot evict standard output when no debug is queued.
+      const removedDebug = removeOldestQueuedAppend('debug');
+      if (!removedDebug && classification === 'debug') {
+        recordOverflowDrop('debug');
+        return false;
       }
-      queue.push({ kind: 'append', data, classification });
-      queuedAppends += 1;
-      ensureDrain();
-      return true;
-    },
+      if (!removedDebug) removeOldestQueuedAppend();
+    }
+    queue.push({ kind: 'append', data, classification });
+    queuedAppends += 1;
+    ensureDrain();
+    return true;
+  };
+
+  return {
+    push: (data) => push(data, 'standard'),
+    pushDebug: (record) => push(formatDaemonDebugLog(record), 'debug'),
     flush: () => runExclusive(async () => undefined),
     runExclusive,
     shutdown() {

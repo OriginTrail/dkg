@@ -167,7 +167,6 @@ import {
   type DaemonLogExporterStartResult,
 } from './log-lifecycle.js';
 import { startDaemonLogFileWriter } from './daemon-log-file-writer.js';
-import { formatDaemonDebugLog } from './log-sink.js';
 import {
   createTelemetryRuntime,
   type TelemetryTransitionResult,
@@ -2632,9 +2631,7 @@ export async function runDaemonInner(
   // the controller owns sink attachment plus the one active remote exporter.
   const daemonLogController = startDaemonLogController({
     writeLocalDebug: (record) => {
-      daemonLogFileWriter.push(formatDaemonDebugLog(record), {
-        classification: 'debug',
-      });
+      daemonLogFileWriter.pushDebug(record);
     },
     insertDiagnosticLog: (record) => dashDb.insertLog(record),
     redact: redactForRemote,

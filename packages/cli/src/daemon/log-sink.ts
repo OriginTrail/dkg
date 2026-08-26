@@ -11,6 +11,10 @@ import {
   type LogLevel,
   type LogRecord,
 } from '@origintrail-official/dkg-core';
+import {
+  isDebugLogRecord,
+  type DebugLogRecord,
+} from './daemon-log-file-writer.js';
 
 type PersistedDiagnosticLogLevel = Extract<LogLevel, 'warn' | 'error'>;
 
@@ -27,7 +31,7 @@ export interface RemoteLogShipper {
 
 export interface DaemonLogSinkDeps {
   /** Queue an unredacted debug record for the local file-backed daemon log. */
-  writeLocalDebug: (record: CanonicalLogRecord) => void;
+  writeLocalDebug: (record: DebugLogRecord) => void;
   /** Persist a FULL (un-redacted) warning/error record to the local DB. */
   insertDiagnosticLog: (rec: {
     ts: number;
@@ -45,20 +49,6 @@ export interface DaemonLogSinkDeps {
   now?: () => number;
 }
 
-/** Format the debug-only path that does not already pass through stdout/stderr. */
-export function formatDaemonDebugLog(
-  entry: CanonicalLogRecord,
-  now = Date.now(),
-): string {
-  const source = entry.sourceOperationId
-    ? ` [from:${entry.sourceOperationId}]`
-    : '';
-  return (
-    `[${new Date(now).toISOString()}] ${entry.operationName} `
-    + `${entry.operationId}${source} [${entry.module}] ${entry.message} [DEBUG]\n`
-  );
-}
-
 /**
  * Build the `Logger.setSink` callback. Forwards one redacted copy to the
  * selected shipper and does no redaction work when export is disabled.
@@ -66,7 +56,7 @@ export function formatDaemonDebugLog(
 export function createDaemonLogSink(deps: DaemonLogSinkDeps): (entry: CanonicalLogRecord) => void {
   const now = deps.now ?? Date.now;
   return (entry: CanonicalLogRecord): void => {
-    if (entry.level === 'debug') {
+    if (isDebugLogRecord(entry)) {
       try {
         deps.writeLocalDebug(entry);
       } catch {

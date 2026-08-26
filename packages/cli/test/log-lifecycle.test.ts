@@ -1,11 +1,13 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Logger } from '@origintrail-official/dkg-core';
 import { startDaemonLogController } from '../src/daemon/log-lifecycle.js';
-import { startDaemonLogFileWriter } from '../src/daemon/daemon-log-file-writer.js';
-import { formatDaemonDebugLog } from '../src/daemon/log-sink.js';
+import {
+  startDaemonLogFileWriter,
+  type DebugLogRecord,
+} from '../src/daemon/daemon-log-file-writer.js';
 import type { DkgConfig } from '../src/config.js';
 import { createTelemetryRuntime } from '../src/daemon/telemetry-runtime.js';
 
@@ -185,9 +187,7 @@ describe('startDaemonLogController', () => {
     const logFileWriter = startDaemonLogFileWriter({ logFile: file });
     const controller = startDaemonLogController({
       writeLocalDebug: (record) => {
-        logFileWriter.push(formatDaemonDebugLog(record), {
-          classification: 'debug',
-        });
+        logFileWriter.pushDebug(record);
       },
       insertDiagnosticLog: (record) => persisted.push(record.message),
       redact: (record) => record,
@@ -238,10 +238,15 @@ describe('startDaemonLogController', () => {
         concurrentAppends -= 1;
       },
     });
-    const pushDebug = (index: number) => logFileWriter.push(
-      `message-${index}\n`,
-      { classification: 'debug' },
-    );
+    const debugRecord = (index: number): DebugLogRecord => ({
+      level: 'debug',
+      operationName: 'system',
+      operationId: `op-${index}`,
+      module: 'queue-test',
+      message: `message-${index}`,
+    });
+    expectTypeOf(logFileWriter.pushDebug).parameter(0).toEqualTypeOf<DebugLogRecord>();
+    const pushDebug = (index: number) => logFileWriter.pushDebug(debugRecord(index));
 
     pushDebug(0);
     await appendStarted;
@@ -331,24 +336,35 @@ describe('startDaemonLogController', () => {
 
     logFileWriter.push('info-0\n');
     await firstAppendStarted;
-    logFileWriter.push('debug-1\n', { classification: 'debug' });
+    logFileWriter.pushDebug({
+      level: 'debug',
+      operationName: 'system',
+      operationId: 'op-debug-1',
+      module: 'mixed-writer-test',
+      message: 'debug-1',
+    });
     logFileWriter.push('info-2\n');
     const rotation = logFileWriter.runExclusive(async () => {
       events.push('rotate');
     });
-    logFileWriter.push('debug-3\n', { classification: 'debug' });
+    logFileWriter.pushDebug({
+      level: 'debug',
+      operationName: 'system',
+      operationId: 'op-debug-3',
+      module: 'mixed-writer-test',
+      message: 'debug-3',
+    });
 
     releaseFirstAppend();
     await rotation;
     await logFileWriter.shutdown();
 
-    expect(events).toEqual([
-      'append:info-0',
-      'append:debug-1',
-      'append:info-2',
-      'rotate',
-      'append:debug-3',
-    ]);
+    expect(events).toHaveLength(5);
+    expect(events[0]).toBe('append:info-0');
+    expect(events[1]).toContain('debug-1 [DEBUG]');
+    expect(events[2]).toBe('append:info-2');
+    expect(events[3]).toBe('rotate');
+    expect(events[4]).toContain('debug-3 [DEBUG]');
     expect(maxConcurrentAppends).toBe(1);
     expect(logFileWriter.pending()).toBe(0);
   });
