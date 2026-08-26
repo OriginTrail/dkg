@@ -53,6 +53,8 @@ import {
   type FinalizedVmHarnessRuntimeV1,
 } from './finalized-vm-harness-runtime.ts';
 import { sealGate2ExecutedRuntimeManifestV1 } from './runtime-load-hook.ts';
+import { stagePrivateCatalogBulkPredecessorV1 } from
+  '../rfc64-cp2-private-swm-vm-recovery/bulk-predecessor.ts';
 
 const role = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE2_ADAPTER_DATA_DIR;
@@ -62,6 +64,8 @@ const finalizedVmConfigInput = process.env.DKG_RFC64_GATE2_FINALIZED_VM_CONFIG;
 const networkChainIdInput = process.env.DKG_RFC64_GATE2_NETWORK_CHAIN_ID;
 const localCatalogAgentAddressInput =
   process.env.DKG_RFC64_GATE2_CATALOG_LOCAL_AGENT_ADDRESS;
+const allowBulkCatalogPredecessor =
+  process.env.DKG_RFC64_GATE2_ALLOW_BULK_CATALOG_PREDECESSOR === '1';
 const bundleServeDelayMs = parseBoundedDelayMs(
   process.env.DKG_RFC64_GATE2_BUNDLE_SERVE_DELAY_MS,
 );
@@ -438,6 +442,19 @@ async function handle(command: Command): Promise<void> {
         currentAgent,
         command,
         'policy-bound',
+      );
+      emitOperationResult(command, output);
+      return;
+    }
+    case 'stagePrivateCatalogBulkPredecessor': {
+      requireRole('author');
+      if (!allowBulkCatalogPredecessor) {
+        throw new Error('bulk catalog predecessor fixture is not enabled for this process');
+      }
+      const output = await stagePrivateCatalogBulkPredecessorV1(
+        currentAgent,
+        command.input,
+        verifyControlEnvelopeIssuerSignatureV1,
       );
       emitOperationResult(command, output);
       return;

@@ -44,6 +44,7 @@ import {
   createGate2TwoAgentDataDirsV1,
   spawnGate2HarnessAgentV1,
 } from '../rfc64-gate2-multi-asset-completeness/two-agent-harness.ts';
+import { planPrivateCatalogConstructionV1 } from './batch-plan.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ARTIFACT = process.env.DKG_RFC64_PRIVATE_CP2_ARTIFACT
@@ -65,6 +66,7 @@ const ASSET_COUNT = boundedAssetCount(
   process.env.DKG_RFC64_PRIVATE_ASSET_COUNT,
   32,
 );
+const CATALOG_CONSTRUCTION_PLAN = planPrivateCatalogConstructionV1(ASSET_COUNT);
 const PROCESS_EVENT_TIMEOUT_MS = Math.max(90_000, ASSET_COUNT * 2_000);
 const FIRST_KA_NUMBER = 1_000n;
 const ASSERTION_ROOT =
@@ -101,6 +103,7 @@ async function execute(): Promise<void> {
   try {
     const author = spawnGate2HarnessAgentV1({
       role: 'author',
+      allowBulkCatalogPredecessor: true,
       catalogLocalAgentAddress: AUTHOR,
       dataDir: dataDirs.author,
       eventTimeoutMs: PROCESS_EVENT_TIMEOUT_MS,
@@ -173,26 +176,56 @@ async function execute(): Promise<void> {
       },
     ), 'private genesis');
     let previousHead = stagedHead(genesis, 'private genesis');
-    let publication: Record<string, unknown> | null = null;
-    for (let index = 0; index < assets.length; index += 1) {
-      publication = output(await author.request(
-        'publishCatalogExactSetSuccessor',
-        `private-successor-${index + 1}`,
+    let fixturePredecessor: Record<string, unknown> | null = null;
+    if (CATALOG_CONSTRUCTION_PLAN.fixturePredecessorAssetCount > 0) {
+      fixturePredecessor = output(await author.request(
+        'stagePrivateCatalogBulkPredecessor',
+        'private-bulk-predecessor',
         'operation-completed',
         {
           previousHead,
           authorPrivateKey: AUTHOR_WALLET.privateKey,
           catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
-          assets: assets.slice(0, index + 1),
-          deployment: DEPLOYMENT,
-          issuedAt: String(1773900001000 + index),
+          scope: catalogScope(),
+          assets: assets.slice(0, CATALOG_CONSTRUCTION_PLAN.fixturePredecessorAssetCount),
+          finalAssetCount: ASSET_COUNT,
+          fixtureStageBatchSize: CATALOG_CONSTRUCTION_PLAN.fixtureStageBatchSize,
+          issuedAt: '1773900001000',
         },
-      ), `private successor ${index + 1}`);
-      previousHead = stagedHead(publication, `private successor ${index + 1}`);
+      ), 'private bulk predecessor');
+      exact(
+        fixturePredecessor.inventoryRowCount,
+        String(CATALOG_CONSTRUCTION_PLAN.fixturePredecessorAssetCount),
+        'private bulk predecessor row count',
+      );
+      exactJson(
+        fixturePredecessor.fixtureStageBatchSizes,
+        CATALOG_CONSTRUCTION_PLAN.fixtureStageBatchSizes,
+        'private bulk predecessor batch sizes',
+      );
+      previousHead = stagedHead(fixturePredecessor, 'private bulk predecessor');
     }
-    if (publication === null) throw new Error('private successor publication is missing');
+    const publication = output(await author.request(
+      'publishCatalogExactSetSuccessor',
+      'private-final-successor',
+      'operation-completed',
+      {
+        previousHead,
+        authorPrivateKey: AUTHOR_WALLET.privateKey,
+        catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+        assets,
+        deployment: DEPLOYMENT,
+        issuedAt: '1773900002000',
+      },
+    ), 'private final successor');
+    exact(publication.inventoryRowCount, String(ASSET_COUNT), 'private final catalog row count');
     const announcement = record(publication.announcement, 'private successor announcement');
     exact(announcement.policyDigest, POLICY_DIGEST, 'private announcement policy digest');
+    exact(
+      announcement.catalogVersion,
+      CATALOG_CONSTRUCTION_PLAN.fixturePredecessorAssetCount === 0 ? '1' : '2',
+      'private final catalog version',
+    );
     const headDigest = requiredDigest(publication.headObjectDigest, 'private head digest');
 
     // Permit the author's outbound request, but leave the receiver without an
@@ -332,6 +365,18 @@ async function execute(): Promise<void> {
       accessPolicy: 1,
       policySource: 'finalized-chain',
       catalogTransport: 'private-v2-only',
+      catalogConstruction: {
+        mode: 'bounded-fixture-predecessor-plus-one-production-successor-v1',
+        fixturePredecessorAssetCount:
+          CATALOG_CONSTRUCTION_PLAN.fixturePredecessorAssetCount,
+        fixtureStageBatchSize: CATALOG_CONSTRUCTION_PLAN.fixtureStageBatchSize,
+        fixtureStageBatchSizes: CATALOG_CONSTRUCTION_PLAN.fixtureStageBatchSizes,
+        productionSuccessorCount: CATALOG_CONSTRUCTION_PLAN.productionSuccessorCount,
+        productionSuccessorExactSetSizes:
+          CATALOG_CONSTRUCTION_PLAN.productionSuccessorExactSetSizes,
+        finalCatalogVersion: announcement.catalogVersion,
+        finalInventoryRowCount: ASSET_COUNT,
+      },
       chainExpectedAssets: ASSET_COUNT,
       swm: { expected: ASSET_COUNT, recovered: swmRecovered },
       vm: { expected: ASSET_COUNT, recovered: vmRecovered },

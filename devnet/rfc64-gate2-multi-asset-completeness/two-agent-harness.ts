@@ -55,6 +55,8 @@ export function assertGate2HarnessSourceStateV1(
 }
 
 export function spawnGate2HarnessAgentV1(input: {
+  /** Permit the CP2 scale fixture to stage one test-only bulk predecessor. */
+  readonly allowBulkCatalogPredecessor?: boolean;
   readonly catalogLocalAgentAddress?: string;
   readonly dataDir: string;
   readonly eventTimeoutMs?: number;
@@ -101,6 +103,9 @@ export function spawnGate2HarnessAgentV1(input: {
         DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX: masterKeyHex,
         DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST: input.runtimeManifestDigest,
         DKG_RFC64_GATE2_RUNTIME_SOURCE_COMMIT: input.sourceCommit,
+        ...(input.allowBulkCatalogPredecessor === true
+          ? { DKG_RFC64_GATE2_ALLOW_BULK_CATALOG_PREDECESSOR: '1' }
+          : {}),
         ...(input.bundleServeDelayMs === undefined
           ? {}
           : {

@@ -6,6 +6,16 @@ publishes 32 signed catalog assets. The cold receiver must recover exactly
 32/32 SWM assets and materialize exactly 32/32 VM assets from the finalized
 chain ordinal set.
 
+The scale fixture does not build 500 cumulative exact sets. For a 500-asset
+run, it stages the
+first 499 deterministic rows in bounded batches of at most 64, then calls the
+production exact-set successor once to add row 500 and commit the exact
+500-row catalog. This preserves the product's one-row ordinary-successor rule
+while keeping fixture construction linear. The verdict artifact records the
+batch sizes and the production successor count. The fixture predecessor is
+never announced or applied on the receiver; only the final production head is
+sent through the private V2 transport.
+
 The canary also proves that an unbound peer cannot receive the private catalog.
 It uses only the authorized RFC-64 V2 private transport.
 
