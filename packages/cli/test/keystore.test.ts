@@ -4,7 +4,7 @@ import {
   decryptKeystore,
   isEncryptedKeystore,
   _setScryptN,
-  _scryptCostPolicy,
+  SCRYPT_KDF_POLICY,
   type EncryptedKeystore,
 } from '../src/keystore.js';
 
@@ -17,7 +17,7 @@ beforeAll(() => {
   // exercising a parameter set that the production-hardened loader
   // accepts (a previous value of 2^14 was below the floor and would
   // now correctly be refused as a weak keystore).
-  _setScryptN(2 ** 15);
+  _setScryptN(SCRYPT_KDF_POLICY.minN);
 });
 
 const TEST_KEY = 'aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344';
@@ -118,7 +118,8 @@ describe('decryptKeystore error handling', () => {
     // Boundary, not a wild value: n/r chosen so the working set is exactly one
     // scrypt block over MAX_WORKING_SET. A ceiling raised or lowered by any
     // amount fails this pair, which a 2**30 smoke test would not.
-    const { maxWorkingSetBytes, workingSetBytes } = _scryptCostPolicy();
+    const { maxWorkingSetBytes } = SCRYPT_KDF_POLICY;
+    const workingSetBytes = SCRYPT_KDF_POLICY.workingSetBytes.bind(SCRYPT_KDF_POLICY);
     const overN = (maxWorkingSetBytes / (128 * 8)) * 2; // r=8 => 2x ceiling
     expect(workingSetBytes(overN, 8)).toBeGreaterThan(maxWorkingSetBytes);
     const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
@@ -133,7 +134,8 @@ describe('decryptKeystore error handling', () => {
     // Proves the ceiling is inclusive without allocating it: dklen is validated
     // after the cost policy, so an invalid dklen stops execution before scrypt.
     // The error text discriminates — a memory rejection would name the cost.
-    const { maxWorkingSetBytes, workingSetBytes } = _scryptCostPolicy();
+    const { maxWorkingSetBytes } = SCRYPT_KDF_POLICY;
+    const workingSetBytes = SCRYPT_KDF_POLICY.workingSetBytes.bind(SCRYPT_KDF_POLICY);
     const atN = maxWorkingSetBytes / (128 * 8);
     expect(workingSetBytes(atN, 8)).toBe(maxWorkingSetBytes);
     const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
@@ -144,7 +146,7 @@ describe('decryptKeystore error handling', () => {
   });
 
   it('accepts p at the ceiling and rejects p one above it', async () => {
-    const { maxP } = _scryptCostPolicy();
+    const { maxP } = SCRYPT_KDF_POLICY;
     const atCeiling = await encryptKeystore(TEST_KEY, PASSPHRASE);
     atCeiling.crypto.kdfparams.p = maxP;
     atCeiling.crypto.kdfparams.dklen = 16;
@@ -167,37 +169,45 @@ describe('decryptKeystore error handling', () => {
     );
   });
 
-  it('budgets enough memory for the CLI production parameters to actually derive', async () => {
-    // The regression this pins is a shipped one: `deriveKey` passed a hardcoded
-    // maxmem of 256 MiB while production N=2**18, r=8 needs a working set of
-    // exactly 256 MiB, and OpenSSL bounds `workingSet + overhead <= maxmem`.
-    // Production keystores therefore failed with ERR_CRYPTO_INVALID_SCRYPT_PARAMS.
-    // The suite lowers N to 2**15, so no round-trip test could ever catch it —
-    // this asserts the policy arithmetic instead, which is where the bug lived.
-    const { executionMaxmemBytes, productionWorkingSetBytes, maxWorkingSetBytes, assertWithinLimits } =
-      _scryptCostPolicy();
-    expect(productionWorkingSetBytes).toBe(128 * (2 ** 18) * 8);
-    expect(productionWorkingSetBytes).toBeLessThanOrEqual(maxWorkingSetBytes);
+  it('budgets enough memory for the production parameters to actually derive', async () => {
+    // The regression this pins shipped: `deriveKey` passed a hardcoded maxmem of
+    // 256 MiB while production N=2**18, r=8 needs a working set of exactly
+    // 256 MiB, and OpenSSL bounds `workingSet + overhead <= maxmem` — so the
+    // module's own parameters failed with ERR_CRYPTO_INVALID_SCRYPT_PARAMS.
+    // The suite lowers N, so no round-trip test could catch it; this asserts
+    // the policy arithmetic, which is where the bug lived. All values come from
+    // the ONE production-consumed policy object — there is no separate
+    // test-facing copy left to drift.
+    const { production, executionMaxmemBytes, maxWorkingSetBytes } = SCRYPT_KDF_POLICY;
+    const productionWorkingSet = SCRYPT_KDF_POLICY.workingSetBytes(production.n, production.r);
+    expect(productionWorkingSet).toBeLessThanOrEqual(maxWorkingSetBytes);
     // Strictly greater: equality is exactly what OpenSSL rejects.
-    expect(executionMaxmemBytes).toBeGreaterThan(productionWorkingSetBytes);
+    expect(executionMaxmemBytes).toBeGreaterThan(productionWorkingSet);
     expect(executionMaxmemBytes).toBeGreaterThan(maxWorkingSetBytes);
     // And production parameters must pass the acceptance policy unchanged.
-    expect(() => assertWithinLimits(2 ** 18, 8, 1)).not.toThrow();
+    expect(() =>
+      SCRYPT_KDF_POLICY.assertCostWithinLimits(production.n, production.r, production.p),
+    ).not.toThrow();
   });
 
-  it('round-trips a keystore at the CLI production parameters', async () => {
+  it('round-trips a keystore at the production parameters the policy declares', async () => {
     // Must go through encryptKeystore/decryptKeystore — i.e. through deriveKey —
-    // or it proves nothing. A direct scryptSync call using the policy constant
+    // or it proves nothing: a direct scryptSync call using the policy constant
     // passes even when deriveKey ignores that constant, which is precisely the
-    // divergence that shipped. Allocates the real 256 MiB production working
-    // set once; the suite otherwise runs at N=2**15 to stay parallel-safe.
-    _setScryptN(2 ** 18);
+    // divergence that shipped. Restoring the override to the POLICY's production
+    // N (not a literal) also pins that encryption cannot emit a different
+    // production value than the policy reports: the emitted kdfparams must
+    // equal SCRYPT_KDF_POLICY.production exactly. Allocates the real 256 MiB
+    // working set once; the suite otherwise runs at minN to stay parallel-safe.
+    _setScryptN(SCRYPT_KDF_POLICY.production.n);
     try {
       const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
-      expect(ks.crypto.kdfparams.n).toBe(2 ** 18);
+      expect(ks.crypto.kdfparams.n).toBe(SCRYPT_KDF_POLICY.production.n);
+      expect(ks.crypto.kdfparams.r).toBe(SCRYPT_KDF_POLICY.production.r);
+      expect(ks.crypto.kdfparams.p).toBe(SCRYPT_KDF_POLICY.production.p);
       expect(await decryptKeystore(ks, PASSPHRASE)).toBe(TEST_KEY);
     } finally {
-      _setScryptN(2 ** 15);
+      _setScryptN(SCRYPT_KDF_POLICY.minN);
     }
   });
 });

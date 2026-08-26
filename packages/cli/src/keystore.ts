@@ -34,118 +34,129 @@ export interface EncryptedKeystore {
   id: string;
 }
 
-let SCRYPT_N = 2 ** 18;
-const SCRYPT_R = 8;
-const SCRYPT_P = 1;
-const DKLEN = 32;
-
 /**
- * CLI-1 (
- * MUST enforce on the (untrusted) `kdfparams` block before deriving
- * a key. Without these, an attacker who can write a keystore file
- * can advertise toy scrypt parameters (e.g. N=256, r=1) and force the
- * loader to brute-force in O(1). Production scrypt minimums per
- * draft RFC and OWASP cheat-sheet:
- *   - N ≥ 2^15 (32 768 iterations) — production floor
- *   - r ≥ 8                          — memory-hardness factor
- *   - p ≥ 1                          — parallelism floor
- *   - dklen == 32                    — exact match for AES-256-GCM
- *   - salt ≥ 16 bytes                — defeats precomputed rainbow
- */
-const MIN_SCRYPT_N = 2 ** 15;
-const MIN_SCRYPT_R = 8;
-const MIN_SCRYPT_P = 1;
-const REQUIRED_DKLEN = 32;
-const MIN_SALT_BYTES = 16;
-
-/**
- * Upper bounds, the counterpart to the minimums above. The minimums stop a
- * keystore advertising a cost cheap enough to attack; the maximums stop one
- * advertising a cost too expensive to service, which would let a file exhaust
- * the process before any passphrase is checked.
+ * Single owner of the scrypt KDF policy: production parameters, lower and upper
+ * bounds, the derived execution budget, and the cost validation that guards it.
+ * Encryption, derivation, validation, and the tests all consume THIS object —
+ * there is deliberately no second representation to drift from it.
  *
- * ONE policy governs both what we accept and what we execute. Splitting those
- * apart is what made the previous revision wrong in both directions:
+ * Lower bounds (CLI-1): what we MUST enforce on the (untrusted) `kdfparams`
+ * block before deriving a key. Without these, an attacker who can write a
+ * keystore file can advertise toy scrypt parameters (e.g. N=256, r=1) and force
+ * the loader to brute-force in O(1). Production scrypt minimums per draft RFC
+ * and OWASP cheat-sheet: N ≥ 2^15, r ≥ 8, p ≥ 1, dklen == 32 (AES-256-GCM),
+ * salt ≥ 16 bytes.
  *
- *  - `deriveKey` passed a hardcoded `maxmem` of 256 MiB while this CLI writes
- *    N=2^18, r=8 — a working set of *exactly* 256 MiB. OpenSSL's check is
- *    `workingSet + overhead <= maxmem`, so the CLI's own production parameters
- *    were rejected with `ERR_CRYPTO_INVALID_SCRYPT_PARAMS` ("memory limit
- *    exceeded"). The test suite never caught it because it lowers N to 2^15.
+ * Upper bounds: the counterpart. The minimums stop a keystore advertising a
+ * cost cheap enough to attack; the maximums stop one advertising a cost too
+ * expensive to service, which would let a file exhaust the process before any
+ * passphrase is checked.
+ *
+ * The acceptance ceiling and the execution budget are ONE policy. Splitting
+ * them is what made two prior revisions wrong:
+ *  - `deriveKey` passed a hardcoded `maxmem` of 256 MiB while production writes
+ *    N=2^18, r=8 — a working set of *exactly* 256 MiB. OpenSSL enforces
+ *    `workingSet + overhead <= maxmem`, so the module's own production
+ *    parameters failed with `ERR_CRYPTO_INVALID_SCRYPT_PARAMS` ("memory limit
+ *    exceeded"). The suite never caught it because it lowers N to 2^15.
  *  - An acceptance ceiling above the execution budget would admit parameters
- *    that then fail inside OpenSSL rather than at our own diagnosable boundary.
- *
- * So: `MAX_SCRYPT_WORKING_SET_BYTES` is the largest working set we accept, and
- * the execution budget is derived from it with an allowance for OpenSSL's own
- * overhead (measured at ~0.3% of the working set; 8 MiB is generous at the
- * ceiling). Everything that needs a limit reads one of these two.
+ *    that then fail inside OpenSSL rather than at our diagnosable boundary.
+ * So `executionMaxmemBytes` is derived from `maxWorkingSetBytes` plus an
+ * allowance for OpenSSL's own overhead (measured at ~0.3% of the working set;
+ * 8 MiB is generous at the ceiling).
  */
-const MAX_SCRYPT_WORKING_SET_BYTES = 512 * 1024 * 1024;
-const SCRYPT_OVERHEAD_ALLOWANCE_BYTES = 8 * 1024 * 1024;
-const SCRYPT_EXECUTION_MAXMEM_BYTES =
-  MAX_SCRYPT_WORKING_SET_BYTES + SCRYPT_OVERHEAD_ALLOWANCE_BYTES;
-const MAX_SCRYPT_P = 16;
-
-/** scrypt's working set, the quantity both the ceiling and OpenSSL bound. */
-function scryptWorkingSetBytes(n: number, r: number): number {
-  return 128 * n * r;
+export interface ScryptKdfPolicy {
+  /** Parameters this module writes when creating a keystore. */
+  readonly production: { readonly n: number; readonly r: number; readonly p: number };
+  readonly minN: number;
+  readonly minR: number;
+  readonly minP: number;
+  readonly maxP: number;
+  readonly requiredDklen: number;
+  readonly minSaltBytes: number;
+  /** Largest scrypt working set (128 * N * r bytes) we accept. */
+  readonly maxWorkingSetBytes: number;
+  /** `maxmem` handed to OpenSSL: the ceiling plus its bounded overhead. */
+  readonly executionMaxmemBytes: number;
+  /** scrypt's working set — the quantity both the ceiling and OpenSSL bound. */
+  workingSetBytes(n: number, r: number): number;
+  /**
+   * Throws a diagnosable error for any parameter set we will not service, so
+   * nothing reaches OpenSSL that could only fail there. (Lower bounds live in
+   * `decryptKeystore` beside their established "weak keystore" wording.)
+   */
+  assertCostWithinLimits(n: number, r: number, p: number): void;
 }
+
+const SCRYPT_OVERHEAD_ALLOWANCE_BYTES = 8 * 1024 * 1024;
 
 /** scrypt requires N to be a power of two; a non-power-of-two throws deep in OpenSSL. */
 function isPowerOfTwo(value: number): boolean {
   return Number.isSafeInteger(value) && value > 0 && (value & (value - 1)) === 0;
 }
 
+export const SCRYPT_KDF_POLICY: ScryptKdfPolicy = Object.freeze({
+  production: Object.freeze({ n: 2 ** 18, r: 8, p: 1 }),
+  minN: 2 ** 15,
+  minR: 8,
+  minP: 1,
+  maxP: 16,
+  requiredDklen: 32,
+  minSaltBytes: 16,
+  maxWorkingSetBytes: 512 * 1024 * 1024,
+  executionMaxmemBytes: 512 * 1024 * 1024 + SCRYPT_OVERHEAD_ALLOWANCE_BYTES,
+  workingSetBytes(n: number, r: number): number {
+    return 128 * n * r;
+  },
+  assertCostWithinLimits(n: number, r: number, p: number): void {
+    if (!isPowerOfTwo(n)) {
+      throw new Error(
+        `Refusing to load keystore: scrypt N must be a power of two (got n=${n}).`,
+      );
+    }
+    const workingSetBytes = SCRYPT_KDF_POLICY.workingSetBytes(n, r);
+    if (!Number.isSafeInteger(workingSetBytes) || workingSetBytes > SCRYPT_KDF_POLICY.maxWorkingSetBytes) {
+      throw new Error(
+        `Refusing to load keystore: KDF memory cost above maximum (n=${n}, r=${r} implies ${workingSetBytes} bytes > ${SCRYPT_KDF_POLICY.maxWorkingSetBytes}). scrypt memory cost too high.`,
+      );
+    }
+    if (p > SCRYPT_KDF_POLICY.maxP) {
+      throw new Error(
+        `Refusing to load keystore: KDF parameters above maximum (p=${p} > ${SCRYPT_KDF_POLICY.maxP}). scrypt p too high.`,
+      );
+    }
+  },
+});
+
+// The policy's production cost must itself be serviceable — enforced at module
+// load so the invariant cannot silently rot behind a constant edit.
+SCRYPT_KDF_POLICY.assertCostWithinLimits(
+  SCRYPT_KDF_POLICY.production.n,
+  SCRYPT_KDF_POLICY.production.r,
+  SCRYPT_KDF_POLICY.production.p,
+);
+
 /**
- * Sole owner of the upper-bound policy. Throws a diagnosable error for any
- * parameter set we will not service, so nothing reaches OpenSSL that could only
- * fail there. Lower bounds stay inline in `decryptKeystore` alongside their
- * existing "weak keystore" wording.
+ * The N actually used for NEW keystores. Initialized from the immutable policy;
+ * only the test seam below may change it (production N ~ 256 MiB per derivation
+ * OOMs CI workers running parallel shards). The production default itself lives
+ * on `SCRYPT_KDF_POLICY.production` and cannot be reassigned.
  */
-function assertScryptCostWithinLimits(n: number, r: number, p: number): void {
-  if (!isPowerOfTwo(n)) {
-    throw new Error(
-      `Refusing to load keystore: scrypt N must be a power of two (got n=${n}).`,
-    );
-  }
-  const workingSetBytes = scryptWorkingSetBytes(n, r);
-  if (!Number.isSafeInteger(workingSetBytes) || workingSetBytes > MAX_SCRYPT_WORKING_SET_BYTES) {
-    throw new Error(
-      `Refusing to load keystore: KDF memory cost above maximum (n=${n}, r=${r} implies ${workingSetBytes} bytes > ${MAX_SCRYPT_WORKING_SET_BYTES}). scrypt memory cost too high.`,
-    );
-  }
-  if (p > MAX_SCRYPT_P) {
-    throw new Error(
-      `Refusing to load keystore: KDF parameters above maximum (p=${p} > ${MAX_SCRYPT_P}). scrypt p too high.`,
-    );
-  }
-}
+let activeScryptN = SCRYPT_KDF_POLICY.production.n;
 
 /** @internal Allow tests to use lighter scrypt params to avoid memory limits */
-export function _setScryptN(n: number) { SCRYPT_N = n; }
-
-/** @internal Exposes the KDF cost policy so tests can pin it without deriving. */
-export function _scryptCostPolicy() {
-  return {
-    maxWorkingSetBytes: MAX_SCRYPT_WORKING_SET_BYTES,
-    executionMaxmemBytes: SCRYPT_EXECUTION_MAXMEM_BYTES,
-    maxP: MAX_SCRYPT_P,
-    productionWorkingSetBytes: scryptWorkingSetBytes(2 ** 18, SCRYPT_R),
-    workingSetBytes: scryptWorkingSetBytes,
-    assertWithinLimits: assertScryptCostWithinLimits,
-  };
-}
+export function _setScryptN(n: number) { activeScryptN = n; }
 
 function deriveKey(
   passphrase: string,
   salt: Buffer,
   params?: { N?: number; r?: number; p?: number; dklen?: number },
 ): Buffer {
-  return scryptSync(passphrase, salt, params?.dklen ?? DKLEN, {
-    N: params?.N ?? SCRYPT_N,
-    r: params?.r ?? SCRYPT_R,
-    p: params?.p ?? SCRYPT_P,
-    maxmem: SCRYPT_EXECUTION_MAXMEM_BYTES,
+  return scryptSync(passphrase, salt, params?.dklen ?? SCRYPT_KDF_POLICY.requiredDklen, {
+    N: params?.N ?? activeScryptN,
+    r: params?.r ?? SCRYPT_KDF_POLICY.production.r,
+    p: params?.p ?? SCRYPT_KDF_POLICY.production.p,
+    maxmem: SCRYPT_KDF_POLICY.executionMaxmemBytes,
   });
 }
 
@@ -174,10 +185,10 @@ export async function encryptKeystore(
       tag: tag.toString('hex'),
       kdf: 'scrypt',
       kdfparams: {
-        n: SCRYPT_N,
-        r: SCRYPT_R,
-        p: SCRYPT_P,
-        dklen: DKLEN,
+        n: activeScryptN,
+        r: SCRYPT_KDF_POLICY.production.r,
+        p: SCRYPT_KDF_POLICY.production.p,
+        dklen: SCRYPT_KDF_POLICY.requiredDklen,
         salt: salt.toString('hex'),
       },
     },
@@ -198,35 +209,35 @@ export async function decryptKeystore(
   // CLI-1 (
   // calling scryptSync. Previously, weak params either (a) produced a
   // generic "Decryption failed" (because `deriveKey` always re-derived
-  // with the global SCRYPT_N regardless of what the file advertised —
+  // with the module-global N regardless of what the file advertised —
   // a related bug) or (b) handed pathological values to OpenSSL and
   // crashed with ERR_OUT_OF_RANGE. Either way the operator had no way
   // to know the keystore was forged with an attackable cost factor.
   // We now reject up-front with a crisp "weak keystore" error so the
   // caller can refuse to load the file instead of silently accepting
   // a downgraded KDF.
-  if (typeof kdfparams.n !== "number" || kdfparams.n < MIN_SCRYPT_N) {
+  if (typeof kdfparams.n !== "number" || kdfparams.n < SCRYPT_KDF_POLICY.minN) {
     throw new Error(
-      `Refusing to load weak keystore: KDF parameters below minimum (n=${kdfparams.n} < ${MIN_SCRYPT_N}). scrypt cost too low.`,
+      `Refusing to load weak keystore: KDF parameters below minimum (n=${kdfparams.n} < ${SCRYPT_KDF_POLICY.minN}). scrypt cost too low.`,
     );
   }
-  if (typeof kdfparams.r !== "number" || kdfparams.r < MIN_SCRYPT_R) {
+  if (typeof kdfparams.r !== "number" || kdfparams.r < SCRYPT_KDF_POLICY.minR) {
     throw new Error(
-      `Refusing to load weak keystore: KDF parameters below minimum (r=${kdfparams.r} < ${MIN_SCRYPT_R}). scrypt r too low.`,
+      `Refusing to load weak keystore: KDF parameters below minimum (r=${kdfparams.r} < ${SCRYPT_KDF_POLICY.minR}). scrypt r too low.`,
     );
   }
-  if (typeof kdfparams.p !== "number" || kdfparams.p < MIN_SCRYPT_P) {
+  if (typeof kdfparams.p !== "number" || kdfparams.p < SCRYPT_KDF_POLICY.minP) {
     throw new Error(
-      `Refusing to load weak keystore: KDF parameters below minimum (p=${kdfparams.p} < ${MIN_SCRYPT_P}). scrypt p too low.`,
+      `Refusing to load weak keystore: KDF parameters below minimum (p=${kdfparams.p} < ${SCRYPT_KDF_POLICY.minP}). scrypt p too low.`,
     );
   }
   // Counterpart to the minimums above. Single policy owner — see
-  // `assertScryptCostWithinLimits`; nothing that could only fail inside OpenSSL
-  // is allowed past this point.
-  assertScryptCostWithinLimits(kdfparams.n, kdfparams.r, kdfparams.p);
-  if (kdfparams.dklen !== REQUIRED_DKLEN) {
+  // `SCRYPT_KDF_POLICY.assertCostWithinLimits`; nothing that could only fail
+  // inside OpenSSL is allowed past this point.
+  SCRYPT_KDF_POLICY.assertCostWithinLimits(kdfparams.n, kdfparams.r, kdfparams.p);
+  if (kdfparams.dklen !== SCRYPT_KDF_POLICY.requiredDklen) {
     throw new Error(
-      `Refusing to load weak keystore: dklen must be ${REQUIRED_DKLEN} for AES-256-GCM (got ${kdfparams.dklen}). invalid dklen.`,
+      `Refusing to load weak keystore: dklen must be ${SCRYPT_KDF_POLICY.requiredDklen} for AES-256-GCM (got ${kdfparams.dklen}). invalid dklen.`,
     );
   }
   // compute saltHex into a local FIRST, defensively
@@ -241,7 +252,7 @@ export async function decryptKeystore(
   // explicitly reject odd-length hex strings
   // before decoding. `Buffer.from('aa…', 'hex')` silently drops the
   // dangling nibble, so a 33-character salt would advertise 16.5 bytes
-  // (>= MIN_SALT_BYTES under integer division) and slip through the
+  // (>= SCRYPT_KDF_POLICY.minSaltBytes under integer division) and slip through the
   // length floor while actually deriving from a 16-byte salt with the
   // last nibble silently lost. We catch that here so the caller sees
   // the same "weak keystore" error class as other malformed values.
@@ -252,19 +263,19 @@ export async function decryptKeystore(
     && saltHex.length % 2 === 0;
   if (
     !saltHexLooksWellFormed
-    || saltHex.length / 2 < MIN_SALT_BYTES
+    || saltHex.length / 2 < SCRYPT_KDF_POLICY.minSaltBytes
   ) {
     const advertisedBytes = Math.floor(saltHex.length / 2);
     throw new Error(
-      `Refusing to load weak keystore: salt too short or malformed (${advertisedBytes} bytes < ${MIN_SALT_BYTES}). weak keystore.`,
+      `Refusing to load weak keystore: salt too short or malformed (${advertisedBytes} bytes < ${SCRYPT_KDF_POLICY.minSaltBytes}). weak keystore.`,
     );
   }
 
   const salt = Buffer.from(kdfparams.salt, 'hex');
   // Derive with the params actually advertised by the file (now that
   // we've gated them above). The previous code ignored kdfparams and
-  // always used the global SCRYPT_N, which was both a correctness bug
-  // (any keystore with N != SCRYPT_N would fail to decrypt even with
+  // always used the module-global N, which was both a correctness bug
+  // (any keystore whose advertised N differed would fail to decrypt even with
   // the right passphrase) and the reason a weak-N keystore returned
   // "Decryption failed" instead of "weak keystore".
   const key = deriveKey(passphrase, salt, {
