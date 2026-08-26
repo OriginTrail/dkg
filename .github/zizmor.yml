@@ -71,54 +71,6 @@ rules:
     ignore:
       - dependabot-advisory.yml
 
-  # `cache-poisoning` — scoped exceptions for non-publishing workflows on
-  # `release/*` push.
-  #
-  # When `release/rc.12` is listed under `on: push: branches: […]`,
-  # zizmor's `cache-poisoning` audit fires on `actions/setup-node@…
-  # with: cache: pnpm` and `actions/cache@…` steps. The rule's general
-  # shape is: "push trigger on a release-like ref (tags or `release/*`
-  # branches) + a runtime cache = cache contents could influence bytes
-  # later shipped by a release publish job."
-  #
-  # The workflows ignored here are release-branch gates, not publishing
-  # surfaces:
-  #
-  #   * `ci.yml` runs tests/lints/static analysis. It uploads a
-  #     short-lived `build-outputs` artifact only for sibling test jobs
-  #     in the same workflow, plus SARIF to Code Scanning; neither is a
-  #     package, Docker image, GitHub release asset, or input to a
-  #     publishing workflow.
-  #   * `evm-integration.yml` runs Hardhat-backed integration tests
-  #     under read-only `contents` permissions and does not upload
-  #     artifacts.
-  #   * `supply-chain-scan.yml` runs scanners/audits. It may upload
-  #     scanner SARIF/job summaries, but it does not ship package or
-  #     release artifacts.
-  #
-  # Cache contents can affect gate speed and possibly gate results, but
-  # they are not promoted into user-consumed release bytes by these
-  # workflows.
-  #
-  # The actual publish surfaces — `npm-publish.yml`, `release.yml` —
-  # remain under the strict default rule (no `ignore:` here covers them).
-  # If a future maintainer wires publishing, release-asset creation, or
-  # cross-workflow artifact promotion into any ignored workflow, this
-  # exception MUST be re-evaluated before that PR lands.
-  #
-  # Defense-in-depth: the `Guard zizmor cache-poisoning exception scope`
-  # step in `supply-chain-scan.yml` greps the ignored workflows for known
-  # publishing-action markers (`gh release create`, `npm publish`,
-  # `docker push`, etc.) on every audit run and fails the gate if any are
-  # found — so the moment one of these workflows gains a publish step,
-  # this exception is forced back through review instead of silently
-  # going stale.
-  cache-poisoning:
-    ignore:
-      - ci.yml
-      - evm-integration.yml
-      - supply-chain-scan.yml
-
   # `artipacked` (deliberate non-suppression — historical note).
   #
   # Earlier revisions of this PR carried a global `artipacked: ignore:`
