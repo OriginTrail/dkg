@@ -17,11 +17,10 @@ export async function runRfc64PrivateGateArtifactLifecycleV1({
   artifactPath,
   execute,
   resolveSourceRevision,
-  sourceRevision = null,
   now = () => new Date(),
 }) {
   const startedAt = now().toISOString();
-  let canonicalSourceRevision = canonicalSourceRevisionV1(sourceRevision);
+  let canonicalSourceRevision = null;
   await writeGateArtifactAtomicV1(artifactPath, {
     schema: SCHEMA,
     status: 'INCOMPLETE',
@@ -31,11 +30,12 @@ export async function runRfc64PrivateGateArtifactLifecycleV1({
   });
 
   try {
-    if (resolveSourceRevision !== undefined) {
-      canonicalSourceRevision = canonicalSourceRevisionV1(await resolveSourceRevision());
-      if (canonicalSourceRevision === null) {
-        throw new TypeError('RFC-64 private gate source revision is malformed');
-      }
+    if (typeof resolveSourceRevision !== 'function') {
+      throw new TypeError('RFC-64 private gate requires one source revision resolver');
+    }
+    canonicalSourceRevision = canonicalSourceRevisionV1(await resolveSourceRevision());
+    if (canonicalSourceRevision === null) {
+      throw new TypeError('RFC-64 private gate source revision is malformed');
     }
     const artifact = await execute({ sourceRevision: canonicalSourceRevision });
     const completed = {

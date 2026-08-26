@@ -8,12 +8,10 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
-import { assertGate2ExecutedRuntimeMatchesBuildV1 } from '../../../../devnet/rfc64-gate2-multi-asset-completeness/runtime-provenance.ts';
 import { PROJECTION_DIGEST, roleAgentAddress } from './fixture.mjs';
 import { sanitizeGateFailureV1 } from './gate-artifact.mjs';
 import { isExpectedPrivateCatalogDenialResultV1 } from './denial-evidence.mjs';
 import {
-  RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
   buildRfc64PrivateRuntimeProvenanceV1,
 } from './runtime-provenance.mjs';
 
@@ -341,9 +339,6 @@ export async function executeRfc64PrivateReleaseGateV1({
       { id: 'outsider', loaded: requiredChildRuntimeManifest(outsider) },
       { id: 'receiver-restart', loaded: requiredChildRuntimeManifest(restartedReceiver) },
     ];
-    for (const processEvidence of runtimeProcesses) {
-      assertGate2ExecutedRuntimeMatchesBuildV1(processEvidence.loaded, runtimeManifest);
-    }
     const sealedRuntimeProvenance = buildRfc64PrivateRuntimeProvenanceV1(
       runtimeManifest,
       runtimeProcesses,
@@ -386,8 +381,6 @@ export async function executeRfc64PrivateReleaseGateV1({
         && restartState.exactExpectedHead === true
         && restartState.inventoryRowCount === '2',
       restartPreservedExactSwmAndVm: hasExactMemoryContents(restartState),
-      allChildRuntimeBytesMatchCleanBuild:
-        runtimeProcesses.length === RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.length,
     });
     const status = Object.values(checks).every(Boolean) ? 'PASS' : 'FAIL';
     artifact = {

@@ -2421,6 +2421,80 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     )).rejects.toBe(discoveryFailure);
   });
 
+  it('rejects every stale durable postcondition without a registered receiver failure', async () => {
+    const selectedHeadDigest = `0x${'a1'.repeat(32)}` as Digest32V1;
+    const selectedVersion = '3';
+    const synchronized = {
+      announcement: {
+        authorAddress: AUTHOR,
+        catalogHeadObjectDigest: selectedHeadDigest,
+        catalogVersion: selectedVersion,
+        signatureVariantDigest: `0x${'a2'.repeat(32)}`,
+      },
+      head: {
+        envelope: {
+          payload: {
+            networkId: NETWORK_ID,
+            contextGraphId: CONTEXT_GRAPH_ID,
+            governanceChainId: null,
+            governanceContractAddress: null,
+            ownershipTransitionDigest: null,
+            subGraphName: null,
+            authorAddress: AUTHOR,
+            era: '0',
+            bucketCount: '1',
+            catalogIssuerDelegationDigest: `0x${'a3'.repeat(32)}`,
+            version: selectedVersion,
+            previousHeadDigest: null,
+            totalRows: '0',
+            directoryHeight: '0',
+            directoryRootDigest: `0x${'a4'.repeat(32)}`,
+            issuedAt: FIXED_HEAD_ISSUED_AT,
+          },
+        },
+      },
+    };
+    const staleAppliedSnapshots = [
+      null,
+      {
+        currentCatalogHeadDigest: `0x${'a5'.repeat(32)}`,
+        catalogVersion: selectedVersion,
+      },
+      {
+        currentCatalogHeadDigest: selectedHeadDigest,
+        catalogVersion: '2',
+      },
+    ];
+
+    for (const applied of staleAppliedSnapshots) {
+      const readCurrentAttempt = vi.fn(() => null);
+      const agentLike = {
+        rfc64PublicCatalogServiceV1: {
+          synchronizeCurrentCatalogHead: vi.fn().mockResolvedValue(synchronized),
+        },
+        rfc64PersistenceV1: {
+          inventory: { readAppliedCatalogHeadV1: vi.fn(() => applied) },
+        },
+        rfc64PublicCatalogReconciliationFailuresV1: { readCurrentAttempt },
+      };
+
+      await expect(DKGAgent.prototype.synchronizeRfc64PublicCatalogFromProviderV1.call(
+        agentLike as never,
+        {
+          remotePeerId: 'provider-peer',
+          scope: {
+            networkId: NETWORK_ID,
+            contextGraphId: CONTEXT_GRAPH_ID,
+            subGraphName: null,
+            authorAddress: AUTHOR,
+            catalogEra: '0',
+          },
+        },
+      )).rejects.toThrow(/durable applied postcondition/u);
+      expect(readCurrentAttempt).toHaveBeenCalledWith(selectedHeadDigest);
+    }
+  });
+
   it('cold-starts after publication from a provider current-head snapshot', async () => {
     const [author, provider] = await Promise.all([
       startNativeAgent('cold-author'),

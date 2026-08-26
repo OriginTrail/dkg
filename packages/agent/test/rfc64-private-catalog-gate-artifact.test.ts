@@ -87,7 +87,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     const provenance = runtimeProvenance('b'.repeat(40));
     const artifact = await runRfc64PrivateGateArtifactLifecycleV1({
       artifactPath,
-      sourceRevision: 'b'.repeat(40),
+      resolveSourceRevision: () => 'b'.repeat(40),
       now: () => timestamps.shift() ?? new Date('2026-08-26T00:00:02.000Z'),
       execute: async () => ({
         schema: 'dkg-rfc64-private-release-gate-v1',
@@ -179,6 +179,40 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     })).toThrow(/runtime provenance is incomplete/u);
   });
 
+  it('rejects every mutation of the fixed nine-process topology', () => {
+    const sourceRevision = 'e'.repeat(40);
+    const provenance = runtimeProvenance(sourceRevision);
+    const base = {
+      schema: 'dkg-rfc64-private-release-gate-v1',
+      status: 'PASS',
+      startedAt: '2026-08-26T00:00:01.000Z',
+      finishedAt: '2026-08-26T00:00:02.000Z',
+      sourceRevision,
+      runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
+    };
+    const swapped = [...provenance.processes];
+    [swapped[0], swapped[1]] = [swapped[1]!, swapped[0]!];
+    const mutations = [
+      { ...provenance, processes: provenance.processes.slice(0, -1) },
+      { ...provenance, processes: [...provenance.processes, provenance.processes[0]] },
+      { ...provenance, processes: swapped },
+      {
+        ...provenance,
+        processes: provenance.processes.map((entry, index) => index === 0
+          ? { ...entry, id: 'renamed-process' }
+          : entry),
+      },
+      { ...provenance, schema: 'wrong-runtime-provenance-schema' },
+    ];
+
+    for (const runtimeProvenanceMutation of mutations) {
+      expect(() => assertRfc64PrivateGatePassProvenanceV1({
+        ...base,
+        runtimeProvenance: runtimeProvenanceMutation,
+      })).toThrow(/runtime provenance is incomplete/u);
+    }
+  });
+
   it('replaces a stale PASS before work and publishes sanitized FAIL on early failure', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-artifact-'));
     temporaryRoots.push(root);
@@ -199,7 +233,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
 
     await expect(runRfc64PrivateGateArtifactLifecycleV1({
       artifactPath,
-      sourceRevision: 'A'.repeat(40),
+      resolveSourceRevision: () => 'A'.repeat(40),
       now: () => timestamps.shift() ?? new Date('2026-08-26T00:00:02.000Z'),
       execute: async () => {
         startingArtifact = JSON.parse(await readFile(artifactPath, 'utf8'));
@@ -210,7 +244,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     expect(startingArtifact).toMatchObject({
       status: 'INCOMPLETE',
       phase: 'starting',
-      sourceRevision: 'a'.repeat(40),
+      sourceRevision: null,
     });
     const rawFailureArtifact = await readFile(artifactPath, 'utf8');
     expect(rawFailureArtifact).not.toContain('prior-pass-must-not-survive');
@@ -341,6 +375,62 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       },
     })).rejects.toThrow(/runtime manifest differs/u);
 
+    expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toMatchObject({
+      status: 'FAIL',
+      sourceRevision,
+    });
+  });
+
+  it('does not execute when the source changes during the clean build', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-build-race-'));
+    temporaryRoots.push(root);
+    const artifactPath = join(root, 'artifacts', 'latest.json');
+    const sourceRevision = '5'.repeat(40);
+    const revisions = [sourceRevision, '6'.repeat(40)];
+    const build = vi.fn();
+    const execute = vi.fn();
+
+    await expect(runRfc64PrivateGateFromCleanBuildV1({
+      artifactPath,
+      repoRoot: root,
+      execute,
+      dependencies: {
+        resolveSourceRevision: () => sourceRevision,
+        readCleanSourceRevision: () => revisions.shift()!,
+        runCleanRuntimeBuild: build,
+      },
+    })).rejects.toThrow(/source HEAD changed/u);
+
+    expect(build).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+    expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toMatchObject({
+      status: 'FAIL',
+      sourceRevision,
+    });
+  });
+
+  it('publishes FAIL when the source changes during live execution', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-execution-race-'));
+    temporaryRoots.push(root);
+    const artifactPath = join(root, 'artifacts', 'latest.json');
+    const sourceRevision = '7'.repeat(40);
+    const revisions = [sourceRevision, sourceRevision, '8'.repeat(40)];
+    const cleanBuild = runtimeManifest(sourceRevision, '9');
+    const execute = vi.fn(async () => ({ status: 'PASS' }));
+
+    await expect(runRfc64PrivateGateFromCleanBuildV1({
+      artifactPath,
+      repoRoot: root,
+      execute,
+      dependencies: {
+        resolveSourceRevision: () => sourceRevision,
+        readCleanSourceRevision: () => revisions.shift()!,
+        runCleanRuntimeBuild: () => {},
+        buildRuntimeManifest: () => cleanBuild,
+      },
+    })).rejects.toThrow(/source HEAD changed/u);
+
+    expect(execute).toHaveBeenCalledOnce();
     expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toMatchObject({
       status: 'FAIL',
       sourceRevision,
