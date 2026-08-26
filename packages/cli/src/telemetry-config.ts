@@ -9,6 +9,17 @@ import type { DkgConfig } from './config.js';
 export type LogExporterMode = 'none' | 'otlp' | 'syslog';
 export type ActiveLogExporterMode = Exclude<LogExporterMode, 'none'>;
 
+/** Resolve OTLP logs with standard signal-specific > base > config precedence. */
+export function resolveOtlpLogEndpoint(
+  telemetry: DkgConfig['telemetry'],
+  env: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  const envBase = env.OTEL_EXPORTER_OTLP_ENDPOINT?.replace(/\/+$/, '');
+  return env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+    || (envBase ? `${envBase}/v1/logs` : undefined)
+    || telemetry?.logs?.endpoint;
+}
+
 /**
  * Which log exporter the daemon should start. Only consulted when
  * `telemetry.enabled`. UNSET defaults to 'syslog' (preserves prior behaviour),

@@ -116,18 +116,37 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
   // The scanner replacement consumes each declaration via a single
   // anchored regex with no nested quantifier — total work is O(n).
 
-  // Same-shape measurement helper as the epcis ReDoS regression so
-  // CI flake characteristics stay consistent across packages.
+  // Warm the parser, then measure process CPU time in batches large enough
+  // that sub-millisecond timer precision cannot dominate a call. CPU time is
+  // isolated from contention with Vitest's other worker processes; taking the
+  // fastest of three batches also filters GC without an additive allowance
+  // that could mask superlinear growth.
   const measure = (input: string) => {
-    let minMs = Infinity;
-    for (let i = 0; i < 5; i++) {
-      const t0 = performance.now();
-      const r = detectSparqlQueryForm(input);
-      const elapsed = performance.now() - t0;
-      expect(typeof r).toBe('string');
-      if (elapsed < minMs) minMs = elapsed;
+    for (let i = 0; i < 5; i++) detectSparqlQueryForm(input);
+
+    let iterations = 1;
+    let fastestBatchCpuMs = Infinity;
+    while (iterations <= 4_096) {
+      fastestBatchCpuMs = Infinity;
+      let result = '';
+      for (let sample = 0; sample < 3; sample++) {
+        const cpuStart = process.cpuUsage();
+        for (let i = 0; i < iterations; i++) {
+          result = detectSparqlQueryForm(input);
+        }
+        const cpu = process.cpuUsage(cpuStart);
+        fastestBatchCpuMs = Math.min(
+          fastestBatchCpuMs,
+          (cpu.user + cpu.system) / 1_000,
+        );
+      }
+      expect(typeof result).toBe('string');
+      if (fastestBatchCpuMs >= 25 || iterations === 4_096) {
+        return fastestBatchCpuMs / iterations;
+      }
+      iterations *= 2;
     }
-    return minMs;
+    throw new Error('unreachable timing loop');
   };
 
   it('rejects N=1000 dangling PREFIX decls (no terminal form) in linear time', () => {
@@ -147,11 +166,10 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
     // Hang guard: 10k decls must reject in under a second. The buggy
     // regex took >>10s here in local repro.
     expect(largeMs).toBeLessThan(1000);
-    // Linearity guard: 10x input → bounded growth. Keep a process-level
-    // scheduling cushion because coverage runs this beside other test workers;
-    // the vulnerable regex still exceeds both this bound and the 1s guard by
-    // an order of magnitude.
-    expect(largeMs).toBeLessThan(smallMs * 25 + 250);
+    // Linearity guard: batching makes the small measurement stable enough for
+    // a ratio-only assertion. A 10x input may take at most 25x as long, which
+    // leaves CI headroom while rejecting materially superlinear growth.
+    expect(largeMs / smallMs).toBeLessThan(25);
   });
 
   it('classifies N=10_000 valid PREFIX decls + trailing SELECT in linear time', () => {

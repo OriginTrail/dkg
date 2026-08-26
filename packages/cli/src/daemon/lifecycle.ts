@@ -152,6 +152,7 @@ import {
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import {
   resolveOtelSignals,
+  resolveOtlpLogEndpoint,
   resolveLogExporterMode,
   isUnknownLogExporter,
   type ActiveLogExporterMode,
@@ -2807,14 +2808,7 @@ export async function runDaemonInner(
     mode: ActiveLogExporterMode,
   ): DaemonLogExporterStartResult {
     if (mode === 'otlp') {
-      // Resolve env-first, matching the traces/metrics precedence
-      // (resolveOtelSignals): standard logs endpoint, base endpoint + /v1/logs,
-      // then config. There is deliberately no guessed network fallback.
-      const envBase = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.replace(/\/$/, "");
-      const endpoint =
-        process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
-        || (envBase ? `${envBase}/v1/logs` : undefined)
-        || config.telemetry?.logs?.endpoint;
+      const endpoint = resolveOtlpLogEndpoint(config.telemetry, process.env);
       if (!endpoint) {
         return {
           ok: false,

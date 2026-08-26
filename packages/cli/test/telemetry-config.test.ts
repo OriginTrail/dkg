@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../src/telemetry-config.js';
+import {
+  resolveOtelSignals,
+  resolveOtlpLogEndpoint,
+  resolveLogExporterMode,
+  isUnknownLogExporter,
+} from '../src/telemetry-config.js';
 
 /**
  * Daemon telemetry-routing resolution (the logic lifecycle.ts uses to pick the
@@ -27,6 +32,34 @@ describe('resolveLogExporterMode', () => {
     expect(isUnknownLogExporter({ enabled: true, logs: { exporter: 'otlp' } })).toBe(false);
     expect(isUnknownLogExporter({ enabled: true })).toBe(false);
     expect(isUnknownLogExporter(undefined)).toBe(false);
+  });
+});
+
+describe('resolveOtlpLogEndpoint', () => {
+  const config = {
+    enabled: true,
+    logs: { endpoint: 'http://config/v1/logs' },
+  } as const;
+
+  it('uses logs-specific env before base env and config', () => {
+    expect(resolveOtlpLogEndpoint(config, {
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'http://specific/v1/logs',
+      OTEL_EXPORTER_OTLP_ENDPOINT: 'http://base:4318',
+    })).toBe('http://specific/v1/logs');
+  });
+
+  it('derives /v1/logs from the base env and trims trailing slashes', () => {
+    expect(resolveOtlpLogEndpoint(config, {
+      OTEL_EXPORTER_OTLP_ENDPOINT: 'http://base:4318///',
+    })).toBe('http://base:4318/v1/logs');
+  });
+
+  it('falls back to config when no environment endpoint resolves', () => {
+    expect(resolveOtlpLogEndpoint(config, {})).toBe('http://config/v1/logs');
+  });
+
+  it('returns undefined instead of guessing a network endpoint', () => {
+    expect(resolveOtlpLogEndpoint({ enabled: true }, {})).toBeUndefined();
   });
 });
 
