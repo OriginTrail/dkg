@@ -31,6 +31,7 @@ import { runRfc64PrivateGateFromCleanBuildV1 } from '../devnet/rfc64-private-cat
 import {
   RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
   buildRfc64PrivateRuntimeProvenanceV1,
+  createRfc64PrivateRuntimeEvidenceCollectorV1,
 } from '../devnet/rfc64-private-catalog/runtime-provenance.mjs';
 import {
   AgentChild,
@@ -138,6 +139,29 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     })).toThrow(/runtime provenance is incomplete/u);
   });
 
+  it('rejects syntactically valid outer provenance bindings that differ from the runtime proof', () => {
+    const sourceRevision = 'c'.repeat(40);
+    const provenance = runtimeProvenance(sourceRevision);
+    const base = {
+      schema: 'dkg-rfc64-private-release-gate-v1',
+      status: 'PASS',
+      startedAt: '2026-08-26T00:00:01.000Z',
+      finishedAt: '2026-08-26T00:00:02.000Z',
+      sourceRevision,
+      runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
+      runtimeProvenance: provenance,
+    };
+
+    expect(() => assertRfc64PrivateGatePassProvenanceV1({
+      ...base,
+      sourceRevision: 'd'.repeat(40),
+    })).toThrow(/not source-bound/u);
+    expect(() => assertRfc64PrivateGatePassProvenanceV1({
+      ...base,
+      runtimeManifestDigest: `0x${'f'.repeat(64)}`,
+    })).toThrow(/not source-bound/u);
+  });
+
   it('rejects non-canonical clean-build and executed-runtime hash claims', () => {
     const sourceRevision = 'd'.repeat(40);
     const provenance = runtimeProvenance(sourceRevision);
@@ -211,6 +235,29 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
         runtimeProvenance: runtimeProvenanceMutation,
       })).toThrow(/runtime provenance is incomplete/u);
     }
+  });
+
+  it('assembles all nine shutdown receipts in canonical process order and rejects omissions', () => {
+    const sourceRevision = 'f'.repeat(40);
+    const sourceBuild = buildGate2RuntimeManifestFromEntriesV1(sourceRevision, RUNTIME_FILES);
+    const loaded = buildGate2ExecutedRuntimeManifestV1(sourceRevision, RUNTIME_FILES);
+    const collector = createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild);
+    for (const id of RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1) {
+      collector.record(id, {
+        exit: { code: 0, signal: null, error: null },
+        executedRuntimeManifest: structuredClone(loaded),
+      });
+    }
+
+    expect(collector.seal().processes.map(({ id }) => id)).toEqual(
+      RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
+    );
+
+    const incomplete = createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild);
+    for (const id of RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.slice(0, -1)) {
+      incomplete.record(id, { executedRuntimeManifest: structuredClone(loaded) });
+    }
+    expect(() => incomplete.seal()).toThrow(/missing process: receiver-restart/u);
   });
 
   it('replaces a stale PASS before work and publishes sanitized FAIL on early failure', async () => {
@@ -453,11 +500,11 @@ describe('RFC-64 private release gate process and denial evidence', () => {
     const ready = await child.waitFor('ready', { timeoutMs: 20_000 });
     expect(ready.runtimeBuildManifestDigest).toBe(cleanBuild.manifestDigest);
 
-    const exit = await child.stop();
-    expect(exit).toMatchObject({ code: 0, error: null });
-    expect(child.executedRuntimeManifest).toBeDefined();
+    const shutdown = await child.stop();
+    expect(shutdown.exit).toMatchObject({ code: 0, error: null });
+    expect(shutdown.executedRuntimeManifest).toBeDefined();
     expect(() => assertGate2ExecutedRuntimeMatchesBuildV1(
-      child.executedRuntimeManifest,
+      shutdown.executedRuntimeManifest,
       cleanBuild,
     )).not.toThrow();
   }, 60000);

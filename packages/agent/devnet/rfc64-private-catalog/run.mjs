@@ -12,7 +12,7 @@ import { PROJECTION_DIGEST, roleAgentAddress } from './fixture.mjs';
 import { sanitizeGateFailureV1 } from './gate-artifact.mjs';
 import { isExpectedPrivateCatalogDenialResultV1 } from './denial-evidence.mjs';
 import {
-  buildRfc64PrivateRuntimeProvenanceV1,
+  createRfc64PrivateRuntimeEvidenceCollectorV1,
 } from './runtime-provenance.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -155,49 +155,68 @@ export class AgentChild {
   }
 
   async stop() {
-    if (this.exited) return this.exit;
+    if (this.shutdownReceipt !== undefined) return this.shutdownReceipt;
+    if (this.exited) {
+      const exit = await this.exit;
+      if (exit.error !== null) throw exit.error;
+      throw new Error(`${this.role}: process exited without a runtime-evidence shutdown receipt`);
+    }
     let handshakeFailure = null;
+    let executedRuntimeManifest;
     try {
       const stopped = await this.request(
         { cmd: 'stop' },
         'stopping',
         this.stopTimeouts.handshake,
       );
-      this.executedRuntimeManifest = stopped.executedRuntimeManifest;
+      executedRuntimeManifest = requiredExecutedRuntimeManifest(stopped, this.role);
     } catch (error) {
       handshakeFailure = error;
     }
-    let result = this.exited ? await this.exit : null;
-    if (result === null && handshakeFailure === null) {
-      result = await waitForExit(this.exit, this.stopTimeouts.gracefulExit);
+    if (handshakeFailure !== null) {
+      let forcedExit;
+      try {
+        forcedExit = await this.forceStop();
+      } catch (terminationFailure) {
+        throw new AggregateError(
+          [handshakeFailure, terminationFailure],
+          `${this.role}: stop handshake and forced termination failed`,
+        );
+      }
+      throw forcedExit.error === null
+        ? new Error(
+          `${this.role}: stop handshake failed; forced process exit completed`,
+          { cause: handshakeFailure },
+        )
+        : new AggregateError(
+          [handshakeFailure, forcedExit.error],
+          `${this.role}: stop handshake failed; forced process exit completed`,
+        );
     }
-    let forced = false;
-    if (result === null) {
-      forced = true;
-      this.proc.kill('SIGTERM');
-      result = await waitForExit(this.exit, this.stopTimeouts.sigtermExit);
-    }
+    let result = this.exited
+      ? await this.exit
+      : await waitForExit(this.exit, this.stopTimeouts.gracefulExit);
+    if (result === null) result = await this.forceStop();
+    if (result.error !== null) throw result.error;
+    this.shutdownReceipt = Object.freeze({
+      exit: Object.freeze(result),
+      executedRuntimeManifest,
+    });
+    return this.shutdownReceipt;
+  }
+
+  /** Bounded process reaping for failures that cannot produce provenance. */
+  async forceStop() {
+    if (this.exited) return this.exit;
+    this.proc.kill('SIGTERM');
+    let result = await waitForExit(this.exit, this.stopTimeouts.sigtermExit);
     if (result === null) {
       this.proc.kill('SIGKILL');
       result = await waitForExit(this.exit, this.stopTimeouts.sigkillExit);
     }
     if (result === null) {
-      const terminationFailure = new Error(
-        `${this.role}: process did not exit after bounded SIGTERM and SIGKILL`,
-      );
-      throw handshakeFailure === null
-        ? terminationFailure
-        : new AggregateError([handshakeFailure, terminationFailure], terminationFailure.message);
+      throw new Error(`${this.role}: process did not exit after bounded SIGTERM and SIGKILL`);
     }
-    if (forced && handshakeFailure !== null) {
-      throw result.error === null
-        ? handshakeFailure
-        : new AggregateError(
-          [handshakeFailure, result.error],
-          `${this.role}: stop handshake failed; forced process exit completed`,
-        );
-    }
-    if (result.error !== null) throw result.error;
     return result;
   }
 }
@@ -213,6 +232,7 @@ export async function executeRfc64PrivateReleaseGateV1({
     runtimeManifestDigest: runtimeManifest.manifestDigest,
     sourceRevision,
   });
+  const runtimeEvidence = createRfc64PrivateRuntimeEvidenceCollectorV1(runtimeManifest);
   const runRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-private-release-gate-'));
   const manifestPath = join(runRoot, 'manifest.json');
   const dataDirs = Object.fromEntries(ROLES.map((role) => [role, join(runRoot, role)]));
@@ -227,12 +247,9 @@ export async function executeRfc64PrivateReleaseGateV1({
       });
       const ready = await child.waitFor('ready');
       assertReadyRuntimeManifest(ready, runtimeManifest.manifestDigest);
-      const exit = await child.stop();
-      if (exit.error !== null) throw exit.error;
-      return [role, {
-        loaded: requiredChildRuntimeManifest(child),
-        ready,
-      }];
+      const shutdown = await child.stop();
+      runtimeEvidence.record(`probe-${role}`, shutdown);
+      return [role, { ready }];
     }));
     const probed = Object.fromEntries(probeEntries);
     const peerIds = Object.fromEntries(ROLES.map((role) => [role, probed[role].ready.peerId]));
@@ -257,7 +274,9 @@ export async function executeRfc64PrivateReleaseGateV1({
       expectedHeadDigest: published.headObjectDigest,
     }, 'inspection');
 
-    const ownerExit = await owner.stop();
+    const ownerShutdown = await owner.stop();
+    runtimeEvidence.record('owner', ownerShutdown);
+    const ownerExit = ownerShutdown.exit;
     active.delete(owner);
     const ownerListenerClosed = await waitForTcpListenerClosed(owner.ready.multiaddr);
     if (!ownerListenerClosed) {
@@ -309,9 +328,9 @@ export async function executeRfc64PrivateReleaseGateV1({
       expectedHeadDigest: published.headObjectDigest,
     }, 'inspection');
 
-    await provider2.stop();
+    runtimeEvidence.record('provider2', await provider2.stop());
     active.delete(provider2);
-    await receiver.stop();
+    runtimeEvidence.record('receiver', await receiver.stop());
     active.delete(receiver);
     const restartedReceiver = await startRole(
       'receiver',
@@ -326,23 +345,12 @@ export async function executeRfc64PrivateReleaseGateV1({
       expectedHeadDigest: published.headObjectDigest,
     }, 'inspection');
 
-    await outsider.stop();
+    runtimeEvidence.record('outsider', await outsider.stop());
     active.delete(outsider);
-    await restartedReceiver.stop();
+    runtimeEvidence.record('receiver-restart', await restartedReceiver.stop());
     active.delete(restartedReceiver);
 
-    const runtimeProcesses = [
-      ...ROLES.map((role) => ({ id: `probe-${role}`, loaded: probed[role].loaded })),
-      { id: 'owner', loaded: requiredChildRuntimeManifest(owner) },
-      { id: 'provider2', loaded: requiredChildRuntimeManifest(provider2) },
-      { id: 'receiver', loaded: requiredChildRuntimeManifest(receiver) },
-      { id: 'outsider', loaded: requiredChildRuntimeManifest(outsider) },
-      { id: 'receiver-restart', loaded: requiredChildRuntimeManifest(restartedReceiver) },
-    ];
-    const sealedRuntimeProvenance = buildRfc64PrivateRuntimeProvenanceV1(
-      runtimeManifest,
-      runtimeProcesses,
-    );
+    const sealedRuntimeProvenance = runtimeEvidence.seal();
 
     const checks = Object.freeze({
       fourStableUniqueDaemonIdentities:
@@ -471,13 +479,6 @@ function requiredExecutedRuntimeManifest(event, label) {
     throw new Error(`${label}: child did not report executed runtime provenance`);
   }
   return manifest;
-}
-
-function requiredChildRuntimeManifest(child) {
-  return requiredExecutedRuntimeManifest(
-    { executedRuntimeManifest: child.executedRuntimeManifest },
-    child.role,
-  );
 }
 
 async function connectBothWays(left, right) {

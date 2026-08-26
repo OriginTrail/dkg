@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
 
 import { canonicalize, type CanonicalValue } from './src/canonical.ts';
+import { validateFixedRuntimeProcessEvidenceV1 } from '../rfc64-runtime-process-evidence.mts';
 
 export const GATE2_RUNTIME_MANIFEST_SCHEMA_VERSION =
   'dkg-rfc64-gate2-runtime-manifest-v1' as const;
@@ -309,21 +310,17 @@ export function buildRuntimeProcessProvenanceV1<
     input.sourceBuild.runtimeFiles,
   );
   assertGate2RuntimeManifestEqualV1(input.sourceBuild, canonicalSourceBuild);
-  if (input.processes.length !== input.expectedProcessIds.length) {
-    throw new Error('runtime provenance has an unexpected process count');
-  }
-  const processes = input.processes.map((processEvidence, index) => {
-    const expectedId = input.expectedProcessIds[index];
-    if (processEvidence.id !== expectedId) {
-      throw new Error(`runtime provenance process ${index} must be ${expectedId}`);
-    }
-    assertGate2ExecutedRuntimeMatchesBuildV1(processEvidence.loaded, canonicalSourceBuild);
-    return Object.freeze({ id: expectedId, loaded: processEvidence.loaded });
+  const processes = validateFixedRuntimeProcessEvidenceV1({
+    expectedProcessIds: input.expectedProcessIds,
+    processes: input.processes,
+    validateLoaded: (loaded) => {
+      assertGate2ExecutedRuntimeMatchesBuildV1(loaded, canonicalSourceBuild);
+    },
   });
   return Object.freeze({
     schema: input.schema,
     sourceBuild: canonicalSourceBuild,
-    processes: Object.freeze(processes),
+    processes,
   });
 }
 
@@ -362,18 +359,15 @@ export function buildGate2RuntimeProvenanceV1(
     'receiverBeforeCrash',
     'receiverAfterRestart',
   ]);
-  if (inputProcesses.length !== expectedIds.length) {
-    throw new Error('Gate 2 runtime provenance must contain exactly three process boundaries');
-  }
-  const processes = inputProcesses.map((processEvidence, index) => {
-    if (processEvidence.id !== expectedIds[index]) {
-      throw new Error(`Gate 2 runtime process ${index} must be ${expectedIds[index]}`);
-    }
-    assertGate2ExecutedRuntimeMatchesBuildV1(processEvidence.loaded, sourceBuild);
-    return Object.freeze({ id: processEvidence.id, loaded: processEvidence.loaded });
+  const processes = validateFixedRuntimeProcessEvidenceV1({
+    expectedProcessIds: expectedIds,
+    processes: inputProcesses,
+    validateLoaded: (loaded) => {
+      assertGate2ExecutedRuntimeMatchesBuildV1(loaded, sourceBuild);
+    },
   });
   const payload = Object.freeze({
-    processes: Object.freeze(processes),
+    processes,
     schemaVersion: GATE2_RUNTIME_PROVENANCE_SCHEMA_VERSION,
     sourceBuild,
   });
