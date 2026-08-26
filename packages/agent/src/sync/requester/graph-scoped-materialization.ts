@@ -57,7 +57,6 @@ export type VerifyContextGraphBinding = (
 
 export type GraphScopedMaterializationOutcome =
   | 'applied'
-  | 'proof-ready'
   | 'stale'
   | 'quarantined';
 

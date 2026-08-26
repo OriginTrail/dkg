@@ -295,6 +295,48 @@ describe('durable graph-scoped KA materialization', () => {
     expect(getMerkleRootCount).not.toHaveBeenCalled();
   });
 
+  it('fails closed when the historical asset is not bound to the requested context graph', async () => {
+    const historicalData = dataQuad(1);
+    const historicalRoot = computeFlatKCRootV10([historicalData], []);
+    const historicalAsset: VerifiedGraphScopedAsset = {
+      contextGraphId,
+      ual,
+      assertionVersion: 1n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [historicalData],
+      metadataQuads: generateGraphKnowledgeAssetMetadata({
+        contextGraphId,
+        ual,
+        merkleRoot: historicalRoot,
+        publisherPeerId: 'historical-provider',
+        accessPolicy: 'public',
+        timestamp: new Date(0),
+        assertionVersion: 1,
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        assertionGraph,
+      }, { status: 'tentative' }),
+    };
+    const verifyContextGraphBinding = vi.fn(async () => false);
+
+    await expect(authenticateChallengePinnedGraphScopedAsset(
+      authenticatedV2Chain(),
+      historicalAsset,
+      {
+        assetUal: ual,
+        merkleRootHex: toHex(historicalRoot),
+        merkleLeafCount: 1n,
+      },
+      verifyContextGraphBinding,
+    )).rejects.toMatchObject({ code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' });
+    expect(verifyContextGraphBinding).toHaveBeenCalledWith(
+      contextGraphId,
+      14n,
+      undefined,
+    );
+  });
+
   it('forwards the graph-scoped authentication deadline through the helper', async () => {
     const authenticationDeadline = 1_800_000_123_456;
     const storeGraphScopedAsset = vi.fn(async (

@@ -24,6 +24,20 @@ export interface ExactAssetCommitment {
   readonly merkleLeafCount: bigint;
 }
 
+declare const EXACT_ASSET_SELECTION: unique symbol;
+
+export type ExactAssetSelectionInput =
+  | {
+      readonly kind: 'ual-only';
+      readonly assetUals: readonly string[];
+      readonly commitments?: never;
+    }
+  | {
+      readonly kind: 'challenge-pinned';
+      readonly commitments: readonly ExactAssetCommitment[];
+      readonly assetUals?: never;
+    };
+
 /**
  * Atomic exact-fetch selection. UAL-only recovery remains available for
  * ordinary VM reconciliation; proof-time recovery cannot represent an asset
@@ -33,10 +47,12 @@ export type ExactAssetSelection =
   | Readonly<{
       readonly kind: 'ual-only';
       readonly assetUals: readonly string[];
+      readonly [EXACT_ASSET_SELECTION]: true;
     }>
   | Readonly<{
       readonly kind: 'challenge-pinned';
       readonly commitments: readonly ExactAssetCommitment[];
+      readonly [EXACT_ASSET_SELECTION]: true;
     }>;
 
 export function exactSyncPhaseAccumulationLimits(assetUals: readonly string[]): {
@@ -109,7 +125,7 @@ export function createUalOnlyExactAssetSelection(
   return Object.freeze({
     kind: 'ual-only',
     assetUals: Object.freeze(requireExactAssetUals(assetUals)),
-  });
+  }) as ExactAssetSelection;
 }
 
 export function createChallengePinnedExactAssetSelection(
@@ -143,10 +159,13 @@ export function createChallengePinnedExactAssetSelection(
   return Object.freeze({
     kind: 'challenge-pinned',
     commitments: Object.freeze(commitments),
-  });
+  }) as ExactAssetSelection;
 }
 
-export function requireExactAssetSelection(value: unknown): ExactAssetSelection {
+/** Parse untrusted input once; internal APIs accept only the branded result. */
+export function requireExactAssetSelection(
+  value: ExactAssetSelectionInput | unknown,
+): ExactAssetSelection {
   if (typeof value !== 'object' || value === null) {
     throw new TypeError('Exact asset selection kind is invalid');
   }

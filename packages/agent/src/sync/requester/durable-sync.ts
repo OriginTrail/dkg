@@ -35,6 +35,7 @@ import {
 } from '../checkpoint/state.js';
 import type { SyncPageProgress, SyncPageResult } from './page-fetch.js';
 import type {
+  ChallengePinnedGraphScopedAsset,
   GraphScopedMaterializationOutcome,
   VerifiedGraphScopedAsset,
 } from './graph-scoped-materialization.js';
@@ -50,8 +51,9 @@ import {
   type ExactDurableFetchDisposition,
 } from './exact-durable-fetch.js';
 import {
+  exactAssetCommitmentsForSelection,
   exactAssetUalsForSelection,
-  requireExactAssetSelection,
+  type ExactAssetCommitment,
   type ExactAssetSelection,
 } from '../exact-assets.js';
 
@@ -97,6 +99,8 @@ export interface DetailedDurableSyncResult {
   readonly result: InitializedDurableSyncResult;
   /** Present only when this physical run used an exact-asset filter. */
   readonly exactFetchDisposition?: ExactDurableFetchDisposition;
+  /** Authenticated proof-only assets, never applied to durable live state. */
+  readonly authenticatedExactAssets?: readonly ChallengePinnedGraphScopedAsset[];
 }
 
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -199,6 +203,11 @@ export interface DurableSyncGraphScopedStoreRequest {
   readonly asset: VerifiedGraphScopedAsset;
   readonly authenticationDeadline: number;
   readonly signal?: AbortSignal;
+}
+
+export interface DurableSyncChallengePinnedAuthenticationRequest
+  extends DurableSyncGraphScopedStoreRequest {
+  readonly commitment: ExactAssetCommitment;
 }
 
 export type DurableSyncCheckpointWrite =
@@ -361,6 +370,10 @@ export interface DurableSyncContext {
   storeGraphScopedAsset?: (
     request: DurableSyncGraphScopedStoreRequest,
   ) => Promise<GraphScopedMaterializationOutcome>;
+  /** Proof-only authentication path; its result is returned explicitly. */
+  authenticateChallengePinnedAsset?: (
+    request: DurableSyncChallengePinnedAuthenticationRequest,
+  ) => Promise<ChallengePinnedGraphScopedAsset>;
   /** Runs after verified snapshot writes and before phase checkpoints advance. */
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   deleteCheckpoint: (key: string) => void;
@@ -545,6 +558,7 @@ async function runDurableSyncWithBudget(
     processDurableBatchInWorker,
     storeInsert,
     storeGraphScopedAsset,
+    authenticateChallengePinnedAsset,
     onVerifiedFullSnapshot,
     deleteCheckpoint,
     setCheckpoint,
@@ -564,6 +578,7 @@ async function runDurableSyncWithBudget(
 
   const accumulator = createDurableSyncAccumulator();
   const exactFetchDispositions: ExactDurableFetchDisposition[] = [];
+  const authenticatedExactAssets: ChallengePinnedGraphScopedAsset[] = [];
 
   const recordPhaseOutcome = (
     result: SyncPageResult,
@@ -708,13 +723,22 @@ async function runDurableSyncWithBudget(
         ? Math.min(contextGraphBudget.metaFetchDeadline ?? deadline, deadline)
         : deadline;
       const sinceBatchId = sinceBatchIdFor?.(pid);
-      const exactAssetSelectionInput = exactAssetSelectionFor?.(pid);
-      const exactAssetSelection = exactAssetSelectionInput === undefined
-        ? undefined
-        : requireExactAssetSelection(exactAssetSelectionInput);
+      const exactAssetSelection = exactAssetSelectionFor?.(pid);
       const exactAssetUals = exactAssetSelection === undefined
         ? undefined
         : exactAssetUalsForSelection(exactAssetSelection);
+      const challengeCommitments = new Map(
+        exactAssetSelection === undefined
+          ? []
+          : (exactAssetCommitmentsForSelection(exactAssetSelection) ?? [])
+              .map((commitment) => [commitment.assetUal, commitment]),
+      );
+      const exactRequesterScope: SyncCheckpointScope | undefined =
+        exactAssetSelection?.kind === 'challenge-pinned'
+          ? `challenge-exact:${exactAssetSelection.commitments
+              .map((commitment) => `${commitment.merkleRootHex}:${commitment.merkleLeafCount}`)
+              .join('.')}`
+          : undefined;
       const rootlessVerifiedFullSnapshot = sinceBatchId === undefined
         && !isSystemContextGraph;
       if (exactAssetUals !== undefined) {
@@ -762,11 +786,10 @@ async function runDurableSyncWithBudget(
           ),
         shouldStopAfterPage,
         ...(phase === 'meta' && durableMetaContinuation
-          ? {
-              returnAcceptedPrefixOnRetryableTransportFailure: true,
-              requesterScope: durableMetaContinuation.requesterScope,
-            }
+          ? { returnAcceptedPrefixOnRetryableTransportFailure: true }
           : {}),
+        requesterScope: exactRequesterScope
+          ?? (phase === 'meta' ? durableMetaContinuation?.requesterScope : undefined),
         fetchContext: fetchContext(phase === 'meta' ? metaFetchDeadline : deadline),
       });
       const rawMetaResult: SyncPageResult = skipAgentsMeta
@@ -1201,10 +1224,24 @@ async function runDurableSyncWithBudget(
         processed.verifiedMeta,
         processed.verifiedGraphScopedDataGraphs ?? [],
       );
-      if (partitioned.assets.length > 0 && !storeGraphScopedAsset) {
+      if (
+        partitioned.assets.length > 0
+        && exactAssetSelection?.kind !== 'challenge-pinned'
+        && !storeGraphScopedAsset
+      ) {
         throw Object.assign(
           new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
           { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
+        );
+      }
+      if (
+        partitioned.assets.length > 0
+        && exactAssetSelection?.kind === 'challenge-pinned'
+        && !authenticateChallengePinnedAsset
+      ) {
+        throw Object.assign(
+          new Error('Challenge-pinned durable sync requires a proof-only authentication path'),
+          { code: 'VM_CHALLENGE_AUTHENTICATION_UNSUPPORTED' },
         );
       }
       // A rootless manifest contains only exact graph assets in the DATA
@@ -1246,26 +1283,39 @@ async function runDurableSyncWithBudget(
           break;
         }
         throwIfOperationAborted();
-        const outcome = await storeGraphScopedAsset!({
-          asset,
-          authenticationDeadline: graphScopedAuthenticationDeadline,
-          signal,
-        });
-        if (outcome === 'applied') {
-          // Materialization is atomic per asset, not per fetched page. Account
-          // for each committed asset immediately so a later asset failure does
-          // not erase truthful progress from the returned summary.
-          recordDurableSyncDiagnostics(accumulator, {
-            insertedDataTriples: asset.dataQuads.length,
-            insertedMetaTriples: asset.metadataQuads.length,
-            insertedTriples: asset.dataQuads.length + asset.metadataQuads.length,
+        const challengeCommitment = challengeCommitments.get(asset.ual);
+        if (exactAssetSelection?.kind === 'challenge-pinned') {
+          if (challengeCommitment === undefined) {
+            throw new Error(`Challenge-pinned durable sync returned unselected asset ${asset.ual}`);
+          }
+          const authenticated = await authenticateChallengePinnedAsset!({
+            asset,
+            commitment: challengeCommitment,
+            authenticationDeadline: graphScopedAuthenticationDeadline,
+            signal,
           });
-        } else if (outcome === 'proof-ready') {
-          logDebug(ctx, `Prepared challenge-scoped proof material for ${asset.ual}`);
-        } else if (outcome === 'stale') {
-          logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
+          authenticatedExactAssets.push(authenticated);
+          logDebug(ctx, `Authenticated challenge-scoped exact asset ${asset.ual}`);
         } else {
-          logWarn(ctx, `Quarantined graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
+          const outcome = await storeGraphScopedAsset!({
+            asset,
+            authenticationDeadline: graphScopedAuthenticationDeadline,
+            signal,
+          });
+          if (outcome === 'applied') {
+            // Materialization is atomic per asset, not per fetched page. Account
+            // for each committed asset immediately so a later asset failure does
+            // not erase truthful progress from the returned summary.
+            recordDurableSyncDiagnostics(accumulator, {
+              insertedDataTriples: asset.dataQuads.length,
+              insertedMetaTriples: asset.metadataQuads.length,
+              insertedTriples: asset.dataQuads.length + asset.metadataQuads.length,
+            });
+          } else if (outcome === 'stale') {
+            logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
+          } else {
+            logWarn(ctx, `Quarantined graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
+          }
         }
         const settledCheckpoint = checkpointSettledManifestGraph?.(asset.assertionGraph);
         if (settledCheckpoint) mayYieldAtSettledManifestBoundary = true;
@@ -1383,6 +1433,9 @@ async function runDurableSyncWithBudget(
   return {
     result,
     ...(exactFetchDisposition ? { exactFetchDisposition } : {}),
+    ...(authenticatedExactAssets.length === 0
+      ? {}
+      : { authenticatedExactAssets: Object.freeze([...authenticatedExactAssets]) }),
   };
 }
 

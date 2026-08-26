@@ -21,7 +21,10 @@ import {
   type SyncCheckpointScope,
 } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
+import {
+  createChallengePinnedExactAssetSelection,
+  createUalOnlyExactAssetSelection,
+} from '../src/sync/exact-assets.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import {
   VmReconcileQueueClosedError,
@@ -732,6 +735,61 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(fetchCalls).toBe(2);
       expect(forward).toBe(reverse.result);
       expect(reverse.disposition).toBe('clean-absent');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('never coalesces challenge-pinned fetches whose commitments differ', async () => {
+    const firstMetaFetch = deferred<SyncPageResult>();
+    const requesterScopes: Array<SyncCheckpointScope | undefined> = [];
+    let fetchCalls = 0;
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    stubLifecycleFetch(agent, async ({ phase, requesterScope }) => {
+      fetchCalls += 1;
+      if (phase === 'meta') requesterScopes.push(requesterScope);
+      if (fetchCalls === 1) return firstMetaFetch.promise;
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      consumedUnpersistedMetaTriples: 0,
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+    const pinnedSelection = (rootByte: string) => createChallengePinnedExactAssetSelection([{
+      assetUal: EXACT_UAL_7,
+      merkleRootHex: rootByte.repeat(64),
+      merkleLeafCount: 1n,
+    }]);
+
+    try {
+      const first = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        'challenge-isolated-cg',
+        pinnedSelection('1'),
+      );
+      await waitFor(() => fetchCalls === 1);
+      const second = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        'challenge-isolated-cg',
+        pinnedSelection('2'),
+      );
+      firstMetaFetch.resolve(emptySyncPage('meta'));
+
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(fetchCalls).toBe(4);
+      expect(firstResult.result).not.toBe(secondResult.result);
+      expect(requesterScopes).toHaveLength(2);
+      expect(requesterScopes[0]).not.toBe(requesterScopes[1]);
+      expect(requesterScopes.every((scope) => scope?.startsWith('challenge-exact:')))
+        .toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }

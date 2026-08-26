@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   MemoryLayer,
   createGraphKnowledgeAssetScope,
@@ -10,6 +10,8 @@ import { generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-p
 import {
   filterExactAssetDurablePayload,
   runDurableSync,
+  runDurableSyncDetailed,
+  type DurableSyncChallengePinnedAuthenticationRequest,
 } from '../src/sync/requester/durable-sync.js';
 import {
   createChallengePinnedExactAssetSelection,
@@ -272,6 +274,89 @@ describe('exact-asset rolling-upgrade filter', () => {
     expect(matching.processCalls).toHaveLength(1);
   });
 
+  it('returns every authenticated challenge asset explicitly without materializing live state', async () => {
+    const firstUal = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const secondUal = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const fixture = (assetUal: string, rootByte: number, privateRoot?: Uint8Array) => {
+      const scope = createGraphKnowledgeAssetScope(assetUal, '1');
+      const graph = knowledgeAssetLayerGraphUri(
+        'mfacts',
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const root = new Uint8Array(32).fill(rootByte);
+      const data: Quad = {
+        subject: `urn:asset:${rootByte}`,
+        predicate: 'urn:value',
+        object: `"${rootByte}"`,
+        graph,
+      };
+      const meta = generateGraphKnowledgeAssetMetadata({
+        ual: assetUal,
+        contextGraphId: 'mfacts',
+        merkleRoot: root,
+        publisherPeerId: 'peer',
+        accessPolicy: 'public',
+        timestamp: new Date(0),
+        assertionVersion: '1',
+        publicTripleCount: 1,
+        privateTripleCount: privateRoot === undefined ? 0 : 1,
+        ...(privateRoot === undefined ? {} : { privateMerkleRoot: privateRoot }),
+        assertionGraph: graph,
+      }, { status: 'tentative' });
+      return { assetUal, data, graph, meta, root };
+    };
+    const privateRoot = new Uint8Array(32).fill(0x33);
+    const first = fixture(firstUal, 0x11, privateRoot);
+    const second = fixture(secondUal, 0x22);
+    const selection = createChallengePinnedExactAssetSelection([
+      {
+        assetUal: firstUal,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 1n,
+      },
+      {
+        assetUal: secondUal,
+        merkleRootHex: '22'.repeat(32),
+        merkleLeafCount: 1n,
+      },
+    ]);
+    const authenticateChallengePinnedAsset = vi.fn(async (
+      request: DurableSyncChallengePinnedAuthenticationRequest,
+    ) => ({
+      asset: request.asset,
+      privateRoots: request.asset.ual === firstUal ? [privateRoot] : [],
+    }));
+    const storeGraphScopedAsset = vi.fn(async () => {
+      throw new Error('challenge-pinned assets must not reach durable materialization');
+    });
+    const { context } = makeContext({
+      exactAssetSelectionFor: () => selection,
+      pageQuads: {
+        data: [first.data, second.data],
+        meta: [...first.meta, ...second.meta],
+      },
+      processResult: {
+        verifiedData: [first.data, second.data],
+        verifiedMeta: [...first.meta, ...second.meta],
+        verifiedGraphScopedDataGraphs: [first.graph, second.graph],
+      },
+      authenticateChallengePinnedAsset,
+      storeGraphScopedAsset,
+    });
+
+    const detailed = await runDurableSyncDetailed(context);
+
+    expect(detailed.authenticatedExactAssets?.map(({ asset }) => asset.ual)).toEqual([
+      firstUal,
+      secondUal,
+    ]);
+    expect(detailed.authenticatedExactAssets?.[0]?.privateRoots).toEqual([privateRoot]);
+    expect(authenticateChallengePinnedAsset).toHaveBeenCalledTimes(2);
+    expect(storeGraphScopedAsset).not.toHaveBeenCalled();
+    expect(detailed.result.insertedTriples).toBe(0);
+  });
+
   it('does not thread a filter when exactAssetSelectionFor is not wired', async () => {
     const { calls, context } = makeContext();
     await runDurableSync(context);
@@ -288,9 +373,14 @@ function makeContext(options: {
   processResult?: {
     verifiedData?: Quad[];
     verifiedMeta?: Quad[];
+    verifiedGraphScopedDataGraphs?: string[];
     totalFetchedDataQuads?: number;
     totalFetchedMetaQuads?: number;
   };
+  authenticateChallengePinnedAsset?: (
+    request: DurableSyncChallengePinnedAuthenticationRequest,
+  ) => Promise<{ asset: import('../src/sync/requester/graph-scoped-materialization.js').VerifiedGraphScopedAsset; privateRoots: readonly Uint8Array[] }>;
+  storeGraphScopedAsset?: () => Promise<never>;
 } = {}) {
   const calls: FetchCall[] = [];
   const processCalls: Array<{
@@ -307,7 +397,9 @@ function makeContext(options: {
       : phase === 'data' ? ([{ id: 'data' }] as never[]) : ([{ id: 'meta' }] as never[]),
     bytesReceived: phase === 'data' ? 20 : 10,
     resumedFromOffset: 0,
-    nextOffset: phase === 'data' ? 1 : 2,
+    nextOffset: options.pageQuads
+      ? options.pageQuads[phase].length
+      : phase === 'data' ? 1 : 2,
     checkpointKey: `cp|${phase}`,
     completed: true,
     timedOut: false,
@@ -356,16 +448,21 @@ function makeContext(options: {
         return {
           verifiedData,
           verifiedMeta,
+          verifiedGraphScopedDataGraphs:
+            options.processResult?.verifiedGraphScopedDataGraphs,
           consumedUnpersistedMetaTriples: 0,
           totalFetchedDataQuads: options.processResult?.totalFetchedDataQuads ?? dataQuads.length,
           totalFetchedMetaQuads: options.processResult?.totalFetchedMetaQuads ?? metaQuads.length,
           rejectedKcs: 0,
           emptyResponses: 0,
           metaOnlyResponses: 0,
+          verifiedPrivateOnlyResponses: 0,
           dataRejectedMissingMeta: 0,
         };
       },
       storeInsert: async ({ quads }) => { insertedBatches.push(quads); },
+      authenticateChallengePinnedAsset: options.authenticateChallengePinnedAsset,
+      storeGraphScopedAsset: options.storeGraphScopedAsset,
       deleteCheckpoint: (key: string) => { deletedCheckpoints.push(key); },
       setCheckpoint: () => undefined,
       logInfo: () => undefined,
