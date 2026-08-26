@@ -371,6 +371,8 @@ export interface ChainReconciledKCInput {
   contextGraphId: string;
   onChainCgId: string;
   ual: string;
+  /** Exact current chain rootCount when the caller has one coherent snapshot. */
+  assertionVersion?: bigint;
   merkleRoot: Uint8Array;
   publisherAddress: string;
   kaId: bigint;
@@ -1437,6 +1439,7 @@ export class FinalizationHandler {
   private async reconcileConfirmedGraphScopedVmWithoutWorkspaceHead(input: {
     contextGraphId: string;
     ual: string;
+    assertionVersion?: bigint;
     merkleRoot: Uint8Array;
     kaId: bigint;
     versionBlock: number;
@@ -1464,6 +1467,8 @@ export class FinalizationHandler {
       scope.ual !== input.ual
       || packedKaId !== input.kaId
       || envelope.batchId !== input.kaId
+      || (input.assertionVersion !== undefined
+        && !sameBigIntLiteral(envelope.assertionVersion, input.assertionVersion))
       || !equalBytes(envelope.merkleRoot, input.merkleRoot)
       || (input.subGraphName !== undefined && input.subGraphName !== envelope.subGraphName)
     ) {
@@ -1514,6 +1519,7 @@ export class FinalizationHandler {
     contextGraphId: string;
     onChainCgId?: string;
     ual: string;
+    assertionVersion?: bigint;
     merkleRoot: Uint8Array;
     publisherAddress: string;
     kaId: bigint;
@@ -1533,6 +1539,7 @@ export class FinalizationHandler {
       contextGraphId,
       onChainCgId,
       ual,
+      assertionVersion,
       merkleRoot,
       publisherAddress,
       kaId,
@@ -1577,6 +1584,7 @@ export class FinalizationHandler {
         return (await this.reconcileConfirmedGraphScopedVmWithoutWorkspaceHead({
           contextGraphId,
           ual,
+          assertionVersion,
           merkleRoot,
           kaId,
           versionBlock,
@@ -1590,6 +1598,7 @@ export class FinalizationHandler {
       return this.reconcileConfirmedGraphScopedVmWithoutWorkspaceHead({
         contextGraphId,
         ual,
+        assertionVersion,
         merkleRoot,
         kaId,
         versionBlock,
@@ -1633,10 +1642,16 @@ export class FinalizationHandler {
       && BigInt(workspaceHead.assertionVersion)
         > BigInt(trustedAssertionEvidence.assertionVersion);
     const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
-    if (scope.ual !== ual || packedKaId !== kaId) {
+    if (
+      scope.ual !== ual
+      || packedKaId !== kaId
+      || (assertionVersion !== undefined
+        && !sameBigIntLiteral(scope.assertionVersion, assertionVersion))
+    ) {
       this.log.warn(
         ctx,
-        `Chain-reconcile: UAL-derived kaId ${packedKaId} does not match chain kaId ${kaId} for ${ual}`,
+        `Chain-reconcile: local graph-scoped identity or assertion version does not match `
+          + `current chain identity for ${ual}`,
       );
       return 'no-swm';
     }
@@ -3088,6 +3103,7 @@ export class FinalizationHandler {
     const {
       contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
       kaId, versionBlock, authorAddress, subGraphName, trustedAssertionEvidence,
+      assertionVersion,
     } = input;
 
     if (!(await this.verifyChainCgBinding(kaId, onChainCgId, ctx))) {
@@ -3099,10 +3115,13 @@ export class FinalizationHandler {
     }
 
     const journalReplay = await this.replayMatchingRecoveryEntries(input, ctx);
-    if (journalReplay === 'recovered') {
+    // The recovery index predates exact chain-rootCount evidence. Exact asset
+    // inspection must therefore verify the resulting local assertion version
+    // below instead of treating a same-root replay as sufficient on its own.
+    if (journalReplay === 'recovered' && assertionVersion === undefined) {
       return { outcome: 'already-confirmed', legacyEligible: false, input };
     }
-    if (journalReplay === 'retry-pending') {
+    if (journalReplay === 'retry-pending' && assertionVersion === undefined) {
       return { outcome: 'receipt-revalidation-pending', legacyEligible: false, input };
     }
     if (journalReplay === 'invalidated') {
@@ -3117,6 +3136,7 @@ export class FinalizationHandler {
       contextGraphId,
       onChainCgId,
       ual,
+      assertionVersion,
       merkleRoot,
       publisherAddress,
       kaId,

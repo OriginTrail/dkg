@@ -2,13 +2,27 @@
 
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { runRfc64PrivateGateArtifactLifecycleV1 } from '../devnet/rfc64-private-catalog/gate-artifact.mjs';
+import {
+  Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1,
+  Rfc64PublicCatalogNativeTransportErrorV1,
+} from '@origintrail-official/dkg-agent';
+import {
+  classifyExpectedPrivateCatalogDenialV1,
+  isExpectedPrivateCatalogDenialResultV1,
+} from '../devnet/rfc64-private-catalog/denial-evidence.mjs';
+import {
+  assertRfc64PrivateGatePassProvenanceV1,
+  runRfc64PrivateGateArtifactLifecycleV1,
+} from '../devnet/rfc64-private-catalog/gate-artifact.mjs';
+import { AgentChild } from '../devnet/rfc64-private-catalog/run.mjs';
 
 const temporaryRoots: string[] = [];
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => (
@@ -17,6 +31,54 @@ afterEach(async () => {
 });
 
 describe('RFC-64 private release gate artifact lifecycle', () => {
+  it('writes a successful PASS with exact run and source provenance', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-artifact-'));
+    temporaryRoots.push(root);
+    const artifactPath = join(root, 'artifacts', 'latest.json');
+    const timestamps = [
+      new Date('2026-08-26T00:00:00.000Z'),
+      new Date('2026-08-26T00:00:01.000Z'),
+    ];
+
+    const artifact = await runRfc64PrivateGateArtifactLifecycleV1({
+      artifactPath,
+      sourceRevision: 'b'.repeat(40),
+      now: () => timestamps.shift() ?? new Date('2026-08-26T00:00:02.000Z'),
+      execute: async () => ({
+        schema: 'dkg-rfc64-private-release-gate-v1',
+        status: 'PASS',
+        checks: { strict: true },
+      }),
+    });
+
+    expect(artifact).toMatchObject({
+      status: 'PASS',
+      startedAt: '2026-08-26T00:00:00.000Z',
+      finishedAt: '2026-08-26T00:00:01.000Z',
+      sourceRevision: 'b'.repeat(40),
+    });
+    expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toEqual(artifact);
+    expect(() => assertRfc64PrivateGatePassProvenanceV1(artifact)).not.toThrow();
+  });
+
+  it('rejects PASS provenance with a missing revision or invalid run interval', () => {
+    const base = {
+      schema: 'dkg-rfc64-private-release-gate-v1',
+      status: 'PASS',
+      startedAt: '2026-08-26T00:00:01.000Z',
+      finishedAt: '2026-08-26T00:00:02.000Z',
+      sourceRevision: 'c'.repeat(40),
+    };
+    expect(() => assertRfc64PrivateGatePassProvenanceV1({
+      ...base,
+      sourceRevision: null,
+    })).toThrow(/exact source revision/u);
+    expect(() => assertRfc64PrivateGatePassProvenanceV1({
+      ...base,
+      finishedAt: '2026-08-25T23:59:59.000Z',
+    })).toThrow(/precedes/u);
+  });
+
   it('replaces a stale PASS before work and publishes sanitized FAIL on early failure', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-artifact-'));
     temporaryRoots.push(root);
@@ -63,5 +125,84 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       },
       sourceRevision: 'a'.repeat(40),
     });
+  });
+});
+
+describe('RFC-64 private release gate process and denial evidence', () => {
+  it('reaps a child that ignores the stop command and SIGTERM', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-stop-'));
+    temporaryRoots.push(root);
+    const child = new AgentChild('ignored-stop', root, undefined, 'ignored-stop', {
+      agentProcess: join(HERE, 'fixtures', 'rfc64-private-catalog-ignored-stop-child.mjs'),
+      stopHandshakeTimeoutMs: 25,
+      gracefulExitTimeoutMs: 25,
+      sigtermExitTimeoutMs: 25,
+      sigkillExitTimeoutMs: 2_000,
+    });
+    await child.waitFor('ready', { timeoutMs: 2_000 });
+
+    await expect(child.stop()).rejects.toThrow(/forced process exit completed/u);
+    const exit = await child.exit;
+    expect(exit.signal).toBe('SIGKILL');
+    expect(child.exited).toBe(true);
+  });
+
+  it('accepts only stable typed private policy denials', () => {
+    const discoveryDenial = new Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1(
+      'catalog-discovery-policy-denied',
+      'denied',
+    );
+    const nativeDenial = new Rfc64PublicCatalogNativeTransportErrorV1(
+      'catalog-native-policy-denied',
+      'denied',
+    );
+    expect(classifyExpectedPrivateCatalogDenialV1(
+      new AggregateError([discoveryDenial], 'provider failed'),
+    )).toEqual({
+      failureClass: 'Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1',
+      failureCode: 'catalog-discovery-policy-denied',
+    });
+    expect(classifyExpectedPrivateCatalogDenialV1(
+      new Error('wrapper', { cause: nativeDenial }),
+    )).toEqual({
+      failureClass: 'Rfc64PublicCatalogNativeTransportErrorV1',
+      failureCode: 'catalog-native-policy-denied',
+    });
+  });
+
+  it('does not treat transport, timeout, provider, or forged failures as denial', () => {
+    const denial = new Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1(
+      'catalog-discovery-policy-denied',
+      'denied',
+    );
+    const protocolFailure = new Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1(
+      'catalog-discovery-wire',
+      'bad response',
+    );
+    expect(classifyExpectedPrivateCatalogDenialV1(protocolFailure)).toBeNull();
+    expect(classifyExpectedPrivateCatalogDenialV1(
+      new Rfc64PublicCatalogNativeTransportErrorV1(
+        'catalog-native-resource-refused',
+        'resource limit',
+      ),
+    )).toBeNull();
+    expect(classifyExpectedPrivateCatalogDenialV1(
+      Object.assign(new Error('timed out'), { name: 'AbortError' }),
+    )).toBeNull();
+    expect(classifyExpectedPrivateCatalogDenialV1(
+      new AggregateError([denial, new Error('provider disconnected')]),
+    )).toBeNull();
+    expect(classifyExpectedPrivateCatalogDenialV1(
+      Object.assign(new Error('forged'), {
+        name: 'Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1',
+        code: 'catalog-discovery-policy-denied',
+      }),
+    )).toBeNull();
+    expect(isExpectedPrivateCatalogDenialResultV1({
+      denied: true,
+      applied: false,
+      failureClass: 'AggregateError',
+      failureCode: null,
+    })).toBe(false);
   });
 });

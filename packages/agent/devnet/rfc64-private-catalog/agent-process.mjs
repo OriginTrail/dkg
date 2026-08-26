@@ -30,6 +30,7 @@ import {
   ownerWallet,
   roleAgentAddress,
 } from './fixture.mjs';
+import { classifyExpectedPrivateCatalogDenialV1 } from './denial-evidence.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
@@ -346,10 +347,12 @@ async function proveDenied(command, requestId) {
       failureClass: null,
     });
   } catch (error) {
+    const denial = classifyExpectedPrivateCatalogDenialV1(error);
+    if (denial === null) throw error;
     emit('sync-denial-result', requestId, {
       denied: true,
       applied: false,
-      failureClass: error?.name ?? 'Error',
+      ...denial,
     });
   }
 }

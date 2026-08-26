@@ -3132,6 +3132,42 @@ describe('graph-scoped finalization handler', () => {
     }, createOperationContext('system'))).resolves.toBe('no-swm');
   });
 
+  it('rejects stale confirmed A-v1 state when the chain returns to root A at v3', async () => {
+    const { message } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    await store.deleteByPattern({
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+    });
+    const internals = handler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    // The local confirmed envelope is assertion v1 with root A. The coherent
+    // chain snapshot has advanced A(v1) -> B(v2) -> A(v3). Equal content alone
+    // must not let the v1 envelope advance the v3 materialization stamp.
+    await expect(handler.handleExactChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      assertionVersion: 3n,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 999,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('no-swm');
+
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    const advanced = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+        + '<http://dkg.io/ontology/materializedVersion> "999:0" } }',
+    );
+    expect(advanced.type === 'boolean' && advanced.value).toBe(false);
+  });
+
   it('recognizes an exact confirmed VM copy when the mutable workspace head is corrupt', async () => {
     const { message, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);

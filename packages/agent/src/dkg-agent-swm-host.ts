@@ -3245,6 +3245,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           contextGraphId: localCgId,
           onChainCgId: item.onChainCgId,
           ual: item.ual,
+          assertionVersion: item.assertionVersion,
           merkleRoot: item.merkleRoot,
           publisherAddress: item.publisherAddress,
           kaId: item.kaId,

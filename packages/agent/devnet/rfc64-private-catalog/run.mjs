@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
@@ -13,6 +13,7 @@ import {
   runRfc64PrivateGateArtifactLifecycleV1,
   sanitizeGateFailureV1,
 } from './gate-artifact.mjs';
+import { isExpectedPrivateCatalogDenialResultV1 } from './denial-evidence.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENT_ROOT = join(HERE, '..', '..');
@@ -24,16 +25,22 @@ const RUN_TIMEOUT_MS = 90_000;
 let requestSequence = 0;
 let lifecycleSequence = 0;
 
-class AgentChild {
-  constructor(role, dataDir, manifestPath, mode = 'run') {
+export class AgentChild {
+  constructor(role, dataDir, manifestPath, mode = 'run', options = {}) {
     this.role = role;
     this.spawnSequence = ++lifecycleSequence;
     this.spawnedAt = new Date().toISOString();
     this.events = [];
     this.waiters = [];
     this.exited = false;
-    this.proc = spawn(process.execPath, [AGENT_PROCESS], {
-      cwd: AGENT_ROOT,
+    this.stopTimeouts = Object.freeze({
+      handshake: options.stopHandshakeTimeoutMs ?? 5_000,
+      gracefulExit: options.gracefulExitTimeoutMs ?? 10_000,
+      sigtermExit: options.sigtermExitTimeoutMs ?? 5_000,
+      sigkillExit: options.sigkillExitTimeoutMs ?? 5_000,
+    });
+    this.proc = spawn(process.execPath, [options.agentProcess ?? AGENT_PROCESS], {
+      cwd: options.agentRoot ?? AGENT_ROOT,
       env: {
         ...process.env,
         NODE_ENV: 'production',
@@ -126,17 +133,42 @@ class AgentChild {
 
   async stop() {
     if (this.exited) return this.exit;
+    let handshakeFailure = null;
     try {
-      await this.request({ cmd: 'stop' }, 'stopping', 5_000);
+      await this.request({ cmd: 'stop' }, 'stopping', this.stopTimeouts.handshake);
     } catch (error) {
-      if (!this.exited) throw error;
+      handshakeFailure = error;
     }
-    let result = await waitForExit(this.exit, 10_000);
+    let result = this.exited ? await this.exit : null;
+    if (result === null && handshakeFailure === null) {
+      result = await waitForExit(this.exit, this.stopTimeouts.gracefulExit);
+    }
+    let forced = false;
     if (result === null) {
+      forced = true;
       this.proc.kill('SIGTERM');
-      result = await waitForExit(this.exit, 5_000);
+      result = await waitForExit(this.exit, this.stopTimeouts.sigtermExit);
     }
-    if (result === null) throw new Error(`${this.role}: process did not exit after stop`);
+    if (result === null) {
+      this.proc.kill('SIGKILL');
+      result = await waitForExit(this.exit, this.stopTimeouts.sigkillExit);
+    }
+    if (result === null) {
+      const terminationFailure = new Error(
+        `${this.role}: process did not exit after bounded SIGTERM and SIGKILL`,
+      );
+      throw handshakeFailure === null
+        ? terminationFailure
+        : new AggregateError([handshakeFailure, terminationFailure], terminationFailure.message);
+    }
+    if (forced && handshakeFailure !== null) {
+      throw result.error === null
+        ? handshakeFailure
+        : new AggregateError(
+          [handshakeFailure, result.error],
+          `${this.role}: stop handshake failed; forced process exit completed`,
+        );
+    }
     if (result.error !== null) throw result.error;
     return result;
   }
@@ -268,8 +300,7 @@ async function main() {
       finalizedChainPathExecuted:
         provider2State.rpcCalls > 0 && receiverState.rpcCalls > 0,
       outsiderDeniedBeforeApplication:
-        outsiderDenial.denied === true
-        && outsiderDenial.applied === false
+        isExpectedPrivateCatalogDenialResultV1(outsiderDenial)
         && outsiderState.appliedHeadDigest === null,
       outsiderReceivedNoPrivateGraphs:
         outsiderState.graphCounts.every(({ swm, vm }) => swm === 0 && vm === 0),
@@ -314,6 +345,7 @@ async function main() {
       outsider: {
         denied: outsiderDenial.denied,
         failureClass: outsiderDenial.failureClass,
+        failureCode: outsiderDenial.failureCode,
         appliedHeadDigest: outsiderState.appliedHeadDigest,
         graphCounts: outsiderState.graphCounts,
       },
@@ -437,19 +469,34 @@ function parseTcpMultiaddr(value) {
   return { host: match[1], port: Number(match[2]) };
 }
 
-runRfc64PrivateGateArtifactLifecycleV1({
-  artifactPath: ARTIFACT,
-  execute: main,
-  sourceRevision: process.env.GITHUB_SHA ?? null,
-}).then((artifact) => {
-  process.stdout.write(`${stableJson(artifact)}\n`);
-  process.stdout.write(
-    `RFC-64 private Releases 1-3 four-process gate: ${artifact.status}\n`,
-  );
-}).catch((error) => {
-  const failure = sanitizeGateFailureV1(error);
-  process.stderr.write(
-    `RFC-64 private release gate failed (${failure.failureClass})\n`,
-  );
-  process.exitCode = 1;
-});
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runRfc64PrivateGateArtifactLifecycleV1({
+    artifactPath: ARTIFACT,
+    execute: main,
+    sourceRevision: resolveGateSourceRevisionV1(),
+  }).then((artifact) => {
+    process.stdout.write(`${stableJson(artifact)}\n`);
+    process.stdout.write(
+      `RFC-64 private Releases 1-3 four-process gate: ${artifact.status}\n`,
+    );
+  }).catch((error) => {
+    const failure = sanitizeGateFailureV1(error);
+    process.stderr.write(
+      `RFC-64 private release gate failed (${failure.failureClass})\n`,
+    );
+    process.exitCode = 1;
+  });
+}
+
+function resolveGateSourceRevisionV1() {
+  if (process.env.GITHUB_SHA !== undefined) return process.env.GITHUB_SHA;
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: AGENT_ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
