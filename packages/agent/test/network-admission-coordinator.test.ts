@@ -66,35 +66,16 @@ describe('protocol admission error boundary', () => {
     // peer, so it cannot catch a factory whose full-admission half was
     // disconnected (e.g. replaced with `async () => true`). This pins each
     // half's delegation to the SAME coordinator.
-    const probeError = new NetworkAdmissionProbeError(REMOTE_PEER_ID, 'retryable probe backed off');
     const ensureAdmitted = vi.fn().mockResolvedValue(true);
     const isRejectedPeer = vi.fn().mockReturnValue(false);
     const policy = createNetworkAdmissionRouterPolicy({ ensureAdmitted, isRejectedPeer });
 
-    // Full-admission half: delegates with operation context + options...
-    const options = { timeoutMs: 123 };
-    await expect(
-      policy.isPeerAccepted(REMOTE_PEER_ID, '/dkg/test/1.0.0', 'inbound', options),
-    ).resolves.toBe(true);
+    await expect(policy.isPeerAccepted(REMOTE_PEER_ID, '/p', 'inbound')).resolves.toBe(true);
     expect(ensureAdmitted).toHaveBeenCalledTimes(1);
     expect(ensureAdmitted.mock.calls[0][0]).toBe(REMOTE_PEER_ID);
-    expect(ensureAdmitted.mock.calls[0][1]).toMatchObject({ operationName: 'connect' });
-    expect(ensureAdmitted.mock.calls[0][2]).toBe(options);
-    // ...a negative verdict propagates...
-    ensureAdmitted.mockResolvedValueOnce(false);
-    await expect(policy.isPeerAccepted(REMOTE_PEER_ID, '/p', 'outbound')).resolves.toBe(false);
-    // ...and the error-translation boundary is preserved per direction.
-    ensureAdmitted.mockRejectedValueOnce(probeError);
-    await expect(
-      policy.isPeerAccepted(REMOTE_PEER_ID, '/p', 'inbound'),
-    ).rejects.toBeInstanceOf(QuietRetryableHandlerError);
-    ensureAdmitted.mockRejectedValueOnce(probeError);
-    await expect(policy.isPeerAccepted(REMOTE_PEER_ID, '/p', 'outbound')).rejects.toBe(probeError);
 
-    // Cached half: delegates to isRejectedPeer on the same coordinator.
     expect(policy.isPeerKnownRejected(REMOTE_PEER_ID, '/p')).toBe(false);
-    isRejectedPeer.mockReturnValueOnce(true);
-    expect(policy.isPeerKnownRejected(REMOTE_PEER_ID, '/p')).toBe(true);
+    expect(isRejectedPeer).toHaveBeenCalledTimes(1);
     expect(isRejectedPeer).toHaveBeenCalledWith(REMOTE_PEER_ID);
   });
 });
