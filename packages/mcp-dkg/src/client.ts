@@ -16,16 +16,40 @@ export interface SparqlBinding {
   } | string; // some daemons flatten to strings; we normalise downstream
 }
 
-export interface SparqlResult {
-  head?: { vars?: string[] };
-  bindings: SparqlBinding[];
-  quads?: Array<{
+export interface SparqlQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+  graph?: string;
+}
+
+export type SparqlResult =
+  | {
+      type: 'bindings';
+      head?: { vars?: string[] };
+      bindings: SparqlBinding[];
+      quads?: never;
+      value?: never;
+    }
+  | {
+      type: 'quads';
+      head?: never;
+      bindings?: never;
+      quads: Array<{
     subject: string;
     predicate: string;
     object: string;
     graph?: string;
-  }>;
-}
+      }>;
+      value?: never;
+    }
+  | {
+      type: 'boolean';
+      head?: never;
+      bindings?: never;
+      quads?: never;
+      value: boolean;
+    };
 
 export interface QueryResponse {
   result: SparqlResult;
@@ -444,7 +468,7 @@ export class DkgClient {
     if (args.minTrust != null) body.minTrust = args.minTrust;
 
     const r = await this.request<QueryResponse>('POST', '/api/query', body);
-    return r.result ?? { bindings: [] };
+    return r.result ?? { type: 'bindings', bindings: [] };
   }
 
   /**

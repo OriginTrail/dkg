@@ -1,11 +1,12 @@
 import React, { useMemo, useState, useCallback, useEffect, Suspense } from 'react';
-import { executeQuery, type QueryExecutionView, type SubGraphInfo } from '../../../api.js';
+import { executeQuery, type SubGraphInfo } from '../../../api.js';
+import { prepareQueryCatalogExecution } from '@origintrail-official/dkg-core/query-catalog';
 // PR #2131 review — route through api-wrapper so the cards resolve in mock
 // mode (see SubGraphBar.tsx). `withFallback` only diverts when mock mode is
 // latched, so a real transient failure still rejects into `setFetchError`.
 import { api } from '../../../api-wrapper.js';
 import { useMemoryEntities, canonicalEntityUri, type TrustLevel, type MemoryEntity, type Triple, type LayeredTriple } from '../../../hooks/useMemoryEntities.js';
-import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
+import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
 import { SubGraphBar } from '../../../components/SubGraphBar.js';
@@ -998,6 +999,7 @@ export function SubGraphDetailView({
   initialLayer,
   initialEnabledLayers: initialEnabledLayersProp,
   onEnabledLayersChange,
+  onOpenQueryCatalog,
 }: {
   slug: string;
   rawMemory: ReturnType<typeof useMemoryEntities>;
@@ -1033,6 +1035,8 @@ export function SubGraphDetailView({
    *  the detail view stays uncontrolled and chip-hop navigation
    *  reverts to the stale seed shape. */
   onEnabledLayersChange?: (layers: ReadonlySet<TrustLevel>) => void;
+  /** Navigate to the full Query Catalogue when a saved template needs inputs. */
+  onOpenQueryCatalog?: () => void;
 }) {
   const profile = useProjectProfileContext();
   const binding = profile?.forSubGraph(slug);
@@ -1407,18 +1411,21 @@ export function SubGraphDetailView({
     setQueryError(null);
   }, []);
 
-  const runQuery = useCallback(async (q: {
-    slug: string;
-    sparql: string;
-    resultColumn: string;
-    name: string;
-    view?: QueryExecutionView;
-  }) => {
+  const runQuery = useCallback(async (q: QueryCatalog['queries'][number]) => {
+    if ((q.parameters?.length ?? 0) > 0) {
+      onOpenQueryCatalog?.();
+      return;
+    }
     setQueryLoading(true);
     setQueryError(null);
     setActiveQuerySlug(q.slug);
     try {
-      const r = await executeQuery(q.sparql, contextGraphId, undefined, undefined, q.view);
+      const execution = prepareQueryCatalogExecution(q);
+      const r = await executeQuery(execution.sparql, {
+        contextGraphId,
+        view: execution.view,
+        subGraphName: execution.subGraphName,
+      });
       const bindings = (r as any)?.result?.bindings ?? [];
       const col = q.resultColumn || 'uri';
       const ids = new Set<string>();
@@ -1437,7 +1444,7 @@ export function SubGraphDetailView({
     } finally {
       setQueryLoading(false);
     }
-  }, [contextGraphId]);
+  }, [contextGraphId, onOpenQueryCatalog]);
 
   // `profile.forSubGraph` short-circuits ROOT_SLUG_SENTINEL to the
   // synthesized Root binding (icon ⊘ / displayName "Root" /
@@ -1608,17 +1615,20 @@ export function SubGraphDetailView({
               </span>
               {catalog.queries.map(q => {
                 const isActive = activeQuerySlug === q.slug;
+                const requiresParameters = (q.parameters?.length ?? 0) > 0;
                 return (
                   <button
                     key={q.slug}
                     type="button"
                     className={`v10-subgraph-savedquery${isActive ? ' active' : ''}`}
                     onClick={() => isActive ? clearQuery() : runQuery(q)}
-                    title={q.description || q.name}
+                    title={requiresParameters
+                      ? `${q.description || q.name} Open Query Catalogue to enter parameters.`
+                      : q.description || q.name}
                     disabled={queryLoading && !isActive}
                   >
                     <span className="v10-subgraph-savedquery-glyph">
-                      {queryLoading && isActive ? '…' : isActive ? '✓' : '◎'}
+                      {requiresParameters ? '↗' : queryLoading && isActive ? '…' : isActive ? '✓' : '◎'}
                     </span>
                     {q.name}
                   </button>

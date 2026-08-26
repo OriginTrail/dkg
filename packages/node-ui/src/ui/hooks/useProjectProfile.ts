@@ -16,8 +16,11 @@ import {
 } from '@origintrail-official/dkg-core/query-catalog-parameters';
 import {
   decodeQueryCatalogBindings,
+  decodeQueryCatalogReadResponse,
   groupQueryCatalogItems,
+  legacyQueryCatalogExecutionView,
   queryCatalogBindingValue,
+  type QueryCatalogItem,
 } from '@origintrail-official/dkg-core/query-catalog';
 import { executeQuery, readProfileQueryCatalog, type QueryExecutionView } from '../api.js';
 import { ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
@@ -26,7 +29,7 @@ async function runProjectQuery(
   sparql: string,
   contextGraphId: string,
 ): Promise<Array<Record<string, unknown>>> {
-  const r = await executeQuery(sparql, contextGraphId);
+  const r = await executeQuery(sparql, { contextGraphId });
   // Bindings can arrive as either bare strings (quadstore internal path)
   // or SPARQL-JSON objects like `{ value, type, datatype?, "xml:lang"? }`.
   // Preserve the raw shape here — `stripLiteral` / `stripIri` normalise
@@ -36,9 +39,9 @@ async function runProjectQuery(
 
 async function readProjectQueryCatalog(
   contextGraphId: string,
-): Promise<Array<Record<string, unknown>>> {
+): Promise<QueryCatalogItem[]> {
   const response = await readProfileQueryCatalog(contextGraphId);
-  return response.result.bindings;
+  return decodeQueryCatalogReadResponse(response);
 }
 
 export interface SubGraphBinding {
@@ -293,21 +296,6 @@ GROUP BY ?chip ?subGraph ?type ?predicate ?label`;
 interface QueryCatalogRowShape extends Record<string, unknown> {}
 interface SavedQueryRowShape extends Record<string, unknown> {}
 
-function legacySavedQueryExecutionView(
-  queryIri: string,
-  catalogIri: string,
-): QueryExecutionView | undefined {
-  // ListenerBoi's query contracts are authored against its projected working
-  // memory. The Rust typed adapter already pins this same view; keep the Node
-  // UI compatible with existing v1-v3 catalogs, which predate an explicit
-  // executionView triple in the profile schema.
-  if (queryIri.startsWith('urn:listenerboi:query:') || catalogIri.startsWith('urn:listenerboi:catalog:')) {
-    return 'working-memory';
-  }
-
-  return undefined;
-}
-
 export function buildQueryCatalogState(
   catalogRows: readonly QueryCatalogRowShape[],
   queryRows: readonly SavedQueryRowShape[],
@@ -336,8 +324,21 @@ export function buildQueryCatalogState(
     };
   });
   const decoded = decodeQueryCatalogBindings(enrichedRows, {
-    legacyView: legacySavedQueryExecutionView,
+    legacyView: legacyQueryCatalogExecutionView,
   }).map((query) => query.catalogIri ? query : {
+    ...query,
+    catalogSlug: `default:${query.subGraph}`,
+  });
+  return buildQueryCatalogStateFromItems(decoded);
+}
+
+function buildQueryCatalogStateFromItems(decodedItems: readonly QueryCatalogItem[]): {
+  queryCatalogs: QueryCatalog[];
+  savedQueries: SavedQuery[];
+  catalogsBySubGraph: Map<string, QueryCatalog[]>;
+  queriesBySubGraph: Map<string, SavedQuery[]>;
+} {
+  const decoded = decodedItems.map((query) => query.catalogIri ? query : {
     ...query,
     catalogSlug: `default:${query.subGraph}`,
   });
@@ -451,8 +452,31 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
   const chipsBySgRef = useRef<Map<string, FilterChip[]>>(new Map());
   const queryCatalogsBySgRef = useRef<Map<string, QueryCatalog[]>>(new Map());
   const queriesBySgRef = useRef<Map<string, SavedQuery[]>>(new Map());
+  const loadedContextGraphIdRef = useRef<string | undefined>();
 
   useEffect(() => {
+    // Invalidate the prior snapshot before any asynchronous request starts.
+    // Callback consumers also check the context tag below, so project A data
+    // cannot be read during or after a failed project B load.
+    loadedContextGraphIdRef.current = undefined;
+    setDisplayName(contextGraphId ?? DEFAULT_PROFILE_SEED.displayName);
+    setDescription(undefined);
+    setPrimaryColor(DEFAULT_PROFILE_SEED.primaryColor);
+    setAccentColor(DEFAULT_PROFILE_SEED.accentColor);
+    setSubGraphs([]);
+    setTypeBindings([]);
+    setViews([]);
+    setFilterChips([]);
+    setQueryCatalogs([]);
+    setSavedQueries([]);
+    typeIndexRef.current = new Map();
+    subIndexRef.current = new Map();
+    viewIndexRef.current = new Map();
+    chipsBySgRef.current = new Map();
+    queryCatalogsBySgRef.current = new Map();
+    queriesBySgRef.current = new Map();
+    setError(undefined);
+
     if (!contextGraphId) {
       setLoading(false);
       return;
@@ -461,7 +485,6 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
 
     (async () => {
       setLoading(true);
-      setError(undefined);
       try {
         const [rootRows, sgRows, typeRows, viewRows, chipRows, queryCatalogRows] = await Promise.all([
           runProjectQuery(buildProfileRootQuery(contextGraphId), contextGraphId).catch(() => []),
@@ -569,22 +592,12 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
         }
         chipsBySgRef.current = chipsBySg;
 
-        const catalogRows = queryCatalogRows.map(row => ({
-          catalog: row.catalog,
-          subGraph: row.subGraph,
-          name: row.catalogName,
-          description: row.catalogDescription,
-          rank: row.catalogRank,
-        }));
-        const queryRows = queryCatalogRows.map(row => ({
-          ...row,
-          column: row.resultColumn,
-        }));
-        const queryCatalogState = buildQueryCatalogState(catalogRows, queryRows);
+        const queryCatalogState = buildQueryCatalogStateFromItems(queryCatalogRows);
         setQueryCatalogs(queryCatalogState.queryCatalogs);
         setSavedQueries(queryCatalogState.savedQueries);
         queryCatalogsBySgRef.current = queryCatalogState.catalogsBySubGraph;
         queriesBySgRef.current = queryCatalogState.queriesBySubGraph;
+        loadedContextGraphIdRef.current = contextGraphId;
       } catch (err: any) {
         if (!cancelled) setError(err?.message ?? String(err));
       } finally {
@@ -603,29 +616,40 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
       // identity and the project header strip never displays the
       // raw sentinel as a breadcrumb label.
       if (slug === ROOT_SLUG_SENTINEL) return ROOT_SUBGRAPH_BINDING;
+      if (loadedContextGraphIdRef.current !== contextGraphId) return DEFAULT_SUBGRAPH_FALLBACK(slug);
       return subIndexRef.current.get(slug) ?? DEFAULT_SUBGRAPH_FALLBACK(slug);
     },
-    [],
+    [contextGraphId],
   );
   const forType = useCallback(
-    (typeIri: string) => typeIndexRef.current.get(typeIri) ?? DEFAULT_TYPE_FALLBACK(typeIri),
-    [],
+    (typeIri: string) => loadedContextGraphIdRef.current === contextGraphId
+      ? typeIndexRef.current.get(typeIri) ?? DEFAULT_TYPE_FALLBACK(typeIri)
+      : DEFAULT_TYPE_FALLBACK(typeIri),
+    [contextGraphId],
   );
   const view = useCallback(
-    (slug: string) => viewIndexRef.current.get(slug),
-    [],
+    (slug: string) => loadedContextGraphIdRef.current === contextGraphId
+      ? viewIndexRef.current.get(slug)
+      : undefined,
+    [contextGraphId],
   );
   const chipsFor = useCallback(
-    (slug: string) => chipsBySgRef.current.get(slug) ?? [],
-    [],
+    (slug: string) => loadedContextGraphIdRef.current === contextGraphId
+      ? chipsBySgRef.current.get(slug) ?? []
+      : [],
+    [contextGraphId],
   );
   const savedQueryCatalogsFor = useCallback(
-    (slug: string) => queryCatalogsBySgRef.current.get(slug) ?? [],
-    [],
+    (slug: string) => loadedContextGraphIdRef.current === contextGraphId
+      ? queryCatalogsBySgRef.current.get(slug) ?? []
+      : [],
+    [contextGraphId],
   );
   const savedQueriesFor = useCallback(
-    (slug: string) => queriesBySgRef.current.get(slug) ?? [],
-    [],
+    (slug: string) => loadedContextGraphIdRef.current === contextGraphId
+      ? queriesBySgRef.current.get(slug) ?? []
+      : [],
+    [contextGraphId],
   );
 
   return {

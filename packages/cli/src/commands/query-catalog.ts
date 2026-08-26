@@ -9,11 +9,10 @@ import { readFile, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
 import {
-  CONTEXT_GRAPH_QUERY_SUBGRAPH,
-  decodeQueryCatalogBindings,
+  decodeQueryCatalogReadResponse,
+  prepareQueryCatalogExecution,
   type QueryCatalogItem,
 } from '@origintrail-official/dkg-core/query-catalog';
-import { renderQueryCatalogTemplate } from '@origintrail-official/dkg-core/query-catalog-parameters';
 import {
   dkgAuthTokenPath,
   FAUCET_WALLETS_PER_REQUEST,
@@ -107,8 +106,7 @@ export function registerQueryCatalogCommand(program: Command): void {
 async function loadSavedQueriesForCatalog(contextGraphId: string): Promise<QueryCatalogItem[]> {
   const client = await ApiClient.connect();
   const result = await client.readQueryCatalog(contextGraphId);
-  const bindings = result.result.type === 'bindings' ? result.result.bindings : [];
-  return decodeQueryCatalogBindings(bindings);
+  return decodeQueryCatalogReadResponse(result);
 }
 
 function collectQueryParameter(value: string, previous: string[]): string[] {
@@ -180,19 +178,16 @@ queryCatalogCmd
         process.exit(1);
       }
       const client = await ApiClient.connect();
-      const sparql = renderQueryCatalogTemplate(
-        match.sparql,
-        match.parameters,
+      const execution = prepareQueryCatalogExecution(
+        match,
         parseQueryParameterValues(options.param),
       );
       const queryOptions = {
-        ...(match.subGraph && match.subGraph !== CONTEXT_GRAPH_QUERY_SUBGRAPH
-          ? { subGraphName: match.subGraph }
-          : {}),
-        ...(match.view ? { view: match.view } : {}),
+        ...(execution.subGraphName ? { subGraphName: execution.subGraphName } : {}),
+        ...(execution.view ? { view: execution.view } : {}),
       };
       const result = await client.query(
-        sparql,
+        execution.sparql,
         contextGraphId,
         Object.keys(queryOptions).length > 0 ? queryOptions : undefined,
       );

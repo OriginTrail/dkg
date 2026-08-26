@@ -7,17 +7,42 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildQueryCatalogState, useProjectProfile, type ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
 import { ROOT_SLUG_SENTINEL } from '../src/ui/lib/subGraphs.js';
 import { readProfileQueryCatalog } from '../src/ui/api.js';
+import {
+  decodeQueryCatalogBindings,
+  QUERY_CATALOG_READ_CAPABILITIES,
+} from '@origintrail-official/dkg-core/query-catalog';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock('../src/ui/api.js', () => ({
   executeQuery: vi.fn(async () => ({ result: { bindings: [] } })),
   readProfileQueryCatalog: vi.fn(async () => ({
+    schemaVersion: 1,
+    capabilities: {
+      canonicalItems: true,
+      queryParameters: true,
+      executionView: true,
+    },
     contextGraphId: 'cg-test',
     graph: 'did:dkg:context-graph:cg-test/meta/query-catalog',
+    items: [],
     result: { type: 'bindings', bindings: [] },
   })),
 }));
+
+function queryCatalogResponse(
+  bindings: Array<Record<string, unknown>>,
+  contextGraphId = 'cg-test',
+) {
+  return {
+    schemaVersion: 1 as const,
+    capabilities: QUERY_CATALOG_READ_CAPABILITIES,
+    contextGraphId,
+    graph: `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`,
+    items: decodeQueryCatalogBindings(bindings),
+    result: { type: 'bindings' as const, bindings },
+  };
+}
 
 describe('buildQueryCatalogState', () => {
   it('groups saved queries into explicit catalogs and sorts them by rank', () => {
@@ -147,11 +172,7 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     document.body.appendChild(container);
     root = createRoot(container);
     captured = null;
-    vi.mocked(readProfileQueryCatalog).mockResolvedValue({
-      contextGraphId: 'cg-test',
-      graph: 'did:dkg:context-graph:cg-test/meta/query-catalog',
-      result: { type: 'bindings', bindings: [] },
-    });
+    vi.mocked(readProfileQueryCatalog).mockResolvedValue(queryCatalogResponse([]));
   });
 
   afterEach(() => {
@@ -203,12 +224,7 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
   });
 
   it('loads saved queries through the dedicated profile catalog endpoint', async () => {
-    vi.mocked(readProfileQueryCatalog).mockResolvedValueOnce({
-      contextGraphId: 'cg-test',
-      graph: 'did:dkg:context-graph:cg-test/meta/query-catalog',
-      result: {
-        type: 'bindings',
-        bindings: [{
+    vi.mocked(readProfileQueryCatalog).mockResolvedValueOnce(queryCatalogResponse([{
           q: 'urn:listenerboi:query:open-incidents',
           subGraph: 'incidents',
           catalog: 'urn:listenerboi:catalog:investigations',
@@ -220,9 +236,7 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
           catalogName: 'ListenerBoi investigations',
           catalogDescription: 'Reusable incident investigation queries.',
           catalogRank: '2',
-        }],
-      },
-    });
+    }]));
 
     await act(async () => {
       root.render(React.createElement(Probe, { contextGraphId: 'cg-test' }));
@@ -255,5 +269,53 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
 
     expect(captured!.error).toBe('catalog read failed');
     expect(captured!.loading).toBe(false);
+  });
+
+  it('fails explicitly when an older daemon omits the catalog capability envelope', async () => {
+    vi.mocked(readProfileQueryCatalog).mockResolvedValueOnce({
+      contextGraphId: 'cg-test',
+      graph: 'did:dkg:context-graph:cg-test/meta/query-catalog',
+      result: { type: 'bindings', bindings: [] },
+    } as never);
+
+    await act(async () => {
+      root.render(React.createElement(Probe, { contextGraphId: 'cg-test' }));
+    });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(captured!.error).toContain('Incompatible query-catalog daemon contract');
+    expect(captured!.queryCatalogs).toEqual([]);
+    expect(captured!.savedQueries).toEqual([]);
+  });
+
+  it('clears project A state and indexes when project B catalog loading fails', async () => {
+    vi.mocked(readProfileQueryCatalog).mockResolvedValueOnce(queryCatalogResponse([{
+          q: 'urn:dkg:profile:project-a:query:trace',
+          subGraph: 'shared-slug',
+          catalog: 'urn:dkg:profile:project-a:catalog:operations',
+          name: 'Project A trace',
+          sparql: 'SELECT ?record WHERE { ?record ?p ?o }',
+          resultColumn: 'record',
+    }], 'project-a'));
+
+    await act(async () => {
+      root.render(React.createElement(Probe, { contextGraphId: 'project-a' }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(captured!.savedQueriesFor('shared-slug')).toHaveLength(1);
+
+    vi.mocked(readProfileQueryCatalog).mockRejectedValueOnce(new Error('project B unavailable'));
+    await act(async () => {
+      root.render(React.createElement(Probe, { contextGraphId: 'project-b' }));
+    });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(captured!.contextGraphId).toBe('project-b');
+    expect(captured!.displayName).toBe('project-b');
+    expect(captured!.error).toBe('project B unavailable');
+    expect(captured!.savedQueries).toEqual([]);
+    expect(captured!.queryCatalogs).toEqual([]);
+    expect(captured!.savedQueriesFor('shared-slug')).toEqual([]);
+    expect(captured!.savedQueryCatalogsFor('shared-slug')).toEqual([]);
   });
 });

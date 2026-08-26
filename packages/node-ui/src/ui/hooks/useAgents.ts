@@ -193,7 +193,7 @@ export function useAgents(contextGraphId: string | undefined): AgentsData {
       setLoading(true);
       setError(undefined);
       try {
-        const result = await executeQuery(buildAgentsQuery(contextGraphId), contextGraphId);
+        const result = await executeQuery(buildAgentsQuery(contextGraphId), { contextGraphId });
         if (cancelled) return;
         const rows = ((result as any)?.result?.bindings ?? []) as Array<Record<string, any>>;
         const parsed = parseAgents(rows);

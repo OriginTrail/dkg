@@ -44,7 +44,7 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
   it('renders CONSTRUCT quads instead of dropping graph-shaped results', async () => {
     client = new FakeClient({
       query: async () => ({
-        bindings: [],
+        type: 'quads',
         quads: [{
           subject: 'urn:model:05',
           predicate: 'http://www.w3.org/2000/01/rdf-schema#label',
@@ -57,7 +57,8 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     registerReadTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
 
     const result = await server.call('dkg_query', {
-      sparql: 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }',
+      sparql: `PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+CONSTRUCT { ?s rdfs:label ?label } WHERE { ?s rdfs:label ?label }`,
       view: 'working-memory',
     });
 
@@ -65,6 +66,22 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     expect(result.content[0].text).toContain('| subject | predicate | object | graph |');
     expect(result.content[0].text).toContain('urn:model:05');
     expect(result.content[0].text).toContain('Catalog Model 05');
+  });
+
+  it.each([true, false])('renders ASK %s without dropping the boolean result', async (value) => {
+    client = new FakeClient({
+      query: async () => ({ type: 'boolean', value }),
+    });
+    server = new FakeServer();
+    registerReadTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+
+    const result = await server.call('dkg_query', {
+      sparql: 'ASK { ?s ?p ?o }',
+      view: 'working-memory',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toBe(String(value));
   });
 
   it.each(['working-memory', 'shared-working-memory', 'verifiable-memory'])(

@@ -1,7 +1,6 @@
 import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import {
-  renderQueryCatalogTemplate,
   isQueryCatalogParameterRequired,
   type QueryCatalogParameterDefinition,
 } from '@origintrail-official/dkg-core/query-catalog-parameters';
@@ -10,6 +9,7 @@ import {
   USER_QUERY_CATALOG_NAME,
   USER_QUERY_CATALOG_SLUG,
   buildQueryCatalogWrite,
+  prepareQueryCatalogExecution,
 } from '@origintrail-official/dkg-core/query-catalog';
 import { useFetch } from '../../../hooks.js';
 import { executeQuery, writeProfileQueryCatalog, type QueryExecutionView } from '../../../api.js';
@@ -26,6 +26,21 @@ LIMIT 1000`;
 
 const USER_QUERY_CATALOG_DESCRIPTION = 'User-created SPARQL saved in this node profile for this Context Graph.';
 type SavedCatalogQuery = QueryCatalog['queries'][number];
+type QueryEditorSession =
+  | { kind: 'ad-hoc'; draft: string }
+  | {
+      kind: 'catalog';
+      key: string;
+      query: SavedCatalogQuery;
+      values: Record<string, string>;
+      draft: string;
+    };
+type ActiveQueryExecution = {
+  sparql: string;
+  view?: QueryExecutionView;
+  subGraphName?: string;
+  sourceKey?: string;
+};
 
 function sparqlString(value: string): string {
   return JSON.stringify(value);
@@ -271,10 +286,8 @@ function queryErrorMessage(error: string | null): ReactNode {
 export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: string }) {
   const profile = useProjectProfileContext();
   const defaultQuery = useMemo(() => contextGraphQueryTemplate(contextGraphId), [contextGraphId]);
-  const [draftQuery, setDraftQuery] = useState(defaultQuery);
-  const [activeQuery, setActiveQuery] = useState(defaultQuery);
-  const [activeQueryView, setActiveQueryView] = useState<QueryExecutionView | undefined>();
-  const [activeCatalogQueryKey, setActiveCatalogQueryKey] = useState<string | null>(null);
+  const [session, setSession] = useState<QueryEditorSession>({ kind: 'ad-hoc', draft: defaultQuery });
+  const [activeExecution, setActiveExecution] = useState<ActiveQueryExecution>({ sparql: defaultQuery });
   const [localSavedCatalogs, setLocalSavedCatalogs] = useState<QueryCatalog[]>([]);
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState('');
@@ -282,7 +295,6 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const [catalogParameterValues, setCatalogParameterValues] = useState<Record<string, string>>({});
   const [parameterError, setParameterError] = useState<string | null>(null);
   const builtInCatalog = useMemo(() => contextGraphBuiltInCatalog(contextGraphId), [contextGraphId]);
   const queryCatalogs = useMemo(
@@ -294,41 +306,56 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     [builtInCatalog, localSavedCatalogs, profile?.error, profile?.loading, queryCatalogs],
   );
   const selectedCatalogQuery = useMemo(() => {
-    if (!activeCatalogQueryKey) return undefined;
-    for (const catalog of queryCatalogs) {
-      for (const query of catalog.queries) {
-        const key = `${query.subGraph}|${query.catalogSlug}|${query.slug}`;
-        if (key === activeCatalogQueryKey) return query;
-      }
-    }
-    return undefined;
-  }, [activeCatalogQueryKey, queryCatalogs]);
+    return session.kind === 'catalog' ? session.query : undefined;
+  }, [session]);
+  const activeCatalogQueryKey = session.kind === 'catalog' ? session.key : null;
+  const draftQuery = session.draft;
+  const catalogParameterValues = session.kind === 'catalog' ? session.values : {};
 
   useEffect(() => {
-    setDraftQuery(defaultQuery);
-    setActiveQuery(defaultQuery);
-    setActiveQueryView(undefined);
-    setActiveCatalogQueryKey(null);
+    setSession({ kind: 'ad-hoc', draft: defaultQuery });
+    setActiveExecution({ sparql: defaultQuery });
     setLocalSavedCatalogs([]);
     setSaveOpen(false);
     setSaveName('');
     setSaveDescription('');
     setSaveError(null);
     setSaveMessage(null);
-    setCatalogParameterValues({});
     setParameterError(null);
   }, [defaultQuery]);
 
   const { data, loading, error, refresh } = useFetch(
-    () => executeQuery(activeQuery, contextGraphId, undefined, undefined, activeQueryView),
-    [activeQuery, activeQueryView, contextGraphId],
+    () => executeQuery(activeExecution.sparql, {
+      contextGraphId,
+      view: activeExecution.view,
+      subGraphName: activeExecution.subGraphName,
+    }),
+    [activeExecution.sparql, activeExecution.subGraphName, activeExecution.view, contextGraphId],
     0,
   );
 
+  const executionMatchesSession = session.kind !== 'catalog'
+    || activeExecution.sourceKey === session.key;
+  const queryResult = executionMatchesSession
+    ? (data as any)?.result ?? (data as any)?.results
+    : undefined;
+  const resultType = queryResult?.type
+    ?? (Array.isArray(queryResult?.quads)
+      ? 'quads'
+      : typeof queryResult?.value === 'boolean'
+        ? 'boolean'
+        : 'bindings');
   const rows = useMemo(
-    () => (data as any)?.result?.bindings ?? (data as any)?.results?.bindings ?? [],
-    [data],
+    () => resultType === 'quads'
+      ? queryResult?.quads ?? []
+      : resultType === 'bindings'
+        ? queryResult?.bindings ?? []
+        : [],
+    [queryResult, resultType],
   );
+  const booleanResult = resultType === 'boolean' && typeof queryResult?.value === 'boolean'
+    ? queryResult.value
+    : undefined;
 
   const hasSavedProfileQueries = useMemo(
     () => queryCatalogs.some(catalog => !isBuiltInQueryCatalog(catalog) && catalog.queries.length > 0),
@@ -346,61 +373,57 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   }, [rows]);
 
   const runQuery = useCallback(() => {
-    let next = draftQuery.trim();
-    if (!next) return;
-    let nextView: QueryExecutionView | undefined;
-    const renderingSelectedTemplate = selectedCatalogQuery
-      && (selectedCatalogQuery.parameters?.length ?? 0) > 0
-      && next === selectedCatalogQuery.sparql.trim();
-    if (renderingSelectedTemplate) {
+    const draft = session.draft.trim();
+    if (!draft) return;
+    let execution: ActiveQueryExecution;
+    if (session.kind === 'catalog' && draft === session.query.sparql.trim()) {
       try {
-        next = renderQueryCatalogTemplate(
-          selectedCatalogQuery.sparql,
-          selectedCatalogQuery.parameters ?? [],
-          catalogParameterValues,
-        );
-        nextView = selectedCatalogQuery.view;
+        execution = {
+          ...prepareQueryCatalogExecution(session.query, session.values),
+          sourceKey: session.key,
+        };
         setParameterError(null);
       } catch (err: any) {
         setParameterError(err?.message ?? String(err));
         return;
       }
     } else {
-      const rerunningCatalogQuery = activeCatalogQueryKey !== null && next === activeQuery;
-      nextView = rerunningCatalogQuery ? activeQueryView : undefined;
-      if (!rerunningCatalogQuery) setActiveCatalogQueryKey(null);
+      execution = { sparql: draft };
+      if (session.kind === 'catalog') setSession({ kind: 'ad-hoc', draft });
       setParameterError(null);
     }
     setSaveMessage(null);
     setSaveError(null);
-    if (next === activeQuery && activeQueryView === nextView) {
+    if (
+      execution.sparql === activeExecution.sparql
+      && execution.view === activeExecution.view
+      && execution.subGraphName === activeExecution.subGraphName
+    ) {
       refresh();
       return;
     }
-    setActiveQueryView(nextView);
-    setActiveQuery(next);
-  }, [activeCatalogQueryKey, activeQuery, activeQueryView, catalogParameterValues, draftQuery, refresh, selectedCatalogQuery]);
+    setActiveExecution(execution);
+  }, [activeExecution, refresh, session]);
 
   const resetQuery = useCallback(() => {
-    setDraftQuery(defaultQuery);
-    setActiveCatalogQueryKey(null);
+    setSession({ kind: 'ad-hoc', draft: defaultQuery });
     setSaveMessage(null);
     setSaveError(null);
-    setCatalogParameterValues({});
     setParameterError(null);
-    if (activeQuery === defaultQuery && activeQueryView === undefined) {
+    if (
+      activeExecution.sparql === defaultQuery
+      && activeExecution.view === undefined
+      && activeExecution.subGraphName === undefined
+    ) {
       refresh();
       return;
     }
-    setActiveQueryView(undefined);
-    setActiveQuery(defaultQuery);
-  }, [activeQuery, activeQueryView, defaultQuery, refresh]);
+    setActiveExecution({ sparql: defaultQuery });
+  }, [activeExecution, defaultQuery, refresh]);
 
   const runCatalogQuery = useCallback((key: string, query: SavedCatalogQuery) => {
     const next = query.sparql.trim();
     if (!next) return;
-    setActiveCatalogQueryKey(key);
-    setDraftQuery(next);
     setSaveMessage(null);
     setSaveError(null);
     setParameterError(null);
@@ -408,15 +431,22 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     const values = Object.fromEntries(parameters
       .filter(parameter => parameter.defaultValue !== undefined)
       .map(parameter => [parameter.name, String(parameter.defaultValue)]));
-    setCatalogParameterValues(values);
+    setSession({ kind: 'catalog', key, query, values, draft: next });
     if (parameters.length > 0) return;
-    if (activeQuery === next && activeQueryView === query.view) {
+    const execution: ActiveQueryExecution = {
+      ...prepareQueryCatalogExecution(query, values),
+      sourceKey: key,
+    };
+    if (
+      activeExecution.sparql === execution.sparql
+      && activeExecution.view === execution.view
+      && activeExecution.subGraphName === execution.subGraphName
+    ) {
       refresh();
       return;
     }
-    setActiveQueryView(query.view);
-    setActiveQuery(next);
-  }, [activeQuery, activeQueryView, refresh]);
+    setActiveExecution(execution);
+  }, [activeExecution, refresh]);
 
   const openSaveForm = useCallback(() => {
     const firstLine = draftQuery.trim().split('\n').find(line => line.trim());
@@ -459,10 +489,21 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       await writeProfileQueryCatalog(contextGraphId, quads);
       setLocalSavedCatalogs(prev => appendSavedQueryCatalog(prev, query));
       const key = `${query.subGraph}|${query.catalogSlug}|${query.slug}`;
-      setActiveCatalogQueryKey(key);
-      setDraftQuery(query.sparql);
-      if (activeQuery === query.sparql) refresh();
-      else setActiveQuery(query.sparql);
+      const values = session.kind === 'catalog' ? session.values : {};
+      setSession({ kind: 'catalog', key, query, values, draft: query.sparql });
+      try {
+        const savedExecution = prepareQueryCatalogExecution(query, values);
+        setActiveExecution(previous =>
+          previous.sparql === savedExecution.sparql
+          && previous.view === savedExecution.view
+          && previous.subGraphName === savedExecution.subGraphName
+            ? { ...previous, sourceKey: key }
+            : previous,
+        );
+      } catch {
+        // The write already validated the template. Missing runtime values only
+        // mean there is no executed result to associate with this saved entry.
+      }
       setSaveName('');
       setSaveDescription('');
       setSaveOpen(false);
@@ -472,7 +513,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     } finally {
       setSaving(false);
     }
-  }, [activeQuery, contextGraphId, draftQuery, refresh, saveDescription, saveName, selectedCatalogQuery]);
+  }, [contextGraphId, draftQuery, saveDescription, saveName, selectedCatalogQuery, session]);
 
   return (
     <div className="v10-memory-layer-view v10-cg-query-view">
@@ -599,10 +640,12 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                     className="v10-form-input"
                     aria-label={parameter.label ?? parameter.name}
                     value={catalogParameterValues[parameter.name] ?? ''}
-                    onChange={event => setCatalogParameterValues(previous => ({
-                      ...previous,
-                      [parameter.name]: event.target.value,
-                    }))}
+                    onChange={event => setSession(previous => previous.kind === 'catalog'
+                      ? {
+                          ...previous,
+                          values: { ...previous.values, [parameter.name]: event.target.value },
+                        }
+                      : previous)}
                   >
                     <option value="">Choose...</option>
                     <option value="true">True</option>
@@ -617,10 +660,12 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                     required={isQueryCatalogParameterRequired(parameter)}
                     value={catalogParameterValues[parameter.name] ?? ''}
                     placeholder={parameter.description}
-                    onChange={event => setCatalogParameterValues(previous => ({
-                      ...previous,
-                      [parameter.name]: event.target.value,
-                    }))}
+                    onChange={event => setSession(previous => previous.kind === 'catalog'
+                      ? {
+                          ...previous,
+                          values: { ...previous.values, [parameter.name]: event.target.value },
+                        }
+                      : previous)}
                   />
                 )}
                 {parameter.description && <small>{parameter.description}</small>}
@@ -634,9 +679,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           aria-label="SPARQL editor"
           value={draftQuery}
           onChange={(e) => {
-            setDraftQuery(e.target.value);
-            setActiveCatalogQueryKey(null);
-            setCatalogParameterValues({});
+            setSession({ kind: 'ad-hoc', draft: e.target.value });
             setParameterError(null);
           }}
           spellCheck={false}
@@ -681,7 +724,16 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       {saveError && <p className="v10-mlv-status" style={{ color: 'var(--text-danger)' }}>{saveError}</p>}
 
       <div className="v10-cg-query-results">
-        {loading && (
+        {!executionMatchesSession && (
+          <EmptyState
+            compact
+            tone="query"
+            icon="?"
+            title="Enter parameters, then run this query."
+            description="Previous query results are hidden so they are not presented as results for the newly selected template."
+          />
+        )}
+        {executionMatchesSession && loading && (
           <EmptyState
             compact
             tone="query"
@@ -689,7 +741,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             title="Loading query results..."
           />
         )}
-        {error && (
+        {executionMatchesSession && error && (
           <EmptyState
             compact
             tone="danger"
@@ -699,7 +751,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           />
         )}
 
-        {!loading && !error && rows.length === 0 && (
+        {executionMatchesSession && !loading && !error && booleanResult === undefined && rows.length === 0 && (
           <EmptyState
             compact
             tone="query"
@@ -709,9 +761,18 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           />
         )}
 
-        {!loading && !error && rows.length > 0 && (
+        {executionMatchesSession && !loading && !error && booleanResult !== undefined && (
+          <div className="v10-mlv-table-wrap" aria-label="ASK result">
+            <div className="v10-mlv-result-count">ASK result</div>
+            <strong>{String(booleanResult)}</strong>
+          </div>
+        )}
+
+        {executionMatchesSession && !loading && !error && booleanResult === undefined && rows.length > 0 && (
           <div className="v10-mlv-table-wrap">
-            <div className="v10-mlv-result-count">{rows.length} result{rows.length === 1 ? '' : 's'}</div>
+            <div className="v10-mlv-result-count">
+              {rows.length} {resultType === 'quads' ? `quad${rows.length === 1 ? '' : 's'}` : `result${rows.length === 1 ? '' : 's'}`}
+            </div>
             <table className="v10-mlv-table">
               <thead>
                 <tr>

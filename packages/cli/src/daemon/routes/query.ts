@@ -107,7 +107,6 @@ import {
   CLI_NPM_PACKAGE,
 } from '../../config.js';
 import {
-  getApiQueryPriority,
   type ApiQueryPriority,
 } from '../api-query-priority.js';
 export {
@@ -333,6 +332,11 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+import {
+  API_QUERY_CALLER_DISCONNECTED,
+  createStoreQueryRequestLifecycle,
+  type StoreQueryRequestLifecycle,
+} from '../store-query-lifecycle.js';
 
 
 // Keep these in sync with VerifyCollector's hard enforcement in
@@ -340,22 +344,9 @@ import type { RequestContext } from './context.js';
 // HTTP input is rejected before the agent starts VERIFY work.
 const VERIFY_COLLECTION_TIMEOUT_MIN_MS = 1_000;
 const VERIFY_COLLECTION_TIMEOUT_MAX_MS = 30 * 60 * 1000;
-const API_QUERY_CALLER_DISCONNECTED = 'API_QUERY_CALLER_DISCONNECTED';
-
-export interface ApiQueryRequestLifecycle {
-  readonly signal: AbortSignal;
+export interface ApiQueryRequestLifecycle extends StoreQueryRequestLifecycle {
   readonly priority: ApiQueryPriority;
   readonly source: 'api.query';
-  dispose(): void;
-}
-
-class ApiQueryCallerDisconnectedError extends Error {
-  readonly code = API_QUERY_CALLER_DISCONNECTED;
-
-  constructor() {
-    super('API query caller disconnected');
-    this.name = 'ApiQueryCallerDisconnectedError';
-  }
 }
 
 /**
@@ -367,25 +358,7 @@ export function createApiQueryRequestLifecycle(
   req: IncomingMessage,
   res: ServerResponse,
 ): ApiQueryRequestLifecycle {
-  const controller = new AbortController();
-  const abortDisconnectedQuery = () => {
-    if (!controller.signal.aborted) {
-      controller.abort(new ApiQueryCallerDisconnectedError());
-    }
-  };
-  req.once('aborted', abortDisconnectedQuery);
-  res.once('close', abortDisconnectedQuery);
-  if (req.aborted || res.destroyed) abortDisconnectedQuery();
-
-  return {
-    signal: controller.signal,
-    priority: getApiQueryPriority(),
-    source: 'api.query',
-    dispose() {
-      req.removeListener('aborted', abortDisconnectedQuery);
-      res.removeListener('close', abortDisconnectedQuery);
-    },
-  };
+  return createStoreQueryRequestLifecycle(req, res, 'api.query') as ApiQueryRequestLifecycle;
 }
 
 function parseVerifyTimeoutMs(
@@ -676,7 +649,14 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       }
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
-      tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
+      const resultCount = result?.type === 'bindings'
+        ? result.bindings.length
+        : result?.type === 'quads'
+          ? result.quads.length
+          : result?.type === 'boolean'
+            ? 1
+            : 0;
+      tracker.complete(ctx, { tripleCount: resultCount });
       return jsonResponse(res, 200, {
         result,
         phases: { execute: execDur, serverTotal: Date.now() - serverT0 },

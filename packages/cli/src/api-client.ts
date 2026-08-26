@@ -25,6 +25,7 @@ import type {
   CatchupStatusResponse,
   CatchupStatusWireResponse,
 } from './catchup-status.js';
+import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -53,6 +54,10 @@ export type ContextGraphJoinPolicyUpdate =
 
 export type QueryResult =
   | { type: 'bindings'; bindings: Array<Record<string, string>> }
+  | {
+      type: 'quads';
+      quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+    }
   | { type: 'boolean'; value: boolean }
   | { type?: undefined; [key: string]: unknown };
 
@@ -1510,7 +1515,7 @@ export class ApiClient {
     });
   }
 
-  async readQueryCatalog(contextGraphId: string): Promise<{ result: QueryResult }> {
+  async readQueryCatalog(contextGraphId: string): Promise<QueryCatalogReadResponse> {
     return this.post('/api/profile/query-catalog/read', { contextGraphId });
   }
 

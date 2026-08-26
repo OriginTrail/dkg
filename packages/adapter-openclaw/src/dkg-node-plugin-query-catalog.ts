@@ -13,7 +13,7 @@ import {
   USER_QUERY_CATALOG_NAME,
   USER_QUERY_CATALOG_SLUG,
   buildQueryCatalogWrite,
-  decodeQueryCatalogBindings,
+  decodeQueryCatalogReadResponse,
   queryCatalogBindingValue,
   queryCatalogSlug,
   type QueryCatalogItem,
@@ -80,11 +80,7 @@ export function normalizeSemanticEnrichmentQuads(rawQuads: unknown): {
 }
 
 export function normalizeQueryCatalogItems(response: Record<string, unknown>): QueryCatalogToolItem[] {
-  const result = response.result as { type?: string; bindings?: unknown[] } | undefined;
-  const bindings = result?.type === 'bindings' && Array.isArray(result.bindings)
-    ? result.bindings
-    : [];
-  return decodeQueryCatalogBindings(bindings);
+  return decodeQueryCatalogReadResponse(response);
 }
 
 export function optionalString(value: unknown): string | undefined {

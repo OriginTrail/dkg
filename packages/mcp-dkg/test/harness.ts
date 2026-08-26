@@ -440,7 +440,7 @@ export class FakeClient {
     const view = String(args.view ?? 'working-memory');
     const key = `${cgId}::${view}`;
     const bindings = this.memoryFixtures.get(key) ?? [];
-    return { bindings };
+    return { type: 'bindings' as const, bindings };
   }
 
   async getAgentIdentity() {

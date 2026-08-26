@@ -62,7 +62,13 @@ import {
   createSwmCatchupPeerSelector,
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC, getMetrics } from '@origintrail-official/dkg-core';
+import {
+  decodeQueryCatalogBindings,
+  encodeQueryCatalogBindings,
+  QUERY_CATALOG_READ_CAPABILITIES,
+  QUERY_CATALOG_SCHEMA_VERSION,
+} from '@origintrail-official/dkg-core/query-catalog';
 import {
   QUERY_CATALOG_ATOMIC_UPSERT_UNSUPPORTED,
   writeQueryCatalog,
@@ -242,8 +248,13 @@ import {
   shortId,
   sleep,
   deriveBlockExplorerUrl,
+  respondIfStoreUnavailable,
   respondIfChainRpcTransportError,
 } from '../http-utils.js';
+import {
+  createStoreQueryRequestLifecycle,
+  isApiQueryCallerDisconnected,
+} from '../store-query-lifecycle.js';
 import {
   normalizeRepo,
   isValidRepoSpec,
@@ -653,24 +664,91 @@ WHERE {
     OPTIONAL { ?catalog schema:description ?catalogDescription }
     OPTIONAL { ?catalog prof:rank ?catalogRank }
   }
-}`;
+}
+ORDER BY ?q
+LIMIT 5001`;
 
+    const queryLifecycle = createStoreQueryRequestLifecycle(
+      req,
+      res,
+      'api.profile.query_catalog.read',
+    );
+    let result;
     try {
-      const result = await agent.store.query(query);
-      const bindings = result.type === "bindings" ? result.bindings : [];
-      return jsonResponse(res, 200, {
-        contextGraphId,
-        graph,
-        result: {
-          type: "bindings",
-          bindings,
-        },
+      result = await agent.store.query(query, {
+        signal: queryLifecycle.signal,
+        priority: queryLifecycle.priority,
+        source: queryLifecycle.source,
+        maxResponseBytes: 1024 * 1024,
       });
     } catch (err: any) {
-      return jsonResponse(res, 400, {
+      if (isApiQueryCallerDisconnected(err) || queryLifecycle.signal.aborted) {
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      if (respondIfStoreUnavailable(res, err) !== null) return;
+      if (err?.code === 'STORE_RESPONSE_TOO_LARGE') {
+        return jsonResponse(res, 413, {
+          error: err?.message ?? 'Query catalog response exceeded the byte limit',
+          code: 'QUERY_CATALOG_RESULT_TOO_LARGE',
+          limitBytes: 1024 * 1024,
+          ...(typeof err?.actualBytes === 'number' ? { actualBytes: err.actualBytes } : {}),
+        });
+      }
+      return jsonResponse(res, 500, {
         error: err?.message ?? "Query catalog read failed",
       });
+    } finally {
+      queryLifecycle.dispose();
     }
+
+    if (result.type !== 'bindings') {
+      return jsonResponse(res, 500, {
+        error: `Query catalog SELECT returned unexpected result type: ${result.type}`,
+        code: 'QUERY_CATALOG_INVALID_RESULT_TYPE',
+      });
+    }
+    const rawBindings = result.bindings;
+    if (rawBindings.length > 5000) {
+      return jsonResponse(res, 413, {
+        error: 'Query catalog result exceeds the 5000-row limit.',
+        code: 'QUERY_CATALOG_RESULT_TOO_LARGE',
+        limitRows: 5000,
+      });
+    }
+    let items;
+    try {
+      items = decodeQueryCatalogBindings(rawBindings);
+    } catch (err: any) {
+      return jsonResponse(res, 422, {
+        error: err?.message ?? 'Stored query catalog data is invalid',
+        code: 'QUERY_CATALOG_INVALID_DATA',
+      });
+    }
+    const bindings = encodeQueryCatalogBindings(items);
+    const payload = {
+      schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
+      capabilities: QUERY_CATALOG_READ_CAPABILITIES,
+      contextGraphId,
+      graph,
+      items,
+      result: {
+        type: "bindings" as const,
+        bindings,
+      },
+    };
+    const responseBytes = Buffer.byteLength(JSON.stringify(payload));
+    getMetrics().storeQueryResultRows.record(rawBindings.length, { source: 'api.profile.query_catalog.read' });
+    getMetrics().storeQueryResultBytesEstimate.record(responseBytes, { source: 'api.profile.query_catalog.read' });
+    if (responseBytes > 1024 * 1024) {
+      return jsonResponse(res, 413, {
+        error: 'Query catalog response exceeds the 1 MiB serialized-response limit.',
+        code: 'QUERY_CATALOG_RESULT_TOO_LARGE',
+        limitBytes: 1024 * 1024,
+        actualBytes: responseBytes,
+      });
+    }
+    return jsonResponse(res, 200, payload);
   }
 
   // POST /api/shared-memory/catchup

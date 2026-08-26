@@ -73,7 +73,7 @@ import {
   queryCatalogSlug,
   readOnlySparqlOperation,
 } from './dkg-node-plugin-query-catalog.js';
-import { renderQueryCatalogTemplate } from '@origintrail-official/dkg-core/query-catalog-parameters';
+import { prepareQueryCatalogExecution } from '@origintrail-official/dkg-core/query-catalog';
 import {
   channelConfigFingerprint,
   extractUserTextFromContent,
@@ -2992,19 +2992,16 @@ export class DkgNodePlugin {
       if (rawParameters !== undefined && (!rawParameters || typeof rawParameters !== 'object' || Array.isArray(rawParameters))) {
         return this.error('"parameters" must be an object keyed by saved-query parameter name.');
       }
-      const sparql = renderQueryCatalogTemplate(
-        savedQuery.sparql,
-        savedQuery.parameters,
+      const execution = prepareQueryCatalogExecution(
+        savedQuery,
         (rawParameters ?? {}) as Record<string, unknown>,
       );
       const queryOpts = {
         contextGraphId,
-        ...(savedQuery.subGraph && savedQuery.subGraph !== CONTEXT_GRAPH_QUERY_SUBGRAPH
-          ? { subGraphName: savedQuery.subGraph }
-          : {}),
-        ...(savedQuery.view ? { view: savedQuery.view } : {}),
+        ...(execution.subGraphName ? { subGraphName: execution.subGraphName } : {}),
+        ...(execution.view ? { view: execution.view } : {}),
       };
-      const result = await this.client.query(sparql, queryOpts);
+      const result = await this.client.query(execution.sparql, queryOpts);
       return this.json({
         contextGraphId,
         savedQuery,

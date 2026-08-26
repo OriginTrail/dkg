@@ -160,6 +160,34 @@ describe('ContextGraphQueryView', () => {
     await act(async () => { root.unmount(); });
   });
 
+  it.each([true, false])('renders ASK %s results', async (value) => {
+    apiMocks.executeQuery.mockResolvedValueOnce({ result: { type: 'boolean', value } });
+    const { container, root } = await renderWithProfile(profile());
+
+    await waitForText(container, 'ASK result');
+    expect(container.querySelector('[aria-label="ASK result"]')?.textContent).toContain(String(value));
+    expect(container.textContent).not.toContain('No results for this query.');
+
+    await act(async () => { root.unmount(); });
+  });
+
+  it('renders CONSTRUCT quads as graph-shaped results', async () => {
+    apiMocks.executeQuery.mockResolvedValueOnce({
+      result: {
+        type: 'quads',
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],
+      },
+    });
+    const { container, root } = await renderWithProfile(profile());
+
+    await waitForText(container, '1 quad');
+    expect(container.textContent).toContain('subject');
+    expect(container.textContent).toContain('urn:s');
+    expect(container.textContent).toContain('urn:g');
+
+    await act(async () => { root.unmount(); });
+  });
+
   it('groups saved queries and loads the selected query into the editor', async () => {
     const savedProfile = profile({
       queryCatalogs: [{
@@ -254,10 +282,7 @@ describe('ContextGraphQueryView', () => {
     expect(textarea.value).toContain('schema.org/name');
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('schema.org/name'),
-      'cg-test',
-      undefined,
-      undefined,
-      'working-memory',
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory' },
     );
 
     const runButton = Array.from(container.querySelectorAll('button'))
@@ -270,10 +295,7 @@ describe('ContextGraphQueryView', () => {
     });
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('schema.org/name'),
-      'cg-test',
-      undefined,
-      undefined,
-      'working-memory',
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory' },
     );
 
     apiMocks.executeQuery.mockClear();
@@ -283,10 +305,7 @@ describe('ContextGraphQueryView', () => {
     });
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('# edited'),
-      'cg-test',
-      undefined,
-      undefined,
-      undefined,
+      { contextGraphId: 'cg-test', subGraphName: undefined, view: undefined },
     );
 
     await act(async () => { root.unmount(); });
@@ -361,11 +380,9 @@ describe('ContextGraphQueryView', () => {
 
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('"748387\\" } UNION { ?s ?p ?o"'),
-      'cg-test',
-      undefined,
-      undefined,
-      'verifiable-memory',
+      { contextGraphId: 'cg-test', subGraphName: undefined, view: 'verifiable-memory' },
     );
+    const callsBeforeSave = apiMocks.executeQuery.mock.calls.length;
 
     const saveButton = Array.from(container.querySelectorAll('button'))
       .find(button => button.textContent === 'Save');
@@ -384,6 +401,8 @@ describe('ContextGraphQueryView', () => {
     const writtenQuads = apiMocks.writeProfileQueryCatalog.mock.calls.at(-1)?.[1] as Array<{ predicate: string }>;
     expect(writtenQuads.some(quad => quad.predicate.endsWith('/queryParameters'))).toBe(true);
     expect(writtenQuads.some(quad => quad.predicate.endsWith('/executionView'))).toBe(true);
+    expect(apiMocks.executeQuery).toHaveBeenCalledTimes(callsBeforeSave);
+    expect(apiMocks.executeQuery.mock.calls.some(([sparql]) => String(sparql).includes('{{'))).toBe(false);
     await act(async () => { root.unmount(); });
   });
 

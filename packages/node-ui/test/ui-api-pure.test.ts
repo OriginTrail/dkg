@@ -313,7 +313,7 @@ describe('UI API tests', () => {
 
   describe('POST endpoints', () => {
     it('executeQuery sends sparql and contextGraphId', async () => {
-      await executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-1');
+      await executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-1' });
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
       const body = JSON.parse(call?.body ?? '{}');
       expect(body.sparql).toBe('SELECT * WHERE { ?s ?p ?o }');
@@ -323,13 +323,29 @@ describe('UI API tests', () => {
     it('executeQuery sends the daemon working-memory view', async () => {
       await executeQuery(
         'SELECT ?incident WHERE { ?incident ?p ?o }',
-        'cg-listenerboi',
-        undefined,
-        undefined,
-        'working-memory',
+        { contextGraphId: 'cg-listenerboi', view: 'working-memory' },
       );
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
       expect(JSON.parse(call?.body ?? '{}').view).toBe('working-memory');
+    });
+
+    it('executeQuery maps named scope and partition options into the request body', async () => {
+      await executeQuery('SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }', {
+        contextGraphId: 'cg-scoped',
+        subGraphName: 'incidents',
+        view: 'shared-working-memory',
+        includeSharedMemory: true,
+        includeContextGraphPartitions: true,
+      });
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({
+        sparql: 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }',
+        contextGraphId: 'cg-scoped',
+        subGraphName: 'incidents',
+        view: 'shared-working-memory',
+        includeSharedMemory: true,
+        includeContextGraphPartitions: true,
+      });
     });
 
     it('readProfileQueryCatalog uses the dedicated profile endpoint', async () => {
@@ -806,11 +822,11 @@ describe('UI API tests', () => {
   describe('executeQuery in-flight dedup', () => {
     it('coalesces concurrent identical queries to one /api/query POST', async () => {
       const results = await Promise.all([
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
       ]);
       const queryCalls = requestLog.filter(
         r => r.method === 'POST' && r.url.startsWith('/api/query'),
@@ -824,8 +840,8 @@ describe('UI API tests', () => {
 
     it('does not coalesce when args differ', async () => {
       await Promise.all([
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-a'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-b'),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-a' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-b' }),
       ]);
       const queryCalls = requestLog.filter(
         r => r.method === 'POST' && r.url.startsWith('/api/query'),
@@ -834,8 +850,8 @@ describe('UI API tests', () => {
     });
 
     it('issues a fresh fetch once the prior request has settled', async () => {
-      await executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-sequential');
-      await executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-sequential');
+      await executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-sequential' });
+      await executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-sequential' });
       const queryCalls = requestLog.filter(
         r => r.method === 'POST' && r.url.startsWith('/api/query'),
       );

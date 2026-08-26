@@ -3,11 +3,17 @@ import {
   assertQueryCatalogTemplate,
   normalizeQueryCatalogParameters,
   parseQueryCatalogParameters,
+  renderQueryCatalogTemplate,
   serializeQueryCatalogParameters,
   type QueryCatalogParameterDefinition,
 } from './query-catalog-parameters.js';
 
 export const QUERY_CATALOG_SCHEMA_VERSION = 1;
+export const QUERY_CATALOG_READ_CAPABILITIES = Object.freeze({
+  canonicalItems: true,
+  queryParameters: true,
+  executionView: true,
+} as const);
 export const CONTEXT_GRAPH_QUERY_SUBGRAPH = '__context_graph';
 export const USER_QUERY_CATALOG_SLUG = 'ui-saved-queries';
 export const USER_QUERY_CATALOG_NAME = 'Saved queries';
@@ -45,6 +51,28 @@ export interface QueryCatalog {
   queries: QueryCatalogItem[];
 }
 
+export interface QueryCatalogReadResponse {
+  schemaVersion: typeof QUERY_CATALOG_SCHEMA_VERSION;
+  capabilities: typeof QUERY_CATALOG_READ_CAPABILITIES;
+  contextGraphId: string;
+  graph: string;
+  items: QueryCatalogItem[];
+  /** Raw SELECT rows retained so older clients can continue to decode them. */
+  result: {
+    type: 'bindings';
+    bindings: Array<Record<string, unknown>>;
+  };
+}
+
+export class QueryCatalogContractError extends Error {
+  readonly code = 'QUERY_CATALOG_CONTRACT_INCOMPATIBLE';
+
+  constructor(message = 'Incompatible query-catalog daemon contract. Upgrade the daemon and retry.') {
+    super(message);
+    this.name = 'QueryCatalogContractError';
+  }
+}
+
 export interface QueryCatalogWriteQuad {
   subject: string;
   predicate: string;
@@ -54,6 +82,25 @@ export interface QueryCatalogWriteQuad {
 
 export interface DecodeQueryCatalogOptions {
   legacyView?: (queryIri: string, catalogIri: string) => GetView | undefined;
+}
+
+export interface PreparedQueryCatalogExecution {
+  sparql: string;
+  view?: GetView;
+  subGraphName?: string;
+}
+
+export function prepareQueryCatalogExecution(
+  query: Pick<QueryCatalogItem, 'sparql' | 'parameters' | 'view' | 'subGraph'>,
+  values: Record<string, unknown> = {},
+): PreparedQueryCatalogExecution {
+  return {
+    sparql: renderQueryCatalogTemplate(query.sparql, query.parameters, values),
+    ...(query.view ? { view: query.view } : {}),
+    ...(query.subGraph && query.subGraph !== CONTEXT_GRAPH_QUERY_SUBGRAPH
+      ? { subGraphName: query.subGraph }
+      : {}),
+  };
 }
 
 export function queryCatalogBindingValue(value: unknown): string {
@@ -100,6 +147,17 @@ function parseRank(value: string, fallback: number): number {
 
 function parseView(value: string): GetView | undefined {
   return (GET_VIEWS as readonly string[]).includes(value) ? value as GetView : undefined;
+}
+
+/** Migration rule for catalogs authored before executionView was persisted. */
+export function legacyQueryCatalogExecutionView(
+  queryIri: string,
+  catalogIri: string,
+): GetView | undefined {
+  return queryIri.startsWith('urn:listenerboi:query:')
+    || catalogIri.startsWith('urn:listenerboi:catalog:')
+    ? 'working-memory'
+    : undefined;
 }
 
 export function decodeQueryCatalogBindings(
@@ -150,7 +208,9 @@ export function decodeQueryCatalogBindings(
       parameters: parseQueryCatalogParameters(
         oneValue(rows, 'queryParameters', queryIri) || undefined,
       ),
-      view: explicitView ?? options.legacyView?.(queryIri, catalogIri),
+      view: explicitView
+        ?? options.legacyView?.(queryIri, catalogIri)
+        ?? legacyQueryCatalogExecutionView(queryIri, catalogIri),
     });
   }
 
@@ -160,6 +220,105 @@ export function decodeQueryCatalogBindings(
     || a.rank - b.rank
     || a.name.localeCompare(b.name),
   );
+}
+
+/** Encode one deterministic row per saved query for legacy binding consumers. */
+export function encodeQueryCatalogBindings(
+  items: readonly QueryCatalogItem[],
+): Array<Record<string, string>> {
+  return items.map((item) => ({
+    q: item.queryIri,
+    ...(item.catalogIri ? { catalog: item.catalogIri } : {}),
+    name: item.name,
+    ...(item.description ? { description: item.description } : {}),
+    sparql: item.sparql,
+    ...(item.resultColumn ? { resultColumn: item.resultColumn } : {}),
+    ...(item.parameters.length > 0
+      ? { queryParameters: serializeQueryCatalogParameters(item.parameters) }
+      : {}),
+    ...(item.view ? { executionView: item.view } : {}),
+    subGraph: item.subGraph,
+    rank: String(item.rank),
+    catalogName: item.catalogName,
+    ...(item.catalogDescription ? { catalogDescription: item.catalogDescription } : {}),
+    catalogRank: String(item.catalogRank),
+  }));
+}
+
+/**
+ * Decode the versioned daemon DTO used by head clients. This deliberately does
+ * not fall back to raw bindings: an older daemon cannot prove that it returned
+ * parameter and execution-view metadata, so silently accepting that response
+ * could execute a saved template with the wrong semantics.
+ */
+export function decodeQueryCatalogReadResponse(response: unknown): QueryCatalogItem[] {
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    throw new QueryCatalogContractError();
+  }
+  const envelope = response as Record<string, unknown>;
+  const capabilities = envelope.capabilities as Record<string, unknown> | undefined;
+  if (
+    envelope.schemaVersion !== QUERY_CATALOG_SCHEMA_VERSION
+    || capabilities?.canonicalItems !== true
+    || capabilities?.queryParameters !== true
+    || capabilities?.executionView !== true
+    || !Array.isArray(envelope.items)
+  ) {
+    throw new QueryCatalogContractError();
+  }
+
+  return envelope.items.map((raw, index) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new QueryCatalogContractError(`Invalid query-catalog item at index ${index}.`);
+    }
+    const item = raw as Record<string, unknown>;
+    const requiredStrings = [
+      'queryIri',
+      'catalogIri',
+      'slug',
+      'name',
+      'sparql',
+      'catalogSlug',
+      'catalogName',
+      'subGraph',
+    ] as const;
+    for (const field of requiredStrings) {
+      if (typeof item[field] !== 'string') {
+        throw new QueryCatalogContractError(`Invalid query-catalog item ${index}: ${field} must be a string.`);
+      }
+    }
+    if (
+      typeof item.rank !== 'number'
+      || !Number.isFinite(item.rank)
+      || typeof item.catalogRank !== 'number'
+      || !Number.isFinite(item.catalogRank)
+    ) {
+      throw new QueryCatalogContractError(`Invalid query-catalog item ${index}: ranks must be finite numbers.`);
+    }
+    const view = item.view === undefined ? undefined : parseView(String(item.view));
+    if (item.view !== undefined && view === undefined) {
+      throw new QueryCatalogContractError(`Invalid query-catalog item ${index}: unsupported execution view.`);
+    }
+    return {
+      queryIri: item.queryIri as string,
+      catalogIri: item.catalogIri as string,
+      slug: item.slug as string,
+      name: item.name as string,
+      ...(typeof item.description === 'string' ? { description: item.description } : {}),
+      sparql: item.sparql as string,
+      ...(typeof item.resultColumn === 'string' ? { resultColumn: item.resultColumn } : {}),
+      rank: item.rank as number,
+      catalogSlug: item.catalogSlug as string,
+      catalogName: item.catalogName as string,
+      ...(typeof item.catalogDescription === 'string'
+        ? { catalogDescription: item.catalogDescription }
+        : {}),
+      catalogRank: item.catalogRank as number,
+      subGraph: item.subGraph as string,
+      parameters: normalizeQueryCatalogParameters(item.parameters),
+      ...(view ? { view } : {}),
+    } satisfies QueryCatalogItem;
+  });
 }
 
 export function groupQueryCatalogItems(items: readonly QueryCatalogItem[]): QueryCatalog[] {

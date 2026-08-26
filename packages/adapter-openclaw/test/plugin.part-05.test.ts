@@ -3,11 +3,26 @@ import { homedir, tmpdir } from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import { toEip55Checksum } from '@origintrail-official/dkg-core';
+import {
+  decodeQueryCatalogBindings,
+  QUERY_CATALOG_READ_CAPABILITIES,
+} from '@origintrail-official/dkg-core/query-catalog';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import { DkgChannelPlugin } from '../src/DkgChannelPlugin.js';
 import { ChatTurnWriter } from '../src/ChatTurnWriter.js';
 import { INTERNAL_HOOK_SYMBOL } from '../src/HookSurface.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
+
+function queryCatalogEnvelope(bindings: Array<Record<string, unknown>>) {
+  return {
+    schemaVersion: 1,
+    capabilities: QUERY_CATALOG_READ_CAPABILITIES,
+    contextGraphId: 'cg-1',
+    graph: 'did:dkg:context-graph:cg-1/meta/query-catalog',
+    items: decodeQueryCatalogBindings(bindings),
+    result: { type: 'bindings' as const, bindings },
+  };
+}
 
 describe("DkgNodePlugin", () => {
 
@@ -75,10 +90,7 @@ describe("DkgNodePlugin", () => {
   it('round-trips query catalog resultColumn metadata in list output', async () => {
     const plugin = new DkgNodePlugin();
     (plugin as any).client = {
-      readQueryCatalog: vi.fn(async () => ({
-        result: {
-          type: 'bindings',
-          bindings: [
+      readQueryCatalog: vi.fn(async () => queryCatalogEnvelope([
             {
               q: 'urn:dkg:profile:cg-1:query:orders',
               catalog: 'urn:dkg:profile:cg-1:catalog:saved',
@@ -87,9 +99,7 @@ describe("DkgNodePlugin", () => {
               resultColumn: '"uri"',
               subGraph: '"__context_graph"',
             },
-          ],
-        },
-      })),
+      ])),
     };
 
     const result = await (plugin as any).handleQueryCatalogList({ context_graph_id: 'cg-1' });
@@ -107,10 +117,7 @@ describe("DkgNodePlugin", () => {
     const query = vi.fn(async () => ({ result: { bindings: [] } }));
     const plugin = new DkgNodePlugin();
     (plugin as any).client = {
-      readQueryCatalog: vi.fn(async () => ({
-        result: {
-          type: 'bindings',
-          bindings: [
+      readQueryCatalog: vi.fn(async () => queryCatalogEnvelope([
             {
               q: 'urn:dkg:profile:cg-1:query:orders',
               catalog: 'urn:dkg:profile:cg-1:catalog:saved',
@@ -119,9 +126,7 @@ describe("DkgNodePlugin", () => {
               resultColumn: '"s"',
               subGraph: '"production"',
             },
-          ],
-        },
-      })),
+      ])),
       query,
     };
 
@@ -141,10 +146,7 @@ describe("DkgNodePlugin", () => {
     const query = vi.fn(async () => ({ result: { bindings: [] } }));
     const plugin = new DkgNodePlugin();
     (plugin as any).client = {
-      readQueryCatalog: vi.fn(async () => ({
-        result: {
-          type: 'bindings',
-          bindings: [{
+      readQueryCatalog: vi.fn(async () => queryCatalogEnvelope([{
             q: 'urn:dkg:profile:cg-1:query:configuration-trace',
             catalog: 'urn:dkg:profile:cg-1:catalog:kamstrup',
             name: '"Configuration trace"',
@@ -152,9 +154,7 @@ describe("DkgNodePlugin", () => {
             queryParameters: '"[{\\"name\\":\\"configurationId\\",\\"type\\":\\"string\\"}]"',
             executionView: '"verifiable-memory"',
             subGraph: '"__context_graph"',
-          }],
-        },
-      })),
+      }])),
       query,
     };
 
