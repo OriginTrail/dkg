@@ -74,10 +74,12 @@ export * from './backpressure-observability.js';
 export {
   Logger,
   createOperationContext,
+  formatLogRecord,
   type OperationContext,
   type OperationName,
   type LogSink,
   type LogRecord,
+  type LogRecordFormatOptions,
   type CanonicalLogRecord,
   type LogLevel,
   LOG_LEVELS,

@@ -122,7 +122,9 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
   // assertion uses long, alternating wall-time batches in a dedicated child.
   // The child disables V8 JIT tiers and calibrates each size to >=250 ms, so
   // optimization thresholds, timer granularity, and a single scheduler slice
-  // cannot dominate the ratio under the parallel coverage runner.
+  // cannot dominate the ratio under the parallel coverage runner. Both ratio
+  // samples remain above V8's large-object allocation boundary so the
+  // comparison measures scanner growth rather than an allocator transition.
   const measure = (input: string) => {
     for (let i = 0; i < 2; i++) detectSparqlQueryForm(input);
     let fastestMs = Infinity;
@@ -158,20 +160,20 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
     expect(ms).toBeLessThan(500);
   });
 
-  it('rejects N=10_000 dangling PREFIX decls in bounded time (10x input → bounded growth)', () => {
+  it('rejects N=10_000 dangling PREFIX decls in bounded time (4x input → bounded growth)', () => {
     const { smallMs, largeMs } = measureGrowthInIsolatedProcess();
 
     // Hang guard: 10k decls must reject in under a second. The buggy
     // regex took >>10s here in local repro.
     expect(largeMs).toBeLessThan(1000);
     // Linearity guard: batching makes the small measurement stable enough for
-    // a ratio-only assertion. A 10x input may take at most 25x as long, which
-    // leaves CI headroom while rejecting materially superlinear growth.
+    // a ratio-only assertion. A 4x input may take at most 10x as long, which
+    // leaves CI headroom while rejecting quadratic/backtracking growth.
     expect(
       largeMs / smallMs,
       `isolated scaling samples: small=${smallMs.toFixed(6)}ms ` +
       `large=${largeMs.toFixed(6)}ms`,
-    ).toBeLessThan(25);
+    ).toBeLessThan(10);
   }, 25_000);
 
   it('classifies N=10_000 valid PREFIX decls + trailing SELECT in linear time', () => {

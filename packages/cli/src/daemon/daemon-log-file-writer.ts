@@ -1,5 +1,9 @@
 import { appendFile } from 'node:fs/promises';
-import type { CanonicalLogRecord } from '@origintrail-official/dkg-core';
+import {
+  formatLogRecord,
+  type CanonicalLogRecord,
+} from '@origintrail-official/dkg-core';
+import type { DaemonLogRotationResult } from './log-rotation.js';
 
 export type DaemonLogWriteClass = 'standard' | 'debug';
 export type DebugLogRecord = CanonicalLogRecord & { level: 'debug' };
@@ -8,24 +12,11 @@ export function isDebugLogRecord(record: CanonicalLogRecord): record is DebugLog
   return record.level === 'debug';
 }
 
-export function formatDaemonDebugLog(
-  entry: DebugLogRecord,
-  now = Date.now(),
-): string {
-  const source = entry.sourceOperationId
-    ? ` [from:${entry.sourceOperationId}]`
-    : '';
-  return (
-    `[${new Date(now).toISOString()}] ${entry.operationName} `
-    + `${entry.operationId}${source} [${entry.module}] ${entry.message} [DEBUG]\n`
-  );
-}
-
 export interface DaemonLogFileWriter {
   push(data: string): boolean;
   pushDebug(record: DebugLogRecord): boolean;
   flush(): Promise<void>;
-  runExclusive<T>(operation: () => Promise<T>): Promise<T>;
+  rotate(): Promise<DaemonLogRotationResult>;
   shutdown(): Promise<void>;
   pending(): number;
   dropped(): number;
@@ -37,14 +28,18 @@ interface AppendWork {
   classification: DaemonLogWriteClass;
 }
 
-interface ExclusiveWork {
-  kind: 'exclusive';
-  operation: () => Promise<unknown>;
-  resolve: (value: unknown) => void;
+interface RotationWork {
+  kind: 'rotation';
+  resolve: (value: DaemonLogRotationResult) => void;
   reject: (error: unknown) => void;
 }
 
-type Work = AppendWork | ExclusiveWork;
+interface FlushWork {
+  kind: 'flush';
+  resolve: () => void;
+}
+
+type Work = AppendWork | RotationWork | FlushWork;
 
 /**
  * Owns every in-process append to daemon.log. Writes are serialized, queued
@@ -57,6 +52,7 @@ export function startDaemonLogFileWriter(opts: {
   maxBatchEntries?: number;
   maxAppendAttempts?: number;
   append?: (data: string) => Promise<void>;
+  rotate?: () => Promise<DaemonLogRotationResult>;
   waitBeforeRetry?: (failedAttempt: number) => Promise<void>;
   onDiagnostic?: (message: string) => void | Promise<void>;
 }): DaemonLogFileWriter {
@@ -136,13 +132,21 @@ export function startDaemonLogFileWriter(opts: {
   const drain = async (): Promise<void> => {
     while (queue.length > 0) {
       const first = queue[0];
-      if (first.kind === 'exclusive') {
+      if (first.kind === 'rotation') {
         queue.shift();
         try {
-          first.resolve(await first.operation());
+          if (!opts.rotate) {
+            throw new Error('daemon log rotation is not configured');
+          }
+          first.resolve(await opts.rotate());
         } catch (error) {
           first.reject(error);
         }
+        continue;
+      }
+      if (first.kind === 'flush') {
+        queue.shift();
+        first.resolve();
         continue;
       }
 
@@ -168,15 +172,22 @@ export function startDaemonLogFileWriter(opts: {
     });
   };
 
-  const runExclusive = <T>(operation: () => Promise<T>): Promise<T> => {
+  const rotate = (): Promise<DaemonLogRotationResult> => {
     if (!accepting) return Promise.reject(new Error('daemon log writer is stopped'));
-    return new Promise<T>((resolve, reject) => {
+    return new Promise<DaemonLogRotationResult>((resolve, reject) => {
       queue.push({
-        kind: 'exclusive',
-        operation,
-        resolve: (value) => resolve(value as T),
+        kind: 'rotation',
+        resolve,
         reject,
       });
+      ensureDrain();
+    });
+  };
+
+  const flush = (): Promise<void> => {
+    if (!accepting) return Promise.reject(new Error('daemon log writer is stopped'));
+    return new Promise<void>((resolve) => {
+      queue.push({ kind: 'flush', resolve });
       ensureDrain();
     });
   };
@@ -201,9 +212,13 @@ export function startDaemonLogFileWriter(opts: {
 
   return {
     push: (data) => push(data, 'standard'),
-    pushDebug: (record) => push(formatDaemonDebugLog(record), 'debug'),
-    flush: () => runExclusive(async () => undefined),
-    runExclusive,
+    pushDebug: (record) => push(formatLogRecord(record, {
+      timestampStyle: 'iso-bracketed',
+      includeLevel: true,
+      trailingNewline: true,
+    }), 'debug'),
+    flush,
+    rotate,
     shutdown() {
       if (shutdownPromise) return shutdownPromise;
       accepting = false;

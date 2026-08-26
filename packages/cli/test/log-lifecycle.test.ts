@@ -3,7 +3,10 @@ import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Logger } from '@origintrail-official/dkg-core';
-import { startDaemonLogController } from '../src/daemon/log-lifecycle.js';
+import {
+  exitAfterFatalLogDrain,
+  startDaemonLogController,
+} from '../src/daemon/log-lifecycle.js';
 import {
   startDaemonLogFileWriter,
   type DebugLogRecord,
@@ -13,8 +16,34 @@ import { createTelemetryRuntime } from '../src/daemon/telemetry-runtime.js';
 
 describe('startDaemonLogController', () => {
   afterEach(() => {
+    vi.useRealTimers();
     Logger.setSink(null);
     vi.restoreAllMocks();
+  });
+
+  it('forces fatal exit when the file writer never drains', async () => {
+    vi.useFakeTimers();
+    const detach = vi.fn();
+    const shutdown = vi.fn(() => new Promise<void>(() => {}));
+    const exit = vi.fn();
+    const reportTimeout = vi.fn();
+
+    const fatalExit = exitAfterFatalLogDrain({
+      detach,
+      shutdown,
+      exit,
+      reportTimeout,
+      timeoutMs: 25,
+    });
+    await vi.advanceTimersByTimeAsync(25);
+    await fatalExit;
+
+    expect(detach).toHaveBeenCalledTimes(1);
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(reportTimeout).toHaveBeenCalledWith(
+      expect.stringContaining('fatal log drain timed out'),
+    );
+    expect(exit).toHaveBeenCalledWith(1);
   });
 
   it('owns exporter attach, runtime detach, and diagnostic persistence independently', async () => {
@@ -273,6 +302,71 @@ describe('startDaemonLogController', () => {
     expect(appended.join('')).not.toContain('message-16');
   });
 
+  it('drops debug before standard output in both mixed overflow directions', async () => {
+    const runScenario = async (queueWrites: (
+      writer: ReturnType<typeof startDaemonLogFileWriter>,
+      debug: DebugLogRecord,
+    ) => void) => {
+      let releaseAppend!: () => void;
+      let markAppendStarted!: () => void;
+      const appendStarted = new Promise<void>((resolve) => {
+        markAppendStarted = resolve;
+      });
+      const appendGate = new Promise<void>((resolve) => {
+        releaseAppend = resolve;
+      });
+      const appended: string[] = [];
+      let appendCalls = 0;
+      const writer = startDaemonLogFileWriter({
+        logFile: 'unused-in-injected-test',
+        maxQueuedEntries: 2,
+        maxBatchEntries: 1,
+        append: async (data) => {
+          appendCalls += 1;
+          if (appendCalls === 1) {
+            markAppendStarted();
+            await appendGate;
+          }
+          appended.push(data);
+        },
+      });
+      const debug: DebugLogRecord = {
+        level: 'debug',
+        operationName: 'system',
+        operationId: 'op-debug',
+        module: 'overflow-test',
+        message: 'debug-queued',
+      };
+
+      expect(writer.push('in-flight\n')).toBe(true);
+      await appendStarted;
+      queueWrites(writer, debug);
+      releaseAppend();
+      await writer.shutdown();
+      return { appended: appended.join(''), writer };
+    };
+
+    const evicted = await runScenario((writer, debug) => {
+      expect(writer.push('standard-a\n')).toBe(true);
+      expect(writer.pushDebug(debug)).toBe(true);
+      expect(writer.push('standard-c\n')).toBe(true);
+    });
+    expect(evicted.appended).toContain('standard-a');
+    expect(evicted.appended).toContain('standard-c');
+    expect(evicted.appended).not.toContain('debug-queued');
+    expect(evicted.writer.dropped()).toBe(1);
+
+    const rejected = await runScenario((writer, debug) => {
+      expect(writer.push('standard-a\n')).toBe(true);
+      expect(writer.push('standard-b\n')).toBe(true);
+      expect(writer.pushDebug(debug)).toBe(false);
+    });
+    expect(rejected.appended).toContain('standard-a');
+    expect(rejected.appended).toContain('standard-b');
+    expect(rejected.appended).not.toContain('debug-queued');
+    expect(rejected.writer.dropped()).toBe(1);
+  });
+
   it('retries failed batches, counts final loss, and awaits a durable diagnostic', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-log-writer-diagnostic-'));
     const diagnosticFile = join(directory, 'daemon-log-writer-errors.log');
@@ -321,6 +415,10 @@ describe('startDaemonLogController', () => {
     const logFileWriter = startDaemonLogFileWriter({
       logFile: 'unused-in-injected-test',
       maxBatchEntries: 1,
+      rotate: async () => {
+        events.push('rotate');
+        return { rotated: true, previousBytes: 10, keptBytes: 5 };
+      },
       append: async (data) => {
         appendCalls += 1;
         concurrentAppends += 1;
@@ -344,9 +442,7 @@ describe('startDaemonLogController', () => {
       message: 'debug-1',
     });
     logFileWriter.push('info-2\n');
-    const rotation = logFileWriter.runExclusive(async () => {
-      events.push('rotate');
-    });
+    const rotation = logFileWriter.rotate();
     logFileWriter.pushDebug({
       level: 'debug',
       operationName: 'system',
@@ -356,7 +452,11 @@ describe('startDaemonLogController', () => {
     });
 
     releaseFirstAppend();
-    await rotation;
+    expect(await rotation).toEqual({
+      rotated: true,
+      previousBytes: 10,
+      keptBytes: 5,
+    });
     await logFileWriter.shutdown();
 
     expect(events).toHaveLength(5);

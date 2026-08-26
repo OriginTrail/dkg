@@ -6,6 +6,54 @@ import {
   type RemoteLogShipper,
 } from './log-sink.js';
 
+export const DEFAULT_FATAL_LOG_DRAIN_TIMEOUT_MS = 2_000;
+
+/**
+ * Fatal exceptions must not leave a broken daemon alive because its log file
+ * is stuck. Detach all producers, give accepted writes one short best-effort
+ * drain window, then invoke the exit callback regardless of the outcome.
+ */
+export async function exitAfterFatalLogDrain(opts: {
+  detach: () => void;
+  shutdown: () => Promise<void>;
+  exit: (code: number) => void;
+  timeoutMs?: number;
+  reportTimeout?: (message: string) => void;
+}): Promise<void> {
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    try {
+      opts.detach();
+    } catch {
+      // A failed detach cannot be allowed to suppress fatal process exit.
+    }
+
+    const outcome = await Promise.race([
+      Promise.resolve()
+        .then(opts.shutdown)
+        .then(() => 'drained' as const, () => 'failed' as const),
+      new Promise<'timed-out'>((resolve) => {
+        deadline = setTimeout(
+          () => resolve('timed-out'),
+          opts.timeoutMs ?? DEFAULT_FATAL_LOG_DRAIN_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    if (outcome === 'timed-out') {
+      try {
+        opts.reportTimeout?.(
+          'fatal log drain timed out; exiting with queued log writes abandoned',
+        );
+      } catch {
+        // Timeout reporting bypasses the writer and remains best effort.
+      }
+    }
+  } finally {
+    if (deadline) clearTimeout(deadline);
+    opts.exit(1);
+  }
+}
+
 interface DaemonLogExporter {
   mode: ActiveLogExporterMode;
   shipper: RemoteLogShipper;

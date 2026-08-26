@@ -1,4 +1,4 @@
-import { classifySparqlOperation } from '@origintrail-official/dkg-core/dist/sparql-operation.js';
+import { classifySparqlOperation } from '@origintrail-official/dkg-core/sparql-operation';
 
 function detect(input) {
   const operation = classifySparqlOperation(input);
@@ -46,7 +46,11 @@ function calibrate(variants) {
 }
 
 export function measureSparqlRedosGrowth() {
-  const smallVariants = variantsFor(inputFor(1_000));
+  // Keep both samples above V8's large-object allocation boundary. Crossing
+  // that boundary made the old 1k/10k pair measure allocator regimes rather
+  // than scanner growth on GitHub's coverage hosts. A 4x input range with a
+  // strict 10x ceiling still rejects quadratic/backtracking regressions.
+  const smallVariants = variantsFor(inputFor(2_500));
   const largeVariants = variantsFor(inputFor(10_000));
   for (const variant of [...smallVariants, ...largeVariants]) detect(variant);
   const smallIterations = calibrate(smallVariants);

@@ -163,6 +163,7 @@ import {
 } from '../metrics-collector-config.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import {
+  exitAfterFatalLogDrain,
   startDaemonLogController,
   type DaemonLogExporterStartResult,
 } from './log-lifecycle.js';
@@ -1189,6 +1190,7 @@ export async function runDaemonInner(
   const logWriterDiagnosticFile = join(dkgDir(), 'daemon-log-writer-errors.log');
   const daemonLogFileWriter = startDaemonLogFileWriter({
     logFile,
+    rotate: () => rotateDaemonLogIfNeeded(logFile),
     onDiagnostic: async (message) => {
       const line = `[${new Date().toISOString()}] ${message}\n`;
       await appendFile(logWriterDiagnosticFile, line).catch(() => {});
@@ -1249,13 +1251,15 @@ export async function runDaemonInner(
     log(`[fatal] Uncaught exception: ${err?.stack ?? msg}`);
     removePid()
       .catch(() => {})
-      .finally(async () => {
-        detachDaemonLogTee();
-        try {
-          await daemonLogFileWriter.shutdown();
-        } finally {
-          process.exit(1);
-        }
+      .finally(() => {
+        void exitAfterFatalLogDrain({
+          detach: detachDaemonLogTee,
+          shutdown: () => daemonLogFileWriter.shutdown(),
+          exit: (code) => process.exit(code),
+          reportTimeout: (message) => {
+            origStderrWrite(`[daemon-log-writer] ${message}\n`);
+          },
+        });
       });
   });
 
@@ -3034,9 +3038,7 @@ export async function runDaemonInner(
   const pruneRuntimeState = async (): Promise<void> => {
     try {
       dashDb.prune();
-      const rotation = await daemonLogFileWriter.runExclusive(
-        () => rotateDaemonLogIfNeeded(logFile),
-      );
+      const rotation = await daemonLogFileWriter.rotate();
       if (rotation.rotated) {
         log(
           `Rotated daemon.log (was ${(rotation.previousBytes / 1024 / 1024).toFixed(1)} MB)`,
