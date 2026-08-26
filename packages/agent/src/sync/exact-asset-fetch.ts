@@ -69,6 +69,7 @@ export interface ExactAssetChainSnapshot {
 export interface ExactAssetFetchEvidence {
   ual: string;
   kaId: bigint;
+  batchId: bigint;
   onChainCgId: string;
   merkleRoot: Uint8Array;
   authorAddress: string;
@@ -236,6 +237,9 @@ async function resolveEvidence(
   return {
     ual,
     kaId,
+    // The V10 exact-fetch chain inventory uses one packed KA per batch.
+    // Keep this identity explicit so reconciliation never invents it later.
+    batchId: kaId,
     onChainCgId,
     merkleRoot: bytes32FromHex(snapshot.latestRoot, ual),
     authorAddress: snapshot.latestAuthor,
