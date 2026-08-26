@@ -20,16 +20,16 @@ function variantsFor(input) {
 }
 
 function measureOne(input, expectedLength) {
-  const startedAt = performance.now();
+  const startedAt = process.cpuUsage();
   const resultLength = detect(input).length;
-  const elapsedMs = performance.now() - startedAt;
+  const elapsed = process.cpuUsage(startedAt);
   if (resultLength !== expectedLength) {
     throw new Error(
       `SPARQL benchmark result mismatch: expected ` +
       `${expectedLength}, received ${resultLength}`,
     );
   }
-  return elapsedMs;
+  return (elapsed.user + elapsed.system) / 1_000;
 }
 
 export function measureSparqlRedosGrowth() {
