@@ -1,11 +1,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import {
-  type VerifiedGraphScopedFinalizationEvidence,
-} from './finalization-graph-envelope.js';
-import {
   type FinalizationRecoveryEntry,
   type FinalizationRecoveryHealth,
-  type FinalizationRecoveryRecoveredEvidenceCommit,
+  type FinalizationRecoveryVerifiedEvidenceCommit,
   type FinalizationRecoveryReceiveInput,
   type FinalizationRecoveryReceiveResult,
   type FinalizationRecoverySettledPublisherUpgradeResult,
@@ -505,26 +502,10 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     });
   }
 
-  markVerified(
+  commitVerifiedEvidence(
     key: string,
     generation: number,
-    evidence: VerifiedGraphScopedFinalizationEvidence,
-  ): Promise<FinalizationRecoveryVerifyResult> {
-    if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
-    return this.mutate(() => {
-      if (this.#closed) return { status: 'closed' };
-      return this.commitVerifiedEvidenceWithinTransaction(
-        key,
-        generation,
-        { evidence, placement: 'original' },
-      );
-    });
-  }
-
-  commitRecoveredEvidence(
-    key: string,
-    generation: number,
-    commit: FinalizationRecoveryRecoveredEvidenceCommit,
+    commit: FinalizationRecoveryVerifiedEvidenceCommit,
   ): Promise<FinalizationRecoveryVerifyResult> {
     if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
     return this.mutate(() => {
@@ -540,7 +521,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
   private commitVerifiedEvidenceWithinTransaction(
     key: string,
     generation: number,
-    commit: FinalizationRecoveryRecoveredEvidenceCommit,
+    commit: FinalizationRecoveryVerifiedEvidenceCommit,
   ): FinalizationRecoveryVerifyResult {
     const { evidence } = commit;
     let outcome: FinalizationRecoveryVerifyResult = { status: 'conflict' };

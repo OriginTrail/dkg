@@ -1009,13 +1009,11 @@ describe('graph-scoped finalization recovery admission', () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recover-commit-failed-'));
     try {
       const store = await openSqliteFinalizationRecoveryStore(directory);
-      const markVerified = vi.fn(async () => ({ status: 'closed' as const }));
-      const commitRecoveredEvidence = vi.fn(async () => ({ status: 'closed' as const }));
+      const commitVerifiedEvidence = vi.fn(async () => ({ status: 'closed' as const }));
       const markReorged = vi.fn(store.markReorged.bind(store));
       const refusingStore = new Proxy(store, {
         get(target, property) {
-          if (property === 'markVerified') return markVerified;
-          if (property === 'commitRecoveredEvidence') return commitRecoveredEvidence;
+          if (property === 'commitVerifiedEvidence') return commitVerifiedEvidence;
           if (property === 'markReorged') return markReorged;
           const value = Reflect.get(target, property, target);
           return typeof value === 'function' ? value.bind(target) : value;
@@ -1059,13 +1057,17 @@ describe('graph-scoped finalization recovery admission', () => {
       })).resolves.toBe('none');
 
       expect(recoverVerifiedEvidence).toHaveBeenCalledOnce();
-      expect(commitRecoveredEvidence).toHaveBeenCalledOnce();
-      expect(commitRecoveredEvidence).toHaveBeenCalledWith(
+      expect(commitVerifiedEvidence).toHaveBeenCalledTimes(2);
+      expect(commitVerifiedEvidence).toHaveBeenCalledWith(
         expect.any(String),
         0,
         expect.objectContaining({ placement: 'canonical-moved' }),
       );
-      expect(markVerified).toHaveBeenCalledOnce();
+      expect(commitVerifiedEvidence).toHaveBeenCalledWith(
+        expect.any(String),
+        0,
+        expect.objectContaining({ placement: 'original' }),
+      );
       expect(markReorged).not.toHaveBeenCalled();
       expect(prepare).toHaveBeenCalledOnce();
       expect(apply).not.toHaveBeenCalled();
@@ -1450,7 +1452,10 @@ describe('graph-scoped finalization recovery admission', () => {
   });
 
   it('distinguishes reorged block placement from permanent receipt content mismatch', async () => {
-    const resolve = async (receipt: CanonicalFinalizationReceipt) => {
+    const resolve = async (
+      receipt: CanonicalFinalizationReceipt,
+      expectation?: unknown,
+    ) => {
       const recovery = new FinalizationRecovery(
         undefined,
         recoveryChain({
@@ -1462,11 +1467,21 @@ describe('graph-scoped finalization recovery admission', () => {
         { info: () => {}, warn: () => {} },
         recoveryMaterializer(),
       );
-      return recovery.resolveCanonicalReceipt(parsedMessage(), undefined, 'original');
+      return expectation === undefined
+        ? recovery.resolveCanonicalReceipt(parsedMessage())
+        : recovery.resolveCanonicalReceipt(parsedMessage(), expectation as never);
     };
 
     await expect(resolve(confirmedReceipt({ blockNumber: 124 })))
       .resolves.toEqual({ status: 'reorged' });
+    await expect(resolve(
+      confirmedReceipt({ blockNumber: 124 }),
+      {
+        kind: 'persisted',
+        evidence: verifiedEvidence(),
+        placement: 'invalid-at-runtime',
+      },
+    )).resolves.toEqual({ status: 'reorged' });
     await expect(resolve(confirmedReceipt({
       merkleRoot: Uint8Array.from({ length: 32 }, () => 1),
     }))).resolves.toEqual({ status: 'rejected' });
@@ -2055,11 +2070,7 @@ describe('graph-scoped finalization recovery admission', () => {
         contextGraphId: CONTEXT_GRAPH,
         candidate: parsedMessage(),
       });
-      expect(await recovery.resolveCanonicalReceipt(
-        parsedMessage(),
-        undefined,
-        'original',
-      )).toEqual({
+      expect(await recovery.resolveCanonicalReceipt(parsedMessage())).toEqual({
         status: 'unsupported',
       });
       if (!entry) throw new Error('expected durable RECEIVED entry');

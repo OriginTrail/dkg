@@ -1505,8 +1505,7 @@ describe('graph-scoped finalization handler', () => {
           inbox.recordSettledPublisherUpgrade.bind(inbox),
         rearmSettledWithTrustedPublisher:
           inbox.rearmSettledWithTrustedPublisher.bind(inbox),
-        markVerified: async () => ({ status: 'closed' }),
-        commitRecoveredEvidence: async () => ({ status: 'closed' }),
+        commitVerifiedEvidence: async () => ({ status: 'closed' }),
         markReorged: inbox.markReorged.bind(inbox),
         clearSettledRetry: inbox.clearSettledRetry.bind(inbox),
         rejectSettled: inbox.rejectSettled.bind(inbox),
@@ -1591,11 +1590,8 @@ describe('graph-scoped finalization handler', () => {
         rearmSettledWithTrustedPublisher: async () => {
           throw new Error('rearmSettledWithTrustedPublisher must not run after failed admission');
         },
-        markVerified: async () => {
-          throw new Error('markVerified must not run after failed admission');
-        },
-        commitRecoveredEvidence: async () => {
-          throw new Error('commitRecoveredEvidence must not run after failed admission');
+        commitVerifiedEvidence: async () => {
+          throw new Error('commitVerifiedEvidence must not run after failed admission');
         },
         markReorged: async () => false,
         clearSettledRetry: async () => {},

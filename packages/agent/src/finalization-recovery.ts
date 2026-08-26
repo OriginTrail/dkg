@@ -128,6 +128,15 @@ export type FinalizationRecoveryReplayOutcome =
   | 'retry-pending'
   | 'none';
 
+export type FinalizationCanonicalReceiptExpectation =
+  | { kind: 'candidate-placement' }
+  | { kind: 'reorg-recovery' }
+  | {
+      kind: 'persisted';
+      evidence: VerifiedGraphScopedFinalizationEvidence;
+      placement: Exclude<VerifiedGraphScopedFinalizationEvidencePlacement, 'mismatch'>;
+    };
+
 export type FinalizationRecoveryReplayMaterializationOutcome =
   | 'promoted'
   | 'already-confirmed'
@@ -760,13 +769,26 @@ export class FinalizationRecovery<
 
   async resolveCanonicalReceipt(
     candidate: ParsedGraphScopedFinalization,
-    persisted: VerifiedGraphScopedFinalizationEvidence | undefined,
-    evidencePlacement: Exclude<VerifiedGraphScopedFinalizationEvidencePlacement, 'mismatch'>,
+    expectation: FinalizationCanonicalReceiptExpectation = {
+      kind: 'candidate-placement',
+    },
   ): Promise<FinalizationCanonicalReceiptOutcome> {
     const resolver = this.chain?.resolveCanonicalFinalizationReceipt;
     if (!this.chain || this.chain.chainId === 'none' || !resolver) {
       return { status: 'unsupported' };
     }
+    const persisted = expectation?.kind === 'persisted'
+      ? expectation.evidence
+      : undefined;
+    // Treat omitted or invalid placement data as the original candidate
+    // placement. This preserves fail-closed reorg detection for JavaScript callers.
+    const evidencePlacement = expectation?.kind === 'reorg-recovery'
+      || (
+        expectation?.kind === 'persisted'
+        && expectation.placement === 'canonical-moved'
+      )
+      ? 'canonical-moved'
+      : 'original';
     let resolution: CanonicalFinalizationReceiptResolution;
     try {
       resolution = await resolver.call(
@@ -837,8 +859,15 @@ export class FinalizationRecovery<
     const { entry } = context;
     const canonical = await this.resolveCanonicalReceipt(
       candidate,
-      entry.verifiedEvidence,
-      entry.state === 'REORGED' ? 'canonical-moved' : 'original',
+      entry.verifiedEvidence
+        ? {
+            kind: 'persisted',
+            evidence: entry.verifiedEvidence,
+            placement: entry.state === 'REORGED' ? 'canonical-moved' : 'original',
+          }
+        : entry.state === 'REORGED'
+          ? { kind: 'reorg-recovery' }
+          : { kind: 'candidate-placement' },
     );
     if (canonical.status === 'unsupported') {
       await this.markUnsupported(entry);
@@ -980,7 +1009,11 @@ export class FinalizationRecovery<
     const store = this.getStore();
     if (!store) return undefined;
     try {
-      const result = await store.markVerified(entry.key, entry.generation, evidence);
+      const result = await store.commitVerifiedEvidence(
+        entry.key,
+        entry.generation,
+        { evidence, placement: 'original' },
+      );
       if (result.status === 'verified' || result.status === 'existing') return result.entry;
       this.log.warn(
         `Finalization recovery inbox refused VERIFIED for ${entry.ual}: ${result.status}`,
@@ -1002,7 +1035,7 @@ export class FinalizationRecovery<
     const store = this.getStore();
     if (!store) return undefined;
     try {
-      const result = await store.commitRecoveredEvidence(
+      const result = await store.commitVerifiedEvidence(
         entry.key,
         entry.generation,
         placement === 'canonical-moved'
@@ -1128,8 +1161,7 @@ export class FinalizationRecovery<
     if (!publisherUpgradeNewlyRecorded && !attemptDue) return undefined;
     const canonical = await this.resolveCanonicalReceipt(
       input.candidate,
-      evidence,
-      placement,
+      { kind: 'persisted', evidence, placement },
     );
     if (canonical.status === 'rejected') {
       await this.invalidateSettled(
@@ -1607,8 +1639,7 @@ export class FinalizationRecovery<
     }
     const canonical = await this.resolveCanonicalReceipt(
       candidate,
-      evidence,
-      placement,
+      { kind: 'persisted', evidence, placement },
     );
     if (canonical.status === 'confirmed') {
       if (entry.publisherUpgradePending) {
@@ -2164,8 +2195,7 @@ export class FinalizationRecovery<
   ): Promise<FinalizationCanonicalReceiptOutcome['status']> {
     const outcome = await this.resolveCanonicalReceipt(
       candidate,
-      evidence,
-      placement,
+      { kind: 'persisted', evidence, placement },
     );
     if (outcome.status !== 'confirmed') return outcome.status;
     const receipt = outcome.receipt;
