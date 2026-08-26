@@ -1091,9 +1091,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    *
    * The explicit binding mode owns both numeric self-address handling and
    * outcome mapping. `legacy-policy` preserves compatibility,
-   * `chain-attested-repair` requires a committed mapping proof, and
-   * `retryable-durable` additionally propagates transport failures so bounded
-   * durable verification can retry a fresh read.
+   * `chain-attested-repair` requires a committed mapping proof.
+   * `retryable-durable` preserves the established raw numeric self-address
+   * while propagating transport failures for every other identity read so
+   * bounded durable verification can retry a fresh read.
    */
   async localCgMatchesOnChainSlot(this: DKGAgent,
     contextGraphId: string,
@@ -1111,7 +1112,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       onChainId,
       opCtx,
       options.signal,
-      bindingMode === 'legacy-policy',
+      bindingMode !== 'chain-attested-repair',
       (localId) => this.isWireIdKeyedSubscription(localId),
       (ctx, message) => this.log.warn(ctx, message),
       (read) => this.raceChainPolicyRead(read),

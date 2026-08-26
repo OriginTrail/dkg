@@ -244,11 +244,17 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
   });
 
   it('preserves the compatibility self-address outside strict repair', async () => {
-    // Existing publish/share paths still accept a local numeric self-address.
-    // Chain-attested metadata repair opts into the stricter name-hash proof.
+    // Existing publish/share and durable verification paths still accept a
+    // local numeric self-address. Chain-attested metadata repair alone opts
+    // into the stricter name-hash proof.
     const agentLike = makeAgentLike({ onChainId: '7', accessPolicy: 0, onChainNameHash: null });
     await expect(isPublic(agentLike, '7')).resolves.toBe(true);
     expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([7n]);
+    expect((agentLike.chain.getContextGraphNameHash as any).calls).toEqual([]);
+
+    const retryableStrictBinding = (DKGAgent.prototype as any)
+      .requireLocalCgMatchesOnChainSlot;
+    await expect(retryableStrictBinding.call(agentLike, '7', '7')).resolves.toBe(true);
     expect((agentLike.chain.getContextGraphNameHash as any).calls).toEqual([]);
   });
 
