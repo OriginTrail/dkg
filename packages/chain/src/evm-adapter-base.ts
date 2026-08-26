@@ -1829,7 +1829,7 @@ export class EVMChainAdapterBase {
         );
       }
       return { preBroadcastTxHash };
-    });
+    }, label);
 
     const receipt = await this.waitForReceiptWithFailover(
       prepared.preBroadcastTxHash,
@@ -1881,8 +1881,10 @@ export class EVMChainAdapterBase {
     label: string,
     opts?: { gasLimitBufferBps?: number },
   ): Promise<ethers.TransactionReceipt> {
-    return this.withSerializedSignerWrite(signer, (ctx) =>
-      ctx.sendContractTransaction(contract, method, args, signer, label, opts),
+    return this.withSerializedSignerWrite(
+      signer,
+      (ctx) => ctx.sendContractTransaction(contract, method, args, signer, label, opts),
+      label,
     );
   }
 
@@ -1893,8 +1895,13 @@ export class EVMChainAdapterBase {
   protected async withSerializedSignerWrite<T>(
     signer: Wallet,
     fn: (ctx: SerializedSignerWriteContext) => Promise<T>,
-    /** Names the operation in serializer wait/hold diagnostics (GH#1574). */
-    writeLabel = 'signer write',
+    /**
+     * Names the operation in serializer stall diagnostics (GH#1574).
+     * REQUIRED: a default would let a new call site silently report as
+     * "signer write", which is exactly the ambiguity this replaces — a wedged
+     * publish followed by an update would name neither.
+     */
+    writeLabel: string,
   ): Promise<T> {
     return this.signerTxSerializer.run(signer.address, () =>
       fn({
@@ -2313,20 +2320,25 @@ export class EVMChainAdapterBase {
   ): T {
     if (preferIdle && !this.idleAwareSelectionDisabled) {
       // GH#953 — soft-prefer a wallet with no in-flight or queued write.
-      // GH#1574 — a lane whose holder is past the stall threshold is NOT idle,
-      // but it is also not healthy: routing new work behind it inherits the
-      // wedge invisibly, which is the failure this issue reports. Treat a
-      // stalled lane as the LEAST preferred rather than merely busy.
-      const stallAfterMs = TX_SERIALIZER_STALL_MULTIPLE * this.receiptTimeoutMs;
-      const isStalled = (address: string): boolean => {
-        const held = this.signerTxSerializer.holdElapsedMs(address);
-        return held !== undefined && held >= stallAfterMs;
+      // GH#1574 — a lane whose holder is wedged is NOT idle, but it is not
+      // healthy either: routing new work behind it inherits the wedge
+      // invisibly, which is the failure that issue reports. Rank the
+      // serializer's OWN health verdict rather than reading raw timings and
+      // re-deriving the threshold here — two copies of that policy would
+      // drift, and diagnostics could call a lane stalled while selection
+      // still called it healthy.
+      const rank = (address: string): number => {
+        const state = this.signerTxSerializer.state(address);
+        return state === 'idle' ? 0 : state === 'busy' ? 1 : 2;
       };
-      const idle = fundableIdx.find((index) =>
-        !this.signerTxSerializer.isActive(candidates[index].address));
-      if (idle !== undefined) return candidates[idle];
-      const notStalled = fundableIdx.find((index) => !isStalled(candidates[index].address));
-      if (notStalled !== undefined) return candidates[notStalled];
+      let best: number | undefined;
+      let bestRank = Number.POSITIVE_INFINITY;
+      for (const index of fundableIdx) {
+        const r = rank(candidates[index].address);
+        if (r < bestRank) { bestRank = r; best = index; }
+        if (bestRank === 0) break;
+      }
+      if (best !== undefined) return candidates[best];
     }
     return candidates[fundableIdx[0]];
   }

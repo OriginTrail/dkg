@@ -16,43 +16,50 @@
  * while preserving cross-wallet concurrency.
  *
  * OBSERVABILITY (GH#1574). Acquisition used to be structurally invisible: the
- * wait for a predecessor was a bare promise-chain link with no timer, no
- * counter and no log. A queued caller's `fn` was simply never invoked, so none
- * of the downstream bounds ever armed — populate, broadcast and receipt
- * deadlines all apply AFTER acquisition. Three mainnet publishes logged
- * "Submitting V10 on-chain publish tx" and then produced nothing for two
- * hours, with acquisition the only unbounded zero-diagnostic segment in the
- * path. This class now reports long waits and long holds; it deliberately does
- * NOT impose an acquisition timeout — see the note on `run`.
+ * wait for a predecessor was a bare promise-chain link with no timer, counter
+ * or log. A queued caller's `fn` was simply never invoked, so none of the
+ * downstream bounds ever armed — populate, broadcast and receipt deadlines all
+ * apply AFTER acquisition. Three mainnet publishes logged "Submitting V10
+ * on-chain publish tx" and then produced nothing for two hours, with
+ * acquisition the only unbounded zero-diagnostic segment in the path.
+ *
+ * Each lane owns ONE observer that reports a bounded snapshot: who holds it,
+ * how long, how deep the queue is, and how long the oldest waiter has waited.
+ * Deliberately not one timer per queued call — a lane with a wedged holder and
+ * 100 queued publishes would then create 101 timers and emit 101 lines per
+ * cadence to describe a single unhealthy lane.
  */
 
-/** Observation emitted while a caller waits for, or holds, a lane. */
+/** Health of a single lane, as the serializer defines it. */
+export type LaneState = 'idle' | 'busy' | 'stalled';
+
+/** One bounded snapshot of a lane that has been busy long enough to report. */
 export interface KeyedSerializerObservation {
-  kind: 'wait' | 'hold';
   key: string;
-  /** Caller-supplied description of the operation. */
-  label: string;
-  /** Milliseconds spent waiting (kind='wait') or holding (kind='hold'). */
-  elapsedMs: number;
-  /** Queued operations ahead of this caller at submission (kind='wait'). */
-  positionsAhead: number;
-  /** Total queued+running operations on this key right now. */
+  /** Queued + running operations. */
   depth: number;
-  /** The operation currently holding the lane, when known (kind='wait'). */
-  holderLabel?: string;
-  /** True once elapsed passes the stall threshold — a wedge, not queueing. */
+  /** Operations queued behind the holder. */
+  waiting: number;
+  /** The operation currently holding the lane. */
+  holderLabel: string;
+  /** How long the holder has held it. */
+  holdElapsedMs: number;
+  /** The longest-waiting queued operation, when there is one. */
+  oldestWaiterLabel?: string;
+  oldestWaiterMs?: number;
+  /** True once the hold passes the stall threshold — a wedge, not queueing. */
   stalled: boolean;
 }
 
 export interface KeyedSerializerOptions {
-  /** Emit the first observation after this long. */
+  /** Delay before the FIRST observation for a lane. */
   observeAfterMs?: number;
-  /** Repeat cadence after the first observation. */
+  /** Cadence of subsequent observations. Distinct from the initial delay. */
   observeIntervalMs?: number;
   /**
-   * Beyond this, a wait or hold is reported as stalled rather than queued.
-   * Callers should derive it from their own in-lane bounds — the critical
-   * section legitimately contains a full transaction round-trip.
+   * Beyond this hold duration a lane is `stalled` rather than `busy`. Callers
+   * should derive it from their own in-lane bounds — the critical section
+   * legitimately contains a full transaction round-trip.
    */
   stallAfterMs?: number;
   now?: () => number;
@@ -63,13 +70,21 @@ const DEFAULT_OBSERVE_AFTER_MS = 30_000;
 const DEFAULT_OBSERVE_INTERVAL_MS = 60_000;
 const DEFAULT_STALL_AFTER_MS = 1_200_000;
 
+interface Waiter {
+  label: string;
+  queuedAt: number;
+}
+
 interface Lane {
   tail: Promise<void>;
   /** Queued + running operations. Load-bearing: see `isActive`. */
   depth: number;
   holder?: { label: string; startedAt: number };
-  /** At most one holder, so at most one hold observer. */
-  holdTimer?: ReturnType<typeof setInterval>;
+  /** Insertion-ordered, so the first entry is the longest-waiting. */
+  waiters: Set<Waiter>;
+  /** Exactly one observer per lane, whatever the queue depth. */
+  firstTimer?: ReturnType<typeof setTimeout>;
+  repeatTimer?: ReturnType<typeof setInterval>;
 }
 
 export class KeyedSerializer {
@@ -92,85 +107,43 @@ export class KeyedSerializer {
    * Run `fn` after every previously-submitted operation for `key` has
    * settled. Returns `fn`'s result (or rejection) verbatim.
    *
+   * `label` names the operation in diagnostics — pass the caller's own
+   * operation name so a report can say WHAT is holding the lane.
+   *
    * NO ACQUISITION TIMEOUT, deliberately. The critical section legitimately
-   * contains a full transaction round-trip — `ensureV10ApproveTrac` runs
-   * INSIDE the lane and is bounded by the adapter's receipt deadline (600s by
-   * default), and the forced-reapprove path can do that twice — so a healthy
-   * publish can hold a lane for ten to twenty minutes. A timeout short enough
-   * to catch a wedge would abort legitimate work; one long enough to be safe
-   * would not catch anything the operator has not already noticed. Reporting
-   * the wait is what turns a silent two-hour wedge into something diagnosable,
-   * which is what the issue actually asks for.
+   * contains a full transaction round-trip — the adapter's TRAC approval runs
+   * INSIDE the lane bounded by its receipt deadline, and the forced-reapprove
+   * path can do that twice — so a healthy publish can hold a lane ten to
+   * twenty minutes. A timeout short enough to catch a wedge would abort
+   * legitimate work; one long enough to be safe would not catch anything an
+   * operator had not already noticed. Worse, `tail.then(fn, fn)` has `fn`
+   * ALREADY chained, so rejecting the outer promise on a timer would leave
+   * `fn` to run when the predecessor settles — sending a transaction for an
+   * operation the caller gave up on and very likely retried elsewhere.
+   * Reporting the wait is what turns a silent wedge into something
+   * diagnosable, which is what GH#1574 asks for.
    */
   run<T>(key: string, fn: () => Promise<T>, label = 'write'): Promise<T> {
     let lane = this.lanes.get(key);
     if (!lane) {
-      lane = { tail: Promise.resolve(), depth: 0 };
+      lane = { tail: Promise.resolve(), depth: 0, waiters: new Set() };
       this.lanes.set(key, lane);
     }
     const currentLane = lane;
 
-    const queuedAt = this.now();
     currentLane.depth += 1;
-    const positionsAhead = currentLane.depth - 1;
-
-    // The wait observer is CALL-SCOPED, never stored on the lane. Several
-    // callers can be waiting at once, so a single slot on `Lane` would be
-    // overwritten by each new arrival — leaking the previous timer and, at
-    // depth >= 3, emitting false stall reports on a healthy lane.
-    let waitTimer: ReturnType<typeof setInterval> | undefined;
-    const clearWaitObserver = (): void => {
-      if (waitTimer !== undefined) {
-        clearInterval(waitTimer);
-        waitTimer = undefined;
-      }
-    };
-    if (positionsAhead > 0) {
-      waitTimer = setInterval(() => {
-        const elapsedMs = this.now() - queuedAt;
-        if (elapsedMs < this.observeAfterMs) return;
-        this.onObserve({
-          kind: 'wait',
-          key,
-          label,
-          elapsedMs,
-          positionsAhead,
-          depth: currentLane.depth,
-          holderLabel: currentLane.holder?.label,
-          stalled: elapsedMs >= this.stallAfterMs,
-        });
-      }, Math.min(this.observeAfterMs, this.observeIntervalMs));
-      // Never hold the process open for a diagnostic.
-      waitTimer.unref?.();
-    }
+    const waiter: Waiter = { label, queuedAt: this.now() };
+    currentLane.waiters.add(waiter);
+    this.ensureObserver(key, currentLane);
 
     const wrapped = async (): Promise<T> => {
-      // FIRST statement, synchronous, before any await: a caller that has
-      // acquired must never emit a "waiting" line.
-      clearWaitObserver();
-      const startedAt = this.now();
-      currentLane.holder = { label, startedAt };
-      currentLane.holdTimer = setInterval(() => {
-        const elapsedMs = this.now() - startedAt;
-        if (elapsedMs < this.observeAfterMs) return;
-        this.onObserve({
-          kind: 'hold',
-          key,
-          label,
-          elapsedMs,
-          positionsAhead: 0,
-          depth: currentLane.depth,
-          stalled: elapsedMs >= this.stallAfterMs,
-        });
-      }, Math.min(this.observeAfterMs, this.observeIntervalMs));
-      currentLane.holdTimer.unref?.();
+      // Synchronous, before any await: a caller that has acquired must never
+      // be counted among the waiters.
+      currentLane.waiters.delete(waiter);
+      currentLane.holder = { label, startedAt: this.now() };
       try {
         return await fn();
       } finally {
-        if (currentLane.holdTimer !== undefined) {
-          clearInterval(currentLane.holdTimer);
-          currentLane.holdTimer = undefined;
-        }
         currentLane.holder = undefined;
         currentLane.depth -= 1;
       }
@@ -190,11 +163,7 @@ export class KeyedSerializer {
     void tail.then(() => {
       const cur = this.lanes.get(key);
       if (cur === currentLane && cur.tail === tail) {
-        clearWaitObserver();
-        if (cur.holdTimer !== undefined) {
-          clearInterval(cur.holdTimer);
-          cur.holdTimer = undefined;
-        }
+        this.clearObserver(cur);
         this.lanes.delete(key);
       }
     });
@@ -207,7 +176,7 @@ export class KeyedSerializer {
    * LOAD-BEARING, not diagnostic: the adapter's fundable-signer selection uses
    * it to soft-prefer an idle wallet (GH#953). If a lane entry leaked, every
    * wallet would read busy forever and the idle bias would silently disappear
-   * — making the wedge this class now reports MORE likely.
+   * — making the wedge this class reports MORE likely.
    */
   isActive(key: string): boolean {
     return this.lanes.has(key);
@@ -224,24 +193,90 @@ export class KeyedSerializer {
   }
 
   /**
-   * How long the current holder of `key` has held it, or `undefined` when the
-   * lane is idle or merely queued. Lets callers distinguish "busy" from
-   * "wedged" without reaching into internals.
+   * Lane health, as ONE definition owned here.
+   *
+   * The adapter ranks this when choosing a wallet rather than reading raw
+   * timings and re-deriving the threshold — two copies of the policy would
+   * drift, and diagnostics could then call a lane stalled while wallet
+   * selection still called it healthy.
    */
+  state(key: string): LaneState {
+    const lane = this.lanes.get(key);
+    if (!lane) return 'idle';
+    const holder = lane.holder;
+    if (holder && this.now() - holder.startedAt >= this.stallAfterMs) return 'stalled';
+    return 'busy';
+  }
+
+  /** True when `key`'s holder has held past the stall threshold. */
+  isStalled(key: string): boolean {
+    return this.state(key) === 'stalled';
+  }
+
+  /** How long the current holder of `key` has held it, if any. */
   holdElapsedMs(key: string): number | undefined {
     const holder = this.lanes.get(key)?.holder;
     return holder ? this.now() - holder.startedAt : undefined;
   }
+
+  /**
+   * Arm the lane's single observer: one shot after `observeAfterMs`, then
+   * every `observeIntervalMs`. Keeping the initial delay and the repeat
+   * cadence distinct matters — reusing the smaller of the two for a repeating
+   * timer makes a long wedge log twice as often as configured.
+   */
+  private ensureObserver(key: string, lane: Lane): void {
+    if (lane.firstTimer !== undefined || lane.repeatTimer !== undefined) return;
+    lane.firstTimer = setTimeout(() => {
+      lane.firstTimer = undefined;
+      this.emit(key, lane);
+      lane.repeatTimer = setInterval(() => this.emit(key, lane), this.observeIntervalMs);
+      lane.repeatTimer.unref?.();
+    }, this.observeAfterMs);
+    // Never hold the process open for a diagnostic.
+    lane.firstTimer.unref?.();
+  }
+
+  private clearObserver(lane: Lane): void {
+    if (lane.firstTimer !== undefined) {
+      clearTimeout(lane.firstTimer);
+      lane.firstTimer = undefined;
+    }
+    if (lane.repeatTimer !== undefined) {
+      clearInterval(lane.repeatTimer);
+      lane.repeatTimer = undefined;
+    }
+  }
+
+  private emit(key: string, lane: Lane): void {
+    const holder = lane.holder;
+    // Nothing holds the lane — a handover in progress is not worth reporting.
+    if (!holder) return;
+    const oldest = lane.waiters.values().next().value as Waiter | undefined;
+    const holdElapsedMs = this.now() - holder.startedAt;
+    this.onObserve({
+      key,
+      depth: lane.depth,
+      waiting: lane.waiters.size,
+      holderLabel: holder.label,
+      holdElapsedMs,
+      oldestWaiterLabel: oldest?.label,
+      oldestWaiterMs: oldest ? this.now() - oldest.queuedAt : undefined,
+      stalled: holdElapsedMs >= this.stallAfterMs,
+    });
+  }
 }
 
 function defaultObserve(o: KeyedSerializerObservation): void {
-  const where = o.kind === 'wait'
-    ? `waiting ${Math.round(o.elapsedMs / 1000)}s behind ${o.positionsAhead} operation(s)` +
-      (o.holderLabel ? ` (holder: ${o.holderLabel})` : '')
-    : `has held the lane ${Math.round(o.elapsedMs / 1000)}s`;
+  const waiting = o.waiting > 0
+    ? ` ${o.waiting} operation(s) queued behind it` +
+      (o.oldestWaiterLabel
+        ? `, longest ${o.oldestWaiterLabel} waiting ${Math.round((o.oldestWaiterMs ?? 0) / 1000)}s`
+        : '')
+    : ' nothing queued behind it';
   // `console.warn` is the logging convention in this package.
   console.warn(
-    `[chain] tx serializer${o.stalled ? ' STALL' : ''}: ${o.label} on ${o.key} ${where}; ` +
-      `lane depth ${o.depth}.`,
+    `[chain] tx serializer${o.stalled ? ' STALL' : ''}: ${o.holderLabel} has held the lane for ` +
+      `${o.key} ${Math.round(o.holdElapsedMs / 1000)}s;${waiting}.`,
   );
 }

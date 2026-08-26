@@ -4742,6 +4742,48 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       } finally { releaseA(); releaseB(); }
     });
 
+    // GH#1574 — when EVERY funded wallet is busy, the old rule fell through to
+    // the round-robin head. If that head's lane is WEDGED, the new write
+    // inherits the wedge invisibly — the exact failure the issue reports.
+    // A stalled lane is now ranked below a merely-busy one.
+    it('prefers a busy wallet over one whose lane has stalled', async () => {
+      const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      // Drive the serializer's own clock so one lane can be aged past the
+      // derived stall threshold (2 x receiptTimeoutMs) while the other is not.
+      let clock = 0;
+      const stallAfterMs = 2 * (a as any).receiptTimeoutMs;
+      const Ctor = (a as any).signerTxSerializer.constructor;
+      (a as any).signerTxSerializer = new Ctor({
+        stallAfterMs, now: () => clock, onObserve: () => {},
+      });
+
+      let releaseA!: () => void; let releaseB!: () => void;
+      const gA = new Promise<void>((r) => { releaseA = r; });
+      const gB = new Promise<void>((r) => { releaseB = r; });
+
+      // A is the round-robin head, and it wedges FIRST.
+      void (a as any).signerTxSerializer.run(walletA.address, () => gA, 'wedged publish');
+      await Promise.resolve(); await Promise.resolve();
+
+      try {
+        // Age A past the threshold BEFORE B ever starts, so only A is stalled.
+        clock += stallAfterMs;
+        void (a as any).signerTxSerializer.run(walletB.address, () => gB, 'healthy publish');
+        await Promise.resolve(); await Promise.resolve();
+
+        expect((a as any).signerTxSerializer.state(walletA.address)).toBe('stalled');
+        expect((a as any).signerTxSerializer.state(walletB.address)).toBe('busy');
+
+        // Neither is idle, so the old rule would return the head (A) and
+        // queue the new write behind the wedge. It must pick B.
+        const chosen = await (a as any).selectSigner({
+          txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true,
+        });
+        expect(chosen.address).toBe(walletB.address);
+      } finally { releaseA(); releaseB(); }
+    });
+
     it('native-only (RS) probes never poison the cached TRAC balance a publish relies on', async () => {
       const { a, walletA, walletB, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
       registerPool(a);
