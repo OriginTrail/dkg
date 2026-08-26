@@ -71,6 +71,8 @@ export interface ExactAssetFetchEvidence {
   kaId: bigint;
   batchId: bigint;
   onChainCgId: string;
+  /** Coherent chain rootCount; this is the exact current assertion version. */
+  assertionVersion: bigint;
   merkleRoot: Uint8Array;
   authorAddress: string;
   publisherAddress: string;
@@ -241,6 +243,7 @@ async function resolveEvidence(
     // Keep this identity explicit so reconciliation never invents it later.
     batchId: kaId,
     onChainCgId,
+    assertionVersion: snapshot.rootCount,
     merkleRoot: bytes32FromHex(snapshot.latestRoot, ual),
     authorAddress: snapshot.latestAuthor,
     publisherAddress: snapshot.latestPublisher,
@@ -344,10 +347,13 @@ export async function runExactAssetFetch(
         `Exact asset fetch from ${peerId} failed: `
           + `${error instanceof Error ? error.message : String(error)}`,
       );
-      continue;
     }
     requireCurrent(deps);
 
+    // A peer fetch is not transactional. It can persist a strict prefix before
+    // it rejects, so inspect durable local state after every started attempt.
+    // Retain the rejection only as a diagnostic and continue failover with the
+    // exact unresolved suffix.
     const nextRemaining = new Map<string, ExactAssetFetchEvidence>();
     for (const item of remaining.values()) {
       requireCurrent(deps);

@@ -10,6 +10,7 @@ import { verifyExactGraphContent } from './exact-graph-content-verifier.js';
 export interface ConfirmedGraphScopedVmResolutionInput {
   contextGraphId: string;
   ual: string;
+  assertionVersion?: bigint;
   merkleRoot: Uint8Array;
   kaId: bigint;
   batchId: bigint;
@@ -68,6 +69,8 @@ export async function resolveConfirmedGraphScopedVm(
     scope.ual !== input.ual
     || packedKaId !== input.kaId
     || envelope.batchId !== input.batchId
+    || (input.assertionVersion !== undefined
+      && BigInt(envelope.assertionVersion) !== input.assertionVersion)
     || !equalBytes(envelope.merkleRoot, input.merkleRoot)
     || input.subGraphName !== envelope.subGraphName
   ) {

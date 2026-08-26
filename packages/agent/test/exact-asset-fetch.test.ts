@@ -143,6 +143,7 @@ describe('exact Context Graph asset fetch', () => {
     );
     expect(inspect).toHaveBeenCalledTimes(3);
     expect(inspect.mock.calls[0]?.[0]).toMatchObject({
+      assertionVersion: 1n,
       merkleRoot: new Uint8Array(32).fill(7),
       authorAddress: '0x00000000000000000000000000000000000000a1',
       publisherAddress: '0x00000000000000000000000000000000000000b1',

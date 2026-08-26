@@ -347,6 +347,8 @@ export interface ChainReconciledKCInput {
   contextGraphId: string;
   onChainCgId: string;
   ual: string;
+  /** Exact current chain rootCount when the caller has one coherent snapshot. */
+  assertionVersion?: bigint;
   merkleRoot: Uint8Array;
   publisherAddress: string;
   kaId: bigint;
@@ -1406,6 +1408,7 @@ export class FinalizationHandler {
   private async reconcileConfirmedGraphScopedVmWithoutWorkspaceHead(input: {
     contextGraphId: string;
     ual: string;
+    assertionVersion?: bigint;
     merkleRoot: Uint8Array;
     kaId: bigint;
     batchId: bigint;
@@ -1415,6 +1418,9 @@ export class FinalizationHandler {
     const resolution = await resolveConfirmedGraphScopedVm(this.store, {
       contextGraphId: input.contextGraphId,
       ual: input.ual,
+      ...(input.assertionVersion === undefined
+        ? {}
+        : { assertionVersion: input.assertionVersion }),
       merkleRoot: input.merkleRoot,
       kaId: input.kaId,
       batchId: input.batchId,
@@ -1524,6 +1530,7 @@ export class FinalizationHandler {
     contextGraphId: string;
     onChainCgId?: string;
     ual: string;
+    assertionVersion?: bigint;
     merkleRoot: Uint8Array;
     publisherAddress: string;
     kaId: bigint;
@@ -1544,6 +1551,7 @@ export class FinalizationHandler {
       contextGraphId,
       onChainCgId,
       ual,
+      assertionVersion,
       merkleRoot,
       publisherAddress,
       kaId,
@@ -1589,6 +1597,7 @@ export class FinalizationHandler {
         return (await this.reconcileConfirmedGraphScopedVmWithoutWorkspaceHead({
           contextGraphId,
           ual,
+          assertionVersion,
           merkleRoot,
           kaId,
           batchId,
@@ -1603,6 +1612,7 @@ export class FinalizationHandler {
       return this.reconcileConfirmedGraphScopedVmWithoutWorkspaceHead({
         contextGraphId,
         ual,
+        assertionVersion,
         merkleRoot,
         kaId,
         batchId,
@@ -1647,10 +1657,16 @@ export class FinalizationHandler {
       && BigInt(workspaceHead.assertionVersion)
         > BigInt(trustedAssertionEvidence.assertionVersion);
     const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
-    if (scope.ual !== ual || packedKaId !== kaId) {
+    if (
+      scope.ual !== ual
+      || packedKaId !== kaId
+      || (assertionVersion !== undefined
+        && !sameBigIntLiteral(scope.assertionVersion, assertionVersion))
+    ) {
       this.log.warn(
         ctx,
-        `Chain-reconcile: UAL-derived kaId ${packedKaId} does not match chain kaId ${kaId} for ${ual}`,
+        `Chain-reconcile: local graph-scoped identity or assertion version does not match `
+          + `current chain identity for ${ual}`,
       );
       return 'no-swm';
     }
@@ -3103,12 +3119,9 @@ export class FinalizationHandler {
     const input = resolvedInput;
     const {
       contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
-      kaId, batchId, versionBlock, authorAddress, subGraphName, trustedAssertionEvidence,
+      kaId, batchId, versionBlock, authorAddress, subGraphName,
+      trustedAssertionEvidence, assertionVersion,
     } = input;
-    const ctxGraphId = onChainCgId.length > 0 ? onChainCgId : undefined;
-    const targetMetaGraph = ctxGraphId
-      ? contextGraphMetaUri(contextGraphId, ctxGraphId)
-      : `did:dkg:context-graph:${contextGraphId}/_meta`;
 
     if (!(await this.verifyChainCgBinding(kaId, onChainCgId, ctx))) {
       this.log.info(
@@ -3119,10 +3132,13 @@ export class FinalizationHandler {
     }
 
     const journalReplay = await this.replayMatchingRecoveryEntries(input, ctx);
-    if (journalReplay === 'recovered') {
+    // The recovery index predates exact chain-rootCount evidence. Exact asset
+    // inspection must therefore verify the resulting local assertion version
+    // below instead of treating a same-root replay as sufficient on its own.
+    if (journalReplay === 'recovered' && assertionVersion === undefined) {
       return { outcome: 'already-confirmed', legacyEligible: false, input };
     }
-    if (journalReplay === 'retry-pending') {
+    if (journalReplay === 'retry-pending' && assertionVersion === undefined) {
       return { outcome: 'receipt-revalidation-pending', legacyEligible: false, input };
     }
     if (journalReplay === 'invalidated') {
@@ -3137,6 +3153,7 @@ export class FinalizationHandler {
       contextGraphId,
       onChainCgId,
       ual,
+      assertionVersion,
       merkleRoot,
       publisherAddress,
       kaId,
@@ -3156,15 +3173,6 @@ export class FinalizationHandler {
       );
       return { outcome: 'no-swm', legacyEligible: false, input };
     }
-    if (await this.isAlreadyConfirmed(
-      ual,
-      targetMetaGraph,
-      `did:dkg:context-graph:${contextGraphId}/_meta`,
-    )) {
-      this.log.info(ctx, `Chain-reconcile: legacy ${ual} already confirmed in VM, skipping`);
-      return { outcome: 'already-confirmed', legacyEligible: false, input };
-    }
-
     this.log.info(
       ctx,
       `Chain-reconcile: exact graph-scoped state is absent for ${ual}; legacy scan is not part of the exact operation`,
@@ -3198,6 +3206,21 @@ export class FinalizationHandler {
       kaId, batchId, versionBlock, authorAddress, subGraphName,
     } = exact.input;
     const ctxGraphId = onChainCgId.length > 0 ? onChainCgId : undefined;
+    const targetMetaGraph = ctxGraphId
+      ? contextGraphMetaUri(contextGraphId, ctxGraphId)
+      : `did:dkg:context-graph:${contextGraphId}/_meta`;
+
+    // The ordinary compatibility path may retain the historical confirmed
+    // marker shortcut. Exact RFC-64 fetch cannot use this marker because it
+    // proves neither the current assertion version nor the current chain root.
+    if (await this.isAlreadyConfirmed(
+      ual,
+      targetMetaGraph,
+      `did:dkg:context-graph:${contextGraphId}/_meta`,
+    )) {
+      this.log.info(ctx, `Chain-reconcile: legacy ${ual} already confirmed in VM, skipping`);
+      return 'already-confirmed';
+    }
 
     // Recover the published roots from the legacy local SWM snapshot. This is
     // the only operation that may scan historical workspace operations.
@@ -3223,9 +3246,6 @@ export class FinalizationHandler {
       resolvedSubGraphName,
     );
     const isDualWrite = keepRootCopyOnLabel === true && !!ctxGraphId && !resolvedSubGraphName;
-    const targetMetaGraph = ctxGraphId
-      ? contextGraphMetaUri(contextGraphId, ctxGraphId)
-      : `did:dkg:context-graph:${contextGraphId}/_meta`;
     const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
 
     const outcome = await this.applyVerifiedFinalization({

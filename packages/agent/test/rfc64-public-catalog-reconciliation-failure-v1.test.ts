@@ -2,9 +2,11 @@ import type { Digest32V1 } from '@origintrail-official/dkg-core';
 import { describe, expect, it } from 'vitest';
 
 import { Rfc64PublicCatalogNativeReceiverErrorV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
+import { FinalizedVmCompositionErrorV1 } from '../src/rfc64/finalized-vm-composer-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
   Rfc64PublicCatalogReconciliationFailureRegistryV1,
+  classifyRfc64CatalogReconciliationTerminalReasonV1,
 } from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 
 function digest(index: number): Digest32V1 {
@@ -57,6 +59,145 @@ describe('RFC-64 public catalog terminal failure registry v1', () => {
 
     registry.clear();
     expect(registry.size).toBe(0);
+    expect(registry.currentAttemptFailureSize).toBe(0);
+    expect(registry.currentAttemptTokenSize).toBe(0);
     expect(registry.read(digest(1))).toBeNull();
+  });
+
+  it('releases terminal attempt tokens while bounding retained failure state', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    for (
+      let index = 1;
+      index <= RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1 + 32;
+      index += 1
+    ) {
+      const head = digest(index);
+      const token = registry.beginAttempt(head);
+      registry.record(
+        head,
+        Object.assign(new Error('terminal'), { code: 'terminal-code' }),
+        null,
+        token,
+      );
+      registry.endAttempt(head, token);
+    }
+
+    expect(registry.currentAttemptTokenSize).toBe(0);
+    expect(registry.currentAttemptFailureSize).toBe(
+      RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+    );
+    expect(registry.size).toBe(
+      RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+    );
+  });
+
+  it('bounds active attempt tokens when a lifecycle callback is lost', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    for (
+      let index = 1;
+      index <= RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1 + 32;
+      index += 1
+    ) {
+      registry.beginAttempt(digest(index));
+    }
+    expect(registry.currentAttemptTokenSize).toBe(
+      RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+    );
+  });
+
+  it('retains one stable typed cause code without retaining cause text', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const cause = Object.assign(new Error('private asset details stay local'), {
+      code: 'finalized-vm-composition-incomplete',
+    });
+    registry.record(digest(1), new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-activation',
+      'precommit failed',
+      { cause },
+    ));
+
+    expect(registry.read(digest(1))).toEqual({
+      catalogHeadDigest: digest(1),
+      errorName: 'Rfc64PublicCatalogNativeReceiverErrorV1',
+      errorCode: 'catalog-native-receiver-activation',
+      causeCode: 'finalized-vm-composition-incomplete',
+    });
+  });
+
+  it('keeps immutable diagnostics separate from the current retry result', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const head = digest(1);
+    const firstAttempt = registry.beginAttempt(head);
+    registry.record(
+      head,
+      Object.assign(new Error('first'), { code: 'first-code' }),
+      null,
+      firstAttempt,
+    );
+    expect(registry.readCurrentAttempt(head)).toMatchObject({ errorCode: 'first-code' });
+
+    const secondAttempt = registry.beginAttempt(head);
+    expect(registry.readCurrentAttempt(head)).toBeNull();
+    registry.record(
+      head,
+      Object.assign(new Error('second'), { code: 'second-code' }),
+      null,
+      secondAttempt,
+    );
+
+    expect(registry.read(head)).toMatchObject({ errorCode: 'first-code' });
+    expect(registry.readCurrentAttempt(head)).toMatchObject({
+      terminalReason: null,
+      errorCode: 'second-code',
+    });
+  });
+
+  it('fences stale failure and success callbacks by monotonic attempt token', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const head = digest(1);
+    const older = registry.beginAttempt(head);
+    const newer = registry.beginAttempt(head);
+    expect(newer).toBeGreaterThan(older);
+
+    registry.record(
+      head,
+      Object.assign(new Error('older failure'), { code: 'older-code' }),
+      null,
+      older,
+    );
+    expect(registry.readCurrentAttempt(head)).toBeNull();
+
+    registry.record(
+      head,
+      Object.assign(new Error('newer failure'), { code: 'newer-code' }),
+      null,
+      newer,
+    );
+    expect(registry.readCurrentAttempt(head)).toMatchObject({ errorCode: 'newer-code' });
+    registry.completeAttempt(head, older);
+    expect(registry.readCurrentAttempt(head)).toMatchObject({ errorCode: 'newer-code' });
+    registry.completeAttempt(head, newer);
+    expect(registry.readCurrentAttempt(head)).toBeNull();
+  });
+
+  it('translates only the exact typed private VM incomplete failure', () => {
+    const incomplete = new FinalizedVmCompositionErrorV1(
+      'finalized-vm-composition-incomplete',
+      'private details are not part of the semantic result',
+    );
+    const wrapped = new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-activation',
+      'precommit failed',
+      { cause: incomplete },
+    );
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(wrapped))
+      .toBe('no-authorized-provider');
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(
+      new Rfc64PublicCatalogNativeReceiverErrorV1(
+        'catalog-native-receiver-activation',
+        'ordinary failure',
+        { cause: new Error('RPC unavailable') },
+      ),
+    )).toBeNull();
   });
 });

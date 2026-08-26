@@ -99,7 +99,7 @@ export async function resolveAndVerifyRfc64FinalizedPolicyInSnapshotV1(
     request.signal,
   );
   request.signal.throwIfAborted();
-  assertAcceptedRfc64FinalizedPublicPolicyV1(
+  assertAcceptedRfc64FinalizedPolicyV1(
     config,
     request.catalogLane,
     request.acceptedPolicy,
@@ -109,7 +109,7 @@ export async function resolveAndVerifyRfc64FinalizedPolicyInSnapshotV1(
 }
 
 /** Single-source policy predicate shared by every finalized RFC-64 consumer. */
-export function assertAcceptedRfc64FinalizedPublicPolicyV1(
+export function assertAcceptedRfc64FinalizedPolicyV1(
   config: Readonly<Rfc64FinalizedPolicyVerifierConfigV1>,
   catalogLane: Readonly<Rfc64FinalizedPolicyVerifierRequestV1['catalogLane']>,
   policy: Readonly<ContextGraphPolicyV1>,
@@ -124,8 +124,7 @@ export function assertAcceptedRfc64FinalizedPublicPolicyV1(
   const sameSourceAnchor = source.kind === 'finalized-chain'
     && source.blockNumber === finalized.blockNumber;
   if (
-    policy.accessPolicy !== 0
-    || policy.networkId !== config.networkId
+    policy.networkId !== config.networkId
     || policy.contextGraphId !== catalogLane.contextGraphId
     || policy.governanceChainId !== config.chainId
     || policy.governanceContractAddress !== config.contextGraphStorageAddress
@@ -143,10 +142,14 @@ export function assertAcceptedRfc64FinalizedPublicPolicyV1(
   ) {
     fail(
       'finalized-policy-verifier-policy',
-      'accepted public policy or cleartext name binding differs from finalized chain truth',
+      'accepted policy or cleartext name binding differs from finalized chain truth',
     );
   }
 }
+
+/** @deprecated Use the policy-neutral finalized-policy predicate. */
+export const assertAcceptedRfc64FinalizedPublicPolicyV1 =
+  assertAcceptedRfc64FinalizedPolicyV1;
 
 function snapshotConfig(
   input: Rfc64FinalizedPolicyVerifierConfigV1,

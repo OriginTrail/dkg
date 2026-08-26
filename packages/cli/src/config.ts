@@ -11,8 +11,11 @@ import type {
   SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
 import {
+  resolveRfc64CatalogActivationsV1,
+  type ResolvedRfc64CatalogActivationConfigV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationConfigV1,
+  type Rfc64CatalogActivationConfigV1,
   type ResolvedRfc64PublicCatalogActivationConfigV1,
   type Rfc64PublicCatalogActivationChainIdentityV1,
   type Rfc64PublicCatalogActivationConfigV1,
@@ -528,6 +531,9 @@ export type ResolvedRfc64PublicCatalogActivationConfig =
   ResolvedRfc64PublicCatalogActivationConfigV1;
 export type Rfc64PublicCatalogActivationChainIdentity =
   Rfc64PublicCatalogActivationChainIdentityV1;
+export type Rfc64CatalogActivationConfig = Rfc64CatalogActivationConfigV1;
+export type ResolvedRfc64CatalogActivationConfig =
+  ResolvedRfc64CatalogActivationConfigV1;
 
 export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
@@ -624,6 +630,13 @@ export interface DkgConfig {
   contextGraphs?: string[];
   /** Opt-in, bounded RFC-64 catalog activation for explicitly selected public CGs. */
   rfc64PublicCatalog?: Rfc64PublicCatalogActivationConfig;
+  /**
+   * Additive, bounded RFC-64 activation for explicitly selected public or
+   * invite-only CGs. Private selections require a manual policy, roster, and
+   * exact peer-to-agent authority map. Release 3 permits up to eight complete
+   * current-roster providers for bounded failover.
+   */
+  rfc64Catalog?: Rfc64CatalogActivationConfig;
   /**
    * Explicitly trusted context graphs that daemon startup may create locally
    * instead of treating as remote subscription targets. Intended for local
@@ -1175,6 +1188,17 @@ export function resolveRfc64PublicCatalogActivation(
     config.rfc64PublicCatalog,
     chainIdentity,
   );
+}
+
+/** Resolve the policy-neutral union and the compatibility public projection. */
+export function resolveRfc64CatalogActivations(
+  config: Pick<DkgConfig, 'rfc64Catalog' | 'rfc64PublicCatalog'>,
+  chainIdentity: Rfc64PublicCatalogActivationChainIdentity,
+) {
+  return resolveRfc64CatalogActivationsV1({
+    catalog: config.rfc64Catalog,
+    publicCatalog: config.rfc64PublicCatalog,
+  }, chainIdentity);
 }
 
 export { resolveRfc64PublicCatalogActivationChainIdentityV1 };

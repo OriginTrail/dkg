@@ -2872,12 +2872,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     contextGraphId: string,
   ): boolean {
     if (!(this.config.syncContextGraphs ?? []).includes(contextGraphId)) return false;
-    return this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies.some(
+    const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+      ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
+      ?? [];
+    return acceptedPolicies.some(
       ({ policyEnvelope }) => (
         policyEnvelope.payload.accessPolicy === 0
         && policyEnvelope.payload.contextGraphId === contextGraphId
       ),
-    ) ?? false;
+    );
   }
 
   isRfc64SelectedVmReconcileTargetAllowed(
@@ -2940,8 +2943,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // intentionally do not become member subscriptions (no gossip fan-out or
       // durable subscription row), but finalized VM must still be reconciled
       // from the canonical on-chain ordinal inventory.
-      for (const { policyEnvelope } of this.config.rfc64PublicCatalogBootstrap
-        ?.acceptedPublicPolicies ?? []) {
+      const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+        ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
+        ?? [];
+      for (const { policyEnvelope } of acceptedPolicies) {
         const localCgId = policyEnvelope.payload.contextGraphId;
         if (
           !eligible.includes(localCgId)
@@ -3240,6 +3245,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           contextGraphId: localCgId,
           onChainCgId: item.onChainCgId,
           ual: item.ual,
+          assertionVersion: item.assertionVersion,
           merkleRoot: item.merkleRoot,
           publisherAddress: item.publisherAddress,
           kaId: item.kaId,
