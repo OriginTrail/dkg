@@ -107,9 +107,11 @@ export function createFinalizedVmStoreMaterializerV1(
       ual: request.candidate.ual,
       merkleRoot: ethers.getBytes(request.candidate.assertionRoot),
       publisherPeerId: 'rfc64-finalized-catalog-v1',
-      // RFC-64 private finalized recovery must never label restored VM data as
-      // public. CG-level reads are authorized from the current accepted roster.
-      accessPolicy: 'ownerOnly',
+      // Preserve the exact accepted policy at the persisted metadata boundary:
+      // private recovery is owner-only, while public recovery remains public.
+      accessPolicy: request.acceptedPolicy.accessPolicy === 0
+        ? 'public'
+        : 'ownerOnly',
       allowedPeers: [],
       timestamp,
       assertionVersion: request.candidate.assertionVersion,

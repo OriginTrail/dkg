@@ -195,7 +195,6 @@ export function createFinalizedVmRuntimeV1(
           finalizedContextGraph,
           inventory,
           placements: request.placements,
-          requireCompleteAuthorSet: request.acceptedPolicy.accessPolicy === 1,
         });
         return Object.freeze({
           finalizedContextGraph,

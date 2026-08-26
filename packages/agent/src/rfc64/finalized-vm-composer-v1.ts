@@ -33,7 +33,6 @@ const COMPOSITION_KEYS = [
   'finalizedContextGraph',
   'inventory',
   'placements',
-  'requireCompleteAuthorSet',
 ] as const;
 const CATALOG_LANE_KEYS = ['contextGraphId', 'subGraphName'] as const;
 const PLACEMENT_KEYS = ['authorship', 'sealBinding'] as const;
@@ -58,8 +57,6 @@ export interface ComposeFinalizedVmSetRequestV1 {
   readonly finalizedContextGraph: FinalizedContextGraphReadV1;
   readonly inventory: FinalizedVmChainInventoryV1;
   readonly placements: readonly FinalizedVmPlacementEvidenceV1[];
-  /** Private Release 2 requires every finalized row in this author lane. */
-  readonly requireCompleteAuthorSet: boolean;
 }
 
 interface ResolvedFinalizedVmPlacementV1 {
@@ -118,12 +115,6 @@ export function composeFinalizedVmSetV1(
     'finalized-vm-composition-input',
   );
   const catalogLane = snapshotCatalogLane(request.catalogLane);
-  if (typeof request.requireCompleteAuthorSet !== 'boolean') {
-    fail(
-      'finalized-vm-composition-input',
-      'requireCompleteAuthorSet must be boolean',
-    );
-  }
   let assertedAtKav10Address: EvmAddressV1;
   let catalogAuthorAddress: EvmAddressV1;
   let inventory: Readonly<FinalizedVmChainInventoryV1>;
@@ -235,7 +226,7 @@ export function composeFinalizedVmSetV1(
     const placement = placementsByKaId.get(candidate.kaId);
     if (placement === undefined) {
       if (
-        request.requireCompleteAuthorSet
+        finalizedContextGraph.accessPolicy === 1
         && candidate.authorAddress === catalogAuthorAddress
       ) {
         fail(
