@@ -10,11 +10,13 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
+  asGraphWriteRevisionSource,
   StoreResponseTooLargeError,
   type QueryOptions,
   type TripleStore,
   type ChangelogReader,
   type ChangeOp,
+  type GraphWriteRevision,
 } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
@@ -234,14 +236,40 @@ export function createResponderGraphListMemo(
   store: TripleStore,
   ttlMs = 10_000,
 ): GraphListMemo {
+  const writeRevisionSource = asGraphWriteRevisionSource(store);
+  type Revision = GraphWriteRevision | string | undefined;
+  const currentRevision = (refreshGeneration: string | undefined): Revision =>
+    writeRevisionSource?.getWriteRevision('') ?? refreshGeneration;
+  const isWriteRevision = (revision: Revision): revision is GraphWriteRevision =>
+    typeof revision === 'object' && revision !== null;
+  const supersedesCompleted = (stored: Revision, current: Revision): boolean => {
+    if (writeRevisionSource) {
+      return !isWriteRevision(stored)
+        || !isWriteRevision(current)
+        || !stored.stable
+        || !current.stable
+        || stored.generation !== current.generation;
+    }
+    // A deep-page read without a session generation joins/uses the current
+    // snapshot; only an explicitly newer responder session supersedes it.
+    return current !== undefined && stored !== current;
+  };
+  const supersedesInflight = (stored: Revision, current: Revision): boolean => {
+    if (writeRevisionSource) {
+      return !isWriteRevision(stored)
+        || !isWriteRevision(current)
+        || stored.generation !== current.generation;
+    }
+    return current !== undefined && stored !== current;
+  };
   let cached: {
     value: readonly string[];
     cachedAt: number;
-    refreshGeneration?: string;
+    revision: Revision;
   } | null = null;
   let inflight: {
     promise: Promise<readonly string[]>;
-    refreshGeneration?: string;
+    revision: Revision;
   } | null = null;
   return {
     async get(options?: {
@@ -252,9 +280,11 @@ export function createResponderGraphListMemo(
       throwIfAborted(options?.signal);
       while (inflight) {
         const pending = inflight;
-        const supersedesPending = options?.refreshGeneration !== undefined &&
-          options.refreshGeneration !== pending.refreshGeneration;
-        if (!supersedesPending) {
+        const revision = currentRevision(options?.refreshGeneration);
+        // Stability controls completed-cache reuse, not single-flight
+        // identity. Concurrent reads at the same unstable generation share
+        // one enumeration; the result is simply discarded for later callers.
+        if (!supersedesInflight(pending.revision, revision)) {
           return [...(await raceAgainstAbort(pending.promise, options?.signal))];
         }
         try {
@@ -264,12 +294,13 @@ export function createResponderGraphListMemo(
         }
       }
       const now = Date.now();
+      const revision = currentRevision(options?.refreshGeneration);
+      if (cached && supersedesCompleted(cached.revision, revision)) cached = null;
       if (
         cached &&
-        options?.refreshGeneration !== undefined &&
-        cached.refreshGeneration !== options.refreshGeneration
-      ) cached = null;
-      if (!options?.refresh && cached && now - cached.cachedAt < ttlMs) return [...cached.value];
+        now - cached.cachedAt < ttlMs &&
+        (!options?.refresh || (writeRevisionSource !== null && isWriteRevision(revision) && revision.stable))
+      ) return [...cached.value];
       // This load is shared by concurrent responders. Do not bind it to the
       // first stream's abort signal; waiters race their own abort locally via
       // raceAgainstAbort/throwIfAborted below.
@@ -279,7 +310,7 @@ export function createResponderGraphListMemo(
           cached = {
             value: sorted,
             cachedAt: Date.now(),
-            refreshGeneration: options?.refreshGeneration,
+            revision,
           };
           return sorted;
         })
@@ -288,7 +319,7 @@ export function createResponderGraphListMemo(
         });
       inflight = {
         promise: load,
-        refreshGeneration: options?.refreshGeneration,
+        revision,
       };
       const graphs = await load;
       throwIfAborted(options?.signal);
