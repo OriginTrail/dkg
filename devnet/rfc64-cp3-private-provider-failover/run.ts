@@ -36,7 +36,7 @@ import { type Gate2AgentChild, type Gate2AgentEvent } from
 import { canonicalDocument, type CanonicalValue } from
   '../rfc64-gate2-multi-asset-completeness/src/canonical.ts';
 import { consumeGate2RuntimeLaunchReceiptV1 } from
-  '../rfc64-runtime-provenance.mts';
+  '../rfc64-gate2-multi-asset-completeness/runtime-provenance.ts';
 import {
   assertGate2HarnessReadyV1,
   assertGate2HarnessSourceStateV1,

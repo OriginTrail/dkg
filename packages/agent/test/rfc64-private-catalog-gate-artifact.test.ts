@@ -9,11 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  assertGate2ExecutedRuntimeMatchesBuildV1,
-  buildGate2ExecutedRuntimeManifestV1,
-  buildGate2RuntimeManifestFromEntriesV1,
-  buildGate2RuntimeManifestV1,
-} from '../../../devnet/rfc64-gate2-multi-asset-completeness/runtime-provenance.js';
+  assertExecutedRuntimeMatchesBuildV1,
+  buildExecutedRuntimeManifestV1,
+  buildRuntimeManifestFromEntriesV1,
+  buildRuntimeManifestV1,
+} from '../../../devnet/rfc64-runtime-provenance.mts';
 
 import {
   Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1,
@@ -36,6 +36,7 @@ import {
 } from '../devnet/rfc64-private-catalog/runtime-provenance.mjs';
 import {
   AgentChild,
+  executeRfc64PrivateReleaseGateV1,
   hasExactMemoryContents,
 } from '../devnet/rfc64-private-catalog/run.mjs';
 import { PROJECTION_DIGEST } from '../devnet/rfc64-private-catalog/fixture.mjs';
@@ -55,8 +56,8 @@ const RUNTIME_FILES = Object.freeze([
 })));
 
 function runtimeProvenance(sourceRevision: string) {
-  const sourceBuild = buildGate2RuntimeManifestFromEntriesV1(sourceRevision, RUNTIME_FILES);
-  const loaded = buildGate2ExecutedRuntimeManifestV1(sourceRevision, RUNTIME_FILES);
+  const sourceBuild = buildRuntimeManifestFromEntriesV1(sourceRevision, RUNTIME_FILES);
+  const loaded = buildExecutedRuntimeManifestV1(sourceRevision, RUNTIME_FILES);
   return buildRfc64PrivateRuntimeProvenanceV1(
     sourceBuild,
     RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.map((id) => ({ id, loaded })),
@@ -86,7 +87,23 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       schema: 'dkg-rfc64-private-runtime-provenance-v1',
       processes: [],
       sourceBuild: null,
-    })).toThrow(/invalid envelope/u);
+    })).toThrow(/source manifest must be an object/u);
+
+    const valid = runtimeProvenance('1'.repeat(40));
+    expect(() => assertRfc64PrivateRuntimeProvenanceV1({
+      ...valid,
+      sourceBuild: {},
+    })).toThrow(/source manifest is missing data field build/u);
+    expect(() => assertRfc64PrivateRuntimeProvenanceV1({
+      ...valid,
+      processes: [{}],
+    })).toThrow(/runtime process 0 is missing data field id/u);
+    expect(() => assertRfc64PrivateRuntimeProvenanceV1({
+      ...valid,
+      processes: valid.processes.map((entry, index) => index === 0
+        ? { ...entry, loaded: {} }
+        : entry),
+    })).toThrow(/loaded manifest is missing data field manifestDigest/u);
   });
 
   it('writes a successful PASS with exact run and source provenance', async () => {
@@ -252,8 +269,8 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
 
   it('assembles all nine shutdown receipts in canonical process order and rejects omissions', () => {
     const sourceRevision = 'f'.repeat(40);
-    const sourceBuild = buildGate2RuntimeManifestFromEntriesV1(sourceRevision, RUNTIME_FILES);
-    const loaded = buildGate2ExecutedRuntimeManifestV1(sourceRevision, RUNTIME_FILES);
+    const sourceBuild = buildRuntimeManifestFromEntriesV1(sourceRevision, RUNTIME_FILES);
+    const loaded = buildExecutedRuntimeManifestV1(sourceRevision, RUNTIME_FILES);
     const collector = createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild);
     for (const id of RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1) {
       collector.record(id, {
@@ -503,7 +520,7 @@ describe('RFC-64 private release gate process and denial evidence', () => {
     const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-provenance-child-'));
     temporaryRoots.push(root);
     const sourceRevision = 'a'.repeat(40);
-    const cleanBuild = buildGate2RuntimeManifestV1(REPO_ROOT, sourceRevision);
+    const cleanBuild = buildRuntimeManifestV1(REPO_ROOT, sourceRevision);
     const child = new AgentChild('production-probe', root, undefined, 'probe', {
       runtimeProvenance: {
         runtimeManifestDigest: cleanBuild.manifestDigest,
@@ -516,7 +533,7 @@ describe('RFC-64 private release gate process and denial evidence', () => {
     const shutdown = await child.stop();
     expect(shutdown.exit).toMatchObject({ code: 0, error: null });
     expect(shutdown.executedRuntimeManifest).toBeDefined();
-    expect(() => assertGate2ExecutedRuntimeMatchesBuildV1(
+    expect(() => assertExecutedRuntimeMatchesBuildV1(
       shutdown.executedRuntimeManifest,
       cleanBuild,
     )).not.toThrow();
@@ -555,6 +572,41 @@ describe('RFC-64 private release gate process and denial evidence', () => {
     expect(exit.signal).toBe('SIGKILL');
     expect(child.exited).toBe(true);
   });
+
+  it('reaps every probe child when readiness never arrives', async () => {
+    const children: AgentChild[] = [];
+    const sourceRevision = 'b'.repeat(40);
+    const startedAt = Date.now();
+
+    await expect(executeRfc64PrivateReleaseGateV1({
+      sourceRevision,
+      runtimeManifest: {
+        manifestDigest: `0x${'1'.repeat(64)}`,
+        sourceCommit: sourceRevision,
+      },
+      probeReadyTimeoutMs: 25,
+      createAgentChild: (...args: ConstructorParameters<typeof AgentChild>) => {
+        const [role, dataDir, manifestPath, mode, options] = args;
+        const child = new AgentChild(role, dataDir, manifestPath, mode, {
+          ...options,
+          agentProcess: join(
+            HERE,
+            'fixtures',
+            'rfc64-private-catalog-hanging-probe-child.mjs',
+          ),
+          sigtermExitTimeoutMs: 25,
+          sigkillExitTimeoutMs: 2_000,
+        });
+        children.push(child);
+        return child;
+      },
+    })).rejects.toThrow(/timed out waiting for ready/u);
+
+    expect(children).toHaveLength(4);
+    await Promise.all(children.map((child) => child.exit));
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(children.every(({ exited }) => exited)).toBe(true);
+  }, 10_000);
 
   it('accepts only stable typed private policy denials', () => {
     const discoveryDenial = new Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1(

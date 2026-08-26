@@ -36,12 +36,12 @@ import {
   roleAgentAddress,
 } from './fixture.mjs';
 import { classifyExpectedPrivateCatalogDenialV1 } from './denial-evidence.mjs';
-import { sealGate2ExecutedRuntimeManifestV1 } from '../../../../devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts';
+import { sealExecutedRuntimeManifestV1 } from '../../../../devnet/rfc64-runtime-load-hook.mts';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
 const DATA_DIR = requiredEnv('DKG_RFC64_PRIVATE_DATA_DIR');
-const RUNTIME_MANIFEST_DIGEST = requiredEnv('DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST');
+const RUNTIME_MANIFEST_DIGEST = requiredEnv('DKG_RFC64_RUNTIME_MANIFEST_DIGEST');
 const MANIFEST_PATH = process.env.DKG_RFC64_PRIVATE_MANIFEST;
 
 let agent;
@@ -405,7 +405,7 @@ async function shutdown(code, requestId) {
   try { await agent?.stop(); } catch { /* best effort */ }
   try { await rpc?.close(); } catch { /* best effort */ }
   await emitAndFlush('stopping', requestId, {
-    executedRuntimeManifest: sealGate2ExecutedRuntimeManifestV1(),
+    executedRuntimeManifest: sealExecutedRuntimeManifestV1(),
   });
   process.exit(code);
 }

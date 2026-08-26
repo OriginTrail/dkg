@@ -1,25 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
 
-import { canonicalize, type CanonicalValue } from './rfc64-gate2-multi-asset-completeness/src/canonical.ts';
+import { canonicalize, type CanonicalValue } from './rfc64-runtime-canonical.mts';
 import { validateFixedRuntimeProcessEvidenceV1 } from './rfc64-runtime-process-evidence.mts';
 
-export const GATE2_RUNTIME_MANIFEST_SCHEMA_VERSION =
-  'dkg-rfc64-gate2-runtime-manifest-v1' as const;
-export const GATE2_RUNTIME_MANIFEST_DIGEST_DOMAIN =
-  'dkg-rfc64-gate2-runtime-manifest-v1\n' as const;
-export const GATE2_EXECUTED_RUNTIME_MANIFEST_SCHEMA_VERSION =
-  'dkg-rfc64-gate2-executed-runtime-manifest-v1' as const;
-export const GATE2_EXECUTED_RUNTIME_MANIFEST_DIGEST_DOMAIN =
-  'dkg-rfc64-gate2-executed-runtime-manifest-v1\n' as const;
-export const GATE2_RUNTIME_PROVENANCE_SCHEMA_VERSION =
-  'dkg-rfc64-gate2-runtime-provenance-v1' as const;
-export const GATE2_RUNTIME_PROVENANCE_DIGEST_DOMAIN =
-  'dkg-rfc64-gate2-runtime-provenance-v1\n' as const;
+export const RUNTIME_MANIFEST_SCHEMA_VERSION =
+  'dkg-rfc64-runtime-manifest-v1' as const;
+export const RUNTIME_MANIFEST_DIGEST_DOMAIN =
+  'dkg-rfc64-runtime-manifest-v1\n' as const;
+export const EXECUTED_RUNTIME_MANIFEST_SCHEMA_VERSION =
+  'dkg-rfc64-executed-runtime-manifest-v1' as const;
+export const EXECUTED_RUNTIME_MANIFEST_DIGEST_DOMAIN =
+  'dkg-rfc64-executed-runtime-manifest-v1\n' as const;
 
-export const GATE2_RUNTIME_PACKAGE_CLOSURE = Object.freeze([
+export const RUNTIME_PACKAGE_CLOSURE = Object.freeze([
   Object.freeze({ name: '@origintrail-official/dkg-agent', path: 'packages/agent/dist' }),
   Object.freeze({ name: '@origintrail-official/dkg-chain', path: 'packages/chain/dist' }),
   Object.freeze({ name: '@origintrail-official/dkg-core', path: 'packages/core/dist' }),
@@ -33,7 +31,7 @@ export const GATE2_RUNTIME_PACKAGE_CLOSURE = Object.freeze([
   Object.freeze({ name: '@origintrail-official/dkg-storage', path: 'packages/storage/dist' }),
 ] as const);
 
-export const GATE2_RUNTIME_CLEAN_ARGS = Object.freeze([
+export const RUNTIME_CLEAN_ARGS = Object.freeze([
   '-r',
   '--filter',
   '@origintrail-official/dkg-agent...',
@@ -43,7 +41,7 @@ export const GATE2_RUNTIME_CLEAN_ARGS = Object.freeze([
   'clean',
 ] as const);
 
-export const GATE2_RUNTIME_BUILD_ARGS = Object.freeze([
+export const RUNTIME_BUILD_ARGS = Object.freeze([
   '-r',
   '--filter',
   '@origintrail-official/dkg-agent...',
@@ -53,6 +51,37 @@ export const GATE2_RUNTIME_BUILD_ARGS = Object.freeze([
   'build',
 ] as const);
 
+export interface RuntimeEvidenceProfileV1 {
+  readonly buildArgs: readonly string[];
+  readonly cleanArgs: readonly string[];
+  readonly executedManifestDigestDomain: string;
+  readonly executedManifestSchemaVersion: string;
+  readonly mandatoryEntrypoints: readonly string[];
+  readonly manifestDigestDomain: string;
+  readonly manifestSchemaVersion: string;
+  readonly packageClosure: readonly {
+    readonly name: string;
+    readonly path: string;
+  }[];
+}
+
+export const RFC64_RUNTIME_EVIDENCE_PROFILE_V1: Readonly<RuntimeEvidenceProfileV1> =
+  Object.freeze({
+    buildArgs: RUNTIME_BUILD_ARGS,
+    cleanArgs: RUNTIME_CLEAN_ARGS,
+    executedManifestDigestDomain: EXECUTED_RUNTIME_MANIFEST_DIGEST_DOMAIN,
+    executedManifestSchemaVersion: EXECUTED_RUNTIME_MANIFEST_SCHEMA_VERSION,
+    mandatoryEntrypoints: Object.freeze([
+      'packages/agent/dist/index.js',
+      'packages/chain/dist/index.js',
+      'packages/core/dist/index.js',
+      'packages/storage/dist/index.js',
+    ]),
+    manifestDigestDomain: RUNTIME_MANIFEST_DIGEST_DOMAIN,
+    manifestSchemaVersion: RUNTIME_MANIFEST_SCHEMA_VERSION,
+    packageClosure: RUNTIME_PACKAGE_CLOSURE,
+  });
+
 const SOURCE_COMMIT = /^[0-9a-f]{40,64}$/u;
 const DIGEST = /^0x[0-9a-f]{64}$/u;
 const RUNTIME_FILE = /\.(?:js|json|node|wasm)$/u;
@@ -60,13 +89,13 @@ const MAX_RUNTIME_FILES = 4_096;
 const MAX_RUNTIME_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_RUNTIME_CLOSURE_BYTES = 512 * 1024 * 1024;
 
-export interface Gate2RuntimeFileEvidenceV1 {
+export interface RuntimeFileEvidenceV1 {
   readonly byteLength: number;
   readonly path: string;
   readonly sha256: string;
 }
 
-export interface Gate2RuntimeManifestV1 {
+export interface RuntimeManifestV1 {
   readonly build: {
     readonly buildArgs: readonly string[];
     readonly cleanArgs: readonly string[];
@@ -77,43 +106,21 @@ export interface Gate2RuntimeManifestV1 {
     readonly name: string;
     readonly path: string;
   }[];
-  readonly runtimeFiles: readonly Gate2RuntimeFileEvidenceV1[];
-  readonly schemaVersion: typeof GATE2_RUNTIME_MANIFEST_SCHEMA_VERSION;
+  readonly runtimeFiles: readonly RuntimeFileEvidenceV1[];
+  readonly schemaVersion: string;
   readonly sourceCommit: string;
 }
 
-export interface Gate2RuntimeLaunchReceiptV1 {
-  readonly manifest: Readonly<Gate2RuntimeManifestV1>;
-  readonly sourceCommit: string;
-}
-
-export interface Gate2ExecutedRuntimeManifestV1 {
+export interface ExecutedRuntimeManifestV1 {
   readonly manifestDigest: string;
-  readonly runtimeFiles: readonly Gate2RuntimeFileEvidenceV1[];
-  readonly schemaVersion: typeof GATE2_EXECUTED_RUNTIME_MANIFEST_SCHEMA_VERSION;
+  readonly runtimeFiles: readonly RuntimeFileEvidenceV1[];
+  readonly schemaVersion: string;
   readonly sourceCommit: string;
-}
-
-export type Gate2RuntimeProcessIdV1 =
-  | 'author'
-  | 'receiverBeforeCrash'
-  | 'receiverAfterRestart';
-
-export interface Gate2RuntimeProcessEvidenceV1 {
-  readonly id: Gate2RuntimeProcessIdV1;
-  readonly loaded: Gate2ExecutedRuntimeManifestV1;
-}
-
-export interface Gate2RuntimeProvenanceV1 {
-  readonly processes: readonly Gate2RuntimeProcessEvidenceV1[];
-  readonly provenanceDigest: string;
-  readonly schemaVersion: typeof GATE2_RUNTIME_PROVENANCE_SCHEMA_VERSION;
-  readonly sourceBuild: Gate2RuntimeManifestV1;
 }
 
 export interface RuntimeProcessEvidenceV1<ProcessId extends string> {
   readonly id: ProcessId;
-  readonly loaded: Gate2ExecutedRuntimeManifestV1;
+  readonly loaded: ExecutedRuntimeManifestV1;
 }
 
 export interface RuntimeProcessProvenanceV1<
@@ -122,20 +129,18 @@ export interface RuntimeProcessProvenanceV1<
 > {
   readonly processes: readonly RuntimeProcessEvidenceV1<ProcessId>[];
   readonly schema: Schema;
-  readonly sourceBuild: Gate2RuntimeManifestV1;
+  readonly sourceBuild: RuntimeManifestV1;
 }
 
-/** Scenario-neutral names for consumers outside the Gate 2 adapter. */
-export type RuntimeManifestV1 = Gate2RuntimeManifestV1;
-export type ExecutedRuntimeManifestV1 = Gate2ExecutedRuntimeManifestV1;
-export const RFC64_RUNTIME_PACKAGE_CLOSURE_V1 = GATE2_RUNTIME_PACKAGE_CLOSURE;
-
-let pendingLaunchReceipt: Readonly<Gate2RuntimeLaunchReceiptV1> | undefined;
+export const RFC64_RUNTIME_PACKAGE_CLOSURE_V1 = RUNTIME_PACKAGE_CLOSURE;
 
 /** Remove ignored outputs and rebuild the complete workspace runtime dependency closure. */
-export function runGate2CleanRuntimeBuildV1(repoRootInput: string): void {
+export function runCleanRuntimeBuildV1(
+  repoRootInput: string,
+  profile: RuntimeEvidenceProfileV1 = RFC64_RUNTIME_EVIDENCE_PROFILE_V1,
+): void {
   const repoRoot = resolve(repoRootInput);
-  for (const args of [GATE2_RUNTIME_CLEAN_ARGS, GATE2_RUNTIME_BUILD_ARGS]) {
+  for (const args of [profile.cleanArgs, profile.buildArgs]) {
     execFileSync('pnpm', [...args], {
       cwd: repoRoot,
       env: process.env,
@@ -144,28 +149,26 @@ export function runGate2CleanRuntimeBuildV1(repoRootInput: string): void {
   }
 }
 
-export const runCleanRuntimeBuildV1 = runGate2CleanRuntimeBuildV1;
-
 /** Hash every executable/data artifact in the freshly built workspace package closure. */
-export function buildGate2RuntimeManifestV1(
+export function buildRuntimeManifestV1(
   repoRootInput: string,
   sourceCommit: string,
-): Readonly<Gate2RuntimeManifestV1> {
+  profile: RuntimeEvidenceProfileV1 = RFC64_RUNTIME_EVIDENCE_PROFILE_V1,
+): Readonly<RuntimeManifestV1> {
   const repoRoot = resolve(repoRootInput);
-  const entries: Gate2RuntimeFileEvidenceV1[] = [];
-  for (const pkg of GATE2_RUNTIME_PACKAGE_CLOSURE) {
+  const entries: RuntimeFileEvidenceV1[] = [];
+  for (const pkg of profile.packageClosure) {
     collectRuntimeFiles(repoRoot, resolve(repoRoot, pkg.path), entries);
   }
-  return buildGate2RuntimeManifestFromEntriesV1(sourceCommit, entries);
+  return buildRuntimeManifestFromEntriesV1(sourceCommit, entries, profile);
 }
 
-export const buildRuntimeManifestV1 = buildGate2RuntimeManifestV1;
-
 /** Deterministic constructor exposed for adversarial manifest tests. */
-export function buildGate2RuntimeManifestFromEntriesV1(
+export function buildRuntimeManifestFromEntriesV1(
   sourceCommit: string,
-  inputEntries: readonly Gate2RuntimeFileEvidenceV1[],
-): Readonly<Gate2RuntimeManifestV1> {
+  inputEntries: readonly RuntimeFileEvidenceV1[],
+  profile: RuntimeEvidenceProfileV1 = RFC64_RUNTIME_EVIDENCE_PROFILE_V1,
+): Readonly<RuntimeManifestV1> {
   if (!SOURCE_COMMIT.test(sourceCommit)) throw new TypeError('runtime source commit is malformed');
   if (inputEntries.length < 1 || inputEntries.length > MAX_RUNTIME_FILES) {
     throw new RangeError('runtime manifest file count is outside the closed bound');
@@ -205,82 +208,83 @@ export function buildGate2RuntimeManifestFromEntriesV1(
       sha256: input.sha256,
     });
   }).sort((left, right) => compareText(left.path, right.path));
-  const packageClosure = Object.freeze(GATE2_RUNTIME_PACKAGE_CLOSURE.map((pkg) =>
+  const packageClosure = Object.freeze(profile.packageClosure.map((pkg) =>
     Object.freeze({ name: pkg.name, path: pkg.path })));
   const build = Object.freeze({
-    buildArgs: GATE2_RUNTIME_BUILD_ARGS,
-    cleanArgs: GATE2_RUNTIME_CLEAN_ARGS,
+    buildArgs: Object.freeze([...profile.buildArgs]),
+    cleanArgs: Object.freeze([...profile.cleanArgs]),
     command: 'pnpm' as const,
   });
   const payload = Object.freeze({
     build,
     packageClosure,
     runtimeFiles: Object.freeze(runtimeFiles),
-    schemaVersion: GATE2_RUNTIME_MANIFEST_SCHEMA_VERSION,
+    schemaVersion: profile.manifestSchemaVersion,
     sourceCommit,
   });
   const manifestDigest = sha256(
-    GATE2_RUNTIME_MANIFEST_DIGEST_DOMAIN,
+    profile.manifestDigestDomain,
     canonicalize(payload as unknown as CanonicalValue),
   );
   return Object.freeze({ ...payload, manifestDigest });
 }
 
-export function assertGate2RuntimeManifestEqualV1(
-  actual: Gate2RuntimeManifestV1,
-  expected: Gate2RuntimeManifestV1,
+export function assertRuntimeManifestEqualV1(
+  actual: RuntimeManifestV1,
+  expected: RuntimeManifestV1,
 ): void {
   if (
     canonicalize(actual as unknown as CanonicalValue)
     !== canonicalize(expected as unknown as CanonicalValue)
   ) {
-    throw new Error('Gate 2 runtime manifest differs from the clean source build');
+    throw new Error('runtime manifest differs from the clean source build');
   }
 }
 
-export const assertRuntimeManifestEqualV1 = assertGate2RuntimeManifestEqualV1;
-
 /** Deterministic manifest of the exact workspace dist files observed by a child loader hook. */
-export function buildGate2ExecutedRuntimeManifestV1(
+export function buildExecutedRuntimeManifestV1(
   sourceCommit: string,
-  inputEntries: readonly Gate2RuntimeFileEvidenceV1[],
-): Readonly<Gate2ExecutedRuntimeManifestV1> {
-  const validated = buildGate2RuntimeManifestFromEntriesV1(sourceCommit, inputEntries);
+  inputEntries: readonly RuntimeFileEvidenceV1[],
+  profile: RuntimeEvidenceProfileV1 = RFC64_RUNTIME_EVIDENCE_PROFILE_V1,
+): Readonly<ExecutedRuntimeManifestV1> {
+  const validated = buildRuntimeManifestFromEntriesV1(sourceCommit, inputEntries, profile);
   const payload = Object.freeze({
     runtimeFiles: validated.runtimeFiles,
-    schemaVersion: GATE2_EXECUTED_RUNTIME_MANIFEST_SCHEMA_VERSION,
+    schemaVersion: profile.executedManifestSchemaVersion,
     sourceCommit,
   });
   return Object.freeze({
     ...payload,
     manifestDigest: sha256(
-      GATE2_EXECUTED_RUNTIME_MANIFEST_DIGEST_DOMAIN,
+      profile.executedManifestDigestDomain,
       canonicalize(payload as unknown as CanonicalValue),
     ),
   });
 }
 
 /** Fail closed unless every child-observed byte is present in the clean-build snapshot. */
-export function assertGate2ExecutedRuntimeMatchesBuildV1(
-  executed: Gate2ExecutedRuntimeManifestV1,
-  cleanBuild: Gate2RuntimeManifestV1,
+export function assertExecutedRuntimeMatchesBuildV1(
+  executed: ExecutedRuntimeManifestV1,
+  cleanBuild: RuntimeManifestV1,
+  profile: RuntimeEvidenceProfileV1 = RFC64_RUNTIME_EVIDENCE_PROFILE_V1,
 ): void {
-  const rebuilt = buildGate2ExecutedRuntimeManifestV1(
+  const rebuilt = buildExecutedRuntimeManifestV1(
     executed.sourceCommit,
     executed.runtimeFiles,
+    profile,
   );
   if (canonicalize(rebuilt as unknown as CanonicalValue)
     !== canonicalize(executed as unknown as CanonicalValue)) {
-    throw new Error('Gate 2 executed runtime manifest is not internally canonical');
+    throw new Error('executed runtime manifest is not internally canonical');
   }
   if (executed.sourceCommit !== cleanBuild.sourceCommit) {
-    throw new Error('Gate 2 executed runtime manifest names a different source commit');
+    throw new Error('executed runtime manifest names a different source commit');
   }
   const expectedByPath = new Map(cleanBuild.runtimeFiles.map((entry) => [entry.path, entry]));
-  const allowedPrefixes = GATE2_RUNTIME_PACKAGE_CLOSURE.map((entry) => `${entry.path}/`);
+  const allowedPrefixes = profile.packageClosure.map((entry) => `${entry.path}/`);
   for (const entry of executed.runtimeFiles) {
     if (!allowedPrefixes.some((prefix) => entry.path.startsWith(prefix))) {
-      throw new Error(`Gate 2 child loaded an undeclared workspace package: ${entry.path}`);
+      throw new Error(`runtime child loaded an undeclared workspace package: ${entry.path}`);
     }
     const expected = expectedByPath.get(entry.path);
     if (
@@ -288,24 +292,19 @@ export function assertGate2ExecutedRuntimeMatchesBuildV1(
       || expected.byteLength !== entry.byteLength
       || expected.sha256 !== entry.sha256
     ) {
-      throw new Error(`Gate 2 child loaded bytes outside the clean-build snapshot: ${entry.path}`);
+      throw new Error(`runtime child loaded bytes outside the clean-build snapshot: ${entry.path}`);
     }
   }
-  for (const mandatory of [
-    'packages/agent/dist/index.js',
-    'packages/chain/dist/index.js',
-    'packages/core/dist/index.js',
-    'packages/storage/dist/index.js',
-  ]) {
+  for (const mandatory of profile.mandatoryEntrypoints) {
     if (!executed.runtimeFiles.some((entry) => entry.path === mandatory)) {
-      throw new Error(`Gate 2 child did not load mandatory runtime entrypoint: ${mandatory}`);
+      throw new Error(`runtime child did not load mandatory runtime entrypoint: ${mandatory}`);
     }
   }
 }
 
 /**
  * Build provenance for an arbitrary fixed process topology using the same
- * canonical clean-build and executed-runtime contracts as Gate 2.
+ * canonical clean-build and executed-runtime contracts.
  */
 export function buildRuntimeProcessProvenanceV1<
   ProcessId extends string,
@@ -313,19 +312,22 @@ export function buildRuntimeProcessProvenanceV1<
 >(input: {
   readonly expectedProcessIds: readonly ProcessId[];
   readonly processes: readonly RuntimeProcessEvidenceV1<ProcessId>[];
+  readonly profile?: RuntimeEvidenceProfileV1;
   readonly schema: Schema;
-  readonly sourceBuild: Gate2RuntimeManifestV1;
+  readonly sourceBuild: RuntimeManifestV1;
 }): Readonly<RuntimeProcessProvenanceV1<ProcessId, Schema>> {
-  const canonicalSourceBuild = buildGate2RuntimeManifestFromEntriesV1(
+  const profile = input.profile ?? RFC64_RUNTIME_EVIDENCE_PROFILE_V1;
+  const canonicalSourceBuild = buildRuntimeManifestFromEntriesV1(
     input.sourceBuild.sourceCommit,
     input.sourceBuild.runtimeFiles,
+    profile,
   );
-  assertGate2RuntimeManifestEqualV1(input.sourceBuild, canonicalSourceBuild);
+  assertRuntimeManifestEqualV1(input.sourceBuild, canonicalSourceBuild);
   const processes = validateFixedRuntimeProcessEvidenceV1({
     expectedProcessIds: input.expectedProcessIds,
     processes: input.processes,
     validateLoaded: (loaded) => {
-      assertGate2ExecutedRuntimeMatchesBuildV1(loaded, canonicalSourceBuild);
+      assertExecutedRuntimeMatchesBuildV1(loaded, canonicalSourceBuild, profile);
     },
   });
   return Object.freeze({
@@ -343,12 +345,14 @@ export function assertRuntimeProcessProvenanceV1<
   actual: RuntimeProcessProvenanceV1<ProcessId, Schema>,
   expected: {
     readonly processIds: readonly ProcessId[];
+    readonly profile?: RuntimeEvidenceProfileV1;
     readonly schema: Schema;
   },
 ): Readonly<RuntimeProcessProvenanceV1<ProcessId, Schema>> {
   const rebuilt = buildRuntimeProcessProvenanceV1({
     expectedProcessIds: expected.processIds,
     processes: actual.processes,
+    profile: expected.profile,
     schema: expected.schema,
     sourceBuild: actual.sourceBuild,
   });
@@ -369,88 +373,188 @@ export function assertPersistedRuntimeProcessProvenanceV1<
   actual: unknown,
   expected: {
     readonly processIds: readonly ProcessId[];
+    readonly profile?: RuntimeEvidenceProfileV1;
     readonly schema: Schema;
   },
 ): Readonly<RuntimeProcessProvenanceV1<ProcessId, Schema>> {
-  if (typeof actual !== 'object' || actual === null || Array.isArray(actual)) {
-    throw new TypeError('persisted runtime process provenance must be an object');
+  const record = parsePlainRecord(actual, 'persisted runtime process provenance');
+  const schema = parseStringField(record, 'schema', 'persisted runtime process provenance');
+  if (schema !== expected.schema) {
+    throw new TypeError('persisted runtime process provenance has an invalid schema');
   }
-  const candidate = actual as Partial<RuntimeProcessProvenanceV1<ProcessId, Schema>>;
-  if (
-    candidate.schema !== expected.schema
-    || !Array.isArray(candidate.processes)
-    || typeof candidate.sourceBuild !== 'object'
-    || candidate.sourceBuild === null
-    || Array.isArray(candidate.sourceBuild)
-  ) {
-    throw new TypeError('persisted runtime process provenance has an invalid envelope');
-  }
-  return assertRuntimeProcessProvenanceV1(
-    candidate as RuntimeProcessProvenanceV1<ProcessId, Schema>,
-    expected,
+  const processValues = parseArrayField(
+    record,
+    'processes',
+    'persisted runtime process provenance',
   );
-}
-
-export function buildGate2RuntimeProvenanceV1(
-  sourceBuild: Gate2RuntimeManifestV1,
-  inputProcesses: readonly Gate2RuntimeProcessEvidenceV1[],
-): Readonly<Gate2RuntimeProvenanceV1> {
-  const expectedIds: readonly Gate2RuntimeProcessIdV1[] = Object.freeze([
-    'author',
-    'receiverBeforeCrash',
-    'receiverAfterRestart',
-  ]);
-  const processes = validateFixedRuntimeProcessEvidenceV1({
-    expectedProcessIds: expectedIds,
-    processes: inputProcesses,
-    validateLoaded: (loaded) => {
-      assertGate2ExecutedRuntimeMatchesBuildV1(loaded, sourceBuild);
-    },
+  const processes = processValues.map((value, index) => {
+    const processRecord = parsePlainRecord(value, `runtime process ${index}`);
+    const id = parseStringField(processRecord, 'id', `runtime process ${index}`);
+    const expectedId = expected.processIds[index];
+    if (expectedId === undefined || id !== expectedId) {
+      throw new TypeError(`runtime process ${index} has an invalid id`);
+    }
+    return Object.freeze({
+      id: expectedId,
+      loaded: parseExecutedRuntimeManifestV1(
+        readDataField(processRecord, 'loaded', `runtime process ${index}`),
+        `runtime process ${index} loaded manifest`,
+      ),
+    });
   });
-  const payload = Object.freeze({
-    processes,
-    schemaVersion: GATE2_RUNTIME_PROVENANCE_SCHEMA_VERSION,
-    sourceBuild,
-  });
-  return Object.freeze({
-    ...payload,
-    provenanceDigest: sha256(
-      GATE2_RUNTIME_PROVENANCE_DIGEST_DOMAIN,
-      canonicalize(payload as unknown as CanonicalValue),
+  const parsed = Object.freeze({
+    processes: Object.freeze(processes),
+    schema: expected.schema,
+    sourceBuild: parseRuntimeManifestV1(
+      readDataField(record, 'sourceBuild', 'persisted runtime process provenance'),
+      'runtime source manifest',
     ),
   });
+  const rebuilt = assertRuntimeProcessProvenanceV1(parsed, expected);
+  if (
+    canonicalize(actual as CanonicalValue)
+    !== canonicalize(rebuilt as unknown as CanonicalValue)
+  ) {
+    throw new TypeError('persisted runtime process provenance is not canonical');
+  }
+  return rebuilt;
 }
 
-export function installGate2RuntimeLaunchReceiptV1(
-  receipt: Gate2RuntimeLaunchReceiptV1,
-): void {
-  if (pendingLaunchReceipt !== undefined) {
-    throw new Error('Gate 2 runtime launch receipt is already installed');
-  }
-  if (receipt.manifest.sourceCommit !== receipt.sourceCommit) {
-    throw new Error('Gate 2 runtime launch receipt does not bind its source commit');
-  }
-  pendingLaunchReceipt = Object.freeze({
-    manifest: receipt.manifest,
-    sourceCommit: receipt.sourceCommit,
+export function parseRuntimeManifestV1(
+  value: unknown,
+  label = 'runtime manifest',
+): Readonly<RuntimeManifestV1> {
+  const record = parsePlainRecord(value, label);
+  const buildRecord = parsePlainRecord(readDataField(record, 'build', label), `${label} build`);
+  return Object.freeze({
+    build: Object.freeze({
+      buildArgs: Object.freeze(parseStringArrayField(buildRecord, 'buildArgs', `${label} build`)),
+      cleanArgs: Object.freeze(parseStringArrayField(buildRecord, 'cleanArgs', `${label} build`)),
+      command: parseLiteralField(buildRecord, 'command', 'pnpm', `${label} build`),
+    }),
+    manifestDigest: parseStringField(record, 'manifestDigest', label),
+    packageClosure: Object.freeze(parseArrayField(record, 'packageClosure', label).map(
+      (entry, index) => {
+        const packageRecord = parsePlainRecord(entry, `${label} package ${index}`);
+        return Object.freeze({
+          name: parseStringField(packageRecord, 'name', `${label} package ${index}`),
+          path: parseStringField(packageRecord, 'path', `${label} package ${index}`),
+        });
+      },
+    )),
+    runtimeFiles: Object.freeze(parseArrayField(record, 'runtimeFiles', label).map(
+      (entry, index) => parseRuntimeFileEvidenceV1(entry, `${label} file ${index}`),
+    )),
+    schemaVersion: parseStringField(record, 'schemaVersion', label),
+    sourceCommit: parseStringField(record, 'sourceCommit', label),
   });
 }
 
-export function consumeGate2RuntimeLaunchReceiptV1(): Readonly<Gate2RuntimeLaunchReceiptV1> {
-  const receipt = pendingLaunchReceipt;
-  pendingLaunchReceipt = undefined;
-  if (receipt === undefined) {
-    throw new Error(
-      'Gate 2 live harness requires its clean-build launcher; direct run.ts execution is forbidden',
-    );
+export function parseExecutedRuntimeManifestV1(
+  value: unknown,
+  label = 'executed runtime manifest',
+): Readonly<ExecutedRuntimeManifestV1> {
+  const record = parsePlainRecord(value, label);
+  return Object.freeze({
+    manifestDigest: parseStringField(record, 'manifestDigest', label),
+    runtimeFiles: Object.freeze(parseArrayField(record, 'runtimeFiles', label).map(
+      (entry, index) => parseRuntimeFileEvidenceV1(entry, `${label} file ${index}`),
+    )),
+    schemaVersion: parseStringField(record, 'schemaVersion', label),
+    sourceCommit: parseStringField(record, 'sourceCommit', label),
+  });
+}
+
+function parseRuntimeFileEvidenceV1(
+  value: unknown,
+  label: string,
+): Readonly<RuntimeFileEvidenceV1> {
+  const record = parsePlainRecord(value, label);
+  return Object.freeze({
+    byteLength: parseSafeIntegerField(record, 'byteLength', label),
+    path: parseStringField(record, 'path', label),
+    sha256: parseStringField(record, 'sha256', label),
+  });
+}
+
+function parsePlainRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
   }
-  return receipt;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError(`${label} must be a plain object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function readDataField(record: Record<string, unknown>, field: string, label: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(record, field);
+  if (
+    descriptor === undefined
+    || !descriptor.enumerable
+    || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+  ) {
+    throw new TypeError(`${label} is missing data field ${field}`);
+  }
+  return descriptor.value;
+}
+
+function parseStringField(record: Record<string, unknown>, field: string, label: string): string {
+  const value = readDataField(record, field, label);
+  if (typeof value !== 'string') throw new TypeError(`${label}.${field} must be a string`);
+  return value;
+}
+
+function parseSafeIntegerField(
+  record: Record<string, unknown>,
+  field: string,
+  label: string,
+): number {
+  const value = readDataField(record, field, label);
+  if (!Number.isSafeInteger(value)) throw new TypeError(`${label}.${field} must be a safe integer`);
+  return value as number;
+}
+
+function parseArrayField(
+  record: Record<string, unknown>,
+  field: string,
+  label: string,
+): unknown[] {
+  const value = readDataField(record, field, label);
+  if (!Array.isArray(value)) throw new TypeError(`${label}.${field} must be an array`);
+  return value;
+}
+
+function parseStringArrayField(
+  record: Record<string, unknown>,
+  field: string,
+  label: string,
+): string[] {
+  return parseArrayField(record, field, label).map((value, index) => {
+    if (typeof value !== 'string') {
+      throw new TypeError(`${label}.${field}[${index}] must be a string`);
+    }
+    return value;
+  });
+}
+
+function parseLiteralField<Literal extends string>(
+  record: Record<string, unknown>,
+  field: string,
+  literal: Literal,
+  label: string,
+): Literal {
+  if (readDataField(record, field, label) !== literal) {
+    throw new TypeError(`${label}.${field} must be ${literal}`);
+  }
+  return literal;
 }
 
 function collectRuntimeFiles(
   repoRoot: string,
   directory: string,
-  entries: Gate2RuntimeFileEvidenceV1[],
+  entries: RuntimeFileEvidenceV1[],
 ): void {
   const children = readdirSync(directory, { withFileTypes: true })
     .sort((left, right) => compareText(left.name, right.name));

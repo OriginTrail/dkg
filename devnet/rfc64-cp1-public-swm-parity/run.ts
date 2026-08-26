@@ -25,7 +25,7 @@ import {
 } from '../rfc64-gate2-multi-asset-completeness/agent-child.js';
 import {
   consumeGate2RuntimeLaunchReceiptV1,
-} from '../rfc64-runtime-provenance.mts';
+} from '../rfc64-gate2-multi-asset-completeness/runtime-provenance.ts';
 import {
   assertGate2HarnessReadyV1,
   assertGate2HarnessSourceStateV1,

@@ -20,7 +20,7 @@ const AGENT_ROOT = join(HERE, '..', '..');
 const AGENT_PROCESS = join(HERE, 'agent-process.mjs');
 const RUNTIME_LOAD_HOOK = resolve(
   HERE,
-  '../../../../devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts',
+  '../../../../devnet/rfc64-runtime-load-hook.mts',
 );
 export const RFC64_PRIVATE_GATE_ARTIFACT_PATH = join(HERE, 'artifacts', 'latest.json');
 const ROLES = Object.freeze(['owner', 'provider2', 'receiver', 'outsider']);
@@ -69,9 +69,9 @@ export class AgentChild {
           DKG_RFC64_PRIVATE_MANIFEST: manifestPath,
         }),
         ...(runtimeProvenance === undefined ? {} : {
-          DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST:
+          DKG_RFC64_RUNTIME_MANIFEST_DIGEST:
             runtimeProvenance.runtimeManifestDigest,
-          DKG_RFC64_GATE2_RUNTIME_SOURCE_COMMIT: runtimeProvenance.sourceRevision,
+          DKG_RFC64_RUNTIME_SOURCE_COMMIT: runtimeProvenance.sourceRevision,
         }),
       },
       stdio: ['pipe', 'pipe', 'inherit'],
@@ -222,6 +222,8 @@ export class AgentChild {
 }
 
 export async function executeRfc64PrivateReleaseGateV1({
+  createAgentChild = (...args) => new AgentChild(...args),
+  probeReadyTimeoutMs = RUN_TIMEOUT_MS,
   runtimeManifest,
   sourceRevision,
 }) {
@@ -242,14 +244,22 @@ export async function executeRfc64PrivateReleaseGateV1({
     await Promise.all(Object.values(dataDirs).map((path) => mkdir(path, { recursive: true })));
 
     const probeEntries = await Promise.all(ROLES.map(async (role) => {
-      const child = new AgentChild(role, dataDirs[role], undefined, 'probe', {
+      const child = createAgentChild(role, dataDirs[role], undefined, 'probe', {
         runtimeProvenance,
       });
-      const ready = await child.waitFor('ready');
-      assertReadyRuntimeManifest(ready, runtimeManifest.manifestDigest);
-      const shutdown = await child.stop();
-      runtimeEvidence.record(`probe-${role}`, shutdown);
-      return [role, { ready }];
+      active.add(child);
+      let shutdownRecorded = false;
+      try {
+        const ready = await child.waitFor('ready', { timeoutMs: probeReadyTimeoutMs });
+        assertReadyRuntimeManifest(ready, runtimeManifest.manifestDigest);
+        const shutdown = await child.stop();
+        runtimeEvidence.record(`probe-${role}`, shutdown);
+        shutdownRecorded = true;
+        return [role, { ready }];
+      } finally {
+        if (!shutdownRecorded) await child.forceStop();
+        active.delete(child);
+      }
     }));
     const probed = Object.fromEntries(probeEntries);
     const peerIds = Object.fromEntries(ROLES.map((role) => [role, probed[role].ready.peerId]));
@@ -434,7 +444,12 @@ export async function executeRfc64PrivateReleaseGateV1({
     };
     if (status !== 'PASS') process.exitCode = 1;
   } finally {
-    await Promise.all([...active].map((child) => child.stop().catch(() => undefined)));
+    // Any child still owned here is on a failure path and cannot contribute a
+    // trustworthy shutdown receipt. Reap it directly instead of waiting for a
+    // provenance handshake that may never have reached readiness.
+    await Promise.all([...active].map((child) => (
+      child.forceStop().catch(() => undefined)
+    )));
     if (process.env.DKG_RFC64_PRIVATE_KEEP_RUN !== '1') {
       await rm(runRoot, { recursive: true, force: true });
     } else {
