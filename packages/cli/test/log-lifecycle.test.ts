@@ -14,6 +14,12 @@ import {
 import type { DkgConfig } from '../src/config.js';
 import { createTelemetryRuntime } from '../src/daemon/telemetry-runtime.js';
 
+const noRotation = async () => ({
+  rotated: false,
+  previousBytes: 0,
+  keptBytes: 0,
+});
+
 describe('startDaemonLogController', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -213,7 +219,10 @@ describe('startDaemonLogController', () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-debug-log-'));
     const file = join(directory, 'daemon.log');
     const persisted: string[] = [];
-    const logFileWriter = startDaemonLogFileWriter({ logFile: file });
+    const logFileWriter = startDaemonLogFileWriter({
+      logFile: file,
+      rotate: noRotation,
+    });
     const controller = startDaemonLogController({
       writeLocalDebug: (record) => {
         logFileWriter.pushDebug(record);
@@ -256,6 +265,7 @@ describe('startDaemonLogController', () => {
     let maxConcurrentAppends = 0;
     const logFileWriter = startDaemonLogFileWriter({
       logFile: 'unused-in-injected-test',
+      rotate: noRotation,
       maxQueuedEntries: 4,
       maxBatchEntries: 1,
       append: async (data) => {
@@ -319,6 +329,7 @@ describe('startDaemonLogController', () => {
       let appendCalls = 0;
       const writer = startDaemonLogFileWriter({
         logFile: 'unused-in-injected-test',
+        rotate: noRotation,
         maxQueuedEntries: 2,
         maxBatchEntries: 1,
         append: async (data) => {
@@ -375,6 +386,7 @@ describe('startDaemonLogController', () => {
     });
     const logFileWriter = startDaemonLogFileWriter({
       logFile: 'unused-in-injected-test',
+      rotate: noRotation,
       maxAppendAttempts: 3,
       append,
       waitBeforeRetry: async () => undefined,

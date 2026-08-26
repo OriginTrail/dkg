@@ -1,4 +1,4 @@
-import { classifySparqlOperation } from '@origintrail-official/dkg-core/sparql-operation';
+import { classifySparqlOperation } from '../../dist/sparql-operation.js';
 
 function detect(input) {
   const operation = classifySparqlOperation(input);

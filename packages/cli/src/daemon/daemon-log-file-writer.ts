@@ -52,7 +52,7 @@ export function startDaemonLogFileWriter(opts: {
   maxBatchEntries?: number;
   maxAppendAttempts?: number;
   append?: (data: string) => Promise<void>;
-  rotate?: () => Promise<DaemonLogRotationResult>;
+  rotate: () => Promise<DaemonLogRotationResult>;
   waitBeforeRetry?: (failedAttempt: number) => Promise<void>;
   onDiagnostic?: (message: string) => void | Promise<void>;
 }): DaemonLogFileWriter {
@@ -135,9 +135,6 @@ export function startDaemonLogFileWriter(opts: {
       if (first.kind === 'rotation') {
         queue.shift();
         try {
-          if (!opts.rotate) {
-            throw new Error('daemon log rotation is not configured');
-          }
           first.resolve(await opts.rotate());
         } catch (error) {
           first.reject(error);

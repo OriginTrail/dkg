@@ -15,11 +15,6 @@
       "import": "./dist/project-ontology.js",
       "default": "./dist/project-ontology.js"
     },
-    "./sparql-operation": {
-      "types": "./dist/sparql-operation.d.ts",
-      "import": "./dist/sparql-operation.js",
-      "default": "./dist/sparql-operation.js"
-    },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"
   },

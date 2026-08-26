@@ -139,7 +139,7 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
 
   const measureGrowthInIsolatedProcess = () => {
     const runner = fileURLToPath(new URL(
-      './fixtures/sparql-redos-benchmark.mjs',
+      '../../core/test/fixtures/sparql-redos-benchmark.mjs',
       import.meta.url,
     ));
     return JSON.parse(execFileSync(
