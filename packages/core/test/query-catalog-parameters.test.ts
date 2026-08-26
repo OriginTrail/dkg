@@ -54,4 +54,50 @@ describe('query catalog parameters', () => {
       parameters,
     )).toThrow(/undeclared query parameter/);
   });
+
+  it('preserves explicit and defaulted empty strings as valid string terms', () => {
+    const template = 'SELECT * WHERE { BIND({{prefix}} AS ?prefix) }';
+    const required = normalizeQueryCatalogParameters([
+      { name: 'prefix', type: 'string' },
+    ]);
+    expect(renderQueryCatalogTemplate(template, required, { prefix: '' }))
+      .toBe('SELECT * WHERE { BIND("" AS ?prefix) }');
+
+    const defaulted = normalizeQueryCatalogParameters([
+      { name: 'prefix', type: 'string', required: false, defaultValue: '' },
+    ]);
+    expect(defaulted[0]).toEqual({ name: 'prefix', type: 'string', defaultValue: '' });
+    expect(renderQueryCatalogTemplate(template, defaulted, {}))
+      .toBe('SELECT * WHERE { BIND("" AS ?prefix) }');
+  });
+
+  it('normalizes required/defaulted state and rejects contradictory declarations', () => {
+    expect(normalizeQueryCatalogParameters([{ name: 'id', type: 'string' }])[0])
+      .toEqual({ name: 'id', type: 'string' });
+    expect(normalizeQueryCatalogParameters([
+      { name: 'id', type: 'string', defaultValue: 'fallback' },
+    ])[0]).toEqual({ name: 'id', type: 'string', defaultValue: 'fallback' });
+    expect(() => normalizeQueryCatalogParameters([
+      { name: 'id', type: 'string', required: true, defaultValue: 'fallback' },
+    ])).toThrow(/cannot declare a defaultValue/);
+  });
+
+  it('only replaces placeholders in complete RDF-term positions', () => {
+    const template = `SELECT * WHERE {
+  # {{ignoredComment}}
+  BIND("{{ignoredString}}" AS ?literal)
+  BIND(<urn:example:{{ignoredIri}}> AS ?iri)
+  BIND({{value}} AS ?value)
+}`;
+    expect(renderQueryCatalogTemplate(
+      template,
+      [{ name: 'value', type: 'string' }],
+      { value: 'safe' },
+    )).toContain('BIND("safe" AS ?value)');
+    expect(() => renderQueryCatalogTemplate(
+      'SELECT * WHERE { BIND(prefix{{value}} AS ?value) }',
+      [{ name: 'value', type: 'string' }],
+      { value: 'safe' },
+    )).toThrow(/complete SPARQL term position/);
+  });
 });

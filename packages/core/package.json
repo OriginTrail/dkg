@@ -20,6 +20,11 @@
       "import": "./dist/query-catalog-parameters.js",
       "default": "./dist/query-catalog-parameters.js"
     },
+    "./query-catalog": {
+      "types": "./dist/query-catalog.d.ts",
+      "import": "./dist/query-catalog.js",
+      "default": "./dist/query-catalog.js"
+    },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"
   },

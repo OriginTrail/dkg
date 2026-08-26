@@ -9,6 +9,8 @@
  * never perform raw string interpolation on parameter values.
  */
 
+import { isSafeIri, sparqlString } from './sparql-safe.js';
+
 export const QUERY_CATALOG_PARAMETER_TYPES = [
   'string',
   'integer',
@@ -30,10 +32,14 @@ export interface QueryCatalogParameterDefinition {
 }
 
 const PARAMETER_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
-const PARAMETER_PLACEHOLDER = /\{\{([A-Za-z][A-Za-z0-9_]*)\}\}/g;
 const INTEGER = /^[+-]?\d+$/;
 const NUMBER = /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$/;
-const SAFE_IRI = /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$/;
+
+interface QueryCatalogTemplatePlaceholder {
+  name: string;
+  start: number;
+  end: number;
+}
 
 export function normalizeQueryCatalogParameters(input: unknown): QueryCatalogParameterDefinition[] {
   if (input === undefined || input === null || input === '') return [];
@@ -65,24 +71,38 @@ export function normalizeQueryCatalogParameters(input: unknown): QueryCatalogPar
     if (typeof value.description === 'string' && value.description.trim()) {
       definition.description = value.description.trim();
     }
+    let declaredRequired: boolean | undefined;
     if (value.required !== undefined) {
       if (typeof value.required !== 'boolean') {
         throw new Error(`Query parameter ${name} required must be a boolean.`);
       }
-      definition.required = value.required;
+      declaredRequired = value.required;
     }
-    if (value.defaultValue !== undefined) {
+    const hasDefault = value.defaultValue !== undefined;
+    if (hasDefault) {
       if (!isParameterValue(value.defaultValue)) {
         throw new Error(`Query parameter ${name} has an invalid defaultValue.`);
       }
       renderQueryCatalogParameter(definition, value.defaultValue);
       definition.defaultValue = value.defaultValue;
     }
-    if (definition.required === false && definition.defaultValue === undefined) {
+    if (declaredRequired === true && hasDefault) {
+      throw new Error(`Required query parameter ${name} cannot declare a defaultValue.`);
+    }
+    if (declaredRequired === false && !hasDefault) {
       throw new Error(`Optional query parameter ${name} must declare a defaultValue.`);
     }
+    // The normalized model derives requiredness from default presence. Keep
+    // accepting the legacy `required` input as a validation hint, but do not
+    // persist a second independent state that can drift from defaultValue.
     return definition;
   });
+}
+
+export function isQueryCatalogParameterRequired(
+  definition: QueryCatalogParameterDefinition,
+): boolean {
+  return definition.defaultValue === undefined;
 }
 
 export function parseQueryCatalogParameters(value: string | undefined): QueryCatalogParameterDefinition[] {
@@ -102,8 +122,8 @@ export function serializeQueryCatalogParameters(input: unknown): string {
 
 export function queryCatalogTemplateParameterNames(template: string): string[] {
   const names: string[] = [];
-  for (const match of template.matchAll(PARAMETER_PLACEHOLDER)) {
-    if (!names.includes(match[1])) names.push(match[1]);
+  for (const placeholder of scanQueryCatalogTemplatePlaceholders(template)) {
+    if (!names.includes(placeholder.name)) names.push(placeholder.name);
   }
   return names;
 }
@@ -150,7 +170,15 @@ export function renderQueryCatalogTemplate(
     rendered.set(definition.name, renderQueryCatalogParameter(definition, value));
   }
 
-  return template.replace(PARAMETER_PLACEHOLDER, (_placeholder, name: string) => rendered.get(name)!);
+  const placeholders = scanQueryCatalogTemplatePlaceholders(template);
+  let output = '';
+  let cursor = 0;
+  for (const placeholder of placeholders) {
+    output += template.slice(cursor, placeholder.start);
+    output += rendered.get(placeholder.name)!;
+    cursor = placeholder.end;
+  }
+  return output + template.slice(cursor);
 }
 
 export function renderQueryCatalogParameter(
@@ -177,7 +205,7 @@ export function renderQueryCatalogParameter(
     }
     case 'iri': {
       const normalized = String(value).trim();
-      if (!SAFE_IRI.test(normalized)) throw new Error(`Query parameter ${definition.name} must be a safe absolute IRI.`);
+      if (!isSafeIri(normalized)) throw new Error(`Query parameter ${definition.name} must be a safe absolute IRI.`);
       return `<${normalized}>`;
     }
   }
@@ -187,15 +215,84 @@ function isParameterValue(value: unknown): value is QueryCatalogParameterValue {
   return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
 }
 
-function isMissing(value: unknown): value is undefined | null | '' {
-  return value === undefined || value === null || value === '';
+function isMissing(value: unknown): value is undefined | null {
+  return value === undefined || value === null;
 }
 
-function sparqlString(value: string): string {
-  return `"${value
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r')
-    .replace(/\t/g, '\\t')}"`;
+function scanQueryCatalogTemplatePlaceholders(
+  template: string,
+): QueryCatalogTemplatePlaceholder[] {
+  const placeholders: QueryCatalogTemplatePlaceholder[] = [];
+  let index = 0;
+  let quote: "'" | '"' | "'''" | '"""' | undefined;
+  let inComment = false;
+  let inIri = false;
+
+  while (index < template.length) {
+    const char = template[index];
+    if (inComment) {
+      if (char === '\n' || char === '\r') inComment = false;
+      index += 1;
+      continue;
+    }
+    if (quote) {
+      if (char === '\\') {
+        index += 2;
+        continue;
+      }
+      if (template.startsWith(quote, index)) {
+        index += quote.length;
+        quote = undefined;
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+    if (inIri) {
+      if (char === '\\') {
+        index += 2;
+        continue;
+      }
+      if (char === '>') inIri = false;
+      index += 1;
+      continue;
+    }
+    if (char === '#') {
+      inComment = true;
+      index += 1;
+      continue;
+    }
+    if (template.startsWith("'''", index) || template.startsWith('"""', index)) {
+      quote = template.slice(index, index + 3) as "'''" | '"""';
+      index += 3;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      index += 1;
+      continue;
+    }
+    if (char === '<' && template[index + 1] !== '=' && !/\s/.test(template[index + 1] ?? '')) {
+      inIri = true;
+      index += 1;
+      continue;
+    }
+    if (template.startsWith('{{', index)) {
+      const match = template.slice(index).match(/^\{\{([A-Za-z][A-Za-z0-9_]*)\}\}/);
+      if (match) {
+        const end = index + match[0].length;
+        const before = template[index - 1];
+        const after = template[end];
+        if ((before && /[A-Za-z0-9_?:.%~-]/.test(before))
+          || (after && /[A-Za-z0-9_?:.%~-]/.test(after))) {
+          throw new Error(`Query parameter ${match[1]} must occupy a complete SPARQL term position.`);
+        }
+        placeholders.push({ name: match[1], start: index, end });
+        index = end;
+        continue;
+      }
+    }
+    index += 1;
+  }
+  return placeholders;
 }

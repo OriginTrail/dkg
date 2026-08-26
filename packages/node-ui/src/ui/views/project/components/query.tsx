@@ -1,11 +1,16 @@
 import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import {
-  assertQueryCatalogTemplate,
   renderQueryCatalogTemplate,
-  serializeQueryCatalogParameters,
+  isQueryCatalogParameterRequired,
   type QueryCatalogParameterDefinition,
 } from '@origintrail-official/dkg-core/query-catalog-parameters';
+import {
+  CONTEXT_GRAPH_QUERY_SUBGRAPH,
+  USER_QUERY_CATALOG_NAME,
+  USER_QUERY_CATALOG_SLUG,
+  buildQueryCatalogWrite,
+} from '@origintrail-official/dkg-core/query-catalog';
 import { useFetch } from '../../../hooks.js';
 import { executeQuery, writeProfileQueryCatalog, type QueryExecutionView } from '../../../api.js';
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
@@ -19,14 +24,7 @@ function contextGraphQueryTemplate(contextGraphId: string): string {
 LIMIT 1000`;
 }
 
-const CONTEXT_GRAPH_QUERY_SUBGRAPH = '__context_graph';
-const USER_QUERY_CATALOG_SLUG = 'ui-saved-queries';
-const USER_QUERY_CATALOG_NAME = 'Saved queries';
 const USER_QUERY_CATALOG_DESCRIPTION = 'User-created SPARQL saved in this node profile for this Context Graph.';
-const PROFILE_NS = 'http://dkg.io/ontology/profile/';
-const SCHEMA_NS = 'http://schema.org/';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 type SavedCatalogQuery = QueryCatalog['queries'][number];
 
 function sparqlString(value: string): string {
@@ -115,29 +113,6 @@ LIMIT 100`,
   };
 }
 
-function querySlug(value: string): string {
-  const slug = value
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48);
-  return slug || 'saved-query';
-}
-
-function profileUri(contextGraphId: string, kind: 'catalog' | 'query', slug: string): string {
-  return `urn:dkg:profile:${encodeURIComponent(contextGraphId)}:${kind}:${encodeURIComponent(slug)}`;
-}
-
-function literal(value: string): string {
-  return JSON.stringify(value);
-}
-
-function intLiteral(value: number): string {
-  return `"${value}"^^<${XSD_INTEGER}>`;
-}
-
 function buildSavedQueryWrite(
   contextGraphId: string,
   name: string,
@@ -150,12 +125,22 @@ function buildSavedQueryWrite(
   quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
 } {
   const rank = Date.now();
-  const slug = `${querySlug(name)}-${rank.toString(36)}`;
-  const catalogUri = profileUri(contextGraphId, 'catalog', USER_QUERY_CATALOG_SLUG);
-  const queryUri = profileUri(contextGraphId, 'query', slug);
-  assertQueryCatalogTemplate(sparql, parameters);
+  const write = buildQueryCatalogWrite({
+    contextGraphId,
+    name,
+    description: description || undefined,
+    sparql,
+    subGraph: CONTEXT_GRAPH_QUERY_SUBGRAPH,
+    catalogSlug: USER_QUERY_CATALOG_SLUG,
+    catalogName: USER_QUERY_CATALOG_NAME,
+    catalogDescription: USER_QUERY_CATALOG_DESCRIPTION,
+    rank,
+    catalogRank: 50,
+    parameters,
+    view,
+  });
   const query: SavedCatalogQuery = {
-    slug,
+    slug: write.savedQuery.slug,
     subGraph: CONTEXT_GRAPH_QUERY_SUBGRAPH,
     catalogSlug: USER_QUERY_CATALOG_SLUG,
     catalogName: USER_QUERY_CATALOG_NAME,
@@ -169,34 +154,7 @@ function buildSavedQueryWrite(
     parameters: [...parameters],
     view,
   };
-  const quads = [
-    { subject: catalogUri, predicate: RDF_TYPE, object: `${PROFILE_NS}QueryCatalog`, graph: '' },
-    { subject: catalogUri, predicate: `${PROFILE_NS}forSubGraph`, object: literal(CONTEXT_GRAPH_QUERY_SUBGRAPH), graph: '' },
-    { subject: catalogUri, predicate: `${PROFILE_NS}displayName`, object: literal(USER_QUERY_CATALOG_NAME), graph: '' },
-    { subject: catalogUri, predicate: `${SCHEMA_NS}description`, object: literal(USER_QUERY_CATALOG_DESCRIPTION), graph: '' },
-    { subject: catalogUri, predicate: `${PROFILE_NS}rank`, object: intLiteral(50), graph: '' },
-    { subject: queryUri, predicate: RDF_TYPE, object: `${PROFILE_NS}SavedQuery`, graph: '' },
-    { subject: queryUri, predicate: `${PROFILE_NS}forSubGraph`, object: literal(CONTEXT_GRAPH_QUERY_SUBGRAPH), graph: '' },
-    { subject: queryUri, predicate: `${PROFILE_NS}inCatalog`, object: catalogUri, graph: '' },
-    { subject: queryUri, predicate: `${PROFILE_NS}displayName`, object: literal(name), graph: '' },
-    { subject: queryUri, predicate: `${PROFILE_NS}sparqlQuery`, object: literal(sparql), graph: '' },
-    { subject: queryUri, predicate: `${PROFILE_NS}rank`, object: intLiteral(rank), graph: '' },
-  ];
-  if (description) {
-    quads.push({ subject: queryUri, predicate: `${SCHEMA_NS}description`, object: literal(description), graph: '' });
-  }
-  if (parameters.length > 0) {
-    quads.push({
-      subject: queryUri,
-      predicate: `${PROFILE_NS}queryParameters`,
-      object: literal(serializeQueryCatalogParameters(parameters)),
-      graph: '',
-    });
-  }
-  if (view) {
-    quads.push({ subject: queryUri, predicate: `${PROFILE_NS}executionView`, object: literal(view), graph: '' });
-  }
-  return { query, quads };
+  return { query, quads: write.quads };
 }
 
 function appendSavedQueryCatalog(catalogs: QueryCatalog[], query: SavedCatalogQuery): QueryCatalog[] {
@@ -656,7 +614,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                     aria-label={parameter.label ?? parameter.name}
                     type={parameter.type === 'integer' || parameter.type === 'number' ? 'number' : 'text'}
                     step={parameter.type === 'integer' ? '1' : parameter.type === 'number' ? 'any' : undefined}
-                    required={parameter.required !== false && parameter.defaultValue === undefined}
+                    required={isQueryCatalogParameterRequired(parameter)}
                     value={catalogParameterValues[parameter.name] ?? ''}
                     placeholder={parameter.description}
                     onChange={event => setCatalogParameterValues(previous => ({

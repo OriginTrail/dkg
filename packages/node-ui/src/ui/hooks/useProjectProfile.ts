@@ -12,9 +12,13 @@
  */
 import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
-  parseQueryCatalogParameters,
   type QueryCatalogParameterDefinition,
 } from '@origintrail-official/dkg-core/query-catalog-parameters';
+import {
+  decodeQueryCatalogBindings,
+  groupQueryCatalogItems,
+  queryCatalogBindingValue,
+} from '@origintrail-official/dkg-core/query-catalog';
 import { executeQuery, readProfileQueryCatalog, type QueryExecutionView } from '../api.js';
 import { ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 
@@ -289,20 +293,10 @@ GROUP BY ?chip ?subGraph ?type ?predicate ?label`;
 interface QueryCatalogRowShape extends Record<string, unknown> {}
 interface SavedQueryRowShape extends Record<string, unknown> {}
 
-function savedQueryExecutionView(
-  row: SavedQueryRowShape,
+function legacySavedQueryExecutionView(
   queryIri: string,
   catalogIri: string,
 ): QueryExecutionView | undefined {
-  const declared = stripLiteral(row.executionView ?? row.view);
-  if (
-    declared === 'working-memory'
-    || declared === 'shared-working-memory'
-    || declared === 'verifiable-memory'
-  ) {
-    return declared;
-  }
-
   // ListenerBoi's query contracts are authored against its projected working
   // memory. The Rust typed adapter already pins this same view; keep the Node
   // UI compatible with existing v1-v3 catalogs, which predate an explicit
@@ -323,88 +317,56 @@ export function buildQueryCatalogState(
   catalogsBySubGraph: Map<string, QueryCatalog[]>;
   queriesBySubGraph: Map<string, SavedQuery[]>;
 } {
-  const catalogsByUri = new Map<string, QueryCatalog>();
-
+  const catalogsByUri = new Map<string, QueryCatalogRowShape>();
   for (const row of catalogRows) {
-    const catalogIri = stripIri(row.catalog);
+    const catalogIri = queryCatalogBindingValue(row.catalog);
     if (!catalogIri) continue;
-    const slug = catalogIri.split(':catalog:').pop() ?? catalogIri;
-    catalogsByUri.set(catalogIri, {
-      slug,
-      subGraph: stripLiteral(row.subGraph),
-      name: stripLiteral(row.name) || slug,
-      description: stripLiteral(row.description) || undefined,
-      rank: parseInt10(row.rank) || 99,
-      queries: [],
-    });
+    catalogsByUri.set(catalogIri, row);
   }
 
-  const queries: SavedQuery[] = queryRows
-    .map(row => {
-      const qIri = stripIri(row.q);
-      const slug = qIri.split(':query:').pop() ?? qIri;
-      const subGraph = stripLiteral(row.subGraph);
-      const catalogIri = stripIri(row.catalog);
-      const catalog = catalogIri ? catalogsByUri.get(catalogIri) : undefined;
-      const implicitCatalogSlug = `default:${subGraph}`;
-      return {
-        slug,
-        subGraph,
-        catalogSlug: catalog?.slug ?? implicitCatalogSlug,
-        catalogName: catalog?.name ?? 'Queries',
-        catalogDescription: catalog?.description,
-        catalogRank: catalog?.rank ?? 999,
-        name: stripLiteral(row.name) || slug,
-        description: stripLiteral(row.description) || undefined,
-        sparql: stripLiteral(row.sparql),
-        resultColumn: stripLiteral(row.column) || '',
-        rank: parseInt10(row.rank) || 99,
-        view: savedQueryExecutionView(row, qIri, catalogIri),
-        parameters: parseQueryCatalogParameters(stripLiteral(row.queryParameters) || undefined),
-      };
-    })
-    .filter(q => q.subGraph && q.sparql)
-    .sort((a, b) =>
-      a.subGraph.localeCompare(b.subGraph)
-      || a.catalogRank - b.catalogRank
-      || a.catalogName.localeCompare(b.catalogName)
-      || a.rank - b.rank
-      || a.name.localeCompare(b.name),
-    );
-
-  const catalogsByComposite = new Map<string, QueryCatalog>();
-  for (const catalog of catalogsByUri.values()) {
-    catalogsByComposite.set(`${catalog.subGraph}|${catalog.slug}`, { ...catalog, queries: [] });
-  }
-
-  for (const query of queries) {
-    const key = `${query.subGraph}|${query.catalogSlug}`;
-    const existing = catalogsByComposite.get(key);
-    if (existing) {
-      existing.queries.push(query);
-      continue;
-    }
-    catalogsByComposite.set(key, {
-      slug: query.catalogSlug,
-      subGraph: query.subGraph,
-      name: query.catalogName,
-      description: query.catalogDescription,
-      rank: query.catalogRank,
-      queries: [query],
-    });
-  }
-
-  const queryCatalogs = Array.from(catalogsByComposite.values())
-    .filter(catalog => catalog.queries.length > 0)
-    .map(catalog => ({
-      ...catalog,
-      queries: [...catalog.queries].sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name)),
-    }))
-    .sort((a, b) =>
-      a.subGraph.localeCompare(b.subGraph)
-      || a.rank - b.rank
-      || a.name.localeCompare(b.name),
-    );
+  const enrichedRows = queryRows.map((row) => {
+    const catalogIri = queryCatalogBindingValue(row.catalog);
+    const catalog = catalogsByUri.get(catalogIri);
+    return {
+      ...row,
+      resultColumn: row.resultColumn ?? row.column,
+      catalogName: row.catalogName ?? catalog?.name,
+      catalogDescription: row.catalogDescription ?? catalog?.description,
+      catalogRank: row.catalogRank ?? catalog?.rank,
+    };
+  });
+  const decoded = decodeQueryCatalogBindings(enrichedRows, {
+    legacyView: legacySavedQueryExecutionView,
+  }).map((query) => query.catalogIri ? query : {
+    ...query,
+    catalogSlug: `default:${query.subGraph}`,
+  });
+  const queries: SavedQuery[] = decoded.map((query) => ({
+    slug: query.slug,
+    subGraph: query.subGraph,
+    catalogSlug: query.catalogSlug,
+    catalogName: query.catalogName,
+    catalogDescription: query.catalogDescription,
+    catalogRank: query.catalogRank,
+    name: query.name,
+    description: query.description,
+    sparql: query.sparql,
+    resultColumn: query.resultColumn ?? '',
+    rank: query.rank,
+    view: query.view,
+    parameters: query.parameters,
+  }));
+  const queryByIri = new Map(decoded.map((query, index) => [query.queryIri, queries[index]]));
+  const queryCatalogs: QueryCatalog[] = groupQueryCatalogItems(decoded).map((catalog) => ({
+    slug: catalog.slug,
+    subGraph: catalog.subGraph,
+    name: catalog.name,
+    description: catalog.description,
+    rank: catalog.rank,
+    queries: catalog.queries
+      .map((query) => queryByIri.get(query.queryIri))
+      .filter((query): query is SavedQuery => Boolean(query)),
+  }));
 
   const catalogsBySubGraph = new Map<string, QueryCatalog[]>();
   const queriesBySubGraph = new Map<string, SavedQuery[]>();

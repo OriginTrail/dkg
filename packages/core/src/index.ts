@@ -407,3 +407,4 @@ export {
   resolveNodeTimerDelayMs,
 } from './node-timer.js';
 export * from './query-catalog-parameters.js';
+export * from './query-catalog.js';

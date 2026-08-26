@@ -9,10 +9,11 @@ import { readFile, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
 import {
-  parseQueryCatalogParameters,
-  renderQueryCatalogTemplate,
-  type QueryCatalogParameterDefinition,
-} from '@origintrail-official/dkg-core/query-catalog-parameters';
+  CONTEXT_GRAPH_QUERY_SUBGRAPH,
+  decodeQueryCatalogBindings,
+  type QueryCatalogItem,
+} from '@origintrail-official/dkg-core/query-catalog';
+import { renderQueryCatalogTemplate } from '@origintrail-official/dkg-core/query-catalog-parameters';
 import {
   dkgAuthTokenPath,
   FAUCET_WALLETS_PER_REQUEST,
@@ -80,7 +81,6 @@ import {
   publishEntityBatches,
   formatPublisherJobOutput,
   formatPublisherJobValue,
-  stripQuotes,
   formatQuadObject,
   sleep,
   stopDaemonIfRunning,
@@ -104,71 +104,11 @@ import {
 } from '../cli-supervisor.js';
 
 export function registerQueryCatalogCommand(program: Command): void {
-type QueryCatalogItem = {
-  slug: string;
-  name: string;
-  description?: string;
-  sparql: string;
-  resultColumn?: string;
-  rank: number;
-  catalogSlug: string;
-  catalogName: string;
-  catalogDescription?: string;
-  catalogRank: number;
-  subGraph: string;
-  parameters: QueryCatalogParameterDefinition[];
-  view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
-};
-
-const CONTEXT_GRAPH_QUERY_SUBGRAPH = '__context_graph';
-
 async function loadSavedQueriesForCatalog(contextGraphId: string): Promise<QueryCatalogItem[]> {
   const client = await ApiClient.connect();
   const result = await client.readQueryCatalog(contextGraphId);
   const bindings = result.result.type === 'bindings' ? result.result.bindings : [];
-  return bindings
-    .map((row) => {
-      const qIri = catalogBindingValue(row.q);
-      const catalogIri = catalogBindingValue(row.catalog);
-      const slug = qIri.split(':query:').pop() ?? qIri;
-      const catalogSlug = catalogIri ? (catalogIri.split(':catalog:').pop() ?? catalogIri) : 'ui-saved-queries';
-      return {
-        slug,
-        name: catalogBindingValue(row.name) || slug,
-        description: row.description ? catalogBindingValue(row.description) : undefined,
-        sparql: catalogBindingValue(row.sparql),
-        resultColumn: row.resultColumn ? catalogBindingValue(row.resultColumn) : undefined,
-        rank: Number.parseInt(catalogBindingValue(row.rank) || '99', 10) || 99,
-        catalogSlug,
-        catalogName: catalogBindingValue(row.catalogName) || 'Queries',
-        catalogDescription: row.catalogDescription ? catalogBindingValue(row.catalogDescription) : undefined,
-        catalogRank: Number.parseInt(catalogBindingValue(row.catalogRank) || '999', 10) || 999,
-        subGraph: catalogBindingValue(row.subGraph),
-        parameters: parseQueryCatalogParameters(
-          row.queryParameters ? catalogBindingValue(row.queryParameters) : undefined,
-        ),
-        view: savedQueryView(row.executionView ?? row.view),
-      };
-    })
-    .filter((item) => item.sparql.length > 0)
-    .sort((a, b) => a.subGraph.localeCompare(b.subGraph) || a.catalogRank - b.catalogRank || a.rank - b.rank || a.name.localeCompare(b.name));
-}
-
-function catalogBindingValue(value: unknown): string {
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const bindingValue = (value as { value?: unknown }).value;
-    if (typeof bindingValue === 'string') return bindingValue;
-  }
-  return stripQuotes(String(value ?? ''));
-}
-
-function savedQueryView(value: unknown): QueryCatalogItem['view'] {
-  const normalized = catalogBindingValue(value);
-  return normalized === 'working-memory'
-    || normalized === 'shared-working-memory'
-    || normalized === 'verifiable-memory'
-    ? normalized
-    : undefined;
+  return decodeQueryCatalogBindings(bindings);
 }
 
 function collectQueryParameter(value: string, previous: string[]): string[] {
