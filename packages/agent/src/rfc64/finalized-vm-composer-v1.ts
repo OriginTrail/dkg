@@ -225,6 +225,8 @@ export function composeFinalizedVmSetV1(
   for (const candidate of inventory.rows) {
     const placement = placementsByKaId.get(candidate.kaId);
     if (placement === undefined) {
+      // Completeness is a property of the finalized policy, never a caller
+      // option that could weaken a private author lane's closure requirement.
       if (
         finalizedContextGraph.accessPolicy === 1
         && candidate.authorAddress === catalogAuthorAddress
