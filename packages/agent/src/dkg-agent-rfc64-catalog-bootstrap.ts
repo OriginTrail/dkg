@@ -21,6 +21,9 @@ import type {
   Rfc64PublicCatalogBootstrapScopeV1,
 } from './dkg-agent-types.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import {
+  classifyRfc64CatalogReconciliationTerminalReasonV1,
+} from './rfc64/public-catalog-reconciliation-failure-v1.js';
 
 const MAX_STATUS_ERROR_BYTES_V1 = 1024;
 const MAX_CONCURRENT_TARGETS_V1 = 4;
@@ -68,14 +71,38 @@ export function classifyRfc64CatalogBootstrapFailureV1(
   completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
 }> {
   const knownIncomplete = requiresPrivateVm
-    && error instanceof Rfc64CatalogSynchronizationErrorV1
-    && error.terminalReason === 'no-authorized-provider';
+    && hasNoAuthorizedProviderTerminalReasonV1(error);
   return Object.freeze({
     outcome: knownIncomplete
       ? 'known-incomplete'
       : error === null ? 'not-found' : 'failed',
     completionReason: knownIncomplete ? 'no-authorized-provider' : null,
   });
+}
+
+function hasNoAuthorizedProviderTerminalReasonV1(error: unknown): boolean {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; current !== null && depth < 8 && !seen.has(current); depth += 1) {
+    seen.add(current);
+    if (
+      current instanceof Rfc64CatalogSynchronizationErrorV1
+      && current.terminalReason === 'no-authorized-provider'
+    ) {
+      return true;
+    }
+    if (classifyRfc64CatalogReconciliationTerminalReasonV1(current)
+      === 'no-authorized-provider') {
+      return true;
+    }
+    if (typeof current !== 'object') return false;
+    try {
+      current = (current as { readonly cause?: unknown }).cause ?? null;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 interface MutableTargetStatusV1 {
@@ -194,9 +221,8 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           authorAddress: target.authorAddress,
           catalogEra: policyEnvelope.payload.era,
         }),
-        // Releases 1-2 private recovery is deliberately single-provider. The
-        // graph-complete provider is the only source used for every signed
-        // author catalog; configured target candidates do not widen it.
+        // Private recovery uses only graph-complete providers for every signed
+        // author catalog. Per-author candidates cannot widen that authority.
         providers: policyEnvelope.payload.accessPolicy === 1
           ? completeSwmProviders
           : target.providers,
@@ -314,11 +340,16 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     try {
       const completeSwmProviders = [...new Set(
         state.config.acceptedPolicies.flatMap(
+          ({ completeSwmProviders: providers = [] }) => providers,
+        ),
+      )];
+      const publicCompleteSwmProviders = new Set(
+        state.config.acceptedPolicies.flatMap(
           ({ policyEnvelope, completeSwmProviders: providers = [] }) => (
             policyEnvelope.payload.accessPolicy === 0 ? providers : []
           ),
         ),
-      )];
+      );
       await mapWithConcurrency(
         completeSwmProviders,
         MAX_CONCURRENT_TARGETS_V1,
@@ -332,16 +363,18 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
             // the lifecycle scheduler to seed or resume the selected lane; it
             // owns the seed/incomplete/complete state transition and becomes a
             // no-op after exact plane proof.
-            this.queueSelectedSwmFromPeerOnConnect(
-              providerPeerId,
-              (_peerId, error) => {
-                this.log.warn(
-                  state.ctx,
-                  `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
-                );
-              },
-              0,
-            );
+            if (publicCompleteSwmProviders.has(providerPeerId)) {
+              this.queueSelectedSwmFromPeerOnConnect(
+                providerPeerId,
+                (_peerId, error) => {
+                  this.log.warn(
+                    state.ctx,
+                    `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
+                  );
+                },
+                0,
+              );
+            }
           } catch (error) {
             this.log.warn(
               state.ctx,
@@ -381,51 +414,47 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     target.catalogVersion = null;
     target.inventoryRowCount = null;
     target.lastError = null;
-    let sawNotFound = false;
     let lastError: string | null = null;
     let terminalError: unknown | null = null;
-    for (const providerPeerId of target.providers) {
-      if (signal.aborted) return;
-      target.attempts += 1;
-      try {
-        const applied = await this.synchronizeRfc64PublicCatalogFromProviderV1({
-          remotePeerId: providerPeerId,
-          scope: target.scope,
-          signal,
-        });
-        if (applied === null) {
-          sawNotFound = true;
-          continue;
-        }
+    try {
+      const applied = await this.synchronizeRfc64CatalogFromProvidersV1({
+        remotePeerIds: target.providers,
+        scope: target.scope,
+        signal,
+      });
+      if (applied !== null) {
         target.outcome = 'applied';
         target.completionReason = null;
-        target.providerPeerId = providerPeerId;
+        target.providerPeerId = applied.appliedProviderPeerId
+          ?? applied.providerPeerIds[0]
+          ?? null;
+        // Discovery is hedged across the full bounded provider set before the
+        // receiver selects an exact highest head for activation.
+        target.attempts = target.providers.length;
         target.appliedHeadDigest = applied.currentCatalogHeadDigest;
         target.catalogVersion = applied.catalogVersion;
         target.inventoryRowCount = applied.inventoryRowCount;
         target.lastError = null;
         target.updatedAtMs = Date.now();
         return;
-      } catch (error) {
-        if (signal.aborted) return;
-        const classification = classifyRfc64CatalogBootstrapFailureV1(
-          target.requiresPrivateVm,
-          error,
-        );
-        if (
-          terminalError === null
-          || classification.outcome === 'known-incomplete'
-        ) terminalError = error;
-        lastError = boundedErrorV1(errorMessageV1(error));
       }
+      // A null result means the bounded provider loop completed without a
+      // current head. Preserve the number of providers that were attempted.
+      target.attempts = target.providers.length;
+    } catch (error) {
+      if (signal.aborted) return;
+      // The bounded discovery call snapshots and attempts the complete
+      // configured provider set before it reports a terminal failure. Keep
+      // that work visible for both failed and known-incomplete outcomes.
+      target.attempts = target.providers.length;
+      terminalError = error;
+      lastError = boundedErrorV1(errorMessageV1(error));
     }
     const classification = classifyRfc64CatalogBootstrapFailureV1(
       target.requiresPrivateVm,
       terminalError,
     );
-    target.outcome = classification.outcome === 'not-found' && !sawNotFound
-      ? 'failed'
-      : classification.outcome;
+    target.outcome = classification.outcome;
     target.completionReason = classification.completionReason;
     target.providerPeerId = null;
     target.appliedHeadDigest = null;

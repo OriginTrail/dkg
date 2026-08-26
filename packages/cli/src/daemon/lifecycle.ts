@@ -292,7 +292,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -1342,7 +1341,7 @@ export async function runDaemonInner(
     ...new Set([
       ...resolveContextGraphs(config),
       ...resolveNetworkDefaultContextGraphs(network),
-      ...rfc64Catalog.selectedContextGraphs,
+      ...rfc64Catalog.selectedPublicContextGraphs,
     ]),
   ];
 

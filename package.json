@@ -7,6 +7,7 @@
     "releaseRuntimeBuildScript": "build:runtime:packages"
   },
   "scripts": {
+    "promotion:closes": "node scripts/promotion-closes.mjs",
     "build": "node scripts/build.mjs",
     "build:packages": "turbo build",
     "build:runtime:packages": "node scripts/build-runtime-packages.mjs",
@@ -29,7 +30,8 @@
     "bench:swm-triple-volume": "pnpm --filter @origintrail-official/dkg benchmark:swm-triple-volume --",
     "bench:baseline": "pnpm --filter @origintrail-official/dkg-storage build && ESBENCH_RESULT=bench/results/baseline.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/baseline.html esbench --config esbench.config.mjs",
     "bench:compare": "pnpm --filter @origintrail-official/dkg-storage build && ESBENCH_DIFF=bench/results/baseline.json ESBENCH_RESULT=bench/results/compare.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/compare.html esbench --config esbench.config.mjs",
-    "lint": "turbo lint",
+    "lint": "node scripts/ci/check-oxlint-baseline.mjs",
+    "lint:baseline:update": "node scripts/ci/check-oxlint-baseline.mjs --write",
     "clean": "turbo clean",
     "dev": "turbo dev",
     "dkg": "node packages/cli/dist/cli.js",
@@ -82,6 +84,8 @@
     "typecheck:m1:rfc64-private-swm-recovery": "tsc --project devnet/rfc64-cp1-private-swm-recovery/tsconfig.json",
     "test:m2:rfc64-private-swm-vm-recovery": "node --import tsx devnet/rfc64-cp2-private-swm-vm-recovery/launch-live.ts",
     "typecheck:m2:rfc64-private-swm-vm-recovery": "tsc --project devnet/rfc64-cp2-private-swm-vm-recovery/tsconfig.json",
+    "test:m3:rfc64-private-provider-failover": "node --import tsx devnet/rfc64-cp3-private-provider-failover/launch-live.ts",
+    "typecheck:m3:rfc64-private-provider-failover": "tsc --project devnet/rfc64-cp3-private-provider-failover/tsconfig.json",
     "test:devnet:v10-core-flows": "vitest run --config devnet/v10-core-flows/vitest.config.ts",
     "test:devnet:v10-e2e": "vitest run --config devnet/v10-end-to-end/vitest.config.ts",
     "test:devnet:v10-stress": "vitest run --config devnet/v10-stress/vitest.config.ts",
@@ -119,10 +123,12 @@
     "@vitest/coverage-v8": "^4.0.18",
     "esbench": "^0.8.1",
     "knip": "^6.6.1",
+    "oxlint": "1.80.0",
     "tsx": "^4.21.0",
     "turbo": "^2",
     "typescript": "^5.7",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "yaml": "2.9.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

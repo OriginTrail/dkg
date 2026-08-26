@@ -1,4 +1,4 @@
-import type { NotificationsFeedResponse } from '../api.js';
+import type { NotificationsFeedResponse, SubGraphInfo } from '../api.js';
 
 export const MOCK_STATUS = {
   name: 'my-dkg-node',
@@ -197,4 +197,70 @@ export const MOCK_SESSIONS = {
       ],
     },
   ],
+};
+
+// GH#1763 — mock sub-graph lists keyed by CG id, mirroring the real
+// `/api/sub-graph/list` response shape. `provider.ts` previously reached for
+// this map through `(mock as any).MOCK_SUBGRAPHS`, which the module never
+// exported: the optional lookup kept mock mode from crashing, but the
+// per-CG override the comment promised could never fire and the production
+// Vite build emitted a missing-export warning on every run.
+//
+// Only CGs whose sub-graph UI is worth exercising need an entry — the
+// provider falls back to an empty list for anything absent, which is what
+// `cg:supply-chain-eu` deliberately exercises.
+//
+// Fidelity rules this fixture must hold to, because its stated job is
+// mirroring a real `/api/sub-graph/list` response (PR #2131 review):
+//   1. `name` is the sub-graph SLUG, not a display label. `validateSubGraphName`
+//      (`packages/core/src/constants.ts:650`) rejects whitespace, so a name like
+//      `'Arctic Ice'` is a row the daemon can never emit. The human-readable
+//      label arrives from the profile binding (`displayName ?? sg.name`).
+//   2. `uri` is `did:dkg:context-graph:<cgId>/<name>` — `contextGraphSubGraphUri`
+//      (`constants.ts:563`), which `generateSubGraphRegistration` mints the
+//      registration subject from. The tail must equal `name` exactly.
+//   3. `createdBy` / `createdAt` are always emitted by the list route
+//      (`cli/src/daemon/routes/context-graph.ts:1004-1010`), so a row without
+//      them is likewise unreachable.
+// `mock-provider-subgraphs.test.ts` pins all three.
+export const MOCK_SUBGRAPHS: Record<
+  string,
+  { contextGraphId: string; subGraphs: SubGraphInfo[] }
+> = {
+  'cg:pharma-drug-interactions': {
+    contextGraphId: 'cg:pharma-drug-interactions',
+    subGraphs: [
+      {
+        name: 'interactions',
+        uri: 'did:dkg:context-graph:cg:pharma-drug-interactions/interactions',
+        description: 'Pairwise drug interaction records',
+        createdBy: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
+        createdAt: '2026-04-02T09:15:00Z',
+        entityCount: 148,
+        tripleCount: 1721,
+      },
+      {
+        name: 'contraindications',
+        uri: 'did:dkg:context-graph:cg:pharma-drug-interactions/contraindications',
+        createdBy: 'did:dkg:agent:0x2222222222222222222222222222222222222222',
+        createdAt: '2026-04-05T16:40:00Z',
+        entityCount: 79,
+        tripleCount: 604,
+      },
+    ],
+  },
+  'cg:climate-science': {
+    contextGraphId: 'cg:climate-science',
+    subGraphs: [
+      {
+        name: 'arctic-ice',
+        uri: 'did:dkg:context-graph:cg:climate-science/arctic-ice',
+        description: 'Sea-ice extent projections',
+        createdBy: 'did:dkg:agent:0x3333333333333333333333333333333333333333',
+        createdAt: '2026-04-11T08:05:00Z',
+        entityCount: 32,
+        tripleCount: 410,
+      },
+    ],
+  },
 };

@@ -519,7 +519,18 @@ export function resolveRfc64CatalogActivationsV1(
       'rfc64Catalog and rfc64PublicCatalog bootstrap retry intervals conflict',
     );
   }
-  const acceptedPolicies = [...byGraph.values()];
+  // Each compatibility block is bounded when it is snapshotted above, but
+  // their union must satisfy the same global limits. Re-snapshot the merged
+  // manifest so two individually valid blocks cannot bypass the 64-policy or
+  // 256-target activation bounds.
+  const mergedBootstrap = snapshotRfc64CatalogBootstrapConfigV1({
+    acceptedPolicies: [...byGraph.values()],
+    retryIntervalMs: retryIntervals[0] ?? 30_000,
+  });
+  if (mergedBootstrap === undefined) {
+    throw new TypeError('merged RFC-64 catalog bootstrap is unavailable');
+  }
+  const acceptedPolicies = mergedBootstrap.acceptedPolicies;
   const selectedPublicContextGraphs = acceptedPolicies
     .filter(({ policyEnvelope }) => policyEnvelope.payload.accessPolicy === 0)
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId);
@@ -536,10 +547,7 @@ export function resolveRfc64CatalogActivationsV1(
     selectedPrivateContextGraphs: Object.freeze(selectedPrivateContextGraphs),
     deploymentProfile,
     accessPolicyAuthority: catalog.accessPolicyAuthority,
-    bootstrap: Object.freeze({
-      acceptedPolicies: Object.freeze(acceptedPolicies),
-      retryIntervalMs: retryIntervals[0] ?? 30_000,
-    }),
+    bootstrap: mergedBootstrap,
   });
   return Object.freeze({ catalog: mergedCatalog, publicCatalog });
 }

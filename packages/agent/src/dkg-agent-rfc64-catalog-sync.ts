@@ -49,6 +49,20 @@ export interface SynchronizeRfc64PublicCatalogFromProviderResultV1
   readonly signatureVariantDigest: Digest32V1;
 }
 
+export interface SynchronizeRfc64CatalogFromProvidersParamsV1 {
+  readonly remotePeerIds: readonly string[];
+  readonly scope: Rfc64PublicCatalogCurrentHeadScopeV1;
+  readonly signal?: AbortSignal;
+}
+
+export interface SynchronizeRfc64CatalogFromProvidersResultV1
+  extends AppliedCatalogHeadSnapshotV1 {
+  readonly providerPeerIds: readonly string[];
+  readonly appliedProviderPeerId: string | null;
+  readonly providerAttempts: number;
+  readonly signatureVariantDigest: Digest32V1;
+}
+
 export class Rfc64CatalogSyncMethods extends DKGAgentBase {
   /**
    * Pull one provider's authenticated current public-root head and run it
@@ -60,35 +74,60 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     params: SynchronizeRfc64PublicCatalogFromProviderParamsV1,
   ): Promise<SynchronizeRfc64PublicCatalogFromProviderResultV1 | null> {
-    const providerPeerId = params.remotePeerId;
+    const synchronized = await this.synchronizeRfc64CatalogFromProvidersV1({
+      remotePeerIds: [params.remotePeerId],
+      scope: params.scope,
+      ...(params.signal === undefined ? {} : { signal: params.signal }),
+    });
+    if (synchronized === null) return null;
+    return Object.freeze({
+      ...synchronized,
+      providerPeerId: params.remotePeerId,
+    });
+  }
+
+  /** Bounded multi-provider discovery and exact-head failover. */
+  async synchronizeRfc64CatalogFromProvidersV1(
+    this: DKGAgent,
+    params: SynchronizeRfc64CatalogFromProvidersParamsV1,
+  ): Promise<SynchronizeRfc64CatalogFromProvidersResultV1 | null> {
     const scope = params.scope;
     const signal = params.signal;
     const service = this.rfc64PublicCatalogServiceV1;
     if (service === undefined) {
       throw new Error('RFC-64 public catalog service is not started');
     }
-    const synchronized = await service.synchronizeCurrentCatalogHead({
-      remotePeerId: providerPeerId,
+    const synchronized = await service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: params.remotePeerIds,
       scope,
       ...(signal === undefined ? {} : { signal }),
     });
     if (synchronized === null) return null;
+    if (
+      synchronized.completionOutcome !== 'applied'
+      && synchronized.completionOutcome !== 'already-applied'
+    ) {
+      throw new Error(
+        'RFC-64 current catalog head synchronization did not complete successfully'
+        + ` (${synchronized.completionOutcome})`,
+      );
+    }
     const catalogScope = deriveAuthorCatalogScopeFromHeadV1(
-      synchronized.head.envelope.payload,
+      synchronized.current.head.envelope.payload,
     );
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(catalogScope);
     const applied = this.rfc64PersistenceV1?.inventory.readAppliedCatalogHeadV1(
       catalogScopeDigest,
-      synchronized.announcement.authorAddress,
+      synchronized.current.announcement.authorAddress,
     ) ?? null;
     if (
       applied === null
       || applied.currentCatalogHeadDigest
-        !== synchronized.announcement.catalogHeadObjectDigest
-      || applied.catalogVersion !== synchronized.announcement.catalogVersion
+        !== synchronized.current.announcement.catalogHeadObjectDigest
+      || applied.catalogVersion !== synchronized.current.announcement.catalogVersion
     ) {
       const failure = this.rfc64PublicCatalogReconciliationFailuresV1.readCurrentAttempt(
-        synchronized.announcement.catalogHeadObjectDigest,
+        synchronized.current.announcement.catalogHeadObjectDigest,
       );
       if (failure !== null) {
         throw new Rfc64CatalogSynchronizationErrorV1(
@@ -102,8 +141,10 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
     }
     return Object.freeze({
       ...applied,
-      providerPeerId,
-      signatureVariantDigest: synchronized.announcement.signatureVariantDigest,
+      providerPeerIds: synchronized.providerPeerIds,
+      appliedProviderPeerId: synchronized.appliedProviderPeerId,
+      providerAttempts: synchronized.providerAttempts,
+      signatureVariantDigest: synchronized.current.announcement.signatureVariantDigest,
     });
   }
 }

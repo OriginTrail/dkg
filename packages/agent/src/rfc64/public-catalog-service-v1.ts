@@ -62,6 +62,7 @@ import {
 } from './catalog-access-policy-v1.js';
 import {
   Rfc64PublicCatalogReceiverV1,
+  type Rfc64PublicCatalogReceiverCompletionOutcomeV1,
   type Rfc64PublicCatalogReceiverReconcilerV1,
   type Rfc64PublicCatalogReceiverOptionsV1,
   type Rfc64PublicCatalogReceiverStatsV1,
@@ -85,6 +86,9 @@ import {
   type Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1,
 } from './public-catalog-native-reconciler-v1.js';
 import type {
+  Rfc64PublicCatalogNativeReceiverResourceStatsV1,
+} from './public-catalog-native-receiver-v1.js';
+import type {
   Rfc64PublicCatalogIssuerAuthorizationV1,
 } from './public-catalog-successor-producer-v1.js';
 import {
@@ -96,6 +100,7 @@ import {
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from './public-catalog-transport-v1.js';
 import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './catalog-peers-v1.js';
+import { mapWithConcurrency } from '../map-with-concurrency.js';
 
 export {
   RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
@@ -104,6 +109,8 @@ export {
 
 /** Default per-peer announce/fetch deadline (ms). */
 const DEFAULT_TRANSPORT_TIMEOUT_MS = 10_000;
+const MAX_FAILOVER_PROVIDERS_V1 = 8;
+const MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1 = 4;
 
 export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly router: ProtocolRouter;
@@ -144,6 +151,9 @@ export interface Rfc64PublicCatalogReconcilerClientsV1 {
   readonly headTransport: Rfc64PublicCatalogHeadFetchClientV1;
   readonly contentTransport: Rfc64PublicCatalogContentFetchClientV1;
   readonly resolveTrustedCatalogScope: Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1;
+  readonly verifyIssuerSignature: (
+    envelope: SignedControlEnvelopeV1,
+  ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
   readonly transportTimeoutMs: number;
 }
 
@@ -157,6 +167,9 @@ export interface Rfc64PublicCatalogServiceNativeOptionsV1 extends Pick<
   readonly createReconciler: (
     clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>,
   ) => Rfc64PublicCatalogReceiverReconcilerV1;
+  /** Local aggregate resource counters. Never include provider or private scope identity. */
+  readonly readResourceStats?: () =>
+    Readonly<Rfc64PublicCatalogNativeReceiverResourceStatsV1> | null;
 }
 
 export interface Rfc64PublicCatalogServiceCurrentHeadDiscoveryOptionsV1 {
@@ -223,6 +236,12 @@ export interface DiscoverRfc64PublicCatalogCurrentHeadInputV1 {
   readonly signal?: AbortSignal;
 }
 
+export interface DiscoverRfc64PublicCatalogCurrentHeadProvidersInputV1 {
+  readonly remotePeerIds: readonly string[];
+  readonly scope: Rfc64PublicCatalogCurrentHeadScopeV1;
+  readonly signal?: AbortSignal;
+}
+
 /** Verified discovery result. Returning it never stages or activates the head. */
 export interface DiscoveredRfc64PublicCatalogCurrentHeadV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
@@ -237,10 +256,23 @@ export interface DiscoveredRfc64PublicCatalogCurrentHeadV1 {
 export type SynchronizedRfc64PublicCatalogCurrentHeadV1 =
   DiscoveredRfc64PublicCatalogCurrentHeadV1;
 
+export interface SynchronizedRfc64CatalogCurrentHeadProvidersV1 {
+  readonly current: DiscoveredRfc64PublicCatalogCurrentHeadV1;
+  /** Exact successful terminal result for the current accepted policy attempt. */
+  readonly completionOutcome: Rfc64PublicCatalogReceiverCompletionOutcomeV1;
+  /** Providers that proved the exact selected current head before reconciliation. */
+  readonly providerPeerIds: readonly string[];
+  /** Provider that produced the applied transition; null for a durable replay. */
+  readonly appliedProviderPeerId: string | null;
+  /** Actual reconciliation attempts for this exact scheduled task. */
+  readonly providerAttempts: number;
+}
+
 export interface Rfc64PublicCatalogServiceStatsV1 {
   readonly started: boolean;
   readonly acceptedPolicies: number;
   readonly receiver: Rfc64PublicCatalogReceiverStatsV1;
+  readonly nativeReceiver: Readonly<Rfc64PublicCatalogNativeReceiverResourceStatsV1> | null;
 }
 
 export class Rfc64PublicCatalogServiceV1 {
@@ -255,6 +287,8 @@ export class Rfc64PublicCatalogServiceV1 {
     Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 | undefined;
   readonly #nativeTransport: Rfc64PublicCatalogNativeTransportV1 | undefined;
   readonly #transportTimeoutMs: number;
+  readonly #readNativeResourceStats: () =>
+    Readonly<Rfc64PublicCatalogNativeReceiverResourceStatsV1> | null;
   #started = false;
   #closed = false;
 
@@ -264,6 +298,7 @@ export class Rfc64PublicCatalogServiceV1 {
     this.#verifyIssuerSignature =
       options.verifyIssuerSignature ?? verifyControlEnvelopeIssuerSignatureV1;
     this.#transportTimeoutMs = options.transportTimeoutMs ?? DEFAULT_TRANSPORT_TIMEOUT_MS;
+    this.#readNativeResourceStats = options.native?.readResourceStats ?? (() => null);
 
     this.#transport = new Rfc64PublicCatalogTransportV1(options.router, {
       controlObjects: this.#controlObjects,
@@ -317,6 +352,7 @@ export class Rfc64PublicCatalogServiceV1 {
         }),
         resolveTrustedCatalogScope: (announcement: Rfc64PublicCatalogHeadAnnouncementV1) =>
           this.#resolveTrustedCatalogScope(announcement),
+        verifyIssuerSignature: this.#verifyIssuerSignature,
         transportTimeoutMs: this.#transportTimeoutMs,
       }));
     this.#receiver = new Rfc64PublicCatalogReceiverV1(reconciler, options.receiver);
@@ -651,6 +687,100 @@ export class Rfc64PublicCatalogServiceV1 {
     return discovered;
   }
 
+  /**
+   * Discover candidates with bounded hedging, retain every provider for the
+   * exact highest current head, then let the ordinary receiver own scoring,
+   * backoff, failover, and the durable applied transition.
+   */
+  async synchronizeCurrentCatalogHeadFromProviders(
+    input: DiscoverRfc64PublicCatalogCurrentHeadProvidersInputV1,
+  ): Promise<SynchronizedRfc64CatalogCurrentHeadProvidersV1 | null> {
+    const remotePeerIds = snapshotRfc64PublicCatalogAnnouncementPeersV1(
+      input.remotePeerIds,
+    );
+    if (remotePeerIds.length < 1 || remotePeerIds.length > MAX_FAILOVER_PROVIDERS_V1) {
+      throw new TypeError('RFC-64 provider failover requires 1-8 distinct providers');
+    }
+    const scope = input.scope;
+    const signal = input.signal;
+    const attempts = await mapWithConcurrency(
+      remotePeerIds,
+      MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1,
+      async (remotePeerId) => {
+        try {
+          const discovered = await this.discoverCurrentCatalogHead({
+            remotePeerId,
+            scope,
+            ...(signal === undefined ? {} : { signal }),
+          });
+          return Object.freeze({ remotePeerId, discovered, error: null });
+        } catch (error) {
+          if (signal?.aborted) throw signal.reason;
+          return Object.freeze({ remotePeerId, discovered: null, error });
+        }
+      },
+    );
+    const available = attempts.filter((attempt) => attempt.discovered !== null) as Array<{
+      readonly remotePeerId: string;
+      readonly discovered: DiscoveredRfc64PublicCatalogCurrentHeadV1;
+      readonly error: null;
+    }>;
+    if (available.length === 0) {
+      const errors = attempts.flatMap(({ error }) => error === null ? [] : [error]);
+      if (errors.length > 0) {
+        throw new AggregateError(errors, 'RFC-64 no configured provider was reachable');
+      }
+      return null;
+    }
+    let highestVersion = -1n;
+    for (const { discovered } of available) {
+      const version = BigInt(discovered.announcement.catalogVersion);
+      if (version > highestVersion) highestVersion = version;
+    }
+    const highest = available.filter(({ discovered }) => (
+      BigInt(discovered.announcement.catalogVersion) === highestVersion
+    ));
+    const selectedIdentity = exactHeadIdentityV1(highest[0]!.discovered.announcement);
+    if (highest.some(({ discovered }) => (
+      exactHeadIdentityV1(discovered.announcement) !== selectedIdentity
+    ))) {
+      throw new Error('RFC-64 providers reported conflicting heads at the same catalog version');
+    }
+    const selected = highest.filter(({ discovered }) => (
+      exactHeadIdentityV1(discovered.announcement) === selectedIdentity
+    ));
+    if (signal?.aborted) throw signal.reason;
+    const completion = await this.#receiver.scheduleManyAndWait(selected.map(({
+      remotePeerId,
+      discovered,
+    }) => ({
+      remotePeerId,
+      announcement: discovered.announcement,
+    })));
+    const providerPeerIds = Object.freeze(selected.map(({ remotePeerId }) => remotePeerId));
+    if (
+      completion.appliedProviderPeerId !== null
+      && !providerPeerIds.includes(completion.appliedProviderPeerId)
+    ) {
+      throw new Error(
+        'RFC-64 receiver completed through a provider outside the requested failover set',
+      );
+    }
+    if (completion.outcome !== 'applied' && completion.outcome !== 'already-applied') {
+      throw new Error(
+        `RFC-64 current-head synchronization ended with ${completion.outcome}`,
+        completion.error === null ? {} : { cause: completion.error },
+      );
+    }
+    return Object.freeze({
+      current: selected[0]!.discovered,
+      completionOutcome: completion.outcome,
+      providerPeerIds,
+      appliedProviderPeerId: completion.appliedProviderPeerId,
+      providerAttempts: completion.providerAttempts,
+    });
+  }
+
   /** Idle-await the receiver (tests / graceful shutdown coordination). */
   whenReceiverIdle(): Promise<void> {
     return this.#receiver.whenIdle();
@@ -661,6 +791,7 @@ export class Rfc64PublicCatalogServiceV1 {
       started: this.#started,
       acceptedPolicies: this.#policies.size,
       receiver: this.#receiver.stats(),
+      nativeReceiver: this.#readNativeResourceStats(),
     });
   }
 
@@ -778,6 +909,11 @@ export class Rfc64PublicCatalogServiceV1 {
       );
     }
     try {
+      if (record.policy.accessPolicy === 1 && input.subGraphName !== null) {
+        throw new Error(
+          'RFC-64 current-head discovery supports only the root catalog lane',
+        );
+      }
       if (!this.#policies.isSwmAuthorAuthorized({
         networkId: input.networkId,
         contextGraphId: input.contextGraphId,
@@ -847,6 +983,22 @@ export class Rfc64PublicCatalogServiceV1 {
       throw new Error('RFC-64 public catalog service is not started');
     }
   }
+}
+
+function exactHeadIdentityV1(
+  announcement: Readonly<Rfc64PublicCatalogHeadAnnouncementV1>,
+): string {
+  return [
+    announcement.networkId,
+    announcement.contextGraphId,
+    announcement.subGraphName ?? '',
+    announcement.authorAddress,
+    announcement.catalogEra,
+    announcement.catalogVersion,
+    announcement.policyDigest,
+    announcement.catalogHeadObjectDigest,
+    announcement.signatureVariantDigest,
+  ].join('\n');
 }
 
 function assertSupportedCatalogFanout(

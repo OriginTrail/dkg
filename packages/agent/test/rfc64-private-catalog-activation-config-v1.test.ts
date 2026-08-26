@@ -20,6 +20,11 @@ import {
   resolveRfc64CatalogActivationsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import {
+  snapshotRfc64CatalogBootstrapConfigV1,
+  snapshotRfc64PublicCatalogBootstrapConfigV1,
+} from '../src/rfc64/catalog-authority-config-v1.js';
+import { mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
 
 const NETWORK = 'otp:20430' as NetworkIdV1;
 const PRIVATE_CG = (
@@ -32,7 +37,9 @@ const OWNER = '0x1111111111111111111111111111111111111111' as EvmAddressV1;
 const LOCAL = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const PROVIDER = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
 const OUTSIDER = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
+const PROVIDER_TWO = '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 const PROVIDER_PEER = '12D3KooPrivateProvider';
+const PROVIDER_TWO_PEER = '12D3KooPrivateProviderTwo';
 const HOLDER_PEER = '12D3KooPrivateHolder';
 
 function policy(contextGraphId: ContextGraphIdV1, accessPolicy: 0 | 1): ContextGraphPolicyV1 {
@@ -96,6 +103,7 @@ function rosterEnvelope(
           ? ['holder'] as const
           : ['holder', 'provider'] as const,
       },
+      { agentAddress: PROVIDER_TWO, roles: ['holder', 'provider'] as const },
     ],
     issuedAt: '0',
   };
@@ -112,15 +120,17 @@ function privateActivation(options: {
   roster?: UnsignedMemberRosterEnvelopeV1;
   localAgentAddress?: EvmAddressV1;
   boundAgentAddress?: EvmAddressV1;
+  providers?: readonly string[];
 } = {}) {
   const envelope = policyEnvelope(policy(PRIVATE_CG, 1));
+  const providers = options.providers ?? [PROVIDER_PEER];
   return {
     bootstrap: {
       acceptedPolicies: [{
         policyEnvelope: envelope,
         rosterEnvelope: options.roster ?? rosterEnvelope(envelope),
-        targets: [{ authorAddress: PROVIDER, providers: [PROVIDER_PEER] }],
-        completeSwmProviders: [PROVIDER_PEER],
+        targets: [{ authorAddress: PROVIDER, providers }],
+        completeSwmProviders: providers,
       }],
       retryIntervalMs: 1_000,
     },
@@ -129,8 +139,23 @@ function privateActivation(options: {
       peerAgentBindings: [{
         peerId: PROVIDER_PEER,
         agentAddress: options.boundAgentAddress ?? PROVIDER,
-      }],
+      }, ...(providers.includes(PROVIDER_TWO_PEER)
+        ? [{ peerId: PROVIDER_TWO_PEER, agentAddress: PROVIDER_TWO }]
+        : [])],
     },
+  } as const;
+}
+
+function publicBootstrapPolicy(index: number, targetCount = 0) {
+  const contextGraphId = `${OWNER}/bounded-public-${index}` as ContextGraphIdV1;
+  return {
+    policyEnvelope: policyEnvelope(policy(contextGraphId, 0)),
+    targets: Array.from({ length: targetCount }, (_, targetIndex) => ({
+      authorAddress: `0x${(
+        BigInt(index + 1) * 1_000n + BigInt(targetIndex + 1)
+      ).toString(16).padStart(40, '0')}` as EvmAddressV1,
+      providers: [PROVIDER_PEER],
+    })),
   } as const;
 }
 
@@ -261,7 +286,16 @@ describe('RFC-64 private catalog activation', () => {
     });
   });
 
-  it('keeps every private target on the one complete provider and in the roster', () => {
+  it('accepts multiple complete providers and keeps every target on the exact ordered set', () => {
+    const multiProvider = resolveRfc64CatalogActivationConfigV1(
+      privateActivation({ providers: [PROVIDER_PEER, PROVIDER_TWO_PEER] }),
+      chainIdentity,
+    );
+    expect(multiProvider.bootstrap?.acceptedPolicies[0]).toMatchObject({
+      completeSwmProviders: [PROVIDER_PEER, PROVIDER_TWO_PEER],
+      targets: [{ providers: [PROVIDER_PEER, PROVIDER_TWO_PEER] }],
+    });
+
     const activation = privateActivation();
     expect(() => resolveRfc64CatalogActivationConfigV1({
       ...activation,
@@ -272,7 +306,7 @@ describe('RFC-64 private catalog activation', () => {
           targets: [{ authorAddress: PROVIDER, providers: ['12D3KooOtherProvider'] }],
         }],
       },
-    }, chainIdentity)).toThrow(/must use the one completeSwmProvider/u);
+    }, chainIdentity)).toThrow(/must use the exact completeSwmProviders list/u);
 
     expect(() => resolveRfc64CatalogActivationConfigV1({
       ...activation,
@@ -314,5 +348,105 @@ describe('RFC-64 private catalog activation', () => {
       catalog: privateActivation(),
       publicCatalog: conflictingPublic,
     }, chainIdentity)).toThrow(/conflict for selected graph/u);
+  });
+
+  it('enforces the global policy limit after additive and compatibility blocks are merged', () => {
+    const additivePolicies = Array.from(
+      { length: 32 },
+      (_, index) => publicBootstrapPolicy(index),
+    );
+    const compatibilityPolicies = Array.from(
+      { length: 33 },
+      (_, index) => publicBootstrapPolicy(index + additivePolicies.length),
+    );
+
+    expect(() => resolveRfc64CatalogActivationsV1({
+      catalog: {
+        bootstrap: {
+          acceptedPolicies: additivePolicies,
+          retryIntervalMs: 1_000,
+        },
+      },
+      publicCatalog: {
+        bootstrap: {
+          acceptedPublicPolicies: compatibilityPolicies,
+          retryIntervalMs: 1_000,
+        },
+      },
+    }, chainIdentity)).toThrow(/acceptedPolicies must contain at most 64 policies/u);
+  });
+
+  it('enforces the global target limit after additive and compatibility blocks are merged', () => {
+    expect(() => resolveRfc64CatalogActivationsV1({
+      catalog: {
+        bootstrap: {
+          acceptedPolicies: [publicBootstrapPolicy(0, 128)],
+          retryIntervalMs: 1_000,
+        },
+      },
+      publicCatalog: {
+        bootstrap: {
+          acceptedPublicPolicies: [publicBootstrapPolicy(1, 129)],
+          retryIntervalMs: 1_000,
+        },
+      },
+    }, chainIdentity)).toThrow(/targets must contain at most 256 catalogs/u);
+  });
+
+  it('merges additive private bootstrap with legacy public bootstrap without dropping either', () => {
+    const privateBootstrap = privateActivation().bootstrap;
+    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
+    const legacyPublic = {
+      acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
+      retryIntervalMs: 1_000,
+    } as const;
+
+    const merged = mergeRfc64CatalogBootstrapsV1(privateBootstrap, legacyPublic);
+
+    expect(merged?.acceptedPolicies.map(({ policyEnvelope: envelope }) => (
+      envelope.payload.contextGraphId
+    ))).toEqual([PRIVATE_CG, PUBLIC_CG]);
+    expect(merged?.retryIntervalMs).toBe(1_000);
+    expect(() => mergeRfc64CatalogBootstrapsV1(privateBootstrap, {
+      ...legacyPublic,
+      acceptedPublicPolicies: [{
+        policyEnvelope: privateBootstrap.acceptedPolicies[0]!.policyEnvelope,
+        targets: [],
+      }],
+    })).toThrow(/configured twice/u);
+  });
+
+  it('enforces the policy limit in the daemon additive/legacy bootstrap merge', () => {
+    const catalog = snapshotRfc64CatalogBootstrapConfigV1({
+      acceptedPolicies: Array.from(
+        { length: 32 },
+        (_, index) => publicBootstrapPolicy(index),
+      ),
+      retryIntervalMs: 1_000,
+    })!;
+    const legacyPublic = snapshotRfc64PublicCatalogBootstrapConfigV1({
+      acceptedPublicPolicies: Array.from(
+        { length: 33 },
+        (_, index) => publicBootstrapPolicy(index + 32),
+      ),
+      retryIntervalMs: 1_000,
+    })!;
+
+    expect(() => mergeRfc64CatalogBootstrapsV1(catalog, legacyPublic))
+      .toThrow(/acceptedPolicies must contain at most 64 policies/u);
+  });
+
+  it('enforces the target limit in the daemon additive/legacy bootstrap merge', () => {
+    const catalog = snapshotRfc64CatalogBootstrapConfigV1({
+      acceptedPolicies: [publicBootstrapPolicy(0, 128)],
+      retryIntervalMs: 1_000,
+    })!;
+    const legacyPublic = snapshotRfc64PublicCatalogBootstrapConfigV1({
+      acceptedPublicPolicies: [publicBootstrapPolicy(1, 129)],
+      retryIntervalMs: 1_000,
+    })!;
+
+    expect(() => mergeRfc64CatalogBootstrapsV1(catalog, legacyPublic))
+      .toThrow(/targets must contain at most 256 catalogs/u);
   });
 });

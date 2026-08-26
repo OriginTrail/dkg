@@ -121,7 +121,7 @@ deterministic harness and must exactly match the selected network.
 Its `networkId` and numeric `assertedAtChainId` are checked against the same
 effective chain identity before subscriptions, stores, or agent startup begin.
 
-### Experimental Releases 1-2: selected private SWM and VM
+### Experimental Releases 1-3: selected private SWM, VM, and provider failover
 
 `rfc64Catalog` is the additive policy-neutral form. Release 1 lets a current
 member recover SWM for one explicitly selected owner-signed, unregistered
@@ -129,6 +129,16 @@ private CG from one pinned complete provider. Release 2 also accepts a
 registered private CG whose policy source is `finalized-chain`. For that graph,
 the receiver recovers SWM from the same pinned provider and materializes VM
 from the exact finalized chain ordinal set before it commits the catalog head.
+Release 3 accepts 1-8 current roster providers for the same exact graph-complete
+head. It discovers at most four providers at once, selects the highest exact
+head, rejects a same-version conflict, and retries another retained provider
+when a transfer fails.
+
+Verified control objects and KA bundles are stored as they arrive. A retry or
+process restart reads these objects from the local durable cache. It does not
+download the same verified bytes again. Private status exposes only aggregate
+attempt, switch, backoff, cache, network, and byte counters. It does not expose
+private provider identities.
 
 Private VM recovery fails closed. The accepted roster must bind to the exact
 policy digest. The catalog author and the content provider must be current
@@ -153,11 +163,17 @@ The bounded operator shape is:
         {
           "policyEnvelope": "<canonical independently verified ContextGraphPolicyV1 envelope>",
           "rosterEnvelope": "<canonical independently verified MemberRosterV1 envelope>",
-          "completeSwmProviders": ["12D3Koo...private-provider"],
+          "completeSwmProviders": [
+            "12D3Koo...private-provider-a",
+            "12D3Koo...private-provider-b"
+          ],
           "targets": [
             {
               "authorAddress": "0x...catalog-author",
-              "providers": ["12D3Koo...private-provider"]
+              "providers": [
+                "12D3Koo...private-provider-a",
+                "12D3Koo...private-provider-b"
+              ]
             }
           ]
         }
@@ -167,8 +183,12 @@ The bounded operator shape is:
       "localAgentAddress": "0x...current-local-member",
       "peerAgentBindings": [
         {
-          "peerId": "12D3Koo...private-provider",
+          "peerId": "12D3Koo...private-provider-a",
           "agentAddress": "0x...current-roster-provider"
+        },
+        {
+          "peerId": "12D3Koo...private-provider-b",
+          "agentAddress": "0x...other-current-roster-provider"
         }
       ]
     }
@@ -183,7 +203,7 @@ binding to a current roster member with the `provider` role. The local address
 must also be a current member. The daemon rejects a missing or conflicting
 policy, roster, provider binding, network, or local membership before it starts.
 
-Releases 1-2 do not follow roster successors automatically. When a member is
+Releases 1-3 do not follow roster successors automatically. When a member is
 removed, install the new independently verified policy/roster snapshot, remove
 obsolete peer bindings, and restart the node. This fences the removed peer from
 new transfers. Content already received by that member cannot be

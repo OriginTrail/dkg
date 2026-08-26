@@ -158,13 +158,20 @@ export function snapshotRfc64CatalogBootstrapConfigV1(
         `acceptedPolicies[${index}].completeSwmProviders`,
         'rfc64Catalog.bootstrap',
       );
-    if (policy.accessPolicy === 1 && completeSwmProviders?.length !== 1) {
+    if (
+      policy.accessPolicy === 1
+      && (
+        completeSwmProviders === undefined
+        || completeSwmProviders.length < 1
+        || completeSwmProviders.length > MAX_RFC64_BOOTSTRAP_PROVIDERS_V1
+      )
+    ) {
       throw new TypeError(
-        'rfc64Catalog private Releases 1-2 policies require exactly one completeSwmProvider',
+        'rfc64Catalog private policies require 1-8 completeSwmProviders',
       );
     }
     if (policy.accessPolicy === 1) {
-      const completeProvider = completeSwmProviders![0]!;
+      const completeProviders = completeSwmProviders!;
       const rosterMembers = new Set(
         rosterEnvelope!.payload.members.map(({ agentAddress }) => agentAddress),
       );
@@ -174,9 +181,14 @@ export function snapshotRfc64CatalogBootstrapConfigV1(
             'rfc64Catalog private catalog target author is not a current roster member',
           );
         }
-        if (target.providers.length !== 1 || target.providers[0] !== completeProvider) {
+        if (
+          target.providers.length !== completeProviders.length
+          || target.providers.some((provider, providerIndex) => (
+            provider !== completeProviders[providerIndex]
+          ))
+        ) {
           throw new TypeError(
-            'rfc64Catalog private Releases 1-2 targets must use the one completeSwmProvider',
+            'rfc64Catalog private targets must use the exact completeSwmProviders list',
           );
         }
       }

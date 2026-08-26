@@ -9,6 +9,42 @@ import { Rfc64PublicCatalogNativeReceiverErrorV1 } from './public-catalog-native
 export type Rfc64CatalogReconciliationTerminalReasonV1 =
   | 'no-authorized-provider';
 
+/** One bounded provider's terminal reconciliation result. */
+export interface Rfc64CatalogProviderTerminalFailureV1 {
+  readonly providerPeerId: string;
+  readonly error: unknown;
+}
+
+/**
+ * Bounded aggregate for one exact-head failover attempt.
+ *
+ * The receiver retains at most one terminal error for each of its at most eight
+ * selected providers. `attemptedProviderCount` also includes providers whose
+ * terminal result was `not-found`, so downstream classification can require a
+ * conclusive error from the complete provider set instead of trusting the last
+ * provider tried.
+ */
+export class Rfc64CatalogProviderFailureAggregateV1 extends AggregateError {
+  readonly attemptedProviderCount: number;
+  readonly providerFailures: readonly Readonly<Rfc64CatalogProviderTerminalFailureV1>[];
+
+  constructor(
+    attemptedProviderCount: number,
+    providerFailures: readonly Readonly<Rfc64CatalogProviderTerminalFailureV1>[],
+  ) {
+    const failures = Object.freeze(providerFailures.map(({ providerPeerId, error }) => (
+      Object.freeze({ providerPeerId, error })
+    )));
+    super(
+      failures.map(({ error }) => error),
+      'RFC-64 catalog reconciliation exhausted its selected providers',
+    );
+    this.name = 'Rfc64CatalogProviderFailureAggregateV1';
+    this.attemptedProviderCount = attemptedProviderCount;
+    this.providerFailures = failures;
+  }
+}
+
 /** Stable process-local evidence for one scheduler-terminal reconciliation failure. */
 export interface Rfc64PublicCatalogReconciliationFailureV1 {
   readonly catalogHeadDigest: Digest32V1;
@@ -26,6 +62,9 @@ export interface Rfc64CatalogReconciliationAttemptFailureV1 {
   readonly errorCode: string | null;
 }
 
+/** Monotonic process-local identity for one execution-time reconciliation attempt. */
+export type Rfc64CatalogReconciliationAttemptTokenV1 = number;
+
 /** Hard process-memory bound for distinct terminal receiver failures. */
 export const RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1 = 128;
 
@@ -42,10 +81,19 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
     Digest32V1,
     Rfc64CatalogReconciliationAttemptFailureV1
   >();
+  readonly #currentAttemptTokens = new Map<
+    Digest32V1,
+    Rfc64CatalogReconciliationAttemptTokenV1
+  >();
+  #attemptSequence = 0;
 
   /** Start a new semantic attempt without changing immutable diagnostic history. */
-  beginAttempt(catalogHeadDigest: Digest32V1): void {
+  beginAttempt(catalogHeadDigest: Digest32V1): Rfc64CatalogReconciliationAttemptTokenV1 {
+    const token = ++this.#attemptSequence;
+    evictOldestWhenFullV1(this.#currentAttemptTokens);
+    this.#currentAttemptTokens.set(catalogHeadDigest, token);
     this.#currentAttemptFailures.delete(catalogHeadDigest);
+    return token;
   }
 
   /** Scheduler-terminal callback sink. The first failure for one head wins. */
@@ -53,6 +101,7 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
     catalogHeadDigest: Digest32V1,
     error: unknown,
     terminalReason: Rfc64CatalogReconciliationTerminalReasonV1 | null = null,
+    attemptToken?: Rfc64CatalogReconciliationAttemptTokenV1,
   ): void {
     const errorName = stableErrorNameV1(error);
     const errorCode = stableErrorCodeV1(error);
@@ -66,6 +115,13 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
         ...(causeCode === null ? {} : { causeCode }),
       }));
     }
+    const currentAttemptToken = this.#currentAttemptTokens.get(catalogHeadDigest);
+    if (
+      (currentAttemptToken !== undefined && currentAttemptToken !== attemptToken)
+      || (currentAttemptToken === undefined && attemptToken !== undefined)
+    ) {
+      return;
+    }
     evictOldestWhenFullV1(this.#currentAttemptFailures);
     this.#currentAttemptFailures.set(catalogHeadDigest, Object.freeze({
       catalogHeadDigest,
@@ -73,6 +129,25 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
       errorName,
       errorCode,
     }));
+  }
+
+  /** Clear only the exact current attempt; stale successes cannot erase a newer failure. */
+  completeAttempt(
+    catalogHeadDigest: Digest32V1,
+    attemptToken: Rfc64CatalogReconciliationAttemptTokenV1,
+  ): void {
+    if (this.#currentAttemptTokens.get(catalogHeadDigest) !== attemptToken) return;
+    this.#currentAttemptFailures.delete(catalogHeadDigest);
+    this.#currentAttemptTokens.delete(catalogHeadDigest);
+  }
+
+  /** Release only the exact terminal attempt token; retain its failure result. */
+  endAttempt(
+    catalogHeadDigest: Digest32V1,
+    attemptToken: Rfc64CatalogReconciliationAttemptTokenV1,
+  ): void {
+    if (this.#currentAttemptTokens.get(catalogHeadDigest) !== attemptToken) return;
+    this.#currentAttemptTokens.delete(catalogHeadDigest);
   }
 
   read(catalogHeadDigest: Digest32V1): Rfc64PublicCatalogReconciliationFailureV1 | null {
@@ -89,11 +164,22 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
   clear(): void {
     this.#failures.clear();
     this.#currentAttemptFailures.clear();
+    this.#currentAttemptTokens.clear();
   }
 
   /** Internal test/diagnostic bound assertion; never exposed on DKGAgent. */
   get size(): number {
     return this.#failures.size;
+  }
+
+  /** Internal test/diagnostic bound assertion; never exposed on DKGAgent. */
+  get currentAttemptFailureSize(): number {
+    return this.#currentAttemptFailures.size;
+  }
+
+  /** Internal test/diagnostic bound assertion; never exposed on DKGAgent. */
+  get currentAttemptTokenSize(): number {
+    return this.#currentAttemptTokens.size;
   }
 }
 
@@ -155,6 +241,25 @@ function evictOldestWhenFullV1<T>(map: Map<Digest32V1, T>): void {
  * receiver boundary. No message parsing or recursive cause traversal is used.
  */
 export function classifyRfc64CatalogReconciliationTerminalReasonV1(
+  error: unknown,
+): Rfc64CatalogReconciliationTerminalReasonV1 | null {
+  if (error instanceof Rfc64CatalogProviderFailureAggregateV1) {
+    if (
+      error.attemptedProviderCount < 1
+      || error.providerFailures.length !== error.attemptedProviderCount
+    ) {
+      return null;
+    }
+    return error.providerFailures.every(({ error: providerError }) => (
+      classifySingleProviderTerminalReasonV1(providerError) === 'no-authorized-provider'
+    ))
+      ? 'no-authorized-provider'
+      : null;
+  }
+  return classifySingleProviderTerminalReasonV1(error);
+}
+
+function classifySingleProviderTerminalReasonV1(
   error: unknown,
 ): Rfc64CatalogReconciliationTerminalReasonV1 | null {
   if (

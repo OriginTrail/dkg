@@ -55,9 +55,15 @@ export function assertGate2HarnessSourceStateV1(
 }
 
 export function spawnGate2HarnessAgentV1(input: {
+  /** Permit the CP2 scale fixture to stage one test-only bulk predecessor. */
+  readonly allowBulkCatalogPredecessor?: boolean;
   readonly catalogLocalAgentAddress?: string;
   readonly dataDir: string;
+  readonly eventTimeoutMs?: number;
   readonly finalizedVmConfigJson?: string;
+  readonly masterKeyHex?: string;
+  /** Harness-only provider delay used to prove mid-transfer failover. */
+  readonly bundleServeDelayMs?: number;
   readonly networkChainId?: string;
   readonly registry: ChildProcessRegistry;
   readonly repoRoot: string;
@@ -65,12 +71,26 @@ export function spawnGate2HarnessAgentV1(input: {
   readonly runtimeManifestDigest: string;
   readonly sourceCommit: string;
 }): Gate2AgentChild {
+  const masterKeyHex = input.masterKeyHex ?? ROLE_MASTER_KEYS[input.role];
+  if (!/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
+    throw new TypeError('harness agent masterKeyHex must be 32 lowercase hex bytes');
+  }
+  if (
+    input.bundleServeDelayMs !== undefined
+    && (
+      !Number.isSafeInteger(input.bundleServeDelayMs)
+      || input.bundleServeDelayMs < 0
+      || input.bundleServeDelayMs > 10_000
+    )
+  ) {
+    throw new TypeError('harness bundleServeDelayMs must be an integer from 0 to 10000');
+  }
   const childEnv = { ...process.env };
   delete childEnv.NODE_OPTIONS;
   delete childEnv.NODE_PATH;
   delete childEnv.TSX_TSCONFIG_PATH;
   return new Gate2AgentChild({
-    eventTimeoutMs: PROCESS_TIMEOUT_MS,
+    eventTimeoutMs: input.eventTimeoutMs ?? PROCESS_TIMEOUT_MS,
     registry: input.registry,
     role: input.role,
     spawn: {
@@ -80,9 +100,18 @@ export function spawnGate2HarnessAgentV1(input: {
       env: {
         ...childEnv,
         DKG_RFC64_GATE2_ADAPTER_DATA_DIR: input.dataDir,
-        DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX: ROLE_MASTER_KEYS[input.role],
+        DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX: masterKeyHex,
         DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST: input.runtimeManifestDigest,
         DKG_RFC64_GATE2_RUNTIME_SOURCE_COMMIT: input.sourceCommit,
+        ...(input.allowBulkCatalogPredecessor === true
+          ? { DKG_RFC64_GATE2_ALLOW_BULK_CATALOG_PREDECESSOR: '1' }
+          : {}),
+        ...(input.bundleServeDelayMs === undefined
+          ? {}
+          : {
+              DKG_RFC64_GATE2_BUNDLE_SERVE_DELAY_MS:
+                String(input.bundleServeDelayMs),
+            }),
         ...(input.catalogLocalAgentAddress === undefined
           ? {}
           : {

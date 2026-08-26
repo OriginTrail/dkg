@@ -17,6 +17,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
+import { mintRfc64CatalogNativeScopedReadCapabilityV1 } from '../src/rfc64/catalog-native-scoped-read-capability-v1-internal.js';
 import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
@@ -82,6 +83,42 @@ function policyRegistry(
     ownerAddress: AUTHOR,
     curatorAddress: CURATOR,
   });
+}
+
+function exactScopeKey(scope: Rfc64PublicCatalogNativeFetchScopeV1): string {
+  return JSON.stringify([
+    scope.networkId,
+    scope.contextGraphId,
+    scope.subGraphName,
+    scope.authorAddress,
+    scope.catalogEra,
+    scope.catalogVersion,
+    scope.policyDigest,
+    scope.catalogHeadObjectDigest,
+  ]);
+}
+
+function scopeBoundResolver(options: {
+  readonly scope: Rfc64PublicCatalogNativeFetchScopeV1;
+  readonly allowedObjectDigests: ReadonlySet<Digest32V1>;
+  readonly allowedBundleDigests: ReadonlySet<Digest32V1>;
+  readonly readCatalogObjectByDigest: (
+    digest: Digest32V1,
+  ) => Promise<SignedControlEnvelopeV1 | null>;
+  readonly readKaBundleByDigest: (digest: Digest32V1) => Promise<Uint8Array | null>;
+}) {
+  const capability = mintRfc64CatalogNativeScopedReadCapabilityV1({
+    scope: options.scope,
+    readCatalogObjectByDigest: (digest) => options.allowedObjectDigests.has(digest)
+      ? options.readCatalogObjectByDigest(digest)
+      : Promise.resolve(null),
+    readKaBundleByDigest: (digest) => options.allowedBundleDigests.has(digest)
+      ? options.readKaBundleByDigest(digest)
+      : Promise.resolve(null),
+  });
+  return vi.fn(async (scope: Rfc64PublicCatalogNativeFetchScopeV1) => (
+    exactScopeKey(scope) === exactScopeKey(options.scope) ? capability : null
+  ));
 }
 
 describe('RFC-64 public catalog native content transport v1', () => {
@@ -153,12 +190,32 @@ describe('RFC-64 public catalog native content transport v1', () => {
       accessPolicy,
       publishPolicy,
     );
+    const scope = Object.freeze({
+      networkId: produced.head.payload.networkId,
+      contextGraphId: produced.head.payload.contextGraphId,
+      subGraphName: produced.head.payload.subGraphName,
+      authorAddress: produced.head.payload.authorAddress,
+      catalogEra: produced.head.payload.era,
+      catalogVersion: produced.head.payload.version,
+      policyDigest: POLICY_DIGEST,
+      catalogHeadObjectDigest: produced.head.objectDigest,
+    }) satisfies Rfc64PublicCatalogNativeFetchScopeV1;
+    const resolveScopedReadCapability = scopeBoundResolver({
+      scope,
+      allowedObjectDigests: new Set(
+        produced.stagedObjects.map(({ objectDigest }) => objectDigest as Digest32V1),
+      ),
+      allowedBundleDigests: new Set([bundle.blobDigest]),
+      readCatalogObjectByDigest: authorCatalogReads,
+      readKaBundleByDigest: authorBundleReads,
+    });
 
     const authorTransport = new Rfc64PublicCatalogNativeTransportV1(
       new ProtocolRouter(authorNode),
       {
         readCatalogObjectByDigest: authorCatalogReads,
         readKaBundleByDigest: authorBundleReads,
+        resolveScopedReadCapability,
         authorizeCatalogOperation: async (input) => {
           authorAuthorizations.push(input.operation);
           return authorPolicy.authorize(input);
@@ -187,16 +244,6 @@ describe('RFC-64 public catalog native content transport v1', () => {
     expect(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1)
       .toBe('/dkg/catalog/1/ka-bundle/by-digest');
 
-    const scope = Object.freeze({
-      networkId: produced.head.payload.networkId,
-      contextGraphId: produced.head.payload.contextGraphId,
-      subGraphName: produced.head.payload.subGraphName,
-      authorAddress: produced.head.payload.authorAddress,
-      catalogEra: produced.head.payload.era,
-      catalogVersion: produced.head.payload.version,
-      policyDigest: POLICY_DIGEST,
-      catalogHeadObjectDigest: produced.head.objectDigest,
-    }) satisfies Rfc64PublicCatalogNativeFetchScopeV1;
     const fetchedRoot = await receiverTransport.fetchCatalogObject(authorNode.peerId, {
       ...scope,
       kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
@@ -221,6 +268,8 @@ describe('RFC-64 public catalog native content transport v1', () => {
       'catalog-object-fetch-inbound',
       'catalog-object-fetch-inbound',
       'catalog-object-fetch-inbound',
+      'catalog-object-fetch-inbound',
+      'ka-bundle-fetch-inbound',
       'ka-bundle-fetch-inbound',
       'ka-bundle-fetch-inbound',
       'ka-bundle-fetch-inbound',
@@ -345,19 +394,164 @@ describe('RFC-64 public catalog native content transport v1', () => {
     expect(providerBundleRead).not.toHaveBeenCalled();
   }, 20_000);
 
+  it('does not expose private shared-store digests through an authorized public V1 scope', async () => {
+    const [authorNode, receiverNode] = await Promise.all([startNode(), startNode()]);
+    await connect(receiverNode, authorNode);
+    const publicCatalog = await produceEmptyAuthorCatalogGenesisV1({
+      scope: {
+        networkId: 'otp:20430',
+        contextGraphId: '0x1111111111111111111111111111111111111111/public-boundary',
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+        bucketCount: '1',
+      } as AuthorCatalogScopeV1,
+      catalogIssuerDelegationDigest: DELEGATION_DIGEST,
+      issuedAt: '1773900000000',
+      signer: {
+        issuer: AUTHOR,
+        signDigest: async (digest) => AUTHOR_WALLET.signMessage(digest),
+      },
+    });
+    const privateCatalog = await produceEmptyAuthorCatalogGenesisV1({
+      scope: {
+        networkId: publicCatalog.head.payload.networkId,
+        contextGraphId: '0x1111111111111111111111111111111111111111/private-boundary',
+        governanceChainId: publicCatalog.head.payload.governanceChainId,
+        governanceContractAddress: publicCatalog.head.payload.governanceContractAddress,
+        ownershipTransitionDigest: publicCatalog.head.payload.ownershipTransitionDigest,
+        subGraphName: publicCatalog.head.payload.subGraphName,
+        authorAddress: publicCatalog.head.payload.authorAddress,
+        era: publicCatalog.head.payload.era,
+        bucketCount: publicCatalog.head.payload.bucketCount,
+      } as AuthorCatalogScopeV1,
+      catalogIssuerDelegationDigest: DELEGATION_DIGEST,
+      issuedAt: '1773900000000',
+      signer: {
+        issuer: AUTHOR,
+        signDigest: async (digest) => AUTHOR_WALLET.signMessage(digest),
+      },
+    });
+    const publicBundle = encodeOpaqueKaBundleV1(UTF8.encode('public'), new Uint8Array());
+    const privateBundle = encodeOpaqueKaBundleV1(UTF8.encode('private'), new Uint8Array());
+    const sharedObjects = new Map<string, SignedControlEnvelopeV1>([
+      ...publicCatalog.stagedObjects.map((object) => [object.objectDigest, object] as const),
+      ...privateCatalog.stagedObjects.map((object) => [object.objectDigest, object] as const),
+    ]);
+    const sharedBundles = new Map<string, Uint8Array>([
+      [publicBundle.blobDigest, publicBundle.bundleBytes],
+      [privateBundle.blobDigest, privateBundle.bundleBytes],
+    ]);
+    const providerObjectRead = vi.fn(async (digest: Digest32V1) =>
+      sharedObjects.get(digest) ?? null);
+    const providerBundleRead = vi.fn(async (digest: Digest32V1) =>
+      sharedBundles.get(digest) ?? null);
+    const publicScope = Object.freeze({
+      networkId: publicCatalog.head.payload.networkId,
+      contextGraphId: publicCatalog.head.payload.contextGraphId,
+      subGraphName: publicCatalog.head.payload.subGraphName,
+      authorAddress: publicCatalog.head.payload.authorAddress,
+      catalogEra: publicCatalog.head.payload.era,
+      catalogVersion: publicCatalog.head.payload.version,
+      policyDigest: POLICY_DIGEST,
+      catalogHeadObjectDigest: publicCatalog.head.objectDigest,
+    }) satisfies Rfc64PublicCatalogNativeFetchScopeV1;
+    const authorPolicy = policyRegistry(
+      LOCAL_MEMBER,
+      REMOTE_MEMBER,
+      publicCatalog.head.payload.contextGraphId,
+      0,
+      0,
+    );
+    const receiverPolicy = policyRegistry(
+      REMOTE_MEMBER,
+      LOCAL_MEMBER,
+      publicCatalog.head.payload.contextGraphId,
+      0,
+      0,
+    );
+    const authorTransport = new Rfc64PublicCatalogNativeTransportV1(
+      new ProtocolRouter(authorNode),
+      {
+        readCatalogObjectByDigest: providerObjectRead,
+        readKaBundleByDigest: providerBundleRead,
+        resolveScopedReadCapability: scopeBoundResolver({
+          scope: publicScope,
+          allowedObjectDigests: new Set(
+            publicCatalog.stagedObjects.map(({ objectDigest }) => objectDigest as Digest32V1),
+          ),
+          allowedBundleDigests: new Set([publicBundle.blobDigest]),
+          readCatalogObjectByDigest: providerObjectRead,
+          readKaBundleByDigest: providerBundleRead,
+        }),
+        authorizeCatalogOperation: authorPolicy.authorize,
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      },
+    );
+    const receiverTransport = new Rfc64PublicCatalogNativeTransportV1(
+      new ProtocolRouter(receiverNode),
+      {
+        readCatalogObjectByDigest: async () => null,
+        readKaBundleByDigest: async () => null,
+        authorizeCatalogOperation: receiverPolicy.authorize,
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      },
+    );
+    transports.push(authorTransport, receiverTransport);
+    authorTransport.start();
+    receiverTransport.start();
+
+    await expect(receiverTransport.fetchCatalogObject(authorNode.peerId, {
+      ...publicScope,
+      kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
+      targetObjectType: AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+      targetObjectDigest: privateCatalog.head.payload.directoryRootDigest,
+    })).resolves.toBeNull();
+    await expect(receiverTransport.fetchKaBundle(authorNode.peerId, {
+      ...publicScope,
+      kind: RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
+      blobDigest: privateBundle.blobDigest,
+      byteLength: privateBundle.bundleBytes.byteLength.toString() as never,
+    })).resolves.toBeNull();
+    expect(providerObjectRead).not.toHaveBeenCalledWith(
+      privateCatalog.head.payload.directoryRootDigest,
+    );
+    expect(providerBundleRead).not.toHaveBeenCalledWith(privateBundle.blobDigest);
+  }, 30_000);
+
   it('rechecks provider authorization after an awaited catalog-object miss', async () => {
     const [authorNode, receiverNode] = await Promise.all([startNode(), startNode()]);
     await connect(receiverNode, authorNode);
     const providerRead = vi.fn(async () => null);
+    const requestScope = {
+      networkId: 'otp:20430' as never,
+      contextGraphId: '0x1111111111111111111111111111111111111111/revoked' as never,
+      subGraphName: 'member-subgraph' as never,
+      authorAddress: AUTHOR,
+      catalogEra: '0' as never,
+      catalogVersion: '1' as never,
+      policyDigest: POLICY_DIGEST,
+      catalogHeadObjectDigest: `0x${'81'.repeat(32)}` as Digest32V1,
+    } satisfies Rfc64PublicCatalogNativeFetchScopeV1;
     let providerAuthorizationChecks = 0;
     const authorTransport = new Rfc64PublicCatalogNativeTransportV1(
       new ProtocolRouter(authorNode),
       {
         readCatalogObjectByDigest: providerRead,
         readKaBundleByDigest: async () => null,
+        resolveScopedReadCapability: scopeBoundResolver({
+          scope: requestScope,
+          allowedObjectDigests: new Set([`0x${'82'.repeat(32)}` as Digest32V1]),
+          allowedBundleDigests: new Set(),
+          readCatalogObjectByDigest: providerRead,
+          readKaBundleByDigest: async () => null,
+        }),
         authorizeCatalogOperation: async () => {
           providerAuthorizationChecks += 1;
-          return providerAuthorizationChecks === 1 ? {
+          return providerAuthorizationChecks <= 2 ? {
             accessPolicy: 0,
             policyDigest: POLICY_DIGEST,
           } : null;
@@ -383,23 +577,17 @@ describe('RFC-64 public catalog native content transport v1', () => {
 
     await expect(receiverTransport.fetchCatalogObject(authorNode.peerId, {
       kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
-      networkId: 'otp:20430' as never,
-      contextGraphId: '0x1111111111111111111111111111111111111111/revoked' as never,
-      subGraphName: 'member-subgraph' as never,
-      authorAddress: AUTHOR,
-      catalogEra: '0' as never,
-      catalogVersion: '1' as never,
-      policyDigest: POLICY_DIGEST,
-      catalogHeadObjectDigest: `0x${'81'.repeat(32)}` as Digest32V1,
+      ...requestScope,
       targetObjectType: AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
       targetObjectDigest: `0x${'82'.repeat(32)}` as Digest32V1,
     }, { timeoutMs: 4_000 })).rejects.toMatchObject({
       code: 'catalog-native-policy-denied',
     });
     expect(providerRead).toHaveBeenCalledOnce();
-    // Route selection checks the policy before choosing V1 or V2. The V1
-    // handler then checks before and after the awaited provider read.
-    expect(providerAuthorizationChecks).toBe(3);
+    // The V1 handler checks before work, after exact-scope capability
+    // resolution, and around the awaited provider read. The denied post-read
+    // check prevents the miss from being returned under stale authority.
+    expect(providerAuthorizationChecks).toBe(4);
   }, 15_000);
 
   it('rechecks current authorization after the outbound bundle-fetch await', async () => {

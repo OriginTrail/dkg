@@ -8,6 +8,7 @@ import {
   MemoryLayer,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
+  computeAuthorCatalogScopeDigestV1,
   computeContextGraphPolicyObjectDigestV1,
   contextGraphLayerUri,
   contextGraphMetaUri,
@@ -43,6 +44,7 @@ import {
   createGate2TwoAgentDataDirsV1,
   spawnGate2HarnessAgentV1,
 } from '../rfc64-gate2-multi-asset-completeness/two-agent-harness.ts';
+import { planPrivateCatalogConstructionV1 } from './batch-plan.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ARTIFACT = process.env.DKG_RFC64_PRIVATE_CP2_ARTIFACT
@@ -60,7 +62,12 @@ const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const RECEIVER_WALLET = new ethers.Wallet(`0x${'65'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const RECEIVER = RECEIVER_WALLET.address.toLowerCase() as EvmAddressV1;
-const ASSET_COUNT = 32;
+const ASSET_COUNT = boundedAssetCount(
+  process.env.DKG_RFC64_PRIVATE_ASSET_COUNT,
+  32,
+);
+const CATALOG_CONSTRUCTION_PLAN = planPrivateCatalogConstructionV1(ASSET_COUNT);
+const PROCESS_EVENT_TIMEOUT_MS = Math.max(90_000, ASSET_COUNT * 2_000);
 const FIRST_KA_NUMBER = 1_000n;
 const ASSERTION_ROOT =
   '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f' as Digest32V1;
@@ -96,8 +103,10 @@ async function execute(): Promise<void> {
   try {
     const author = spawnGate2HarnessAgentV1({
       role: 'author',
+      allowBulkCatalogPredecessor: true,
       catalogLocalAgentAddress: AUTHOR,
       dataDir: dataDirs.author,
+      eventTimeoutMs: PROCESS_EVENT_TIMEOUT_MS,
       networkChainId: NETWORK_ID,
       registry,
       repoRoot: REPO_ROOT,
@@ -129,6 +138,7 @@ async function execute(): Promise<void> {
       role: 'receiver',
       catalogLocalAgentAddress: RECEIVER,
       dataDir: dataDirs.receiver,
+      eventTimeoutMs: PROCESS_EVENT_TIMEOUT_MS,
       finalizedVmConfigJson,
       networkChainId: NETWORK_ID,
       registry,
@@ -166,27 +176,62 @@ async function execute(): Promise<void> {
       },
     ), 'private genesis');
     let previousHead = stagedHead(genesis, 'private genesis');
-    let publication: Record<string, unknown> | null = null;
-    for (let index = 0; index < assets.length; index += 1) {
-      publication = output(await author.request(
-        'publishCatalogExactSetSuccessor',
-        `private-successor-${index + 1}`,
+    let fixturePredecessor: Record<string, unknown> | null = null;
+    if (CATALOG_CONSTRUCTION_PLAN.fixturePredecessorAssetCount > 0) {
+      fixturePredecessor = output(await author.request(
+        'stagePrivateCatalogBulkPredecessor',
+        'private-bulk-predecessor',
         'operation-completed',
         {
           previousHead,
           authorPrivateKey: AUTHOR_WALLET.privateKey,
           catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
-          assets: assets.slice(0, index + 1),
-          deployment: DEPLOYMENT,
-          issuedAt: String(1773900001000 + index),
+          scope: catalogScope(),
+          assets: assets.slice(0, CATALOG_CONSTRUCTION_PLAN.fixturePredecessorAssetCount),
+          finalAssetCount: ASSET_COUNT,
+          fixtureStageBatchSize: CATALOG_CONSTRUCTION_PLAN.fixtureStageBatchSize,
+          issuedAt: '1773900001000',
         },
-      ), `private successor ${index + 1}`);
-      previousHead = stagedHead(publication, `private successor ${index + 1}`);
+      ), 'private bulk predecessor');
+      exact(
+        fixturePredecessor.inventoryRowCount,
+        String(CATALOG_CONSTRUCTION_PLAN.fixturePredecessorAssetCount),
+        'private bulk predecessor row count',
+      );
+      exactJson(
+        fixturePredecessor.fixtureStageBatchSizes,
+        CATALOG_CONSTRUCTION_PLAN.fixtureStageBatchSizes,
+        'private bulk predecessor batch sizes',
+      );
+      previousHead = stagedHead(fixturePredecessor, 'private bulk predecessor');
     }
-    if (publication === null) throw new Error('private successor publication is missing');
+    const publication = output(await author.request(
+      'publishCatalogExactSetSuccessor',
+      'private-final-successor',
+      'operation-completed',
+      {
+        previousHead,
+        authorPrivateKey: AUTHOR_WALLET.privateKey,
+        catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+        assets,
+        deployment: DEPLOYMENT,
+        issuedAt: '1773900002000',
+      },
+    ), 'private final successor');
+    exact(publication.inventoryRowCount, String(ASSET_COUNT), 'private final catalog row count');
     const announcement = record(publication.announcement, 'private successor announcement');
     exact(announcement.policyDigest, POLICY_DIGEST, 'private announcement policy digest');
+    exact(
+      announcement.catalogVersion,
+      CATALOG_CONSTRUCTION_PLAN.fixturePredecessorAssetCount === 0 ? '1' : '2',
+      'private final catalog version',
+    );
+    const headDigest = requiredDigest(publication.headObjectDigest, 'private head digest');
 
+    // Permit the author's outbound request, but leave the receiver without an
+    // authenticated peer-to-agent binding so the inbound private check is the
+    // authority that rejects this first delivery.
+    await bindPeer(author, receiverPeerId, RECEIVER, 'author-bind-receiver');
     const denied = output(await author.request(
       'announce',
       'private-unbound-denial',
@@ -196,11 +241,30 @@ async function execute(): Promise<void> {
     exactJson(denied.announcedPeers, [], 'unbound announcement accepted peers');
     exact(array(denied.failedPeers, 'unbound announcement failed peers').length, 1,
       'unbound announcement failure count');
+    await receiver.request(
+      'awaitReceiverIdle',
+      'private-unbound-receiver-idle',
+      'receiver-idle',
+    );
+    const deniedAppliedHead = await receiver.request(
+      'appliedHeadReadback',
+      'private-unbound-applied-head',
+      'operation-completed',
+      {
+        catalogScopeDigest: computeAuthorCatalogScopeDigestV1(catalogScope()),
+        authorAddress: AUTHOR,
+      },
+    );
+    exact(deniedAppliedHead.output, null, 'unbound receiver applied head');
+    const deniedSynchronization = await receiver.request(
+      'exactInventoryReadback',
+      'private-unbound-inventory',
+      'operation-completed',
+      { catalogHeadDigest: headDigest },
+    );
+    exact(deniedSynchronization.output, null, 'unbound receiver synchronization evidence');
 
-    await Promise.all([
-      bindPeer(author, receiverPeerId, RECEIVER, 'author-bind-receiver'),
-      bindPeer(receiver, authorPeerId, AUTHOR, 'receiver-bind-author'),
-    ]);
+    await bindPeer(receiver, authorPeerId, AUTHOR, 'receiver-bind-author');
     const delivery = output(await author.request(
       'announce',
       'private-authorized-announce',
@@ -211,12 +275,14 @@ async function execute(): Promise<void> {
     exactJson(delivery.failedPeers, [], 'authorized announcement failures');
     await receiver.request('awaitReceiverIdle', 'private-receiver-idle', 'receiver-idle');
 
-    const headDigest = requiredDigest(publication.headObjectDigest, 'private head digest');
     const terminalFailure = await receiver.request(
       'terminalFailureReadback',
       'private-terminal-failure',
       'operation-completed',
-      { catalogHeadDigest: headDigest },
+      {
+        catalogHeadDigest: headDigest,
+        includeHarnessDiagnostic: true,
+      },
     );
     exact(terminalFailure.output, null, 'private terminal failure');
     const synchronization = output(await receiver.request(
@@ -302,6 +368,18 @@ async function execute(): Promise<void> {
       accessPolicy: 1,
       policySource: 'finalized-chain',
       catalogTransport: 'private-v2-only',
+      catalogConstruction: {
+        mode: 'bounded-fixture-predecessor-plus-one-production-successor-v1',
+        fixturePredecessorAssetCount:
+          CATALOG_CONSTRUCTION_PLAN.fixturePredecessorAssetCount,
+        fixtureStageBatchSize: CATALOG_CONSTRUCTION_PLAN.fixtureStageBatchSize,
+        fixtureStageBatchSizes: CATALOG_CONSTRUCTION_PLAN.fixtureStageBatchSizes,
+        productionSuccessorCount: CATALOG_CONSTRUCTION_PLAN.productionSuccessorCount,
+        productionSuccessorExactSetSizes:
+          CATALOG_CONSTRUCTION_PLAN.productionSuccessorExactSetSizes,
+        finalCatalogVersion: announcement.catalogVersion,
+        finalInventoryRowCount: ASSET_COUNT,
+      },
       chainExpectedAssets: ASSET_COUNT,
       swm: { expected: ASSET_COUNT, recovered: swmRecovered },
       vm: { expected: ASSET_COUNT, recovered: vmRecovered },
@@ -524,6 +602,18 @@ function requiredDigest(value: unknown, label: string): Digest32V1 {
   const result = requiredString(value, label);
   if (!/^0x[0-9a-f]{64}$/u.test(result)) throw new TypeError(`${label} is not a digest`);
   return result as Digest32V1;
+}
+
+function boundedAssetCount(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!/^[1-9][0-9]{0,2}$/u.test(value)) {
+    throw new TypeError('DKG_RFC64_PRIVATE_ASSET_COUNT must be an integer from 1 to 500');
+  }
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 1 || count > 500) {
+    throw new TypeError('DKG_RFC64_PRIVATE_ASSET_COUNT must be an integer from 1 to 500');
+  }
+  return count;
 }
 
 function exact(actual: unknown, expected: unknown, label: string): void {

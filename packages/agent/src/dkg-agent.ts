@@ -366,6 +366,7 @@ import {
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type Rfc64CatalogBootstrapConfigV1,
   type Rfc64CatalogBootstrapPolicyV1,
+  type Rfc64PublicCatalogBootstrapConfigV1,
   type DKGAgentACKTransportOptions,
   type ImportedArtifactByteStore,
   type ReplicationEvent,
@@ -424,6 +425,7 @@ import {
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogControlsV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
+import { snapshotRfc64CatalogBootstrapConfigV1 } from './rfc64/catalog-authority-config-v1.js';
 import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
@@ -484,6 +486,7 @@ export type {
   Rfc64CatalogAccessPolicyAuthorityConfigV1,
   Rfc64CatalogBootstrapConfigV1,
   Rfc64CatalogBootstrapPolicyV1,
+  Rfc64PublicCatalogBootstrapConfigV1,
   DKGAgentACKTransportOptions,
   ImportedArtifactByteStore,
 };
@@ -752,6 +755,42 @@ function createACKSendP2P(input: {
  *   const response = await agent.invokeSkill(offerings[0], inputData);
  *   await agent.stop();
  */
+export function mergeRfc64CatalogBootstrapsV1(
+  catalog: Readonly<Rfc64CatalogBootstrapConfigV1> | undefined,
+  legacyPublic: Readonly<Rfc64PublicCatalogBootstrapConfigV1> | undefined,
+): Readonly<Rfc64CatalogBootstrapConfigV1> | undefined {
+  if (catalog === undefined && legacyPublic === undefined) return undefined;
+  if (
+    catalog?.retryIntervalMs !== undefined
+    && legacyPublic?.retryIntervalMs !== undefined
+    && catalog.retryIntervalMs !== legacyPublic.retryIntervalMs
+  ) {
+    throw new TypeError('RFC-64 catalog bootstrap retry intervals conflict');
+  }
+  const acceptedPolicies = [
+    ...(catalog?.acceptedPolicies ?? []),
+    ...(legacyPublic?.acceptedPublicPolicies ?? []),
+  ];
+  const seen = new Set<string>();
+  for (const { policyEnvelope } of acceptedPolicies) {
+    const policy = policyEnvelope.payload;
+    const key = `${policy.networkId}\n${policy.contextGraphId}`;
+    if (seen.has(key)) {
+      throw new TypeError('RFC-64 catalog bootstrap Context Graph is configured twice');
+    }
+    seen.add(key);
+  }
+  const retryIntervalMs = catalog?.retryIntervalMs ?? legacyPublic?.retryIntervalMs;
+  const merged = snapshotRfc64CatalogBootstrapConfigV1({
+    acceptedPolicies,
+    ...(retryIntervalMs === undefined ? {} : { retryIntervalMs }),
+  });
+  if (merged === undefined) {
+    throw new TypeError('merged RFC-64 catalog bootstrap is unavailable');
+  }
+  return merged;
+}
+
 export class DKGAgent extends DKGAgentBase {
   private chainContextGraphScanFailure:
     | { signature: string; count: number }
@@ -848,7 +887,7 @@ export class DKGAgent extends DKGAgentBase {
       syncContextGraphs: [
         ...new Set([
           ...(normalizedConfig.syncContextGraphs ?? []),
-          ...catalogActivation.selectedContextGraphs,
+          ...catalogActivation.selectedPublicContextGraphs,
         ]),
       ],
     };
@@ -899,7 +938,15 @@ export class DKGAgent extends DKGAgentBase {
     const rfc64PublicCatalogAutoPublishPolicy =
       rfc64PublicCatalogControls.autoPublishPolicy;
     const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
-    const rfc64CatalogBootstrap = catalogActivation.bootstrap;
+    const rfc64CatalogBootstrap = mergeRfc64CatalogBootstrapsV1(
+      catalogActivation.bootstrap,
+      // resolveRfc64CatalogActivationsV1 already folds the compatibility
+      // activation into catalogActivation. Only the legacy standalone block
+      // still has to be added here.
+      normalizedConfig.rfc64PublicCatalogActivation === undefined
+        ? rfc64PublicCatalogBootstrap
+        : undefined,
+    );
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {

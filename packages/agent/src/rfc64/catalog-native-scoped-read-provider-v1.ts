@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Provider-side scope proof for RFC-64 native private content reads.
+ * Provider-side scope proof for RFC-64 native content reads.
  *
  * The durable stores are intentionally digest keyed and shared by all context
- * graphs. This adapter is the only bridge from an authorized private wire
+ * graphs. This adapter is the only bridge from an authorized exact wire
  * scope to those stores. It first closes one exact bounded signed head and then
  * exposes only the control-object and bundle digests reachable from that head.
  */
@@ -34,8 +34,11 @@ import {
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SignedAuthorCatalogIssuerDelegationEnvelopeV1,
+  type SignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import type {
+  VerifiedControlEnvelopeIssuerSignatureV1,
+} from '@origintrail-official/dkg-chain';
 
 import {
   verifyAuthorCatalogRowAuthorshipV1,
@@ -54,18 +57,32 @@ import {
 export interface Rfc64CatalogNativeScopedReadProviderOptionsV1 {
   readonly controlObjects: Pick<Rfc64ControlObjectOperationsV1, 'getVerifiedObjectByDigest'>;
   readonly kaBundles: Pick<Rfc64KaBundleOperationsV1, 'readKaBundleByDigest'>;
+  /** The exact verifier configured for every other catalog service path. */
+  readonly verifyIssuerSignature: (
+    envelope: SignedControlEnvelopeV1,
+  ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
   /** Accepted-current authority; never derive policy scope from the request. */
   readonly resolveAcceptedPolicySnapshot: (
     networkId: Rfc64PublicCatalogNativeFetchScopeV1['networkId'],
     contextGraphId: Rfc64PublicCatalogNativeFetchScopeV1['contextGraphId'],
   ) => AcceptedRfc64CatalogAccessSnapshotV1 | null
     | Promise<AcceptedRfc64CatalogAccessSnapshotV1 | null>;
+  /** Optional diagnostics hook after one successful whole-bucket proof. */
+  readonly onAuthorCatalogBucketProof?: () => void;
 }
 
-type Rfc64CatalogNativePrivateAuthorityScopeV1 = Pick<
+type Rfc64CatalogNativeAuthorityScopeV1 = Pick<
   Rfc64PublicCatalogNativeFetchScopeV1,
   'networkId' | 'contextGraphId' | 'authorAddress' | 'catalogEra' | 'policyDigest'
 >;
+
+interface ResolvedRfc64CatalogNativeScopedReadCapabilityV1 {
+  readonly capability: Rfc64CatalogNativeScopedReadCapabilityV1;
+  readonly catalogScope: Readonly<AuthorCatalogScopeV1>;
+}
+
+/** Hard process-memory bound for verified exact-head read capabilities. */
+const RFC64_CATALOG_NATIVE_SCOPED_READ_CAPABILITY_CACHE_MAX_ENTRIES_V1 = 128;
 
 /**
  * Create a resolver for the currently supported bounded root lane: one
@@ -77,13 +94,60 @@ export function createRfc64CatalogNativeScopedReadProviderV1(
   if (
     typeof options?.controlObjects?.getVerifiedObjectByDigest !== 'function'
     || typeof options?.kaBundles?.readKaBundleByDigest !== 'function'
+    || typeof options?.verifyIssuerSignature !== 'function'
     || typeof options?.resolveAcceptedPolicySnapshot !== 'function'
+    || (
+      options.onAuthorCatalogBucketProof !== undefined
+      && typeof options.onAuthorCatalogBucketProof !== 'function'
+    )
   ) {
     throw new TypeError('RFC-64 scoped read provider dependencies are incomplete');
   }
-  return async (scope) => {
+  const capabilities = new Map<string, ResolvedRfc64CatalogNativeScopedReadCapabilityV1>();
+  const constructions = new Map<
+    string,
+    Promise<ResolvedRfc64CatalogNativeScopedReadCapabilityV1>
+  >();
+  return async (untrustedScope) => {
     try {
-      return await resolveExactBoundedHeadCapability(options, scope);
+      const scope = snapshotScope(untrustedScope);
+      const cacheKey = exactScopeCacheKey(scope);
+      const cached = capabilities.get(cacheKey);
+      if (cached !== undefined) {
+        // Do not let a cached cryptographic closure outlive its accepted-current
+        // policy or private author membership. The capability repeats the full
+        // policy/scope check before every object or bundle read as well.
+        try {
+          await requireAcceptedCurrentCatalogScope(
+            options,
+            cached.catalogScope,
+            scope.policyDigest,
+          );
+        } catch (cause) {
+          capabilities.delete(cacheKey);
+          throw cause;
+        }
+        return cached.capability;
+      }
+      let construction = constructions.get(cacheKey);
+      if (construction === undefined) {
+        if (
+          constructions.size
+          >= RFC64_CATALOG_NATIVE_SCOPED_READ_CAPABILITY_CACHE_MAX_ENTRIES_V1
+        ) {
+          throw new Error('RFC-64 scoped read capability construction limit reached');
+        }
+        construction = resolveExactBoundedHeadCapability(options, scope);
+        constructions.set(cacheKey, construction);
+      }
+      let resolved: ResolvedRfc64CatalogNativeScopedReadCapabilityV1;
+      try {
+        resolved = await construction;
+      } finally {
+        if (constructions.get(cacheKey) === construction) constructions.delete(cacheKey);
+      }
+      rememberSuccessfulCapability(capabilities, cacheKey, resolved);
+      return resolved.capability;
     } catch {
       // Invalid, missing, cross-scope, or corrupt closures all have the same
       // externally observable result. Do not make the resolver a digest oracle.
@@ -95,9 +159,9 @@ export function createRfc64CatalogNativeScopedReadProviderV1(
 async function resolveExactBoundedHeadCapability(
   options: Rfc64CatalogNativeScopedReadProviderOptionsV1,
   requestedScope: Readonly<Rfc64PublicCatalogNativeFetchScopeV1>,
-): Promise<Rfc64CatalogNativeScopedReadCapabilityV1> {
+): Promise<ResolvedRfc64CatalogNativeScopedReadCapabilityV1> {
   const scope = snapshotScope(requestedScope);
-  const accepted = await requireAcceptedCurrentPrivateScope(options, scope);
+  const accepted = await requireAcceptedCurrentScope(options, scope);
   const storedHead = await readStored(options, scope.catalogHeadObjectDigest);
   if (storedHead === null) throw new Error('requested catalog head is not stored');
   assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
@@ -162,20 +226,29 @@ async function resolveExactBoundedHeadCapability(
     assertRfc64PublicCatalogExactSetBundleBytesV1(
       bucket.payload.rows.map((row) => row.transfer.byteLength),
     );
+    const firstRow = bucket.payload.rows[0];
+    if (firstRow === undefined) throw new Error('non-empty catalog bucket has no first row');
+    // One exact authorship proof authenticates the common delegation, head,
+    // directory path, bucket signature, and complete signed bucket bytes. The
+    // preceding canonical bucket/scope assertion has already validated every
+    // row, including ordering, uniqueness, bucket mapping, and packed author.
+    // Repeating the same whole-bucket proof for each target row made a bounded
+    // N-row capability construction O(N^2) without adding authorization.
+    verifyAuthorCatalogRowAuthorshipV1({
+      catalogIssuerDelegation: delegation,
+      catalogIssuerDelegationSignature: storedDelegation.issuerSignature,
+      parentAuthorAgentEvidence: null,
+      catalogHead: head,
+      catalogHeadSignature: storedHead.issuerSignature,
+      directoryPathEnvelopes: [directory],
+      directoryPathSignatures: [storedDirectory.issuerSignature],
+      directoryPathProof: directoryProof,
+      catalogBucket: bucket,
+      catalogBucketSignature: storedBucket.issuerSignature,
+      targetKaId: firstRow.kaId,
+    });
+    options.onAuthorCatalogBucketProof?.();
     for (const row of bucket.payload.rows) {
-      verifyAuthorCatalogRowAuthorshipV1({
-        catalogIssuerDelegation: delegation,
-        catalogIssuerDelegationSignature: storedDelegation.issuerSignature,
-        parentAuthorAgentEvidence: null,
-        catalogHead: head,
-        catalogHeadSignature: storedHead.issuerSignature,
-        directoryPathEnvelopes: [directory],
-        directoryPathSignatures: [storedDirectory.issuerSignature],
-        directoryPathProof: directoryProof,
-        catalogBucket: bucket,
-        catalogBucketSignature: storedBucket.issuerSignature,
-        targetKaId: row.kaId,
-      });
       const byteLength = Number(BigInt(row.transfer.byteLength));
       const previous = allowedBundles.get(row.transfer.blobDigest);
       if (previous !== undefined && previous !== byteLength) {
@@ -189,11 +262,11 @@ async function resolveExactBoundedHeadCapability(
     );
   }
 
-  await requireAcceptedCurrentPrivateCatalogScope(options, catalogScope, scope.policyDigest);
-  return mintRfc64CatalogNativeScopedReadCapabilityV1({
+  await requireAcceptedCurrentCatalogScope(options, catalogScope, scope.policyDigest);
+  const capability = mintRfc64CatalogNativeScopedReadCapabilityV1({
     scope,
     readCatalogObjectByDigest: async (objectDigest) => {
-      await requireAcceptedCurrentPrivateCatalogScope(options, catalogScope, scope.policyDigest);
+      await requireAcceptedCurrentCatalogScope(options, catalogScope, scope.policyDigest);
       const expectedType = allowedControlObjects.get(objectDigest);
       if (expectedType === undefined) return null;
       const stored = await readStored(options, objectDigest);
@@ -207,7 +280,7 @@ async function resolveExactBoundedHeadCapability(
       return stored.envelope;
     },
     readKaBundleByDigest: async (blobDigest) => {
-      await requireAcceptedCurrentPrivateCatalogScope(options, catalogScope, scope.policyDigest);
+      await requireAcceptedCurrentCatalogScope(options, catalogScope, scope.policyDigest);
       const expectedByteLength = allowedBundles.get(blobDigest);
       if (expectedByteLength === undefined) return null;
       const bundle = await options.kaBundles.readKaBundleByDigest(blobDigest);
@@ -222,11 +295,42 @@ async function resolveExactBoundedHeadCapability(
       return bundle;
     },
   });
+  return Object.freeze({ capability, catalogScope });
 }
 
-async function requireAcceptedCurrentPrivateScope(
+function exactScopeCacheKey(
+  scope: Readonly<Rfc64PublicCatalogNativeFetchScopeV1>,
+): string {
+  return JSON.stringify([
+    scope.networkId,
+    scope.contextGraphId,
+    scope.subGraphName,
+    scope.authorAddress,
+    scope.catalogEra,
+    scope.catalogVersion,
+    scope.policyDigest,
+    scope.catalogHeadObjectDigest,
+  ]);
+}
+
+function rememberSuccessfulCapability(
+  capabilities: Map<string, ResolvedRfc64CatalogNativeScopedReadCapabilityV1>,
+  cacheKey: string,
+  resolved: ResolvedRfc64CatalogNativeScopedReadCapabilityV1,
+): void {
+  if (
+    !capabilities.has(cacheKey)
+    && capabilities.size >= RFC64_CATALOG_NATIVE_SCOPED_READ_CAPABILITY_CACHE_MAX_ENTRIES_V1
+  ) {
+    const oldest = capabilities.keys().next().value as string | undefined;
+    if (oldest !== undefined) capabilities.delete(oldest);
+  }
+  capabilities.set(cacheKey, resolved);
+}
+
+async function requireAcceptedCurrentScope(
   options: Rfc64CatalogNativeScopedReadProviderOptionsV1,
-  scope: Readonly<Rfc64CatalogNativePrivateAuthorityScopeV1>,
+  scope: Readonly<Rfc64CatalogNativeAuthorityScopeV1>,
 ): Promise<Readonly<AcceptedRfc64CatalogAccessSnapshotV1>> {
   const accepted = await options.resolveAcceptedPolicySnapshot(
     scope.networkId,
@@ -235,11 +339,14 @@ async function requireAcceptedCurrentPrivateScope(
   if (
     accepted === null
     || accepted.policyDigest !== scope.policyDigest
-    || accepted.policy.accessPolicy !== 1
     || accepted.policy.networkId !== scope.networkId
     || accepted.policy.contextGraphId !== scope.contextGraphId
     || accepted.policy.era !== scope.catalogEra
-    || accepted.roster === null
+  ) {
+    throw new Error('requested catalog scope is not accepted-current authority');
+  }
+  if (accepted.policy.accessPolicy === 1 && (
+    accepted.roster === null
     || accepted.roster.networkId !== accepted.policy.networkId
     || accepted.roster.contextGraphId !== accepted.policy.contextGraphId
     || accepted.roster.ownershipTransitionDigest
@@ -251,18 +358,21 @@ async function requireAcceptedCurrentPrivateScope(
     || !accepted.roster.members.some(
       (member) => member.agentAddress === scope.authorAddress,
     )
-  ) {
-    throw new Error('requested private catalog scope is not accepted-current authority');
+  )) {
+    throw new Error('requested catalog scope is not accepted-current authority');
+  }
+  if (accepted.policy.accessPolicy === 0 && accepted.roster !== null) {
+    throw new Error('public catalog scope must not carry a private member roster');
   }
   return accepted;
 }
 
-async function requireAcceptedCurrentPrivateCatalogScope(
+async function requireAcceptedCurrentCatalogScope(
   options: Rfc64CatalogNativeScopedReadProviderOptionsV1,
   catalogScope: Readonly<AuthorCatalogScopeV1>,
   policyDigest: Digest32V1,
 ): Promise<void> {
-  const accepted = await requireAcceptedCurrentPrivateScope(options, {
+  const accepted = await requireAcceptedCurrentScope(options, {
     networkId: catalogScope.networkId,
     contextGraphId: catalogScope.contextGraphId,
     authorAddress: catalogScope.authorAddress,
@@ -287,7 +397,7 @@ function assertAcceptedPolicyMatchesCatalogScope(
     || policy.ownershipTransitionDigest !== catalogScope.ownershipTransitionDigest
     || policy.era !== catalogScope.era
   ) {
-    throw new Error('accepted-current policy differs from the exact private catalog scope');
+    throw new Error('accepted-current policy differs from the exact catalog scope');
   }
 }
 
@@ -297,7 +407,7 @@ async function readStored(
 ) {
   return options.controlObjects.getVerifiedObjectByDigest({
     objectDigest,
-    verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    verifyIssuerSignature: options.verifyIssuerSignature,
   });
 }
 

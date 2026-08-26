@@ -66,6 +66,12 @@ import {
   type Rfc64CatalogActivationInputV1,
   type Rfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import {
+  Rfc64PublicCatalogNativeReceiverErrorV1,
+} from '../src/rfc64/public-catalog-native-receiver-v1.js';
+import {
+  classifyRfc64CatalogReconciliationTerminalReasonV1,
+} from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 import type {
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
@@ -840,6 +846,47 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
 
     expect((agent as any).config.syncContextGraphs).toContain(CONTEXT_GRAPH_ID);
+  });
+
+  it('keeps a private catalog selection out of the legacy durable sync scope', async () => {
+    const policy = privateCatalogPolicy();
+    const policyEnvelope = {
+      issuer: AUTHOR,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+      payload: policy,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedContextGraphPolicyEnvelopeV1;
+    const policyDigest = computeContextGraphPolicyObjectDigestV1(policyEnvelope);
+    const rosterEnvelope = {
+      issuer: AUTHOR,
+      objectType: MEMBER_ROSTER_OBJECT_TYPE_V1,
+      payload: privateCatalogRoster(policy, policyDigest),
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedMemberRosterEnvelopeV1;
+    const providerPeerId = '12D3KooPrivateCatalogProvider';
+    const agent = await startNativeAgentWithOptions({
+      name: 'direct-private-catalog-scope',
+      catalogActivation: {
+        enabled: true,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        accessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          peerAgentBindings: [{ peerId: providerPeerId, agentAddress: AUTHOR }],
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope,
+            rosterEnvelope,
+            targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+            completeSwmProviders: [providerPeerId],
+          }],
+        },
+      },
+    });
+
+    expect((agent as any).config.syncContextGraphs).not.toContain(CONTEXT_GRAPH_ID);
   });
 
   it('projects a manifest-selected activation without an explicit enabled switch', async () => {
@@ -1904,9 +1951,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       ownerAddress: AUTHOR,
     });
     const appliedHeadDigest = `0x${'a1'.repeat(32)}` as Digest32V1;
+    const providerPeerId = '12D3KooStatusProvider';
     const synchronize = vi.spyOn(
       DKGAgent.prototype,
-      'synchronizeRfc64PublicCatalogFromProviderV1',
+      'synchronizeRfc64CatalogFromProvidersV1',
     ).mockResolvedValueOnce({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -1914,11 +1962,15 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       appliedInventoryDigest: `0x${'b2'.repeat(32)}` as Digest32V1,
       catalogVersion: '2' as never,
       inventoryRowCount: '3' as never,
+      providerPeerIds: [providerPeerId],
+      appliedProviderPeerId: providerPeerId,
+      providerAttempts: 1,
+      signatureVariantDigest: `0x${'c3'.repeat(32)}` as Digest32V1,
     }).mockResolvedValue(null);
     const bootstrap: Rfc64PublicCatalogBootstrapConfigV1 = {
       acceptedPublicPolicies: [{
         policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
-        targets: [{ authorAddress: AUTHOR, providers: ['12D3KooStatusProvider'] }],
+        targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
       }],
       retryIntervalMs: 1_000,
     };
@@ -1945,6 +1997,40 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       });
     }, { timeout: 10_000, interval: 50 });
     expect(synchronize).toHaveBeenCalledTimes(2);
+    synchronize.mockRestore();
+  }, 30_000);
+
+  it('reports configured provider attempts when bootstrap synchronization fails', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const synchronize = vi.spyOn(
+      DKGAgent.prototype,
+      'synchronizeRfc64CatalogFromProvidersV1',
+    ).mockRejectedValue(new Error('simulated bootstrap synchronization failure'));
+    const providers = ['12D3KooFailedProviderA', '12D3KooFailedProviderB'];
+    const receiver = await startNativeAgentWithOptions({
+      name: 'bootstrap-failed-attempt-count',
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [{ authorAddress: AUTHOR, providers }],
+        }],
+        retryIntervalMs: 60_000,
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+        outcome: 'failed',
+        attempts: providers.length,
+        providerPeerId: null,
+        appliedHeadDigest: null,
+      });
+    }, { timeout: 10_000, interval: 50 });
+    expect(synchronize).toHaveBeenCalledTimes(1);
     synchronize.mockRestore();
   }, 30_000);
 
@@ -2475,16 +2561,30 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       'replaceGraphAndSubject',
     ).mockRejectedValue(new Error('simulated receiver semantic-activation failure'));
 
-    await expect(cold.synchronizeRfc64PublicCatalogFromProviderV1({
-      remotePeerId: provider.peerId,
-      scope: {
-        networkId: NETWORK_ID,
-        contextGraphId: CONTEXT_GRAPH_ID,
-        subGraphName: null,
-        authorAddress: AUTHOR,
-        catalogEra: '0',
-      },
-    })).rejects.toThrow(/reconciliation failed \(catalog-native-receiver-activation\)/u);
+    const synchronizationFailure: unknown = await cold
+      .synchronizeRfc64PublicCatalogFromProviderV1({
+        remotePeerId: provider.peerId,
+        scope: {
+          networkId: NETWORK_ID,
+          contextGraphId: CONTEXT_GRAPH_ID,
+          subGraphName: null,
+          authorAddress: AUTHOR,
+          catalogEra: '0',
+        },
+      }).catch((error: unknown) => error);
+    expect(synchronizationFailure).toMatchObject({
+      name: 'Error',
+      message: 'RFC-64 current-head synchronization ended with failed',
+      cause: expect.any(Rfc64PublicCatalogNativeReceiverErrorV1),
+    });
+    const activationFailure = (synchronizationFailure as Error).cause;
+    expect(activationFailure).toMatchObject({
+      name: 'Rfc64PublicCatalogNativeReceiverErrorV1',
+      code: 'catalog-native-receiver-activation',
+    });
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(
+      activationFailure,
+    )).toBeNull();
     expect(replaceGraphAndSubject).toHaveBeenCalled();
     expect(cold.readRfc64PublicCatalogReconciliationFailureV1(
       successor.headObjectDigest,
@@ -2803,6 +2903,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(cold.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
       outcome: 'known-incomplete',
       completionReason: 'no-authorized-provider',
+      attempts: 1,
       providerPeerId: null,
       appliedHeadDigest: null,
     });

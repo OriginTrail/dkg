@@ -245,18 +245,19 @@ export type ResolveRfc64CatalogNativeScopedReadCapabilityV1 = (
 
 export interface Rfc64PublicCatalogNativeTransportOptionsV1 {
   /**
-   * Provider-side exact immutable catalog-object lookup for public V1
-   * compatibility. It is never used for private content.
+   * Legacy digest reader retained for client-only construction compatibility.
+   * Inbound V1 and V2 serving requires `resolveScopedReadCapability` and never
+   * performs a global digest lookup through this callback.
    */
   readonly readCatalogObjectByDigest?: (
     objectDigest: Digest32V1,
   ) => Promise<SignedControlEnvelopeV1 | null>;
-  /** Public V1 compatibility lookup. It is never used for private content. */
+  /** Legacy client-only reader; inbound serving never calls it directly. */
   readonly readKaBundleByDigest?: (
     blobDigest: Digest32V1,
   ) => Promise<Uint8Array | null>;
   /**
-   * Provider-side private-capable lookup. A capability is valid for exactly
+   * Provider-side public/private lookup. A capability is valid for exactly
    * the supplied accepted-current head scope and no other graph or head.
    */
   readonly resolveScopedReadCapability?: ResolveRfc64CatalogNativeScopedReadCapabilityV1;
@@ -686,19 +687,8 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     request: Rfc64PublicCatalogObjectFetchRequestV1,
     protocol: Exclude<Rfc64CatalogNativeContentProtocolV1, 'select-outbound'>,
   ): Promise<SignedControlEnvelopeV1 | null> {
-    if (protocol === 'public-v1') {
-      if (authorization.accessPolicy !== 0 || this.options.readCatalogObjectByDigest === undefined) {
-        fail('catalog-native-policy-denied', 'V1 catalog object read is not public-capable');
-      }
-      return recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
-        () => this.assertCatalogPolicyCurrent(
-          'catalog-object-fetch-inbound',
-          remotePeerId,
-          request,
-          protocol,
-        ),
-        () => this.options.readCatalogObjectByDigest!(request.targetObjectDigest),
-      );
+    if (protocol === 'public-v1' && authorization.accessPolicy !== 0) {
+      fail('catalog-native-policy-denied', 'V1 catalog object read is not public-capable');
     }
     const capability = await this.resolveExactScopedReadCapability(
       'catalog-object-fetch-inbound',
@@ -724,19 +714,8 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     request: Rfc64PublicCatalogBundleFetchRequestV1,
     protocol: Exclude<Rfc64CatalogNativeContentProtocolV1, 'select-outbound'>,
   ): Promise<Uint8Array | null> {
-    if (protocol === 'public-v1') {
-      if (authorization.accessPolicy !== 0 || this.options.readKaBundleByDigest === undefined) {
-        fail('catalog-native-policy-denied', 'V1 KA bundle read is not public-capable');
-      }
-      return recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
-        () => this.assertCatalogPolicyCurrent(
-          'ka-bundle-fetch-inbound',
-          remotePeerId,
-          request,
-          protocol,
-        ),
-        () => this.options.readKaBundleByDigest!(request.blobDigest),
-      );
+    if (protocol === 'public-v1' && authorization.accessPolicy !== 0) {
+      fail('catalog-native-policy-denied', 'V1 KA bundle read is not public-capable');
     }
     const capability = await this.resolveExactScopedReadCapability(
       'ka-bundle-fetch-inbound',
@@ -761,7 +740,7 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     remotePeerId: string,
     request: Rfc64PublicCatalogObjectFetchRequestV1
       | Rfc64PublicCatalogBundleFetchRequestV1,
-    protocol: 'scoped-v2',
+    protocol: Exclude<Rfc64CatalogNativeContentProtocolV1, 'select-outbound'>,
   ): Promise<Rfc64CatalogNativeScopedReadCapabilityV1 | null> {
     const resolve = this.options.resolveScopedReadCapability;
     if (resolve === undefined) {

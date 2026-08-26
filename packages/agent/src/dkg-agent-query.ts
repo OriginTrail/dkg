@@ -32,6 +32,8 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
+  assertContextGraphIdV1, assertNetworkIdV1,
+  type ContextGraphIdV1, type NetworkIdV1,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
@@ -778,11 +780,49 @@ export class QueryMethods extends DKGAgentBase {
     return false;
   }
 
-  /** Current accepted RFC-64 private roster; null means selected but unavailable. */
+  /**
+   * Resolve the current accepted RFC-64 roster for a selected private CG.
+   * `undefined` means the CG is not owned by RFC-64 activation. `null` means
+   * it is selected but current authority is unavailable, so reads must deny.
+   */
   resolveRfc64PrivateReadRosterV1(
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] | null | undefined {
+    const service = this.rfc64PublicCatalogServiceV1;
+    // RFC-64 policies are keyed by the effective namespaced chain network
+    // (for example `otp:20430`). `networkIdentity.networkId` is the DKG
+    // genesis hash and must never be used as catalog-policy authority.
+    const activeNetworkId = this.config.networkIdentity?.chainId;
+    if (service !== undefined && activeNetworkId !== undefined) {
+      let canonicalNetworkId: NetworkIdV1 | null = null;
+      let canonicalContextGraphId: ContextGraphIdV1 | null = null;
+      try {
+        assertNetworkIdV1(activeNetworkId);
+        assertContextGraphIdV1(contextGraphId);
+        canonicalNetworkId = activeNetworkId;
+        canonicalContextGraphId = contextGraphId;
+      } catch {
+        // Non-RFC-64 identifiers continue through the legacy authorization path.
+      }
+      if (canonicalNetworkId !== null && canonicalContextGraphId !== null) {
+        const current = service.acceptedPolicySnapshot(
+          canonicalNetworkId,
+          canonicalContextGraphId,
+        );
+        if (current !== null) {
+          if (current.policy.accessPolicy !== 1) return undefined;
+          if (current.roster === null) return null;
+          return Object.freeze(
+            current.roster.members.map(({ agentAddress }) => agentAddress),
+          );
+        }
+      }
+    }
+
+    // A configured private selection remains fail-closed until its authority
+    // is accepted into the live registry. Bootstrap is a liveness/source hint,
+    // not the ownership boundary for query authorization.
     const configured = this.config.rfc64CatalogBootstrap?.acceptedPolicies.filter(
       ({ policyEnvelope }) => (
         policyEnvelope.payload.contextGraphId === contextGraphId
@@ -790,12 +830,19 @@ export class QueryMethods extends DKGAgentBase {
       ),
     ) ?? [];
     if (configured.length === 0) return undefined;
-    const service = this.rfc64PublicCatalogServiceV1;
     if (service === undefined) return null;
+
     for (const { policyEnvelope } of configured) {
       const policy = policyEnvelope.payload;
-      const current = service.acceptedPolicySnapshot(policy.networkId, policy.contextGraphId);
-      if (current !== null && current.policy.accessPolicy === 1 && current.roster !== null) {
+      const current = service.acceptedPolicySnapshot(
+        policy.networkId,
+        policy.contextGraphId,
+      );
+      if (
+        current !== null
+        && current.policy.accessPolicy === 1
+        && current.roster !== null
+      ) {
         return Object.freeze(current.roster.members.map(({ agentAddress }) => agentAddress));
       }
     }
@@ -825,9 +872,24 @@ export class QueryMethods extends DKGAgentBase {
         if (match?.[1]) privateContextGraphIds.add(match[1]);
       }
     }
-    for (const { policyEnvelope } of this.config.rfc64CatalogBootstrap?.acceptedPolicies ?? []) {
+    for (const { policyEnvelope } of this.config?.rfc64CatalogBootstrap?.acceptedPolicies ?? []) {
       if (policyEnvelope.payload.accessPolicy === 1) {
         privateContextGraphIds.add(policyEnvelope.payload.contextGraphId);
+      }
+    }
+    // Runtime authority can be accepted independently of startup bootstrap.
+    // Subscription/sync selection and the bounded local graph-name index
+    // supply CG candidates without exposing the private policy registry itself.
+    const runtimeCandidates = new Set<string>([
+      ...this.subscribedContextGraphs.keys(),
+      ...(this.config.syncContextGraphs ?? []),
+      ...await new GraphManager(this.store).listContextGraphs({
+        source: 'agent.query.rfc64RuntimePrivateGraphs',
+      }),
+    ]);
+    for (const contextGraphId of runtimeCandidates) {
+      if (this.resolveRfc64PrivateReadRosterV1(contextGraphId) !== undefined) {
+        privateContextGraphIds.add(contextGraphId);
       }
     }
     const prefixes: string[] = [];

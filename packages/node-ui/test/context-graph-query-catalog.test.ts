@@ -12,6 +12,14 @@ const apiMocks = vi.hoisted(() => ({
   writeProfileQueryCatalog: vi.fn(),
 }));
 
+// PR #2131 — SubGraphBar/SubGraphOverviewGrid now call `fetchSubGraphs`
+// through `api-wrapper` so the chip row and cards resolve in mock mode.
+// Point the wrapper at the same mock so this suite drives the same path
+// the component actually takes.
+vi.mock('../src/ui/api-wrapper.js', () => ({
+  api: { fetchSubGraphs: vi.fn(async () => ({ subGraphs: [] })) },
+}));
+
 vi.mock('../src/ui/api.js', () => ({
   listJoinRequests: vi.fn(async () => ({ requests: [] })),
   approveJoinRequest: vi.fn(),

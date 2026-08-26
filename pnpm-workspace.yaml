@@ -26,6 +26,7 @@ packages:
   - "devnet/rfc64-cp1-public-swm-parity"
   - "devnet/rfc64-cp1-private-swm-recovery"
   - "devnet/rfc64-cp2-private-swm-vm-recovery"
+  - "devnet/rfc64-cp3-private-provider-failover"
   - "devnet/rfc64-m0-public-baseline"
   - "devnet/pr1386-term-canon"
   - "devnet/pr1385-subgraph-rs"

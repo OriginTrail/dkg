@@ -51,8 +51,8 @@ const FINALIZED_BLOCK_HASH = `0x${'77'.repeat(32)}`;
 export function parseFinalizedVmHarnessConfigV1(
   input: string,
 ): Readonly<FinalizedVmHarnessConfigV1> {
-  if (Buffer.byteLength(input) > 16_384) {
-    throw new TypeError('finalized VM harness config exceeds 16 KiB');
+  if (Buffer.byteLength(input) > 1_000_000) {
+    throw new TypeError('finalized VM harness config exceeds 1 MiB');
   }
   const parsed = plainRecord(JSON.parse(input), 'finalized VM harness config');
   const contextGraphId = requiredString(parsed.contextGraphId, 'finalizedVm.contextGraphId');

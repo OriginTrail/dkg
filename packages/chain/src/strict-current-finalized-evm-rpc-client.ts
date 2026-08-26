@@ -52,13 +52,18 @@ export async function postStrictFinalizedJsonRpcV1(
     throw unavailable(`JSON-RPC ${method} transport failed`, cause);
   }
 
-  const body = await readResponseBodyBounded(response, maxResponseBytes);
   if (!response.ok) {
     // An HTTP intermediary/provider failure is transport availability, even if
     // its untrusted body happens to mimic a deterministic JSON-RPC revert. Only
     // a successful JSON-RPC transport response may select an invalidity code.
+    // Do not run the successful-response byte cap over an error page first:
+    // oversized proxy/provider bodies must remain failover-eligible transport
+    // failures, not become terminal resource-limit evidence.
+    await response.body?.cancel().catch(() => undefined);
     throw unavailable(`JSON-RPC ${method} returned HTTP ${response.status}`);
   }
+
+  const body = await readResponseBodyBounded(response, maxResponseBytes);
 
   let parsed: unknown;
   try {

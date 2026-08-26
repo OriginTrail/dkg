@@ -378,7 +378,7 @@ describe('RFC-64 private exact-scope native transport', () => {
     provider.stop();
   });
 
-  it('keeps legacy digest-only reads compatible for public V1', async () => {
+  it('denies public V1 inbound reads when only a global digest reader is configured', async () => {
     const fixture = await contentFixture();
     const [providerRouter, receiverRouter] = routerPair();
     const readObject = vi.fn(async (digest: Digest32V1) => fixture.catalogObjects.get(digest) ?? null);
@@ -408,9 +408,12 @@ describe('RFC-64 private exact-scope native transport', () => {
     await expect(receiver.fetchCatalogObject(
       providerRouter.peerId,
       requestCatalogObject(fixture.scope, root.objectDigest as Digest32V1),
-    )).resolves.toMatchObject({ envelope: root });
+    )).rejects.toMatchObject({
+      code: 'catalog-native-policy-denied',
+      message: expect.stringContaining('exact-scope read capability is not configured'),
+    });
     expect(provider.privateScopeBoundReadsConfigured).toBe(false);
-    expect(readObject).toHaveBeenCalledWith(root.objectDigest);
+    expect(readObject).not.toHaveBeenCalled();
     expect(receiverRouter.sentProtocols).toEqual([
       RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
     ]);

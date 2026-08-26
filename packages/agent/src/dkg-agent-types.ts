@@ -1379,7 +1379,7 @@ export interface Rfc64CatalogBootstrapPolicyV1 {
   readonly policyEnvelope: UnsignedContextGraphPolicyEnvelopeV1;
   readonly rosterEnvelope?: UnsignedMemberRosterEnvelopeV1;
   readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
-  /** Releases 1-2 require exactly one graph-complete provider for private recovery. */
+  /** One to eight graph-complete providers for selected private recovery. */
   readonly completeSwmProviders?: readonly string[];
 }
 

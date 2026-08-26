@@ -285,11 +285,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) return;
+    const verifyIssuerSignature = verifyControlEnvelopeIssuerSignatureV1;
     const service = new Rfc64PublicCatalogServiceV1({
       router: this.router,
       controlObjects: persistence.controlObjects,
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority,
-      native: this.createRfc64PublicCatalogNativeOptionsV1(),
+      native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
+      verifyIssuerSignature,
       currentHeadDiscovery: {
         readCurrentAppliedCatalogHeadDigest: async (trustedScope) => {
           const applied = persistence.inventory.readAppliedCatalogHeadV1(
@@ -300,16 +302,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       receiver: {
-        onAttemptStart: (announcement) => {
+        onReconciliationAttemptStart: (announcement) => (
           this.rfc64PublicCatalogReconciliationFailuresV1.beginAttempt(
             announcement.catalogHeadObjectDigest,
+          )
+        ),
+        onReconciliationAttemptSuccess: (announcement, attemptToken) => {
+          this.rfc64PublicCatalogReconciliationFailuresV1.completeAttempt(
+            announcement.catalogHeadObjectDigest,
+            attemptToken,
           );
         },
-        onError: (announcement, error) => {
+        onReconciliationAttemptEnd: (announcement, attemptToken) => {
+          this.rfc64PublicCatalogReconciliationFailuresV1.endAttempt(
+            announcement.catalogHeadObjectDigest,
+            attemptToken,
+          );
+        },
+        onError: (announcement, error, attemptToken) => {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
             announcement.catalogHeadObjectDigest,
             error,
             classifyRfc64CatalogReconciliationTerminalReasonV1(error),
+            attemptToken ?? undefined,
           );
         },
       },
@@ -747,6 +762,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   /** Build native mode only when a local deployment source exists. */
   private createRfc64PublicCatalogNativeOptionsV1(
     this: DKGAgent,
+    verifyIssuerSignature: typeof verifyControlEnvelopeIssuerSignatureV1,
   ): Rfc64PublicCatalogServiceNativeOptionsV1 | undefined {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) return undefined;
@@ -765,22 +781,27 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const resolveScopedReadCapability = createRfc64CatalogNativeScopedReadProviderV1({
       controlObjects: persistence.controlObjects,
       kaBundles: persistence.kaBundles,
+      verifyIssuerSignature,
       resolveAcceptedPolicySnapshot: (networkId, contextGraphId) =>
         this.requireRfc64PublicCatalogServiceV1().acceptedPolicySnapshot(
           networkId,
           contextGraphId,
         ),
     });
+    let readNativeResourceStats: () => ReturnType<
+      Rfc64PublicCatalogNativeReceiverV1['resourceStats']
+    > | null = () => null;
     return Object.freeze({
       readCatalogObjectByDigest: async (objectDigest: Digest32V1) => {
         const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
           objectDigest,
-          verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+          verifyIssuerSignature,
         });
         return stored?.envelope ?? null;
       },
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
       resolveScopedReadCapability,
+      readResourceStats: () => readNativeResourceStats(),
       createReconciler: (clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>) => {
         const chainConfig = this.config.chainConfig;
         const acceptedPolicySnapshotForCatalogScope = (scope: AuthorCatalogScopeV1) =>
@@ -816,16 +837,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         const beforeAppliedHeadCommit = Object.freeze(async (
           plan: Parameters<typeof finalizedPolicyPrecommit>[0],
           signal: AbortSignal,
-        ): Promise<void> => {
+        ): ReturnType<typeof finalizedVmPrecommit> => {
           const accepted = acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
           if (
             accepted.policy.accessPolicy === 1
             && accepted.policy.source.kind === 'finalized-chain'
           ) {
-            await finalizedVmPrecommit(plan, signal);
-            return;
+            return finalizedVmPrecommit(plan, signal);
           }
-          await finalizedPolicyPrecommit(plan, signal);
+          return finalizedPolicyPrecommit(plan, signal);
         });
         const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
           headTransport: clients.headTransport,
@@ -834,9 +854,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           inventory: persistence.inventory,
           kaBundles: persistence.kaBundles,
           store: this.store,
+          verifyIssuerSignature: clients.verifyIssuerSignature,
           beforeAppliedHeadCommit,
           transportTimeoutMs: clients.transportTimeoutMs,
         });
+        readNativeResourceStats = () => nativeReceiver.resourceStats();
         const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
           nativeReceiver: Object.freeze({
             synchronizeBoundedPublicRootCatalog: async (...args) => {
@@ -851,6 +873,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           inventory: persistence.inventory,
           resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
           resolveDeployment,
+          requiresAppliedHeadPrecommit: (announcement) => {
+            const accepted = this.requireRfc64PublicCatalogServiceV1()
+              .acceptedPolicySnapshotForCatalogScope(
+                clients.resolveTrustedCatalogScope(announcement),
+              );
+            return accepted.policy.accessPolicy === 1
+              && accepted.policy.source.kind === 'finalized-chain';
+          },
           readStagedCatalogHead: async (announcement) => {
             const stored = await persistence.controlObjects.getVerifiedObject({
               objectDigest: announcement.catalogHeadObjectDigest,

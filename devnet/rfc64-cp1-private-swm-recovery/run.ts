@@ -7,6 +7,7 @@ import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
+  computeAuthorCatalogScopeDigestV1,
   computeContextGraphPolicyObjectDigestV1,
   type AuthorCatalogScopeV1,
   type CanonicalGraphScopedAuthorSealV1,
@@ -170,7 +171,12 @@ async function execute(): Promise<void> {
     if (publication === null) throw new Error('private successor publication is missing');
     const announcement = record(publication.announcement, 'private successor announcement');
     exact(announcement.policyDigest, POLICY_DIGEST, 'private announcement policy digest');
+    const headDigest = requiredDigest(publication.headObjectDigest, 'private head digest');
 
+    // Permit the author's outbound request, but leave the receiver without an
+    // authenticated peer-to-agent binding so the inbound private check is the
+    // authority that rejects this first delivery.
+    await bindPeer(author, receiverPeerId, RECEIVER, 'author-bind-receiver');
     const denied = output(await author.request(
       'announce',
       'private-unbound-denial',
@@ -185,11 +191,30 @@ async function execute(): Promise<void> {
       receiverPeerId,
       'unbound announcement failed peer',
     );
+    await receiver.request(
+      'awaitReceiverIdle',
+      'private-unbound-receiver-idle',
+      'receiver-idle',
+    );
+    const deniedAppliedHead = await receiver.request(
+      'appliedHeadReadback',
+      'private-unbound-applied-head',
+      'operation-completed',
+      {
+        catalogScopeDigest: computeAuthorCatalogScopeDigestV1(catalogScope()),
+        authorAddress: OWNER,
+      },
+    );
+    exact(deniedAppliedHead.output, null, 'unbound receiver applied head');
+    const deniedSynchronization = await receiver.request(
+      'exactInventoryReadback',
+      'private-unbound-inventory',
+      'operation-completed',
+      { catalogHeadDigest: headDigest },
+    );
+    exact(deniedSynchronization.output, null, 'unbound receiver synchronization evidence');
 
-    await Promise.all([
-      bindPeer(author, receiverPeerId, RECEIVER, 'author-bind-receiver'),
-      bindPeer(receiver, authorPeerId, OWNER, 'receiver-bind-author'),
-    ]);
+    await bindPeer(receiver, authorPeerId, OWNER, 'receiver-bind-author');
     const delivery = output(await author.request(
       'announce',
       'private-authorized-announce',
@@ -200,7 +225,6 @@ async function execute(): Promise<void> {
     exact(delivery.failedPeers, [], 'authorized announcement failures');
     await receiver.request('awaitReceiverIdle', 'private-receiver-idle', 'receiver-idle');
 
-    const headDigest = requiredDigest(publication.headObjectDigest, 'private head digest');
     const synchronization = output(await receiver.request(
       'exactInventoryReadback',
       'private-inventory',
@@ -209,6 +233,12 @@ async function execute(): Promise<void> {
     ), 'private inventory');
     const rows = array(synchronization.rows, 'private inventory rows');
     exact(rows.length, ASSET_COUNT, 'private recovered row count');
+    const expectedKaIds = assets.map(({ seal }) => seal.reservedKaId).sort();
+    const recoveredKaIds = rows.map((value, index) => (
+      requiredString(record(value, `private row ${index}`).kaId, `private row ${index} kaId`)
+    )).sort();
+    exact(new Set(recoveredKaIds).size, ASSET_COUNT, 'private recovered unique KA identity count');
+    exact(recoveredKaIds, expectedKaIds, 'private recovered exact KA identity set');
     exact(synchronization.inventoryRowCount, ASSET_COUNT, 'private inventory row count');
     exact(synchronization.activatedTripleCount, ASSET_COUNT * 2, 'private activated triples');
     exact(synchronization.appliedHeadStatus, 'applied', 'private applied head status');
@@ -236,6 +266,7 @@ async function execute(): Promise<void> {
       accessPolicy: 1,
       assetsPublished: ASSET_COUNT,
       assetsRecovered: rows.length,
+      exactKaIdentitySetVerified: true,
       deniedUnboundPeer: true,
       processBoundary: {
         authorExitCode: authorStopped.exit.code,

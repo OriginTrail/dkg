@@ -121,6 +121,62 @@ async function requestStatusWithAgent(
 }
 
 describe('/api/status RFC-64 private recovery privacy', () => {
+  it('reports aggregate telemetry for a private-only catalog activation', async () => {
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/private-only-telemetry';
+    const response = await requestStatusWithAgent(
+      {
+        rfc64PublicCatalogStatsV1: () => ({
+          started: true,
+          acceptedPolicies: 1,
+          receiver: {
+            providerAttempts: 2,
+            providerSwitches: 1,
+            providerSuccesses: 1,
+            providerBackoffMs: 4,
+          },
+          nativeReceiver: {
+            controlObjectCacheHits: 3,
+            controlObjectNetworkFetches: 5,
+            kaBundleCacheHits: 7,
+            kaBundleNetworkFetches: 11,
+            kaBundleCacheBytes: 13,
+            kaBundleNetworkBytes: 17,
+          },
+        }),
+      },
+      {},
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [privateContextGraph],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [privateContextGraph],
+        accessPolicyAuthority: {
+          localAgentAddress: '0x3333333333333333333333333333333333333333',
+          peerAgentBindings: [],
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64PublicCatalog.enabled).toBe(false);
+    expect(response.body.rfc64Catalog.resourceTelemetry).toEqual({
+      providerAttempts: 2,
+      providerSwitches: 1,
+      providerSuccesses: 1,
+      providerBackoffMs: 4,
+      controlObjectCacheHits: 3,
+      controlObjectNetworkFetches: 5,
+      kaBundleCacheHits: 7,
+      kaBundleNetworkFetches: 11,
+      kaBundleCacheBytes: 13,
+      kaBundleNetworkBytes: 17,
+    });
+    expect(JSON.stringify(response.body)).not.toContain('peerAgentBindings');
+  });
+
   it('reports only aggregate private recovery state and hides provider identities', async () => {
     const privateContextGraph =
       '0x1111111111111111111111111111111111111111/private-release-2';
@@ -129,6 +185,24 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     const publicProvider = '12D3KooPublicProviderMayAppear';
     const response = await requestStatusWithAgent(
       {
+        rfc64PublicCatalogStatsV1: () => ({
+          started: true,
+          acceptedPolicies: 1,
+          receiver: {
+            providerAttempts: 3,
+            providerSwitches: 1,
+            providerSuccesses: 1,
+            providerBackoffMs: 20,
+          },
+          nativeReceiver: {
+            controlObjectCacheHits: 4,
+            controlObjectNetworkFetches: 5,
+            kaBundleCacheHits: 6,
+            kaBundleNetworkFetches: 7,
+            kaBundleCacheBytes: 800,
+            kaBundleNetworkBytes: 900,
+          },
+        }),
         readRfc64PublicCatalogBootstrapStatusV1: () => ({
           running: false,
           pass: 1,
@@ -215,6 +289,18 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       outcomeCounts: { 'known-incomplete': 1 },
       completionReasons: ['no-authorized-provider'],
     }]);
+    expect(response.body.rfc64Catalog.resourceTelemetry).toEqual({
+      providerAttempts: 3,
+      providerSwitches: 1,
+      providerSuccesses: 1,
+      providerBackoffMs: 20,
+      controlObjectCacheHits: 4,
+      controlObjectNetworkFetches: 5,
+      kaBundleCacheHits: 6,
+      kaBundleNetworkFetches: 7,
+      kaBundleCacheBytes: 800,
+      kaBundleNetworkBytes: 900,
+    });
     expect(response.body.rfc64PublicCatalog.bootstrap.targets).toHaveLength(1);
     expect(response.body.rfc64PublicCatalog.bootstrap.targets[0]).toMatchObject({
       scope: { contextGraphId: publicContextGraph },

@@ -29,7 +29,6 @@ import {
   RELAY_RESERVATION_TTL_MS,
   EDGE_NODE_MAX_CONNECTIONS,
   MAX_RELAY_SERVER_CAPACITY,
-  RELAY_CAPACITY_MULTIPLIER,
   deriveRelayCaps,
   validateRelayServerCapacity,
   checkFdLimit,

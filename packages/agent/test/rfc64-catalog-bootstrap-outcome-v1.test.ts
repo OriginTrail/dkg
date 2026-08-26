@@ -7,6 +7,7 @@ import { Rfc64CatalogSynchronizationErrorV1 } from '../src/dkg-agent-rfc64-catal
 import { FinalizedVmCompositionErrorV1 } from '../src/rfc64/finalized-vm-composer-v1.js';
 import { Rfc64PublicCatalogNativeReceiverErrorV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import {
+  Rfc64CatalogProviderFailureAggregateV1,
   Rfc64PublicCatalogReconciliationFailureRegistryV1,
   classifyRfc64CatalogReconciliationTerminalReasonV1,
 } from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
@@ -47,11 +48,12 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
       'the exact precommit failed',
       { cause: compositionFailure },
     );
-    registry.beginAttempt(headDigest);
+    const attemptToken = registry.beginAttempt(headDigest);
     registry.record(
       headDigest,
       receiverFailure,
       classifyRfc64CatalogReconciliationTerminalReasonV1(receiverFailure),
+      attemptToken,
     );
     const attempt = registry.readCurrentAttempt(headDigest)!;
     const synchronizationFailure = new Rfc64CatalogSynchronizationErrorV1(
@@ -83,6 +85,51 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
     expect(classifyRfc64CatalogBootstrapFailureV1(false, synchronizationFailure)).toEqual({
       outcome: 'failed',
       completionReason: null,
+    });
+  });
+
+  it('keeps mixed provider failures operational in both orders', () => {
+    const timeout = new Error('provider transport timed out');
+    const incomplete = new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-incomplete',
+      'the authorized provider does not have the signed bundle',
+    );
+    for (const providerErrors of [
+      [timeout, incomplete],
+      [incomplete, timeout],
+    ]) {
+      const aggregate = new Rfc64CatalogProviderFailureAggregateV1(2, providerErrors.map(
+        (error, index) => ({ providerPeerId: `peer-${index}`, error }),
+      ));
+      const serviceFailure = new Error(
+        'RFC-64 current-head synchronization ended with failed',
+        { cause: aggregate },
+      );
+      expect(classifyRfc64CatalogReconciliationTerminalReasonV1(aggregate)).toBeNull();
+      expect(classifyRfc64CatalogBootstrapFailureV1(true, serviceFailure)).toEqual({
+        outcome: 'failed',
+        completionReason: null,
+      });
+    }
+  });
+
+  it('classifies only an all-incomplete provider set as known-incomplete', () => {
+    const aggregate = new Rfc64CatalogProviderFailureAggregateV1(2, [0, 1].map((index) => ({
+      providerPeerId: `peer-${index}`,
+      error: new Rfc64PublicCatalogNativeReceiverErrorV1(
+        'catalog-native-receiver-incomplete',
+        'the authorized provider does not have the signed bundle',
+      ),
+    })));
+    const serviceFailure = new Error(
+      'RFC-64 current-head synchronization ended with failed',
+      { cause: aggregate },
+    );
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(aggregate))
+      .toBe('no-authorized-provider');
+    expect(classifyRfc64CatalogBootstrapFailureV1(true, serviceFailure)).toEqual({
+      outcome: 'known-incomplete',
+      completionReason: 'no-authorized-provider',
     });
   });
 });

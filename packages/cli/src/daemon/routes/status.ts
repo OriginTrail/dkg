@@ -224,7 +224,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -701,7 +700,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   const contextGraphMembersMatch = path.match(/^\/api\/context-graph\/([^/]+)\/members$/);
   if (req.method === "GET" && contextGraphMembersMatch) {
     const contextGraphId = decodeURIComponent(contextGraphMembersMatch[1]);
-    if (!isValidContextGraphId(contextGraphId)) {
+    if (!validateContextGraphId(contextGraphId).valid) {
       return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     }
     return jsonResponse(res, 200, {
@@ -781,7 +780,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       accessPolicyAuthority: undefined,
     };
     const rfc64PublicCatalogService =
-      rfc64PublicCatalogActivation.enabled
+      rfc64CatalogActivation.enabled
       && typeof agent.rfc64PublicCatalogStatsV1 === 'function'
         ? agent.rfc64PublicCatalogStatsV1()
         : null;
@@ -974,6 +973,28 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         privateAuthorityConfigured:
           rfc64CatalogActivation.accessPolicyAuthority !== undefined,
         privateRecovery: rfc64PrivateRecovery,
+        resourceTelemetry:
+          rfc64CatalogActivation.selectedPrivateContextGraphs.length === 0
+            || rfc64PublicCatalogService === null
+            ? null
+            : {
+                providerAttempts: rfc64PublicCatalogService.receiver.providerAttempts,
+                providerSwitches: rfc64PublicCatalogService.receiver.providerSwitches,
+                providerSuccesses: rfc64PublicCatalogService.receiver.providerSuccesses,
+                providerBackoffMs: rfc64PublicCatalogService.receiver.providerBackoffMs,
+                controlObjectCacheHits:
+                  rfc64PublicCatalogService.nativeReceiver?.controlObjectCacheHits ?? 0,
+                controlObjectNetworkFetches:
+                  rfc64PublicCatalogService.nativeReceiver?.controlObjectNetworkFetches ?? 0,
+                kaBundleCacheHits:
+                  rfc64PublicCatalogService.nativeReceiver?.kaBundleCacheHits ?? 0,
+                kaBundleNetworkFetches:
+                  rfc64PublicCatalogService.nativeReceiver?.kaBundleNetworkFetches ?? 0,
+                kaBundleCacheBytes:
+                  rfc64PublicCatalogService.nativeReceiver?.kaBundleCacheBytes ?? 0,
+                kaBundleNetworkBytes:
+                  rfc64PublicCatalogService.nativeReceiver?.kaBundleNetworkBytes ?? 0,
+              },
       },
       // Product-default scheduling is deliberately separate from the signed
       // catalog authority surface above. Every explicitly requested CG is

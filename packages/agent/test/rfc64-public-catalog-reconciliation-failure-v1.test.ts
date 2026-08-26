@@ -59,7 +59,50 @@ describe('RFC-64 public catalog terminal failure registry v1', () => {
 
     registry.clear();
     expect(registry.size).toBe(0);
+    expect(registry.currentAttemptFailureSize).toBe(0);
+    expect(registry.currentAttemptTokenSize).toBe(0);
     expect(registry.read(digest(1))).toBeNull();
+  });
+
+  it('releases terminal attempt tokens while bounding retained failure state', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    for (
+      let index = 1;
+      index <= RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1 + 32;
+      index += 1
+    ) {
+      const head = digest(index);
+      const token = registry.beginAttempt(head);
+      registry.record(
+        head,
+        Object.assign(new Error('terminal'), { code: 'terminal-code' }),
+        null,
+        token,
+      );
+      registry.endAttempt(head, token);
+    }
+
+    expect(registry.currentAttemptTokenSize).toBe(0);
+    expect(registry.currentAttemptFailureSize).toBe(
+      RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+    );
+    expect(registry.size).toBe(
+      RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+    );
+  });
+
+  it('bounds active attempt tokens when a lifecycle callback is lost', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    for (
+      let index = 1;
+      index <= RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1 + 32;
+      index += 1
+    ) {
+      registry.beginAttempt(digest(index));
+    }
+    expect(registry.currentAttemptTokenSize).toBe(
+      RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+    );
   });
 
   it('retains one stable typed cause code without retaining cause text', () => {
@@ -84,19 +127,57 @@ describe('RFC-64 public catalog terminal failure registry v1', () => {
   it('keeps immutable diagnostics separate from the current retry result', () => {
     const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
     const head = digest(1);
-    registry.beginAttempt(head);
-    registry.record(head, Object.assign(new Error('first'), { code: 'first-code' }));
+    const firstAttempt = registry.beginAttempt(head);
+    registry.record(
+      head,
+      Object.assign(new Error('first'), { code: 'first-code' }),
+      null,
+      firstAttempt,
+    );
     expect(registry.readCurrentAttempt(head)).toMatchObject({ errorCode: 'first-code' });
 
-    registry.beginAttempt(head);
+    const secondAttempt = registry.beginAttempt(head);
     expect(registry.readCurrentAttempt(head)).toBeNull();
-    registry.record(head, Object.assign(new Error('second'), { code: 'second-code' }));
+    registry.record(
+      head,
+      Object.assign(new Error('second'), { code: 'second-code' }),
+      null,
+      secondAttempt,
+    );
 
     expect(registry.read(head)).toMatchObject({ errorCode: 'first-code' });
     expect(registry.readCurrentAttempt(head)).toMatchObject({
       terminalReason: null,
       errorCode: 'second-code',
     });
+  });
+
+  it('fences stale failure and success callbacks by monotonic attempt token', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const head = digest(1);
+    const older = registry.beginAttempt(head);
+    const newer = registry.beginAttempt(head);
+    expect(newer).toBeGreaterThan(older);
+
+    registry.record(
+      head,
+      Object.assign(new Error('older failure'), { code: 'older-code' }),
+      null,
+      older,
+    );
+    expect(registry.readCurrentAttempt(head)).toBeNull();
+
+    registry.record(
+      head,
+      Object.assign(new Error('newer failure'), { code: 'newer-code' }),
+      null,
+      newer,
+    );
+    expect(registry.readCurrentAttempt(head)).toMatchObject({ errorCode: 'newer-code' });
+    registry.completeAttempt(head, older);
+    expect(registry.readCurrentAttempt(head)).toMatchObject({ errorCode: 'newer-code' });
+    registry.completeAttempt(head, newer);
+    expect(registry.readCurrentAttempt(head)).toBeNull();
   });
 
   it('translates only the exact typed private VM incomplete failure', () => {
