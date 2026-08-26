@@ -18,15 +18,26 @@ export type ReceiptBackedGraphScopedEvidenceRecovery =
   | { status: 'recovered'; evidence: VerifiedGraphScopedFinalizationEvidence }
   | { status: 'unavailable'; reason: string };
 
+export type ReceiptBackedGraphScopedAssertion = Pick<
+  KnowledgeAssetWorkspaceHead,
+  | 'kaUal'
+  | 'assertionVersion'
+  | 'publicQuadsDigest'
+  | 'publicTripleCount'
+  | 'privateMerkleRoot'
+  | 'privateTripleCount'
+>;
+
 export interface RecoverReceiptBackedGraphScopedEvidenceInput {
   store: TripleStore;
   chain?: ChainAdapter;
   contextGraphId: string;
   scope: { ual: string; assertionVersion: string };
-  head: KnowledgeAssetWorkspaceHead;
+  head: ReceiptBackedGraphScopedAssertion;
   merkleRoot: Uint8Array;
   publisherAddress: string;
   kaId: bigint;
+  batchId: bigint;
   onChainContextGraphId: bigint;
   subGraphName?: string;
 }
@@ -195,7 +206,7 @@ export async function recoverReceiptBackedGraphScopedEvidence(
       if (
         canonical.txHash.toLowerCase() !== transactionHash.toLowerCase()
         || canonical.kaId !== input.kaId
-        || canonical.batchId !== input.kaId
+        || canonical.batchId !== input.batchId
         || canonical.startKAId !== input.kaId
         || canonical.endKAId !== input.kaId
       ) return { status: 'unavailable', reason: 'canonical publish receipt does not match the target KA' };

@@ -28,10 +28,12 @@ import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-au
 
 const COMPOSITION_KEYS = [
   'assertedAtKav10Address',
+  'catalogAuthorAddress',
   'catalogLane',
   'finalizedContextGraph',
   'inventory',
   'placements',
+  'requireCompleteAuthorSet',
 ] as const;
 const CATALOG_LANE_KEYS = ['contextGraphId', 'subGraphName'] as const;
 const PLACEMENT_KEYS = ['authorship', 'sealBinding'] as const;
@@ -50,10 +52,14 @@ export interface FinalizedVmPlacementEvidenceV1 {
 export interface ComposeFinalizedVmSetRequestV1 {
   /** Trusted lifecycle/KAV10 deployment address against which catalog seals were authored. */
   readonly assertedAtKav10Address: EvmAddressV1;
+  /** Exact author lane whose finalized chain rows must all be present. */
+  readonly catalogAuthorAddress: EvmAddressV1;
   readonly catalogLane: FinalizedVmCatalogLaneV1;
   readonly finalizedContextGraph: FinalizedContextGraphReadV1;
   readonly inventory: FinalizedVmChainInventoryV1;
   readonly placements: readonly FinalizedVmPlacementEvidenceV1[];
+  /** Private Release 2 requires every finalized row in this author lane. */
+  readonly requireCompleteAuthorSet: boolean;
 }
 
 interface ResolvedFinalizedVmPlacementV1 {
@@ -80,6 +86,7 @@ export type FinalizedVmCompositionErrorCodeV1 =
   | 'finalized-vm-composition-input'
   | 'finalized-vm-composition-inventory'
   | 'finalized-vm-composition-placement'
+  | 'finalized-vm-composition-incomplete'
   | 'finalized-vm-composition-mismatch'
   | 'finalized-vm-composition-duplicate';
 
@@ -111,7 +118,14 @@ export function composeFinalizedVmSetV1(
     'finalized-vm-composition-input',
   );
   const catalogLane = snapshotCatalogLane(request.catalogLane);
+  if (typeof request.requireCompleteAuthorSet !== 'boolean') {
+    fail(
+      'finalized-vm-composition-input',
+      'requireCompleteAuthorSet must be boolean',
+    );
+  }
   let assertedAtKav10Address: EvmAddressV1;
+  let catalogAuthorAddress: EvmAddressV1;
   let inventory: Readonly<FinalizedVmChainInventoryV1>;
   let finalizedContextGraph: Readonly<FinalizedContextGraphReadV1>;
   try {
@@ -120,6 +134,11 @@ export function composeFinalizedVmSetV1(
       'finalized VM assertedAtKav10Address',
     );
     assertedAtKav10Address = request.assertedAtKav10Address;
+    assertCanonicalEvmAddress(
+      request.catalogAuthorAddress,
+      'finalized VM catalogAuthorAddress',
+    );
+    catalogAuthorAddress = request.catalogAuthorAddress;
     inventory = snapshotFinalizedVmChainInventoryV1(request.inventory);
     finalizedContextGraph = snapshotFinalizedContextGraphReadV1(
       request.finalizedContextGraph,
@@ -170,6 +189,7 @@ export function composeFinalizedVmSetV1(
     if (
       authorship.contextGraphId !== catalogLane.contextGraphId
       || authorship.subGraphName !== catalogLane.subGraphName
+      || authorship.authorAddress !== catalogAuthorAddress
       || authorship.governanceChainId !== finalizedContextGraph.chainId
       || authorship.governanceContractAddress !== finalizedContextGraph.governanceContract
     ) {
@@ -213,7 +233,18 @@ export function composeFinalizedVmSetV1(
   const materializations: Readonly<FinalizedVmMaterializationPlanRowV1>[] = [];
   for (const candidate of inventory.rows) {
     const placement = placementsByKaId.get(candidate.kaId);
-    if (placement === undefined) continue;
+    if (placement === undefined) {
+      if (
+        request.requireCompleteAuthorSet
+        && candidate.authorAddress === catalogAuthorAddress
+      ) {
+        fail(
+          'finalized-vm-composition-incomplete',
+          `known-incomplete: no-authorized-provider for finalized KA ${candidate.kaId}`,
+        );
+      }
+      continue;
+    }
     assertCandidateMatchesPlacement(
       candidate,
       inventory,

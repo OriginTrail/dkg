@@ -1,3 +1,5 @@
+import { BoundedLruCache } from './bounded-lru-cache.js';
+
 const SPARQL_READ_ONLY_OPERATIONS = ['SELECT', 'CONSTRUCT', 'ASK', 'DESCRIBE'] as const;
 const SPARQL_MUTATING_KEYWORDS = [
   'INSERT',
@@ -23,6 +25,25 @@ export interface SparqlOperationAnalysis {
   operation: SparqlOperationClassification;
   mutatingKeyword: string | null;
 }
+
+type SparqlOperationFacts = Readonly<{
+  form: SparqlDetectedOperation;
+  mutatingKeyword: string | null;
+}>;
+
+const SPARQL_ANALYSIS_CACHE_MAX_ENTRIES = 256;
+const SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH = 64 * 1024;
+
+// A single query traverses several store decorators (agent invalidation,
+// changelog, graph index, then the adapter), each of which needs the same safe
+// classification. Exact-string memoization makes that scan/allocation happen
+// once and also covers repeated scoring queries. Bound both cardinality and
+// source size so an untrusted query stream cannot turn this into an unbounded
+// retention surface.
+const sparqlAnalysisCache = new BoundedLruCache<string, SparqlOperationFacts>(
+  SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
+  (source) => source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
+);
 
 const PREFIX_DECL = /\s*PREFIX\s+[^\s:]*:\s*(?:<[^<>"{}|^`\\\x00-\x20]*>)?/iy;
 const BASE_DECL = /\s*BASE\b\s*(?:<[^<>"{}|^`\\\x00-\x20]*>)?/iy;
@@ -152,14 +173,31 @@ function classifySparqlOperationForm(form: SparqlDetectedOperation): SparqlOpera
   return { kind: 'unknown' };
 }
 
+function materializeSparqlOperationAnalysis(
+  facts: SparqlOperationFacts,
+): SparqlOperationAnalysis {
+  return {
+    operation: classifySparqlOperationForm(facts.form),
+    mutatingKeyword: facts.mutatingKeyword,
+  };
+}
+
 export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis {
+  const cached = sparqlAnalysisCache.get(sparql);
+  if (cached) return materializeSparqlOperationAnalysis(cached);
+
   const stripped = stripSparqlLiteralsAndComments(sparql);
   const form = detectSparqlOperationFormFromStripped(stripped);
   const match = MUTATING_PATTERN.exec(stripped);
-  return {
-    operation: classifySparqlOperationForm(form),
+  const facts: SparqlOperationFacts = {
+    form,
     mutatingKeyword: match?.[1] ?? null,
   };
+
+  sparqlAnalysisCache.set(sparql, facts);
+  // The cache owns only immutable scalar facts. Materializing at the public
+  // boundary preserves the API's mutable, caller-isolated response objects.
+  return materializeSparqlOperationAnalysis(facts);
 }
 
 export function classifySparqlOperation(sparql: string): SparqlOperationClassification {

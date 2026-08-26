@@ -82,13 +82,15 @@ import {
   type Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { createRfc64FinalizedPolicyAgentPrecommitV1 } from './rfc64/finalized-policy-agent-precommit-v1.js';
+import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
-import type {
-  Rfc64PublicCatalogReconciliationFailureV1,
+import {
+  classifyRfc64CatalogReconciliationTerminalReasonV1,
+  type Rfc64PublicCatalogReconciliationFailureV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import {
   Rfc64PublicCatalogSuccessorProducerV1,
@@ -99,6 +101,7 @@ import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from './rfc64/public-catalog-transport-v1.js';
+import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -282,11 +285,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) return;
+    const verifyIssuerSignature = verifyControlEnvelopeIssuerSignatureV1;
     const service = new Rfc64PublicCatalogServiceV1({
       router: this.router,
       controlObjects: persistence.controlObjects,
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority,
-      native: this.createRfc64PublicCatalogNativeOptionsV1(),
+      native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
+      verifyIssuerSignature,
       currentHeadDiscovery: {
         readCurrentAppliedCatalogHeadDigest: async (trustedScope) => {
           const applied = persistence.inventory.readAppliedCatalogHeadV1(
@@ -297,10 +302,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       receiver: {
-        onError: (announcement, error) => {
+        onReconciliationAttemptStart: (announcement) => (
+          this.rfc64PublicCatalogReconciliationFailuresV1.beginAttempt(
+            announcement.catalogHeadObjectDigest,
+          )
+        ),
+        onReconciliationAttemptSuccess: (announcement, attemptToken) => {
+          this.rfc64PublicCatalogReconciliationFailuresV1.completeAttempt(
+            announcement.catalogHeadObjectDigest,
+            attemptToken,
+          );
+        },
+        onReconciliationAttemptEnd: (announcement, attemptToken) => {
+          this.rfc64PublicCatalogReconciliationFailuresV1.endAttempt(
+            announcement.catalogHeadObjectDigest,
+            attemptToken,
+          );
+        },
+        onError: (announcement, error, attemptToken) => {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
             announcement.catalogHeadObjectDigest,
             error,
+            classifyRfc64CatalogReconciliationTerminalReasonV1(error),
+            attemptToken ?? undefined,
           );
         },
       },
@@ -518,11 +542,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const scope = deriveAuthorCatalogScopeFromHeadV1(history.previousHead.payload);
     const heldPolicy = service.acceptedPolicySnapshotForCatalogScope(scope);
     const policyDigest = heldPolicy.policyDigest;
-    if (heldPolicy.policy.accessPolicy === 1 && peers.length > 0) {
-      throw new Error(
-        'RFC-64 private catalog peer fan-out requires scope-bound private content transport',
-      );
-    }
     const authorAddress = params.author.address.toLowerCase() as EvmAddressV1;
     if (authorAddress !== scope.authorAddress) {
       throw new Error('RFC-64 successor author must equal the exact predecessor author');
@@ -707,6 +726,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         catalogHeadDigest: failure.catalogHeadDigest,
         errorName: failure.errorName,
         errorCode: failure.errorCode,
+        ...(failure.causeCode === undefined ? {} : { causeCode: failure.causeCode }),
       });
   }
 
@@ -742,6 +762,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   /** Build native mode only when a local deployment source exists. */
   private createRfc64PublicCatalogNativeOptionsV1(
     this: DKGAgent,
+    verifyIssuerSignature: typeof verifyControlEnvelopeIssuerSignatureV1,
   ): Rfc64PublicCatalogServiceNativeOptionsV1 | undefined {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) return undefined;
@@ -757,27 +778,74 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         announcement.networkId,
         signal,
       );
+    const resolveScopedReadCapability = createRfc64CatalogNativeScopedReadProviderV1({
+      controlObjects: persistence.controlObjects,
+      kaBundles: persistence.kaBundles,
+      verifyIssuerSignature,
+      resolveAcceptedPolicySnapshot: (networkId, contextGraphId) =>
+        this.requireRfc64PublicCatalogServiceV1().acceptedPolicySnapshot(
+          networkId,
+          contextGraphId,
+        ),
+    });
+    let readNativeResourceStats: () => ReturnType<
+      Rfc64PublicCatalogNativeReceiverV1['resourceStats']
+    > | null = () => null;
     return Object.freeze({
       readCatalogObjectByDigest: async (objectDigest: Digest32V1) => {
         const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
           objectDigest,
-          verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+          verifyIssuerSignature,
         });
         return stored?.envelope ?? null;
       },
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
+      resolveScopedReadCapability,
+      readResourceStats: () => readNativeResourceStats(),
       createReconciler: (clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>) => {
         const chainConfig = this.config.chainConfig;
-        const beforeAppliedHeadCommit = createRfc64FinalizedPolicyAgentPrecommitV1({
-          acceptedPolicySnapshotForCatalogScope: (scope) =>
-            this.requireRfc64PublicCatalogServiceV1()
-              .acceptedPolicySnapshotForCatalogScope(scope),
+        const acceptedPolicySnapshotForCatalogScope = (scope: AuthorCatalogScopeV1) =>
+          this.requireRfc64PublicCatalogServiceV1()
+            .acceptedPolicySnapshotForCatalogScope(scope);
+        const finalizedPolicyPrecommit = createRfc64FinalizedPolicyAgentPrecommitV1({
+          acceptedPolicySnapshotForCatalogScope,
           rpcEndpoints: chainConfig === undefined
             ? null
             : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
           getOnChainContextGraphId: (contextGraphId, signal) =>
             this.getContextGraphOnChainId(contextGraphId, { signal }),
           getEvmChainId: () => this.chain.getEvmChainId(),
+        });
+        const finalizedVmPrecommit = createRfc64FinalizedVmAgentPrecommitV1({
+          acceptedPolicySnapshotForCatalogScope,
+          rpcEndpoints: chainConfig === undefined
+            ? null
+            : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
+          getOnChainContextGraphId: (contextGraphId, signal) =>
+            this.getContextGraphOnChainId(contextGraphId, { signal }),
+          getEvmChainId: () => this.chain.getEvmChainId(),
+          getKnowledgeAssetStorageAddress: async () => {
+            if (typeof this.chain.getDKGKnowledgeAssetsAddress !== 'function') {
+              throw new Error('RFC-64 finalized VM recovery requires KnowledgeAssetStorage');
+            }
+            return this.chain.getDKGKnowledgeAssetsAddress();
+          },
+          getKnowledgeAssetsLifecycleAddress: () =>
+            this.chain.getKnowledgeAssetsLifecycleAddress(),
+          store: this.store,
+        });
+        const beforeAppliedHeadCommit = Object.freeze(async (
+          plan: Parameters<typeof finalizedPolicyPrecommit>[0],
+          signal: AbortSignal,
+        ): ReturnType<typeof finalizedVmPrecommit> => {
+          const accepted = acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
+          if (
+            accepted.policy.accessPolicy === 1
+            && accepted.policy.source.kind === 'finalized-chain'
+          ) {
+            return finalizedVmPrecommit(plan, signal);
+          }
+          return finalizedPolicyPrecommit(plan, signal);
         });
         const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
           headTransport: clients.headTransport,
@@ -786,9 +854,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           inventory: persistence.inventory,
           kaBundles: persistence.kaBundles,
           store: this.store,
+          verifyIssuerSignature: clients.verifyIssuerSignature,
           beforeAppliedHeadCommit,
           transportTimeoutMs: clients.transportTimeoutMs,
         });
+        readNativeResourceStats = () => nativeReceiver.resourceStats();
         const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
           nativeReceiver: Object.freeze({
             synchronizeBoundedPublicRootCatalog: async (...args) => {
@@ -803,6 +873,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           inventory: persistence.inventory,
           resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
           resolveDeployment,
+          requiresAppliedHeadPrecommit: (announcement) => {
+            const accepted = this.requireRfc64PublicCatalogServiceV1()
+              .acceptedPolicySnapshotForCatalogScope(
+                clients.resolveTrustedCatalogScope(announcement),
+              );
+            return accepted.policy.accessPolicy === 1
+              && accepted.policy.source.kind === 'finalized-chain';
+          },
           readStagedCatalogHead: async (announcement) => {
             const stored = await persistence.controlObjects.getVerifiedObject({
               objectDigest: announcement.catalogHeadObjectDigest,

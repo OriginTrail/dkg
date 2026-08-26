@@ -11,6 +11,19 @@ import {
   temporaryDirectory,
 } from './finalization-recovery-sqlite-test-helpers.js';
 
+function commitOriginalEvidence(
+  store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>>,
+  key: string,
+  generation: number,
+  verifiedEvidence: ReturnType<typeof evidence>,
+) {
+  return store.commitVerifiedEvidence(
+    key,
+    generation,
+    { evidence: verifiedEvidence, placement: 'original' },
+  );
+}
+
 describe('SQLite finalization recovery deferred spool', () => {
   it('preserves a deferred envelope across reopen and promotes it later', async () => {
     const directory = await temporaryDirectory();
@@ -77,7 +90,7 @@ describe('SQLite finalization recovery deferred spool', () => {
     try {
       const store = await openSqliteFinalizationRecoveryStore(directory, { maxEntries: 1 });
       await store.receive(received());
-      await store.markVerified('entry-1', 0, evidence());
+      await commitOriginalEvidence(store, 'entry-1', 0, evidence());
       await expect(store.receive(received({
         key: 'entry-2',
         txHash: `0x${'ef'.repeat(32)}`,
@@ -332,7 +345,7 @@ describe('SQLite finalization recovery deferred spool', () => {
         now: () => now,
       });
       await store.receive(received());
-      await store.markVerified('entry-1', 0, evidence());
+      await commitOriginalEvidence(store, 'entry-1', 0, evidence());
       await expect(store.receive(received({
         key: 'stale-pending',
         txHash: `0x${'ef'.repeat(32)}`,
