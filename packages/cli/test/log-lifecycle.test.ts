@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Logger } from '@origintrail-official/dkg-core';
 import { startDaemonLogController } from '../src/daemon/log-lifecycle.js';
-import { startDaemonDebugLogWriter } from '../src/daemon/daemon-debug-log-writer.js';
+import { startDaemonLogFileWriter } from '../src/daemon/daemon-log-file-writer.js';
+import { formatDaemonDebugLog } from '../src/daemon/log-sink.js';
 import type { DkgConfig } from '../src/config.js';
 import { createTelemetryRuntime } from '../src/daemon/telemetry-runtime.js';
 
@@ -181,10 +182,12 @@ describe('startDaemonLogController', () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-debug-log-'));
     const file = join(directory, 'daemon.log');
     const persisted: string[] = [];
-    const debugWriter = startDaemonDebugLogWriter({ logFile: file });
+    const logFileWriter = startDaemonLogFileWriter({ logFile: file });
     const controller = startDaemonLogController({
       writeLocalDebug: (record) => {
-        debugWriter.push(record);
+        logFileWriter.push(formatDaemonDebugLog(record), {
+          classification: 'debug',
+        });
       },
       insertDiagnosticLog: (record) => persisted.push(record.message),
       redact: (record) => record,
@@ -197,7 +200,7 @@ describe('startDaemonLogController', () => {
         'discovery scan failed',
       );
       controller.detachSink();
-      await debugWriter.shutdown();
+      await logFileWriter.shutdown();
 
       expect(await readFile(file, 'utf8')).toContain(
         'system op-debug [debug-file-test] discovery scan failed [DEBUG]',
@@ -205,7 +208,7 @@ describe('startDaemonLogController', () => {
       expect(persisted).toEqual([]);
     } finally {
       controller.detachSink();
-      await debugWriter.shutdown();
+      await logFileWriter.shutdown();
       await rm(directory, { recursive: true, force: true });
     }
   });
@@ -222,7 +225,7 @@ describe('startDaemonLogController', () => {
     const appended: string[] = [];
     let concurrentAppends = 0;
     let maxConcurrentAppends = 0;
-    const debugWriter = startDaemonDebugLogWriter({
+    const logFileWriter = startDaemonLogFileWriter({
       logFile: 'unused-in-injected-test',
       maxQueuedEntries: 4,
       maxBatchEntries: 1,
@@ -235,22 +238,19 @@ describe('startDaemonLogController', () => {
         concurrentAppends -= 1;
       },
     });
-    const record = (index: number) => ({
-      level: 'debug' as const,
-      operationName: 'system',
-      operationId: `op-${index}`,
-      module: 'queue-test',
-      message: `message-${index}`,
-    });
+    const pushDebug = (index: number) => logFileWriter.push(
+      `message-${index}\n`,
+      { classification: 'debug' },
+    );
 
-    debugWriter.push(record(0));
+    pushDebug(0);
     await appendStarted;
-    for (let index = 1; index <= 20; index++) debugWriter.push(record(index));
+    for (let index = 1; index <= 20; index++) pushDebug(index);
 
-    expect(debugWriter.pending()).toBe(5); // one active + four bounded queued
-    expect(debugWriter.dropped()).toBe(16);
+    expect(logFileWriter.pending()).toBe(5); // one active + four bounded queued
+    expect(logFileWriter.dropped()).toBe(16);
     let shutdownSettled = false;
-    const shutdown = debugWriter.shutdown().then(() => {
+    const shutdown = logFileWriter.shutdown().then(() => {
       shutdownSettled = true;
     });
     await Promise.resolve();
@@ -259,12 +259,97 @@ describe('startDaemonLogController', () => {
     await shutdown;
     expect(settledBeforeRelease).toBe(false);
     expect(maxConcurrentAppends).toBe(1);
-    expect(debugWriter.pending()).toBe(0);
-    expect(debugWriter.push(record(21))).toBe(false);
+    expect(logFileWriter.pending()).toBe(0);
+    expect(pushDebug(21)).toBe(false);
     expect(appended.join('')).toContain('message-0');
     for (const index of [17, 18, 19, 20]) {
       expect(appended.join('')).toContain(`message-${index}`);
     }
     expect(appended.join('')).not.toContain('message-16');
+  });
+
+  it('retries failed batches, counts final loss, and awaits a durable diagnostic', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-log-writer-diagnostic-'));
+    const diagnosticFile = join(directory, 'daemon-log-writer-errors.log');
+    const append = vi.fn(async () => {
+      throw new Error('disk unavailable');
+    });
+    const logFileWriter = startDaemonLogFileWriter({
+      logFile: 'unused-in-injected-test',
+      maxAppendAttempts: 3,
+      append,
+      waitBeforeRetry: async () => undefined,
+      onDiagnostic: async (message) => {
+        await appendFile(diagnosticFile, `${message}\n`);
+      },
+    });
+
+    try {
+      expect(logFileWriter.push('accepted-before-failure\n')).toBe(true);
+      await logFileWriter.shutdown();
+
+      expect(append).toHaveBeenCalledTimes(3);
+      expect(logFileWriter.pending()).toBe(0);
+      expect(logFileWriter.dropped()).toBe(1);
+      expect(await readFile(diagnosticFile, 'utf8')).toContain(
+        'discarded 1 accepted entry',
+      );
+    } finally {
+      await logFileWriter.shutdown();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes mixed standard/debug writes with rotation and final drain', async () => {
+    let releaseFirstAppend!: () => void;
+    let markFirstAppendStarted!: () => void;
+    const firstAppendStarted = new Promise<void>((resolve) => {
+      markFirstAppendStarted = resolve;
+    });
+    const firstAppendGate = new Promise<void>((resolve) => {
+      releaseFirstAppend = resolve;
+    });
+    const events: string[] = [];
+    let appendCalls = 0;
+    let concurrentAppends = 0;
+    let maxConcurrentAppends = 0;
+    const logFileWriter = startDaemonLogFileWriter({
+      logFile: 'unused-in-injected-test',
+      maxBatchEntries: 1,
+      append: async (data) => {
+        appendCalls += 1;
+        concurrentAppends += 1;
+        maxConcurrentAppends = Math.max(maxConcurrentAppends, concurrentAppends);
+        if (appendCalls === 1) {
+          markFirstAppendStarted();
+          await firstAppendGate;
+        }
+        events.push(`append:${data.trim()}`);
+        concurrentAppends -= 1;
+      },
+    });
+
+    logFileWriter.push('info-0\n');
+    await firstAppendStarted;
+    logFileWriter.push('debug-1\n', { classification: 'debug' });
+    logFileWriter.push('info-2\n');
+    const rotation = logFileWriter.runExclusive(async () => {
+      events.push('rotate');
+    });
+    logFileWriter.push('debug-3\n', { classification: 'debug' });
+
+    releaseFirstAppend();
+    await rotation;
+    await logFileWriter.shutdown();
+
+    expect(events).toEqual([
+      'append:info-0',
+      'append:debug-1',
+      'append:info-2',
+      'rotate',
+      'append:debug-3',
+    ]);
+    expect(maxConcurrentAppends).toBe(1);
+    expect(logFileWriter.pending()).toBe(0);
   });
 });

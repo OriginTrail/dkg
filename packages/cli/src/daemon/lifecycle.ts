@@ -166,7 +166,8 @@ import {
   startDaemonLogController,
   type DaemonLogExporterStartResult,
 } from './log-lifecycle.js';
-import { startDaemonDebugLogWriter } from './daemon-debug-log-writer.js';
+import { startDaemonLogFileWriter } from './daemon-log-file-writer.js';
+import { formatDaemonDebugLog } from './log-sink.js';
 import {
   createTelemetryRuntime,
   type TelemetryTransitionResult,
@@ -1181,28 +1182,45 @@ export async function runDaemonInner(
   // upgrades/restarts and can already be multi-gigabyte at this point.
   const startupLogRotation = await rotateDaemonLogIfNeeded(logFile).catch(() => null);
 
-  // Tee all stdout/stderr (including structured Logger output) into the log file
+  // One file-level writer owns every daemon.log append after startup rotation.
+  // Its separate diagnostic file remains visible when the detached worker's
+  // original stderr is ignored and cannot recurse through the daemon.log tee.
   const origStdoutWrite = process.stdout.write.bind(process.stdout);
   const origStderrWrite = process.stderr.write.bind(process.stderr);
+  const logWriterDiagnosticFile = join(dkgDir(), 'daemon-log-writer-errors.log');
+  const daemonLogFileWriter = startDaemonLogFileWriter({
+    logFile,
+    onDiagnostic: async (message) => {
+      const line = `[${new Date().toISOString()}] ${message}\n`;
+      await appendFile(logWriterDiagnosticFile, line).catch(() => {});
+      if (foreground) origStderrWrite(`[daemon-log-writer] ${message}\n`);
+    },
+  });
+
+  // Tee all stdout/stderr (including structured Logger output) through the
+  // same serialized and bounded file lifecycle.
   process.stdout.write = ((chunk: any, ...args: any[]) => {
-    appendFile(
-      logFile,
+    daemonLogFileWriter.push(
       typeof chunk === "string" ? chunk : chunk.toString(),
-    ).catch(() => {});
+    );
     return origStdoutWrite(chunk, ...args);
   }) as typeof process.stdout.write;
   process.stderr.write = ((chunk: any, ...args: any[]) => {
-    appendFile(
-      logFile,
+    daemonLogFileWriter.push(
       typeof chunk === "string" ? chunk : chunk.toString(),
-    ).catch(() => {});
+    );
     return origStderrWrite(chunk, ...args);
   }) as typeof process.stderr.write;
+
+  const detachDaemonLogTee = (): void => {
+    process.stdout.write = origStdoutWrite as typeof process.stdout.write;
+    process.stderr.write = origStderrWrite as typeof process.stderr.write;
+  };
 
   function log(msg: string) {
     const line = `[${new Date().toISOString()}] ${msg}`;
     if (foreground) origStdoutWrite(line + "\n");
-    appendFile(logFile, line + "\n").catch(() => {});
+    daemonLogFileWriter.push(line + "\n");
   }
   const backpressureMonitor = new BackpressureMonitor({
     emit: (level, message) => log(`[${level}] ${message}`),
@@ -1232,7 +1250,14 @@ export async function runDaemonInner(
     log(`[fatal] Uncaught exception: ${err?.stack ?? msg}`);
     removePid()
       .catch(() => {})
-      .finally(() => process.exit(1));
+      .finally(async () => {
+        detachDaemonLogTee();
+        try {
+          await daemonLogFileWriter.shutdown();
+        } finally {
+          process.exit(1);
+        }
+      });
   });
 
   process.on("unhandledRejection", (reason) => {
@@ -1274,7 +1299,7 @@ export async function runDaemonInner(
  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝              ╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚═╝ ╚═════╝
 `;
   origStdoutWrite(banner + "\n");
-  appendFile(logFile, banner + "\n").catch(() => {});
+  daemonLogFileWriter.push(banner + "\n");
 
   const nodeVersion = getNodeVersion();
   const nodeCommit = getCurrentCommitShort(); // cached once at startup — avoids execSync in hot path
@@ -2605,20 +2630,11 @@ export async function runDaemonInner(
   // Avoid duplicating routine logs into SQLite on the event loop. Low-volume
   // warning/error records remain available to operation and dashboard views;
   // the controller owns sink attachment plus the one active remote exporter.
-  const debugLogWriter = startDaemonDebugLogWriter({
-    logFile,
-    onError: (message) => {
-      origStderrWrite(`[daemon-debug-log] append failed: ${message}\n`);
-    },
-    onDrop: (dropped) => {
-      origStderrWrite(
-        `[daemon-debug-log] queue full; dropped ${dropped} oldest record(s)\n`,
-      );
-    },
-  });
   const daemonLogController = startDaemonLogController({
     writeLocalDebug: (record) => {
-      debugLogWriter.push(record);
+      daemonLogFileWriter.push(formatDaemonDebugLog(record), {
+        classification: 'debug',
+      });
     },
     insertDiagnosticLog: (record) => dashDb.insertLog(record),
     redact: redactForRemote,
@@ -3004,13 +3020,13 @@ export async function runDaemonInner(
   // Daemon shutdown additionally detaches the Logger sink. Runtime telemetry
   // disable keeps the sink attached so warn/error diagnostics still persist.
   async function stopDaemonLogging(): Promise<void> {
-    // Detach synchronously, then drain both independently owned paths. No new
-    // debug record can enter the bounded writer after detachment, and runtime
-    // telemetry remains the one exporter/OTel shutdown owner.
+    // Detach synchronously, then flush the shared file lifecycle through a
+    // serialized barrier. The tee remains active for later teardown messages;
+    // final shutdown detaches it and closes the writer after all producers stop.
     daemonLogController.detachSink();
     await Promise.all([
       telemetryRuntime.shutdown(),
-      debugLogWriter.shutdown(),
+      daemonLogFileWriter.flush(),
     ]);
   }
 
@@ -3021,7 +3037,9 @@ export async function runDaemonInner(
   const pruneRuntimeState = async (): Promise<void> => {
     try {
       dashDb.prune();
-      const rotation = await rotateDaemonLogIfNeeded(logFile);
+      const rotation = await daemonLogFileWriter.runExclusive(
+        () => rotateDaemonLogIfNeeded(logFile),
+      );
       if (rotation.rotated) {
         log(
           `Rotated daemon.log (was ${(rotation.previousBytes / 1024 / 1024).toFixed(1)} MB)`,
@@ -3906,6 +3924,9 @@ export async function runDaemonInner(
       }
     })().catch((err: any) => {
       log(`Shutdown cleanup error: ${err?.message ?? String(err)}`);
+    }).finally(async () => {
+      detachDaemonLogTee();
+      await daemonLogFileWriter.shutdown();
     });
     const { forced } = await raceShutdownWithTimeout(
       cleanup,
