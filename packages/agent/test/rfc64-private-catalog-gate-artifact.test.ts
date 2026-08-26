@@ -32,6 +32,7 @@ import {
   ASSET_NUMBERS,
   CONTEXT_GRAPH_ID,
   PROJECTION_EVIDENCE,
+  PROJECTION_NQUADS,
   PROJECTION_QUADS,
   roleAgentAddress,
 } from '../devnet/rfc64-private-catalog/fixture.mjs';
@@ -44,6 +45,17 @@ import {
 
 const temporaryRoots: string[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
+// Independent oracle: these bytes and this digest are intentionally NOT
+// produced by memory-evidence.mjs. If canonicalization drops or rewrites any
+// term, the fixture/helper assertions below fail together against this pin.
+const EXPECTED_PROJECTION_NQUADS =
+  '<https://example.org/alice> <https://schema.org/age> ' +
+  '"42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n' +
+  '<https://example.org/alice> <https://schema.org/name> "Alice" .';
+const EXPECTED_PROJECTION_EVIDENCE = Object.freeze({
+  count: 2,
+  digest: 'babf6f5fe8b4028a569792682dc3775c7410a853adfeb4e55ecea14d5ba0445f',
+});
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => (
@@ -154,30 +166,18 @@ describe('RFC-64 private release gate process and denial evidence', () => {
     const store = new OxigraphStore();
     const authorAddress = roleAgentAddress('owner');
     try {
-      for (const kaNumber of ASSET_NUMBERS) {
-        for (const layer of [MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiableMemory]) {
+      const graphs = ASSET_NUMBERS.flatMap((kaNumber) => (
+        [MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiableMemory].flatMap((layer) => {
           const graph = contextGraphLayerUri(
             CONTEXT_GRAPH_ID,
             layer,
             authorAddress,
             kaNumber,
           );
-          await store.insert([
-            {
-              graph,
-              subject: 'https://example.org/alice',
-              predicate: 'https://schema.org/age',
-              object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
-            },
-            {
-              graph,
-              subject: 'https://example.org/alice',
-              predicate: 'https://schema.org/name',
-              object: '"Alice"',
-            },
-          ]);
-        }
-      }
+          return bindGraphlessProjectionToGraph(PROJECTION_QUADS, graph);
+        })
+      ));
+      await store.insert(graphs);
 
       const graphCounts = await readPrivateCatalogGraphCountEvidence(store, {
         assetNumbers: ASSET_NUMBERS,
@@ -215,7 +215,9 @@ describe('RFC-64 private release gate process and denial evidence', () => {
       const original = projection('Alice').reverse();
       await store.insert(original);
       const exact = await readExactGraphMemoryEvidence(store, graph);
-      expect(exact).toEqual(PROJECTION_EVIDENCE);
+      expect(PROJECTION_NQUADS).toBe(EXPECTED_PROJECTION_NQUADS);
+      expect(PROJECTION_EVIDENCE).toEqual(EXPECTED_PROJECTION_EVIDENCE);
+      expect(exact).toEqual(EXPECTED_PROJECTION_EVIDENCE);
 
       const exactGraphCounts = ASSET_NUMBERS.map((kaNumber) => ({
         kaNumber,
@@ -245,6 +247,29 @@ describe('RFC-64 private release gate process and denial evidence', () => {
       expect(hasExactPrivateCatalogMemoryContents({
         graphCounts: exactGraphCounts.slice(0, 1),
       }, expected)).toBe(false);
+
+      const semanticCorruptions = [
+        ['omitted age statement', PROJECTION_QUADS.slice(1)],
+        ['omitted name statement', PROJECTION_QUADS.slice(0, 1)],
+        ['changed subject', PROJECTION_QUADS.map((quad, index) => index === 0
+          ? { ...quad, subject: 'https://example.org/bob' }
+          : quad)],
+        ['changed predicate', PROJECTION_QUADS.map((quad, index) => index === 0
+          ? { ...quad, predicate: 'https://schema.org/birthDate' }
+          : quad)],
+        ['changed object', PROJECTION_QUADS.map((quad, index) => index === 0
+          ? { ...quad, object: '"43"^^<http://www.w3.org/2001/XMLSchema#integer>' }
+          : quad)],
+      ] as const;
+      for (const [label, quads] of semanticCorruptions) {
+        await store.delete(original);
+        const corruptedProjection = bindGraphlessProjectionToGraph(quads, graph);
+        await store.insert(corruptedProjection);
+        const evidence = await readExactGraphMemoryEvidence(store, graph);
+        expect(evidence, label).not.toEqual(EXPECTED_PROJECTION_EVIDENCE);
+        await store.delete(corruptedProjection);
+        await store.insert(original);
+      }
 
       await store.delete(original);
       await store.insert(projection('Mallory'));
