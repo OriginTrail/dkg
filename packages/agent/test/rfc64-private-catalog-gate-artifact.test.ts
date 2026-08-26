@@ -32,9 +32,11 @@ import {
   ASSET_NUMBERS,
   CONTEXT_GRAPH_ID,
   PROJECTION_EVIDENCE,
+  PROJECTION_QUADS,
   roleAgentAddress,
 } from '../devnet/rfc64-private-catalog/fixture.mjs';
 import {
+  bindGraphlessProjectionToGraph,
   hasExactPrivateCatalogMemoryContents,
   readExactGraphMemoryEvidence,
   readPrivateCatalogGraphCountEvidence,
@@ -201,20 +203,12 @@ describe('RFC-64 private release gate process and denial evidence', () => {
   it('hashes real graph contents and rejects same-size semantic corruption', async () => {
     const graph = 'urn:rfc64:private-gate:test-memory';
     const store = new OxigraphStore();
-    const projection = (name: string) => [
-      {
-        graph,
-        subject: 'https://example.org/alice',
-        predicate: 'https://schema.org/age',
-        object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
-      },
-      {
-        graph,
-        subject: 'https://example.org/alice',
-        predicate: 'https://schema.org/name',
-        object: `"${name}"`,
-      },
-    ];
+    const projection = (name: string) => bindGraphlessProjectionToGraph(
+      PROJECTION_QUADS.map((quad) => quad.predicate === 'https://schema.org/name'
+        ? { ...quad, object: `"${name}"` }
+        : quad),
+      graph,
+    );
     try {
       // Reverse fixture order: canonicalization, not insertion order, defines
       // the digest used by the process gate.

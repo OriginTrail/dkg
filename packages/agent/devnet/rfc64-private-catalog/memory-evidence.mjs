@@ -14,6 +14,35 @@ import {
 const DEFAULT_MAX_QUAD_COUNT = 16;
 const DEFAULT_MAX_NQUADS_BYTES = 64 * 1024;
 
+/** Canonical graph-name-independent serialization for one projection model. */
+export function canonicalGraphlessProjectionNQuads(quads) {
+  return quadsToNQuads(quads.map(({ subject, predicate, object }) => ({
+    subject,
+    predicate,
+    object,
+    graph: '',
+  }))).split('\n').sort().join('\n');
+}
+
+/** Pure projection evidence shared by fixture construction and store reads. */
+export function computeGraphlessMemoryEvidence(quads) {
+  const canonicalNQuads = canonicalGraphlessProjectionNQuads(quads);
+  return Object.freeze({
+    count: quads.length,
+    digest: createHash('sha256').update(canonicalNQuads, 'utf8').digest('hex'),
+  });
+}
+
+/** Bind the canonical graphless fixture projection to one concrete memory graph. */
+export function bindGraphlessProjectionToGraph(quads, graph) {
+  return quads.map(({ subject, predicate, object }) => ({
+    subject,
+    predicate,
+    object,
+    graph,
+  }));
+}
+
 /**
  * Read one exact graph through the same bounded path used by the release gate
  * and return its canonical, graph-name-independent fingerprint.
@@ -24,11 +53,7 @@ export async function readExactGraphMemoryEvidence(store, graph, options = {}) {
     maxNQuadsBytes: options.maxNQuadsBytes ?? DEFAULT_MAX_NQUADS_BYTES,
     outputGraph: '',
   });
-  const canonicalNQuads = quadsToNQuads(quads).split('\n').sort().join('\n');
-  return Object.freeze({
-    count: quads.length,
-    digest: createHash('sha256').update(canonicalNQuads, 'utf8').digest('hex'),
-  });
+  return computeGraphlessMemoryEvidence(quads);
 }
 
 /**
