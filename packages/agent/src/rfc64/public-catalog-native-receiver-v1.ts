@@ -516,10 +516,6 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     }
     const head = fetchedHead.envelope;
     assertFetchedHeadMatchesTrustedScope(head, trustedCatalogScope);
-    await this.stageVerifiedControlObjectV1(
-      fetchedHead,
-      'verified catalog head could not be staged for restart-safe recovery',
-    );
     if (expected === 'genesis' || (expected === 'any' && claimsGenesisHistory(head))) {
       return this.bootstrapEmptyBoundedPublicRootCatalogFetched(
         remotePeerId,
@@ -571,6 +567,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       head,
       trustedCatalogScope,
       signal,
+    );
+    // A self-signed head is not catalog authority. Persist it only after the
+    // trusted author delegation above has bound this exact issuer and scope.
+    await this.stageVerifiedControlObjectV1(
+      fetchedHead,
+      'authorized catalog head could not be staged for restart-safe recovery',
     );
     const fetchedDirectory = await this.fetchCatalogObjectWithCacheV1(
       remotePeerId,
@@ -717,6 +719,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       head,
       trustedCatalogScope,
       signal,
+    );
+    // Keep authorization-incomplete network heads out of the durable cache.
+    await this.stageVerifiedControlObjectV1(
+      fetchedHead,
+      'authorized catalog head could not be staged for restart-safe recovery',
     );
 
     const fetchedDirectory = await this.fetchCatalogObjectWithCacheV1(

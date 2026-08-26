@@ -19,7 +19,11 @@ import {
   assertRfc64PrivateGatePassProvenanceV1,
   runRfc64PrivateGateArtifactLifecycleV1,
 } from '../devnet/rfc64-private-catalog/gate-artifact.mjs';
-import { AgentChild } from '../devnet/rfc64-private-catalog/run.mjs';
+import {
+  AgentChild,
+  hasExactMemoryContents,
+} from '../devnet/rfc64-private-catalog/run.mjs';
+import { PROJECTION_DIGEST } from '../devnet/rfc64-private-catalog/fixture.mjs';
 
 const temporaryRoots: string[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -129,6 +133,22 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
 });
 
 describe('RFC-64 private release gate process and denial evidence', () => {
+  it('rejects same-size SWM or VM semantic corruption', () => {
+    const exactGraphCounts = [41, 42].map((kaNumber) => ({
+      kaNumber,
+      swm: 2,
+      swmDigest: PROJECTION_DIGEST,
+      vm: 2,
+      vmDigest: PROJECTION_DIGEST,
+    }));
+    expect(hasExactMemoryContents({ graphCounts: exactGraphCounts })).toBe(true);
+    expect(hasExactMemoryContents({
+      graphCounts: exactGraphCounts.map((entry, index) => index === 0
+        ? { ...entry, vmDigest: '0'.repeat(64) }
+        : entry),
+    })).toBe(false);
+  });
+
   it('reaps a child that ignores the stop command and SIGTERM', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-stop-'));
     temporaryRoots.push(root);

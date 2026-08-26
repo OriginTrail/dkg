@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { createHash } from 'node:crypto';
+
 import {
   CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
@@ -34,6 +36,14 @@ export const PROJECTION = new TextEncoder().encode(
   '<https://example.org/alice> <https://schema.org/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
   + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n',
 );
+export const PROJECTION_NQUADS = new TextDecoder().decode(PROJECTION)
+  .trim()
+  .split('\n')
+  .sort()
+  .join('\n');
+export const PROJECTION_DIGEST = createHash('sha256')
+  .update(PROJECTION_NQUADS, 'utf8')
+  .digest('hex');
 export const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: CHAIN_ID,
