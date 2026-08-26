@@ -7,16 +7,12 @@ import {
   RUNTIME_BUILD_ARGS,
   RUNTIME_CLEAN_ARGS,
   RUNTIME_PACKAGE_CLOSURE,
-  assertExecutedRuntimeMatchesBuildV1,
   assertRuntimeManifestEqualV1,
-  buildExecutedRuntimeManifestV1,
-  buildRuntimeManifestFromEntriesV1,
-  buildRuntimeManifestV1,
-  runCleanRuntimeBuildV1,
-  type ExecutedRuntimeManifestV1,
+  createRuntimeEvidenceV1,
+  type ExecutedRuntimeManifestForProfileV1,
   type RuntimeEvidenceProfileV1,
   type RuntimeFileEvidenceV1,
-  type RuntimeManifestV1,
+  type RuntimeManifestForProfileV1,
 } from '../rfc64-runtime-provenance.mts';
 import { validateFixedRuntimeProcessEvidenceV1 } from '../rfc64-runtime-process-evidence.mts';
 
@@ -37,8 +33,7 @@ export const GATE2_RUNTIME_PACKAGE_CLOSURE = RUNTIME_PACKAGE_CLOSURE;
 export const GATE2_RUNTIME_CLEAN_ARGS = RUNTIME_CLEAN_ARGS;
 export const GATE2_RUNTIME_BUILD_ARGS = RUNTIME_BUILD_ARGS;
 
-export const GATE2_RUNTIME_EVIDENCE_PROFILE_V1: Readonly<RuntimeEvidenceProfileV1> =
-  Object.freeze({
+export const GATE2_RUNTIME_EVIDENCE_PROFILE_V1 = Object.freeze({
     buildArgs: GATE2_RUNTIME_BUILD_ARGS,
     cleanArgs: GATE2_RUNTIME_CLEAN_ARGS,
     executedManifestDigestDomain: GATE2_EXECUTED_RUNTIME_MANIFEST_DIGEST_DOMAIN,
@@ -52,15 +47,19 @@ export const GATE2_RUNTIME_EVIDENCE_PROFILE_V1: Readonly<RuntimeEvidenceProfileV
     manifestDigestDomain: GATE2_RUNTIME_MANIFEST_DIGEST_DOMAIN,
     manifestSchemaVersion: GATE2_RUNTIME_MANIFEST_SCHEMA_VERSION,
     packageClosure: GATE2_RUNTIME_PACKAGE_CLOSURE,
-  });
+  } as const satisfies RuntimeEvidenceProfileV1);
+
+export const GATE2_RUNTIME_EVIDENCE_V1 = createRuntimeEvidenceV1(
+  GATE2_RUNTIME_EVIDENCE_PROFILE_V1,
+);
 
 export type Gate2RuntimeFileEvidenceV1 = RuntimeFileEvidenceV1;
-export type Gate2RuntimeManifestV1 = RuntimeManifestV1 & {
-  readonly schemaVersion: typeof GATE2_RUNTIME_MANIFEST_SCHEMA_VERSION;
-};
-export type Gate2ExecutedRuntimeManifestV1 = ExecutedRuntimeManifestV1 & {
-  readonly schemaVersion: typeof GATE2_EXECUTED_RUNTIME_MANIFEST_SCHEMA_VERSION;
-};
+export type Gate2RuntimeManifestV1 = RuntimeManifestForProfileV1<
+  typeof GATE2_RUNTIME_EVIDENCE_PROFILE_V1
+>;
+export type Gate2ExecutedRuntimeManifestV1 = ExecutedRuntimeManifestForProfileV1<
+  typeof GATE2_RUNTIME_EVIDENCE_PROFILE_V1
+>;
 
 export interface Gate2RuntimeLaunchReceiptV1 {
   readonly manifest: Readonly<Gate2RuntimeManifestV1>;
@@ -87,29 +86,21 @@ export interface Gate2RuntimeProvenanceV1 {
 let pendingLaunchReceipt: Readonly<Gate2RuntimeLaunchReceiptV1> | undefined;
 
 export function runGate2CleanRuntimeBuildV1(repoRoot: string): void {
-  runCleanRuntimeBuildV1(repoRoot, GATE2_RUNTIME_EVIDENCE_PROFILE_V1);
+  GATE2_RUNTIME_EVIDENCE_V1.runCleanRuntimeBuild(repoRoot);
 }
 
 export function buildGate2RuntimeManifestV1(
   repoRoot: string,
   sourceCommit: string,
 ): Readonly<Gate2RuntimeManifestV1> {
-  return buildRuntimeManifestV1(
-    repoRoot,
-    sourceCommit,
-    GATE2_RUNTIME_EVIDENCE_PROFILE_V1,
-  ) as Readonly<Gate2RuntimeManifestV1>;
+  return GATE2_RUNTIME_EVIDENCE_V1.buildRuntimeManifest(repoRoot, sourceCommit);
 }
 
 export function buildGate2RuntimeManifestFromEntriesV1(
   sourceCommit: string,
   entries: readonly Gate2RuntimeFileEvidenceV1[],
 ): Readonly<Gate2RuntimeManifestV1> {
-  return buildRuntimeManifestFromEntriesV1(
-    sourceCommit,
-    entries,
-    GATE2_RUNTIME_EVIDENCE_PROFILE_V1,
-  ) as Readonly<Gate2RuntimeManifestV1>;
+  return GATE2_RUNTIME_EVIDENCE_V1.buildRuntimeManifestFromEntries(sourceCommit, entries);
 }
 
 export function assertGate2RuntimeManifestEqualV1(
@@ -123,22 +114,14 @@ export function buildGate2ExecutedRuntimeManifestV1(
   sourceCommit: string,
   entries: readonly Gate2RuntimeFileEvidenceV1[],
 ): Readonly<Gate2ExecutedRuntimeManifestV1> {
-  return buildExecutedRuntimeManifestV1(
-    sourceCommit,
-    entries,
-    GATE2_RUNTIME_EVIDENCE_PROFILE_V1,
-  ) as Readonly<Gate2ExecutedRuntimeManifestV1>;
+  return GATE2_RUNTIME_EVIDENCE_V1.buildExecutedRuntimeManifest(sourceCommit, entries);
 }
 
 export function assertGate2ExecutedRuntimeMatchesBuildV1(
   executed: Gate2ExecutedRuntimeManifestV1,
   cleanBuild: Gate2RuntimeManifestV1,
 ): void {
-  assertExecutedRuntimeMatchesBuildV1(
-    executed,
-    cleanBuild,
-    GATE2_RUNTIME_EVIDENCE_PROFILE_V1,
-  );
+  GATE2_RUNTIME_EVIDENCE_V1.assertExecutedRuntimeMatchesBuild(executed, cleanBuild);
 }
 
 export function buildGate2RuntimeProvenanceV1(

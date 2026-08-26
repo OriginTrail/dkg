@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  RFC64_RUNTIME_EVIDENCE_V1,
   assertExecutedRuntimeMatchesBuildV1,
   buildExecutedRuntimeManifestV1,
   buildRuntimeManifestFromEntriesV1,
   buildRuntimeManifestV1,
 } from '../../../devnet/rfc64-runtime-provenance.mts';
+import { createRuntimeLoadEvidenceV1 } from
+  '../../../devnet/rfc64-runtime-load-evidence.mts';
 
 import {
   Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1,
@@ -516,6 +520,35 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
 });
 
 describe('RFC-64 private release gate process and denial evidence', () => {
+  it('rejects runtime bytes replaced between resolution and the exact load boundary', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rfc64-runtime-load-race-'));
+    temporaryRoots.push(root);
+    const artifactPath = join(root, 'packages', 'agent', 'dist', 'index.js');
+    await mkdir(dirname(artifactPath), { recursive: true });
+    writeFileSync(artifactPath, 'export const marker = "clean";\n');
+    const artifactUrl = pathToFileURL(artifactPath).href;
+    const evidence = createRuntimeLoadEvidenceV1({
+      repoRoot: root,
+      sourceCommit: 'a'.repeat(40),
+    });
+
+    evidence.resolve(artifactUrl, {} as never, () => ({
+      format: 'module',
+      url: artifactUrl,
+    }));
+    writeFileSync(artifactPath, 'export const marker = "other";\n');
+
+    expect(() => evidence.load(artifactUrl, {} as never, () => ({
+      format: 'module',
+      source: readFileSync(artifactPath),
+    }))).toThrow(/changed between resolution and load/u);
+
+    writeFileSync(artifactPath, 'export const marker = "clean";\n');
+    expect(() => evidence.createSealer(RFC64_RUNTIME_EVIDENCE_V1)()).toThrow(
+      /observed no workspace dist artifacts/u,
+    );
+  });
+
   it('launches and gracefully seals the production agent process', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rfc64-private-gate-provenance-child-'));
     temporaryRoots.push(root);
@@ -585,7 +618,7 @@ describe('RFC-64 private release gate process and denial evidence', () => {
         sourceCommit: sourceRevision,
       },
       probeReadyTimeoutMs: 25,
-      createAgentChild: (...args: ConstructorParameters<typeof AgentChild>) => {
+      createProbeChild: (...args: ConstructorParameters<typeof AgentChild>) => {
         const [role, dataDir, manifestPath, mode, options] = args;
         const child = new AgentChild(role, dataDir, manifestPath, mode, {
           ...options,

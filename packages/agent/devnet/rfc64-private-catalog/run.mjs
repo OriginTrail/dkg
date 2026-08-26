@@ -222,7 +222,7 @@ export class AgentChild {
 }
 
 export async function executeRfc64PrivateReleaseGateV1({
-  createAgentChild = (...args) => new AgentChild(...args),
+  createProbeChild = (...args) => new AgentChild(...args),
   probeReadyTimeoutMs = RUN_TIMEOUT_MS,
   runtimeManifest,
   sourceRevision,
@@ -244,7 +244,7 @@ export async function executeRfc64PrivateReleaseGateV1({
     await Promise.all(Object.values(dataDirs).map((path) => mkdir(path, { recursive: true })));
 
     const probeEntries = await Promise.all(ROLES.map(async (role) => {
-      const child = createAgentChild(role, dataDirs[role], undefined, 'probe', {
+      const child = createProbeChild(role, dataDirs[role], undefined, 'probe', {
         runtimeProvenance,
       });
       active.add(child);
