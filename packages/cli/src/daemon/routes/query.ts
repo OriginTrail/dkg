@@ -57,7 +57,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
 import {
   findReservedSubjectPrefix,
   isSkolemizedUri,
@@ -361,6 +361,32 @@ export function createApiQueryRequestLifecycle(
   return createStoreQueryRequestLifecycle(req, res, 'api.query') as ApiQueryRequestLifecycle;
 }
 
+type LegacyApiQueryResult = {
+  bindings: Array<Record<string, string>>;
+  quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+};
+
+export type PublicApiQueryResult =
+  | { type: 'bindings'; bindings: Array<Record<string, string>> }
+  | { type: 'quads'; quads: Array<{ subject: string; predicate: string; object: string; graph: string }> }
+  | { type: 'boolean'; value: boolean };
+
+/** Normalize the legacy engine shape at the public daemon boundary. */
+export function normalizePublicApiQueryResult(
+  sparql: string,
+  result: LegacyApiQueryResult,
+): PublicApiQueryResult {
+  const operation = classifySparqlOperation(sparql);
+  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
+    return { type: 'quads', quads: result.quads ?? [] };
+  }
+  if (operation.kind === 'read' && operation.form === 'ASK') {
+    const raw = result.bindings[0]?.result;
+    return { type: 'boolean', value: String(raw).toLowerCase() === 'true' };
+  }
+  return { type: 'bindings', bindings: result.bindings };
+}
+
 function parseVerifyTimeoutMs(
   raw: unknown,
 ): { value: number | undefined } | { error: string } {
@@ -649,16 +675,17 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       }
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
-      const resultCount = result?.type === 'bindings'
-        ? result.bindings.length
-        : result?.type === 'quads'
-          ? result.quads.length
-          : result?.type === 'boolean'
+      const publicResult = normalizePublicApiQueryResult(sparql, result);
+      const resultCount = publicResult.type === 'bindings'
+        ? publicResult.bindings.length
+        : publicResult.type === 'quads'
+          ? publicResult.quads.length
+          : publicResult.type === 'boolean'
             ? 1
             : 0;
       tracker.complete(ctx, { tripleCount: resultCount });
       return jsonResponse(res, 200, {
-        result,
+        result: publicResult,
         phases: { execute: execDur, serverTotal: Date.now() - serverT0 },
       });
     } catch (err: any) {
