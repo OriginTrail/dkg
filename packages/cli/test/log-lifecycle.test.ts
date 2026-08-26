@@ -1,81 +1,82 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createLogRedactor, Logger } from '@origintrail-official/dkg-core';
-import { DashboardDB } from '@origintrail-official/dkg-node-ui';
-import { startDaemonLogLifecycle } from '../src/daemon/log-lifecycle.js';
+import { Logger } from '@origintrail-official/dkg-core';
+import { startDaemonLogController } from '../src/daemon/log-lifecycle.js';
 
-describe('startDaemonLogLifecycle', () => {
+describe('startDaemonLogController', () => {
   afterEach(() => {
     Logger.setSink(null);
-    vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
-  it('wires legacy cleanup, diagnostic persistence, and shutdown cancellation', () => {
-    vi.useFakeTimers();
-    const dataDir = mkdtempSync(join(tmpdir(), 'dkg-daemon-log-lifecycle-'));
-    let dashDb = new DashboardDB({
-      dataDir,
-      retentionDays: 365,
-      legacyRoutineLogCleanupBatchRows: 2,
+  it('owns exporter attach, runtime detach, and diagnostic persistence independently', async () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const persisted: string[] = [];
+    const pushed: string[] = [];
+    const shutdown = vi.fn(async () => {});
+    const controller = startDaemonLogController({
+      insertDiagnosticLog: (record) => persisted.push(record.message),
+      redact: (record) => ({ ...record, message: `redacted:${record.message}` }),
     });
-    try {
-      const insertLegacy = dashDb.db.prepare(
-        `INSERT INTO logs (ts, level, module, message) VALUES (?, 'info', 'old-daemon', ?)`,
-      );
-      insertLegacy.run(Date.now(), 'legacy-1');
-      insertLegacy.run(Date.now() + 1, 'legacy-2');
-      dashDb.db.prepare(
-        `DELETE FROM settings WHERE key LIKE 'legacyRoutineLogCleanup%'`,
-      ).run();
-      dashDb.close();
-      dashDb = new DashboardDB({
-        dataDir,
-        retentionDays: 365,
-        legacyRoutineLogCleanupBatchRows: 2,
-      });
+    const factory = vi.fn(() => ({
+      shipper: { push: (record: { message: string }) => pushed.push(record.message) },
+      shutdown,
+    }));
 
-      let cleanupCalls = 0;
-      const handle = startDaemonLogLifecycle({
-        dashDb: {
-          insertLog: (record) => dashDb.insertLog(record),
-          runLegacyRoutineLogCleanupBatch: () => {
-            cleanupCalls += 1;
-            return dashDb.runLegacyRoutineLogCleanupBatch();
-          },
-        },
-        log: () => {},
-        redact: createLogRedactor(),
-        remoteShipper: () => null,
-        cleanupIntervals: {
-          initialDelayMs: 10,
-          catchupIntervalMs: 10,
-          reclaimRetryMs: 10,
-        },
-      });
+    expect(controller.startExporter('otlp', factory)).toEqual({ ok: true });
+    expect(controller.startExporter('otlp', factory)).toEqual({ ok: true });
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(controller.startExporter('syslog', factory)).toEqual({
+      ok: false,
+      error: 'Cannot start syslog while otlp is active',
+    });
 
-      const logger = new Logger('lifecycle-test');
-      const context = { operationId: 'op-1', operationName: 'system' as const };
-      logger.info(context, 'routine-current-version');
-      logger.warn(context, 'diagnostic-current-version');
+    const logger = new Logger('controller-test');
+    const context = { operationId: 'op-1', operationName: 'system' as const };
+    logger.info(context, 'routine');
+    logger.warn(context, 'diagnostic-before-disable');
+    expect(persisted).toEqual(['diagnostic-before-disable']);
+    expect(pushed).toEqual(['redacted:routine', 'redacted:diagnostic-before-disable']);
 
-      vi.advanceTimersByTime(10);
-      expect(cleanupCalls).toBe(1);
-      expect(dashDb.db.prepare(
-        `SELECT level, message FROM logs ORDER BY id`,
-      ).all()).toEqual([
-        { level: 'warn', message: 'diagnostic-current-version' },
-      ]);
+    await controller.stopExporter();
+    logger.warn(context, 'diagnostic-after-disable');
+    expect(persisted).toEqual([
+      'diagnostic-before-disable',
+      'diagnostic-after-disable',
+    ]);
+    expect(pushed).toHaveLength(2);
+    expect(shutdown).toHaveBeenCalledTimes(1);
+  });
 
-      // The exact-size batch conservatively scheduled a final probe. Daemon
-      // shutdown must cancel it even though all legacy rows are already gone.
-      handle.stop();
-      vi.advanceTimersByTime(100);
-      expect(cleanupCalls).toBe(1);
-    } finally {
-      if (dashDb.db.open) dashDb.close();
-      rmSync(dataDir, { recursive: true, force: true });
-    }
+  it('detaches the sink synchronously and shuts the active exporter down once', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const persisted: string[] = [];
+    const pushed: string[] = [];
+    let releaseShutdown!: () => void;
+    const shutdown = vi.fn(() => new Promise<void>((resolve) => {
+      releaseShutdown = resolve;
+    }));
+    const controller = startDaemonLogController({
+      insertDiagnosticLog: (record) => persisted.push(record.message),
+      redact: (record) => record,
+    });
+    controller.startExporter('syslog', () => ({
+      shipper: { push: (record) => pushed.push(record.message) },
+      shutdown,
+    }));
+
+    const logger = new Logger('controller-stop-test');
+    const context = { operationId: 'op-2', operationName: 'system' as const };
+    logger.warn(context, 'before-stop');
+    const stopping = controller.stop();
+    logger.warn(context, 'after-stop');
+
+    expect(persisted).toEqual(['before-stop']);
+    expect(pushed).toEqual(['before-stop']);
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    releaseShutdown();
+    await stopping;
+    await controller.stop();
+    expect(shutdown).toHaveBeenCalledTimes(1);
   });
 });

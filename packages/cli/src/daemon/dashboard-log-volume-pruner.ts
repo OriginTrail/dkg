@@ -1,37 +1,38 @@
 import type {
   DashboardDB,
-  LegacyRoutineLogCleanupResult,
+  LogVolumePruneResult,
 } from '@origintrail-official/dkg-node-ui';
 
-export interface LegacyRoutineLogCleanupIntervals {
+export interface DashboardLogVolumePrunerIntervals {
   initialDelayMs: number;
   catchupIntervalMs: number;
   reclaimRetryMs: number;
+  steadyIntervalMs: number;
 }
 
-export const DEFAULT_LEGACY_ROUTINE_LOG_CLEANUP_INTERVALS: LegacyRoutineLogCleanupIntervals = {
+export const DEFAULT_DASHBOARD_LOG_VOLUME_PRUNER_INTERVALS: DashboardLogVolumePrunerIntervals = {
   initialDelayMs: 60_000,
   catchupIntervalMs: 15_000,
   reclaimRetryMs: 10 * 60_000,
+  steadyIntervalMs: 6 * 60 * 60_000,
 };
 
-export interface LegacyRoutineLogCleanupHandle {
+export interface DashboardLogVolumePrunerHandle {
   stop(): void;
 }
 
 /**
- * Own the incremental dashboard-log cleanup lifecycle outside the daemon
- * bootstrap. The database decides what one bounded maintenance step did; this
- * helper decides when the next step runs, aggregates deletion telemetry, and
- * guarantees shutdown clears the recursive timeout.
+ * Own the count-cap maintenance lifecycle independently of logging. Historical
+ * daemon and compatibility rows have no durable ownership marker, so the DB
+ * applies only the published, ownership-neutral row cap and time retention.
  */
-export function startLegacyRoutineLogCleanup(opts: {
-  dashDb: Pick<DashboardDB, 'runLegacyRoutineLogCleanupBatch'>;
+export function startDashboardLogVolumePruner(opts: {
+  dashDb: Pick<DashboardDB, 'pruneLogVolumeBatch'>;
   log: (message: string) => void;
-  intervals?: Partial<LegacyRoutineLogCleanupIntervals>;
-}): LegacyRoutineLogCleanupHandle {
+  intervals?: Partial<DashboardLogVolumePrunerIntervals>;
+}): DashboardLogVolumePrunerHandle {
   const intervals = {
-    ...DEFAULT_LEGACY_ROUTINE_LOG_CLEANUP_INTERVALS,
+    ...DEFAULT_DASHBOARD_LOG_VOLUME_PRUNER_INTERVALS,
     ...opts.intervals,
   };
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -44,7 +45,7 @@ export function startLegacyRoutineLogCleanup(opts: {
     timer.unref?.();
   };
 
-  const nextDelayFor = (result: LegacyRoutineLogCleanupResult): number | null => {
+  const nextDelayFor = (result: LogVolumePruneResult): number => {
     switch (result.status) {
       case 'more':
         return intervals.catchupIntervalMs;
@@ -52,7 +53,7 @@ export function startLegacyRoutineLogCleanup(opts: {
         return intervals.reclaimRetryMs;
       case 'done':
       case 'done-compacted':
-        return null;
+        return intervals.steadyIntervalMs;
     }
   };
 
@@ -60,22 +61,21 @@ export function startLegacyRoutineLogCleanup(opts: {
     timer = null;
     if (stopped) return;
     try {
-      const result = opts.dashDb.runLegacyRoutineLogCleanupBatch();
+      const result = opts.dashDb.pruneLogVolumeBatch();
       rowsDeleted += result.deleted;
       if (result.status === 'done' || result.status === 'done-compacted') {
         if (rowsDeleted > 0 || result.status === 'done-compacted') {
           opts.log(
-            `Legacy routine-log migration removed ${rowsDeleted} old row(s)` +
+            `Dashboard log-volume cleanup removed ${rowsDeleted} old routine row(s)` +
               (result.status === 'done-compacted' ? ' and compacted node-ui.db' : ''),
           );
         }
         rowsDeleted = 0;
       }
-      const nextDelay = nextDelayFor(result);
-      if (nextDelay !== null) schedule(nextDelay);
+      schedule(nextDelayFor(result));
     } catch (error) {
       opts.log(
-        `Legacy routine-log migration deferred: ${error instanceof Error ? error.message : String(error)}`,
+        `Dashboard log-volume cleanup deferred: ${error instanceof Error ? error.message : String(error)}`,
       );
       schedule(intervals.reclaimRetryMs);
     }

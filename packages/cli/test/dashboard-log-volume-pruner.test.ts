@@ -1,21 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { LegacyRoutineLogCleanupResult } from '@origintrail-official/dkg-node-ui';
-import { startLegacyRoutineLogCleanup } from '../src/daemon/legacy-routine-log-cleanup.js';
+import type { LogVolumePruneResult } from '@origintrail-official/dkg-node-ui';
+import { startDashboardLogVolumePruner } from '../src/daemon/dashboard-log-volume-pruner.js';
 
-describe('startLegacyRoutineLogCleanup', () => {
+describe('startDashboardLogVolumePruner', () => {
   afterEach(() => vi.useRealTimers());
 
-  it('starts after the boot delay, catches up quickly, and ends after compaction', () => {
+  it('starts after the boot delay, catches up quickly, logs compaction, and stops cleanly', () => {
     vi.useFakeTimers();
-    const results: LegacyRoutineLogCleanupResult[] = [
+    const results: LogVolumePruneResult[] = [
       { deleted: 25_000, status: 'more' },
       { deleted: 0, status: 'done-compacted' },
     ];
     const calls: number[] = [];
     const logs: string[] = [];
-    const handle = startLegacyRoutineLogCleanup({
+    const handle = startDashboardLogVolumePruner({
       dashDb: {
-        runLegacyRoutineLogCleanupBatch: () => {
+        pruneLogVolumeBatch: () => {
           calls.push(Date.now());
           return results.shift() ?? { deleted: 0, status: 'done' };
         },
@@ -25,6 +25,7 @@ describe('startLegacyRoutineLogCleanup', () => {
         initialDelayMs: 100,
         catchupIntervalMs: 20,
         reclaimRetryMs: 50,
+        steadyIntervalMs: 1_000,
       },
     });
 
@@ -37,48 +38,26 @@ describe('startLegacyRoutineLogCleanup', () => {
     vi.advanceTimersByTime(1);
     expect(calls).toHaveLength(2);
     expect(logs).toEqual([
-      'Legacy routine-log migration removed 25000 old row(s) and compacted node-ui.db',
+      'Dashboard log-volume cleanup removed 25000 old routine row(s) and compacted node-ui.db',
     ]);
 
-    // A completed migration is finite work, not a permanent maintenance loop.
+    handle.stop();
     vi.advanceTimersByTime(5_000);
     expect(calls).toHaveLength(2);
-    handle.stop();
-  });
-
-  it('stop cancels a pending catch-up batch', () => {
-    vi.useFakeTimers();
-    let calls = 0;
-    const handle = startLegacyRoutineLogCleanup({
-      dashDb: {
-        runLegacyRoutineLogCleanupBatch: () => {
-          calls += 1;
-          return { deleted: 10, status: 'more' };
-        },
-      },
-      log: () => {},
-      intervals: { initialDelayMs: 10, catchupIntervalMs: 20 },
-    });
-
-    vi.advanceTimersByTime(10);
-    expect(calls).toBe(1);
-    handle.stop();
-    vi.advanceTimersByTime(1_000);
-    expect(calls).toBe(1);
   });
 
   it('retries reclaim-pending and thrown maintenance steps on the retry cadence', () => {
     vi.useFakeTimers();
-    const steps: Array<LegacyRoutineLogCleanupResult | Error> = [
+    const steps: Array<LogVolumePruneResult | Error> = [
       { deleted: 12, status: 'reclaim-pending' },
       new Error('database is locked'),
       { deleted: 0, status: 'done-compacted' },
     ];
     const logs: string[] = [];
     let calls = 0;
-    const handle = startLegacyRoutineLogCleanup({
+    const handle = startDashboardLogVolumePruner({
       dashDb: {
-        runLegacyRoutineLogCleanupBatch: () => {
+        pruneLogVolumeBatch: () => {
           calls += 1;
           const step = steps.shift() ?? { deleted: 0, status: 'done' as const };
           if (step instanceof Error) throw step;
@@ -96,8 +75,8 @@ describe('startLegacyRoutineLogCleanup', () => {
     vi.advanceTimersByTime(30);
     expect(calls).toBe(3);
     expect(logs).toEqual([
-      'Legacy routine-log migration deferred: database is locked',
-      'Legacy routine-log migration removed 12 old row(s) and compacted node-ui.db',
+      'Dashboard log-volume cleanup deferred: database is locked',
+      'Dashboard log-volume cleanup removed 12 old routine row(s) and compacted node-ui.db',
     ]);
     handle.stop();
   });

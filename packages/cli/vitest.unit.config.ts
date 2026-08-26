@@ -106,7 +106,8 @@ export default defineConfig({
           'test/metrics-presence.test.ts',
           'test/rpc-usage-log.test.ts',
           'test/log-sink.test.ts',
-          'test/legacy-routine-log-cleanup.test.ts',
+          'test/log-lifecycle.test.ts',
+          'test/dashboard-log-volume-pruner.test.ts',
           // RFC 120 / plan PR 1 + 2 — Blazegraph support. Pure logic
           // (mocked fetch + in-memory config); cheap to keep in the
           // fast unit lane.

@@ -20,8 +20,6 @@ import {
   type DurableManifestPrefixDigest,
   type SyncCheckpointEntry,
 } from '@origintrail-official/dkg-core';
-import { LegacyRoutineLogCleanup } from './legacy-routine-log-cleanup.js';
-
 export {
   SqliteChainEventCursorStore,
   SqliteContextGraphRegistryScanCursorStore,
@@ -38,13 +36,13 @@ export const SCHEMA_VERSION = 34;
 // retention alone cannot bound worst-case growth. Operators who want longer
 // retention can override via `setRetentionDays()`; the setting is persisted
 // in the `settings` table and re-read on next boot. The daemon no longer writes
-// routine logs to SQLite; bounded background cleanup removes legacy info/debug
-// rows while warning/error rows keep the operator-selected time window.
+// routine logs to SQLite; the established count cap still bounds compatibility
+// writers while warning/error rows keep the operator-selected time window.
 const DEFAULT_RETENTION_DAYS = 14;
 const LEGACY_IMPLICIT_RETENTION_DAYS = 90;
 const DEFAULT_ROUTINE_LOG_ROW_CAP = 1_000_000;
-const DEFAULT_LEGACY_ROUTINE_LOG_CLEANUP_BATCH_ROWS = 25_000;
-const LEGACY_ROUTINE_LOG_VACUUM_DELETE_THRESHOLD = 10_000;
+const DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS = 25_000;
+const LOGS_VACUUM_DELETE_THRESHOLD = 10_000;
 // SQLite reports reusable-but-not-yet-reclaimed pages via freelist_count.
 // With the default 4 KiB page size this is roughly 4 MiB, large enough
 // to avoid VACUUM churn on idle nodes but small enough to retry a failed
@@ -122,21 +120,16 @@ export interface DashboardDBOptions {
    * `DKG_DASHBOARD_CACHE_TTL_MS` env var, then a 2000ms default.
    */
   cacheTtlMs?: number;
-  /** Maximum legacy routine rows removed by one bounded cleanup tick. */
-  legacyRoutineLogCleanupBatchRows?: number;
-  /** @deprecated Maximum retained info/debug/unknown log rows for compatibility writers. */
+  /** Maximum retained info/debug/unknown log rows. Warning/error rows are time-bound only. */
   routineLogRowCap?: number;
-  /** @deprecated Maximum oldest routine rows removed by one compatibility prune tick. */
+  /** Maximum oldest routine rows removed by one bounded catch-up tick. */
   logVolumePruneBatchRows?: number;
 }
 
-export interface LegacyRoutineLogCleanupResult {
+export interface LogVolumePruneResult {
   deleted: number;
   status: 'more' | 'reclaim-pending' | 'done' | 'done-compacted';
 }
-
-/** @deprecated Use LegacyRoutineLogCleanupResult. */
-export type LogVolumePruneResult = LegacyRoutineLogCleanupResult;
 
 export type StoredContextGraphJoinPolicy = ContextGraphJoinPolicyRecord;
 
@@ -237,8 +230,7 @@ export class DashboardDB {
   private retentionDays: number;
   private readonly explicitRetentionDays: boolean;
   private readonly routineLogRowCap: number;
-  private readonly legacyRoutineLogCleanupBatchRows: number;
-  private readonly legacyRoutineLogCleanup: LegacyRoutineLogCleanup;
+  private readonly logVolumePruneBatchRows: number;
   private routineLogWritesSinceGuard = 0;
 
   constructor(opts: DashboardDBOptions) {
@@ -249,13 +241,9 @@ export class DashboardDB {
       0,
       Math.floor(opts.routineLogRowCap ?? DEFAULT_ROUTINE_LOG_ROW_CAP),
     );
-    this.legacyRoutineLogCleanupBatchRows = Math.max(
+    this.logVolumePruneBatchRows = Math.max(
       1,
-      Math.floor(
-        opts.legacyRoutineLogCleanupBatchRows
-          ?? opts.logVolumePruneBatchRows
-          ?? DEFAULT_LEGACY_ROUTINE_LOG_CLEANUP_BATCH_ROWS,
-      ),
+      Math.floor(opts.logVolumePruneBatchRows ?? DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS),
     );
     this._memoTtlMs = resolveCacheTtlMs(opts.cacheTtlMs);
     const dbPath = join(opts.dataDir, 'node-ui.db');
@@ -272,10 +260,6 @@ export class DashboardDB {
     // autocheckpoint while bounding the worst case.
     this.db.pragma('journal_size_limit = 67108864');
     this.migrate();
-    this.legacyRoutineLogCleanup = new LegacyRoutineLogCleanup(
-      this.db,
-      this.legacyRoutineLogCleanupBatchRows,
-    );
     this.loadRetentionSetting();
     this.prune();
   }
@@ -1341,11 +1325,11 @@ export class DashboardDB {
     const messengerCutoff = Date.now() - 24 * 60 * 60 * 1000;
     this.db.exec(`DELETE FROM message_idempotency WHERE ts < ${messengerCutoff}`);
 
-    // If legacy routine rows remain, defer reclamation to their bounded cleanup
-    // worker so startup does not rebuild a multi-GB DB before deleting them.
-    // This existence probe stops at the first row; unlike the old OFFSET cap
-    // scan, its cost does not grow with the routine-log backlog.
-    if (!this.legacyRoutineLogCleanup.hasPendingRows()) {
+    // Avoid rebuilding an oversized DB at startup while millions of routine
+    // rows are still live. The independent volume pruner trims only rows above
+    // the published count cap, in bounded batches, and performs the final
+    // compaction. Ambiguous rows below the cap remain untouched.
+    if (!this.hasRoutineLogOverflow()) {
       this.reclaimFreePagesIfNeeded(false);
     }
 
@@ -1358,46 +1342,14 @@ export class DashboardDB {
   }
 
   /**
-   * Run one bounded batch of the finite legacy routine-log migration.
+   * Remove one bounded batch of the oldest routine (non-warning/error) logs
+   * above the public count cap. The cap is the only ownership-neutral rule we
+   * can safely apply to pre-upgrade rows: historical daemon sink records and
+   * published compatibility API records have identical schemas.
    *
    * Deletion is deliberately incremental so an upgrade does not block node
-   * startup on a multi-GB transaction. Once the backlog reaches zero, one
+   * startup on a multi-GB transaction. Once the backlog reaches the cap, one
    * VACUUM returns the accumulated free pages to the OS and the file shrinks.
-   */
-  runLegacyRoutineLogCleanupBatch(): LegacyRoutineLogCleanupResult {
-    const batch = this.legacyRoutineLogCleanup.deleteBatch();
-    const deleted = batch.deleted;
-
-    // If the batch filled, conservatively schedule another tick. An exact-size
-    // final batch costs one extra cheap probe before compaction, which is safer
-    // than running a second million-row count after every deletion.
-    const hasMore = batch.hasMore;
-    const reclaim = hasMore
-      ? { compacted: false, reclaimPending: false }
-      : this.reclaimFreePagesIfNeeded(
-        deleted > LEGACY_ROUTINE_LOG_VACUUM_DELETE_THRESHOLD,
-      );
-    if (!hasMore && !reclaim.reclaimPending) {
-      this.legacyRoutineLogCleanup.markComplete();
-      this.truncateWal('legacy routine-log cleanup');
-    }
-    return {
-      deleted,
-      status: hasMore
-        ? 'more'
-        : reclaim.reclaimPending
-          ? 'reclaim-pending'
-          : reclaim.compacted
-            ? 'done-compacted'
-            : 'done',
-    };
-  }
-
-  /**
-   * Preserve the pre-migration cap API for third-party `insertLog` callers.
-   * The daemon no longer uses this loop; its immutable historical migration is
-   * deliberately separate in `runLegacyRoutineLogCleanupBatch`.
-   * @deprecated Routine daemon logs are no longer persisted.
    */
   pruneLogVolumeBatch(): LogVolumePruneResult {
     const overflowCutoff = this.routineLogOverflowCutoff();
@@ -1426,12 +1378,16 @@ export class DashboardDB {
       )
     `).run({
       cutoff: overflowCutoff,
-      batchRows: this.legacyRoutineLogCleanupBatchRows,
+      batchRows: this.logVolumePruneBatchRows,
     }).changes;
-    const hasMore = deleted === this.legacyRoutineLogCleanupBatchRows;
+
+    // If the batch filled, conservatively schedule another tick. An exact-size
+    // final batch costs one extra cheap probe before compaction, which is safer
+    // than running a second million-row count after every deletion.
+    const hasMore = deleted === this.logVolumePruneBatchRows;
     const reclaim = hasMore
       ? { compacted: false, reclaimPending: false }
-      : this.reclaimFreePagesIfNeeded(deleted > LEGACY_ROUTINE_LOG_VACUUM_DELETE_THRESHOLD);
+      : this.reclaimFreePagesIfNeeded(deleted > LOGS_VACUUM_DELETE_THRESHOLD);
     if (!hasMore && !reclaim.reclaimPending) this.truncateWal('log-volume prune');
     return {
       deleted,
@@ -1456,6 +1412,10 @@ export class DashboardDB {
     return row?.id ?? null;
   }
 
+  private hasRoutineLogOverflow(): boolean {
+    return this.routineLogOverflowCutoff() !== null;
+  }
+
   private enforceRoutineLogRowCap(): void {
     const cutoff = this.routineLogOverflowCutoff();
     if (cutoff === null) return;
@@ -1469,7 +1429,7 @@ export class DashboardDB {
         ORDER BY id ASC
         LIMIT ?
       )
-    `).run(cutoff, this.legacyRoutineLogCleanupBatchRows);
+    `).run(cutoff, this.logVolumePruneBatchRows);
   }
 
   private reclaimFreePagesIfNeeded(force: boolean): {
@@ -3146,11 +3106,11 @@ export class DashboardDB {
       this.routineLogWritesSinceGuard += 1;
       // Each guard removes at most one configured batch, so its cadence must
       // never admit more routine rows than that batch can remove. This keeps
-      // the deprecated compatibility writer bounded even with batchRows=1.
+      // the published compatibility writer bounded even with batchRows=1.
       const guardInterval = Math.min(
         1_000,
         Math.max(1, this.routineLogRowCap),
-        this.legacyRoutineLogCleanupBatchRows,
+        this.logVolumePruneBatchRows,
       );
       if (this.routineLogWritesSinceGuard >= guardInterval) {
         this.routineLogWritesSinceGuard = 0;
@@ -3440,7 +3400,6 @@ export class DashboardDB {
 
   close(): void {
     if (!this.db.open) return;
-    this.legacyRoutineLogCleanup.markWriterStopped();
     this.db.close();
   }
 }
