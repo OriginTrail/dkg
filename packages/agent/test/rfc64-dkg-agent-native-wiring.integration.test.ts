@@ -45,7 +45,10 @@ import {
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { DKGAgent } from '../src/dkg-agent.js';
+import {
+  DKGAgent,
+  Rfc64CatalogReconciliationTerminalErrorV1,
+} from '../src/index.js';
 import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
@@ -55,7 +58,6 @@ import {
 import {
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
 } from '../src/dkg-agent-rfc64-catalog-bootstrap.js';
-import { Rfc64CatalogSynchronizationErrorV1 } from '../src/dkg-agent-rfc64-catalog-sync.js';
 import {
   buildOpenOwnerContextGraphPolicyV1,
   unsignedOpenContextGraphPolicyEnvelopeV1,
@@ -2664,10 +2666,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           catalogEra: '0',
         },
       }).catch((error: unknown) => error);
-    expect(synchronizationFailure).toBeInstanceOf(Rfc64CatalogSynchronizationErrorV1);
+    expect(synchronizationFailure).toBeInstanceOf(
+      Rfc64CatalogReconciliationTerminalErrorV1,
+    );
     expect(synchronizationFailure).toMatchObject({
+      outcome: 'failed',
       terminalReason: null,
-      code: 'catalog-native-receiver-activation',
     });
     expect(replaceGraphAndSubject).toHaveBeenCalled();
     expect(cold.readRfc64PublicCatalogReconciliationFailureV1(

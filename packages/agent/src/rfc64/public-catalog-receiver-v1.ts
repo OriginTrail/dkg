@@ -450,6 +450,14 @@ export class Rfc64PublicCatalogReceiverV1 {
     }>[],
     completion: (result: Rfc64PublicCatalogReceiverCompletionV1) => void,
   ): void {
+    // An awaited request can arrive after discovery has completed but after
+    // service shutdown closed the receiver. A closed receiver never pumps its
+    // queue, so resolve at the scheduling boundary instead of enqueuing a
+    // completion that can never settle.
+    if (this.#closed) {
+      completion(receiverCompletion('closed', null, 0, null));
+      return;
+    }
     this.#scheduled += inputs.length;
     const first = inputs[0]!;
     this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));

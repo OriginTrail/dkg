@@ -30,6 +30,7 @@ if (
   || typeof root.maintainRfc64SwmAuthorInventoryV1 !== 'function'
   || typeof root.removeRfc64SwmAuthorInventoryRowV1 !== 'function'
   || typeof root.Rfc64SwmAuthorInventoryProducerErrorV1 !== 'function'
+  || typeof root.Rfc64CatalogReconciliationTerminalErrorV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
 }

@@ -1061,6 +1061,46 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     }
   });
 
+  it('settles a single-provider synchronization closed when shutdown wins the discovery race', async () => {
+    const reconcileHead = vi.fn(async () => 'applied' as const);
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      receiver: { retryBackoffMs: 0 },
+      native: nativeOptions(() => ({
+        isHeadApplied: async () => false,
+        reconcileHead,
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const current = announcement(policy.policyDigest);
+    const discovery = deferred<Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      head: never;
+    }>>();
+    vi.spyOn(service, 'discoverCurrentCatalogHead').mockReturnValue(discovery.promise);
+
+    const synchronization = service.synchronizeCurrentCatalogHead({
+      remotePeerId: 'peer-a',
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+      },
+    });
+    await Promise.resolve();
+    await service.close();
+    discovery.resolve(Object.freeze({ announcement: current, head: {} as never }));
+
+    const failure = await synchronization.then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(Rfc64CatalogReconciliationTerminalErrorV1);
+    expect(failure).toMatchObject({ outcome: 'closed', terminalReason: null });
+    expect(reconcileHead).not.toHaveBeenCalled();
+  });
+
   it('selects the highest exact head, retains all matching providers, and fails over', async () => {
     const router = new RecordingRouter();
     const reconciledPeers: string[] = [];

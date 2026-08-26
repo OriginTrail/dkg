@@ -827,5 +827,26 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     await closing;
     receiver.schedule(headWith(`0x${'cc'.repeat(32)}`), 'peerA');
     expect(receiver.stats().scheduled).toBe(1);
+
+    const postClose = await Promise.race([
+      receiver.scheduleManyAndWait([{
+        announcement: headWith(`0x${'dd'.repeat(32)}`),
+        remotePeerId: 'peerB',
+      }]),
+      new Promise<never>((_resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('post-close awaited scheduling did not settle')),
+          100,
+        );
+        timer.unref?.();
+      }),
+    ]);
+    expect(postClose).toEqual({
+      outcome: 'closed',
+      appliedProviderPeerId: null,
+      providerAttempts: 0,
+      error: null,
+    });
+    expect(receiver.stats().scheduled).toBe(1);
   });
 });
