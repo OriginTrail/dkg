@@ -193,7 +193,7 @@ import {
   NetworkAdmissionCoordinator,
   NetworkAdmissionRejectedError,
 } from './p2p/network-admission-coordinator.js';
-import { createNetworkAdmissionProtocolCheck } from './p2p/network-admission-protocol-adapter.js';
+import { createNetworkAdmissionRouterPolicy } from './p2p/network-admission-protocol-adapter.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -2018,12 +2018,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     this.router = new ProtocolRouter(this.node, {
       peerResolver,
-      isPeerAccepted: createNetworkAdmissionProtocolCheck(this.networkAdmissionCoordinator),
-      // Cached-verdict only: `isRejectedPeer` reads the admission cache and never
-      // probes, so the router can drop an already-rejected peer before buffering
-      // its request without inverting the inbound/outbound I/O order.
-      isPeerKnownRejected: (peerId) =>
-        this.networkAdmissionCoordinator.isRejectedPeer(peerId),
+      // Both admission phases — the probing full check and the cached-verdict
+      // pre-read gate — installed as one policy from one coordinator; see
+      // createNetworkAdmissionRouterPolicy for why they must not be wired
+      // separately.
+      ...createNetworkAdmissionRouterPolicy(this.networkAdmissionCoordinator),
       admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
     });
     // Default to in-memory substrate stores when no durable stores

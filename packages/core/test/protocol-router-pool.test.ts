@@ -34,6 +34,8 @@ const PEER_OLD = '12D3KooWGRUkpYzqu7w17X8YBaPDB6c7TuD3KSGmZSEpCpVjMx9V';
 class FakeStream {
   writeStatus: 'open' | 'closing' | 'closed' = 'open';
   readonly sent: Uint8Array[] = [];
+  /** Async-iterator pulls — 0 proves the frame decoder never touched the stream. */
+  reads = 0;
   private readBuf: Uint8Array[] = [];
   private waiters: Array<(v: IteratorResult<Uint8Array>) => void> = [];
   private closeListeners: EventListener[] = [];
@@ -102,6 +104,7 @@ class FakeStream {
   [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
     return {
       next: () => {
+        this.reads += 1;
         if (this.readBuf.length > 0) {
           return Promise.resolve({ value: this.readBuf.shift()!, done: false });
         }
@@ -747,6 +750,213 @@ describe('ProtocolRouter pooled inbound handler', () => {
     expect(parsed[0].type).toBe(FrameType.ERROR);
     expect(new TextDecoder().decode(parsed[0].payload)).toMatch(/not admitted/);
 
+    inboundStream.endRemote();
+    await inboundRun;
+    await router.closePooling();
+  });
+
+  it('aborts a known-rejected peer\'s pooled inbound stream before reading any frames', async () => {
+    // The pooled counterpart of the one-shot pre-read gate. `reads === 0` is
+    // the discriminator: the frame decoder never pulled from the stream, so a
+    // cached-rejected peer cannot push bounded REQUEST frames at us — nor get
+    // its PINGs answered, since keepalive service also sits behind the loop.
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    let handlerCalls = 0;
+    let probeCalls = 0;
+    const node = {
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    const router = new ProtocolRouter(node, {
+      isPeerAccepted: () => {
+        probeCalls += 1;
+        return true;
+      },
+      isPeerKnownRejected: () => true,
+    });
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+    router.register('/dkg/10.0.1/message', async () => {
+      handlerCalls += 1;
+      return new TextEncoder().encode('should-not-run');
+    });
+
+    expect(inboundHandler).toBeDefined();
+    const inboundStream = new FakeStream();
+    const inboundRun = inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+      remotePeer: {
+        toString: () => PEER_NEW,
+        toMultihash: () => ({ bytes: new Uint8Array() }),
+      },
+    });
+    await flush();
+    // Frames offered after accept must never be consumed.
+    inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    inboundStream.feed(encodeFrame(FrameType.PING));
+    await flush();
+
+    expect(inboundStream.reads).toBe(0);
+    expect(handlerCalls).toBe(0);
+    expect(probeCalls).toBe(0);
+    // No ERROR frame, no PONG — nothing is written to a gated stream.
+    expect(inboundStream.sent.length).toBe(0);
+    expect(inboundStream.writeStatus).toBe('closed');
+    await inboundRun;
+    await router.closePooling();
+  });
+
+  it('keeps read-then-probe pooled ordering when the gate does not recognize the peer', async () => {
+    // False-when-unsure: an unclassified peer keeps the exact pre-gate
+    // behavior — REQUEST buffered, then the full admission check decides.
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    const admittedCalls: string[] = [];
+    let gateCalls = 0;
+    const node = {
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    const router = new ProtocolRouter(node, {
+      isPeerAccepted: (peerId) => {
+        admittedCalls.push(peerId);
+        return true;
+      },
+      isPeerKnownRejected: () => {
+        gateCalls += 1;
+        return false;
+      },
+    });
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+    router.register('/dkg/10.0.1/message', async () => new TextEncoder().encode('ok'));
+
+    const inboundStream = new FakeStream();
+    const inboundRun = inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+      remotePeer: {
+        toString: () => PEER_NEW,
+        toMultihash: () => ({ bytes: new Uint8Array() }),
+      },
+    });
+    await flush();
+    inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    await flush();
+
+    expect(gateCalls).toBe(1); // once per accepted stream
+    expect(inboundStream.reads).toBeGreaterThan(0);
+    expect(admittedCalls).toEqual([PEER_NEW]);
+    const parsed: { type: FrameType; payload: Uint8Array }[] = [];
+    for await (const f of decodeFrames(
+      (async function* () {
+        for (const c of inboundStream.sent) yield c;
+      })(),
+    )) {
+      parsed.push(f);
+    }
+    expect(parsed[0]?.type).toBe(FrameType.RESPONSE);
+    inboundStream.endRemote();
+    await inboundRun;
+    await router.closePooling();
+  });
+
+  it('never consults the pooled gate for admission-exempt logical protocols', async () => {
+    // Exemptions are keyed by the LOGICAL protocol id — the same id the
+    // pooled full-admission check uses — not the wire id the pool listens on.
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    let gateCalls = 0;
+    const node = {
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    const router = new ProtocolRouter(node, {
+      isPeerAccepted: () => false,
+      isPeerKnownRejected: () => {
+        gateCalls += 1;
+        return true;
+      },
+      admissionExemptProtocols: ['/dkg/10.0.1/message'],
+    });
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+    router.register('/dkg/10.0.1/message', async () => new TextEncoder().encode('exempt-ok'));
+
+    const inboundStream = new FakeStream();
+    const inboundRun = inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+      remotePeer: {
+        toString: () => PEER_NEW,
+        toMultihash: () => ({ bytes: new Uint8Array() }),
+      },
+    });
+    await flush();
+    inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    await flush();
+
+    expect(gateCalls).toBe(0);
+    const parsed: { type: FrameType; payload: Uint8Array }[] = [];
+    for await (const f of decodeFrames(
+      (async function* () {
+        for (const c of inboundStream.sent) yield c;
+      })(),
+    )) {
+      parsed.push(f);
+    }
+    expect(parsed[0]?.type).toBe(FrameType.RESPONSE);
+    expect(new TextDecoder().decode(parsed[0].payload)).toBe('exempt-ok');
     inboundStream.endRemote();
     await inboundRun;
     await router.closePooling();

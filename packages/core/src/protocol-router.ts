@@ -175,6 +175,15 @@ export interface ProtocolRouterOptions {
    * buffering their body, and everything else keeps the existing order (read the
    * bounded body, then run the full admission check). Implementations MUST NOT
    * perform I/O or trigger a probe here, and MUST return false when unsure.
+   *
+   * Covers BOTH inbound transports: the one-shot `register()` path and pooled
+   * streams (`enablePooling` installs it as the pool's stream-accept gate,
+   * keyed by the logical protocol id so `admissionExemptProtocols` applies).
+   *
+   * This hook and `isPeerAccepted` are two phases of ONE admission policy and
+   * must consult the same underlying state. Do not wire them from different
+   * sources — use `createNetworkAdmissionRouterPolicy` (dkg-agent) or an
+   * equivalent single constructor that derives both from one coordinator.
    */
   isPeerKnownRejected?: (peerId: string, protocolId: string) => boolean;
   admissionExemptProtocols?: Iterable<string>;
@@ -252,13 +261,23 @@ export class ProtocolRouter {
   }
 
   /**
-   * Pre-read inbound gate. Only consults the cached-verdict predicate; never
-   * probes. Throws the same shape as `requirePeerAccepted` so the existing
-   * catch-path handling (abort + quiet logging) is unchanged.
+   * Pre-read inbound gate predicate: cached verdict only, never probes, and
+   * exempt protocols are never gated. Shared by the one-shot inbound path
+   * (throwing wrapper below) and the pooled stream-accept gate installed by
+   * `enablePooling`.
+   */
+  private isKnownRejectedInboundPeer(peerId: string, protocolId: string): boolean {
+    if (!this.isPeerKnownRejected || this.admissionExemptProtocols.has(protocolId)) return false;
+    return this.isPeerKnownRejected(peerId, protocolId);
+  }
+
+  /**
+   * Pre-read inbound gate for the one-shot path. Throws the same shape as
+   * `requirePeerAccepted` so the existing catch-path handling (abort + quiet
+   * logging) is unchanged.
    */
   private rejectKnownRejectedInboundPeer(peerId: string, protocolId: string): void {
-    if (!this.isPeerKnownRejected || this.admissionExemptProtocols.has(protocolId)) return;
-    if (!this.isPeerKnownRejected(peerId, protocolId)) return;
+    if (!this.isKnownRejectedInboundPeer(peerId, protocolId)) return;
     throw new Error(
       `peer ${peerId.slice(-8)} is not admitted for inbound protocol ${protocolId}`,
     );
@@ -364,6 +383,12 @@ export class ProtocolRouter {
         protocolId: wireProtocolId,
         maxFrameBytes: options.maxFrameBytes ?? this.maxReadBytes,
         primePeer,
+        // Router-owned, deliberately not caller-overridable: the pooled
+        // pre-read gate must be keyed by the LOGICAL protocol id (production
+        // admission exemptions are logical ids) and must consult the same
+        // cached-verdict predicate as the one-shot inbound path.
+        rejectInboundStream: (peerIdStr: string) =>
+          this.isKnownRejectedInboundPeer(peerIdStr, logicalProtocolId),
       },
     );
     this.pooledByLogical.set(logicalProtocolId, {
