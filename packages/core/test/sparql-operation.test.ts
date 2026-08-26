@@ -5,8 +5,6 @@ import {
 } from '../src/sparql-operation.js';
 import {
   BoundedLruCache,
-  SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
-  SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
 } from '../src/bounded-lru-cache.js';
 
 describe('analyzeSparqlOperation memoization', () => {
@@ -55,9 +53,11 @@ describe('analyzeSparqlOperation memoization', () => {
 });
 
 describe('bounded SPARQL analysis cache policy', () => {
+  const maxEntries = 256;
+  const maxSourceLength = 64 * 1024;
   const createCache = () => new BoundedLruCache<string, object>(
-    SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
-    (source) => source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
+    maxEntries,
+    (source) => source.length <= maxSourceLength,
   );
 
   it('returns a cached value and refreshes it before bounded eviction', () => {
@@ -76,9 +76,24 @@ describe('bounded SPARQL analysis cache policy', () => {
 
   it('does not admit a source over 64 KiB', () => {
     const cache = createCache();
-    const oversized = 'x'.repeat(SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH + 1);
+    const oversized = 'x'.repeat(maxSourceLength + 1);
     cache.set(oversized, {});
     expect(cache.size).toBe(0);
     expect(cache.has(oversized)).toBe(false);
+  });
+
+  it('evicts an undefined least-recently-used key without exceeding its bound', () => {
+    const cache = new BoundedLruCache<string | undefined, number>(1);
+
+    cache.set(undefined, 1);
+    cache.set('a', 2);
+    expect(cache.size).toBe(1);
+    expect(cache.has(undefined)).toBe(false);
+    expect(cache.get('a')).toBe(2);
+
+    cache.set('b', 3);
+    expect(cache.size).toBe(1);
+    expect(cache.has('a')).toBe(false);
+    expect(cache.get('b')).toBe(3);
   });
 });

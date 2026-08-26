@@ -1,4 +1,4 @@
-/** Internal bounded LRU used by the SPARQL analyzer and exercised with test-owned instances. */
+/** Small dependency-free bounded LRU for in-process memoization. */
 export class BoundedLruCache<K, V> {
   private readonly entries = new Map<K, V>();
 
@@ -32,10 +32,7 @@ export class BoundedLruCache<K, V> {
     this.entries.delete(key);
     this.entries.set(key, value);
     if (this.entries.size <= this.maxEntries) return;
-    const oldest = this.entries.keys().next().value;
-    if (oldest !== undefined) this.entries.delete(oldest);
+    const oldest = this.entries.keys().next();
+    if (!oldest.done) this.entries.delete(oldest.value);
   }
 }
-
-export const SPARQL_ANALYSIS_CACHE_MAX_ENTRIES = 256;
-export const SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH = 64 * 1024;

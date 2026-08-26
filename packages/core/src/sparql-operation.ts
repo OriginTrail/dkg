@@ -1,8 +1,4 @@
-import {
-  BoundedLruCache,
-  SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
-  SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
-} from './bounded-lru-cache.js';
+import { BoundedLruCache } from './bounded-lru-cache.js';
 
 const SPARQL_READ_ONLY_OPERATIONS = ['SELECT', 'CONSTRUCT', 'ASK', 'DESCRIBE'] as const;
 const SPARQL_MUTATING_KEYWORDS = [
@@ -30,13 +26,21 @@ export interface SparqlOperationAnalysis {
   mutatingKeyword: string | null;
 }
 
+type SparqlOperationFacts = Readonly<{
+  form: SparqlDetectedOperation;
+  mutatingKeyword: string | null;
+}>;
+
+const SPARQL_ANALYSIS_CACHE_MAX_ENTRIES = 256;
+const SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH = 64 * 1024;
+
 // A single query traverses several store decorators (agent invalidation,
 // changelog, graph index, then the adapter), each of which needs the same safe
 // classification. Exact-string memoization makes that scan/allocation happen
 // once and also covers repeated scoring queries. Bound both cardinality and
 // source size so an untrusted query stream cannot turn this into an unbounded
 // retention surface.
-const sparqlAnalysisCache = new BoundedLruCache<string, SparqlOperationAnalysis>(
+const sparqlAnalysisCache = new BoundedLruCache<string, SparqlOperationFacts>(
   SPARQL_ANALYSIS_CACHE_MAX_ENTRIES,
   (source) => source.length <= SPARQL_ANALYSIS_CACHE_MAX_SOURCE_LENGTH,
 );
@@ -169,45 +173,31 @@ function classifySparqlOperationForm(form: SparqlDetectedOperation): SparqlOpera
   return { kind: 'unknown' };
 }
 
-function cloneSparqlOperationClassification(
-  operation: SparqlOperationClassification,
-): SparqlOperationClassification {
-  switch (operation.kind) {
-    case 'read':
-      return { kind: 'read', form: operation.form };
-    case 'update':
-      return { kind: 'update' };
-    case 'unknown':
-      return { kind: 'unknown' };
-  }
-}
-
-function cloneSparqlOperationAnalysis(
-  analysis: SparqlOperationAnalysis,
+function materializeSparqlOperationAnalysis(
+  facts: SparqlOperationFacts,
 ): SparqlOperationAnalysis {
   return {
-    operation: cloneSparqlOperationClassification(analysis.operation),
-    mutatingKeyword: analysis.mutatingKeyword,
+    operation: classifySparqlOperationForm(facts.form),
+    mutatingKeyword: facts.mutatingKeyword,
   };
 }
 
 export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis {
   const cached = sparqlAnalysisCache.get(sparql);
-  if (cached) return cloneSparqlOperationAnalysis(cached);
+  if (cached) return materializeSparqlOperationAnalysis(cached);
 
   const stripped = stripSparqlLiteralsAndComments(sparql);
   const form = detectSparqlOperationFormFromStripped(stripped);
   const match = MUTATING_PATTERN.exec(stripped);
-  const analysis: SparqlOperationAnalysis = {
-    operation: classifySparqlOperationForm(form),
+  const facts: SparqlOperationFacts = {
+    form,
     mutatingKeyword: match?.[1] ?? null,
   };
 
-  sparqlAnalysisCache.set(sparql, analysis);
-  // Cache owns the canonical object. Public APIs historically returned mutable
-  // data, so expose a fresh copy and prevent one caller from poisoning later
-  // classifications shared across store layers.
-  return cloneSparqlOperationAnalysis(analysis);
+  sparqlAnalysisCache.set(sparql, facts);
+  // The cache owns only immutable scalar facts. Materializing at the public
+  // boundary preserves the API's mutable, caller-isolated response objects.
+  return materializeSparqlOperationAnalysis(facts);
 }
 
 export function classifySparqlOperation(sparql: string): SparqlOperationClassification {
