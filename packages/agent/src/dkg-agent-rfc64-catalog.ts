@@ -177,6 +177,10 @@ export type {
 
 export {
   RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+  Rfc64CatalogReconciliationTerminalErrorV1,
+  type Rfc64CatalogReconciliationFailureCompletionV1,
+  type Rfc64CatalogReconciliationFailureOutcomeV1,
+  type Rfc64CatalogReconciliationTerminalReasonV1,
   type Rfc64PublicCatalogReconciliationFailureV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 

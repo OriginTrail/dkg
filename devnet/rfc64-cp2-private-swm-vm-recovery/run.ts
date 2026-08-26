@@ -263,6 +263,7 @@ async function execute(): Promise<void> {
       { catalogHeadDigest: headDigest },
     );
     exact(deniedSynchronization.output, null, 'unbound receiver synchronization evidence');
+    await assertColdReceiverHasNoRecoveredAssets(receiver, assets);
 
     await bindPeer(receiver, authorPeerId, AUTHOR, 'receiver-bind-author');
     const delivery = output(await author.request(
@@ -418,6 +419,46 @@ async function execute(): Promise<void> {
         );
       },
     });
+  }
+}
+
+async function assertColdReceiverHasNoRecoveredAssets(
+  receiver: Gate2AgentChild,
+  assets: readonly Readonly<{ readonly seal: CanonicalGraphScopedAuthorSealV1 }>[],
+): Promise<void> {
+  for (const [index, { seal }] of assets.entries()) {
+    const kaNumber = BigInt(seal.reservedKaId) & ((1n << 96n) - 1n);
+    const ual = `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`;
+    const swmGraph = contextGraphLayerUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.SharedWorkingMemory,
+      AUTHOR,
+      Number(kaNumber),
+    );
+    const swm = output(await receiver.request(
+      'semanticGraphReadback',
+      `private-unbound-swm-${index}`,
+      'operation-completed',
+      { swmGraph },
+    ), `unbound SWM ${index}`);
+    exact(swm.activatedQuadCount, 0, `unbound SWM ${index} triple count`);
+    exact(swm.projectionNQuads, '\n', `unbound SWM ${index} projection`);
+
+    const vmGraph = contextGraphLayerUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.VerifiableMemory,
+      AUTHOR,
+      Number(kaNumber),
+    );
+    const vm = output(await receiver.request(
+      'vmGraphReadback',
+      `private-unbound-vm-${index}`,
+      'operation-completed',
+      { vmGraph, metaGraph: contextGraphMetaUri(CONTEXT_GRAPH_ID), ual },
+    ), `unbound VM ${index}`);
+    exact(vm.tripleCount, 0, `unbound VM ${index} triple count`);
+    exact(vm.projectionNQuads, '\n', `unbound VM ${index} projection`);
+    exactJson(vm.metadataBindings, [], `unbound VM ${index} metadata`);
   }
 }
 

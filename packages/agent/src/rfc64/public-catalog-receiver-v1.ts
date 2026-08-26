@@ -81,19 +81,16 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
   readonly onAttemptStart?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ) => void;
-  /**
-   * Called once when the scheduled task actually starts execution. The return
-   * value is an opaque registry token passed to terminal callbacks.
-   */
+  /** @deprecated Observer-only compatibility hook for execution start. */
   readonly onReconciliationAttemptStart?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ) => number;
-  /** Finalize only the exact successful execution-time attempt. */
+  /** @deprecated Observer-only compatibility hook for successful execution. */
   readonly onReconciliationAttemptSuccess?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     attemptToken: number,
   ) => void;
-  /** Release process-local state for the exact attempt after any terminal outcome. */
+  /** @deprecated Observer-only compatibility hook for balanced terminal cleanup. */
   readonly onReconciliationAttemptEnd?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     attemptToken: number,
@@ -101,6 +98,7 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
   readonly onError?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     error: unknown,
+    /** @deprecated Attempt token retained for callback compatibility. */
     attemptToken: number | null,
   ) => void;
 }

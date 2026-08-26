@@ -163,15 +163,6 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
         !== synchronized.current.announcement.catalogHeadObjectDigest
       || applied.catalogVersion !== synchronized.current.announcement.catalogVersion
     ) {
-      const failure = this.rfc64PublicCatalogReconciliationFailuresV1.readCurrentAttempt(
-        synchronized.current.announcement.catalogHeadObjectDigest,
-      );
-      if (failure !== null) {
-        throw new Rfc64CatalogSynchronizationErrorV1(
-          failure.terminalReason,
-          failure.errorCode,
-        );
-      }
       throw new Error(
         'RFC-64 current public catalog head did not reach its durable applied postcondition',
       );

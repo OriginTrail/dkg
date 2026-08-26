@@ -14,7 +14,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from '@origintrail-official/dkg-chain';
 
-import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
+import {
+  assertAcceptedRfc64CatalogAuthorMembershipV1,
+  assertAcceptedRfc64CatalogPolicyRosterV1,
+  type AcceptedRfc64CatalogAccessSnapshotV1,
+} from './catalog-access-policy-v1.js';
 import {
   resolveAndVerifyRfc64FinalizedPolicyInSnapshotV1,
 } from './finalized-policy-verifier-v1.js';
@@ -80,10 +84,14 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
         canonicalizeMemberRosterPayloadV1(untrustedAcceptedPolicy.roster),
       );
     assertAcceptedPolicyMatchesPlanV1(policy, plan.catalogScope);
-    assertRosterMatchesAcceptedPolicyV1(
-      roster,
+    assertAcceptedRfc64CatalogPolicyRosterV1(
       policy,
       untrustedAcceptedPolicy.policyDigest,
+      roster,
+    );
+    assertAcceptedRfc64CatalogAuthorMembershipV1(
+      policy,
+      roster,
       plan.catalogScope.authorAddress,
     );
   } catch (cause) {
@@ -218,10 +226,14 @@ function assertPlanPolicyAndRosterCurrentV1(
       canonicalizeMemberRosterPayloadV1(current.roster),
     );
   assertAcceptedPolicyMatchesPlanV1(policy, plan.catalogScope);
-  assertRosterMatchesAcceptedPolicyV1(
-    roster,
+  assertAcceptedRfc64CatalogPolicyRosterV1(
     policy,
     current.policyDigest,
+    roster,
+  );
+  assertAcceptedRfc64CatalogAuthorMembershipV1(
+    policy,
+    roster,
     plan.catalogScope.authorAddress,
   );
 }
@@ -239,34 +251,6 @@ function assertAcceptedPolicyMatchesPlanV1(
     || policy.era !== scope.era
   ) {
     throw new Error('accepted policy differs from the exact catalog scope');
-  }
-}
-
-function assertRosterMatchesAcceptedPolicyV1(
-  roster: Readonly<MemberRosterV1> | null,
-  policy: AcceptedRfc64CatalogAccessSnapshotV1['policy'],
-  policyDigest: AcceptedRfc64CatalogAccessSnapshotV1['policyDigest'],
-  authorAddress: EvmAddressV1,
-): void {
-  if (policy.accessPolicy === 0) {
-    if (roster !== null) {
-      throw new Error('public RFC-64 policy forbids a private member roster');
-    }
-    return;
-  }
-  if (
-    roster === null
-    || roster.networkId !== policy.networkId
-    || roster.contextGraphId !== policy.contextGraphId
-    || roster.ownershipTransitionDigest !== policy.ownershipTransitionDigest
-    || roster.era !== policy.era
-    || roster.policyDigest !== policyDigest
-    || roster.administrativeDelegationDigest !== policy.administrativeDelegationDigest
-    || !roster.members.some((member) => member.agentAddress === authorAddress)
-  ) {
-    throw new Error(
-      'private RFC-64 precommit requires the exact current policy-bound roster and author membership',
-    );
   }
 }
 
