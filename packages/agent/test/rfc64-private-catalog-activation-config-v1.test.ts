@@ -142,6 +142,19 @@ function privateActivation(options: {
   } as const;
 }
 
+function publicBootstrapPolicy(index: number, targetCount = 0) {
+  const contextGraphId = `${OWNER}/bounded-public-${index}` as ContextGraphIdV1;
+  return {
+    policyEnvelope: policyEnvelope(policy(contextGraphId, 0)),
+    targets: Array.from({ length: targetCount }, (_, targetIndex) => ({
+      authorAddress: `0x${(
+        BigInt(index + 1) * 1_000n + BigInt(targetIndex + 1)
+      ).toString(16).padStart(40, '0')}` as EvmAddressV1,
+      providers: [PROVIDER_PEER],
+    })),
+  } as const;
+}
+
 const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK);
 
 describe('RFC-64 private catalog activation', () => {
@@ -331,6 +344,49 @@ describe('RFC-64 private catalog activation', () => {
       catalog: privateActivation(),
       publicCatalog: conflictingPublic,
     }, chainIdentity)).toThrow(/conflict for selected graph/u);
+  });
+
+  it('enforces the global policy limit after additive and compatibility blocks are merged', () => {
+    const additivePolicies = Array.from(
+      { length: 32 },
+      (_, index) => publicBootstrapPolicy(index),
+    );
+    const compatibilityPolicies = Array.from(
+      { length: 33 },
+      (_, index) => publicBootstrapPolicy(index + additivePolicies.length),
+    );
+
+    expect(() => resolveRfc64CatalogActivationsV1({
+      catalog: {
+        bootstrap: {
+          acceptedPolicies: additivePolicies,
+          retryIntervalMs: 1_000,
+        },
+      },
+      publicCatalog: {
+        bootstrap: {
+          acceptedPublicPolicies: compatibilityPolicies,
+          retryIntervalMs: 1_000,
+        },
+      },
+    }, chainIdentity)).toThrow(/acceptedPolicies must contain at most 64 policies/u);
+  });
+
+  it('enforces the global target limit after additive and compatibility blocks are merged', () => {
+    expect(() => resolveRfc64CatalogActivationsV1({
+      catalog: {
+        bootstrap: {
+          acceptedPolicies: [publicBootstrapPolicy(0, 128)],
+          retryIntervalMs: 1_000,
+        },
+      },
+      publicCatalog: {
+        bootstrap: {
+          acceptedPublicPolicies: [publicBootstrapPolicy(1, 129)],
+          retryIntervalMs: 1_000,
+        },
+      },
+    }, chainIdentity)).toThrow(/targets must contain at most 256 catalogs/u);
   });
 
   it('merges additive private bootstrap with legacy public bootstrap without dropping either', () => {

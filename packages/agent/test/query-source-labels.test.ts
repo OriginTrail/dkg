@@ -69,7 +69,10 @@ const LOCAL_MEMBER = `0x${'11'.repeat(20)}` as EvmAddressV1;
 const REMOTE_MEMBER = `0x${'22'.repeat(20)}` as EvmAddressV1;
 const OUTSIDER = `0x${'33'.repeat(20)}` as EvmAddressV1;
 
-function runtimePrivateQueryAgent() {
+function runtimePrivateQueryAgent(options: {
+  readonly subscribed?: boolean;
+  readonly storedContextGraph?: boolean;
+} = {}) {
   const registry = createRfc64CatalogAccessPolicyRegistryFixture({
     localAgentAddress: LOCAL_MEMBER,
     remoteAgentAddress: REMOTE_MEMBER,
@@ -90,7 +93,11 @@ function runtimePrivateQueryAgent() {
   };
   const store = {
     query: vi.fn(async () => ({ type: 'bindings', bindings: [] })),
-    listGraphsByPrefix: vi.fn(async () => []),
+    listGraphsByPrefix: vi.fn(async () => (
+      options.storedContextGraph === true
+        ? [`did:dkg:context-graph:${RUNTIME_PRIVATE_CG}`]
+        : []
+    )),
   };
   const isPrivateContextGraph = vi.fn(async () => {
     throw new Error('legacy private metadata must not decide runtime RFC-64 authority');
@@ -105,7 +112,9 @@ function runtimePrivateQueryAgent() {
     log: { info() {}, warn() {}, debug() {}, error() {} },
     queryEngine,
     store,
-    subscribedContextGraphs: new Map([[RUNTIME_PRIVATE_CG, { synced: true }]]),
+    subscribedContextGraphs: options.subscribed === false
+      ? new Map()
+      : new Map([[RUNTIME_PRIVATE_CG, { synced: true }]]),
     rfc64PublicCatalogServiceV1: { acceptedPolicySnapshot },
     isPrivateContextGraph,
     isAgentAddressAllowed: QueryMethods.prototype.isAgentAddressAllowed,
@@ -177,6 +186,65 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     expect(outsider.bindings).toEqual([]);
     expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
     expect(fixture.store.query).toHaveBeenCalledTimes(2);
+    expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: 'ASK',
+      sparql: 'ASK { GRAPH ?g { ?s ?p ?o } }',
+      expected: { bindings: [{ result: 'false' }] },
+    },
+    {
+      label: 'COUNT',
+      sparql: 'SELECT (COUNT(*) AS ?count) WHERE { GRAPH ?g { ?s ?p ?o } }',
+      expected: { bindings: [] },
+    },
+    {
+      label: 'SELECT',
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      expected: { bindings: [] },
+    },
+  ])('fails closed before query execution for a truly unscoped outsider $label query', async ({
+    sparql,
+    expected,
+  }) => {
+    const fixture = runtimePrivateQueryAgent();
+
+    await expect(QueryMethods.prototype.query.call(
+      fixture.agent as never,
+      sparql,
+      { callerAgentAddress: OUTSIDER },
+    )).resolves.toEqual(expected);
+    expect(fixture.queryEngine.query).not.toHaveBeenCalled();
+    expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
+  });
+
+  it('uses storage discovery to protect a runtime-only private graph without a subscription', async () => {
+    const fixture = runtimePrivateQueryAgent({
+      subscribed: false,
+      storedContextGraph: true,
+    });
+    const sparql = 'SELECT ?s WHERE { ?s ?p ?o }';
+
+    const member = await QueryMethods.prototype.query.call(
+      fixture.agent as never,
+      sparql,
+      { callerAgentAddress: REMOTE_MEMBER },
+    );
+    expect(member.bindings).toEqual([{ value: 'visible' }]);
+
+    const outsider = await QueryMethods.prototype.query.call(
+      fixture.agent as never,
+      sparql,
+      { callerAgentAddress: OUTSIDER },
+    );
+    expect(outsider.bindings).toEqual([]);
+    expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
+    expect(fixture.store.listGraphsByPrefix).toHaveBeenCalledWith(
+      'did:dkg:context-graph:',
+      { source: 'agent.query.rfc64RuntimePrivateGraphs' },
+    );
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
   });
 });
