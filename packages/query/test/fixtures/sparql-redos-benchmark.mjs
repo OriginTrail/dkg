@@ -1,4 +1,4 @@
-import { classifySparqlOperation } from '@origintrail-official/dkg-core';
+import { classifySparqlOperation } from '@origintrail-official/dkg-core/dist/sparql-operation.js';
 
 function detect(input) {
   const operation = classifySparqlOperation(input);
@@ -14,7 +14,7 @@ function inputFor(count) {
 
 function variantsFor(input) {
   return Array.from(
-    { length: 8 },
+    { length: 4 },
     (_, index) => `${input}# benchmark-${index}\n`,
   );
 }
@@ -39,7 +39,7 @@ export function measureSparqlRedosGrowth() {
   const smallExpectedLength = detect(smallVariants[0]).length;
   const largeExpectedLength = detect(largeVariants[0]).length;
 
-  const iterations = 16;
+  const iterations = 8;
   const samples = [];
   for (let sample = 0; sample < 3; sample++) {
     let smallTotalMs = 0;

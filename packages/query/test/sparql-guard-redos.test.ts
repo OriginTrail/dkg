@@ -120,8 +120,9 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
 
   // Wall time is sufficient for the absolute hang guards below. The scaling
   // assertion uses paired, alternating batches in an isolated process so both
-  // input sizes see equivalent scheduler conditions without relying on the
-  // runner's coarse CPU accounting.
+  // input sizes see equivalent scheduler conditions. The child disables V8's
+  // optimizing tier so the ratio measures parser work instead of host-specific
+  // optimization thresholds, without relying on coarse OS CPU accounting.
   const measure = (input: string) => {
     for (let i = 0; i < 2; i++) detectSparqlQueryForm(input);
     let fastestMs = Infinity;
@@ -141,7 +142,7 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
     ));
     return JSON.parse(execFileSync(
       process.execPath,
-      [runner],
+      ['--no-opt', runner],
       { encoding: 'utf8', timeout: 20_000 },
     )) as { smallMs: number; largeMs: number };
   };
