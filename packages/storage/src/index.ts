@@ -91,9 +91,10 @@ export {
 export {
   GraphWriteGenTracker,
   asGraphWriteGenSource,
+  asGraphWriteRevisionSource,
   type GraphWriteGenSource,
-  type GraphWriteLifecycle,
   type GraphWriteRevision,
+  type GraphWriteRevisionSource,
 } from './graph-write-gen.js';
 export {
   ExactGraphReadError,

@@ -1520,16 +1520,25 @@ describe('sync responder pagination interleaving', () => {
     })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
     expect(calls).toBe(2);
 
+    // The remote mutation is still pending at the same revision. Stability,
+    // not generation change alone, must prevent reuse of the completed read.
+    graphs = ['urn:graph:c', 'urn:graph:a'];
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'same-pending-mutation',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:c']);
+    expect(calls).toBe(3);
+
     // Settlement must advance again so the next session cannot reuse the
     // graph list that was read while the mutation was in flight.
-    graphs = ['urn:graph:c', 'urn:graph:a'];
+    graphs = ['urn:graph:d', 'urn:graph:a'];
     generation++;
     stable = true;
     await expect(memo.get({
       refresh: true,
       refreshGeneration: 'session-3',
-    })).resolves.toEqual(['urn:graph:a', 'urn:graph:c']);
-    expect(calls).toBe(3);
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:d']);
+    expect(calls).toBe(4);
   });
 
   it('supersedes an in-flight graph list when write generation changes', async () => {

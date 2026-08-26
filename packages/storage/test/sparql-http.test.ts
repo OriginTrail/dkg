@@ -1266,6 +1266,54 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('keeps raw updates globally unstable while pending and after an indeterminate failure', async () => {
+    const originalFetch = globalThis.fetch;
+    let releaseResponse!: () => void;
+    let markDispatched!: () => void;
+    const dispatched = new Promise<void>((resolve) => { markDispatched = resolve; });
+    const response = new Promise<Response>((resolve) => {
+      releaseResponse = () => resolve(new Response('', { status: 200 }));
+    });
+    globalThis.fetch = (async () => {
+      markDispatched();
+      return response;
+    }) as typeof fetch;
+    try {
+      const pendingStore = new SparqlHttpStore({
+        queryEndpoint: 'http://pending-update.test/query',
+        updateEndpoint: 'http://pending-update.test/update',
+      });
+      const firstPrefix = 'http://ex.org/first/';
+      const secondPrefix = 'http://ex.org/second/';
+      const updating = pendingStore.update('DELETE WHERE { GRAPH ?g { ?s ?p ?o } }');
+      await dispatched;
+
+      const firstPending = pendingStore.getWriteRevision(firstPrefix);
+      const secondPending = pendingStore.getWriteRevision(secondPrefix);
+      expect(firstPending.stable).toBe(false);
+      expect(secondPending).toEqual(firstPending);
+      expect(pendingStore.getWriteRevision(firstPrefix)).toEqual(firstPending);
+
+      releaseResponse();
+      await updating;
+      expect(pendingStore.getWriteRevision(firstPrefix).stable).toBe(true);
+      expect(pendingStore.getWriteRevision(secondPrefix).stable).toBe(true);
+
+      globalThis.fetch = (async () => new Response('failed', { status: 500 })) as typeof fetch;
+      const failedStore = new SparqlHttpStore({
+        queryEndpoint: 'http://failed-update.test/query',
+        updateEndpoint: 'http://failed-update.test/update',
+      });
+      await expect(failedStore.update('CLEAR ALL')).rejects.toThrow(/failed \(500\)/u);
+      const indeterminate = failedStore.getWriteRevision(firstPrefix);
+      expect(indeterminate.stable).toBe(false);
+      expect(failedStore.getWriteRevision(secondPrefix)).toEqual(indeterminate);
+      expect(failedStore.getWriteRevision(firstPrefix)).toEqual(indeterminate);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('keeps a write stable when managed recovery rejects it before dispatch', async () => {
     let fetchCalls = 0;
     const originalFetch = globalThis.fetch;

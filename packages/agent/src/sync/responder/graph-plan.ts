@@ -10,7 +10,7 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
-  asGraphWriteGenSource,
+  asGraphWriteRevisionSource,
   StoreResponseTooLargeError,
   type QueryOptions,
   type TripleStore,
@@ -236,7 +236,7 @@ export function createResponderGraphListMemo(
   store: TripleStore,
   ttlMs = 10_000,
 ): GraphListMemo {
-  const writeRevisionSource = asGraphWriteGenSource(store);
+  const writeRevisionSource = asGraphWriteRevisionSource(store);
   type Revision = GraphWriteRevision | string | undefined;
   const currentRevision = (refreshGeneration: string | undefined): Revision =>
     writeRevisionSource?.getWriteRevision('') ?? refreshGeneration;

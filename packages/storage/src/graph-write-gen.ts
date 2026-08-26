@@ -11,9 +11,9 @@
  * is a proof of "no local write since"; active or indeterminate remote writes
  * make revisions unstable and therefore ineligible for cache reuse.
  *
- * Consumers recover the capability with {@link asGraphWriteGenSource} (the
+ * Consumers recover the capability with {@link asGraphWriteRevisionSource} (the
  * `asChangelogReader` pattern — no `instanceof`/decorator-order assumption)
- * and compare {@link GraphWriteGenSource.getWriteRevision} snapshots. Every
+ * and compare {@link GraphWriteRevisionSource.getWriteRevision} snapshots. Every
  * imprecision is fail-open: writes whose graph scope is unknowable at the
  * call site (raw SPARQL UPDATE, pattern deletes without a graph) bump a
  * global floor that invalidates every prefix, and LRU eviction folds the
@@ -28,10 +28,12 @@ export interface GraphWriteGenSource {
    * whose URI starts with `graphPrefix`". Two equal snapshots bracket a
    * window with no such write only when both accompanying revisions are
    * stable; the value has no meaning beyond equality.
-   * @deprecated Use `getWriteRevision`; a generation alone cannot represent
-   * an active or indeterminate remote write.
    */
   getWriteGen(graphPrefix: string): number;
+}
+
+/** Revision-aware successor capability used by cache and negative-memo consumers. */
+export interface GraphWriteRevisionSource {
   /** The same observational generation plus whether it is safe to memoize. */
   getWriteRevision(graphPrefix: string): GraphWriteRevision;
 }
@@ -41,7 +43,7 @@ export interface GraphWriteRevision {
   stable: boolean;
 }
 
-export interface GraphWriteLifecycle {
+interface GraphWriteLifecycle {
   settle(): void;
   indeterminate(): void;
 }
@@ -53,7 +55,7 @@ export interface GraphWriteLifecycle {
 const MAX_TRACKED_GRAPHS = 8192;
 
 /** Shared implementation the triple-store adapters embed. */
-export class GraphWriteGenTracker implements GraphWriteGenSource {
+export class GraphWriteGenTracker implements GraphWriteGenSource, GraphWriteRevisionSource {
   private counter = 0;
   /** Floor for writes with unknowable graph scope + LRU-evicted graphs. */
   private globalFloor = 0;
@@ -202,23 +204,58 @@ export class GraphWriteGenTracker implements GraphWriteGenSource {
 }
 
 /**
- * Recover the {@link GraphWriteGenSource} capability from a store (typically a
- * `createTripleStore(...)` result behind the daemon's decorator chain), or
- * `null` when the backing adapter does not track write generations — callers
- * MUST fail open (always scan) on `null`.
+ * Recover the legacy {@link GraphWriteGenSource} capability without changing
+ * its published getWriteGen-only contract.
  */
 export function asGraphWriteGenSource(store: unknown): GraphWriteGenSource | null {
+  let s = store as
+    | { getWriteGen?: unknown; innerStore?: unknown; inner?: unknown }
+    | null
+    | undefined;
+  for (let depth = 0; s && depth < 8; depth++) {
+    if (typeof s.getWriteGen === 'function') return s as GraphWriteGenSource;
+    s = (s.innerStore ?? s.inner) as typeof s;
+  }
+  return null;
+}
+
+/**
+ * Recover the revision-aware capability from a store (typically a
+ * `createTripleStore(...)` result behind the daemon's decorator chain), or
+ * `null` when the backing adapter does not track write generations — callers
+ * MUST fail open (always scan) on `null`. Legacy getWriteGen-only adapters are
+ * normalized to their former stable-generation behavior, preserving the
+ * public capability while newer adapters can report pending remote writes.
+ */
+export function asGraphWriteRevisionSource(store: unknown): GraphWriteRevisionSource | null {
   // Follow `.innerStore` (hand-rolled forwarders like the daemon's
   // listContextGraphs-cache invalidator) and `.inner` (ChangelogStore,
   // GraphSetIndexStore, SharedMemoryLiteralBlobStore) so the capability
   // resolves through any decorator order — mirrors `asChangelogReader`.
   // The depth bound guards a pathological/cyclic chain.
   let s = store as
-    | { getWriteRevision?: unknown; innerStore?: unknown; inner?: unknown }
+    | {
+      getWriteRevision?: unknown;
+      getWriteGen?: unknown;
+      innerStore?: unknown;
+      inner?: unknown;
+    }
     | null
     | undefined;
   for (let depth = 0; s && depth < 8; depth++) {
-    if (typeof s.getWriteRevision === 'function') return s as GraphWriteGenSource;
+    if (typeof s.getWriteRevision === 'function') {
+      const source = s as { getWriteRevision(graphPrefix: string): GraphWriteRevision };
+      return { getWriteRevision: (graphPrefix) => source.getWriteRevision(graphPrefix) };
+    }
+    if (typeof s.getWriteGen === 'function') {
+      const source = s as { getWriteGen(graphPrefix: string): number };
+      return {
+        getWriteRevision: (graphPrefix) => ({
+          generation: source.getWriteGen(graphPrefix),
+          stable: true,
+        }),
+      };
+    }
     s = (s.innerStore ?? s.inner) as typeof s;
   }
   return null;

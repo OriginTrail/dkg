@@ -21,11 +21,11 @@ import {
   GraphManager,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
-  asGraphWriteGenSource,
+  asGraphWriteRevisionSource,
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
   StoreSchedulerBusyError,
-  type GraphWriteGenSource,
+  type GraphWriteRevisionSource,
   type SharedMemoryResultBudget,
   type SwmKaGraphBound,
   type TripleStore,
@@ -422,7 +422,7 @@ export class FinalizationHandler {
   // the negative reconcile memo below. `null` when the store's adapter doesn't
   // track write generations — the memo is then DISABLED and every reconcile
   // scans (fail-open), matching pre-memo behavior.
-  private readonly graphWriteGen: GraphWriteGenSource | null;
+  private readonly graphWriteGen: GraphWriteRevisionSource | null;
   // Negative memo for `findSwmSnapshotForMerkleRoot`: "this (cg, namespace,
   // root) had NO matching local SWM snapshot at write generation G". Unlike
   // `chainCgIdByLookupId` above, caching the negative here is sound BECAUSE it
@@ -463,7 +463,7 @@ export class FinalizationHandler {
       legacyLifecycleLogOptions,
     );
     this.store = store;
-    this.graphWriteGen = asGraphWriteGenSource(store);
+    this.graphWriteGen = asGraphWriteRevisionSource(store);
     this.chain = chain;
     this.eventBus = options.eventBus;
     this.resolveContextGraphOnChainId = options.resolveContextGraphOnChainId;

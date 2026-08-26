@@ -9,7 +9,12 @@
  * O(#ops)-per-sweep rescan storm returns).
  */
 import { describe, it, expect } from 'vitest';
-import { GraphWriteGenTracker, asGraphWriteGenSource } from '../src/graph-write-gen.js';
+import {
+  GraphWriteGenTracker,
+  asGraphWriteGenSource,
+  asGraphWriteRevisionSource,
+  type GraphWriteGenSource,
+} from '../src/graph-write-gen.js';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 
 const CG_PREFIX = 'did:dkg:context-graph:fun-facts/';
@@ -96,6 +101,40 @@ describe('GraphWriteGenTracker', () => {
     expect(settled.stable).toBe(true);
   });
 
+  it('keeps overlapping scoped writes unstable until every lifecycle settles', () => {
+    const tracker = new GraphWriteGenTracker();
+    const first = tracker.beginGraphWrites([SWM_GRAPH]);
+    const second = tracker.beginGraphWrites([SWM_GRAPH]);
+
+    const bothPending = tracker.getWriteRevision(CG_PREFIX);
+    expect(bothPending.stable).toBe(false);
+    first.settle();
+    const onePending = tracker.getWriteRevision(CG_PREFIX);
+    expect(onePending.generation).toBeGreaterThan(bothPending.generation);
+    expect(onePending.stable).toBe(false);
+
+    second.settle();
+    const settled = tracker.getWriteRevision(CG_PREFIX);
+    expect(settled.generation).toBeGreaterThan(onePending.generation);
+    expect(settled.stable).toBe(true);
+  });
+
+  it('makes every prefix unstable for unscoped pending and indeterminate writes', () => {
+    const settledTracker = new GraphWriteGenTracker();
+    const pending = settledTracker.beginUnscopedWrite();
+    expect(settledTracker.getWriteRevision(CG_PREFIX).stable).toBe(false);
+    expect(settledTracker.getWriteRevision('did:dkg:context-graph:other/').stable).toBe(false);
+    pending.settle();
+    expect(settledTracker.getWriteRevision(CG_PREFIX).stable).toBe(true);
+
+    const indeterminateTracker = new GraphWriteGenTracker();
+    const indeterminate = indeterminateTracker.beginUnscopedWrite();
+    indeterminate.indeterminate();
+    const revision = indeterminateTracker.getWriteRevision(CG_PREFIX);
+    expect(revision.stable).toBe(false);
+    expect(indeterminateTracker.getWriteRevision(CG_PREFIX)).toEqual(revision);
+  });
+
   it('folds LRU-evicted graphs into the global floor (eviction can only force rescans)', () => {
     const tracker = new GraphWriteGenTracker();
     tracker.recordGraphWrites([SWM_GRAPH]);
@@ -127,6 +166,24 @@ describe('OxigraphStore write-generation capability', () => {
     expect(asGraphWriteGenSource({ innerStore: { inner: store } })).not.toBeNull();
     expect(asGraphWriteGenSource({})).toBeNull();
     expect(asGraphWriteGenSource(null)).toBeNull();
+  });
+
+  it('preserves legacy getWriteGen-only adapters and normalizes revision discovery', () => {
+    const legacy: GraphWriteGenSource = { getWriteGen: () => 42 };
+    const decorated = { innerStore: { inner: legacy } };
+
+    expect(asGraphWriteGenSource(decorated)?.getWriteGen(CG_PREFIX)).toBe(42);
+    expect(asGraphWriteRevisionSource(decorated)?.getWriteRevision(CG_PREFIX)).toEqual({
+      generation: 42,
+      stable: true,
+    });
+
+    const revisionOnly = { getWriteRevision: () => ({ generation: 7, stable: false }) };
+    expect(asGraphWriteRevisionSource(revisionOnly)?.getWriteRevision(CG_PREFIX)).toEqual({
+      generation: 7,
+      stable: false,
+    });
+    expect(asGraphWriteGenSource(revisionOnly)).toBeNull();
   });
 
   it('bumps the CG prefix on every mutation kind that can affect an SWM scan', async () => {
