@@ -395,8 +395,31 @@ export async function startOxigraphServer(
       : 'supervised recovery';
     const candidate = spawnChild();
     lifecycle = { phase: 'recovering', child: candidate, reason, generation };
-    const reviveDeadline = Date.now() + readyTimeoutMs;
+    // GH#1400 — size THIS attempt, not the one at boot. The WAL grows during
+    // the session, so a mid-life respawn (onClientTimeout, a crashed child)
+    // faces a larger replay than the daemon ever measured at startup. Reusing
+    // the boot value re-arms the exact ratchet: kill a healthy replaying
+    // child, leave the WAL, retry, kill it again.
+    const reviveReady = nextReadyTimeout();
+    if (reviveReady.walBytes > 0) {
+      log(
+        `[oxigraph] restart: ${formatWalBytes(reviveReady.walBytes)} of retained write-ahead log ` +
+          `to replay; allowing up to ${Math.round(reviveReady.timeoutMs / 1000)}s.`,
+      );
+    }
+    const reviveDeadline = Date.now() + reviveReady.timeoutMs;
+    let reviveProgressLog = Date.now();
     while (Date.now() < reviveDeadline) {
+      // Same reasoning as the boot loop: RocksDB emits no progress records
+      // during replay, so without this a multi-minute restart is silent.
+      if (reviveReady.walBytes > 0 && Date.now() - reviveProgressLog >= 10_000) {
+        reviveProgressLog = Date.now();
+        log(
+          `[oxigraph] restart still opening: ` +
+            `${Math.round((Date.now() - (reviveDeadline - reviveReady.timeoutMs)) / 1000)}s elapsed ` +
+            `of ${Math.round(reviveReady.timeoutMs / 1000)}s allowed.`,
+        );
+      }
       if (
         lifecycle.phase !== 'recovering'
         || lifecycle.child !== candidate
@@ -535,7 +558,13 @@ export async function startOxigraphServer(
     generation: lifecycle.generation,
   });
 
+  const exitGuard = (): void => { killSync(); };
+
   const stop = async (): Promise<void> => {
+    // Single release point for the process-exit reaper installed before the
+    // spawn (GH#1400) — every stop path, successful or not, comes through
+    // here, so no caller has to remember a handoff.
+    process.removeListener('exit', exitGuard);
     if (lifecycle.phase === 'stopping') return;
     const candidate = lifecycle.child;
     lifecycle = {
@@ -596,12 +625,14 @@ export async function startOxigraphServer(
   // exits. That window used to be <=30s; sizing it to the WAL makes it
   // minutes, which turns a rare orphan into a likely one — and an orphaned
   // server holding the port and the RocksDB LOCK presents as the very bug
-  // being fixed. Guard the window here and release it once boot settles.
-  const bootExitGuard = (): void => { killSync(); };
-  process.once('exit', bootExitGuard);
-  const releaseBootExitGuard = (): void => {
-    process.removeListener('exit', bootExitGuard);
-  };
+  // being fixed.
+  //
+  // ONE owner, for the handle's whole lifetime: installed before the spawn and
+  // removed by `stop()`. No handoff protocol with the caller — an exception
+  // anywhere in readiness would otherwise skip a release and strand both the
+  // child and a process-global listener. `killSync` is idempotent, so the
+  // caller's own reaper remains harmless.
+  process.on('exit', exitGuard);
 
   const deadline = Date.now() + bootReady.timeoutMs;
   const readyTimeoutMs = bootReady.timeoutMs;
@@ -644,9 +675,6 @@ export async function startOxigraphServer(
           generation: lifecycle.generation,
         };
         log(`Oxigraph server ready on ${bind} after ${attempt} probe(s).`);
-        // Boot settled: the caller registers its own exit reaper against the
-        // returned handle, so hand ownership back (GH#1400).
-        releaseBootExitGuard();
         return {
           host,
           port,
@@ -665,7 +693,7 @@ export async function startOxigraphServer(
   }
 
   // Never became ready — stop the child so we don't leak it, then throw.
-  releaseBootExitGuard();
+  // `stop()` removes the exit guard.
   await stop();
   const stderrHint = lastStderr.trim()
     ? ` Last server output:\n${lastStderr.trim()}`

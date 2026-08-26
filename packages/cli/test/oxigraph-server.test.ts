@@ -864,4 +864,179 @@ describe('startOxigraphServer OOM classification in the restart log', () => {
       await handle.stop();
     }
   });
+
+  // GH#1400 — the helper arithmetic is unit-tested, but the OUTAGE fix depends
+  // on that measurement reaching the readiness deadline. Reverting
+  // startOxigraphServer to a fixed deadline would leave every helper test
+  // green. These drive the real function.
+  //
+  // The delay is produced by withholding listener OWNERSHIP through the
+  // injected `io.findListenOwnerPid` seam — the stand-in binary is shared by
+  // every test in this file and must not be modified.
+  describe('WAL-aware readiness (GH#1400)', () => {
+    async function seedWal(location: string, bytes: number): Promise<void> {
+      const { openSync, closeSync, truncateSync } = await import('node:fs');
+      closeSync(openSync(join(location, '000001.log'), 'w'));
+      // Sparse: costs no disk, reports `bytes`.
+      truncateSync(join(location, '000001.log'), bytes);
+    }
+
+    it('extends the deadline past the base when a WAL is pending', async () => {
+      const port = await freePort();
+      const location = await mkdtemp(join(tmpdir(), 'oxi-wal-auto-'));
+      // 40 MiB / 4000 B per ms = ~10.5s of extension on top of a 250ms base.
+      await seedWal(location, 41_943_040);
+
+      let ownershipFrom: number | null = null;
+      const withholdUntil = Date.now() + 2_000;
+      const handle = await startOxigraphServer({
+        binaryPath: standin,
+        location,
+        port,
+        log: () => {},
+        // Base alone provably cannot cover the 2s delay; base + extension can.
+        autoReadyBaseTimeoutMs: 250,
+        readyIntervalMs: 100,
+        io: {
+          findListenOwnerPid: async (child) => {
+            if (Date.now() < withholdUntil) return null;
+            ownershipFrom = child.pid ?? null;
+            return child.pid ?? null;
+          },
+        },
+      });
+      try {
+        expect(ownershipFrom).not.toBeNull();
+      } finally {
+        await handle.stop();
+        await rm(location, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it('an explicit readyTimeoutMs stays authoritative and is not extended', async () => {
+      const port = await freePort();
+      const location = await mkdtemp(join(tmpdir(), 'oxi-wal-explicit-'));
+      await seedWal(location, 41_943_040);
+
+      const lines: string[] = [];
+      const withholdUntil = Date.now() + 5_000;
+      await expect(startOxigraphServer({
+        binaryPath: standin,
+        location,
+        port,
+        log: (l: string) => lines.push(l),
+        // Explicit and SHORTER than both the delay and the WAL estimate.
+        readyTimeoutMs: 600,
+        readyIntervalMs: 100,
+        io: {
+          findListenOwnerPid: async (child) => (Date.now() < withholdUntil ? null : child.pid ?? null),
+        },
+      })).rejects.toThrow(/did not become ready/);
+
+      // And the operator is told their override is what is keeping them down.
+      expect(lines.join('\n')).toMatch(/below the ~\d+ms estimated to replay/);
+      await rm(location, { recursive: true, force: true });
+    }, 30_000);
+
+    // The RED finding: a mid-life respawn faces the WAL this SESSION wrote,
+    // which the daemon never measured at boot. Reusing the boot-time deadline
+    // re-arms the exact ratchet the fix removes — kill a healthy replaying
+    // child, leave the WAL, retry, kill it again.
+    it('re-measures for a supervised restart instead of reusing the boot deadline', async () => {
+      const port = await freePort();
+      const location = await mkdtemp(join(tmpdir(), 'oxi-wal-revive-'));
+
+      // Boot with NOTHING pending, so the boot deadline is the bare base. The
+      // base is generous enough to absorb a Node stand-in's own startup —
+      // what this test contrasts is the RESTART deadline, not the boot one.
+      let withholdUntil = 0;
+      let spawns = 0;
+      const lines: string[] = [];
+      const { spawn: realSpawn } = await import('node:child_process');
+      const handle = await startOxigraphServer({
+        binaryPath: standin,
+        location,
+        port,
+        log: (l: string) => lines.push(l),
+        autoReadyBaseTimeoutMs: 1_500,
+        readyIntervalMs: 50,
+        restartBackoffBaseMs: 100,
+        restartBackoffMaxMs: 100,
+        io: {
+          spawn: ((cmd: string, args: string[], o: object) => {
+            spawns += 1;
+            return realSpawn(cmd, args, o as never);
+          }) as never,
+          findListenOwnerPid: async (child) => (Date.now() < withholdUntil ? null : child.pid ?? null),
+        },
+      });
+      try {
+        const pid1 = await fetchPid(port);
+        expect(spawns).toBe(1);
+
+        // The session writes: 40 MiB now pending, ~10.5s of replay allowance
+        // on top of the 1.5s base. The respawned child then withholds listener
+        // ownership for 4s — comfortably past the boot deadline, comfortably
+        // inside the re-measured one.
+        await seedWal(location, 41_943_040);
+        withholdUntil = Date.now() + 4_000;
+        process.kill(pid1, 'SIGKILL');
+
+        // Wait on the SUPERVISOR's own view, not the raw port: the stand-in
+        // binds immediately, so polling /pid would report success long before
+        // the readiness deadline it is supposed to be measuring.
+        let healthy = false;
+        for (let i = 0; i < 200; i++) {
+          await sleep(100);
+          const state = handle.getRecoveryState();
+          if (!state.recovering && state.generation > 0 && Date.now() >= withholdUntil) {
+            healthy = (await fetchPid(port)) !== pid1;
+            if (healthy) break;
+          }
+        }
+        expect(healthy, 'supervisor never brought a new child to healthy').toBe(true);
+
+        // ONE respawn. Under the reused boot deadline the supervisor would
+        // have SIGKILLed its own healthy replaying child at 1.5s and spawned
+        // again — repeatedly, for the whole 4s. That count, not the eventual
+        // success, is what separates the fix from the bug.
+        expect(spawns, 'the supervisor killed and re-spawned a replaying child').toBe(2);
+        expect(lines.join('\n')).toMatch(
+          /restart: 40\.0 MiB of retained write-ahead log to replay; allowing up to 1\ds\./,
+        );
+      } finally {
+        await handle.stop();
+        await rm(location, { recursive: true, force: true });
+      }
+    }, 40_000);
+
+    it('releases the process-exit reaper when a boot fails, and still fails fast', async () => {
+      // Two guarantees, and the leak one is the load-bearing half. The reaper
+      // is installed BEFORE the spawn (nothing else reaps the child during a
+      // now-much-longer readiness window) and `stop()` is its single release
+      // point — but a failed boot never returns a handle, so no caller can
+      // invoke `stop()`. The boot path must therefore release it itself, and
+      // the daemon's supervisor retries boot up to 5x, so a leak accumulates.
+      const port = await freePort();
+      const location = await mkdtemp(join(tmpdir(), 'oxi-wal-none-'));
+      const exitListenersBefore = process.listenerCount('exit');
+      const started = Date.now();
+      await expect(startOxigraphServer({
+        binaryPath: standin,
+        location,
+        port,
+        log: () => {},
+        autoReadyBaseTimeoutMs: 500,
+        readyIntervalMs: 100,
+        io: { findListenOwnerPid: async () => null },
+      })).rejects.toThrow(/did not become ready/);
+      expect(process.listenerCount('exit')).toBe(exitListenersBefore);
+      // And with no WAL, no code path could extend — today's fast-fail stands.
+      expect(Date.now() - started).toBeLessThan(5_000);
+      // The failed boot must also take its child with it, or the retry stacks
+      // another `oxigraph serve` and they fight over the port.
+      expect(await portAnswers(port)).toBe(false);
+      await rm(location, { recursive: true, force: true });
+    }, 30_000);
+  });
 });
