@@ -25,6 +25,7 @@ import {
 import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import {
+  VerifiedGraphScopedFinalizationEvidenceCodec,
   parseGraphScopedFinalization,
   type VerifiedGraphScopedFinalizationEvidence,
 } from '../src/finalization-graph-envelope.js';
@@ -143,6 +144,45 @@ function verifiedEvidence(
 }
 
 describe('graph-scoped finalization recovery admission', () => {
+  it('classifies receipt placement independently of the recovery generation', () => {
+    const candidate = parsedMessage();
+    const identity = (generation: number) => ({
+      ual: UAL,
+      kaId: PACKED_KA_ID.toString(),
+      batchId: PACKED_KA_ID.toString(),
+      merkleRoot: `0x${'00'.repeat(32)}`,
+      targetContextGraphId: '42',
+      generation,
+    });
+    const original = verifiedEvidence();
+    const moved = verifiedEvidence({
+      blockNumber: 124,
+      blockHash: `0x${'ef'.repeat(32)}`,
+      txIndex: 7,
+    });
+
+    expect(VerifiedGraphScopedFinalizationEvidenceCodec.classifyPlacement(
+      original,
+      candidate,
+      identity(0),
+    )).toBe('original');
+    expect(VerifiedGraphScopedFinalizationEvidenceCodec.classifyPlacement(
+      original,
+      candidate,
+      identity(9),
+    )).toBe('original');
+    expect(VerifiedGraphScopedFinalizationEvidenceCodec.classifyPlacement(
+      moved,
+      candidate,
+      identity(0),
+    )).toBe('canonical-moved');
+    expect(VerifiedGraphScopedFinalizationEvidenceCodec.classifyPlacement(
+      moved,
+      candidate,
+      identity(9),
+    )).toBe('canonical-moved');
+  });
+
   it('preserves boolean fallback behavior for callers using the original API', async () => {
     const recovery = new FinalizationRecovery(
       undefined,
@@ -882,6 +922,89 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('records moved-receipt retry backoff on the committed generation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recover-moved-retry-'));
+    try {
+      const now = 1_000;
+      const store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const movedEvidence = verifiedEvidence({
+        blockNumber: 124,
+        blockHash: `0x${'ef'.repeat(32)}`,
+        txIndex: 7,
+      });
+      const recoverVerifiedEvidence = vi.fn(async () => movedEvidence);
+      const replayVerified = vi.fn(async () => {
+        throw new StoreSchedulerBusyError(
+          'queue_wait_timeout',
+          'normal',
+          'finalization-recovery-worker',
+        );
+      });
+      const chain = recoveryChain({
+        resolveCanonicalFinalizationReceipt: async () => ({
+          status: 'confirmed',
+          receipt: confirmedReceipt({
+            blockNumber: movedEvidence.blockNumber,
+            blockHash: movedEvidence.blockHash,
+            txIndex: movedEvidence.txIndex,
+          }),
+        }),
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          recoverVerifiedEvidence,
+          replayVerified,
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+      const replay = {
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      };
+
+      await expect(recovery.replayMatching(
+        replay,
+        { persistDeferredBackoff: true },
+      )).resolves.toBe('retry-pending');
+      expect(await store.list()).toMatchObject([{
+        state: 'VERIFIED',
+        generation: 1,
+        attemptCount: 1,
+        nextAttemptAt: expect.any(Number),
+        verifiedEvidence: {
+          blockNumber: 124,
+          blockHash: `0x${'ef'.repeat(32)}`,
+          txIndex: 7,
+        },
+      }]);
+      const [deferred] = await store.list();
+      expect(deferred!.nextAttemptAt).toBeGreaterThan(now);
+
+      await expect(recovery.replayMatching(
+        replay,
+        { persistDeferredBackoff: true },
+      )).resolves.toBe('retry-pending');
+      expect(recoverVerifiedEvidence).toHaveBeenCalledOnce();
+      expect(replayVerified).toHaveBeenCalledOnce();
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('leaves no intermediate REORGED state when a moved receipt cannot be committed', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recover-commit-failed-'));
     try {
@@ -940,7 +1063,7 @@ describe('graph-scoped finalization recovery admission', () => {
       expect(commitRecoveredEvidence).toHaveBeenCalledWith(
         expect.any(String),
         0,
-        expect.objectContaining({ receiptMoved: true }),
+        expect.objectContaining({ placement: 'canonical-moved' }),
       );
       expect(markVerified).toHaveBeenCalledOnce();
       expect(markReorged).not.toHaveBeenCalled();
@@ -1339,7 +1462,7 @@ describe('graph-scoped finalization recovery admission', () => {
         { info: () => {}, warn: () => {} },
         recoveryMaterializer(),
       );
-      return recovery.resolveCanonicalReceipt(parsedMessage());
+      return recovery.resolveCanonicalReceipt(parsedMessage(), undefined, 'original');
     };
 
     await expect(resolve(confirmedReceipt({ blockNumber: 124 })))
@@ -1932,7 +2055,11 @@ describe('graph-scoped finalization recovery admission', () => {
         contextGraphId: CONTEXT_GRAPH,
         candidate: parsedMessage(),
       });
-      expect(await recovery.resolveCanonicalReceipt(parsedMessage())).toEqual({
+      expect(await recovery.resolveCanonicalReceipt(
+        parsedMessage(),
+        undefined,
+        'original',
+      )).toEqual({
         status: 'unsupported',
       });
       if (!entry) throw new Error('expected durable RECEIVED entry');

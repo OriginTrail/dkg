@@ -1413,6 +1413,7 @@ export class FinalizationHandler {
     ual: string;
     merkleRoot: Uint8Array;
     kaId: bigint;
+    batchId: bigint;
     versionBlock: number;
     subGraphName?: string;
   }, ctx: OperationContext): Promise<'already-confirmed' | 'no-swm' | undefined> {
@@ -1421,6 +1422,7 @@ export class FinalizationHandler {
       ual: input.ual,
       merkleRoot: input.merkleRoot,
       kaId: input.kaId,
+      batchId: input.batchId,
       ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
     });
     if (resolution.status === 'absent') return undefined;
@@ -1530,7 +1532,7 @@ export class FinalizationHandler {
     merkleRoot: Uint8Array;
     publisherAddress: string;
     kaId: bigint;
-    batchId?: bigint;
+    batchId: bigint;
     versionBlock: number;
     authorAddress?: string;
     subGraphName?: string;
@@ -1594,6 +1596,7 @@ export class FinalizationHandler {
           ual,
           merkleRoot,
           kaId,
+          batchId,
           versionBlock,
           ...(subGraphName ? { subGraphName } : {}),
         }, ctx)) ?? 'no-swm';
@@ -1607,6 +1610,7 @@ export class FinalizationHandler {
         ual,
         merkleRoot,
         kaId,
+        batchId,
         versionBlock,
         ...(subGraphName ? { subGraphName } : {}),
       }, ctx);
@@ -1655,7 +1659,7 @@ export class FinalizationHandler {
       );
       return 'no-swm';
     }
-    const reconciliationBatchId = batchId ?? kaId;
+    const reconciliationBatchId = batchId;
     if (head.publicTripleCount === 0 && head.privateTripleCount === 0) {
       this.log.warn(ctx, `Chain-reconcile: empty graph-scoped content envelope for ${ual}`);
       return 'no-swm';
@@ -3141,6 +3145,7 @@ export class FinalizationHandler {
       merkleRoot,
       publisherAddress,
       kaId,
+      batchId: kaId,
       versionBlock,
       authorAddress,
       subGraphName,

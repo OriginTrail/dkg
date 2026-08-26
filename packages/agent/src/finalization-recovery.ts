@@ -16,6 +16,7 @@ import {
   type GraphScopedAccessPolicy,
   type ParsedGraphScopedFinalization,
   type VerifiedGraphScopedFinalizationEvidence,
+  type VerifiedGraphScopedFinalizationEvidencePlacement,
 } from './finalization-graph-envelope.js';
 import type {
   FinalizationRecoveryEntry,
@@ -62,6 +63,7 @@ type EnsuredVerifiedReplayEntry =
       status: 'verified';
       entry: FinalizationRecoveryEntry;
       evidence: VerifiedGraphScopedFinalizationEvidence;
+      placement: Exclude<VerifiedGraphScopedFinalizationEvidencePlacement, 'mismatch'>;
     }
   | { status: 'unverified'; entry: FinalizationRecoveryEntry }
   | { status: 'invalid' };
@@ -181,10 +183,6 @@ type FinalizationVerificationContext =
 export type FinalizationCanonicalReceiptOutcome =
   | { status: 'confirmed'; receipt: CanonicalFinalizationReceipt }
   | { status: 'pending' | 'reorged' | 'rejected' | 'not-found' | 'unsupported' };
-
-interface ResolveCanonicalReceiptOptions {
-  acceptCanonicalPlacement?: boolean;
-}
 
 const SETTLED_RECEIPT_RETRY_BASE_MS = 1_000;
 const SETTLED_RECEIPT_RETRY_MAX_MS = 60_000;
@@ -762,8 +760,8 @@ export class FinalizationRecovery<
 
   async resolveCanonicalReceipt(
     candidate: ParsedGraphScopedFinalization,
-    persisted?: VerifiedGraphScopedFinalizationEvidence,
-    options: ResolveCanonicalReceiptOptions = {},
+    persisted: VerifiedGraphScopedFinalizationEvidence | undefined,
+    evidencePlacement: Exclude<VerifiedGraphScopedFinalizationEvidencePlacement, 'mismatch'>,
   ): Promise<FinalizationCanonicalReceiptOutcome> {
     const resolver = this.chain?.resolveCanonicalFinalizationReceipt;
     if (!this.chain || this.chain.chainId === 'none' || !resolver) {
@@ -807,7 +805,7 @@ export class FinalizationRecovery<
       return { status: 'rejected' };
     }
     if (
-      !options.acceptCanonicalPlacement
+      evidencePlacement === 'original'
       && receipt.blockNumber !== candidate.blockNumber
     ) return { status: 'reorged' };
     return { status: 'confirmed', receipt };
@@ -840,7 +838,7 @@ export class FinalizationRecovery<
     const canonical = await this.resolveCanonicalReceipt(
       candidate,
       entry.verifiedEvidence,
-      { acceptCanonicalPlacement: entry.state === 'REORGED' },
+      entry.state === 'REORGED' ? 'canonical-moved' : 'original',
     );
     if (canonical.status === 'unsupported') {
       await this.markUnsupported(entry);
@@ -999,7 +997,7 @@ export class FinalizationRecovery<
   private async commitRecoveredEvidence(
     entry: FinalizationRecoveryEntry,
     evidence: VerifiedGraphScopedFinalizationEvidence,
-    receiptMoved: boolean,
+    placement: Exclude<VerifiedGraphScopedFinalizationEvidencePlacement, 'mismatch'>,
   ): Promise<FinalizationRecoveryEntry | undefined> {
     const store = this.getStore();
     if (!store) return undefined;
@@ -1007,13 +1005,13 @@ export class FinalizationRecovery<
       const result = await store.commitRecoveredEvidence(
         entry.key,
         entry.generation,
-        receiptMoved
+        placement === 'canonical-moved'
           ? {
               evidence,
-              receiptMoved: true,
+              placement,
               reason: 'independently recovered canonical receipt moved',
             }
-          : { evidence, receiptMoved: false },
+          : { evidence, placement },
       );
       if (result.status === 'verified' || result.status === 'existing') {
         return result.entry;
@@ -1084,14 +1082,14 @@ export class FinalizationRecovery<
     entry: FinalizationRecoveryEntry,
   ): Promise<FinalizationRecoveryEntry | undefined> {
     const evidence = entry.verifiedEvidence;
-    if (
-      !evidence
-      || !VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
-        evidence,
-        input.candidate,
-        entry,
-      )
-    ) {
+    const placement = evidence
+      ? VerifiedGraphScopedFinalizationEvidenceCodec.classifyPlacement(
+          evidence,
+          input.candidate,
+          entry,
+        )
+      : 'mismatch';
+    if (!evidence || placement === 'mismatch') {
       this.log.warn(
         `Finalization recovery settled evidence does not match replacement envelope for `
           + `${entry.ual}`,
@@ -1131,7 +1129,7 @@ export class FinalizationRecovery<
     const canonical = await this.resolveCanonicalReceipt(
       input.candidate,
       evidence,
-      { acceptCanonicalPlacement: entry.generation > 0 },
+      placement,
     );
     if (canonical.status === 'rejected') {
       await this.invalidateSettled(
@@ -1589,14 +1587,14 @@ export class FinalizationRecovery<
     deferredRetryDelay?: number,
   ): Promise<FinalizationRecoveryReplayOutcome> {
     const evidence = entry.verifiedEvidence;
-    if (
-      !evidence
-      || !VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
-        evidence,
-        candidate,
-        entry,
-      )
-    ) {
+    const placement = evidence
+      ? VerifiedGraphScopedFinalizationEvidenceCodec.classifyPlacement(
+          evidence,
+          candidate,
+          entry,
+        )
+      : 'mismatch';
+    if (!evidence || placement === 'mismatch') {
       this.log.warn(
         `Finalization recovery settled evidence does not match its envelope for ${entry.ual}`,
       );
@@ -1610,7 +1608,7 @@ export class FinalizationRecovery<
     const canonical = await this.resolveCanonicalReceipt(
       candidate,
       evidence,
-      { acceptCanonicalPlacement: entry.generation > 0 },
+      placement,
     );
     if (canonical.status === 'confirmed') {
       if (entry.publisherUpgradePending) {
@@ -1816,6 +1814,7 @@ export class FinalizationRecovery<
     if (!entry || (!this.isLiveEntry(entry) && entry.state !== 'SETTLED')) {
       return 'none';
     }
+    let activeEntry = entry;
     try {
       // Only autonomous replay observes its persisted deadline. Chain
       // reconciliation remains an immediate, authoritative recovery trigger.
@@ -1838,14 +1837,15 @@ export class FinalizationRecovery<
       const ensured = await this.ensureVerifiedReplayEntry(entry, candidate, input);
       if (ensured.status === 'invalid') return 'none' as const;
       const replayEntry = ensured.entry;
+      activeEntry = replayEntry;
 
       let outcome: FinalizationRecoveryApplyOutcome;
       if (ensured.status === 'verified') {
-        const { evidence } = ensured;
+        const { evidence, placement } = ensured;
         const receiptStatus = await this.verifyPersistedReceipt(
           candidate,
           evidence,
-          replayEntry.generation > 0,
+          placement,
         );
         if (receiptStatus !== 'confirmed') {
           if (receiptStatus === 'reorged') {
@@ -1915,11 +1915,11 @@ export class FinalizationRecovery<
     } catch (error) {
       if (!this.materializer.isRetryableError(error)) throw error;
       this.log.info(
-        `Finalization recovery materialization remains busy for ${entry.ual}; `
+        `Finalization recovery materialization remains busy for ${activeEntry.ual}; `
           + 'keeping inbox entry',
       );
       await this.recordDeferred(
-        entry,
+        activeEntry,
         'replay store scheduler remained busy',
         deferredRetryDelay,
       );
@@ -1959,20 +1959,12 @@ export class FinalizationRecovery<
       return { status: 'unverified', entry };
     }
 
-    const matchesImmutableEnvelope =
-      VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
-        evidence,
-        candidate,
-        entry,
-      );
-    const matchesEnvelope = persistedEvidence && entry.generation === 0
-      ? VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
-          evidence,
-          candidate,
-          entry,
-        )
-      : matchesImmutableEnvelope;
-    if (!matchesEnvelope) {
+    const placement = VerifiedGraphScopedFinalizationEvidenceCodec.classifyPlacement(
+      evidence,
+      candidate,
+      entry,
+    );
+    if (placement === 'mismatch') {
       if (persistedEvidence) {
         this.log.warn(
           `Finalization recovery evidence does not match its envelope for ${entry.ual}`,
@@ -1991,24 +1983,16 @@ export class FinalizationRecovery<
     }
 
     if (persistedEvidence) {
-      return { status: 'verified', entry, evidence };
+      return { status: 'verified', entry, evidence, placement };
     }
-
-    const receiptMoved =
-      entry.generation === 0
-      && !VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
-        evidence,
-        candidate,
-        entry,
-      );
 
     const committed = await this.commitRecoveredEvidence(
       entry,
       evidence,
-      receiptMoved,
+      placement,
     );
     return committed
-      ? { status: 'verified', entry: committed, evidence }
+      ? { status: 'verified', entry: committed, evidence, placement }
       : { status: 'unverified', entry };
   }
 
@@ -2176,12 +2160,12 @@ export class FinalizationRecovery<
   private async verifyPersistedReceipt(
     candidate: ParsedGraphScopedFinalization,
     evidence: VerifiedGraphScopedFinalizationEvidence,
-    acceptCanonicalPlacement: boolean,
+    placement: Exclude<VerifiedGraphScopedFinalizationEvidencePlacement, 'mismatch'>,
   ): Promise<FinalizationCanonicalReceiptOutcome['status']> {
     const outcome = await this.resolveCanonicalReceipt(
       candidate,
       evidence,
-      { acceptCanonicalPlacement },
+      placement,
     );
     if (outcome.status !== 'confirmed') return outcome.status;
     const receipt = outcome.receipt;

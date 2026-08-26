@@ -3145,6 +3145,7 @@ describe('graph-scoped finalization handler', () => {
       ual: UAL,
       merkleRoot: new Uint8Array(32),
       kaId: PACKED_KA_ID,
+      batchId: PACKED_KA_ID,
     })).resolves.toEqual({ status: 'absent' });
 
     const { message } = await stageGraph();
@@ -3154,6 +3155,7 @@ describe('graph-scoped finalization handler', () => {
       ual: UAL,
       merkleRoot: message.kcMerkleRoot,
       kaId: PACKED_KA_ID,
+      batchId: PACKED_KA_ID,
     })).resolves.toMatchObject({
       status: 'verified',
       envelope: { assertionVersion: VERSION, batchId: PACKED_KA_ID },
@@ -3171,6 +3173,7 @@ describe('graph-scoped finalization handler', () => {
       ual: UAL,
       merkleRoot: message.kcMerkleRoot,
       kaId: PACKED_KA_ID,
+      batchId: PACKED_KA_ID,
     })).resolves.toEqual({ status: 'invalid', reason: 'metadata' });
   });
 

@@ -516,7 +516,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       return this.commitVerifiedEvidenceWithinTransaction(
         key,
         generation,
-        evidence,
+        { evidence, placement: 'original' },
       );
     });
   }
@@ -532,8 +532,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       return this.commitVerifiedEvidenceWithinTransaction(
         key,
         generation,
-        commit.evidence,
-        commit.receiptMoved ? commit.reason : undefined,
+        commit,
       );
     });
   }
@@ -541,9 +540,9 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
   private commitVerifiedEvidenceWithinTransaction(
     key: string,
     generation: number,
-    evidence: VerifiedGraphScopedFinalizationEvidence,
-    movedReceiptReason?: string,
+    commit: FinalizationRecoveryRecoveredEvidenceCommit,
   ): FinalizationRecoveryVerifyResult {
+    const { evidence } = commit;
     let outcome: FinalizationRecoveryVerifyResult = { status: 'conflict' };
     this.transaction(() => {
       const row = this.database.prepare(
@@ -561,67 +560,61 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
           : { status: 'conflict' };
         return;
       }
-      const receiptMoved = movedReceiptReason !== undefined;
       if (
         (current.state !== 'RECEIVED' && current.state !== 'REORGED')
-        || (receiptMoved && (current.state !== 'RECEIVED' || generation !== 0))
+        || (
+          commit.placement === 'canonical-moved'
+          && (current.state !== 'RECEIVED' || generation !== 0)
+        )
         || current.txHash.toLowerCase() !== evidence.transactionHash.toLowerCase()
         || current.assertionVersion !== evidence.assertionVersion
       ) return;
 
-      const update = receiptMoved
-        ? this.database.prepare(`
-            UPDATE finalization_inbox_v1
-            SET state = 'VERIFIED',
-                block_number = ?,
-                block_hash = ?,
-                tx_index = ?,
-                publisher_address = ?,
-                author_address = ?,
-                verified_evidence_json = ?,
-                generation = generation + 1,
-                attempt_count = 0,
-                next_attempt_at = NULL,
-                last_error = ?,
-                updated_at = ?
-            WHERE key = ? AND generation = ? AND state = 'RECEIVED'
-              AND verified_evidence_json IS NULL
-          `).run(
-            evidence.blockNumber,
-            evidence.blockHash,
-            evidence.txIndex,
-            evidence.publisherAddress,
-            evidence.authorAddress ?? null,
-            JSON.stringify(evidence),
-            movedReceiptReason,
-            this.#policy.now(),
-            key,
+      const updatePlan = commit.placement === 'canonical-moved'
+        ? {
+            generation: generation + 1,
+            attemptCount: 0,
+            nextAttemptAt: null,
+            lastError: commit.reason,
+          }
+        : {
             generation,
-          )
-        : this.database.prepare(`
-            UPDATE finalization_inbox_v1
-            SET state = 'VERIFIED',
-                block_number = ?,
-                block_hash = ?,
-                tx_index = ?,
-                publisher_address = ?,
-                author_address = ?,
-                verified_evidence_json = ?,
-                updated_at = ?
-            WHERE key = ? AND generation = ?
-              AND state IN ('RECEIVED','REORGED')
-              AND verified_evidence_json IS NULL
-          `).run(
-            evidence.blockNumber,
-            evidence.blockHash,
-            evidence.txIndex,
-            evidence.publisherAddress,
-            evidence.authorAddress ?? null,
-            JSON.stringify(evidence),
-            this.#policy.now(),
-            key,
-            generation,
-          );
+            attemptCount: current.attemptCount,
+            nextAttemptAt: current.nextAttemptAt ?? null,
+            lastError: current.lastError ?? null,
+          };
+      const update = this.database.prepare(`
+        UPDATE finalization_inbox_v1
+        SET state = 'VERIFIED',
+            block_number = ?,
+            block_hash = ?,
+            tx_index = ?,
+            publisher_address = ?,
+            author_address = ?,
+            verified_evidence_json = ?,
+            generation = ?,
+            attempt_count = ?,
+            next_attempt_at = ?,
+            last_error = ?,
+            updated_at = ?
+        WHERE key = ? AND generation = ? AND state = ?
+          AND verified_evidence_json IS NULL
+      `).run(
+        evidence.blockNumber,
+        evidence.blockHash,
+        evidence.txIndex,
+        evidence.publisherAddress,
+        evidence.authorAddress ?? null,
+        JSON.stringify(evidence),
+        updatePlan.generation,
+        updatePlan.attemptCount,
+        updatePlan.nextAttemptAt,
+        updatePlan.lastError,
+        this.#policy.now(),
+        key,
+        generation,
+        current.state,
+      );
       if (update.changes === 0) return;
       const updated = this.database.prepare(
         'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
@@ -632,7 +625,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       }
       const entry = finalizationRecoveryRowToEntry(updated);
       if (
-        entry.generation === generation + (receiptMoved ? 1 : 0)
+        entry.generation === updatePlan.generation
         && entry.verifiedEvidence
         && sameFinalizationRecoveryEvidence(entry.verifiedEvidence, evidence)
       ) outcome = { status: 'verified', entry };

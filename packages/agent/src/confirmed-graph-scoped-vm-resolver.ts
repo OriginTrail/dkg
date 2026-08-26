@@ -12,7 +12,7 @@ export interface ConfirmedGraphScopedVmResolutionInput {
   ual: string;
   merkleRoot: Uint8Array;
   kaId: bigint;
-  batchId?: bigint;
+  batchId: bigint;
   subGraphName?: string;
 }
 
@@ -67,7 +67,7 @@ export async function resolveConfirmedGraphScopedVm(
   if (
     scope.ual !== input.ual
     || packedKaId !== input.kaId
-    || (input.batchId !== undefined && envelope.batchId !== input.batchId)
+    || envelope.batchId !== input.batchId
     || !equalBytes(envelope.merkleRoot, input.merkleRoot)
     || input.subGraphName !== envelope.subGraphName
   ) {

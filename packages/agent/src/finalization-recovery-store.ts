@@ -72,11 +72,11 @@ export type FinalizationRecoveryVerifyResult =
 export type FinalizationRecoveryRecoveredEvidenceCommit =
   | {
       evidence: VerifiedGraphScopedFinalizationEvidence;
-      receiptMoved: false;
+      placement: 'original';
     }
   | {
       evidence: VerifiedGraphScopedFinalizationEvidence;
-      receiptMoved: true;
+      placement: 'canonical-moved';
       reason: string;
     };
 
