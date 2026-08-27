@@ -19,6 +19,10 @@ import {
   buildOpenOwnerContextGraphPolicyV1,
   unsignedOpenContextGraphPolicyEnvelopeV1,
 } from '../src/rfc64/open-catalog-policy-v1.js';
+import {
+  createDkgAgentRfc64SwmRecoveryCoordinatorV1,
+  type DkgAgentRfc64SwmRecoveryRuntimeV1,
+} from '../src/rfc64/dkg-agent-swm-recovery-coordinator-v1.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
@@ -93,7 +97,6 @@ interface LifecycleHarness {
   readonly agent: DKGAgent;
   readonly rfc64Config: LifecycleRfc64Config;
   readonly genericQueuedAt: Map<string, number>;
-  readonly rfc64QueuedAt: Map<string, number>;
   readonly genericSync: ReturnType<typeof vi.fn>;
   readonly selectedSync: ReturnType<typeof vi.fn>;
   readonly admission: SelectedSwmBootstrapAdmission;
@@ -116,7 +119,6 @@ function lifecycleHarness(options: Readonly<{
   selectedPublic?: readonly string[];
 }>): LifecycleHarness {
   const genericQueuedAt = new Map<string, number>();
-  const rfc64QueuedAt = new Map<string, number>();
   const admission = new SelectedSwmBootstrapAdmission();
   const genericSync = vi.fn(async () => {});
   const selectedSync = vi.fn(async () => selectedResult());
@@ -135,7 +137,6 @@ function lifecycleHarness(options: Readonly<{
     networkAdmissionCoordinator: { isAcceptedPeer: () => true },
     selectedSwmBootstrapAdmission: admission,
     catchupOnConnectAt: genericQueuedAt,
-    rfc64SwmRecoveryQueuedAt: rfc64QueuedAt,
     lastSyncDisconnectedAt: new Map<string, number>(),
     lastSuccessfulSyncAt: new Map<string, number>(),
     syncReconcilerBackoff: new Map(),
@@ -155,13 +156,14 @@ function lifecycleHarness(options: Readonly<{
     log: { info: vi.fn() },
   };
   const agent = state as unknown as DKGAgent;
+  const rfc64SwmRecoveryCoordinatorV1 = createDkgAgentRfc64SwmRecoveryCoordinatorV1(
+    () => state as unknown as DkgAgentRfc64SwmRecoveryRuntimeV1,
+  );
   Object.assign(state, {
+    rfc64SwmRecoveryCoordinatorV1,
     syncRfc64AuthorizedSwmRecoveryPlanV1: (plan: Parameters<
       DKGAgent['syncRfc64AuthorizedSwmRecoveryPlanV1']
     >[0]) => LifecycleSyncMethods.prototype.syncRfc64AuthorizedSwmRecoveryPlanV1.call(agent, plan),
-    createRfc64SwmRecoveryCoordinatorV1: () => (
-      LifecycleSyncMethods.prototype.createRfc64SwmRecoveryCoordinatorV1.call(agent)
-    ),
     tryRfc64SwmRecoveryPlanFromPeer: (...args: Parameters<
       DKGAgent['tryRfc64SwmRecoveryPlanFromPeer']
     >) => LifecycleSyncMethods.prototype.tryRfc64SwmRecoveryPlanFromPeer.call(agent, ...args),
@@ -179,7 +181,6 @@ function lifecycleHarness(options: Readonly<{
     agent,
     rfc64Config,
     genericQueuedAt,
-    rfc64QueuedAt,
     genericSync,
     selectedSync,
     admission,
@@ -323,9 +324,15 @@ describe('RFC-64 recovery plan lifecycle adapter', () => {
       vi.fn(),
       0,
     )).toBe(true);
+    // The lifecycle facade must reuse the one stateful coordinator. Rebuilding
+    // it here would lose the private cooldown ledger and schedule twice.
+    expect(harness.agent.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+      plan,
+      vi.fn(),
+      0,
+    )).toBe(false);
     await vi.runAllTimersAsync();
 
-    expect(harness.rfc64QueuedAt.get(PROVIDER)).toBe(100_000);
     expect(harness.genericSync).toHaveBeenCalledOnce();
     expect(harness.selectedSync).toHaveBeenCalledOnce();
   });

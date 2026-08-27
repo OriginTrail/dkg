@@ -188,6 +188,7 @@ const blockedRfc64Modules = [
   'control-envelope-signer-v1.js',
   'control-object-store-v1-internal.js',
   'control-object-store-v1.js',
+  'dkg-agent-swm-recovery-coordinator-v1.js',
   'durable-file-store-v1.js',
   'inventory-v1/exact-record.js',
   'inventory-v1/swm-author-inventory-auth-v1.js',

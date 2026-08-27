@@ -1,6 +1,9 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { invalidateSwmMaterializationWitness } from '@origintrail-official/dkg-storage';
-import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import {
+  withKeyedLocks,
+  type WorkspacePublicSnapshotStore,
+} from '@origintrail-official/dkg-publisher';
 import {
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
@@ -85,6 +88,12 @@ export interface RecoverContextGraphSwmDeps {
     registeredSubGraphNames?: readonly string[],
     excludedSubGraphNames?: readonly string[],
   ) => Promise<ProcessedSwmBatch>;
+  /**
+   * Agent-owned lock domain shared by every authoritative recovery caller.
+   * One complete provider transaction for a Context Graph must finish before
+   * another provider can fetch/apply a competing head for that same graph.
+   */
+  readonly writeLocks: Map<string, Promise<void>>;
   readonly store: SwmRecoveryStore;
   readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   /**
@@ -246,6 +255,25 @@ async function fetchPhaseFully(
 }
 
 export async function recoverContextGraphSwm(
+  deps: RecoverContextGraphSwmDeps,
+): Promise<RecoverContextGraphSwmResult> {
+  return withKeyedLocks(
+    deps.writeLocks,
+    [contextGraphSwmRecoveryWriteLockKey(deps.contextGraphId)],
+    () => recoverContextGraphSwmUnlocked(deps),
+  );
+}
+
+/**
+ * Recovery-level lock key. Per-KA materialization keeps using the canonical
+ * publisher lock, while this coarser key elects exactly one authoritative
+ * provider transaction for a Context Graph at a time.
+ */
+export function contextGraphSwmRecoveryWriteLockKey(contextGraphId: string): string {
+  return `${contextGraphId}\u0000swm-recovery`;
+}
+
+async function recoverContextGraphSwmUnlocked(
   deps: RecoverContextGraphSwmDeps,
 ): Promise<RecoverContextGraphSwmResult> {
   const wsGraph = contextGraphWorkspaceGraphUri(deps.contextGraphId);

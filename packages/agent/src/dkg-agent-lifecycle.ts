@@ -644,7 +644,6 @@ import {
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
 import {
   canonicalizeRfc64SwmRecoveryTargetsV1,
-  Rfc64SwmRecoveryCoordinatorV1,
   type Rfc64AuthorizedSwmRecoveryPlanV1,
 } from './rfc64/swm-recovery-coordinator-v1.js';
 
@@ -1304,6 +1303,7 @@ type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0
 
 interface RecoverContextGraphSwmFromPeerDependencies {
   store: TripleStore;
+  writeLocks: Map<string, Promise<void>>;
   listSubGraphs: (contextGraphId: string) => ReturnType<DKGAgent['listSubGraphs']>;
   createContextGraphSyncDeadline: (remainingContextGraphs: number) => number;
   fetchSyncPages: RecoverContextGraphSwmOptions['fetchSyncPages'];
@@ -4222,7 +4222,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.lastSuccessfulSyncAt.delete(remotePeer);
     this.lastSyncProgressAt.delete(remotePeer);
     this.selectedSwmBootstrapAdmission.clear(remotePeer);
-    this.rfc64SwmRecoveryQueuedAt.delete(remotePeer);
+    this.rfc64SwmRecoveryCoordinatorV1.clearPeer(remotePeer);
     this.syncReconcilerBackoff.delete(remotePeer);
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
@@ -4249,53 +4249,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
   }
 
-  createRfc64SwmRecoveryCoordinatorV1(
-    this: DKGAgent,
-  ): Rfc64SwmRecoveryCoordinatorV1 {
-    return new Rfc64SwmRecoveryCoordinatorV1({
-      selectedPublicContextGraphIds: () => this.config.syncContextGraphs ?? [],
-      requestSelectedPublicAdmission: (peerId, contextGraphIds) =>
-        this.selectedSwmBootstrapAdmission.request(peerId, contextGraphIds),
-      isPeerAccepted: (peerId) => this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
-      isStarted: () => this.started,
-      disconnectBoundary: (peerId, now) => this.syncOnConnectDisconnectBoundary(peerId, now),
-      lastQueuedAt: (peerId) => this.rfc64SwmRecoveryQueuedAt.get(peerId) ?? 0,
-      recordQueuedAt: (peerId, now) => this.rfc64SwmRecoveryQueuedAt.set(peerId, now),
-      backoffRetryAt: (peerId) => this.syncReconcilerBackoff.get(peerId)?.nextRetryAt ?? null,
-      schedule: (run, delayMs) => { setTimeout(run, delayMs); },
-      getProbe: (peerId) => this.getSyncReconcilerProbe(peerId),
-      accountAttempt: (peerId, probe, attempt) => this.accountSyncAttemptWithReconciler(
-        peerId,
-        probe,
-        attempt,
-      ),
-      syncingPeers: this.syncingPeers,
-      getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
-      syncAuthorizedPlan: (plan) => this.syncRfc64AuthorizedSwmRecoveryPlanV1(plan),
-      logInfo: (ctx, message) => this.log.info(ctx, message),
-      onPeerSkippedNoSync: (peerId) => this.skippedNoSyncPeers.add(peerId),
-      onPeerSynced: (peerId, outcome, onSyncAccounting) => {
-        const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
-        if (outcome?.progress) this.lastSyncProgressAt.set(peerId, progressAt);
-        this.skippedNoSyncPeers.delete(peerId);
-        this.syncReconcilerBackoff.delete(peerId);
-        if (outcome !== undefined) onSyncAccounting?.(outcome);
-      },
-    });
-  }
-
   /**
    * Admit one config-bound RFC-64 provider plan. Mixed providers deliberately
    * share this single queue/cooldown boundary while retaining distinct
    * execution lanes per Context Graph.
    */
+  authorizeRfc64SwmRecoveryPlanV1(
+    this: DKGAgent,
+    recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
+  ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
+    return this.rfc64SwmRecoveryCoordinatorV1.authorize(recoveryPlan);
+  }
+
   queueRfc64SwmRecoveryPlanFromPeerOnConnect(
     this: DKGAgent,
     recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
     handleSyncError: (remotePeer: string, err: unknown) => void,
     delayMs = 3000,
   ): boolean {
-    return this.createRfc64SwmRecoveryCoordinatorV1().queue(
+    return this.rfc64SwmRecoveryCoordinatorV1.queue(
       recoveryPlan,
       handleSyncError,
       delayMs,
@@ -4397,7 +4369,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     recoveryPlan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
     handleSyncError: (remotePeer: string, err: unknown) => void,
   ): Promise<void> {
-    await this.createRfc64SwmRecoveryCoordinatorV1().run(recoveryPlan, handleSyncError);
+    await this.rfc64SwmRecoveryCoordinatorV1.run(recoveryPlan, handleSyncError);
   }
 
   async tryRfc64SwmRecoveryPlanFromPeer(
@@ -4405,7 +4377,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     recoveryPlan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
-    return this.createRfc64SwmRecoveryCoordinatorV1().execute(
+    return this.rfc64SwmRecoveryCoordinatorV1.execute(
       recoveryPlan,
       onSyncAccounting,
     );
@@ -5124,11 +5096,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.catchupOnConnectAt.delete(peerId);
       }
     }
-    for (const [peerId, ts] of this.rfc64SwmRecoveryQueuedAt) {
-      if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
-        this.rfc64SwmRecoveryQueuedAt.delete(peerId);
-      }
-    }
+    this.rfc64SwmRecoveryCoordinatorV1.pruneQueueState(
+      now,
+      syncTiming.stalenessThresholdMs,
+      (peerId) => connected.has(peerId),
+    );
     for (const [peerId, ts] of this.lastSyncDisconnectedAt) {
       if (now - ts >= syncTiming.stalenessThresholdMs) {
         this.lastSyncDisconnectedAt.delete(peerId);
@@ -6995,6 +6967,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const recoverPrivateContextGraph = (contextGraphId: string) => runRecoverContextGraphSwmFromPeer(
       {
         store: this.store,
+        writeLocks: this.writeLocks,
         listSubGraphs: (id) => this.listSubGraphs(id),
         createContextGraphSyncDeadline: (remaining) => createContextGraphSyncDeadline({
           remainingContextGraphs: remaining,
@@ -7522,6 +7495,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       () => runRecoverContextGraphSwmFromPeer(
         {
           store: this.store,
+          writeLocks: this.writeLocks,
           listSubGraphs: (id) => this.listSubGraphs(id),
           createContextGraphSyncDeadline: (remaining) => createContextGraphSyncDeadline({
             remainingContextGraphs: remaining,
@@ -10201,6 +10175,7 @@ async function runRecoverContextGraphSwmFromPeer(
     // responder gates via the strict members-only `isMemberRecoveryAuthorized`).
     fetchSyncPages: dependencies.fetchSyncPages,
     processSharedMemoryBatch: dependencies.processSharedMemoryBatch,
+    writeLocks: dependencies.writeLocks,
     publicSnapshotStore: dependencies.publicSnapshotStore,
     snapshotMaterializer: dependencies.snapshotMaterializer,
     // SwmRecoveryStore: invalidate the list cache + mark the meta projection

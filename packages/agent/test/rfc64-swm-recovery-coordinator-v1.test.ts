@@ -3,7 +3,10 @@ import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
 import {
   Rfc64SwmRecoveryCoordinatorV1,
+  type Rfc64SwmRecoveryAdmissionPortV1,
   type Rfc64SwmRecoveryCoordinatorDependenciesV1,
+  type Rfc64SwmRecoveryExecutionPortV1,
+  type Rfc64SwmRecoverySchedulingPortV1,
 } from '../src/rfc64/swm-recovery-coordinator-v1.js';
 
 const PROVIDER = '12D3KooWRfc64CoordinatorProvider';
@@ -34,31 +37,44 @@ function completeSelectedResult() {
   };
 }
 
+interface DependencyOverrides {
+  readonly admission?: Partial<Rfc64SwmRecoveryAdmissionPortV1>;
+  readonly scheduling?: Partial<Rfc64SwmRecoverySchedulingPortV1>;
+  readonly execution?: Partial<Rfc64SwmRecoveryExecutionPortV1>;
+  readonly now?: () => number;
+}
+
 function dependencies(
-  overrides: Partial<Rfc64SwmRecoveryCoordinatorDependenciesV1> = {},
+  overrides: DependencyOverrides = {},
 ): Rfc64SwmRecoveryCoordinatorDependenciesV1 {
   return {
-    selectedPublicContextGraphIds: () => [PUBLIC],
-    requestSelectedPublicAdmission: vi.fn(() => true),
-    isPeerAccepted: () => true,
-    isStarted: () => true,
-    disconnectBoundary: () => 0,
-    lastQueuedAt: () => 0,
-    recordQueuedAt: vi.fn(),
-    backoffRetryAt: () => null,
-    schedule: vi.fn(),
-    getProbe: vi.fn(async () => ({})),
-    accountAttempt: vi.fn(async (_peerId, _probe, attempt) => attempt(() => {})),
-    syncingPeers: new Set(),
-    getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
-    syncAuthorizedPlan: vi.fn(async () => completeSelectedResult()),
-    logInfo: vi.fn(),
-    onPeerSkippedNoSync: vi.fn(),
-    onPeerSynced: vi.fn((_peerId, outcome, accounting) => {
-      if (outcome !== undefined) accounting?.(outcome);
-    }),
-    now: () => 100_000,
-    ...overrides,
+    admission: {
+      selectedPublicContextGraphIds: () => [PUBLIC],
+      requestSelectedPublicAdmission: vi.fn(() => true),
+      isPeerAccepted: () => true,
+      isStarted: () => true,
+      disconnectBoundary: () => 0,
+      backoffRetryAt: () => null,
+      ...overrides.admission,
+    },
+    scheduling: {
+      schedule: vi.fn(),
+      getProbe: vi.fn(async () => ({})),
+      accountAttempt: vi.fn(async (_peerId, _probe, attempt) => attempt(() => {})),
+      ...overrides.scheduling,
+    },
+    execution: {
+      syncingPeers: () => new Set(),
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      syncAuthorizedPlan: vi.fn(async () => completeSelectedResult()),
+      logInfo: vi.fn(),
+      onPeerSkippedNoSync: vi.fn(),
+      onPeerSynced: vi.fn((_peerId, outcome, accounting) => {
+        if (outcome !== undefined) accounting?.(outcome);
+      }),
+      ...overrides.execution,
+    },
+    now: overrides.now ?? (() => 100_000),
   };
 }
 
@@ -85,13 +101,16 @@ describe('RFC-64 SWM recovery coordinator', () => {
         { contextGraphId: PUBLIC, lane: 'selected-public' },
       ],
     });
-    expect(deps.requestSelectedPublicAdmission).toHaveBeenCalledOnce();
-    expect(deps.requestSelectedPublicAdmission).toHaveBeenCalledWith(PROVIDER, [PUBLIC]);
+    expect(deps.admission.requestSelectedPublicAdmission).toHaveBeenCalledOnce();
+    expect(deps.admission.requestSelectedPublicAdmission).toHaveBeenCalledWith(
+      PROVIDER,
+      [PUBLIC],
+    );
   });
 
   it('drops a terminal public scope while retaining the same provider private lane', () => {
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
-      requestSelectedPublicAdmission: vi.fn(() => false),
+      admission: { requestSelectedPublicAdmission: vi.fn(() => false) },
     }));
 
     expect(coordinator.authorize(mixedPlan())).toEqual({
@@ -104,7 +123,7 @@ describe('RFC-64 SWM recovery coordinator', () => {
   it('drives queued private recovery through accounting and synchronization', async () => {
     let scheduled: (() => void) | undefined;
     const schedule = vi.fn((run: () => void) => { scheduled = run; });
-    const deps = dependencies({ schedule });
+    const deps = dependencies({ scheduling: { schedule } });
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
     const handleError = vi.fn();
 
@@ -113,13 +132,12 @@ describe('RFC-64 SWM recovery coordinator', () => {
       targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
     }, handleError, 0)).toBe(true);
     expect(schedule).toHaveBeenCalledOnce();
-    expect(deps.recordQueuedAt).toHaveBeenCalledWith(PROVIDER, 100_000);
     expect(scheduled).toBeTypeOf('function');
     scheduled!();
-    await vi.waitFor(() => expect(deps.syncAuthorizedPlan).toHaveBeenCalledOnce());
-    expect(deps.getProbe).toHaveBeenCalledWith(PROVIDER);
-    expect(deps.accountAttempt).toHaveBeenCalledOnce();
-    expect(deps.syncAuthorizedPlan).toHaveBeenCalledWith({
+    await vi.waitFor(() => expect(deps.execution.syncAuthorizedPlan).toHaveBeenCalledOnce());
+    expect(deps.scheduling.getProbe).toHaveBeenCalledWith(PROVIDER);
+    expect(deps.scheduling.accountAttempt).toHaveBeenCalledOnce();
+    expect(deps.execution.syncAuthorizedPlan).toHaveBeenCalledWith({
       kind: 'rfc64-authorized-swm-recovery-v1',
       providerPeerId: PROVIDER,
       targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
@@ -131,8 +149,10 @@ describe('RFC-64 SWM recovery coordinator', () => {
     let scheduled: (() => void) | undefined;
     const failure = new Error('probe failed');
     const deps = dependencies({
-      schedule: (run) => { scheduled = run; },
-      getProbe: vi.fn(async () => Promise.reject(failure)),
+      scheduling: {
+        schedule: (run) => { scheduled = run; },
+        getProbe: vi.fn(async () => Promise.reject(failure)),
+      },
     });
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
     const handleError = vi.fn();
@@ -143,40 +163,61 @@ describe('RFC-64 SWM recovery coordinator', () => {
     }, handleError, 0)).toBe(true);
     scheduled!();
     await vi.waitFor(() => expect(handleError).toHaveBeenCalledWith(PROVIDER, failure));
-    expect(deps.accountAttempt).not.toHaveBeenCalled();
-    expect(deps.syncAuthorizedPlan).not.toHaveBeenCalled();
+    expect(deps.scheduling.accountAttempt).not.toHaveBeenCalled();
+    expect(deps.execution.syncAuthorizedPlan).not.toHaveBeenCalled();
   });
 
   it('suppresses a plan inside the dedicated RFC-64 queue cooldown', () => {
-    const deps = dependencies({ lastQueuedAt: () => 99_999 });
+    const deps = dependencies();
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
 
     expect(coordinator.queue({
       providerPeerId: PROVIDER,
       targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
+    }, vi.fn(), 0)).toBe(true);
+    expect(coordinator.queue({
+      providerPeerId: PROVIDER,
+      targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
     }, vi.fn(), 0)).toBe(false);
-    expect(deps.recordQueuedAt).not.toHaveBeenCalled();
-    expect(deps.schedule).not.toHaveBeenCalled();
+    expect(deps.scheduling.schedule).toHaveBeenCalledOnce();
+  });
+
+  it('owns queue cleanup across rejected-peer clearing and stale pruning', () => {
+    let now = 100_000;
+    const deps = dependencies({ now: () => now });
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
+    const plan = {
+      providerPeerId: PROVIDER,
+      targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' as const }],
+    };
+
+    expect(coordinator.queue(plan, vi.fn(), 0)).toBe(true);
+    coordinator.clearPeer(PROVIDER);
+    expect(coordinator.queue(plan, vi.fn(), 0)).toBe(true);
+
+    now += 1;
+    coordinator.pruneQueueState(now, 1, () => false);
+    expect(coordinator.queue(plan, vi.fn(), 0)).toBe(true);
+    expect(deps.scheduling.schedule).toHaveBeenCalledTimes(3);
   });
 
   it('suppresses queueing during active reconciler backoff', () => {
-    const deps = dependencies({ backoffRetryAt: () => 100_001 });
+    const deps = dependencies({ admission: { backoffRetryAt: () => 100_001 } });
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
 
     expect(coordinator.queue({
       providerPeerId: PROVIDER,
       targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
     }, vi.fn(), 0)).toBe(false);
-    expect(deps.recordQueuedAt).not.toHaveBeenCalled();
-    expect(deps.schedule).not.toHaveBeenCalled();
+    expect(deps.scheduling.schedule).not.toHaveBeenCalled();
   });
 
   it('rechecks backoff when a delayed queued plan begins', async () => {
     let retryAt: number | null = null;
     let scheduled: (() => void) | undefined;
     const deps = dependencies({
-      backoffRetryAt: () => retryAt,
-      schedule: (run) => { scheduled = run; },
+      admission: { backoffRetryAt: () => retryAt },
+      scheduling: { schedule: (run) => { scheduled = run; } },
     });
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
 
@@ -187,20 +228,20 @@ describe('RFC-64 SWM recovery coordinator', () => {
     retryAt = 100_001;
     scheduled!();
     await Promise.resolve();
-    expect(deps.getProbe).not.toHaveBeenCalled();
-    expect(deps.accountAttempt).not.toHaveBeenCalled();
-    expect(deps.syncAuthorizedPlan).not.toHaveBeenCalled();
+    expect(deps.scheduling.getProbe).not.toHaveBeenCalled();
+    expect(deps.scheduling.accountAttempt).not.toHaveBeenCalled();
+    expect(deps.execution.syncAuthorizedPlan).not.toHaveBeenCalled();
   });
 
   it('executes the real mixed-plan runner with one typed authorized request', async () => {
     const syncAuthorizedPlan = vi.fn(async () => completeSelectedResult());
-    const deps = dependencies({ syncAuthorizedPlan });
+    const deps = dependencies({ execution: { syncAuthorizedPlan } });
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
     const authorized = coordinator.authorize(mixedPlan());
     expect(authorized).not.toBeNull();
 
     await expect(coordinator.execute(authorized!)).resolves.toBe('synced');
-    expect(deps.getPeerProtocols).toHaveBeenCalledWith(PROVIDER);
+    expect(deps.execution.getPeerProtocols).toHaveBeenCalledWith(PROVIDER);
     expect(syncAuthorizedPlan).toHaveBeenCalledOnce();
     expect(syncAuthorizedPlan).toHaveBeenCalledWith({
       kind: 'rfc64-authorized-swm-recovery-v1',

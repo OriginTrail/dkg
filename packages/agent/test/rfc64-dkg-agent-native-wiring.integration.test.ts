@@ -1257,7 +1257,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const authorizedPlans: unknown[] = [];
     vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
       .mockImplementation((plan) => {
-        const authorized = receiver.createRfc64SwmRecoveryCoordinatorV1().authorize(plan);
+        const authorized = receiver.authorizeRfc64SwmRecoveryPlanV1(plan);
         if (authorized === null) return false;
         authorizedPlans.push(authorized);
         return true;
@@ -1322,7 +1322,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const authorizedPlans: unknown[] = [];
     vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
       .mockImplementation((plan) => {
-        const authorized = receiver.createRfc64SwmRecoveryCoordinatorV1().authorize(plan);
+        const authorized = receiver.authorizeRfc64SwmRecoveryPlanV1(plan);
         if (authorized === null) return false;
         authorizedPlans.push(authorized);
         return true;
@@ -1389,7 +1389,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     }> = [];
     vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
       .mockImplementation((plan) => {
-        const authorized = receiver.createRfc64SwmRecoveryCoordinatorV1().authorize(plan);
+        const authorized = receiver.authorizeRfc64SwmRecoveryPlanV1(plan);
         if (authorized === null) return false;
         authorizedPlans.push(authorized);
         return true;
