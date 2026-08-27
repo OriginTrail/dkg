@@ -471,7 +471,11 @@ export class TripleStoreAsyncLiftPublisher
   /** Receipt tasks that continue after the RPC-acceptance fast return. */
   private readonly detachedExecutions = new Map<string, Promise<void>>();
   /** Poked when a tx-bearing job stops being executor-owned; see setReconciliationDemandListener. */
-  private reconciliationDemandListener?: () => void;
+  /** The one atomically-attached scheduling owner; see attachScheduler. */
+  private schedulerListener?: {
+    onReconciliationDemand(): void;
+    onWalletRelease(walletId: string): void;
+  };
   /**
    * Rotates the live-lane iteration start across passes. The pass deadline may truncate the walk,
    * and `list()` order is stable, so without rotation the same head jobs would be re-asked every
@@ -1144,14 +1148,18 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   readonly reconciliationScheduling = {
-    // Exclusive attachment: reconciliation demand has exactly one owner (the scheduling
-    // runner); attaching takes over. See the interface doc for the ownership/handover contract.
-    attachDemandListener: (listener: () => void): (() => void) => {
-      this.reconciliationDemandListener = listener;
+    // Exclusive, ATOMIC attachment: scheduling has exactly one owner (the runner); attaching
+    // takes over BOTH callbacks together, so ownership can never be split between runner
+    // incarnations. See the interface doc for the ownership/handover contract.
+    attachScheduler: (scheduler: {
+      onReconciliationDemand(): void;
+      onWalletRelease(walletId: string): void;
+    }): (() => void) => {
+      this.schedulerListener = scheduler;
       return () => {
         // Detaches only THIS attachment — a stale detach from a superseded owner is a no-op.
-        if (this.reconciliationDemandListener === listener) {
-          this.reconciliationDemandListener = undefined;
+        if (this.schedulerListener === scheduler) {
+          this.schedulerListener = undefined;
         }
       };
     },
@@ -1203,7 +1211,7 @@ export class TripleStoreAsyncLiftPublisher
    */
   private notifyReconciliationDemand(): void {
     try {
-      this.reconciliationDemandListener?.();
+      this.schedulerListener?.onReconciliationDemand();
     } catch {
       // The listener belongs to the caller's scheduler; its failure must not touch job state.
     }
@@ -1227,8 +1235,11 @@ export class TripleStoreAsyncLiftPublisher
       // stays where it is, transaction-bearing and unclaimable, until a node with a chain-proof
       // resolver reconciles it or an operator clears it by id.
       if (job.status === 'broadcast' && !getLiftJobTransactionEvidence(job)) {
-        await this.releaseWalletLockForJob(job);
+        // Reset BEFORE release: the release poke is a one-shot claim invitation, so the
+        // accepted state must already be claim-visible when it fires — the reverse order let
+        // the woken loop find nothing and park while the reset committed unannounced.
         await this.writeJob(this.resetJobToAccepted(job, 'broadcast', undefined), 'recover-reset');
+        await this.releaseWalletLockForJob(job);
         return true;
       }
       // Evidence-bearing (or 'included'): keep the signing wallet reserved.
@@ -1318,7 +1329,7 @@ export class TripleStoreAsyncLiftPublisher
         return true;
       }
       if (resolution.status === 'not-found' && queuedLiftOperationKind(recoverable) === 'create') {
-        await this.releaseWalletLockForJob(recoverable);
+        // Reset BEFORE release — see the evidence-free reset above for why the order matters.
         await this.writeJob(buildLiftJobAcceptedReset(recoverable, {
           now: this.now(),
           recoveredFrom: recoverable.status,
@@ -1331,6 +1342,7 @@ export class TripleStoreAsyncLiftPublisher
             ? { nonceChecked: recoverable.broadcast.nonce }
             : {}),
         }), 'recover-reset');
+        await this.releaseWalletLockForJob(recoverable);
         return true;
       }
       // Pending, unrecognized, inconclusive, and update absence establish no
@@ -1825,11 +1837,12 @@ export class TripleStoreAsyncLiftPublisher
         const current = await this.getStatus(snapshot.jobId);
         if (!current || (current.status !== 'claimed' && current.status !== 'validated')) return;
         if (this.activeProcessJobIds.has(current.jobId)) return;
-        await this.releaseWalletLockForJob(current);
+        // Reset BEFORE release — the release poke must find the accepted state claim-visible.
         await this.writeJob(
           this.resetJobToAccepted(current, current.status, getLiftJobTransactionEvidence(current)),
           'recover-reset',
         );
+        await this.releaseWalletLockForJob(current);
         recovered += 1;
       });
     }
@@ -2096,11 +2109,12 @@ export class TripleStoreAsyncLiftPublisher
         // has just proven does not exist: it could never be proven a second time, because nothing
         // new was ever sent. A later attempt that actually signs something records fresh broadcast
         // evidence, and that holds unconditionally.
-        await this.releaseWalletLockForJob(job);
+        // Reset BEFORE release — the release poke must find the accepted state claim-visible.
         await this.writeJob(
           resetFailedLiftJobToAccepted(job, this.now(), { txHashAccounted: true }),
           'recover-reset',
         );
+        await this.releaseWalletLockForJob(job);
         return 1;
       }
       case 'hold':
@@ -2521,6 +2535,21 @@ export class TripleStoreAsyncLiftPublisher
 
   private async deleteWalletLock(walletId: string): Promise<void> {
     await this.store.deleteByPattern({ subject: walletLockSubject(walletId), graph: this.walletLockGraphUri });
+    // The ONE release choke point (finalize, proven-ineffective reset, stale sweep all funnel
+    // here): the wallet just became claimable, so invite its claim loop instead of leaving the
+    // free wallet to idle out the poll.
+    this.notifyWalletRelease(walletId);
+  }
+
+  // Scheduling-only — the claim attempt re-checks every guard — and it must never throw into
+  // the release path: the listener belongs to the caller's scheduler, and its failure must not
+  // touch lock state.
+  private notifyWalletRelease(walletId: string): void {
+    try {
+      this.schedulerListener?.onWalletRelease(walletId);
+    } catch {
+      // See above: scheduler failures stay the scheduler's problem.
+    }
   }
 
   private async readWalletLock(walletId: string): Promise<{
@@ -2603,7 +2632,17 @@ export class TripleStoreAsyncLiftPublisher
     const walletId = job.claim?.walletId;
     if (!walletId) return;
     const currentLock = await this.readWalletLock(walletId);
-    if (!currentLock) return;
+    if (!currentLock) {
+      // The lock is already gone: someone else (typically the stale sweep, which runs BEFORE
+      // the recovery pass resets this job) deleted it and fired its wake while this job was
+      // not yet claim-visible — a one-shot invitation consumed on nothing. This caller's own
+      // transition IS visible by now (reset sites write before releasing), so re-invite the
+      // claim loop; without this, a sweep-then-reset recovery idles out the poll (r3
+      // 3874961042). Extra pokes are safe — the wake latches, and the claim re-checks
+      // every guard.
+      this.notifyWalletRelease(walletId);
+      return;
+    }
     if (!this.lockMatchesJob(currentLock, job)) return;
     await this.deleteWalletLock(walletId);
   }

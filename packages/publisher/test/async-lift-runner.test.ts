@@ -69,6 +69,41 @@ describe('AsyncLiftRunner', () => {
     await expect(runner.stop()).resolves.toBeUndefined();
   });
 
+  it('degrades to cadence-and-poll scheduling for a pre-scheduler capability object', async () => {
+    // The advertised runtime-compat path for the capability shape from before attachScheduler:
+    // reconcile/recover exist but the attachment method does not. start() must not throw on the
+    // missing method, and both the poll loop and the reconcile cadence must keep running.
+    let processCalls = 0;
+    let reconcileCalls = 0;
+    const publisher = createPublisher({
+      processNext: async () => {
+        processCalls += 1;
+        return null;
+      },
+      reconciliationScheduling: {
+        attachDemandListener: () => () => {},
+        reconcile: async () => {
+          reconcileCalls += 1;
+          return { reconciled: 0, pendingWork: false };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
+      },
+    } as never);
+
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 5,
+    });
+    await runner.start();
+    await waitFor(() => {
+      expect(processCalls).toBeGreaterThanOrEqual(2);
+      expect(reconcileCalls).toBeGreaterThanOrEqual(1);
+    });
+    await expect(runner.stop()).resolves.toBeUndefined();
+  });
+
   it('can recover in paused maintenance mode before wallet processing starts', async () => {
     const order: string[] = [];
     let paused = false;
@@ -471,8 +506,8 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachDemandListener: (listener: () => void) => {
-          demand = listener;
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
           return () => { demand = undefined; };
         },
         reconcile: async () => {
@@ -505,8 +540,8 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachDemandListener: (listener: () => void) => {
-          demand = listener;
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
           return () => {};
         },
         reconcile: async () => {
@@ -544,7 +579,7 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachDemandListener: () => () => {},
+        attachScheduler: () => () => {},
         reconcile: async () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: pending };
@@ -580,8 +615,8 @@ describe('AsyncLiftRunner', () => {
     const errors: unknown[] = [];
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachDemandListener: (listener: () => void) => {
-          demand = listener;
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
           return () => {};
         },
         reconcile: async () => {
@@ -619,8 +654,8 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachDemandListener: (listener: () => void) => {
-          demand = listener;
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
           return () => { demand = undefined; };
         },
         reconcile: async () => {
@@ -656,8 +691,8 @@ describe('AsyncLiftRunner', () => {
     const errors: unknown[] = [];
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachDemandListener: (listener: () => void) => {
-          demand = listener;
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
           return () => {};
         },
         reconcile: async () => {
@@ -692,7 +727,7 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachDemandListener: () => () => {},
+        attachScheduler: () => () => {},
         reconcile: async () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: true };
@@ -737,7 +772,7 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachDemandListener: () => () => {},
+        attachScheduler: () => () => {},
         reconcile: async () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: true };
@@ -779,7 +814,7 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachDemandListener: () => () => {},
+        attachScheduler: () => () => {},
         reconcile: async () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: true };
@@ -817,7 +852,7 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachDemandListener: () => () => {},
+        attachScheduler: () => () => {},
         reconcile: async () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: false };
@@ -849,6 +884,51 @@ describe('AsyncLiftRunner', () => {
       walletIds: ['wallet-1'],
       activeRecoveryIntervalMs: 2_147_483_648,
     })).toThrow(/1 through 2147483647 ms/);
+  });
+
+  it('runs a demanded pass immediately after a successful pass, unfloored by errorBackoffMs', async () => {
+    vi.useFakeTimers();
+    let demand!: () => void;
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
+          return () => {};
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: false };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 600_000,
+      recoveryIntervalMs: 600_000,
+      // Parked ten minutes out: the errorBackoff floor paces FAILURES only; a wake following the
+      // (successful) startup recovery must not wait it out.
+      errorBackoffMs: 600_000,
+    });
+    try {
+      await runner.start();
+      expect(reconciliationCalls).toBe(0);
+      demand();
+      await vi.advanceTimersByTimeAsync(5);
+      expect(reconciliationCalls).toBe(1);
+      // The load-bearing half: a SECOND demanded pass right after a SUCCESSFUL first one must
+      // also run immediately. A floor keyed to attempts (rather than failures) would anchor to
+      // pass 1's start and park this wake for the full parked backoff.
+      demand();
+      await vi.advanceTimersByTimeAsync(5);
+      expect(reconciliationCalls).toBe(2);
+    } finally {
+      const stopping = runner.stop();
+      await stopping;
+      vi.useRealTimers();
+    }
   });
 
   it('stops cleanly while idle without scheduling extra work', async () => {
