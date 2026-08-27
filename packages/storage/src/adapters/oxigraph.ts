@@ -436,7 +436,7 @@ export class OxigraphStore implements TripleStore {
     }
     this.store.update(buildAtomicSubjectsReplaceUpdate(graphUri, replacements));
     this.scheduleFlush();
-    this.writeGen.recordGraphWrites([graphUri]);
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {

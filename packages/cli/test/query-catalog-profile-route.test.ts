@@ -108,7 +108,7 @@ describe('/api/profile/query-catalog/read', () => {
       sparql: { value: 'SELECT ?record WHERE { ?record ?p ?o }' },
       queryParameters: { value: '[{"name":"configurationId","type":"string"}]' },
       executionView: { value: 'verifiable-memory' },
-      view: { value: 'working-memory' },
+      view: { value: 'verifiable-memory' },
     }];
     const query = vi.fn(async (sparql: string, options?: Record<string, unknown>) => {
       expect(sparql).toContain('?queryParameters ?executionView ?view');
@@ -153,6 +153,31 @@ describe('/api/profile/query-catalog/read', () => {
         })],
       },
     });
+  });
+
+  it('returns 422 for invalid or conflicting stored execution views', async () => {
+    for (const binding of [
+      {
+        q: 'urn:dkg:profile:test:query:invalid-view',
+        sparql: 'SELECT * WHERE {}',
+        subGraph: '__context_graph',
+        executionView: 'verifiable-memroy',
+      },
+      {
+        q: 'urn:dkg:profile:test:query:conflicting-view',
+        sparql: 'SELECT * WHERE {}',
+        subGraph: '__context_graph',
+        executionView: 'working-memory',
+        view: 'verifiable-memory',
+      },
+    ]) {
+      const { context, response } = queryCatalogReadContext({
+        store: { query: vi.fn(async () => ({ type: 'bindings' as const, bindings: [binding] })) },
+      });
+      await handleMemoryRoutes(context);
+      expect(response.statusCode).toBe(422);
+      expect(JSON.parse(response.body)).toMatchObject({ code: 'QUERY_CATALOG_INVALID_DATA' });
+    }
   });
 
   it('normalizes legacy ListenerBoi entries for canonical and base binding clients', async () => {

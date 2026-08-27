@@ -829,18 +829,12 @@ export class SparqlHttpStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.replaceSubjects',
     });
-    try {
-      await this.postUpdate(
-        buildAtomicSubjectsReplaceUpdate(graphUri, replacements),
-        { ...options, source: options?.source ?? 'sparql-http.replaceSubjects' },
-        'replaceSubjects',
-      );
-    } catch (error) {
-      this.invalidateListGraphsCache();
-      throw error;
-    }
-    this.invalidateListGraphsCache();
-    this.writeGen.recordGraphWrites([graphUri]);
+    await this.runRemoteGraphMutation({
+      scope: { kind: 'graphs', graphs: [graphUri] },
+      update: buildAtomicSubjectsReplaceUpdate(graphUri, replacements),
+      options: { ...options, source: options?.source ?? 'sparql-http.replaceSubjects' },
+      operation: 'replaceSubjects',
+    });
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {

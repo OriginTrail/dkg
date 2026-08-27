@@ -368,8 +368,18 @@ type LegacyApiQueryResult = {
 
 export type PublicApiQueryResult =
   | { type: 'bindings'; bindings: Array<Record<string, string>> }
-  | { type: 'quads'; quads: Array<{ subject: string; predicate: string; object: string; graph: string }> }
-  | { type: 'boolean'; value: boolean };
+  | {
+      type: 'quads';
+      quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+      /** Compatibility field retained for pre-discriminant clients. */
+      bindings: [];
+    }
+  | {
+      type: 'boolean';
+      value: boolean;
+      /** Compatibility field retained for pre-discriminant clients. */
+      bindings: Array<{ result: string }>;
+    };
 
 /** Normalize the legacy engine shape at the public daemon boundary. */
 export function normalizePublicApiQueryResult(
@@ -378,11 +388,12 @@ export function normalizePublicApiQueryResult(
 ): PublicApiQueryResult {
   const operation = classifySparqlOperation(sparql);
   if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
-    return { type: 'quads', quads: result.quads ?? [] };
+    return { type: 'quads', quads: result.quads ?? [], bindings: [] };
   }
   if (operation.kind === 'read' && operation.form === 'ASK') {
     const raw = result.bindings[0]?.result;
-    return { type: 'boolean', value: String(raw).toLowerCase() === 'true' };
+    const value = String(raw).toLowerCase() === 'true';
+    return { type: 'boolean', value, bindings: [{ result: String(value) }] };
   }
   return { type: 'bindings', bindings: result.bindings };
 }

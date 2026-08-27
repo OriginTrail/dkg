@@ -61,6 +61,23 @@ describe('query catalog codec', () => {
     }])[0]?.view).toBe('working-memory');
   });
 
+  it('rejects invalid and conflicting persisted execution views', () => {
+    const row = {
+      q: 'urn:dkg:profile:test:query:trace',
+      catalog: 'urn:dkg:profile:test:catalog:operations',
+      sparql: 'SELECT * WHERE {}',
+      subGraph: 'incidents',
+    };
+    expect(() => decodeQueryCatalogBindings([
+      { ...row, executionView: 'verifiable-memroy' },
+    ])).toThrow(/unsupported executionView value/);
+    expect(() => decodeQueryCatalogBindings([{
+      ...row,
+      executionView: 'working-memory',
+      view: 'verifiable-memory',
+    }])).toThrow(/conflicting executionView and view values/);
+  });
+
   it('round-trips canonical items as one deterministic legacy binding row', () => {
     const decoded = decodeQueryCatalogBindings([{
       q: 'urn:dkg:profile:test:query:trace',

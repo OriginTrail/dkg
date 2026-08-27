@@ -100,4 +100,12 @@ describe('query catalog parameters', () => {
       { value: 'safe' },
     )).toThrow(/complete SPARQL term position/);
   });
+
+  it('recognizes placeholders after compact less-than comparisons', () => {
+    expect(renderQueryCatalogTemplate(
+      'SELECT ?score WHERE { ?s <urn:score> ?score . FILTER(?score<{{maximum}}) }',
+      [{ name: 'maximum', type: 'number' }],
+      { maximum: 10 },
+    )).toBe('SELECT ?score WHERE { ?s <urn:score> ?score . FILTER(?score<10) }');
+  });
 });

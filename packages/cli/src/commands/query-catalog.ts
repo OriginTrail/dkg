@@ -125,9 +125,21 @@ function parseQueryParameterValues(entries: readonly string[]): Record<string, s
   return values;
 }
 
+function qualifiedSavedQuerySelector(item: QueryCatalogItem): string {
+  return `${item.subGraph}/${item.catalogSlug}/${item.slug}`;
+}
+
 function findSavedQuery(items: QueryCatalogItem[], selector: string): QueryCatalogItem | undefined {
-  return items.find((item) => item.slug === selector)
-    ?? items.find((item) => item.name === selector);
+  const qualified = items.filter((item) => qualifiedSavedQuerySelector(item) === selector);
+  if (qualified.length === 1) return qualified[0];
+  const matches = items.filter((item) => item.slug === selector || item.name === selector);
+  if (matches.length > 1) {
+    throw new Error(
+      `Saved query selector is ambiguous: ${selector}. Use one of: `
+      + matches.map(qualifiedSavedQuerySelector).join(', '),
+    );
+  }
+  return matches[0];
 }
 
 // ─── dkg query-catalog ───────────────────────────────────────────────
@@ -152,6 +164,7 @@ queryCatalogCmd
         console.log(`  Name:        ${item.name}`);
         console.log(`  Catalog:     ${item.catalogName} (${item.catalogSlug})`);
         console.log(`  Sub-graph:   ${item.subGraph}`);
+        console.log(`  Selector:    ${qualifiedSavedQuerySelector(item)}`);
         if (item.resultColumn) console.log(`  Result col:  ${item.resultColumn}`);
         if (item.parameters.length > 0) {
           console.log(`  Parameters:  ${item.parameters.map(parameter => `${parameter.name}:${parameter.type}`).join(', ')}`);

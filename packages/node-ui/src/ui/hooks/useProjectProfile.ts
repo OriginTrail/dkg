@@ -486,7 +486,7 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
     (async () => {
       setLoading(true);
       try {
-        const [rootRows, sgRows, typeRows, viewRows, chipRows, queryCatalogRows] = await Promise.all([
+        const [rootRows, sgRows, typeRows, viewRows, chipRows, queryCatalogOutcome] = await Promise.all([
           runProjectQuery(buildProfileRootQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildSubGraphBindingsQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildTypeBindingsQuery(contextGraphId), contextGraphId).catch(() => []),
@@ -496,7 +496,12 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
           // which is intentionally outside the scoped `/api/query` graph
           // allow-list. Use the dedicated profile endpoint so persisted
           // catalogs are not silently mistaken for an empty result.
-          readProjectQueryCatalog(contextGraphId),
+          readProjectQueryCatalog(contextGraphId)
+            .then(rows => ({ rows, error: undefined }))
+            .catch((catalogError: unknown) => ({
+              rows: [],
+              error: catalogError instanceof Error ? catalogError.message : String(catalogError),
+            })),
         ]);
         if (cancelled) return;
 
@@ -592,12 +597,13 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
         }
         chipsBySgRef.current = chipsBySg;
 
-        const queryCatalogState = buildQueryCatalogStateFromItems(queryCatalogRows);
+        const queryCatalogState = buildQueryCatalogStateFromItems(queryCatalogOutcome.rows);
         setQueryCatalogs(queryCatalogState.queryCatalogs);
         setSavedQueries(queryCatalogState.savedQueries);
         queryCatalogsBySgRef.current = queryCatalogState.catalogsBySubGraph;
         queriesBySgRef.current = queryCatalogState.queriesBySubGraph;
         loadedContextGraphIdRef.current = contextGraphId;
+        if (queryCatalogOutcome.error) setError(queryCatalogOutcome.error);
       } catch (err: any) {
         if (!cancelled) setError(err?.message ?? String(err));
       } finally {

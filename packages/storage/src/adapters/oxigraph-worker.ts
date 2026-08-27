@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, SubjectReplacement, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.js';
+import { StoreResponseTooLargeError } from '../http-response-limit.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -690,10 +691,25 @@ export class OxigraphWorkerStore implements TripleStore {
   }
   async replaceSubjects(graphUri: string, replacements: SubjectReplacement[]): Promise<void> {
     await this.call('replaceSubjects', graphUri, replacements);
-    this.writeGen.recordGraphWrites([graphUri]);
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
-    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
+    const result = await this.callWithTimeout<QueryResult>(
+      this.operationTimeoutMs,
+      options?.signal,
+      'query',
+      sparql,
+    );
+    if (options?.maxResponseBytes !== undefined) {
+      if (!Number.isSafeInteger(options.maxResponseBytes) || options.maxResponseBytes < 0) {
+        throw new RangeError('maxResponseBytes must be a non-negative safe integer');
+      }
+      const actualBytes = Buffer.byteLength(JSON.stringify(result));
+      if (actualBytes > options.maxResponseBytes) {
+        throw new StoreResponseTooLargeError(options.maxResponseBytes, actualBytes);
+      }
+    }
+    return result;
   }
   async hasGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<boolean> {
     return this.callWithTimeout<boolean>(this.operationTimeoutMs, options?.signal, 'hasGraph', graphUri);

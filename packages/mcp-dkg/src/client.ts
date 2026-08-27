@@ -6,6 +6,7 @@
  * `/api/context-graph/*`).
  */
 import type { DkgConfig } from './config.js';
+import { classifySparqlOperation } from '@origintrail-official/dkg-core';
 
 export interface SparqlBinding {
   [key: string]: {
@@ -34,7 +35,7 @@ export type SparqlResult =
   | {
       type: 'quads';
       head?: never;
-      bindings?: never;
+      bindings?: SparqlBinding[];
       quads: Array<{
     subject: string;
     predicate: string;
@@ -46,7 +47,7 @@ export type SparqlResult =
   | {
       type: 'boolean';
       head?: never;
-      bindings?: never;
+      bindings?: SparqlBinding[];
       quads?: never;
       value: boolean;
     };
@@ -54,6 +55,36 @@ export type SparqlResult =
 export interface QueryResponse {
   result: SparqlResult;
   phases?: Record<string, number>;
+}
+
+function normalizeDaemonQueryResult(result: unknown, sparql: string): SparqlResult {
+  const raw = result && typeof result === 'object' && !Array.isArray(result)
+    ? result as Record<string, unknown>
+    : {};
+  if (raw.type === 'boolean' && typeof raw.value === 'boolean') {
+    return { type: 'boolean', value: raw.value };
+  }
+  if (raw.type === 'quads' && Array.isArray(raw.quads)) {
+    return { type: 'quads', quads: raw.quads as SparqlQuad[] };
+  }
+  if (raw.type === 'bindings' && Array.isArray(raw.bindings)) {
+    return { type: 'bindings', bindings: raw.bindings as SparqlBinding[] };
+  }
+
+  const operation = classifySparqlOperation(sparql);
+  const bindings = Array.isArray(raw.bindings) ? raw.bindings as SparqlBinding[] : [];
+  if (operation.kind === 'read' && operation.form === 'ASK') {
+    const resultValue = bindings[0]?.result;
+    const flattened = typeof resultValue === 'string' ? resultValue : resultValue?.value;
+    return { type: 'boolean', value: String(flattened).toLowerCase() === 'true' };
+  }
+  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
+    return {
+      type: 'quads',
+      quads: Array.isArray(raw.quads) ? raw.quads as SparqlQuad[] : [],
+    };
+  }
+  return { type: 'bindings', bindings };
 }
 
 export interface ProjectRow {
@@ -467,8 +498,8 @@ export class DkgClient {
     if (args.agentAddress) body.agentAddress = args.agentAddress;
     if (args.minTrust != null) body.minTrust = args.minTrust;
 
-    const r = await this.request<QueryResponse>('POST', '/api/query', body);
-    return r.result ?? { type: 'bindings', bindings: [] };
+    const r = await this.request<{ result?: unknown }>('POST', '/api/query', body);
+    return normalizeDaemonQueryResult(r.result, args.sparql);
   }
 
   /**

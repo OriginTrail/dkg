@@ -21,6 +21,7 @@ import {
   OxigraphStore,
   createTripleStore,
   tryReplaceSubjectAtomically,
+  tryReplaceSubjectsAtomically,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -74,6 +75,7 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     try {
       // The direct regression: the wrapper forwards the optional capability.
       expect(typeof agentStore.replaceSubject).toBe('function');
+      expect(typeof agentStore.replaceSubjects).toBe('function');
 
       // Seed the job subject + a co-located request subject (separate subject).
       await agentStore.insert([
@@ -122,6 +124,20 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       expect(await agentStore.listGraphs()).toContain(removable);
       expect(await tryReplaceSubjectAtomically(agentStore, removable, 'urn:s:only', [])).toBe(true);
       expect(await agentStore.listGraphs()).not.toContain(removable);
+
+      const batchA = 'urn:dkg:profile:test:catalog:smoke';
+      const batchB = 'urn:dkg:profile:test:query:smoke';
+      expect(await tryReplaceSubjectsAtomically(agentStore, GRAPH, [
+        { subject: batchA, quads: [quad(batchA, 'urn:p:name', '"catalog"')] },
+        { subject: batchB, quads: [quad(batchB, 'urn:p:name', '"query"')] },
+      ])).toBe(true);
+      const batchRows = await agentStore.query(
+        `SELECT ?s WHERE { GRAPH <${GRAPH}> { ?s <urn:p:name> ?name } } ORDER BY ?s`,
+      );
+      expect(batchRows.type === 'bindings' ? batchRows.bindings : []).toEqual([
+        { s: batchA },
+        { s: batchB },
+      ]);
     } finally {
       await agentStore.close();
     }

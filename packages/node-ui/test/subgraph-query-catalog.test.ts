@@ -142,4 +142,29 @@ describe('SubGraphDetailView query catalog execution', () => {
     expect(apiMocks.executeQuery).not.toHaveBeenCalled();
     expect(onOpenQueryCatalog).toHaveBeenCalledTimes(1);
   });
+
+  it('does not present ASK or graph results as an empty entity filter', async () => {
+    apiMocks.executeQuery.mockResolvedValueOnce({ result: { type: 'boolean', value: true } });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile() },
+          React.createElement(SubGraphDetailView, {
+            slug: 'incidents',
+            rawMemory,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+          })),
+      );
+    });
+
+    const button = Array.from(container.querySelectorAll('button'))
+      .find((candidate) => candidate.textContent?.includes('Open incidents'))!;
+    await act(async () => button.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(container.textContent).toContain('query failed');
+    expect(container.textContent).toContain('Demo entity');
+  });
 });

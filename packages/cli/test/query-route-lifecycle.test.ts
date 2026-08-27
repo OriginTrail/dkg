@@ -79,7 +79,7 @@ describe('/api/query request lifecycle', () => {
     expect(normalizePublicApiQueryResult(
       'PREFIX ex: <urn:ex:> ASK { ?s ex:p ?o }',
       { bindings: [{ result: 'true' }] },
-    )).toEqual({ type: 'boolean', value: true });
+    )).toEqual({ type: 'boolean', value: true, bindings: [{ result: 'true' }] });
     expect(normalizePublicApiQueryResult(
       'PREFIX ex: <urn:ex:> DESCRIBE ?s WHERE { ?s ex:p ?o }',
       {
@@ -89,6 +89,7 @@ describe('/api/query request lifecycle', () => {
     )).toEqual({
       type: 'quads',
       quads: [{ subject: 'urn:s', predicate: 'urn:ex:p', object: 'urn:o', graph: 'urn:g' }],
+      bindings: [],
     });
   });
 

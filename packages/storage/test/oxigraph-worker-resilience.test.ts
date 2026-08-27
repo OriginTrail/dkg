@@ -154,6 +154,22 @@ describe('OxigraphWorkerStore resilience', () => {
     },
   ];
 
+  it('enforces the caller response budget on materialized worker results', async () => {
+    const store = makeStore();
+    try {
+      await store.insert([quadFor(GRAPH_A)]);
+      await expect(store.query(
+        'SELECT ?s ?p ?o WHERE { GRAPH <urn:test:tracked:a> { ?s ?p ?o } }',
+        { maxResponseBytes: 8 },
+      )).rejects.toMatchObject({
+        code: 'STORE_RESPONSE_TOO_LARGE',
+        maxBytes: 8,
+      });
+    } finally {
+      await closeQuietly(store);
+    }
+  });
+
   it.each(mutationCases.flatMap((mutation) => [
     { ...mutation, outcome: 'resolve' as const },
     { ...mutation, outcome: 'reject' as const },

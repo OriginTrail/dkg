@@ -10,6 +10,7 @@ import {
   USER_QUERY_CATALOG_SLUG,
   buildQueryCatalogWrite,
   prepareQueryCatalogExecution,
+  queryCatalogSlug,
 } from '@origintrail-official/dkg-core/query-catalog';
 import { useFetch } from '../../../hooks.js';
 import { executeQuery, writeProfileQueryCatalog, type QueryExecutionView } from '../../../api.js';
@@ -135,18 +136,22 @@ function buildSavedQueryWrite(
   sparql: string,
   parameters: readonly QueryCatalogParameterDefinition[] = [],
   view?: QueryExecutionView,
+  subGraph: string = CONTEXT_GRAPH_QUERY_SUBGRAPH,
 ): {
   query: SavedCatalogQuery;
   quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
 } {
   const rank = Date.now();
+  const catalogSlug = subGraph === CONTEXT_GRAPH_QUERY_SUBGRAPH
+    ? USER_QUERY_CATALOG_SLUG
+    : `${USER_QUERY_CATALOG_SLUG}-${queryCatalogSlug(subGraph)}`;
   const write = buildQueryCatalogWrite({
     contextGraphId,
     name,
     description: description || undefined,
     sparql,
-    subGraph: CONTEXT_GRAPH_QUERY_SUBGRAPH,
-    catalogSlug: USER_QUERY_CATALOG_SLUG,
+    subGraph,
+    catalogSlug,
     catalogName: USER_QUERY_CATALOG_NAME,
     catalogDescription: USER_QUERY_CATALOG_DESCRIPTION,
     rank,
@@ -156,8 +161,8 @@ function buildSavedQueryWrite(
   });
   const query: SavedCatalogQuery = {
     slug: write.savedQuery.slug,
-    subGraph: CONTEXT_GRAPH_QUERY_SUBGRAPH,
-    catalogSlug: USER_QUERY_CATALOG_SLUG,
+    subGraph,
+    catalogSlug,
     catalogName: USER_QUERY_CATALOG_NAME,
     catalogDescription: USER_QUERY_CATALOG_DESCRIPTION,
     catalogRank: 50,
@@ -173,7 +178,7 @@ function buildSavedQueryWrite(
 }
 
 function appendSavedQueryCatalog(catalogs: QueryCatalog[], query: SavedCatalogQuery): QueryCatalog[] {
-  const key = `${CONTEXT_GRAPH_QUERY_SUBGRAPH}|${USER_QUERY_CATALOG_SLUG}`;
+  const key = `${query.subGraph}|${query.catalogSlug}`;
   const next = catalogs.map(catalog => ({
     ...catalog,
     queries: [...catalog.queries],
@@ -186,8 +191,8 @@ function appendSavedQueryCatalog(catalogs: QueryCatalog[], query: SavedCatalogQu
   return [
     ...next,
     {
-      slug: USER_QUERY_CATALOG_SLUG,
-      subGraph: CONTEXT_GRAPH_QUERY_SUBGRAPH,
+      slug: query.catalogSlug,
+      subGraph: query.subGraph,
       name: USER_QUERY_CATALOG_NAME,
       description: USER_QUERY_CATALOG_DESCRIPTION,
       rank: 50,
@@ -334,8 +339,18 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     0,
   );
 
-  const executionMatchesSession = session.kind !== 'catalog'
-    || activeExecution.sourceKey === session.key;
+  const executionMatchesSession = useMemo(() => {
+    if (session.kind !== 'catalog') return true;
+    if (activeExecution.sourceKey !== session.key) return false;
+    try {
+      const expected = prepareQueryCatalogExecution(session.query, session.values);
+      return expected.sparql === activeExecution.sparql
+        && expected.view === activeExecution.view
+        && expected.subGraphName === activeExecution.subGraphName;
+    } catch {
+      return false;
+    }
+  }, [activeExecution, session]);
   const queryResult = executionMatchesSession
     ? (data as any)?.result ?? (data as any)?.results
     : undefined;
@@ -399,6 +414,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       && execution.view === activeExecution.view
       && execution.subGraphName === activeExecution.subGraphName
     ) {
+      setActiveExecution(execution);
       refresh();
       return;
     }
@@ -442,6 +458,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       && activeExecution.view === execution.view
       && activeExecution.subGraphName === execution.subGraphName
     ) {
+      setActiveExecution(execution);
       refresh();
       return;
     }
@@ -485,6 +502,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         sparql,
         selectedTemplate?.parameters ?? [],
         selectedTemplate?.view,
+        selectedTemplate?.subGraph ?? CONTEXT_GRAPH_QUERY_SUBGRAPH,
       );
       await writeProfileQueryCatalog(contextGraphId, quads);
       setLocalSavedCatalogs(prev => appendSavedQueryCatalog(prev, query));

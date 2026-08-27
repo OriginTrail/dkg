@@ -272,7 +272,12 @@ function scanQueryCatalogTemplatePlaceholders(
       index += 1;
       continue;
     }
-    if (char === '<' && template[index + 1] !== '=' && !/\s/.test(template[index + 1] ?? '')) {
+    if (
+      char === '<'
+      && template[index + 1] !== '='
+      && template[index + 1] !== '{'
+      && !/\s/.test(template[index + 1] ?? '')
+    ) {
       inIri = true;
       index += 1;
       continue;

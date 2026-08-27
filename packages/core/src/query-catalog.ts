@@ -149,6 +149,15 @@ function parseView(value: string): GetView | undefined {
   return (GET_VIEWS as readonly string[]).includes(value) ? value as GetView : undefined;
 }
 
+function parseStoredView(value: string, field: string, queryIri: string): GetView | undefined {
+  if (!value) return undefined;
+  const parsed = parseView(value);
+  if (!parsed) {
+    throw new Error(`Saved query ${queryIri} has unsupported ${field} value: ${value}.`);
+  }
+  return parsed;
+}
+
 /** Migration rule for catalogs authored before executionView was persisted. */
 export function legacyQueryCatalogExecutionView(
   queryIri: string,
@@ -186,9 +195,16 @@ export function decodeQueryCatalogBindings(
       ':catalog:',
       USER_QUERY_CATALOG_SLUG,
     );
-    const explicitView = parseView(
-      oneValue(rows, 'executionView', queryIri) || oneValue(rows, 'view', queryIri),
+    const executionView = parseStoredView(
+      oneValue(rows, 'executionView', queryIri),
+      'executionView',
+      queryIri,
     );
+    const legacyView = parseStoredView(oneValue(rows, 'view', queryIri), 'view', queryIri);
+    if (executionView && legacyView && executionView !== legacyView) {
+      throw new Error(`Saved query ${queryIri} has conflicting executionView and view values.`);
+    }
+    const explicitView = executionView ?? legacyView;
     items.push({
       queryIri,
       catalogIri,

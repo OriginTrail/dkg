@@ -110,4 +110,32 @@ describe('dkg query-catalog command', () => {
       expect.stringContaining('Missing required query parameter: configurationId'),
     );
   });
+
+  it('rejects ambiguous short selectors and accepts a qualified selector', async () => {
+    const duplicate = {
+      ...savedQuery,
+      queryIri: 'urn:dkg:profile:cg-1:query:configuration-trace-copy',
+      catalogIri: 'urn:dkg:profile:cg-1:catalog:other',
+      catalogSlug: 'other',
+      subGraph: 'archive',
+    };
+    const query = vi.fn(async () => ({ result: { type: 'bindings', bindings: [] } }));
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue({
+      readQueryCatalog: vi.fn(async () => ({ ...envelope(), items: [savedQuery, duplicate] })),
+      query,
+    } as unknown as ApiClient);
+
+    await expect(commandProgram().parseAsync([
+      'node', 'dkg', 'query-catalog', 'run', 'cg-1', 'configuration-trace',
+      '--param', 'configurationId=1',
+    ])).rejects.toThrow('process.exit:1');
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('selector is ambiguous'));
+    expect(query).not.toHaveBeenCalled();
+
+    await commandProgram().parseAsync([
+      'node', 'dkg', 'query-catalog', 'run', 'cg-1',
+      'production/kamstrup/configuration-trace', '--param', 'configurationId=1',
+    ]);
+    expect(query).toHaveBeenCalledTimes(1);
+  });
 });

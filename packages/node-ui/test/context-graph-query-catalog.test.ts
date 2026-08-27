@@ -332,12 +332,12 @@ describe('ContextGraphQueryView', () => {
     const parameterizedProfile = profile({
       queryCatalogs: [{
         slug: 'kamstrup',
-        subGraph: '__context_graph',
+        subGraph: 'docs',
         name: 'Kamstrup',
         rank: 1,
         queries: [{
           slug: 'configuration-trace',
-          subGraph: '__context_graph',
+          subGraph: 'docs',
           catalogSlug: 'kamstrup',
           catalogName: 'Kamstrup',
           catalogRank: 1,
@@ -380,8 +380,15 @@ describe('ContextGraphQueryView', () => {
 
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('"748387\\" } UNION { ?s ?p ?o"'),
-      { contextGraphId: 'cg-test', subGraphName: undefined, view: 'verifiable-memory' },
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'verifiable-memory' },
     );
+    await act(async () => {
+      setFieldValue(parameterInput, 'different configuration');
+    });
+    expect(container.textContent).toContain('Previous query results are hidden');
+    await act(async () => {
+      setFieldValue(parameterInput, '748387" } UNION { ?s ?p ?o');
+    });
     const callsBeforeSave = apiMocks.executeQuery.mock.calls.length;
 
     const saveButton = Array.from(container.querySelectorAll('button'))
@@ -398,9 +405,11 @@ describe('ContextGraphQueryView', () => {
     await act(async () => {
       saveQueryButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    const writtenQuads = apiMocks.writeProfileQueryCatalog.mock.calls.at(-1)?.[1] as Array<{ predicate: string }>;
+    const writtenQuads = apiMocks.writeProfileQueryCatalog.mock.calls.at(-1)?.[1] as Array<{ predicate: string; object: string }>;
     expect(writtenQuads.some(quad => quad.predicate.endsWith('/queryParameters'))).toBe(true);
     expect(writtenQuads.some(quad => quad.predicate.endsWith('/executionView'))).toBe(true);
+    expect(writtenQuads.filter(quad => quad.predicate.endsWith('/forSubGraph')))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ object: '"docs"' })]));
     expect(apiMocks.executeQuery).toHaveBeenCalledTimes(callsBeforeSave);
     expect(apiMocks.executeQuery.mock.calls.some(([sparql]) => String(sparql).includes('{{'))).toBe(false);
     await act(async () => { root.unmount(); });
