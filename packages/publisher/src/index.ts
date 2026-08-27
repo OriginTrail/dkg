@@ -104,7 +104,6 @@ export {
   resolveWorkspaceAgentRecipients,
   resolveWorkspaceAgentRecipientKeys,
   projectWorkspaceAgentRecipientFanout,
-  canonicalWorkspacePeerId,
   type WorkspaceAgentRecipientFanoutSnapshot,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipient,

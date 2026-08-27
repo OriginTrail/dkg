@@ -7,6 +7,11 @@ export type {
 } from './network.js';
 
 export { LibP2PNetwork } from './libp2p-network.js';
+export {
+  canonicalPeerIdString,
+  tryCanonicalPeerIdString,
+  type CanonicalPeerId,
+} from './peer-id.js';
 
 export type { NetworkStateRegistry } from './network-state-registry.js';
 export { StubNetworkStateRegistry } from './network-state-registry.js';

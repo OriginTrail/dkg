@@ -1,5 +1,4 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { peerIdFromString } from '@libp2p/peer-id';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
@@ -12,6 +11,7 @@ import {
   contextGraphSharedMemoryUri,
   decodeWorkspaceEncryptionKey,
   workspaceAgentEncryptionKeyId,
+  tryCanonicalPeerIdString,
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -45,17 +45,6 @@ export interface WorkspaceAgentRecipientFanoutSnapshot {
   readonly complete: boolean;
 }
 
-/** Parse and normalize a libp2p peer ID, rejecting arbitrary profile text. */
-export function canonicalWorkspacePeerId(value: string | undefined): string | null {
-  const candidate = value?.trim();
-  if (!candidate) return null;
-  try {
-    return peerIdFromString(candidate).toString();
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Project a validated encryption snapshot to its reliable transport roster
  * while retaining whether the projection covers every authorized agent.
@@ -69,12 +58,12 @@ export function projectWorkspaceAgentRecipientFanout(
   const peers = new Set<string>();
   const agentsWithPeer = new Set<string>();
   const authorizedAgents = new Set<string>();
-  const canonicalSelfPeerId = canonicalWorkspacePeerId(selfPeerId);
+  const canonicalSelfPeerId = tryCanonicalPeerIdString(selfPeerId ?? '');
   for (const recipient of resolution.recipients) {
     const agentAddress = recipient.agentAddress?.trim().toLowerCase() ?? '';
     if (agentAddress) authorizedAgents.add(agentAddress);
 
-    const peerId = canonicalWorkspacePeerId(recipient.peerId);
+    const peerId = tryCanonicalPeerIdString(recipient.peerId ?? '');
     if (!peerId) continue;
     if (agentAddress) agentsWithPeer.add(agentAddress);
     if (peerId !== canonicalSelfPeerId) peers.add(peerId);

@@ -12,7 +12,6 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@libp2p/peer-id": "^6.0.9",
     "@multiformats/multiaddr": "^13.0.3",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
