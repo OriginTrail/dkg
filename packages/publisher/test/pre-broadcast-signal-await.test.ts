@@ -272,6 +272,38 @@ describe('DKGPublisher.publish awaits the pre-broadcast signal [GH#2270]', () =>
     expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE, operationKind: 'create' }]);
   });
 
+  it('fires onPublishConfirmed once with the receipt hash the chain returned [GH#2359]', async () => {
+    // The receipt-confirmed scheduling hint: exactly one firing, carrying the on-chain
+    // result's transaction hash — the hash a reconciler must validate against persisted
+    // write-ahead evidence before proving the transaction itself.
+    const chain = new PublishSignalRecordingChain();
+    const publisher = await publishOver(chain);
+    const confirmations: Array<{ txHash: string }> = [];
+
+    const result = await publisher.publish({
+      ...(await publishArgs()),
+      onPublishConfirmed: (confirmation) => { confirmations.push(confirmation); },
+    });
+
+    expect(result.status).not.toBe('failed');
+    expect(confirmations).toEqual([{ txHash: result.onChainResult?.txHash }]);
+  });
+
+  it('a throwing onPublishConfirmed listener does not fail the publish [GH#2359]', async () => {
+    // Scheduling-only and non-fail-closed: by the time the hint fires the transaction is
+    // already mined — a listener failure must never surface into the publish outcome.
+    const chain = new PublishSignalRecordingChain();
+    const publisher = await publishOver(chain);
+
+    const result = await publisher.publish({
+      ...(await publishArgs()),
+      onPublishConfirmed: () => { throw new Error('listener exploded'); },
+    });
+
+    expect(result.status).not.toBe('failed');
+    expect(chain.sent).toBe(true);
+  });
+
   it('POSITIVE CONTROL: a plain publish reaches the chain and fires the signal', async () => {
     // Without this, every row below could pass vacuously by never reaching the adapter at all.
     const chain = new PublishSignalRecordingChain();

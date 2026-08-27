@@ -38,6 +38,7 @@ import type {
   AsyncLiftChainProofLookup,
   AsyncLiftChainProofResolution,
   AsyncLiftAdmissionContext,
+  AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   AsyncLiftPublisherRecoveryResolver,
   AsyncLiftPublisherRecoveryResult,
   AsyncLiftRetryOutcome,
@@ -470,6 +471,23 @@ export class TripleStoreAsyncLiftPublisher
   private readonly activeProcessJobIds = new Set<string>();
   /** Receipt tasks that continue after the RPC-acceptance fast return. */
   private readonly detachedExecutions = new Map<string, Promise<void>>();
+  /**
+   * GH#2359 item 2 — executor receipt SCHEDULING hints, by jobId. An entry records only that
+   * the executor reported a confirmed receipt for `txHash`; it authorizes nothing. The early
+   * release lane validates the hash against the job's PERSISTED write-ahead evidence and then
+   * runs the reconciler's own canonical chain proof — only that proof releases the wallet.
+   * After a successful early release the entry carries the proof, so the settle-time finalize
+   * consumes it instead of re-paying the chain reads. Bounded FIFO; entries are dropped on
+   * consumption, invalidation (hash mismatch / terminal disposition), or eviction.
+   */
+  private readonly executorProofHints = new Map<string, {
+    readonly txHash: string;
+    proof?: {
+      readonly recovery: AsyncLiftPublisherRecoveryResult;
+      readonly resolved: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
+    };
+  }>();
+  private static readonly EXECUTOR_PROOF_HINT_CAP = 512;
   /** Poked when a tx-bearing job stops being executor-owned; see setReconciliationDemandListener. */
   /** The one atomically-attached scheduling owner; see attachScheduler. */
   private schedulerListener?: {
@@ -985,6 +1003,7 @@ export class TripleStoreAsyncLiftPublisher
         signalBroadcastAccepted = resolve;
       });
       const inheritedBroadcastAccepted = prepared.publishOptions.onBroadcastAccepted;
+      const inheritedPublishConfirmed = prepared.publishOptions.onPublishConfirmed;
       const executionInput = {
         walletId,
         request,
@@ -1005,6 +1024,18 @@ export class TripleStoreAsyncLiftPublisher
               await inheritedBroadcastAccepted?.(record);
             } finally {
               signalBroadcastAccepted(record);
+            }
+          },
+          // GH#2359 item 2 — the executor's receipt-confirmed scheduling hint: recorded and
+          // poked so a demanded pass can prove the transaction with the reconciler's OWN chain
+          // reads while the executor finishes its local post-receipt tail. Never trusted as
+          // evidence.
+          onPublishConfirmed: (confirmation: { txHash: string }) => {
+            this.recordExecutorProofHint(claimed.jobId, confirmation);
+            try {
+              inheritedPublishConfirmed?.(confirmation);
+            } catch {
+              // Scheduling-only: an inherited listener failure must not touch the execution.
             }
           },
         },
@@ -1139,6 +1170,106 @@ export class TripleStoreAsyncLiftPublisher
       this.notifyReconciliationDemand();
     });
     this.detachedExecutions.set(jobId, tracked);
+  }
+
+  /**
+   * GH#2359 item 2 — record the executor's receipt-confirmed hint and invite a demanded pass.
+   * The entry stores the reported hash ONLY; consumption re-validates it against the job's
+   * persisted write-ahead evidence under the transition lock, and release requires the
+   * reconciler's own canonical proof. A re-fired hint for the same job replaces the entry
+   * (consume-once per attempt); the map is bounded FIFO as a backstop.
+   */
+  private recordExecutorProofHint(jobId: string, confirmation: { readonly txHash?: unknown }): void {
+    const txHash = confirmation?.txHash;
+    if (typeof txHash !== 'string' || txHash.length === 0) return;
+    this.executorProofHints.delete(jobId);
+    while (this.executorProofHints.size >= TripleStoreAsyncLiftPublisher.EXECUTOR_PROOF_HINT_CAP) {
+      const oldest = this.executorProofHints.keys().next().value;
+      if (oldest === undefined) break;
+      this.executorProofHints.delete(oldest);
+    }
+    this.executorProofHints.set(jobId, { txHash });
+    this.notifyReconciliationDemand();
+  }
+
+  /**
+   * GH#2359 item 2 — the early wallet-release lane. For a hinted job the executor still owns,
+   * the pass may prove the transaction NOW (the reconciler's own two canonical reads, identical
+   * to the settle path) and, on a `recovered` verdict, stamp `included` and free the wallet —
+   * while the executor's local post-receipt tail keeps running. This applies the finalize
+   * path's existing rule ("chain proof is sufficient to reuse the signing wallet; local
+   * lifecycle repair can retry independently") at the earliest moment the proof can succeed,
+   * instead of serializing the wallet behind the executor tail plus a later proof.
+   *
+   * The MUTATING repair (`finalizeRecovered`) deliberately stays at settle: it must never run
+   * concurrently with a live executor (the r26 two-writer rule). The established proof is
+   * cached on the hint so the settle-time finalize consumes it instead of re-asking the chain.
+   *
+   * Returns the number of hinted jobs whose proof is still unresolved (`pending`), so the pass
+   * outcome can hold the active cadence for them.
+   */
+  private async releaseWalletsOnExecutorProofHints(
+    inventory: readonly LiftJob[],
+    signal?: AbortSignal,
+  ): Promise<number> {
+    if (this.executorProofHints.size === 0) return 0;
+    let unresolved = 0;
+    for (const snapshot of inventory) {
+      if (signal?.aborted) return unresolved;
+      const hint = this.executorProofHints.get(snapshot.jobId);
+      if (!hint || hint.proof) continue;
+      // Settle-path territory: once the executor no longer owns the job, the normal
+      // interrupted lane consumes the hint (or the chain) itself.
+      if (!this.detachedExecutions.has(snapshot.jobId)) continue;
+      if (!isKnowledgeAssetVmPublishJobRequest(snapshot.request)) {
+        this.executorProofHints.delete(snapshot.jobId);
+        continue;
+      }
+      await this.withJobTransitionLock(snapshot.jobId, async () => {
+        const current = await this.getStatus(snapshot.jobId);
+        if (!current || current.status !== 'broadcast') return;
+        const persistedTxHash = (current as LiftJobBroadcast).broadcast?.txHash;
+        if (!persistedTxHash || persistedTxHash.toLowerCase() !== hint.txHash.toLowerCase()) {
+          // The hint describes an attempt that is not the persisted one (stale attempt after a
+          // reset, or an executor that misreported). It must never influence this record.
+          this.executorProofHints.delete(snapshot.jobId);
+          return;
+        }
+        const recoverable = current as LiftJobBroadcast;
+        const origin = liveChainRecoveryOrigin(recoverable);
+        const resolution = await this.resolveChainProofWithinSignal(origin.lookup, signal);
+        if (resolution === null) { unresolved += 1; return; }
+        if (resolution.status !== 'recovered') {
+          if (resolution.status === 'pending' || resolution.status === 'inconclusive') {
+            // Receipt not yet final at the operator's confirmation depth (or the read could not
+            // settle): keep the hint and let the active cadence retry before settle does.
+            unresolved += 1;
+          } else {
+            // reverted / not-found: the settle path owns that interpretation; the hint has
+            // nothing left to say.
+            this.executorProofHints.delete(snapshot.jobId);
+          }
+          return;
+        }
+        if (!this.knowledgeAssetVmPublishRecoveryResolver) return;
+        const resolved = await this.knowledgeAssetVmPublishRecoveryResolver(
+          current,
+          origin.lookup,
+          resolution.recovery,
+          { ...(signal ? { signal } : {}) },
+        );
+        if (!resolved) { unresolved += 1; return; }
+        // The node has observed inclusion through its OWN canonical proof: stamp it truthfully,
+        // then free the wallet (write-before-release — the poke must find claim-visible state).
+        await this.writeJob(
+          this.mergeJob(recoverable, 'included', { inclusion: resolved.inclusion as never }),
+          'included',
+        );
+        await this.releaseWalletLockForJob(current);
+        hint.proof = { recovery: resolution.recovery, resolved };
+      });
+    }
+    return unresolved;
   }
 
   async drainDetachedExecutions(): Promise<void> {
@@ -1304,7 +1435,17 @@ export class TripleStoreAsyncLiftPublisher
     const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
     const origin = liveChainRecoveryOrigin(recoverable);
     if (this.chainProofResolver) {
-      const resolution = await this.resolveChainProofWithinSignal(origin.lookup, options?.signal);
+      // GH#2359 item 2 — an early release already proved this transaction with this
+      // reconciler's own reads; consume that proof instead of re-paying the chain. The hash
+      // re-check makes a stale hint (reset + re-run between the passes) inert.
+      const hint = this.executorProofHints.get(job.jobId);
+      const cachedProof = hint?.proof !== undefined
+        && hint.txHash.toLowerCase() === (recoverable.broadcast?.txHash ?? '').toLowerCase()
+        ? hint.proof
+        : undefined;
+      const resolution = cachedProof
+        ? { status: 'recovered' as const, recovery: cachedProof.recovery }
+        : await this.resolveChainProofWithinSignal(origin.lookup, options?.signal);
       if (resolution === null) return false;
       if (resolution.status === 'recovered') {
         const outcome = await this.finalizeProvenKnowledgeAssetVmPublish(
@@ -1312,9 +1453,14 @@ export class TripleStoreAsyncLiftPublisher
           origin,
           resolution.recovery,
           options,
+          cachedProof?.resolved,
         );
+        if (outcome === 'finalized') this.executorProofHints.delete(job.jobId);
         return outcome === 'finalized';
       }
+      // Any non-recovered verdict supersedes the hint: the chain (not the executor's claim)
+      // owns this record's interpretation from here.
+      this.executorProofHints.delete(job.jobId);
       if (resolution.status === 'reverted') {
         const failure = createLiftJobFailureMetadata({
           failedFromState: recoverable.status,
@@ -1398,6 +1544,9 @@ export class TripleStoreAsyncLiftPublisher
     // the same budget the proof was. Optional: the LIVE interrupted lane runs outside a
     // chain-proof pass and has no deadline to give.
     options?: { readonly signal?: AbortSignal },
+    // GH#2359 item 2 — canonical evidence this reconciler already resolved at the early
+    // wallet release; consuming it here skips the read-only phase's chain read entirely.
+    preResolved?: AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   ): Promise<'finalized' | 'unresolved' | 'repair-deferred' | 'unsupported'> {
     if (!this.knowledgeAssetVmPublishRecoveryResolver) return 'unresolved';
     // r26 (🔴 3821028709) — the race bounds the WAIT, it does not cancel the loser, and r25 put
@@ -1424,8 +1573,9 @@ export class TripleStoreAsyncLiftPublisher
       signal.addEventListener('abort', () => resolve(deadlineReached), { once: true });
     });
 
-    // --- read-only phase: raced, safe to abandon ---
-    const resolvedOrTimeout = await Promise.race([
+    // --- read-only phase: raced, safe to abandon (skipped when the early release already
+    // resolved the canonical evidence) ---
+    const resolvedOrTimeout = preResolved ?? await Promise.race([
       this.knowledgeAssetVmPublishRecoveryResolver(job, origin.lookup, verdictRecovery, options),
       awaitDeadline(),
     ]);
@@ -1762,7 +1912,12 @@ export class TripleStoreAsyncLiftPublisher
       () => deadline.abort(),
       Math.max(0, this.chainProofDispatchTimeBudgetMs),
     );
+    // GH#2359 item 2 — hinted executor-owned jobs are proven and wallet-released FIRST: the
+    // whole point of the hint is to free the wallet before the executor tail (and this walk)
+    // finish. Unresolved hinted proofs hold the active cadence below.
+    let hintedUnresolved = 0;
     try {
+      hintedUnresolved = await this.releaseWalletsOnExecutorProofHints(inventory, deadline.signal);
       for (let i = 0; i < rotatedTxBearing.length; i += 1) {
         if (deadline.signal.aborted) {
           remainingLive += rotatedTxBearing.length - i;
@@ -1800,7 +1955,7 @@ export class TripleStoreAsyncLiftPublisher
         .filter((job): job is LiftJob => job !== null);
     }
     reconciled += await this.dispatchFailedJobsOnChainProof(dispatcherInventory);
-    return { reconciled, pendingWork: remainingLive > 0 };
+    return { reconciled, pendingWork: remainingLive > 0 || hintedUnresolved > 0 };
   }
 
   private async resolveChainProofWithinSignal(

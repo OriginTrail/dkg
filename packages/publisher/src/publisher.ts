@@ -277,6 +277,15 @@ export interface PublishOptions {
    */
   onBroadcastAccepted?: (record: PreBroadcastRecord) => Promise<void> | void;
   /**
+   * GH#2359 item 2 — notification that the publish transaction's receipt was CONFIRMED and
+   * parsed (an on-chain result exists), fired before any local post-receipt work. This is a
+   * SCHEDULING hint only: it carries the transaction hash and nothing else, so a listener can
+   * go prove the transaction with its own canonical chain reads immediately instead of waiting
+   * for the executor's local tail. It authorizes nothing by itself. Post-receipt and
+   * non-fail-closed: listener failure can never affect the publish.
+   */
+  onPublishConfirmed?: (confirmation: { readonly txHash: string }) => void;
+  /**
    * Skip the publisher-level context-graph graph creation/ensure step.
    * Only callers that already validated the target context graph should set
    * this; it avoids re-entering store-backed graph discovery on direct publish.

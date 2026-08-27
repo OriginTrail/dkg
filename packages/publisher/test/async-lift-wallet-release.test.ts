@@ -439,4 +439,272 @@ describe('async-lift wallet release channel', () => {
     expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
     await probe.expectLastPokeClaimable('wallet-1');
   });
+
+  it('frees the wallet through the receipt hint while the executor tail is still running', async () => {
+    // GH#2359 item 2 - the headline discriminator. The executor confirms its receipt (fires
+    // onPublishConfirmed) and then PARKS in its local post-receipt tail. Without the hint lane,
+    // job2 waits for that tail to settle before job1's wallet can be proven and released; with
+    // it, the demanded pass proves the transaction with the reconciler's own reads, stamps
+    // 'included', and frees the wallet while the tail is still running - so job2's claim is the
+    // observable. The poll is parked: only the hint-driven release can move job2.
+    let releaseTail!: () => void;
+    const tailParked = new Promise<void>((resolve) => { releaseTail = resolve; });
+    let executions = 0;
+    const publisher = createPublisher({
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => (
+        { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          executions += 1;
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            operationKind: 'create',
+          });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await tailParked;
+          throw new Error('tail released late: queue truth is settled by proof, not this result');
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    const job1 = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const job2 = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'albums-next' }));
+
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 600_000,
+      recoveryIntervalMs: 600_000,
+      activeRecoveryIntervalMs: 10,
+      errorBackoffMs: 10,
+    });
+    await runner.start();
+    try {
+      const deadline = Date.now() + 15_000;
+      while (true) {
+        const status2 = (await publisher.getStatus(job2))?.status;
+        if (status2 && status2 !== 'accepted') break;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `job2 was never claimed through the hint-driven release (job1: ${(await publisher.getStatus(job1))?.status}, job2: ${status2})`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      // job1's queue truth at this instant: inclusion observed and stamped, wallet gone, but
+      // NOT finalized - the mutating repair must wait for the executor to settle (r26).
+      expect((await publisher.getStatus(job1))?.status).toBe('included');
+      // job2 went all the way to its own executor through the freed wallet.
+      expect(executions).toBeGreaterThanOrEqual(2);
+
+      releaseTail();
+      const finalizeDeadline = Date.now() + 15_000;
+      while ((await publisher.getStatus(job1))?.status !== 'finalized') {
+        if (Date.now() > finalizeDeadline) {
+          throw new Error(
+            `job1 never finalized after the executor tail settled (status: ${(await publisher.getStatus(job1))?.status})`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } finally {
+      releaseTail();
+      await runner.stop();
+    }
+  });
+
+  it('ignores a receipt hint whose hash does not match the persisted write-ahead evidence', async () => {
+    // The hint is scheduling-only: an executor that reports a hash the durable write-ahead
+    // never recorded (a lie, or a stale attempt surviving a reset) must not move the record or
+    // the wallet. Everything then flows through the normal settle path.
+    let releaseTail!: () => void;
+    const tailParked = new Promise<void>((resolve) => { releaseTail = resolve; });
+    let hinted = false;
+    const publisher = createPublisher({
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => (
+        { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            operationKind: 'create',
+          });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          input.publishOptions.onPublishConfirmed?.({ txHash: `0x${'99'.repeat(32)}` });
+          hinted = true;
+          await tailParked;
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.processNext('wallet-1');
+    const hintDeadline = Date.now() + 5_000;
+    while (!hinted) {
+      if (Date.now() > hintDeadline) throw new Error('the executor never fired the hint');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    // Two passes: the mismatched hint must not act on the first, and must be GONE (not merely
+    // unlucky) on the second.
+    await publisher.reconcileTransactions();
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+    const lock = await store.query(`SELECT ?job WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?job .
+      }
+    }`);
+    expect(lock.type).toBe('bindings');
+    if (lock.type === 'bindings') expect(lock.bindings).toHaveLength(1);
+
+    // The normal settle path is untouched: tail settles, the demanded pass proves and finalizes.
+    releaseTail();
+    await publisher.drainDetachedExecutions();
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
+  });
+
+  it('does not release on a hint until the reconciler own proof says recovered', async () => {
+    // The hint authorizes nothing: while the chain answer is 'pending' (receipt not final at
+    // the operator's confirmation depth) the wallet stays locked, and the pass advertises the
+    // hinted job as pending work so the active cadence retries before settle.
+    let releaseTail!: () => void;
+    const tailParked = new Promise<void>((resolve) => { releaseTail = resolve; });
+    let hinted = false;
+    let verdict: 'pending' | 'recovered' = 'pending';
+    const publisher = createPublisher({
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => (verdict === 'pending'
+        ? { status: 'pending' }
+        : { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            operationKind: 'create',
+          });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          hinted = true;
+          await tailParked;
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.processNext('wallet-1');
+    const hintDeadline = Date.now() + 5_000;
+    while (!hinted) {
+      if (Date.now() > hintDeadline) throw new Error('the executor never fired the hint');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(await publisher.reconciliationScheduling.reconcile())
+      .toEqual({ reconciled: 0, pendingWork: true });
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+    const lock = await store.query(`SELECT ?job WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?job .
+      }
+    }`);
+    expect(lock.type).toBe('bindings');
+    if (lock.type === 'bindings') expect(lock.bindings).toHaveLength(1);
+
+    verdict = 'recovered';
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('included');
+    const lockAfter = await store.query(`SELECT ?job WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?job .
+      }
+    }`);
+    expect(lockAfter.type).toBe('bindings');
+    if (lockAfter.type === 'bindings') expect(lockAfter.bindings).toEqual([]);
+
+    releaseTail();
+    await publisher.drainDetachedExecutions();
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
+  });
+
+  it('pays each canonical chain read once: the settle-time finalize consumes the early proof', async () => {
+    // The early release runs the reconciler's two reads; the settle-time finalize must consume
+    // that cached proof instead of re-asking the chain - otherwise the hint lane would ADD
+    // chain load to every publish instead of moving it earlier.
+    let releaseTail!: () => void;
+    const tailParked = new Promise<void>((resolve) => { releaseTail = resolve; });
+    let hinted = false;
+    let proofAsks = 0;
+    let recoveryAsks = 0;
+    const publisher = createPublisher({
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => {
+        proofAsks += 1;
+        return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
+      },
+      knowledgeAssetVmPublishRecoveryResolver: async () => {
+        recoveryAsks += 1;
+        return {
+          inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+          finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+        } as never;
+      },
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            operationKind: 'create',
+          });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          hinted = true;
+          await tailParked;
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.processNext('wallet-1');
+    const hintDeadline = Date.now() + 5_000;
+    while (!hinted) {
+      if (Date.now() > hintDeadline) throw new Error('the executor never fired the hint');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('included');
+    expect(proofAsks).toBe(1);
+    expect(recoveryAsks).toBe(1);
+
+    releaseTail();
+    await publisher.drainDetachedExecutions();
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
+    expect(proofAsks).toBe(1);
+    expect(recoveryAsks).toBe(1);
+  });
 });

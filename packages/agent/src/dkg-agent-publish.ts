@@ -1967,6 +1967,7 @@ export class PublishMethods extends DKGAgentBase {
        */
       onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
       onBroadcastAccepted?: PublishOptions['onBroadcastAccepted'];
+      onPublishConfirmed?: PublishOptions['onPublishConfirmed'];
     },
   ): Promise<PublishResult> {
     return withRootlessUpdateLock(contextGraphId, kaId, async () => {
@@ -2268,6 +2269,7 @@ export class PublishMethods extends DKGAgentBase {
       onPhase,
       onBeforeBroadcast: opts?.onBeforeBroadcast,
       onBroadcastAccepted: opts?.onBroadcastAccepted,
+      onPublishConfirmed: opts?.onPublishConfirmed,
       subGraphName: opts?.subGraphName,
       precomputedUpdateAttestation: opts.precomputedUpdateAttestation,
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -5215,10 +5217,14 @@ export class PublishMethods extends DKGAgentBase {
       readonly onPhase?: PhaseCallback;
       readonly onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
       readonly onBroadcastAccepted?: PublishOptions['onBroadcastAccepted'];
+      readonly onPublishConfirmed?: PublishOptions['onPublishConfirmed'];
     } = {
       onPhase: opts?.onPhase ?? publishOptions.onPhase,
       onBeforeBroadcast: publishOptions.onBeforeBroadcast,
       onBroadcastAccepted: publishOptions.onBroadcastAccepted,
+      // GH#2359 item 2 — the receipt-confirmed scheduling hint rides the same one-object
+      // spread as the other hooks, so neither branch can drop it.
+      onPublishConfirmed: publishOptions.onPublishConfirmed,
     };
     if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();

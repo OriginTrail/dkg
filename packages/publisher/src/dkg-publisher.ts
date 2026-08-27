@@ -2653,6 +2653,7 @@ export class DKGPublisher implements Publisher {
       onPhase,
       onBeforeBroadcast,
       onBroadcastAccepted,
+      onPublishConfirmed,
     } = options;
     // Round 9 Bug 25 + Round 12 Bug 34: reject user-authored reserved-
     // namespace subjects. The bypass is keyed on a module-private
@@ -3990,6 +3991,17 @@ export class DKGPublisher implements Publisher {
           if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
         }
 
+        // GH#2359 item 2 — the receipt is confirmed and parsed; everything below is local
+        // post-receipt work. Fire the scheduling hint NOW so a demand-driven reconciler can
+        // start its own canonical proof instead of waiting out this tail. Non-fail-closed.
+        if (onChainResult?.txHash) {
+          try {
+            onPublishConfirmed?.({ txHash: onChainResult.txHash });
+          } catch {
+            // Scheduling-only: a listener failure must never affect the publish.
+          }
+        }
+
         onChainResult.tokenAmount = tokenAmount;
 
         const kaId = onChainResult.kaId ?? onChainResult.batchId;
@@ -4548,6 +4560,7 @@ export class DKGPublisher implements Publisher {
   async update(kaId: bigint, options: PublishOptions): Promise<PublishResult> {
     const onBeforeBroadcast = options.onBeforeBroadcast;
     const onBroadcastAccepted = options.onBroadcastAccepted;
+    const onPublishConfirmed = options.onPublishConfirmed;
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const graphUpdate = resolveGraphScopedPublishDescriptor(options);
     if (graphUpdate) {
@@ -5418,6 +5431,15 @@ export class DKGPublisher implements Publisher {
       onPhase?.('chain:submit', 'end');
       onPhase?.('chain', 'end');
       return buildFailedUpdateResult();
+    }
+    // GH#2359 item 2 — same scheduling hint as the publish path: the update receipt is in and
+    // everything below is local post-receipt work.
+    if (txResult.hash) {
+      try {
+        onPublishConfirmed?.({ txHash: txResult.hash });
+      } catch {
+        // Scheduling-only: a listener failure must never affect the update.
+      }
     }
     let effectivePublisherAddress = coercePublisherAddress(txResult.publisherAddress);
     if (!effectivePublisherAddress && typeof this.chain.getLatestMerkleRootPublisher === 'function') {
