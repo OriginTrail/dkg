@@ -1053,6 +1053,12 @@ describe('AsyncLiftRunner', () => {
       demand();
       await vi.advanceTimersByTimeAsync(5);
       expect(reconciliationCalls).toBe(1);
+      // The load-bearing half: a SECOND demanded pass right after a SUCCESSFUL first one must
+      // also run immediately. A floor keyed to attempts (rather than failures) would anchor to
+      // pass 1's start and park this wake for the full parked backoff.
+      demand();
+      await vi.advanceTimersByTimeAsync(5);
+      expect(reconciliationCalls).toBe(2);
     } finally {
       const stopping = runner.stop();
       await stopping;
