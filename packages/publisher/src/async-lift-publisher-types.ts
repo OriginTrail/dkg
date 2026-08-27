@@ -115,6 +115,47 @@ export interface AsyncLiftPublisher {
   reconcileTransactions?(): Promise<number>;
   /** Wait until every receipt task detached after RPC acceptance has stopped. Older implementations can omit it. */
   drainDetachedExecutions?(): Promise<void>;
+  /**
+   * Demand-driven reconciliation scheduling. ONE optional capability rather than independent
+   * optional methods, so a publisher cannot implement the wake-up without the outlook (or the
+   * reverse) — the incoherent halves are unrepresentable. Older implementations omit the whole
+   * capability and a caller that never subscribes loses nothing but latency.
+   */
+  readonly reconciliationScheduling?: {
+    /**
+     * EXCLUSIVE attachment of the demand listener — deliberately not pub/sub. Reconciliation
+     * demand has exactly one owner (the scheduling runner driving this publisher), so attaching
+     * TAKES OVER: a later attachment supersedes the earlier one, which is the safe handover
+     * when a new runner incarnation starts while its predecessor is still stopping. The
+     * returned detach releases only the caller's OWN attachment (a stale detach from a
+     * superseded owner is a no-op), so the handover cannot be torn down by the incarnation it
+     * replaced.
+     *
+     * The poke itself carries no payload and establishes nothing about the queue; it fires
+     * when a tx-bearing job stops being executor-owned (a detached receipt execution settles,
+     * or `processNext` hands back a live broadcast after an ambiguous send) — i.e. only once
+     * the work is actually visible to a {@link reconcileTransactions} pass — and merely
+     * invites the owner to run that pass sooner than its idle cadence would.
+     */
+    attachDemandListener(listener: () => void): () => void;
+    /**
+     * Run one reconcile pass and report BOTH what it settled and whether actionable live work
+     * remains — one operation, one atomic answer, computed during the pass's own walk rather
+     * than by a second queue inventory. This is what the scheduling caller consumes per tick
+     * to pick its next cadence: a separate post-pass outlook query could fail after the pass
+     * succeeded and strand an already-served demand on the idle cadence. Identical pass
+     * semantics to {@link reconcileTransactions}, which stays the wire-stable numeric surface
+     * over the same pass.
+     */
+    reconcile(): Promise<{ reconciled: number; pendingWork: boolean }>;
+    /**
+     * Startup recovery with the same outcome shape: stale-wallet-lock sweep plus one reconcile
+     * pass, so a starting caller seeds its cadence from the pass it already ran instead of
+     * paying a second boot-time inventory. Identical recovery semantics to
+     * {@link AsyncLiftPublisher.recover}, the wire-stable numeric surface over the same pass.
+     */
+    recover(): Promise<{ reconciled: number; pendingWork: boolean }>;
+  };
   getStats(): Promise<Record<LiftJobState, number>>;
   pause(): Promise<void>;
   resume(): Promise<void>;

@@ -15,6 +15,7 @@ import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-s
 // spread (or the `retryTuning:` argument feeding it) fails them.
 const mocks = vi.hoisted(() => ({
   publisherConfigs: [] as any[],
+  runnerConfigs: [] as any[],
 }));
 
 vi.mock('@origintrail-official/dkg-publisher', async importOriginal => {
@@ -27,7 +28,20 @@ vi.mock('@origintrail-official/dkg-publisher', async importOriginal => {
       mocks.publisherConfigs.push(config);
     }
   }
-  return { ...actual, TripleStoreAsyncLiftPublisher: CapturingAsyncLiftPublisher };
+  // Same seam, second hop: the reconcile cadence knobs land on the RUNNER, not the
+  // publisher constructor, so a capture of only the publisher config would let a
+  // dropped runner projection pass every row.
+  class CapturingAsyncLiftRunner extends actual.AsyncLiftRunner {
+    constructor(config: any) {
+      super(config);
+      mocks.runnerConfigs.push(config);
+    }
+  }
+  return {
+    ...actual,
+    TripleStoreAsyncLiftPublisher: CapturingAsyncLiftPublisher,
+    AsyncLiftRunner: CapturingAsyncLiftRunner,
+  };
 });
 
 const { resolvePublisherRetryTuning } = await import('../src/config.js');
@@ -40,6 +54,7 @@ describe('publisher retry-knob config→construction wiring (#2270)', () => {
   let dataDir: string | undefined;
   let store: TripleStore | undefined;
   let runtime: PublisherRuntime | null = null;
+  const capturedLogLines: string[] = [];
 
   afterEach(async () => {
     await runtime?.stop().catch(() => {});
@@ -49,6 +64,8 @@ describe('publisher retry-knob config→construction wiring (#2270)', () => {
     if (dataDir) await rm(dataDir, { recursive: true, force: true });
     dataDir = undefined;
     mocks.publisherConfigs.length = 0;
+    mocks.runnerConfigs.length = 0;
+    capturedLogLines.length = 0;
   });
 
   /** Start the real daemon publisher runtime over a temp wallet + store. */
@@ -68,7 +85,7 @@ describe('publisher retry-knob config→construction wiring (#2270)', () => {
         // A long poll interval keeps the started runner idle for the assertion.
         publisher: { enabled: true, pollIntervalMs: 600_000, ...publisher },
       } as any,
-      log: () => {},
+      log: (line: string) => { capturedLogLines.push(line); },
     });
     expect(runtime).not.toBeNull();
     // Exactly one async-lift publisher is built for the runtime, so there is no
@@ -125,6 +142,85 @@ describe('publisher retry-knob config→construction wiring (#2270)', () => {
     expect(config.retryJitterRatio).toBe(0.4);
     expect(config.retryBackoffBaseMs).toBe(2_222);
     expect(config.retryBackoffMaxMs).toBe(3_333);
+  });
+
+  it('forwards the reconcile cadence knobs and a log-reaching error sink into the runner (10.0.14 slowdown fix)', async () => {
+    await capturePublisherConfig({ recoveryIntervalMs: 111_222, activeRecoveryIntervalMs: 7_500 });
+
+    expect(mocks.runnerConfigs).toHaveLength(1);
+    const runnerConfig = mocks.runnerConfigs[0];
+    expect(runnerConfig.recoveryIntervalMs).toBe(111_222);
+    expect(runnerConfig.activeRecoveryIntervalMs).toBe(7_500);
+    // r3 (🔴 3872361413) — exercise the sink, not its type: runner errors used to be swallowed
+    // after their backoff, and a no-op callback here would silently restore that. The captured
+    // callback must put the error's message into the daemon log.
+    runnerConfig.onError(new Error('reconcile failed'));
+    expect(capturedLogLines).toContain('[publisher] runner error: reconcile failed');
+  });
+
+  it('leaves the runner cadence knobs undefined when unconfigured so the library defaults hold', async () => {
+    await capturePublisherConfig({});
+
+    expect(mocks.runnerConfigs).toHaveLength(1);
+    expect(mocks.runnerConfigs[0].recoveryIntervalMs).toBeUndefined();
+    expect(mocks.runnerConfigs[0].activeRecoveryIntervalMs).toBeUndefined();
+  });
+
+  it('forwards the config-fallback cadence knobs through the STANDALONE runtime path', async () => {
+    // r5 (🟡 3872361432) — the standalone projection is its own boundary; deleting its config
+    // fallback would leave every daemon-path row green while `dkg publisher run` silently used
+    // the library default.
+    const { createPublisherRuntime } = await import('../src/publisher-runner.js');
+    dataDir = await mkdtemp(join(tmpdir(), 'dkg-cadence-standalone-'));
+    await addPublisherWallet(dataDir, ethers.Wallet.createRandom().privateKey);
+    runtime = await createPublisherRuntime({
+      dataDir,
+      config: {
+        name: 'cadence-standalone-test',
+        apiPort: 0,
+        listenPort: 0,
+        nodeRole: 'edge',
+        networkConfig: 'mainnet-gnosis',
+        store: { backend: 'oxigraph' },
+        publisher: {
+          enabled: true,
+          pollIntervalMs: 600_000,
+          recoveryIntervalMs: 111_222,
+          activeRecoveryIntervalMs: 7_500,
+        },
+      } as any,
+    });
+    expect(mocks.runnerConfigs).toHaveLength(1);
+    expect(mocks.runnerConfigs[0].recoveryIntervalMs).toBe(111_222);
+    expect(mocks.runnerConfigs[0].activeRecoveryIntervalMs).toBe(7_500);
+  });
+
+  it('lets an explicit standalone argument override the configured cadence', async () => {
+    const { createPublisherRuntime } = await import('../src/publisher-runner.js');
+    dataDir = await mkdtemp(join(tmpdir(), 'dkg-cadence-standalone-arg-'));
+    await addPublisherWallet(dataDir, ethers.Wallet.createRandom().privateKey);
+    runtime = await createPublisherRuntime({
+      dataDir,
+      recoveryIntervalMs: 222_333,
+      activeRecoveryIntervalMs: 3_333,
+      config: {
+        name: 'cadence-standalone-arg-test',
+        apiPort: 0,
+        listenPort: 0,
+        nodeRole: 'edge',
+        networkConfig: 'mainnet-gnosis',
+        store: { backend: 'oxigraph' },
+        publisher: {
+          enabled: true,
+          pollIntervalMs: 600_000,
+          recoveryIntervalMs: 111_222,
+          activeRecoveryIntervalMs: 7_500,
+        },
+      } as any,
+    });
+    expect(mocks.runnerConfigs).toHaveLength(1);
+    expect(mocks.runnerConfigs[0].recoveryIntervalMs).toBe(222_333);
+    expect(mocks.runnerConfigs[0].activeRecoveryIntervalMs).toBe(3_333);
   });
 
   it('forwards autoRetryEnabled: true as an explicit value, not only the falsy case', async () => {
