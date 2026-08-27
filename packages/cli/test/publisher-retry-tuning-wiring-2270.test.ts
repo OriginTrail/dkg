@@ -15,6 +15,7 @@ import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-s
 // spread (or the `retryTuning:` argument feeding it) fails them.
 const mocks = vi.hoisted(() => ({
   publisherConfigs: [] as any[],
+  runnerConfigs: [] as any[],
 }));
 
 vi.mock('@origintrail-official/dkg-publisher', async importOriginal => {
@@ -27,7 +28,20 @@ vi.mock('@origintrail-official/dkg-publisher', async importOriginal => {
       mocks.publisherConfigs.push(config);
     }
   }
-  return { ...actual, TripleStoreAsyncLiftPublisher: CapturingAsyncLiftPublisher };
+  // Same seam, second hop: the reconcile cadence knobs land on the RUNNER, not the
+  // publisher constructor, so a capture of only the publisher config would let a
+  // dropped runner projection pass every row.
+  class CapturingAsyncLiftRunner extends actual.AsyncLiftRunner {
+    constructor(config: any) {
+      super(config);
+      mocks.runnerConfigs.push(config);
+    }
+  }
+  return {
+    ...actual,
+    TripleStoreAsyncLiftPublisher: CapturingAsyncLiftPublisher,
+    AsyncLiftRunner: CapturingAsyncLiftRunner,
+  };
 });
 
 const { resolvePublisherRetryTuning } = await import('../src/config.js');
@@ -49,6 +63,7 @@ describe('publisher retry-knob config→construction wiring (#2270)', () => {
     if (dataDir) await rm(dataDir, { recursive: true, force: true });
     dataDir = undefined;
     mocks.publisherConfigs.length = 0;
+    mocks.runnerConfigs.length = 0;
   });
 
   /** Start the real daemon publisher runtime over a temp wallet + store. */
@@ -125,6 +140,25 @@ describe('publisher retry-knob config→construction wiring (#2270)', () => {
     expect(config.retryJitterRatio).toBe(0.4);
     expect(config.retryBackoffBaseMs).toBe(2_222);
     expect(config.retryBackoffMaxMs).toBe(3_333);
+  });
+
+  it('forwards the reconcile cadence knobs and the error sink into the runner (10.0.14 slowdown fix)', async () => {
+    await capturePublisherConfig({ recoveryIntervalMs: 111_222, activeRecoveryIntervalMs: 7_500 });
+
+    expect(mocks.runnerConfigs).toHaveLength(1);
+    const runnerConfig = mocks.runnerConfigs[0];
+    expect(runnerConfig.recoveryIntervalMs).toBe(111_222);
+    expect(runnerConfig.activeRecoveryIntervalMs).toBe(7_500);
+    // Runner errors used to be swallowed after their backoff; the daemon now sinks them to its log.
+    expect(typeof runnerConfig.onError).toBe('function');
+  });
+
+  it('leaves the runner cadence knobs undefined when unconfigured so the library defaults hold', async () => {
+    await capturePublisherConfig({});
+
+    expect(mocks.runnerConfigs).toHaveLength(1);
+    expect(mocks.runnerConfigs[0].recoveryIntervalMs).toBeUndefined();
+    expect(mocks.runnerConfigs[0].activeRecoveryIntervalMs).toBeUndefined();
   });
 
   it('forwards autoRetryEnabled: true as an explicit value, not only the falsy case', async () => {
