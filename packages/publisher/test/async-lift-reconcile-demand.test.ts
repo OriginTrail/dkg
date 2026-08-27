@@ -486,26 +486,47 @@ describe('async-lift reconciliation demand channel', () => {
     if (lock.type === 'bindings') expect(lock.bindings).toEqual([]);
   });
 
-  it('pokes the wallet-release listener when the stale-lock sweep frees a wallet', async () => {
+  it('stale-sweep recovery re-invites the claim once the reset is claim-visible', async () => {
+    // r3 (🔴 3874961042) - the sweep runs BEFORE the recovery pass resets the expired job, so
+    // its poke fires while the job is still 'claimed': a one-shot wake consumed on nothing
+    // claimable. Counting that unusable early poke as success hid exactly the gap the wake
+    // channel exists to close - the reset then landed unannounced and a parked runner would
+    // idle out the poll. Same poke-time oracle as the reset-ordering row above: a store query
+    // captured synchronously inside the listener reads what a claimer would see at that
+    // instant, and the LAST poke must see 'accepted'.
     const publisher = createPublisher();
-    const pokes: string[] = [];
+    let jobId = '';
+    const statusAtPoke: Array<{ walletId: string; status: ReturnType<typeof store.query> }> = [];
     publisher.reconciliationScheduling.attachScheduler({
       onReconciliationDemand: () => {},
-      onWalletRelease: (walletId) => pokes.push(walletId),
+      onWalletRelease: (walletId) => {
+        statusAtPoke.push({
+          walletId,
+          status: store.query(`SELECT ?status WHERE {
+            GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> {
+              <${jobSubject(jobId)}> <${CONTROL_STATUS}> ?status .
+            }
+          }`),
+        });
+      },
     });
     await stageShareSnapshot();
-    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     await publisher.claimNext('wallet-1');
     // The "crash": the claim never progresses and its 5-minute lease expires.
     now += 6 * 60_000;
 
     await publisher.recover();
     expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
-    // Both the sweep and the recover-reset release funnel through the one choke point; the
-    // listener heard the wallet become claimable (deduplication is not required — the poke is
-    // scheduling-only and the claim attempt re-checks every guard).
-    expect(pokes.length).toBeGreaterThanOrEqual(1);
-    expect(new Set(pokes)).toEqual(new Set(['wallet-1']));
+    // Every poke funnels through the one choke point and names the freed wallet (deduplication
+    // is not required - the poke is scheduling-only and the claim re-checks every guard).
+    expect(statusAtPoke.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(statusAtPoke.map((p) => p.walletId))).toEqual(new Set(['wallet-1']));
+    const last = await statusAtPoke[statusAtPoke.length - 1].status;
+    expect(last.type).toBe('bindings');
+    if (last.type === 'bindings') {
+      expect(last.bindings[0]?.['status']).toBe('"accepted"');
+    }
   });
 
   it('capability startup recovery performs the real crash-recovery effects, not just the outcome shape', async () => {

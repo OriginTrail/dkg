@@ -2537,12 +2537,18 @@ export class TripleStoreAsyncLiftPublisher
     await this.store.deleteByPattern({ subject: walletLockSubject(walletId), graph: this.walletLockGraphUri });
     // The ONE release choke point (finalize, proven-ineffective reset, stale sweep all funnel
     // here): the wallet just became claimable, so invite its claim loop instead of leaving the
-    // free wallet to idle out the poll. Scheduling-only — the claim attempt re-checks every
-    // guard — and it must never throw into the release path.
+    // free wallet to idle out the poll.
+    this.notifyWalletRelease(walletId);
+  }
+
+  // Scheduling-only — the claim attempt re-checks every guard — and it must never throw into
+  // the release path: the listener belongs to the caller's scheduler, and its failure must not
+  // touch lock state.
+  private notifyWalletRelease(walletId: string): void {
     try {
       this.schedulerListener?.onWalletRelease(walletId);
     } catch {
-      // The listener belongs to the caller's scheduler; its failure must not touch lock state.
+      // See above: scheduler failures stay the scheduler's problem.
     }
   }
 
@@ -2626,7 +2632,17 @@ export class TripleStoreAsyncLiftPublisher
     const walletId = job.claim?.walletId;
     if (!walletId) return;
     const currentLock = await this.readWalletLock(walletId);
-    if (!currentLock) return;
+    if (!currentLock) {
+      // The lock is already gone: someone else (typically the stale sweep, which runs BEFORE
+      // the recovery pass resets this job) deleted it and fired its wake while this job was
+      // not yet claim-visible — a one-shot invitation consumed on nothing. This caller's own
+      // transition IS visible by now (reset sites write before releasing), so re-invite the
+      // claim loop; without this, a sweep-then-reset recovery idles out the poll (r3
+      // 3874961042). Extra pokes are safe — the wake latches, and the claim re-checks
+      // every guard.
+      this.notifyWalletRelease(walletId);
+      return;
+    }
     if (!this.lockMatchesJob(currentLock, job)) return;
     await this.deleteWalletLock(walletId);
   }
