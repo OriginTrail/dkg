@@ -155,6 +155,16 @@ export interface AsyncLiftPublisher {
      * {@link AsyncLiftPublisher.recover}, the wire-stable numeric surface over the same pass.
      */
     recover(): Promise<{ reconciled: number; pendingWork: boolean }>;
+    /**
+     * EXCLUSIVE attachment of the wallet-release listener — same ownership/handover contract as
+     * {@link attachDemandListener}: one owner, takeover-on-attach, identity-guarded detach.
+     * Poked with the wallet id the moment that wallet's lock is DELETED (job finalized, proven
+     * ineffective and reset, or swept as stale), i.e. exactly when the wallet becomes claimable.
+     * Scheduling-only: the poke authorizes nothing — the owner's next claim attempt re-checks
+     * every claim guard — it only lets that attempt run now instead of on the next poll, so
+     * wallet turnover is bounded by chain time rather than by `pollIntervalMs`.
+     */
+    attachWalletReleaseListener(listener: (walletId: string) => void): () => void;
   };
   getStats(): Promise<Record<LiftJobState, number>>;
   pause(): Promise<void>;

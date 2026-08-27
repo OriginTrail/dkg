@@ -36,7 +36,12 @@ export class AsyncLiftRunner {
   private stopped = false;
   private running?: Promise<void>;
   private lastRecoveryAt = 0;
-  private lastRecoveryAttemptAt = 0;
+  /**
+   * Stamped only when a pass FAILS. The errorBackoffMs floor paces retries after failures —
+   * and nothing else: a wake after a successful pass runs immediately, so wake latency is
+   * independent of the operator's errorBackoffMs choice.
+   */
+  private lastFailedRecoveryAttemptAt = 0;
   private recoveryInFlight?: Promise<void>;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   /**
@@ -49,6 +54,11 @@ export class AsyncLiftRunner {
   /** Whether unresolved tx work remains, from the last pass outcome (boot-seeded); selects active vs idle cadence. */
   private pendingReconciliation = false;
   private unsubscribeReconciliationDemand?: () => void;
+  private unsubscribeWalletRelease?: () => void;
+  /** Wallet wake latch: a release poke landing while its loop is mid-processNext skips the next sleep. */
+  private readonly walletWakePending = new Set<string>();
+  /** At most one parked idle sleeper per wallet, resolvable by a release poke (or by stop()). */
+  private readonly walletSleepers = new Map<string, () => void>();
 
   constructor(private readonly config: AsyncLiftRunnerConfig) {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
@@ -106,6 +116,10 @@ export class AsyncLiftRunner {
     // loops below start — so attaching after startup recovery loses nothing.
     this.unsubscribeReconciliationDemand = this.config.publisher.reconciliationScheduling
       ?.attachDemandListener(() => this.demandTransactionReconciliation());
+    // A released wallet is claimable NOW; the poke lets its loop claim immediately instead of
+    // idling out the poll — turnover becomes chain-time-bound, not pollIntervalMs-bound.
+    this.unsubscribeWalletRelease = this.config.publisher.reconciliationScheduling
+      ?.attachWalletReleaseListener((walletId) => this.wakeWallet(walletId));
     this.scheduleTransactionReconciliation();
     this.running = Promise.all(
       this.config.walletIds.map((walletId) => this.walletLoop(walletId)),
@@ -123,6 +137,12 @@ export class AsyncLiftRunner {
     // otherwise poke this corpse on every settle.
     this.unsubscribeReconciliationDemand?.();
     this.unsubscribeReconciliationDemand = undefined;
+    this.unsubscribeWalletRelease?.();
+    this.unsubscribeWalletRelease = undefined;
+    // Wake every parked wallet loop so shutdown does not wait out a poll interval.
+    for (const wake of this.walletSleepers.values()) wake();
+    this.walletSleepers.clear();
+    this.walletWakePending.clear();
     await this.running;
     await this.recoveryInFlight;
     await this.config.publisher.drainDetachedExecutions?.();
@@ -133,7 +153,10 @@ export class AsyncLiftRunner {
       try {
         const processed = await this.config.publisher.processNext(walletId);
         if (!processed && !this.stopped) {
-          await this.sleep(this.pollIntervalMs);
+          // Interruptible idle wait: a wallet-release poke ends it early, and one that landed
+          // during processNext is latched and skips it entirely. The error backoff below stays
+          // deliberately un-interruptible — failure pacing must not be poked away.
+          await this.idleWalletWait(walletId);
         }
       } catch (error) {
         try {
@@ -148,11 +171,48 @@ export class AsyncLiftRunner {
     }
   }
 
+  /** The publisher's poke that walletId's lock was deleted: its next claim attempt can run now. */
+  private wakeWallet(walletId: string): void {
+    if (this.stopped || !this.started) return;
+    // A release for a wallet this runner does not drive must not accumulate latch state.
+    if (!this.config.walletIds.includes(walletId)) return;
+    const sleeper = this.walletSleepers.get(walletId);
+    if (sleeper) {
+      this.walletSleepers.delete(walletId);
+      sleeper();
+      return;
+    }
+    this.walletWakePending.add(walletId);
+  }
+
+  private async idleWalletWait(walletId: string): Promise<void> {
+    // Latch consumed on entry: a poke that landed during processNext means claimable work may
+    // already exist, so skip the sleep entirely.
+    if (this.walletWakePending.delete(walletId)) return;
+    let wake!: () => void;
+    const woken = new Promise<void>((resolve) => { wake = resolve; });
+    this.walletSleepers.set(walletId, wake);
+    // Re-check AFTER registering: a poke in the gap between the entry check and the
+    // registration would otherwise be latched against a sleeper that never sees it.
+    if (this.walletWakePending.delete(walletId)) {
+      this.walletSleepers.delete(walletId);
+      return;
+    }
+    try {
+      await Promise.race([this.sleep(this.pollIntervalMs), woken]);
+    } finally {
+      if (this.walletSleepers.get(walletId) === wake) {
+        this.walletSleepers.delete(walletId);
+      }
+    }
+  }
+
   /**
    * The publisher's poke that reconciliation gained actionable work. Coalesced: during an
    * in-flight pass it only marks the flag, and the pass's own rescheduling turns any number of
-   * pokes into one follow-up pass. `errorBackoffMs` since the last attempt stays the floor, so a
-   * reconciliation that keeps throwing cannot be poked into a hot loop.
+   * pokes into one follow-up pass. `errorBackoffMs` since the last FAILED attempt stays the
+   * floor, so a reconciliation that keeps throwing cannot be poked into a hot loop — while a
+   * wake after a successful pass runs immediately, independent of the errorBackoffMs setting.
    */
   private demandTransactionReconciliation(): void {
     if (this.stopped || !this.started) return;
@@ -171,7 +231,7 @@ export class AsyncLiftRunner {
     const cadenceMs = this.pendingReconciliation ? this.activeRecoveryIntervalMs : this.recoveryIntervalMs;
     const nextAt = Math.max(
       this.reconciliationDemanded ? now : this.lastRecoveryAt + cadenceMs,
-      this.lastRecoveryAttemptAt + this.errorBackoffMs,
+      this.lastFailedRecoveryAttemptAt + this.errorBackoffMs,
     );
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = undefined;
@@ -185,7 +245,6 @@ export class AsyncLiftRunner {
     // the retry), and a mid-pass poke re-sets the latch independently of this capture.
     const demandConsumed = this.reconciliationDemanded;
     this.reconciliationDemanded = false;
-    this.lastRecoveryAttemptAt = Date.now();
     const scheduling = this.config.publisher.reconciliationScheduling;
     // The outlook arrives IN the pass result: serving the demand and learning whether work
     // remains are one atomic step, so no separate post-pass queue read exists to fail after a
@@ -201,6 +260,7 @@ export class AsyncLiftRunner {
         this.pendingReconciliation = outcome.pendingWork;
       })
       .catch(async (error) => {
+        this.lastFailedRecoveryAttemptAt = Date.now();
         this.reconciliationDemanded = this.reconciliationDemanded || demandConsumed;
         try {
           await this.onError?.(error);

@@ -472,6 +472,8 @@ export class TripleStoreAsyncLiftPublisher
   private readonly detachedExecutions = new Map<string, Promise<void>>();
   /** Poked when a tx-bearing job stops being executor-owned; see setReconciliationDemandListener. */
   private reconciliationDemandListener?: () => void;
+  /** Poked with the wallet id when its lock is deleted; see attachWalletReleaseListener. */
+  private walletReleaseListener?: (walletId: string) => void;
   /**
    * Rotates the live-lane iteration start across passes. The pass deadline may truncate the walk,
    * and `list()` order is stable, so without rotation the same head jobs would be re-asked every
@@ -1160,6 +1162,17 @@ export class TripleStoreAsyncLiftPublisher
     // Startup recovery with the outcome kept: the caller seeds its cadence from the pass it
     // already ran instead of paying a second boot-time inventory.
     recover: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.runRecovery(),
+    // Exclusive attachment, same contract as attachDemandListener: the poke fires from the one
+    // release choke point and merely invites the owner's next guarded claim attempt to run now.
+    attachWalletReleaseListener: (listener: (walletId: string) => void): (() => void) => {
+      this.walletReleaseListener = listener;
+      return () => {
+        // Detaches only THIS attachment — a stale detach from a superseded owner is a no-op.
+        if (this.walletReleaseListener === listener) {
+          this.walletReleaseListener = undefined;
+        }
+      };
+    },
   };
 
   /**
@@ -2521,6 +2534,15 @@ export class TripleStoreAsyncLiftPublisher
 
   private async deleteWalletLock(walletId: string): Promise<void> {
     await this.store.deleteByPattern({ subject: walletLockSubject(walletId), graph: this.walletLockGraphUri });
+    // The ONE release choke point (finalize, proven-ineffective reset, stale sweep all funnel
+    // here): the wallet just became claimable, so invite its claim loop instead of leaving the
+    // free wallet to idle out the poll. Scheduling-only — the claim attempt re-checks every
+    // guard — and it must never throw into the release path.
+    try {
+      this.walletReleaseListener?.(walletId);
+    } catch {
+      // The listener belongs to the caller's scheduler; its failure must not touch lock state.
+    }
   }
 
   private async readWalletLock(walletId: string): Promise<{

@@ -385,6 +385,64 @@ describe('async-lift reconciliation demand channel', () => {
     expect((await publisher.getStatus(jobB))?.status).toBe('broadcast');
   });
 
+  it('pokes the wallet-release listener with the wallet id on a real finalize-release, exclusively attached', async () => {
+    const txA = `0x${'aa'.repeat(32)}` as `0x${string}`;
+    const publisher = createPublisher({
+      chainProofResolver: async () => ({ status: 'recovered', recovery: { txHash: txA } } as never),
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: txA },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
+      knowledgeAssetVmPublishHandler: {
+        execute: async () => { throw new Error('executor must not run in this test'); },
+        finalizeRecovered: async () => {},
+      },
+    });
+    const pokes: string[] = [];
+    // Exclusive attachment with the same handover contract as the demand listener: a stale
+    // detach from a superseded owner must not silence the takeover.
+    const detachSuperseded = publisher.reconciliationScheduling.attachWalletReleaseListener(
+      (walletId) => pokes.push(`superseded:${walletId}`),
+    );
+    publisher.reconciliationScheduling.attachWalletReleaseListener(
+      (walletId) => pokes.push(walletId),
+    );
+    detachSuperseded();
+    await stageShareSnapshot();
+
+    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-a');
+    await publisher.update(jobA, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobA, 'broadcast', {
+      broadcast: { txHash: txA, walletId: 'wallet-a', operationKind: 'create' },
+    });
+
+    expect(await publisher.reconciliationScheduling.reconcile()).toEqual({ reconciled: 1, pendingWork: false });
+    expect((await publisher.getStatus(jobA))?.status).toBe('finalized');
+    // The chain-proof release fired the poke with the released wallet's id — and only for the
+    // current attachment.
+    expect(pokes).toEqual(['wallet-a']);
+  });
+
+  it('pokes the wallet-release listener when the stale-lock sweep frees a wallet', async () => {
+    const publisher = createPublisher();
+    const pokes: string[] = [];
+    publisher.reconciliationScheduling.attachWalletReleaseListener((walletId) => pokes.push(walletId));
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    // The "crash": the claim never progresses and its 5-minute lease expires.
+    now += 6 * 60_000;
+
+    await publisher.recover();
+    expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
+    // Both the sweep and the recover-reset release funnel through the one choke point; the
+    // listener heard the wallet become claimable (deduplication is not required — the poke is
+    // scheduling-only and the claim attempt re-checks every guard).
+    expect(pokes.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(pokes)).toEqual(new Set(['wallet-1']));
+  });
+
   it('capability startup recovery performs the real crash-recovery effects, not just the outcome shape', async () => {
     // The runner's capability path replaced `publisher.recover()` as the production startup
     // entry point. This row drives the REAL publisher through a REAL runner start: a crashed
@@ -617,5 +675,67 @@ describe('async-lift reconciliation demand channel', () => {
     }`);
     expect(lock.type).toBe('bindings');
     if (lock.type === 'bindings') expect(lock.bindings).toEqual([]);
+  });
+
+  it('turns the wallet over to the next job through the release poke with the poll parked', async () => {
+    // The end-to-end discriminator for event-driven turnover: with pollIntervalMs parked at ten
+    // minutes, job2 can only leave 'accepted' if the wallet-release poke wakes the claim loop
+    // after job1's finalize. job2 deliberately has no staged snapshot — it only needs to be
+    // CLAIMED (its validation then fails), which is exactly the observable the wake governs.
+    let proofAsks = 0;
+    const publisher = createPublisher({
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => {
+        proofAsks += 1;
+        if (proofAsks < 2) return { status: 'pending' };
+        return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
+      },
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          throw new Error('detached executor result must not be needed for finalization');
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+
+    const job1 = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const job2 = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'albums-next' }));
+
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      // THE point of this row: the claim poll is parked ten minutes out. job1 is claimed by the
+      // loop's first iteration (no sleep precedes it); job2's claim can only come from the poke.
+      pollIntervalMs: 600_000,
+      recoveryIntervalMs: 600_000,
+      activeRecoveryIntervalMs: 10,
+      errorBackoffMs: 10,
+      hasIncludedRecoveryResolver: true,
+    });
+    await runner.start();
+    try {
+      const deadline = Date.now() + 15_000;
+      while (true) {
+        const status2 = (await publisher.getStatus(job2))?.status;
+        if (status2 && status2 !== 'accepted') break;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `job2 was never claimed through the release poke (job1: ${(await publisher.getStatus(job1))?.status}, job2: ${status2})`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } finally {
+      await runner.stop();
+    }
+    expect((await publisher.getStatus(job1))?.status).toBe('finalized');
   });
 });
