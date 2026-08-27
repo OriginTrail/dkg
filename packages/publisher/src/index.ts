@@ -94,7 +94,6 @@ export {
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,
   type EncodedWorkspaceGossipPayload,
-  type WorkspaceGossipFanoutSnapshot,
   type ShareOptions,
   type ShareResult,
   type ShareConditionalOptions,

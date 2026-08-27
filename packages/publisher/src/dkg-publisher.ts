@@ -716,9 +716,6 @@ export interface ShareResult {
   gossipPayload: EncodedWorkspaceGossipPayload;
 }
 
-/** @deprecated Use WorkspaceAgentRecipientFanoutSnapshot. */
-export type WorkspaceGossipFanoutSnapshot = WorkspaceAgentRecipientFanoutSnapshot;
-
 /**
  * Network-ready workspace bytes and their encryption-time transport snapshot.
  *
