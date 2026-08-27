@@ -558,14 +558,13 @@ describe('Random Sampling proof-time exact repair', () => {
     expect(addressSignal?.aborted).toBe(true);
   });
 
-  it('aborts a hanging storage-address lookup promptly when the node stops', async () => {
-    const stop = new AbortController();
+  it('aborts a hanging repair promptly when the owning prover stops', async () => {
+    const owner = new AbortController();
     let addressStarted!: () => void;
     const started = new Promise<void>((resolve) => { addressStarted = resolve; });
     const repair = runRandomSamplingExactRepair({
       chainId: 'base:8453',
       maxPeers: 1,
-      stopSignal: stop.signal,
       timeoutMs: 60_000,
       resolveStorageAddress: () => {
         addressStarted();
@@ -585,12 +584,13 @@ describe('Random Sampling proof-time exact repair', () => {
       cgId: 1n,
       expectedRoot: new Uint8Array(32),
       expectedLeafCount: 1n,
+      signal: owner.signal,
     });
 
     await started;
-    const reason = new Error('node stopped');
-    stop.abort(reason);
-    await expect(repair).rejects.toThrow('node stopped');
+    const reason = new Error('prover stopped');
+    owner.abort(reason);
+    await expect(repair).rejects.toThrow('prover stopped');
   });
 
   it('wires the lifecycle repair callback through the production prover binding', async () => {
@@ -660,6 +660,7 @@ describe('Random Sampling proof-time exact repair', () => {
       cgId: 1n,
       expectedRoot,
       expectedLeafCount: 1n,
+      signal: expect.any(AbortSignal),
     });
     await agentLike.randomSamplingHandle!.stop();
   });

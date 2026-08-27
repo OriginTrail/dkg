@@ -326,7 +326,6 @@ export async function runExactAssetFetch(
     maxPeers: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
     operationLabel: 'Exact asset fetch from',
     assertCurrent: () => requireCurrent(deps),
-    shouldContinue: () => remaining.size > 0,
     preparePeer: deps.preparePeer,
     attemptPeer: async (peerId) => {
       let failure: unknown;
@@ -356,10 +355,15 @@ export async function runExactAssetFetch(
         }
       }
       remaining = nextRemaining;
-      return failure === undefined ? {} : { failure };
+      if (remaining.size === 0) {
+        return failure === undefined
+          ? { kind: 'done' as const }
+          : { kind: 'done' as const, diagnostic: failure };
+      }
+      return failure === undefined
+        ? { kind: 'continue' as const }
+        : { kind: 'continue' as const, error: failure };
     },
-    isSuccess: () => remaining.size === 0,
-    canContinueAfterThrownAttempt: () => false,
     log: deps.log,
   });
   const peerAttempts = traversal.peerAttempts;

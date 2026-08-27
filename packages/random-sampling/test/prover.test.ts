@@ -35,7 +35,11 @@ import {
   tripleContentV10,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { InMemoryProverWal, RandomSamplingProver } from '../src/index.js';
+import {
+  InMemoryProverWal,
+  RandomSamplingProver,
+  startProverLoop,
+} from '../src/index.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -1051,6 +1055,7 @@ describe('RandomSamplingProver — short-circuits', () => {
       cgId: fixture.cgId,
       expectedRoot: root,
       expectedLeafCount: BigInt(leafCount),
+      signal: expect.any(AbortSignal),
     });
     expect(outcome).toMatchObject({
       kind: 'submitted',
@@ -1062,6 +1067,68 @@ describe('RandomSamplingProver — short-circuits', () => {
       'challenge', 'extracted', 'built', 'submitted',
     ]);
     await prover.close();
+  });
+
+  it('aborts and drains a stalled repair before closing prover resources', async () => {
+    const fixture = { cgId: 11n, kaId: 999n };
+    const submitProof = vi.fn(async () => ({
+      hash: '0xshould-not-submit', blockNumber: 1001, success: true,
+    }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: new Uint8Array(32),
+      expectedLeafCount: 1,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    let repairStarted!: () => void;
+    const started = new Promise<void>((resolve) => { repairStarted = resolve; });
+    let repairSignal: AbortSignal | undefined;
+    let repairSettled = false;
+    const repairMissingKnowledgeAsset = vi.fn((input: { signal: AbortSignal }) => {
+      repairSignal = input.signal;
+      repairStarted();
+      return new Promise<never>((_resolve, reject) => {
+        const rejectOnAbort = () => {
+          repairSettled = true;
+          reject(input.signal.reason);
+        };
+        if (input.signal.aborted) rejectOnAbort();
+        else input.signal.addEventListener('abort', rejectOnAbort, { once: true });
+      });
+    });
+    const build = vi.fn();
+    const closeBuilder = vi.fn(async () => {
+      expect(repairSettled).toBe(true);
+    });
+    const onTick = vi.fn();
+    const prover = new RandomSamplingProver({
+      chain,
+      store,
+      identityId: IDENTITY_ID,
+      repairMissingKnowledgeAsset,
+      builder: { build, close: closeBuilder },
+    });
+    const loop = startProverLoop({ prover, intervalMs: 60_000, onTick });
+    loop.start();
+    await started;
+
+    await loop.stop();
+
+    expect(repairSignal?.aborted).toBe(true);
+    expect(onTick).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'error',
+      error: expect.objectContaining({ name: 'AbortError' }),
+    }));
+    expect(build).not.toHaveBeenCalled();
+    expect(submitProof).not.toHaveBeenCalled();
+    expect(closeBuilder).toHaveBeenCalledOnce();
   });
 
   it('proves an older pinned challenge ephemerally without downgrading live v2 state', async () => {

@@ -8,6 +8,8 @@ export interface RandomSamplingExactRepairInput {
   readonly cgId: bigint;
   readonly expectedRoot: Uint8Array;
   readonly expectedLeafCount: bigint;
+  /** Lifetime of the owning prover handle. */
+  readonly signal?: AbortSignal;
 }
 
 export interface RandomSamplingExactRepairResult {
@@ -76,9 +78,14 @@ export async function runRandomSamplingExactRepair(
   const timeoutSignal = (deps.createTimeoutSignal ?? AbortSignal.timeout)(
     deps.timeoutMs ?? 90_000,
   );
-  const signal = deps.stopSignal
-    ? AbortSignal.any([deps.stopSignal, timeoutSignal])
-    : timeoutSignal;
+  const activeSignals = [
+    input.signal,
+    deps.stopSignal,
+    timeoutSignal,
+  ].filter((candidate): candidate is AbortSignal => candidate !== undefined);
+  const signal = activeSignals.length === 1
+    ? activeSignals[0]!
+    : AbortSignal.any(activeSignals);
   if (signal.aborted) throw abortReason(signal);
 
   const localContextGraphId = deps.resolveLocalContextGraphId(input.cgId);
@@ -111,31 +118,36 @@ export async function runRandomSamplingExactRepair(
     assertCurrent: () => {
       if (signal.aborted) throw abortReason(signal);
     },
-    shouldContinue: () => true,
     selectPeerWindow: (peerIds, { maxPeers }) => deps.selectPeerWindow(peerIds, {
       maxPeers,
       peerRotationKey: `rs-proof:${localContextGraphId}`,
     }),
     preparePeer: (peerId) => raceWithAbort(deps.preparePeer(peerId, signal), signal),
     attemptPeer: async (peerId) => {
-      const result = await raceWithAbort(deps.fetchExactKnowledgeAsset(
-        peerId,
-        localContextGraphId,
-        assetUal,
-        expectedCommitment,
-        signal,
-      ), signal);
+      let result: RandomSamplingExactRepairResult;
+      try {
+        result = await raceWithAbort(deps.fetchExactKnowledgeAsset(
+          peerId,
+          localContextGraphId,
+          assetUal,
+          expectedCommitment,
+          signal,
+        ), signal);
+      } catch (error) {
+        if (signal.aborted) throw abortReason(signal);
+        return { kind: 'continue', error };
+      }
       deps.logInfo(
         `RS exact repair for ${assetUal} from ${peerId.slice(-8)}: `
           + `disposition=${result.disposition} inserted=${result.insertedTriples}`,
       );
-      return { result };
+      return result.disposition === 'found' && result.proofMaterial !== undefined
+        ? { kind: 'done', result }
+        : { kind: 'continue' };
     },
-    isSuccess: (result) => result?.disposition === 'found'
-      && result.proofMaterial !== undefined,
     log: deps.logInfo,
   });
-  if (traversal.succeeded && traversal.result?.proofMaterial !== undefined) {
+  if (traversal.completion === 'done' && traversal.result?.proofMaterial !== undefined) {
     return traversal.result.proofMaterial;
   }
 

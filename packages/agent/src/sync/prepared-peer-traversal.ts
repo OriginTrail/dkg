@@ -1,29 +1,35 @@
-export interface PreparedPeerAttempt<T> {
-  readonly result?: T;
-  /** Recoverable attempt failure retained after the caller completed required inspection. */
-  readonly failure?: unknown;
-}
+export type PreparedPeerAttemptOutcome<T> =
+  | {
+      readonly kind: 'done';
+      readonly result?: T;
+      /** A recoverable transport failure may still leave inspected durable progress complete. */
+      readonly diagnostic?: unknown;
+    }
+  | {
+      readonly kind: 'continue';
+      readonly error?: unknown;
+    }
+  | {
+      readonly kind: 'terminal';
+      readonly error: unknown;
+    };
 
 export interface BoundedPreparedPeerTraversalOptions<T> {
   readonly candidatePeerIds: readonly string[];
   readonly maxPeers: number;
   readonly operationLabel: string;
   assertCurrent(): void;
-  shouldContinue(): boolean;
   selectPeerWindow?(
     peerIds: string[],
     options: { readonly maxPeers: number },
   ): readonly string[];
   preparePeer(peerId: string): Promise<boolean>;
-  attemptPeer(peerId: string): Promise<PreparedPeerAttempt<T>>;
-  isSuccess(result: T | undefined): boolean;
-  /** Exact-fetch inspection errors are terminal; proof-repair transport errors may fail over. */
-  canContinueAfterThrownAttempt?(error: unknown): boolean;
+  attemptPeer(peerId: string): Promise<PreparedPeerAttemptOutcome<T>>;
   log(message: string): void;
 }
 
 export interface BoundedPreparedPeerTraversalResult<T> {
-  readonly succeeded: boolean;
+  readonly completion: 'done' | 'exhausted';
   readonly result?: T;
   readonly peerAttempts: number;
   readonly attemptedPeerIds: readonly string[];
@@ -57,7 +63,6 @@ export async function runBoundedPreparedPeerTraversal<T>(
 
   for (const peerId of peerWindow) {
     options.assertCurrent();
-    if (!options.shouldContinue()) break;
     attemptedPeerIds.push(peerId);
 
     let prepared: boolean;
@@ -72,34 +77,37 @@ export async function runBoundedPreparedPeerTraversal<T>(
     if (!prepared) continue;
     peerAttempts += 1;
 
-    let attempt: PreparedPeerAttempt<T>;
+    let outcome: PreparedPeerAttemptOutcome<T>;
     try {
-      attempt = await options.attemptPeer(peerId);
+      outcome = await options.attemptPeer(peerId);
     } catch (error) {
       options.assertCurrent();
-      if (options.canContinueAfterThrownAttempt?.(error) === false) throw error;
-      options.log(`${options.operationLabel} ${peerId} failed: ${errorMessage(error)}`);
-      continue;
+      throw error;
     }
     options.assertCurrent();
-    if (attempt.failure !== undefined) {
+    if (outcome.kind === 'terminal') throw outcome.error;
+    if (outcome.kind === 'continue') {
+      if (outcome.error !== undefined) {
+        options.log(`${options.operationLabel} ${peerId} failed: ${errorMessage(outcome.error)}`);
+      }
+      continue;
+    }
+    if (outcome.diagnostic !== undefined) {
       options.log(
-        `${options.operationLabel} ${peerId} failed: ${errorMessage(attempt.failure)}`,
+        `${options.operationLabel} ${peerId} failed: ${errorMessage(outcome.diagnostic)}`,
       );
     }
-    if (options.isSuccess(attempt.result)) {
-      return {
-        succeeded: true,
-        ...(attempt.result === undefined ? {} : { result: attempt.result }),
-        peerAttempts,
-        attemptedPeerIds,
-        peerWindow,
-      };
-    }
+    return {
+      completion: 'done',
+      ...(outcome.result === undefined ? {} : { result: outcome.result }),
+      peerAttempts,
+      attemptedPeerIds,
+      peerWindow,
+    };
   }
 
   return {
-    succeeded: false,
+    completion: 'exhausted',
     peerAttempts,
     attemptedPeerIds,
     peerWindow,

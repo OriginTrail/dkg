@@ -97,6 +97,8 @@ export interface RandomSamplingProverDeps {
     /** Immutable content identity captured by the active challenge. */
     expectedRoot: Uint8Array;
     expectedLeafCount: bigint;
+    /** Lifetime of the owning prover handle; aborted before handle shutdown drains the tick. */
+    signal: AbortSignal;
   }) => Promise<RandomSamplingRepairMaterial>;
 }
 
@@ -118,6 +120,36 @@ const noopLog: ProverLogger = {
   error: () => undefined,
 };
 
+function lifecycleAbortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException(
+    'Random Sampling prover handle stopped',
+    'AbortError',
+  );
+}
+
+function raceWithLifecycleAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(lifecycleAbortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(lifecycleAbortReason(signal));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
 /**
  * Single-period prover orchestrator. One instance per node — it owns
  * the WAL handle and (optionally) the worker_threads-backed builder.
@@ -135,6 +167,7 @@ export class RandomSamplingProver {
   private readonly wal: ProverWal;
   private readonly log: ProverLogger;
   private readonly repairMissingKnowledgeAsset?: RandomSamplingProverDeps['repairMissingKnowledgeAsset'];
+  private readonly lifecycleController = new AbortController();
   private inflight: Promise<TickOutcome> | null = null;
 
   /**
@@ -177,8 +210,21 @@ export class RandomSamplingProver {
     return this.inflight;
   }
 
-  /** Release builder + WAL handles. Idempotent. */
+  /** Abort handle-owned foreground work before the loop drains its active tick. */
+  cancel(reason: unknown = new DOMException(
+    'Random Sampling prover handle stopped',
+    'AbortError',
+  )): void {
+    if (!this.lifecycleController.signal.aborted) {
+      this.lifecycleController.abort(reason);
+    }
+  }
+
+  /** Release builder + WAL handles after any handle-owned tick has settled. */
   async close(): Promise<void> {
+    this.cancel();
+    const running = this.inflight;
+    if (running) await running.catch(() => undefined);
     await this.builder.close();
     await this.wal.close();
   }
@@ -325,12 +371,16 @@ export class RandomSamplingProver {
         : local.error.name,
     });
     try {
-      const repaired = await this.repairMissingKnowledgeAsset({
+      const signal = this.lifecycleController.signal;
+      if (signal.aborted) throw lifecycleAbortReason(signal);
+      const repaired = await raceWithLifecycleAbort(this.repairMissingKnowledgeAsset({
         kaId: input.kaId,
         cgId: input.cgId,
         expectedRoot: input.expectedRoot,
         expectedLeafCount: input.expectedLeafCount,
-      });
+        signal,
+      }), signal);
+      if (signal.aborted) throw lifecycleAbortReason(signal);
       this.log.info('rs.tick.kc-repaired', {
         kaId: input.kaId.toString(),
         cgId: input.cgId.toString(),
@@ -339,6 +389,7 @@ export class RandomSamplingProver {
       });
       return repaired;
     } catch (repairError) {
+      if (this.lifecycleController.signal.aborted) throw repairError;
       this.log.warn('rs.tick.kc-repair-failed', {
         kaId: input.kaId.toString(),
         cgId: input.cgId.toString(),
