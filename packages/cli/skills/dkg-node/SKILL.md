@@ -6,17 +6,16 @@ description: The DKG V10 Node is your primary memory system. This skill teaches 
 # DKG V10 Node Skill
 
 You are connected to an **OriginTrail Decentralized Knowledge Graph (DKG) V10** node.
-This skill teaches you the full node API surface so you can operate autonomously.
 
 ## 1. Node Info
 
 > This section is dynamically generated from node state at serve-time.
 
-- **Node version:** (dynamic)
-- **Base URL:** (dynamic)
-- **Peer ID:** (dynamic)
-- **Node role:** (dynamic — `core` or `edge`)
-- **Available extraction pipelines:** (dynamic)
+- **Node version:** {{nodeVersion}}
+- **Base URL:** {{baseUrl}}
+- **Peer ID:** {{peerId}}
+- **Node role:** {{nodeRole}}
+- **Available extraction pipelines:** {{extractionPipelines}}
 
 If the Node UI injects a target context graph for the turn, use that target directly. If no target is injected or configured, call `dkg_list_context_graphs` / `GET /api/context-graph/list`; agent tool surfaces default that list to the caller's created/joined context graphs, with `scope: "all"` for every graph the node knows about.
 
@@ -668,6 +667,7 @@ Implications:
 - `POST /api/context-graph/rename` — rename a CG (human-readable name only; the ID is immutable). Body: `{ contextGraphId, name }` (`id` is accepted as an alias for `contextGraphId`; all `/api/context-graph/*` routes accept either).
 - `POST /api/context-graph/subscribe` — subscribe to a context graph. Body: `{ contextGraphId }` (or `{ id }`). Pass `includeSharedMemory: true, forceCatchup: true` for a one-shot bounded repair of an existing graph whose persisted readiness may predate exact RFC-64 coverage. The equivalent CLI command is `dkg subscribe <context-graph> --repair`; omission keeps the already-ready fast path.
 - `POST /api/context-graph/reconcile` — node-admin maintenance endpoint that reconciles one subscribed/hosted context graph against its on-chain KC watermark. Body: `{ contextGraphId }` (or `{ id }`). A current watermark returns without VM-slice or peer catch-up work. Requires the node-level admin token when daemon auth is enabled; agent-scoped tokens are rejected.
+- `POST /api/context-graph/fetch-assets` — node-admin endpoint that fetches 1–10 exact RFC64 Knowledge Asset UALs. Body: `{ contextGraphId, uals, peerIds? }` (`id`, `assetUals`, and `remotePeerIds` are accepted aliases). The node proves that every UAL belongs to the named graph, fetches only unresolved assets, and reports each item as `already-present`, `materialized`, `fetched`, or `unresolved`. If `peerIds` is omitted, the node tries up to five suitable peers. This endpoint does not scan or replace the complete graph, start background reconciliation, or change the graph watermark. Requires the node-level admin token when daemon auth is enabled; agent-scoped tokens are rejected.
 - `GET /api/context-graph/list` — list known context graphs; tool wrappers default to the caller's created/joined graphs and can expose all known graphs with `scope: "all"`
 - `GET /api/context-graph/exists` — check if a context graph exists
 - `GET /api/sync/catchup-status?contextGraphId=...` — poll CG sync progress after subscribing
@@ -898,12 +898,16 @@ chain:
   type: evm
   rpcUrl: https://base.llamarpc.com
   hubAddress: '0x...'
+  finalityConfirmations: 1          # operator-selected; 1 has no successor-block reorg buffer
   approvalPolicy:
     mode: per-publish                # 'per-publish' | 'replenishing' | 'unlimited'
     # `replenishing` mode only:
     targetAllowance: '1000000000000000000000'   # decimal wei-TRAC string (1000 TRAC = 10^21)
     refillBelowFraction: 0.1                     # refill when current < target × this (default 10%)
 ```
+
+`finalityConfirmations` is an operator-selected positive integer. It controls when a mined publish receipt becomes terminal and when its publisher wallet may take another queued job. Standard EVM confirmation counting applies: `1` accepts the receipt's own block after verifying that its hash is canonical; `2` waits for one successor, and so on. The default is `1`.
+Lower values reduce publish latency, but they increase reorganization risk. A value of `1` gives no successor-block buffer: a chain reorganization can reverse a receipt after the node has accepted it and released the wallet. Choose a larger value when the network can have reorganizations or when reversal risk is more important than publish speed. The node uses the configured value for receipt finality and recovery proof snapshots; it does not replace the operator's value with the protocol's separate finalized-block tag.
 
 `targetAllowance` is a string because YAML/JSON can't carry bigints natively — the daemon parses it into a bigint at startup, fails fast on garbage input. `refillBelowFraction` clamps to `[0, 1]`; a value of `1` means "refill on every publish" (defeats the policy) and `0` means "never refill until the publish floor (1 wei-TRAC) is breached" (which on a zero-cost CG would mean approve once then never again).
 

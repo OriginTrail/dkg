@@ -78,6 +78,11 @@ export interface VerifiedGraphScopedFinalizationIdentity {
   targetContextGraphId?: string;
 }
 
+export type VerifiedGraphScopedFinalizationEvidencePlacement =
+  | 'original'
+  | 'canonical-moved'
+  | 'mismatch';
+
 export interface BuildVerifiedGraphScopedFinalizationEvidenceInput {
   candidate: ParsedGraphScopedFinalization;
   publicQuadsDigest?: string;
@@ -251,8 +256,18 @@ export class VerifiedGraphScopedFinalizationEvidenceCodec {
     candidate: ParsedGraphScopedFinalization,
     identity: VerifiedGraphScopedFinalizationIdentity,
   ): boolean {
-    return this.matchesImmutableEnvelope(evidence, candidate, identity)
-      && candidate.blockNumber === evidence.blockNumber;
+    return this.classifyPlacement(evidence, candidate, identity) === 'original';
+  }
+
+  static classifyPlacement(
+    evidence: VerifiedGraphScopedFinalizationEvidence,
+    candidate: ParsedGraphScopedFinalization,
+    identity: VerifiedGraphScopedFinalizationIdentity,
+  ): VerifiedGraphScopedFinalizationEvidencePlacement {
+    if (!this.matchesImmutableEnvelope(evidence, candidate, identity)) return 'mismatch';
+    return candidate.blockNumber === evidence.blockNumber
+      ? 'original'
+      : 'canonical-moved';
   }
 
   static matchesImmutableEnvelope(

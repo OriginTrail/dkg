@@ -126,6 +126,8 @@ export interface ReadOpts {
   endpointSetRetry?: 'all-throttled';
   /** Cancels the active raw ethers FetchRequest for this read. */
   signal?: AbortSignal;
+  /** Absolute operation deadline shared by every endpoint attempt. */
+  deadlineMs?: number;
 }
 
 /** Optional absolute deadline and low-cardinality label for one receipt pass. */
@@ -354,6 +356,7 @@ export class RpcFailoverClient {
         )(error),
         intent: skipPreferred ? 'transparentRead' : 'stickyRead',
         attemptTimeoutMs: providerCount => resolveCapMs(policy, providerCount),
+        ...(opts?.deadlineMs === undefined ? {} : { deadlineMs: opts.deadlineMs }),
         isEmptyResult: opts?.isEmptyResult as ((value: T) => boolean) | undefined,
         onServed: endpoint => noteRpcServed(label, endpoint.rpcUrl, {
           mode: 'read',
@@ -409,6 +412,7 @@ export class RpcFailoverClient {
                 )(error),
                 intent: skipPreferred ? 'transparentRead' : 'stickyRead',
                 attemptTimeoutMs: providerCount => resolveCapMs(policy, providerCount),
+                ...(opts?.deadlineMs === undefined ? {} : { deadlineMs: opts.deadlineMs }),
                 isEmptyResult: opts?.isEmptyResult as ((value: T) => boolean) | undefined,
                 onServed: endpoint => noteRpcServed(label, endpoint.rpcUrl, {
                   mode: 'read',
@@ -665,7 +669,7 @@ export class RpcFailoverClient {
             provider => provider.getTransactionReceipt(txHash),
             {
               isRetryable: error => !options.signal?.aborted && isRetryableRpcError(error),
-              intent: 'write',
+              intent: 'receiptRead',
               attemptTimeoutMs: () => RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
               ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
               isEmptyResult: value => value == null,

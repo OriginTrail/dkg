@@ -2543,6 +2543,12 @@ def _filter_context_graphs_for_scope(graphs: Any, scope: str) -> List[Any]:
 _ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
+# GH#1086 — the checksum fallback below warns at most once per process. The
+# normalizer runs on every call on both the read and the write path, so an
+# unconditional warning would flood the operator log.
+_CHECKSUM_FALLBACK_WARNED = False
+
+
 def _normalize_wm_agent_address(agent_address: str) -> str:
     value = agent_address.strip()
     if value.startswith("did:dkg:agent:"):
@@ -2551,7 +2557,31 @@ def _normalize_wm_agent_address(agent_address: str) -> str:
         try:
             from eth_utils import to_checksum_address
             return to_checksum_address(value)
-        except Exception:
+        except Exception as exc:  # GH#1086
+            # eth-utils ships no keccak backend by default and the Hermes
+            # setup pip-installs nothing, so this is a routine condition rather
+            # than an exceptional one. Fail open: the value is still a usable
+            # identifier, and refusing the call would be the worse regression.
+            #
+            # INVARIANT: this helper is shared by the working-memory read path
+            # (dkg_query, view="working-memory") and the finalize author path,
+            # and its input may already be checksummed — in which case
+            # returning it unchanged is correct. Diagnostics here must
+            # therefore stay operation-neutral and conditional: never name a
+            # write-only consequence, and never assert the value is wrong.
+            global _CHECKSUM_FALLBACK_WARNED
+            if not _CHECKSUM_FALLBACK_WARNED:
+                _CHECKSUM_FALLBACK_WARNED = True
+                logger.warning(
+                    "DKG: could not canonicalize agent address %s to EIP-55 "
+                    "checksum form (%s: %s); using it as-is. If it is not "
+                    "already checksummed it may fail to match canonical "
+                    "identity records. Install a keccak backend to fix: "
+                    "pip install 'eth-hash[pycryptodome]'",
+                    value,
+                    type(exc).__name__,
+                    exc,
+                )
             return value
     return value
 

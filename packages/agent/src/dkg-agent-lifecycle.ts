@@ -202,7 +202,7 @@ import {
   NetworkAdmissionCoordinator,
   NetworkAdmissionRejectedError,
 } from './p2p/network-admission-coordinator.js';
-import { createNetworkAdmissionProtocolCheck } from './p2p/network-admission-protocol-adapter.js';
+import { createNetworkAdmissionRouterPolicy } from './p2p/network-admission-protocol-adapter.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -275,6 +275,7 @@ import {
   exactAssetUalsForSelection,
   exactAssetFilterKey,
   exactSyncPhaseAccumulationLimits,
+  requireExactAssetSelection,
   type ExactAssetSelection,
 } from './sync/exact-assets.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
@@ -307,7 +308,6 @@ import {
   runDurableSync,
   runDurableSyncDetailed,
   type ChallengeExactAssetFetchContext,
-  type DetailedDurableSyncResult,
   type DurableMetaContinuation,
   type DurableSyncContext,
   type VerifiedFullSnapshot,
@@ -595,6 +595,7 @@ import {
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
   type DKGAgentConfig,
+  type ResolvedDKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerProbe,
   type SyncReconcilerBackoff,
@@ -652,7 +653,7 @@ import {
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
 
-function resolveAgentSyncGlobalBackpressure(config: DKGAgentConfig) {
+function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   // `trackSyncContextGraph()` mutates this list when an Edge explicitly
   // subscribes or starts a foreground catch-up. Those operator-selected graphs
   // need the same admission guarantee as an RFC-64 pinned scope: otherwise a
@@ -669,7 +670,7 @@ function resolveAgentSyncGlobalBackpressure(config: DKGAgentConfig) {
     ...config,
     selectedRecoveryContextGraphIds: [...new Set([
       ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
-        config.rfc64PublicCatalogBootstrap,
+        config.rfc64CatalogBootstrap ?? config.rfc64PublicCatalogBootstrap,
       ),
       ...edgeSelectedContextGraphIds,
     ])],
@@ -2038,7 +2039,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     this.router = new ProtocolRouter(this.node, {
       peerResolver,
-      isPeerAccepted: createNetworkAdmissionProtocolCheck(this.networkAdmissionCoordinator),
+      // Both admission phases — the probing full check and the cached-verdict
+      // pre-read gate — installed as one policy from one coordinator; see
+      // createNetworkAdmissionRouterPolicy for why they must not be wired
+      // separately.
+      ...createNetworkAdmissionRouterPolicy(this.networkAdmissionCoordinator),
       admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
     });
     // Default to in-memory substrate stores when no durable stores
@@ -3830,12 +3835,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // `SYNC_STALENESS_THRESHOLD_MS`) and `reconcileSyncFromConnectedPeers`
     // for the full design rationale.
     if (syncReconcilerEnabled(this.config)) {
+      const syncTiming = this.config.syncReconcilerTiming;
       this.syncReconcilerTimer = setInterval(() => {
         this.reconcileSyncFromConnectedPeers().catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Sync reconciler tick failed: ${message}`);
         });
-      }, SYNC_RECONCILER_INTERVAL_MS);
+      }, syncTiming.intervalMs);
       if (this.syncReconcilerTimer.unref) this.syncReconcilerTimer.unref();
     } else {
       this.log.warn(ctx, `Skipping periodic sync reconciler startup (DKG_SYNC_RECONCILER_ENABLED=0)`);
@@ -4312,7 +4318,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): readonly string[] {
     const selected = new Set(this.config.syncContextGraphs ?? []);
     return resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
-      this.config.rfc64PublicCatalogBootstrap,
+      this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
       remotePeer,
     ).filter((contextGraphId) => selected.has(contextGraphId));
   }
@@ -4353,6 +4359,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     delayMs = 3000,
     options: { selectedSwmRetry?: boolean } = {},
   ): boolean {
+    const syncTiming = this.config.syncReconcilerTiming;
     const selectedSwmRetryRequired = options.selectedSwmRetry === true
       && this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer);
     // RFC-64 bootstrap is an independently enabled, graph-scoped recovery
@@ -4370,7 +4377,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       !selectedSwmRetryRequired &&
       lastSuccessfulSync != null &&
       lastSuccessfulSync > disconnectBoundary &&
-      now - lastSuccessfulSync < SYNC_STALENESS_THRESHOLD_MS
+      now - lastSuccessfulSync < syncTiming.stalenessThresholdMs
     ) {
       return false;
     }
@@ -4545,10 +4552,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
     const prioritySharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
     const automaticPeerSweep = source === 'on-connect' || source === 'reconcile';
-    const remotePeerIsCompleteSwmProvider = this.config.rfc64PublicCatalogBootstrap
-      ?.acceptedPublicPolicies.some(
+    const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+      ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
+      ?? [];
+    const remotePeerIsCompleteSwmProvider = acceptedPolicies.some(
         ({ completeSwmProviders = [] }) => completeSwmProviders.includes(remotePeer),
-      ) ?? false;
+      );
     const getSharedMemorySyncPlan = (peerId: string): Promise<SharedMemorySyncContextGraphPlan> => {
       let plan = sharedMemorySyncPlans.get(peerId);
       if (!plan) {
@@ -5016,6 +5025,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.started) return;
     if (!syncReconcilerEnabled(this.config) || !syncOnConnectEnabled(this.config)) return;
     const now = Date.now();
+    const syncTiming = this.config.syncReconcilerTiming;
     const ctx = createOperationContext('sync');
     this.pruneSyncReconcilerState(now);
     for (const pid of this.node.libp2p.getPeers()) {
@@ -5028,7 +5038,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const lastSyncCooldown = Math.max(lastOk ?? 0, lastProgress ?? 0);
       const stale = lastSyncCooldown === 0
         || lastSyncCooldown <= lastDisconnected
-        || (now - lastSyncCooldown) >= SYNC_STALENESS_THRESHOLD_MS;
+        || (now - lastSyncCooldown) >= syncTiming.stalenessThresholdMs;
       if (!stale) continue;
       // Per-peer exponential backoff: a peer that can never be synced
       // (dead / NAT-stuck / persistently stream-resetting) never stamps
@@ -5063,30 +5073,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   pruneSyncReconcilerState(this: DKGAgent, now = Date.now()): void {
+    const syncTiming = this.config.syncReconcilerTiming;
     this.syncCheckpoints.pruneExpired?.(now);
     const connected = new Set(this.node.libp2p.getPeers().map((pid) => pid.toString()));
     for (const [peerId, ts] of this.catchupOnConnectAt) {
-      if (!connected.has(peerId) && now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+      if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
         this.catchupOnConnectAt.delete(peerId);
       }
     }
     for (const [peerId, ts] of this.lastSyncDisconnectedAt) {
-      if (now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+      if (now - ts >= syncTiming.stalenessThresholdMs) {
         this.lastSyncDisconnectedAt.delete(peerId);
       }
     }
     for (const [peerId, ts] of this.lastSuccessfulSyncAt) {
-      if (!connected.has(peerId) && now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+      if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
         this.lastSuccessfulSyncAt.delete(peerId);
       }
     }
     for (const [peerId, ts] of this.lastSyncProgressAt) {
-      if (!connected.has(peerId) && now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+      if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
         this.lastSyncProgressAt.delete(peerId);
       }
     }
     for (const [peerId, backoff] of this.syncReconcilerBackoff) {
-      if (!connected.has(peerId) && now >= backoff.nextRetryAt + SYNC_STALENESS_THRESHOLD_MS) {
+      if (!connected.has(peerId) && now >= backoff.nextRetryAt + syncTiming.stalenessThresholdMs) {
         this.syncReconcilerBackoff.delete(peerId);
       }
     }
@@ -5144,10 +5155,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   recordSyncReconcilerFailure(this: DKGAgent, peerId: string, probe: SyncReconcilerProbe): void {
     if (!this.started || !this.isPeerConnectedForSyncBackoff(peerId)) return;
     const failures = (this.syncReconcilerBackoff.get(peerId)?.failures ?? 0) + 1;
+    const syncTiming = this.config.syncReconcilerTiming;
     // Clamp the exponent so `2 ** exp` can never overflow before the cap.
     const exp = Math.min(failures - 1, 30);
-    const delay = Math.min(SYNC_BACKOFF_BASE_MS * 2 ** exp, SYNC_BACKOFF_MAX_MS);
-    const jittered = delay * (1 + (Math.random() * 2 - 1) * SYNC_BACKOFF_JITTER);
+    const delay = Math.min(syncTiming.backoffBaseMs * 2 ** exp, syncTiming.backoffMaxMs);
+    const jittered = delay * (1 + (Math.random() * 2 - 1) * syncTiming.backoffJitter);
     this.syncReconcilerBackoff.set(peerId, {
       failures,
       nextRetryAt: Date.now() + jittered,
@@ -5693,7 +5705,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<DurableSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
       ? createUalOnlyExactAssetSelection(selectionInput)
-      : selectionInput as ExactAssetSelection;
+      : requireExactAssetSelection(selectionInput);
     return (await this.syncExactKnowledgeAssetsFromPeerDetailed(
       remotePeerId,
       contextGraphId,
@@ -5702,15 +5714,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     )).result;
   }
 
+  syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: string,
+    assetUals: readonly string[],
+    options?: {
+      signal?: AbortSignal;
+      isCurrent?: () => boolean;
+    },
+  ): Promise<ExactKnowledgeAssetSyncResult>;
+  syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: string,
+    selection: ExactAssetSelection,
+    options?: {
+      signal?: AbortSignal;
+      isCurrent?: () => boolean;
+    },
+  ): Promise<ExactKnowledgeAssetSyncResult>;
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
-    selectionInput: ExactAssetSelection,
+    selectionInput: ExactAssetSelection | readonly string[],
     options: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
     } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
+    const selection: ExactAssetSelection = Array.isArray(selectionInput)
+      ? createUalOnlyExactAssetSelection(selectionInput)
+      : requireExactAssetSelection(selectionInput);
     const ctx = createOperationContext('sync');
     const detailed = await this.runLegacyDurableSyncDetailed(
       ctx,
@@ -5720,7 +5753,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       undefined,
       undefined,
       {
-        exactAssetSelection: selectionInput,
+        exactAssetSelection: selection,
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
         source: 'vm-recovery',

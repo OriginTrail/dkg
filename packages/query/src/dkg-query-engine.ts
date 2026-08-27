@@ -1,3 +1,8 @@
+import { isSparqlHttpResponseError } from '@origintrail-official/dkg-storage';
+import { CallerSparqlRejectedError } from './caller-sparql-error.js';
+
+/** Upstream statuses that mean the SUBMITTED query was malformed. */
+const MALFORMED_CALLER_QUERY_STATUSES = new Set([400, 422]);
 import type {
   TripleStore,
   Quad,
@@ -551,8 +556,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         const sharedMemorySparql = swmGraphs.length > 0
           ? (wrapWithGraphUnion(sparql, swmGraphs) ?? wrapWithGraph(sparql, sharedMemoryGraph))
           : wrapWithGraph(sparql, sharedMemoryGraph);
-        const dataResult = await reads.query(dataSparql);
-        const smResult = await reads.query(sharedMemorySparql);
+        // Both are graph-wrapped forms of the CALLER's query, so they carry
+        // the same provenance as execAndNormalize (PR #2330 review — this
+        // branch previously bypassed the marker, leaving the original 500 for
+        // any `includeSharedMemory` request with malformed SPARQL).
+        const dataResult = await this.execCallerQuery(dataSparql, reads);
+        const smResult = await this.execCallerQuery(sharedMemorySparql, reads);
         return mergeSharedMemoryAndDataResults(dataResult, smResult);
       }
       if (options?.graphSuffix === '_shared_memory') {
@@ -1198,11 +1207,34 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return uris;
   }
 
+  /**
+   * Execute CALLER-derived SPARQL and mark a store rejection with provenance.
+   *
+   * GH#1758 — every caller-derived store execution must go through here.
+   * Engine-generated queries (access checks, graph resolution, metadata scans)
+   * deliberately do NOT, so the HTTP boundary can answer 400 for a malformed
+   * caller query without blaming the caller when the configured backend
+   * rejects an internal one.
+   *
+   * Only 400/422 are translated: 401/403/404/429 and 5xx mean the store
+   * rejected US and stay server faults (PR #2330 review).
+   */
+  private async execCallerQuery(sparql: string, reads: StoreReadLane) {
+    try {
+      return await reads.query(sparql);
+    } catch (err) {
+      if (isSparqlHttpResponseError(err) && MALFORMED_CALLER_QUERY_STATUSES.has(err.status)) {
+        throw new CallerSparqlRejectedError(err.message, err.status, { cause: err });
+      }
+      throw err;
+    }
+  }
+
   private async execAndNormalize(
     sparql: string,
     reads: StoreReadLane,
   ): Promise<QueryResult> {
-    const result = await reads.query(sparql);
+    const result = await this.execCallerQuery(sparql, reads);
 
     if (result.type === 'bindings') {
       if (result.bindings.length === 0) {

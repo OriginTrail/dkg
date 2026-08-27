@@ -76,7 +76,7 @@ interface AgentInternals {
   recoverVmReconcileBatch(
     localCgId: string,
     onChainCgId: bigint,
-    targets: readonly Array<{
+    targets: ReadonlyArray<{
       localCgId: string;
       onChainCgId: string;
       ordinal: number;
@@ -1060,7 +1060,9 @@ describe('Phase D - VM reconcile damping', () => {
 
     let internals = await boot(subscriptionStore);
     registerUnmatchedKC(internals.chain, kaId, onChainCgId, bytesToHex(root));
-    (internals.store as TripleStore & { getWriteGen?: (prefix: string) => number }).getWriteGen = () => 0;
+    (internals.store as TripleStore & {
+      getWriteRevision?: (prefix: string) => { generation: number; stable: boolean };
+    }).getWriteRevision = () => ({ generation: 0, stable: true });
     await insertWorkspaceOperationMeta(
       internals.store,
       contextGraphWorkspaceMetaGraphUri(localCgId),
@@ -1078,7 +1080,9 @@ describe('Phase D - VM reconcile damping', () => {
     agent = null;
     internals = await boot(subscriptionStore);
     registerUnmatchedKC(internals.chain, kaId, onChainCgId, bytesToHex(root));
-    (internals.store as TripleStore & { getWriteGen?: (prefix: string) => number }).getWriteGen = () => 0;
+    (internals.store as TripleStore & {
+      getWriteRevision?: (prefix: string) => { generation: number; stable: boolean };
+    }).getWriteRevision = () => ({ generation: 0, stable: true });
     await insertWorkspaceOperationMeta(
       internals.store,
       contextGraphWorkspaceMetaGraphUri(localCgId),
@@ -2214,7 +2218,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).recoverVmReconcileBatch = async (
       _lcg: string,
       _ocg: bigint,
-      targets: readonly Array<{ ordinal: number }>,
+      targets: ReadonlyArray<{ ordinal: number }>,
     ) => {
       recoveryBatches.push(targets.map((target) => target.ordinal));
       return {

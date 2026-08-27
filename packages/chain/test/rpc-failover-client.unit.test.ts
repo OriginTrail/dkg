@@ -255,6 +255,16 @@ describe('RpcFailoverClient.broadcast — idempotent short-circuit + typed exhau
     expect(backup.broadcastTransaction.calls).toEqual([]);
   });
 
+  it('a generic nonce-too-low error is not accepted as proof of the exact signed transaction', async () => {
+    const error = Object.assign(new Error('nonce too low'), { code: 'NONCE_EXPIRED' });
+    const primary = { broadcastTransaction: recorder(async () => { throw error; }) };
+    const backup = { broadcastTransaction: recorder(async () => undefined) };
+    const client = makeClient([primary, backup], URLS);
+
+    await expect(client.broadcast('0xsigned', '0xhash', 'unit write')).rejects.toBe(error);
+    expect(backup.broadcastTransaction.calls).toEqual([]);
+  });
+
   it('all endpoints exhausted → ChainRpcTransportError RPC_ENDPOINTS_EXHAUSTED with a HOST-ONLY message', async () => {
     const primary = { broadcastTransaction: recorder(async () => { throw retryable429(); }) };
     const backup = { broadcastTransaction: recorder(async () => { throw retryable429(); }) };

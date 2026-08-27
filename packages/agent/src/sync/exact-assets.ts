@@ -131,16 +131,16 @@ export function normalizeExactAssetMerkleRootHex(value: unknown): string {
 
 export function createUalOnlyExactAssetSelection(
   assetUals: readonly string[],
-): ExactAssetSelection {
+): UalOnlyExactAssetSelection {
   return Object.freeze({
     kind: 'ual-only',
     assetUals: Object.freeze(requireExactAssetUals(assetUals)),
-  }) as ExactAssetSelection;
+  }) as UalOnlyExactAssetSelection;
 }
 
 export function createChallengePinnedExactAssetSelection(
   inputCommitments: readonly ExactAssetCommitment[],
-): ExactAssetSelection {
+): ChallengePinnedExactAssetSelection {
   if (
     !Array.isArray(inputCommitments)
     || inputCommitments.length < 1
@@ -169,7 +169,7 @@ export function createChallengePinnedExactAssetSelection(
   return Object.freeze({
     kind: 'challenge-pinned',
     commitments: Object.freeze(commitments),
-  }) as ExactAssetSelection;
+  }) as ChallengePinnedExactAssetSelection;
 }
 
 /** Parse untrusted input once; internal APIs accept only the branded result. */

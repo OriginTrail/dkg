@@ -41,11 +41,13 @@ import type {
   SubGraphNameV1,
   TimestampMsV1,
   UnsignedContextGraphPolicyEnvelopeV1,
+  UnsignedMemberRosterEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
   StorageAckTiming,
+  StorageAckTimingInput,
   WorkspacePublicSnapshotStore,
   CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
@@ -59,6 +61,7 @@ import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import type {
+  Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
   ResolvedRfc64PublicCatalogAutoPublishPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
@@ -67,6 +70,7 @@ import type {
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
+import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -1366,6 +1370,25 @@ export interface Rfc64PublicCatalogBootstrapConfigV1 {
   readonly retryIntervalMs?: number;
 }
 
+/**
+ * One policy-neutral, operator-verified RFC-64 catalog selection.  The
+ * canonical roster envelope is present exactly for invite-only policies; its
+ * payload is bound to the exact policy object digest before agent startup.
+ */
+export interface Rfc64CatalogBootstrapPolicyV1 {
+  readonly policyEnvelope: UnsignedContextGraphPolicyEnvelopeV1;
+  readonly rosterEnvelope?: UnsignedMemberRosterEnvelopeV1;
+  readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
+  /** One to eight graph-complete providers for selected private recovery. */
+  readonly completeSwmProviders?: readonly string[];
+}
+
+/** Explicit policy-neutral cold-start manifest used by additive `rfc64Catalog`. */
+export interface Rfc64CatalogBootstrapConfigV1 {
+  readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
+  readonly retryIntervalMs?: number;
+}
+
 export interface DKGAgentConfig {
   name: string;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
@@ -1385,6 +1408,12 @@ export interface DKGAgentConfig {
    * RFC-64 catalog policy. Omission preserves the legacy open-only lane.
    */
   rfc64CatalogAccessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
+  /**
+   * Additive policy-neutral RFC-64 activation. It can select public and
+   * invite-only CGs. Existing selected-public callers may continue to use
+   * `rfc64PublicCatalogActivation`.
+   */
+  rfc64CatalogActivation?: Rfc64CatalogActivationInputV1;
   /**
    * Canonical selected-public activation resolved through the versioned,
    * side-effect-free activation surface. Mutually exclusive with the legacy
@@ -1476,6 +1505,16 @@ export interface DKGAgentConfig {
   syncSharedMemoryOnConnect?: boolean;
   /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
   syncReconcilerEnabled?: boolean;
+  /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
+  syncReconcilerIntervalMs?: number;
+  /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
+  syncStalenessThresholdMs?: number;
+  /** Initial per-peer automatic sync retry delay. Default: 5 minutes. */
+  syncBackoffBaseMs?: number;
+  /** Maximum per-peer automatic sync retry delay. Default: 60 minutes. */
+  syncBackoffMaxMs?: number;
+  /** Fractional retry jitter from 0 through 1. Default: 0.25. */
+  syncBackoffJitter?: number;
   /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
   syncOnConnectEnabled?: boolean;
   /**
@@ -1626,7 +1665,7 @@ export interface DKGAgentConfig {
    * legacy loose aliases below so the handler deadline and publisher send
    * timeout are treated as one invariant.
    */
-  storageAckTiming?: StorageAckTiming;
+  storageAckTiming?: StorageAckTimingInput;
   /**
    * @deprecated Use `storageAckTiming.handlerDeadlineMs`. Kept as a
    * compatibility alias and normalized by `DKGAgent.create`.
@@ -1670,6 +1709,13 @@ export interface DKGAgentConfig {
     chainId?: string;
     /** Overall submitted-transaction receipt deadline (default 10 minutes). */
     receiptTimeoutMs?: number;
+    /**
+     * Operator-selected receipt confirmation depth. Lower values are faster but
+     * increase reorganization risk; 1 gives no successor-block buffer. Defaults to 1.
+     */
+    finalityConfirmations?: number;
+    /** Optional operator cap for transaction fee-per-gas fields (wei). */
+    maxFeePerGasWei?: bigint;
     /**
      * Optional V10 allowance-sizing policy. Threaded straight through to
      * the `EVMChainAdapter`; see `ApprovalPolicy` in
@@ -1833,6 +1879,12 @@ export type ResolvedDKGAgentConfig =
     | 'storageAckTiming'
     | 'ackHandlerDeadlineMs'
     | 'ackSendTimeoutMs'
+    | 'syncReconcilerIntervalMs'
+    | 'syncStalenessThresholdMs'
+    | 'syncBackoffBaseMs'
+    | 'syncBackoffMaxMs'
+    | 'syncBackoffJitter'
+    | 'rfc64CatalogActivation'
     | 'rfc64PublicCatalogActivation'
     | 'rfc64PublicCatalogAutoPublish'
     | 'rfc64PublicCatalogBootstrap'
@@ -1841,7 +1893,9 @@ export type ResolvedDKGAgentConfig =
   > & {
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
+    syncReconcilerTiming: SyncReconcilerTiming;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
+    rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
     rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

@@ -46,6 +46,7 @@ const agents: DKGAgent[] = [];
 const stores: TripleStore[] = [];
 const tempDataDirs: string[] = [];
 const CHAIN_JSONLD_TIMEOUT_MS = 120_000;
+const TWO_AGENT_CHAIN_JSONLD_TIMEOUT_MS = 300_000;
 
 async function createTempDataDir(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
@@ -59,6 +60,7 @@ async function createAgent(name: string, overrides: Partial<DKGAgentConfig> = {}
       kaNumberAllocator: makeTestKaNumberAllocator(),
     name,
     listenPort: 0,
+    listenHost: '127.0.0.1',
     skills: [],
     chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     nodeRole: 'core',
@@ -77,7 +79,9 @@ afterEach(async () => {
     try { await a.stop(); } catch { /* teardown best-effort */ }
   }
   agents.length = 0;
-  stores.length = 0;
+  for (const store of stores.splice(0)) {
+    try { await store.close(); } catch { /* teardown best-effort */ }
+  }
   for (const dir of tempDataDirs.splice(0)) {
     await rm(dir, { recursive: true, force: true });
   }
@@ -995,7 +999,10 @@ describe('publishJsonLd', () => {
     // Produce the canonical seal through the callback signing path. Each test
     // agent has a fresh deterministic KA allocator, so the second agent derives
     // the same author-scoped UAL and can exercise the pre-signed input path.
-    const source = await createAgent('AsyncValidPreSignedSourceBot');
+    const [source, target] = await Promise.all([
+      createAgent('AsyncValidPreSignedSourceBot'),
+      createAgent('AsyncValidPreSignedTargetBot'),
+    ]);
     await source.agent.createContextGraph({
       id: 'async-valid-presigned-source',
       name: 'AsyncValidPreSignedSource',
@@ -1026,7 +1033,6 @@ describe('publishJsonLd', () => {
       await sourceQueue.getStatus(sourceCapture.captureID),
     );
 
-    const target = await createAgent('AsyncValidPreSignedTargetBot');
     await target.agent.createContextGraph({
       id: 'async-valid-presigned-target',
       name: 'AsyncValidPreSignedTarget',
@@ -1057,7 +1063,7 @@ describe('publishJsonLd', () => {
 
     expect(targetRequest.seal).toEqual(sourceRequest.seal);
     expect(targetRequest.seal.authorAddress).toBe(externalAuthor.address);
-  }, CHAIN_JSONLD_TIMEOUT_MS);
+  }, TWO_AGENT_CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish rejects preSignedAuthorAttestation + authorAgentAddress as mutually exclusive', async () => {
     // Sync parity: pick one signing path (caller-provided seal OR daemon custodial).

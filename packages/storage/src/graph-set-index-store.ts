@@ -7,6 +7,7 @@ import type {
   StorePressureSnapshot,
   StoreWorkPriority,
   TripleStore,
+  TripleStoreDecorator,
   UpdateOptions,
 } from './triple-store.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
@@ -187,7 +188,7 @@ class RefreshCoordinator<T> {
  * only graphs containing at least one quad are listed; empty `createGraph()`
  * calls are not visible until data is inserted.
  */
-export class GraphSetIndexStore implements TripleStore {
+export class GraphSetIndexStore implements TripleStoreDecorator {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }
@@ -197,6 +198,7 @@ export class GraphSetIndexStore implements TripleStore {
   }
 
   private readonly inner: TripleStore;
+  readonly innerStore: TripleStore;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
   private readonly revalidateFailureBackoffMs: number;
@@ -219,6 +221,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
+    this.innerStore = inner;
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
     this.revalidateFailureBackoffMs = positiveFiniteMs(

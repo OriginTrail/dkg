@@ -96,7 +96,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -150,7 +150,9 @@ import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
-import { buildReconciledKnowledgeAssetUal } from './ka-identity.js';
+import {
+  buildReconciledKnowledgeAssetUal,
+} from './ka-identity.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -262,10 +264,16 @@ import {
   type VmRecoveryUalDisposition,
 } from './vm-recovery-provider-policy.js';
 import {
-  createUalOnlyExactAssetSelection,
   encodeExactAssetUals,
   MAX_EXACT_SYNC_ASSETS,
 } from './sync/exact-assets.js';
+import {
+  MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+  ExactAssetFetchLifecycleClosedError,
+  runExactAssetFetch,
+  type ContextGraphAssetFetchResult,
+  type ExactAssetFetchEvidence,
+} from './sync/exact-asset-fetch.js';
 
 function rsHealStoreOptions(operation: string, signal?: AbortSignal): QueryOptions {
   return {
@@ -2867,12 +2875,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     contextGraphId: string,
   ): boolean {
     if (!(this.config.syncContextGraphs ?? []).includes(contextGraphId)) return false;
-    return this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies.some(
+    const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+      ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
+      ?? [];
+    return acceptedPolicies.some(
       ({ policyEnvelope }) => (
         policyEnvelope.payload.accessPolicy === 0
         && policyEnvelope.payload.contextGraphId === contextGraphId
       ),
-    ) ?? false;
+    );
   }
 
   isRfc64SelectedVmReconcileTargetAllowed(
@@ -2935,8 +2946,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // intentionally do not become member subscriptions (no gossip fan-out or
       // durable subscription row), but finalized VM must still be reconciled
       // from the canonical on-chain ordinal inventory.
-      for (const { policyEnvelope } of this.config.rfc64PublicCatalogBootstrap
-        ?.acceptedPublicPolicies ?? []) {
+      const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
+        ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
+        ?? [];
+      for (const { policyEnvelope } of acceptedPolicies) {
         const localCgId = policyEnvelope.payload.contextGraphId;
         if (
           !eligible.includes(localCgId)
@@ -3159,6 +3172,151 @@ export class SwmHostModeMethods extends DKGAgentBase {
       throw new VmReconcileQueueClosedError();
     }
     return this.ensureVmReconcileDispatcher().dispatch(localCgId, source);
+  }
+
+  /**
+   * Fetch a small, explicit set of RFC64 Knowledge Assets.
+   *
+   * This operator path is independent of the background chain reconciler. It
+   * proves every requested UAL against the chain, uses the exact-asset wire
+   * filter, and never scans or replaces the complete Context Graph. It also
+   * leaves the graph's contiguous reconcile watermark unchanged: a small
+   * fetch is not proof that any ordinal range is complete.
+   */
+  async fetchContextGraphAssets(
+    this: DKGAgent,
+    localCgId: string,
+    requestedUals: readonly string[],
+    options: { peerIds?: readonly string[] } = {},
+  ): Promise<ContextGraphAssetFetchResult> {
+    if (this.started && (!this.vmReconcileRuntimeReady || this.graphScopedStoreClosed)) {
+      throw new VmReconcileQueueClosedError();
+    }
+
+    const subscription = this.subscribedContextGraphs.get(localCgId);
+    if (!subscription?.subscribed && !subscription?.coreHosted) {
+      throw new ContextGraphNotFoundError(localCgId);
+    }
+    if (
+      typeof this.chain.getKAContextGraphId !== 'function'
+      || typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function'
+    ) {
+      throw new VmReconcileUnavailableError();
+    }
+    const getKAContextGraphId = this.chain.getKAContextGraphId.bind(this.chain);
+    const readKnowledgeAssetVersionSnapshot =
+      this.chain.readKnowledgeAssetVersionSnapshot.bind(this.chain);
+
+    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
+    const signal = this.vmReconcileLifecycleController?.signal;
+    const isCurrent = (): boolean => {
+      const current = this.subscribedContextGraphs.get(localCgId);
+      return !this.vmReconcileRotationClosed
+        && !this.graphScopedStoreClosed
+        && !signal?.aborted
+        && this.vmReconcileLifecycleGeneration === lifecycleGeneration
+        && current === subscription
+        && Boolean(current?.subscribed || current?.coreHosted);
+    };
+    if (!isCurrent()) throw new VmReconcileQueueClosedError();
+
+    const ctx = createOperationContext('system');
+    const finalizer = this.getOrCreateFinalizationHandler();
+    const physicalRun = runExactAssetFetch({
+      contextGraphId: localCgId,
+      requestedUals,
+      ...(options.peerIds === undefined ? {} : { peerIds: options.peerIds }),
+      ...(subscription.onChainId ? { expectedOnChainId: subscription.onChainId } : {}),
+    }, {
+      chainId: this.chain.chainId,
+      signal,
+      isCurrent,
+      getKAContextGraphId: (kaId, readSignal) =>
+        getKAContextGraphId(kaId, { signal: readSignal }),
+      readKnowledgeAssetVersionSnapshot: (kaId, readSignal) =>
+        readKnowledgeAssetVersionSnapshot(kaId, { signal: readSignal }),
+      verifyLocalContextGraph: (onChainCgId) =>
+        this.requireLocalCgMatchesOnChainSlot(
+          localCgId,
+          onChainCgId,
+          ctx,
+          { signal },
+        ),
+      inspectLocal: async (item: ExactAssetFetchEvidence) => {
+        if (!isCurrent()) throw new VmReconcileQueueClosedError();
+        const outcome = await finalizer.handleExactChainReconciledKC({
+          contextGraphId: localCgId,
+          onChainCgId: item.onChainCgId,
+          ual: item.ual,
+          assertionVersion: item.assertionVersion,
+          merkleRoot: item.merkleRoot,
+          publisherAddress: item.publisherAddress,
+          kaId: item.kaId,
+          batchId: item.batchId,
+          versionBlock: item.versionBlock,
+          authorAddress: item.authorAddress,
+        }, ctx);
+        if (outcome === 'promoted') return 'materialized';
+        if (outcome === 'already-confirmed' || outcome === 'stale-target') return 'present';
+        return 'missing';
+      },
+      resolvePeerIds: async () => {
+        const curatorResolution = await this.resolveCuratorPeerIdsForCg(localCgId, {
+          maxPeerIds: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+          signal,
+          isCurrent,
+        }).catch(() => ({ peerIds: [] as string[] }));
+        if (!isCurrent()) throw new VmReconcileQueueClosedError();
+        const connectedPeerIds = this.node?.libp2p?.getConnections?.()
+          ?.map((connection) => connection.remotePeer.toString()) ?? [];
+        return [...new Set([
+          ...curatorResolution.peerIds,
+          this.preferredSyncPeers.get(localCgId),
+          ...connectedPeerIds,
+        ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))];
+      },
+      preparePeer: async (peerId) => {
+        await this.ensurePeerConnected(peerId, { signal });
+        if (!isCurrent()) throw new VmReconcileQueueClosedError();
+        const remotePeer = this.node.libp2p.getConnections()
+          .find((connection) => connection.remotePeer.toString() === peerId)
+          ?.remotePeer;
+        if (!remotePeer || !(await this.waitForSyncProtocol(remotePeer, signal))) return false;
+        return this.ensurePeerAdmittedForRecovery(
+          peerId,
+          ctx,
+          'Exact asset fetch peer',
+          signal,
+        );
+      },
+      fetchFromPeer: async (peerId, uals) => {
+        await this.syncExactKnowledgeAssetsFromPeerDetailed(
+          peerId,
+          localCgId,
+          [...uals],
+          { signal, isCurrent },
+        );
+      },
+      flush: async () => {
+        await this.store.flush?.({
+          priority: 'background',
+          source: 'agent.exactAssetFetch.flush',
+        });
+      },
+      log: (message) => this.log.info(ctx, message),
+    }).catch((error) => {
+      if (error instanceof VmReconcileQueueClosedError
+        || error instanceof ExactAssetFetchLifecycleClosedError) {
+        throw new VmReconcileQueueClosedError();
+      }
+      throw error;
+    });
+
+    this.vmReconcilePhysicalRuns.add(physicalRun);
+    void physicalRun.finally(() => {
+      this.vmReconcilePhysicalRuns.delete(physicalRun);
+    }).catch(() => undefined);
+    return raceVmReconcileAbort(physicalRun, signal);
   }
 
   ensureVmReconcileDispatcher(
@@ -4266,8 +4424,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const rootDataGraph = candidateNamespaces[0]?.dataGraph ?? '';
       const swmSuffix = rootDataGraph.indexOf('/_shared_memory');
       const graphPrefix = swmSuffix >= 0 ? `${rootDataGraph.slice(0, swmSuffix)}/` : rootDataGraph;
-      const writeGen = asGraphWriteGenSource(this.store)?.getWriteGen(graphPrefix);
-      if (writeGen !== undefined) parts.push(`writeGen:${writeGen}`);
+      const writeRevision = asGraphWriteRevisionSource(this.store)?.getWriteRevision(graphPrefix);
+      // A remote mutation can still commit after this fingerprint's reads.
+      // Never turn such an in-flight/indeterminate observation into a stable
+      // negative-cache key.
+      if (writeRevision && !writeRevision.stable) return null;
+      if (writeRevision) parts.push(`writeGen:${writeRevision.generation}`);
       return parts.join('|');
     } catch {
       // Probe failures are not a stable SWM generation. Callers must not cache
@@ -5255,9 +5417,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const detailed = await this.syncExactKnowledgeAssetsFromPeerDetailed(
         peerId,
         localCgId,
-        createUalOnlyExactAssetSelection(
-          attempts.map(({ entry }) => entry.target.ual),
-        ),
+        attempts.map(({ entry }) => entry.target.ual),
         { signal, isCurrent: isRecoveryCurrent },
       );
       const { result } = detailed;
@@ -6068,6 +6228,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       merkleRoot,
       publisherAddress,
       kaId,
+      // V10 context-graph inventory stores one packed KA per batch.
+      batchId: kaId,
       versionBlock,
     };
 

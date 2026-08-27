@@ -14,10 +14,14 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type {
+  Rfc64CatalogBootstrapConfigV1,
+  Rfc64CatalogBootstrapPolicyV1,
   Rfc64PublicCatalogBootstrapConfigV1,
   Rfc64PublicCatalogBootstrapScopeV1,
 } from './dkg-agent-types.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import { Rfc64CatalogSynchronizationErrorV1 } from
+  './rfc64/catalog-synchronization-error-v1.js';
 
 const MAX_STATUS_ERROR_BYTES_V1 = 1024;
 const MAX_CONCURRENT_TARGETS_V1 = 4;
@@ -28,12 +32,17 @@ export type Rfc64PublicCatalogBootstrapOutcomeV1 =
   | 'pending'
   | 'applied'
   | 'not-found'
+  | 'known-incomplete'
   | 'failed';
+
+export type Rfc64CatalogBootstrapCompletionReasonV1 =
+  | 'no-authorized-provider';
 
 export interface Rfc64PublicCatalogBootstrapTargetStatusV1 {
   readonly scope: Readonly<Rfc64PublicCatalogBootstrapScopeV1>;
   readonly providers: readonly string[];
   readonly outcome: Rfc64PublicCatalogBootstrapOutcomeV1;
+  readonly completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
   readonly attempts: number;
   readonly providerPeerId: string | null;
   readonly appliedHeadDigest: Digest32V1 | null;
@@ -52,10 +61,56 @@ export interface Rfc64PublicCatalogBootstrapStatusV1 {
   readonly targets: readonly Rfc64PublicCatalogBootstrapTargetStatusV1[];
 }
 
+export function classifyRfc64CatalogBootstrapFailureV1(
+  requiresPrivateVm: boolean,
+  error: unknown | null,
+): Readonly<{
+  outcome: Extract<Rfc64PublicCatalogBootstrapOutcomeV1, 'not-found' | 'known-incomplete' | 'failed'>;
+  completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
+}> {
+  const knownIncomplete = requiresPrivateVm
+    && hasNoAuthorizedProviderTerminalReasonV1(error);
+  return Object.freeze({
+    outcome: knownIncomplete
+      ? 'known-incomplete'
+      : error === null ? 'not-found' : 'failed',
+    completionReason: knownIncomplete ? 'no-authorized-provider' : null,
+  });
+}
+
+function hasNoAuthorizedProviderTerminalReasonV1(error: unknown): boolean {
+  let current = error;
+  const visited = new Set<object>();
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (
+      current instanceof Rfc64CatalogSynchronizationErrorV1
+      && current.terminalReason === 'no-authorized-provider'
+    ) {
+      return true;
+    }
+    if (
+      (typeof current !== 'object' && typeof current !== 'function')
+      || current === null
+      || visited.has(current)
+    ) {
+      return false;
+    }
+    visited.add(current);
+    try {
+      current = (current as { readonly cause?: unknown }).cause;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 interface MutableTargetStatusV1 {
   readonly scope: Readonly<Rfc64PublicCatalogBootstrapScopeV1>;
   readonly providers: readonly string[];
+  readonly requiresPrivateVm: boolean;
   outcome: Rfc64PublicCatalogBootstrapOutcomeV1;
+  completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
   attempts: number;
   providerPeerId: string | null;
   appliedHeadDigest: Digest32V1 | null;
@@ -66,7 +121,10 @@ interface MutableTargetStatusV1 {
 }
 
 interface BootstrapStateV1 {
-  readonly config: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
+  readonly config: Readonly<{
+    readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
+    readonly retryIntervalMs?: number;
+  }>;
   readonly targets: MutableTargetStatusV1[];
   readonly ctx: OperationContext;
   closed: boolean;
@@ -87,22 +145,30 @@ const STATES = new WeakMap<DKGAgent, BootstrapStateV1>();
  * reservation.
  */
 export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
-  config: Readonly<Rfc64PublicCatalogBootstrapConfigV1> | undefined,
+  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
+    | undefined,
 ): readonly string[] {
   if (config === undefined) return Object.freeze([]);
-  return Object.freeze(config.acceptedPublicPolicies
-    .filter(({ completeSwmProviders = [] }) => completeSwmProviders.length > 0)
+  return Object.freeze(acceptedPoliciesV1(config)
+    .filter(({ policyEnvelope, completeSwmProviders = [] }) => (
+      policyEnvelope.payload.accessPolicy === 0
+      && completeSwmProviders.length > 0
+    ))
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
 
 /** Selected recovery scopes for which one peer is explicitly graph-complete. */
 export function resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
-  config: Readonly<Rfc64PublicCatalogBootstrapConfigV1> | undefined,
+  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
+    | undefined,
   providerPeerId: string,
 ): readonly string[] {
   if (config === undefined) return Object.freeze([]);
-  return Object.freeze(config.acceptedPublicPolicies
-    .filter(({ completeSwmProviders = [] }) => completeSwmProviders.includes(providerPeerId))
+  return Object.freeze(acceptedPoliciesV1(config)
+    .filter(({ policyEnvelope, completeSwmProviders = [] }) => (
+      policyEnvelope.payload.accessPolicy === 0
+      && completeSwmProviders.includes(providerPeerId)
+    ))
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
 
@@ -116,30 +182,38 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): readonly string[] {
-    const config = this.config.rfc64PublicCatalogBootstrap;
+    const config = this.config.rfc64CatalogBootstrap
+      ?? this.config.rfc64PublicCatalogBootstrap;
     if (config === undefined) return Object.freeze([]);
-    const policy = config.acceptedPublicPolicies.find(
+    const policy = acceptedPoliciesV1(config).find(
       ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
     );
-    return policy?.completeSwmProviders ?? Object.freeze([]);
+    return policy?.policyEnvelope.payload.accessPolicy === 0
+      ? policy.completeSwmProviders ?? Object.freeze([])
+      : Object.freeze([]);
   }
 
   /** Accept pinned policies and start the first bounded provider pass. */
   startRfc64PublicCatalogBootstrapV1(this: DKGAgent, ctx: OperationContext): void {
-    const config = this.config.rfc64PublicCatalogBootstrap;
+    const config = this.resolveRuntimeRfc64CatalogBootstrapV1();
     if (config === undefined || STATES.has(this)) return;
     const service = this.rfc64PublicCatalogServiceV1;
     if (service === undefined) {
       throw new Error('RFC-64 bootstrap requires the public catalog service');
     }
-    for (const accepted of config.acceptedPublicPolicies) {
+    for (const accepted of config.acceptedPolicies) {
       service.acceptPolicySnapshot({
         policy: accepted.policyEnvelope.payload,
         policyDigest: computeContextGraphPolicyObjectDigestV1(accepted.policyEnvelope),
+        roster: accepted.rosterEnvelope?.payload,
       });
     }
-    const targets = config.acceptedPublicPolicies.flatMap(({ policyEnvelope, targets }) => (
-      targets.map((target) => ({
+    const targets = config.acceptedPolicies.flatMap(({
+      policyEnvelope,
+      targets: policyTargets,
+      completeSwmProviders = [],
+    }) => (
+      policyTargets.map((target) => ({
         scope: Object.freeze({
           networkId: policyEnvelope.payload.networkId,
           contextGraphId: policyEnvelope.payload.contextGraphId,
@@ -147,7 +221,14 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           authorAddress: target.authorAddress,
           catalogEra: policyEnvelope.payload.era,
         }),
-        providers: target.providers,
+        // Private recovery uses only graph-complete providers for every signed
+        // author catalog. Per-author candidates cannot widen that authority.
+        providers: policyEnvelope.payload.accessPolicy === 1
+          ? completeSwmProviders
+          : target.providers,
+        requiresPrivateVm:
+          policyEnvelope.payload.accessPolicy === 1
+          && policyEnvelope.payload.source.kind === 'finalized-chain',
       }))
     ));
     const state: BootstrapStateV1 = {
@@ -155,7 +236,9 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       targets: targets.map((target) => ({
         scope: target.scope,
         providers: target.providers,
+        requiresPrivateVm: target.requiresPrivateVm,
         outcome: 'pending',
+        completionReason: null,
         attempts: 0,
         providerPeerId: null,
         appliedHeadDigest: null,
@@ -256,10 +339,17 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     state.abortController = abortController;
     try {
       const completeSwmProviders = [...new Set(
-        state.config.acceptedPublicPolicies.flatMap(
+        state.config.acceptedPolicies.flatMap(
           ({ completeSwmProviders: providers = [] }) => providers,
         ),
       )];
+      const publicCompleteSwmProviders = new Set(
+        state.config.acceptedPolicies.flatMap(
+          ({ policyEnvelope, completeSwmProviders: providers = [] }) => (
+            policyEnvelope.payload.accessPolicy === 0 ? providers : []
+          ),
+        ),
+      );
       await mapWithConcurrency(
         completeSwmProviders,
         MAX_CONCURRENT_TARGETS_V1,
@@ -273,16 +363,18 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
             // the lifecycle scheduler to seed or resume the selected lane; it
             // owns the seed/incomplete/complete state transition and becomes a
             // no-op after exact plane proof.
-            this.queueSelectedSwmFromPeerOnConnect(
-              providerPeerId,
-              (_peerId, error) => {
-                this.log.warn(
-                  state.ctx,
-                  `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
-                );
-              },
-              0,
-            );
+            if (publicCompleteSwmProviders.has(providerPeerId)) {
+              this.queueSelectedSwmFromPeerOnConnect(
+                providerPeerId,
+                (_peerId, error) => {
+                  this.log.warn(
+                    state.ctx,
+                    `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
+                  );
+                },
+                0,
+              );
+            }
           } catch (error) {
             this.log.warn(
               state.ctx,
@@ -315,41 +407,55 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     signal: AbortSignal,
   ): Promise<void> {
     target.outcome = 'pending';
+    target.completionReason = null;
     target.attempts = 0;
     target.providerPeerId = null;
     target.appliedHeadDigest = null;
     target.catalogVersion = null;
     target.inventoryRowCount = null;
     target.lastError = null;
-    let sawNotFound = false;
     let lastError: string | null = null;
-    for (const providerPeerId of target.providers) {
-      if (signal.aborted) return;
-      target.attempts += 1;
-      try {
-        const applied = await this.synchronizeRfc64PublicCatalogFromProviderV1({
-          remotePeerId: providerPeerId,
-          scope: target.scope,
-          signal,
-        });
-        if (applied === null) {
-          sawNotFound = true;
-          continue;
-        }
+    let terminalError: unknown | null = null;
+    try {
+      const applied = await this.synchronizeRfc64CatalogFromProvidersV1({
+        remotePeerIds: target.providers,
+        scope: target.scope,
+        signal,
+      });
+      if (applied !== null) {
         target.outcome = 'applied';
-        target.providerPeerId = providerPeerId;
+        target.completionReason = null;
+        target.providerPeerId = applied.appliedProviderPeerId
+          ?? applied.providerPeerIds[0]
+          ?? null;
+        // Discovery is hedged across the full bounded provider set before the
+        // receiver selects an exact highest head for activation.
+        target.attempts = target.providers.length;
         target.appliedHeadDigest = applied.currentCatalogHeadDigest;
         target.catalogVersion = applied.catalogVersion;
         target.inventoryRowCount = applied.inventoryRowCount;
         target.lastError = null;
         target.updatedAtMs = Date.now();
         return;
-      } catch (error) {
-        if (signal.aborted) return;
-        lastError = boundedErrorV1(errorMessageV1(error));
       }
+      // A null result means the bounded provider loop completed without a
+      // current head. Preserve the number of providers that were attempted.
+      target.attempts = target.providers.length;
+    } catch (error) {
+      if (signal.aborted) return;
+      // The bounded discovery call snapshots and attempts the complete
+      // configured provider set before it reports a terminal failure. Keep
+      // that work visible for both failed and known-incomplete outcomes.
+      target.attempts = target.providers.length;
+      terminalError = error;
+      lastError = boundedErrorV1(errorMessageV1(error));
     }
-    target.outcome = lastError === null && sawNotFound ? 'not-found' : 'failed';
+    const classification = classifyRfc64CatalogBootstrapFailureV1(
+      target.requiresPrivateVm,
+      terminalError,
+    );
+    target.outcome = classification.outcome;
+    target.completionReason = classification.completionReason;
     target.providerPeerId = null;
     target.appliedHeadDigest = null;
     target.catalogVersion = null;
@@ -357,6 +463,29 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     target.lastError = lastError;
     target.updatedAtMs = Date.now();
   }
+
+  private resolveRuntimeRfc64CatalogBootstrapV1(
+    this: DKGAgent,
+  ): BootstrapStateV1['config'] | undefined {
+    const current = this.config.rfc64CatalogBootstrap;
+    if (current !== undefined) return current;
+    const legacy = this.config.rfc64PublicCatalogBootstrap;
+    if (legacy === undefined) return undefined;
+    return Object.freeze({
+      acceptedPolicies: legacy.acceptedPublicPolicies,
+      ...(legacy.retryIntervalMs === undefined
+        ? {}
+        : { retryIntervalMs: legacy.retryIntervalMs }),
+    });
+  }
+}
+
+function acceptedPoliciesV1(
+  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>,
+): readonly Rfc64CatalogBootstrapPolicyV1[] {
+  return 'acceptedPolicies' in config
+    ? config.acceptedPolicies
+    : config.acceptedPublicPolicies;
 }
 
 function snapshotTargetStatusV1(
@@ -372,6 +501,7 @@ function snapshotTargetStatusV1(
     }),
     providers: Object.freeze([...target.providers]),
     outcome: target.outcome,
+    completionReason: target.completionReason,
     attempts: target.attempts,
     providerPeerId: target.providerPeerId,
     appliedHeadDigest: target.appliedHeadDigest,

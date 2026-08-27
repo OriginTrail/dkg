@@ -992,7 +992,9 @@ describe('GH#2270 runner chain-proof resolution', () => {
       const gate = vi.fn(async () => false);
       const chain = {
         chainId: 'evm:31337',
-        resolvePublishTransaction: vi.fn(async () => ({ status: 'pending' as const })),
+        // A mined update is not a generic publish event, so the generic lookup reports it as
+        // unrecognized and the update-specific verifier owns recognition + finality.
+        resolvePublishTransaction: vi.fn(async () => ({ status: 'unrecognized' as const })),
         verifyKAUpdate,
         getDKGKnowledgeAssetsAddress: vi.fn(async () => KA_CONTRACT),
         isReceiptBlockFinalAndCanonical: gate,

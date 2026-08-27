@@ -11,7 +11,6 @@ import {
   filterExactAssetDurablePayload,
   runChallengeExactAssetFetch,
   runDurableSync,
-  runDurableSyncDetailed,
   type DurableSyncChallengePinnedAuthenticationRequest,
 } from '../src/sync/requester/durable-sync.js';
 import {
@@ -20,7 +19,6 @@ import {
   exactAssetUalsForSelection,
   requireExactAssetSelection,
   type ChallengePinnedExactAssetSelection,
-  type ExactAssetSelection,
   type UalOnlyExactAssetSelection,
 } from '../src/sync/exact-assets.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
@@ -253,7 +251,7 @@ describe('exact-asset rolling-upgrade filter', () => {
       privateTripleCount: 0,
       assertionGraph: graph,
     }, { status: 'tentative' });
-    const selection = (byte: string): ExactAssetSelection =>
+    const selection = (byte: string): ChallengePinnedExactAssetSelection =>
       createChallengePinnedExactAssetSelection([{
         assetUal: wanted,
         merkleRootHex: byte.repeat(64),
@@ -265,7 +263,7 @@ describe('exact-asset rolling-upgrade filter', () => {
     });
     await runChallengeExactAssetFetch(challengeContext(
       mismatch.context,
-      selection('2') as ChallengePinnedExactAssetSelection,
+      selection('2'),
     ));
     expect(mismatch.calls.map((call) => call.phase)).toEqual(['meta']);
     expect(mismatch.processCalls).toHaveLength(0);
@@ -276,7 +274,7 @@ describe('exact-asset rolling-upgrade filter', () => {
     });
     await runChallengeExactAssetFetch(challengeContext(
       matching.context,
-      selection('1') as ChallengePinnedExactAssetSelection,
+      selection('1'),
     ));
     expect(matching.calls.map((call) => call.phase)).toEqual(['meta', 'data']);
     expect(matching.processCalls).toHaveLength(1);

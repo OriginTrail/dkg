@@ -111,6 +111,10 @@ export interface AsyncLiftPublisher {
   recordPublishResult(jobId: string, publishResult: PublishResult, options?: { publicByteSize?: number }): Promise<LiftJob>;
   recordPublishFailure(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob>;
   recover(): Promise<number>;
+  /** Reconcile interrupted work without restarting the runner. Older implementations can omit it. */
+  reconcileTransactions?(): Promise<number>;
+  /** Wait until every receipt task detached after RPC acceptance has stopped. Older implementations can omit it. */
+  drainDetachedExecutions?(): Promise<void>;
   getStats(): Promise<Record<LiftJobState, number>>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -619,6 +623,16 @@ export interface AsyncLiftPublisherConfig {
     operationKind: 'create' | 'update' | undefined,
   ) => boolean;
   knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
+  /**
+   * Return a named-KA queue job as soon as the RPC has accepted its signed transaction, leaving
+   * receipt/finality ownership to {@link TripleStoreAsyncLiftPublisher.reconcileTransactions}.
+   *
+   * This is deliberately opt-in. A direct library consumer without an independently scheduled
+   * reconciliation lane must keep the historical `processNext()` contract and await the executor
+   * result, otherwise an accepted transaction would remain parked in `broadcast` forever.
+   * Production publisher runtimes enable this only when chain-proof recovery is configured.
+   */
+  detachReceiptReconciliation?: boolean;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
   knowledgeAssetVmPublishHandler?: AsyncKnowledgeAssetVmPublishJobHandler;
   /** @deprecated Use knowledgeAssetVmPublishHandler.execute. */

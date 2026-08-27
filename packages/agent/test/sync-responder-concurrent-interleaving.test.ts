@@ -1483,6 +1483,136 @@ describe('sync responder pagination interleaving', () => {
     expect(calls).toBe(2);
   });
 
+  it('does not retain a graph list read while a remote mutation is pending', async () => {
+    let generation = 0;
+    let stable = true;
+    let calls = 0;
+    let graphs = ['urn:graph:b', 'urn:graph:a', 'urn:graph:b'];
+    const store = {
+      getWriteRevision: (prefix: string) => {
+        expect(prefix).toBe('');
+        return { generation, stable };
+      },
+      listGraphs: async () => {
+        calls++;
+        return graphs;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'session-1',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'session-2',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(1);
+
+    // Dispatch: the endpoint has not committed yet, so a refresh can still
+    // observe and memoize the old graph set at this intermediate generation.
+    generation++;
+    stable = false;
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'pending-mutation',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(2);
+
+    // The remote mutation is still pending at the same revision. Stability,
+    // not generation change alone, must prevent reuse of the completed read.
+    graphs = ['urn:graph:c', 'urn:graph:a'];
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'same-pending-mutation',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:c']);
+    expect(calls).toBe(3);
+
+    // Settlement must advance again so the next session cannot reuse the
+    // graph list that was read while the mutation was in flight.
+    graphs = ['urn:graph:d', 'urn:graph:a'];
+    generation++;
+    stable = true;
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'session-3',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:d']);
+    expect(calls).toBe(4);
+  });
+
+  it('shares one in-flight graph enumeration at an unstable revision without caching it', async () => {
+    const firstRead = deferred<string[]>();
+    const secondRead = deferred<string[]>();
+    let calls = 0;
+    const store = {
+      getWriteRevision: () => ({ generation: 7, stable: false }),
+      listGraphs: async () => {
+        calls += 1;
+        return calls === 1 ? firstRead.promise : secondRead.promise;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const first = memo.get({ refresh: true });
+    const simultaneous = memo.get({ refresh: true });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    firstRead.resolve(['urn:graph:b', 'urn:graph:a']);
+    await expect(first).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    await expect(simultaneous).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(1);
+
+    // Unstable completed results are never reused, even though simultaneous
+    // waiters may share the promise that produced them.
+    const later = memo.get({ refresh: true });
+    await vi.waitFor(() => expect(calls).toBe(2));
+    secondRead.resolve(['urn:graph:c']);
+    await expect(later).resolves.toEqual(['urn:graph:c']);
+  });
+
+  it('supersedes an in-flight graph list when write generation changes', async () => {
+    const oldGraphs = deferred<string[]>();
+    const newGraphs = deferred<string[]>();
+    let generation = 0;
+    let calls = 0;
+    const store = {
+      getWriteRevision: () => ({ generation, stable: true }),
+      listGraphs: async () => {
+        calls++;
+        return calls === 1 ? oldGraphs.promise : newGraphs.promise;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const beforeWrite = memo.get({ refresh: true, refreshGeneration: 'old-session' });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    generation++;
+    const afterWrite = memo.get({ refresh: true, refreshGeneration: 'new-session' });
+
+    oldGraphs.resolve(['urn:graph:old']);
+    await expect(beforeWrite).resolves.toEqual(['urn:graph:old']);
+    await vi.waitFor(() => expect(calls).toBe(2));
+    newGraphs.resolve(['urn:graph:new']);
+    await expect(afterWrite).resolves.toEqual(['urn:graph:new']);
+  });
+
+  it('retains the TTL backstop for writers outside the tracked store process', async () => {
+    let calls = 0;
+    const store = {
+      getWriteRevision: () => ({ generation: 0, stable: true }),
+      listGraphs: async () => {
+        calls++;
+        return ['urn:graph:a'];
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store, 0);
+
+    await memo.get({ refresh: true, refreshGeneration: 'session-1' });
+    await memo.get({ refresh: true, refreshGeneration: 'session-2' });
+
+    expect(calls).toBe(2);
+  });
+
   it('reloads graph-list and subgraph prerequisites for a newer session generation', async () => {
     const oldGraphs = deferred<string[]>();
     const newGraphs = deferred<string[]>();

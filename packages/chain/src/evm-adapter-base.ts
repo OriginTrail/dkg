@@ -25,7 +25,7 @@ import type {
   SignedTransactionEnvelope,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import { KeyedSerializer } from './keyed-mutex.js';
+import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
@@ -44,8 +44,13 @@ import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cu
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt,
+  TX_SERIALIZER_OBSERVE_AFTER_MS,
+  TX_SERIALIZER_OBSERVE_INTERVAL_MS,
+  resolveTxSerializerStallAfterMs,
+} from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
+import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -60,6 +65,8 @@ type ContractWriteSender = (
 
 type SerializedSignerWriteContext = {
   sendContractTransaction: ContractWriteSender;
+  /** Refresh the lane-health clock after a meaningful write-stage boundary. */
+  markProgress: () => void;
 };
 
 /**
@@ -641,6 +648,9 @@ export class EVMChainAdapterBase {
   /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
   protected readonly rpcUsage: RpcUsageTracker;
   protected readonly receiptTimeoutMs: number;
+  protected readonly finalityConfirmations: number;
+
+  protected readonly maxFeePerGasWei?: bigint;
 
   protected readonly configuredStaticChainId?: bigint;
 
@@ -667,7 +677,12 @@ export class EVMChainAdapterBase {
    * `Nonce too low` (OriginTrail/dkg#953). Cross-wallet concurrency is
    * preserved.
    */
-  protected readonly signerTxSerializer = new KeyedSerializer();
+  /**
+   * GH#1574 — configured in the constructor once `receiptTimeoutMs` is known.
+   * Health is based on time since meaningful progress; the receipt deadline is
+   * only a floor for the observational threshold and never cancels the holder.
+   */
+  protected readonly signerTxSerializer: SignerTxSerializer;
 
   /**
    * Lowercased addresses of operational wallets CONFIRMED registered on-chain
@@ -1083,6 +1098,13 @@ export class EVMChainAdapterBase {
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
     this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
+    this.signerTxSerializer = new SignerTxSerializer({
+      observeAfterMs: TX_SERIALIZER_OBSERVE_AFTER_MS,
+      observeIntervalMs: TX_SERIALIZER_OBSERVE_INTERVAL_MS,
+      stallAfterMs: resolveTxSerializerStallAfterMs(this.receiptTimeoutMs),
+    });
+    this.finalityConfirmations = resolveFinalityConfirmations(config.finalityConfirmations);
+    this.maxFeePerGasWei = resolveMaxFeePerGasWei(config.maxFeePerGasWei);
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
         .map((url) => typeof url === 'string' ? url.trim() : '')
@@ -1566,6 +1588,10 @@ export class EVMChainAdapterBase {
       receiptTimeoutMs: this.receiptTimeoutMs,
       pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
+      isReceiptEligible: (receipt, { deadlineMs }) => this.isReceiptBlockFinalAndCanonical(
+        receipt,
+        { deadlineMs },
+      ),
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
         `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
@@ -1573,11 +1599,46 @@ export class EVMChainAdapterBase {
     });
   }
 
+  /**
+   * Return true only when the receipt has the configured canonical depth.
+   * The head and block-hash reads use one provider, so a reorg cannot splice
+   * facts from different endpoints into a successful result.
+   */
+  async isReceiptBlockFinalAndCanonical(
+    receipt: { txHash?: string; blockNumber: number; blockHash: string },
+    options: ChainReadOptions & { deadlineMs?: number } = {},
+  ): Promise<boolean> {
+    return (await this.readProviderRetryingNull(
+      'publish receipt finality',
+      async (provider) => {
+        const latestBlockNumber = await provider.getBlockNumber();
+        const requiredBlockNumber = requiredHeadBlockForReceipt(
+          receipt.blockNumber,
+          this.finalityConfirmations,
+        );
+        if (latestBlockNumber < requiredBlockNumber) return null;
+        const atHeight = await provider.getBlock(receipt.blockNumber);
+        if (!atHeight?.hash) return null;
+        return atHeight.hash.toLowerCase() === receipt.blockHash.toLowerCase();
+      },
+      { signal: options.signal, deadlineMs: options.deadlineMs },
+    )) ?? false;
+  }
+
   protected async signPopulatedTransaction(
     signer: Wallet,
     populated: ethers.TransactionRequest,
   ): Promise<SignedTransactionEnvelope> {
-    const filled = await signer.populateTransaction(populated);
+    let filled = await signer.populateTransaction(populated);
+    if (this.maxFeePerGasWei !== undefined) {
+      const cap = this.maxFeePerGasWei;
+      let baseFeePerGas: bigint | null | undefined;
+      if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
+        const latestBlock = await signer.provider?.getBlock('latest');
+        baseFeePerGas = latestBlock?.baseFeePerGas;
+      }
+      filled = applyTransactionFeeCap(filled, cap, baseFeePerGas);
+    }
     const signedTx = await signer.signTransaction(filled);
     // GH#2270 PR-3 r3 — ONE decode of the signed bytes, here, for both facts the send window
     // needs. The nonce used to be re-parsed at the dispatch boundary from the same string.
@@ -1613,18 +1674,34 @@ export class EVMChainAdapterBase {
     // it propagates up here. The latch is never reset per endpoint, so at most
     // ONE forced approve fires per publish regardless of endpoints tried. Only the
     // one returned signed tx is broadcast; the whole thing runs inside the
-    // per-wallet `KeyedSerializer` (#953), strictly pre-broadcast / pre-WAL.
+    // per-wallet `SignerTxSerializer` (#953), strictly pre-broadcast / pre-WAL.
     let forcedReapprove = false;
     for (;;) {
       try {
-        return await this.populateAndSignAcrossProviders(
-          kaContract,
-          method,
-          [methodParams],
-          signer,
-          `V10 ${method}`,
-          { gasLimitBufferBps: V10_WRITE_GAS_LIMIT_BUFFER_BPS },
-        );
+        for (let preparationPass = 0; ; preparationPass += 1) {
+          try {
+            return await this.populateAndSignAcrossProviders(
+              kaContract,
+              method,
+              [methodParams],
+              signer,
+              `V10 ${method}`,
+              { gasLimitBufferBps: V10_WRITE_GAS_LIMIT_BUFFER_BPS },
+            );
+          } catch (err) {
+            enrichEvmError(err);
+            if (!isRetryableRpcError(err)
+              || preparationPass >= RPC_PREPARATION_ENDPOINT_SET_RETRIES) {
+              throw err;
+            }
+            const baseDelay = Math.min(
+              RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS,
+              RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS * 2 ** preparationPass,
+            );
+            const jitter = Math.floor(Math.random() * Math.max(1, baseDelay / 2));
+            await sleep(baseDelay + jitter);
+          }
+        }
       } catch (err) {
         enrichEvmError(err);
         if (!forcedReapprove && isTooLowAllowanceError(err)) {
@@ -1663,10 +1740,20 @@ export class EVMChainAdapterBase {
     // fired once upstream. The receipt wait is NOT re-broadcast (it owns its own
     // poll + deadline), so lock-hold (held across the retries for the V10 path)
     // stays bounded.
+    await this.broadcastSignedTransactionWithRetries(signedTx, txHash, label);
+    return this.waitForReceiptWithFailover(txHash, label);
+  }
+
+  /** Broadcast one immutable signed transaction with bounded endpoint-set retries. */
+  private async broadcastSignedTransactionWithRetries(
+    signedTx: string,
+    txHash: string,
+    label: string,
+  ): Promise<void> {
     for (let pass = 0; ; pass += 1) {
       try {
         await this.broadcastSignedTransactionWithFailover(signedTx, txHash, label);
-        break;
+        return;
       } catch (err) {
         if (isRetryableRpcError(err) && pass < RPC_ENDPOINT_SET_RETRIES) {
           await sleep(RPC_ENDPOINT_SET_RETRY_BACKOFF_MS);
@@ -1675,7 +1762,6 @@ export class EVMChainAdapterBase {
         throw err;
       }
     }
-    return this.waitForReceiptWithFailover(txHash, label);
   }
 
   /**
@@ -1703,9 +1789,11 @@ export class EVMChainAdapterBase {
     onBroadcast: ((signal: PreBroadcastSignal) => Promise<void> | void) | undefined,
     buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<SignedTransactionEnvelope>,
     onNullReceipt: (preBroadcastTxHash: string) => never,
+    onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void,
   ): Promise<ethers.TransactionReceipt> {
-    return this.withSerializedSignerWrite(signer, async (ctx) => {
+    const prepared = await this.withSerializedSignerWrite(signer, async (ctx) => {
       const { signedTx, txHash: preBroadcastTxHash, nonce } = await buildSignedTx(ctx);
+      ctx.markProgress();
       // GH#2270 PR-3 — the WAL checkpoint also carries the signed NONCE. A null transaction
       // lookup is point-in-time, backend-local evidence: a broadcast whose response timed out can
       // still be accepted and mined later, so "the node does not have it" is not absence. The
@@ -1717,20 +1805,44 @@ export class EVMChainAdapterBase {
       // fail-closed; nothing is re-derived here.
       try {
         await onBroadcast?.({ txHash: preBroadcastTxHash, nonce });
+        ctx.markProgress();
       } catch (hookErr) {
         throw new Error(
           `chain:writeahead hook failed before ${label} broadcast: ` +
           `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
         );
       }
-      const receipt = await this.sendSignedTransactionAndWait(
+      // The nonce-critical lane ends when an endpoint accepts these exact
+      // signed bytes. Receipt polling is deliberately outside the serializer:
+      // the pending nonce has advanced, so the next same-wallet transaction
+      // can be populated safely without this receipt holding the lane for the
+      // full timeout window.
+      await this.broadcastSignedTransactionWithRetries(
         signedTx,
         preBroadcastTxHash,
         `V10 ${label}`,
       );
-      if (!receipt) onNullReceipt(preBroadcastTxHash);
-      return receipt;
-    });
+      ctx.markProgress();
+      try {
+        await onBroadcastAccepted?.({ txHash: preBroadcastTxHash, nonce });
+      } catch (hookErr) {
+        // Post-acceptance notification is observational. The transaction is
+        // already on the wire, so a callback failure must never turn it into a
+        // send failure or invite a second transaction.
+        console.warn(
+          `[chain] post-acceptance callback failed for V10 ${label} ` +
+          `tx=${preBroadcastTxHash}: ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+        );
+      }
+      return { preBroadcastTxHash };
+    }, label);
+
+    const receipt = await this.waitForReceiptWithFailover(
+      prepared.preBroadcastTxHash,
+      `V10 ${label}`,
+    );
+    if (!receipt) onNullReceipt(prepared.preBroadcastTxHash);
+    return receipt;
   }
 
   protected async sendPopulatedTransaction(
@@ -1775,8 +1887,10 @@ export class EVMChainAdapterBase {
     label: string,
     opts?: { gasLimitBufferBps?: number },
   ): Promise<ethers.TransactionReceipt> {
-    return this.withSerializedSignerWrite(signer, (ctx) =>
-      ctx.sendContractTransaction(contract, method, args, signer, label, opts),
+    return this.withSerializedSignerWrite(
+      signer,
+      (ctx) => ctx.sendContractTransaction(contract, method, args, signer, label, opts),
+      label,
     );
   }
 
@@ -1787,18 +1901,36 @@ export class EVMChainAdapterBase {
   protected async withSerializedSignerWrite<T>(
     signer: Wallet,
     fn: (ctx: SerializedSignerWriteContext) => Promise<T>,
+    /**
+     * Names the operation in serializer stall diagnostics (GH#1574).
+     * REQUIRED: a default would let a new call site silently report as
+     * "signer write", which is exactly the ambiguity this replaces — a wedged
+     * publish followed by an update would name neither.
+     */
+    writeLabel: string,
   ): Promise<T> {
-    return this.signerTxSerializer.run(signer.address, () =>
+    return this.signerTxSerializer.run(signer.address, (markProgress) =>
       fn({
-        sendContractTransaction: (contract, method, args, innerSigner, label, opts) => {
+        markProgress,
+        sendContractTransaction: async (contract, method, args, innerSigner, label, opts) => {
           if (ethers.getAddress(innerSigner.address) !== ethers.getAddress(signer.address)) {
             throw new Error(
               `chain: scoped signer write for ${signer.address} cannot send with ${innerSigner.address}`,
             );
           }
-          return this.sendContractTransactionUnlocked(contract, method, args, innerSigner, label, opts);
+          const receipt = await this.sendContractTransactionUnlocked(
+            contract,
+            method,
+            args,
+            innerSigner,
+            label,
+            opts,
+          );
+          markProgress();
+          return receipt;
         },
       }),
+      writeLabel,
     );
   }
 
@@ -1873,13 +2005,16 @@ export class EVMChainAdapterBase {
   ): Promise<void> {
     if (!this.contracts.token) return;
     const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
-    const currentAllowance: bigint = await this.readContract(
+    // Foreground transaction reads preserve the established single-RPC
+    // behaviour: with no alternate endpoint to fail over to, a slow healthy
+    // allowance read may finish after the multi-RPC stall timeout. Serializer
+    // health is observational and must not create a transaction deadline.
+    const currentAllowance = (await this.readContractWith(
       tokenWithSigner,
       'token.allowance',
-      'allowance',
-      signer.address,
-      kav10Address,
-    );
+      (c) => c.allowance(signer.address, kav10Address),
+      { policy: 'pointRead' },
+    )) as bigint;
     const { needsApprove, targetAllowance } = computeApprovalAction(
       this.approvalPolicy,
       tokenAmount,
@@ -2203,9 +2338,29 @@ export class EVMChainAdapterBase {
     preferIdle: boolean,
   ): T {
     if (preferIdle && !this.idleAwareSelectionDisabled) {
-      const idle = fundableIdx.find((index) =>
-        !this.signerTxSerializer.isActive(candidates[index].address));
-      if (idle !== undefined) return candidates[idle];
+      // GH#953 — soft-prefer a wallet with no in-flight or queued write.
+      // GH#1574 — a lane whose holder is wedged is NOT idle, but it is not
+      // healthy either: routing new work behind it inherits the wedge
+      // invisibly, which is the failure that issue reports. Rank the
+      // serializer's OWN health verdict rather than reading raw timings and
+      // re-deriving the threshold here — two copies of that policy would
+      // drift, and diagnostics could call a lane stalled while selection
+      // still called it healthy.
+      const laneRank: Record<SignerTxLaneState, number> = {
+        idle: 0,
+        busy: 1,
+        stalled: 2,
+      };
+      const rank = (address: string): number =>
+        laneRank[this.signerTxSerializer.state(address)];
+      let best: number | undefined;
+      let bestRank = Number.POSITIVE_INFINITY;
+      for (const index of fundableIdx) {
+        const r = rank(candidates[index].address);
+        if (r < bestRank) { bestRank = r; best = index; }
+        if (bestRank === 0) break;
+      }
+      if (best !== undefined) return candidates[best];
     }
     return candidates[fundableIdx[0]];
   }
@@ -3719,6 +3874,7 @@ export class EVMChainAdapterBase {
       () => {
         throw new Error('Transaction receipt is null');
       },
+      params.onBroadcastAccepted,
     ).catch(async (err: unknown) => {
       // Turn an insufficient-funds failure (native gas OR a zero-TRAC
       // transferFrom revert) on the selected wallet into an actionable

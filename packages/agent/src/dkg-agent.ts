@@ -364,6 +364,9 @@ import {
   type SharedMemorySyncResult,
   type DKGAgentConfig,
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  type Rfc64CatalogBootstrapConfigV1,
+  type Rfc64CatalogBootstrapPolicyV1,
+  type Rfc64PublicCatalogBootstrapConfigV1,
   type DKGAgentACKTransportOptions,
   type ImportedArtifactByteStore,
   type ReplicationEvent,
@@ -390,6 +393,7 @@ import {
   isLocalOxigraphConfig,
   sliceIntoCiphertextChunks,
 } from './dkg-agent-helpers.js';
+import { resolveSyncReconcilerTiming } from './sync/reconciler-timing.js';
 import {
   swmSenderStateKey,
   swmReceiverStateKey,
@@ -417,10 +421,11 @@ import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-p
 import { Rfc64CatalogBootstrapMethods } from './dkg-agent-rfc64-catalog-bootstrap.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import {
+  resolveRfc64CatalogActivationsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
-  resolveRfc64PublicCatalogActivationInputV1,
   resolveRfc64PublicCatalogControlsV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
+import { snapshotRfc64CatalogBootstrapConfigV1 } from './rfc64/catalog-authority-config-v1.js';
 import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
@@ -479,6 +484,9 @@ export type {
   CatchupSyncDiagnostics,
   DKGAgentConfig,
   Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  Rfc64CatalogBootstrapConfigV1,
+  Rfc64CatalogBootstrapPolicyV1,
+  Rfc64PublicCatalogBootstrapConfigV1,
   DKGAgentACKTransportOptions,
   ImportedArtifactByteStore,
 };
@@ -693,6 +701,8 @@ function constructConfiguredChainAdapter(
       tokenAddress: config.chainConfig.tokenAddress,
       chainId: config.chainConfig.chainId,
       receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
+      finalityConfirmations: config.chainConfig.finalityConfirmations,
+      maxFeePerGasWei: config.chainConfig.maxFeePerGasWei,
       approvalPolicy: config.chainConfig.approvalPolicy,
       cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
       minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,
@@ -745,10 +755,85 @@ function createACKSendP2P(input: {
  *   const response = await agent.invokeSkill(offerings[0], inputData);
  *   await agent.stop();
  */
+export function mergeRfc64CatalogBootstrapsV1(
+  catalog: Readonly<Rfc64CatalogBootstrapConfigV1> | undefined,
+  legacyPublic: Readonly<Rfc64PublicCatalogBootstrapConfigV1> | undefined,
+): Readonly<Rfc64CatalogBootstrapConfigV1> | undefined {
+  if (catalog === undefined && legacyPublic === undefined) return undefined;
+  if (
+    catalog?.retryIntervalMs !== undefined
+    && legacyPublic?.retryIntervalMs !== undefined
+    && catalog.retryIntervalMs !== legacyPublic.retryIntervalMs
+  ) {
+    throw new TypeError('RFC-64 catalog bootstrap retry intervals conflict');
+  }
+  const acceptedPolicies = [
+    ...(catalog?.acceptedPolicies ?? []),
+    ...(legacyPublic?.acceptedPublicPolicies ?? []),
+  ];
+  const seen = new Set<string>();
+  for (const { policyEnvelope } of acceptedPolicies) {
+    const policy = policyEnvelope.payload;
+    const key = `${policy.networkId}\n${policy.contextGraphId}`;
+    if (seen.has(key)) {
+      throw new TypeError('RFC-64 catalog bootstrap Context Graph is configured twice');
+    }
+    seen.add(key);
+  }
+  const retryIntervalMs = catalog?.retryIntervalMs ?? legacyPublic?.retryIntervalMs;
+  const merged = snapshotRfc64CatalogBootstrapConfigV1({
+    acceptedPolicies,
+    ...(retryIntervalMs === undefined ? {} : { retryIntervalMs }),
+  });
+  if (merged === undefined) {
+    throw new TypeError('merged RFC-64 catalog bootstrap is unavailable');
+  }
+  return merged;
+}
+
 export class DKGAgent extends DKGAgentBase {
   private chainContextGraphScanFailure:
     | { signature: string; count: number }
     | undefined;
+  /**
+   * StorageACK handlers perform store verification. A wallet pool can start
+   * several publishes at once, but sending every ACK round at once overloads
+   * small public core nodes before any chain transaction is submitted. Keep a
+   * node-local FIFO gate for ACK rounds. Chain submission remains concurrent.
+   */
+  private activeStorageACKCollections = 0;
+  private readonly storageACKCollectionWaiters: Array<() => void> = [];
+
+  private async acquireStorageACKCollectionSlot(): Promise<void> {
+    const limit = this.config.storageAckTiming.maxConcurrentCollections;
+    if (this.activeStorageACKCollections < limit) {
+      this.activeStorageACKCollections += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.storageACKCollectionWaiters.push(resolve);
+    });
+  }
+
+  private releaseStorageACKCollectionSlot(): void {
+    const next = this.storageACKCollectionWaiters.shift();
+    if (next) {
+      // Transfer the active slot directly to the oldest waiter. The active
+      // count stays unchanged, so a new caller cannot take the same slot.
+      next();
+      return;
+    }
+    this.activeStorageACKCollections = Math.max(0, this.activeStorageACKCollections - 1);
+  }
+
+  private async withStorageACKCollectionSlot<T>(work: () => Promise<T>): Promise<T> {
+    await this.acquireStorageACKCollectionSlot();
+    try {
+      return await work();
+    } finally {
+      this.releaseStorageACKCollectionSlot();
+    }
+  }
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
     const contextGraphSubscriptionRehydrationEnabled =
@@ -783,12 +868,14 @@ export class DKGAgent extends DKGAgentBase {
     const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(
       constructedAgentChainId,
     );
+    const activations = resolveRfc64CatalogActivationsV1({
+      catalog: normalizedConfig.rfc64CatalogActivation,
+      publicCatalog: normalizedConfig.rfc64PublicCatalogActivation,
+    }, chainIdentity);
+    const catalogActivation = activations.catalog;
     const activation = normalizedConfig.rfc64PublicCatalogActivation === undefined
       ? undefined
-      : resolveRfc64PublicCatalogActivationInputV1(
-        normalizedConfig.rfc64PublicCatalogActivation,
-        chainIdentity,
-      );
+      : activations.publicCatalog;
     const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
       activation,
       legacyDeploymentProfile: normalizedConfig.rfc64CatalogDeploymentProfile,
@@ -800,7 +887,7 @@ export class DKGAgent extends DKGAgentBase {
       syncContextGraphs: [
         ...new Set([
           ...(normalizedConfig.syncContextGraphs ?? []),
-          ...(activation?.selectedContextGraphs ?? []),
+          ...catalogActivation.selectedPublicContextGraphs,
         ]),
       ],
     };
@@ -810,13 +897,56 @@ export class DKGAgent extends DKGAgentBase {
     if (rfc64PublicCatalogControls.requiresDataDir && !config.dataDir) {
       throw new TypeError('rfc64PublicCatalogBootstrap requires dataDir');
     }
-    const rfc64CatalogDeploymentProfile = rfc64PublicCatalogControls.deploymentProfile;
-    const rfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
+    if (catalogActivation.bootstrap !== undefined && !config.dataDir) {
+      throw new TypeError('rfc64Catalog bootstrap requires dataDir');
+    }
+    if (
+      catalogActivation.deploymentProfile !== undefined
+      && rfc64PublicCatalogControls.deploymentProfile !== undefined
+      && JSON.stringify(catalogActivation.deploymentProfile)
+        !== JSON.stringify(rfc64PublicCatalogControls.deploymentProfile)
+    ) {
+      throw new TypeError('RFC-64 catalog deployment profiles conflict');
+    }
+    const rfc64CatalogDeploymentProfile = catalogActivation.deploymentProfile
+      ?? rfc64PublicCatalogControls.deploymentProfile;
+    const legacyRfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
       config.rfc64CatalogAccessPolicyAuthority,
     );
+    if (
+      legacyRfc64CatalogAccessPolicyAuthority !== undefined
+      && catalogActivation.accessPolicyAuthority !== undefined
+    ) {
+      throw new TypeError(
+        'rfc64Catalog.accessPolicyAuthority is mutually exclusive with the legacy function authority',
+      );
+    }
+    const activationPeerAgentBindings = catalogActivation.accessPolicyAuthority === undefined
+      ? undefined
+      : new Map(catalogActivation.accessPolicyAuthority.peerAgentBindings.map(
+        ({ peerId, agentAddress }) => [peerId, agentAddress] as const,
+      ));
+    const rfc64CatalogAccessPolicyAuthority = legacyRfc64CatalogAccessPolicyAuthority
+      ?? (catalogActivation.accessPolicyAuthority === undefined
+        ? undefined
+        : snapshotRfc64CatalogAccessPolicyAuthorityV1({
+          localAgentAddress: catalogActivation.accessPolicyAuthority.localAgentAddress,
+          resolveRemoteAgentAddress: async (remotePeerId) => (
+            activationPeerAgentBindings!.get(remotePeerId) ?? null
+          ),
+        }));
     const rfc64PublicCatalogAutoPublishPolicy =
       rfc64PublicCatalogControls.autoPublishPolicy;
     const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
+    const rfc64CatalogBootstrap = mergeRfc64CatalogBootstrapsV1(
+      catalogActivation.bootstrap,
+      // resolveRfc64CatalogActivationsV1 already folds the compatibility
+      // activation into catalogActivation. Only the legacy standalone block
+      // still has to be added here.
+      normalizedConfig.rfc64PublicCatalogActivation === undefined
+        ? rfc64PublicCatalogBootstrap
+        : undefined,
+    );
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -879,19 +1009,27 @@ export class DKGAgent extends DKGAgentBase {
     };
     const configWithoutRfc64CatalogControls = { ...config };
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogActivation;
+    delete configWithoutRfc64CatalogControls.rfc64CatalogActivation;
     delete configWithoutRfc64CatalogControls.rfc64CatalogDeploymentProfile;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogAutoPublish;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogBootstrap;
     delete configWithoutRfc64CatalogControls.contextGraphSubscriptionRehydrationEnabled;
+    delete configWithoutRfc64CatalogControls.syncReconcilerIntervalMs;
+    delete configWithoutRfc64CatalogControls.syncStalenessThresholdMs;
+    delete configWithoutRfc64CatalogControls.syncBackoffBaseMs;
+    delete configWithoutRfc64CatalogControls.syncBackoffMaxMs;
+    delete configWithoutRfc64CatalogControls.syncBackoffJitter;
     const resolvedConfig: ResolvedDKGAgentConfig = {
       ...configWithoutRfc64CatalogControls,
       genesisId,
       networkIdentity,
       rfc64CatalogAccessPolicyAuthority,
       rfc64CatalogDeploymentProfile,
+      rfc64CatalogBootstrap,
       rfc64PublicCatalogAutoPublishPolicy,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
+      syncReconcilerTiming: resolveSyncReconcilerTiming(config),
     };
 
     const port = config.listenPort ?? 0;
@@ -2316,7 +2454,7 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await collector.collect({
+      const result = await this.withStorageACKCollectionSlot(() => collector.collect({
         merkleRoot: params.merkleRoot,
         contextGraphId: cgIdBigInt,
         contextGraphIdStr: params.contextGraphId,
@@ -2344,7 +2482,7 @@ export class DKGAgent extends DKGAgentBase {
         accessPolicy: params.accessPolicy,
         allowedPeers: params.allowedPeers,
         ackMode: params.ackMode,
-      });
+      }));
       return result.acks;
     };
   }
@@ -2483,7 +2621,7 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await collector.collectUpdate({
+      const result = await this.withStorageACKCollectionSlot(() => collector.collectUpdate({
         kaId: params.kaId,
         contextGraphId: cgIdBigInt,
         preUpdateMerkleRootCount: params.preUpdateMerkleRootCount,
@@ -2511,7 +2649,7 @@ export class DKGAgent extends DKGAgentBase {
         publicTripleCount: params.publicTripleCount,
         privateMerkleRoot: params.privateMerkleRoot,
         privateTripleCount: params.privateTripleCount,
-      });
+      }));
       return result.acks;
     };
   }

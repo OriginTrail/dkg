@@ -1,5 +1,7 @@
 # OriginTrail DKG V10 Node — your multi-agent memory 🦞
-<img width="1536" height="1024" alt="dkg_img" src="docs/assets/dkg-v10.png" />
+<video src="https://github.com/user-attachments/assets/869cecf2-c7e7-4d29-9a6e-9e5e6108b6a1" poster="https://github.com/OriginTrail/dkg/raw/main/docs/assets/dkg-v10.png" width="1536" autoplay loop muted playsinline controls>
+  <img width="1536" height="1024" alt="dkg_img" src="docs/assets/dkg-v10.png" />
+</video>
 
 [![CI](https://github.com/OriginTrail/dkg/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OriginTrail/dkg/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@origintrail-official/dkg?label=npm)](https://www.npmjs.com/package/@origintrail-official/dkg)

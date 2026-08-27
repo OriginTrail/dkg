@@ -2,7 +2,93 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+  MEMBER_ROSTER_OBJECT_TYPE_V1,
+  computeContextGraphPolicyObjectDigestV1,
+} from '@origintrail-official/dkg-core';
 import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
+
+const PRIVATE_RFC64_CONTEXT_GRAPH =
+  '0x1111111111111111111111111111111111111111/private-daemon-wiring';
+const PRIVATE_RFC64_OWNER = '0x1111111111111111111111111111111111111111';
+const PRIVATE_RFC64_LOCAL = '0x2222222222222222222222222222222222222222';
+const PRIVATE_RFC64_PROVIDER = '0x3333333333333333333333333333333333333333';
+const PRIVATE_RFC64_PROVIDER_PEER = '12D3KooPrivateDaemonProvider';
+
+function rfc64PrivateCatalogActivation() {
+  const policyEnvelope = {
+    issuer: PRIVATE_RFC64_OWNER,
+    objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+    payload: {
+      networkId: 'evm:100',
+      contextGraphId: PRIVATE_RFC64_CONTEXT_GRAPH,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      era: '0',
+      version: '0',
+      previousPolicyDigest: null,
+      accessPolicy: 1,
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+      projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+      administrativeDelegationDigest: null,
+      source: {
+        kind: 'owner-signed-unregistered',
+        ownerAddress: PRIVATE_RFC64_OWNER,
+        ownerAuthorityEra: '0',
+      },
+      effectiveAt: '0',
+      issuedAt: '0',
+    },
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  } as const;
+  const rosterEnvelope = {
+    issuer: PRIVATE_RFC64_OWNER,
+    objectType: MEMBER_ROSTER_OBJECT_TYPE_V1,
+    payload: {
+      networkId: 'evm:100',
+      contextGraphId: PRIVATE_RFC64_CONTEXT_GRAPH,
+      ownershipTransitionDigest: null,
+      era: '0',
+      version: '0',
+      previousRosterDigest: null,
+      policyDigest: computeContextGraphPolicyObjectDigestV1(policyEnvelope),
+      administrativeDelegationDigest: null,
+      members: [
+        { agentAddress: PRIVATE_RFC64_LOCAL, roles: ['holder'] },
+        { agentAddress: PRIVATE_RFC64_PROVIDER, roles: ['holder', 'provider'] },
+      ],
+      issuedAt: '0',
+    },
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  } as const;
+  return {
+    bootstrap: {
+      acceptedPolicies: [{
+        policyEnvelope,
+        rosterEnvelope,
+        targets: [{
+          authorAddress: PRIVATE_RFC64_PROVIDER,
+          providers: [PRIVATE_RFC64_PROVIDER_PEER],
+        }],
+        completeSwmProviders: [PRIVATE_RFC64_PROVIDER_PEER],
+      }],
+    },
+    accessPolicyAuthority: {
+      localAgentAddress: PRIVATE_RFC64_LOCAL,
+      peerAgentBindings: [{
+        peerId: PRIVATE_RFC64_PROVIDER_PEER,
+        agentAddress: PRIVATE_RFC64_PROVIDER,
+      }],
+    },
+  };
+}
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -214,6 +300,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(createArg.storageAckTiming).toEqual({
       handlerDeadlineMs: 15_000,
       sendTimeoutMs: 20_000,
+      maxConcurrentCollections: 1,
     });
     expect(createArg.chainConfig).toMatchObject({
       rpcUrl: 'https://private-rpc.example',
@@ -286,6 +373,18 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
     expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
     expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
+  });
+
+  it('keeps a private-only RFC-64 catalog selection out of generic sync wiring', async () => {
+    const rfc64Catalog = rfc64PrivateCatalogActivation();
+    const createArg = await captureCreateArg({
+      contextGraphs: ['legacy-explicit-cg'],
+      rfc64Catalog,
+    });
+
+    expect(createArg.syncContextGraphs).toEqual(['legacy-explicit-cg']);
+    expect(createArg.syncContextGraphs).not.toContain(PRIVATE_RFC64_CONTEXT_GRAPH);
+    expect(createArg.rfc64CatalogActivation).toEqual(rfc64Catalog);
   });
 
   it('keeps receiver-only RFC-64 bootstrap active without enabling auto-publish', async () => {
@@ -378,6 +477,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(createArg.storageAckTiming).toEqual({
       handlerDeadlineMs: 55_000,
       sendTimeoutMs: 60_000,
+      maxConcurrentCollections: 1,
     });
   });
 
@@ -389,6 +489,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(createArg.storageAckTiming).toEqual({
       handlerDeadlineMs: 0,
       sendTimeoutMs: 20_000,
+      maxConcurrentCollections: 1,
     });
   });
 

@@ -73,8 +73,17 @@ describe('SKILL.md file', () => {
     expect(skillContent).toContain('## 10. Common Workflows');
   });
 
-  it('contains dynamic placeholders for node info', () => {
-    expect(skillContent).toContain('(dynamic)');
+  it('contains substitution tokens for node info', () => {
+    // GH#1125 — the template used to carry literal `(dynamic)` text that
+    // `buildSkillMd` swapped out wholesale with one literal `String.replace`.
+    // That failed silently the moment the copy in manifest.ts drifted from the
+    // Markdown here, so the served doc shipped the placeholders verbatim. The
+    // template now carries named `{{token}}` values substituted individually;
+    // `skill-dynamic-substitution.test.ts` pins the rendered output.
+    expect(skillContent).not.toContain('(dynamic)');
+    expect(skillContent).toContain('{{nodeVersion}}');
+    expect(skillContent).toContain('{{baseUrl}}');
+    expect(skillContent).toContain('{{peerId}}');
     expect(skillContent).toContain('**Node version:**');
     expect(skillContent).toContain('**Base URL:**');
     expect(skillContent).toContain('**Peer ID:**');

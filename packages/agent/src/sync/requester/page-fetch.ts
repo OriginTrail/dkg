@@ -616,7 +616,6 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     sinceBatchId,
     assetUals,
     returnAcceptedPrefixOnRetryableTransportFailure,
-    requesterScope,
     maxAcceptedBytes,
     maxAcceptedQuads,
     maxAcceptedHeapBytesEstimate,

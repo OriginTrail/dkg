@@ -71,7 +71,6 @@ Managed Oxigraph accepts optional launch settings under `store.options`:
       "port": 7878,
       "location": "/var/lib/dkg/oxigraph-data",
       "cacheDir": "/var/lib/dkg/oxigraph-bin",
-      "readyTimeoutMs": 180000,
       "clientTimeoutMs": 180000,
       "queryTimeoutS": 175,
       "memoryHighMiB": 2048,
@@ -81,7 +80,9 @@ Managed Oxigraph accepts optional launch settings under `store.options`:
 }
 ```
 
-`readyTimeoutMs` is the maximum startup readiness wait in milliseconds. It must be a positive integer; invalid values are ignored and the default 30-second timeout is used. Increase it when a large or recovering RocksDB database needs longer to open.
+The daemon sizes the startup readiness wait automatically from the RocksDB write-ahead log retained in `location`. Oxigraph is not closed cleanly on shutdown (it installs no SIGTERM handler), so every start replays the previous session's log, and that replay is what a fixed deadline used to cut short. The derived wait assumes a pessimistic 4 MB/s replay floor and is not truncated below that work allowance; when a replay is pending the daemon logs the size and the allowance, then reports progress every 10 seconds.
+
+`readyTimeoutMs` **overrides** that automatic sizing with an explicit maximum, used verbatim and never extended. It must be a positive integer; invalid values are ignored. You normally should not set it — if you configured it as a workaround for a node that would not start, remove it. When an explicit value is lower than the automatic estimate the daemon logs a warning naming both numbers, because that combination is what keeps a recovering node down.
 
 `clientTimeoutMs` is the SPARQL HTTP client deadline in milliseconds. Managed Oxigraph defaults to 30 seconds. When you configure a longer client deadline, the daemon automatically derives a native query deadline five seconds earlier (for example, `180000` derives `175` seconds). If an Oxigraph evaluator path does not honor native cancellation before the client deadline, the daemon terminates and supervises a fresh managed Oxigraph process so the store cannot remain stalled indefinitely.
 

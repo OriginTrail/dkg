@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
 import {
   runSelectedSharedMemoryRetry,
@@ -26,11 +26,21 @@ async function flushTimers(): Promise<void> {
   await Promise.resolve();
 }
 
-async function createUnstartedAgent(name: string): Promise<DKGAgent> {
+async function createUnstartedAgent(
+  name: string,
+  overrides: Pick<
+    DKGAgentConfig,
+    | 'syncStalenessThresholdMs'
+    | 'syncBackoffBaseMs'
+    | 'syncBackoffMaxMs'
+    | 'syncBackoffJitter'
+  > = {},
+): Promise<DKGAgent> {
   return DKGAgent.create({
     name,
     listenHost: '127.0.0.1',
     chainAdapter: new MockChainAdapter(),
+    ...overrides,
   });
 }
 
@@ -439,6 +449,34 @@ describe('sync-on-connect churn gates', () => {
       expect.any(Function),
       'reconcile',
     ]]);
+  });
+
+  it('uses configured staleness and backoff values in the sync lifecycle', async () => {
+    const agent = await createUnstartedAgent('ConfiguredSyncTimingConsumers', {
+      syncStalenessThresholdMs: 20_000,
+      syncBackoffBaseMs: 5_000,
+      syncBackoffMaxMs: 30_000,
+      syncBackoffJitter: 0,
+    });
+    (agent as any).started = true;
+    (agent.node as any).node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    (agent as any).lastSuccessfulSyncAt.set(PEER_A, Date.now() - 30_000);
+    const trySyncFromPeer = recorder(async () => undefined);
+    (agent as any).trySyncFromPeer = trySyncFromPeer;
+    const before = Date.now();
+
+    await (agent as any).reconcileSyncFromConnectedPeers();
+    await flushTimers();
+
+    expect(trySyncFromPeer.calls).toHaveLength(1);
+    const backoff = (agent as any).syncReconcilerBackoff.get(PEER_A);
+    expect(backoff?.failures).toBe(1);
+    expect(backoff?.nextRetryAt - before).toBeGreaterThanOrEqual(5_000);
+    expect(backoff?.nextRetryAt - before).toBeLessThan(5_100);
   });
 
   it('records backoff after a failed sync round and blocks connection-open rescheduling', async () => {

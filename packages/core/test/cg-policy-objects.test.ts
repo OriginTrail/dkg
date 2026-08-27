@@ -33,6 +33,8 @@ import {
 } from '../src/cg-policy-objects.js';
 import {
   CONTROL_OBJECT_SIGNATURE_SUITES,
+  canonicalizeSignedControlEnvelopeBytes,
+  computeControlObjectDigestHex,
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
 } from '../src/sync-control-object.js';
@@ -147,7 +149,19 @@ describe('ContextGraphPolicyV1 codec', () => {
     })).toThrow(/cg-policy-governance/);
     expect(() => assertContextGraphPolicyV1({
       ...POLICY,
+      source: {
+        kind: 'owner-signed-unregistered',
+        ownerAddress: ISSUER,
+        ownerAuthorityEra: '0',
+      },
+    })).toThrow(/cg-policy-governance/);
+    expect(() => assertContextGraphPolicyV1({
+      ...POLICY,
       governanceContractAddress: null,
+    })).toThrow(/cg-policy-governance/);
+    expect(() => assertContextGraphPolicyV1({
+      ...POLICY,
+      source: { ...POLICY.source, contractAddress: ISSUER },
     })).toThrow(/cg-policy-governance/);
   });
 
@@ -433,6 +447,31 @@ describe('MemberRosterV1 codec', () => {
   it('enforces exact envelope type and signed digest', () => {
     expect(() => assertUnsignedMemberRosterEnvelopeV1(ROSTER_UNSIGNED)).not.toThrow();
     expect(() => assertSignedMemberRosterEnvelopeV1(ROSTER_SIGNED)).not.toThrow();
+    expect(() => assertUnsignedMemberRosterEnvelopeV1({
+      ...ROSTER_UNSIGNED,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+    })).toThrow(/cg-policy-type/);
+    expect(() => parseCanonicalUnsignedMemberRosterEnvelopeV1(
+      ROSTER_UNSIGNED_CANONICAL.replace(
+        '"objectType":"MemberRosterV1"',
+        `"objectType":"${CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1}"`,
+      ),
+    )).toThrow(/cg-policy-type/);
+    const signedWrongTypeUnsigned = {
+      ...ROSTER_UNSIGNED,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+    };
+    const signedWrongType = signed(
+      signedWrongTypeUnsigned,
+      computeControlObjectDigestHex(signedWrongTypeUnsigned),
+    );
+    expect(() => assertSignedMemberRosterEnvelopeV1(signedWrongType))
+      .toThrow(/cg-policy-type/);
+    expect(() => parseCanonicalSignedMemberRosterEnvelopeV1(
+      new TextDecoder().decode(
+        canonicalizeSignedControlEnvelopeBytes(signedWrongType),
+      ),
+    )).toThrow(/cg-policy-type/);
     expect(() => assertSignedMemberRosterEnvelopeV1({
       ...ROSTER_SIGNED,
       objectDigest: `0x${'00'.repeat(32)}`,

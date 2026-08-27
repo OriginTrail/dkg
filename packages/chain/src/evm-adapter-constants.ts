@@ -102,6 +102,39 @@ export const RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
 
 export const RPC_RECEIPT_TIMEOUT_MS = 600_000;
 export const MIN_RPC_RECEIPT_TIMEOUT_MS = 1_000;
+export const DEFAULT_FINALITY_CONFIRMATIONS = 1;
+
+/**
+ * Normalize an operator-selected mined-receipt confirmation depth.
+ *
+ * Standard EVM semantics apply: the receipt's own canonical block is
+ * confirmation 1, so a value of 1 makes the receipt eligible immediately
+ * after inclusion. An omitted value defaults to 1.
+ */
+export function resolveFinalityConfirmations(value: unknown): number {
+  if (value === undefined) return DEFAULT_FINALITY_CONFIRMATIONS;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new Error('chain.finalityConfirmations must be an integer >= 1');
+  }
+  return value;
+}
+
+/** Head height at which a receipt has the selected confirmation depth. */
+export function requiredHeadBlockForReceipt(
+  receiptBlockNumber: number,
+  confirmations: number,
+): number {
+  return receiptBlockNumber + confirmations - 1;
+}
+
+/** Canonical state block selected by the same confirmation-depth policy. */
+export function confirmedStateBlockAtHead(
+  latestBlockNumber: number,
+  confirmations: number,
+): number | null {
+  const blockNumber = latestBlockNumber - confirmations + 1;
+  return blockNumber >= 0 ? blockNumber : null;
+}
 
 /** Default an omitted deadline, but reject every explicitly invalid value. */
 export function resolveReceiptTimeoutMs(value: unknown): number {
@@ -129,6 +162,19 @@ export const RPC_ENDPOINT_SET_RETRIES = 1;
 
 export const RPC_ENDPOINT_SET_RETRY_BACKOFF_MS = 500;
 
+/**
+ * Bounded retries for the PRE-SIGN transaction-preparation phase after every
+ * configured RPC endpoint reports a transient transport or throttle error.
+ * No nonce is reserved and no transaction exists during this loop, so a full
+ * endpoint-set retry is safe. The exponential delay lets shared public RPC
+ * quotas reset without exposing a terminal publisher failure.
+ */
+export const RPC_PREPARATION_ENDPOINT_SET_RETRIES = 8;
+
+export const RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS = 2_000;
+
+export const RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS = 30_000;
+
 export const ADMIN_KEY_PURPOSE = 1;
 
 export const OPERATIONAL_KEY_PURPOSE = 2;
@@ -141,3 +187,36 @@ export const OPERATIONAL_KEY_PURPOSE = 2;
  * native+TRAC balance read per wallet instead of re-reading on every iteration.
  */
 export const PUBLISHER_FUNDING_CACHE_TTL_MS = 15_000;
+
+/**
+ * GH#1574 — how long a caller may wait for, or hold, a per-wallet transaction
+ * lane before the serializer says so. Below this, same-wallet queueing is
+ * ordinary and uninteresting.
+ */
+export const TX_SERIALIZER_OBSERVE_AFTER_MS = 30_000;
+
+/**
+ * Repeat cadence once a wait or hold is being reported. Caps a two-hour wedge
+ * at roughly 120 lines per wallet — unmissable in a log, not a flood.
+ */
+export const TX_SERIALIZER_OBSERVE_INTERVAL_MS = 60_000;
+
+/**
+ * Minimum silence interval before routing treats a signer lane as stalled.
+ * This is an observation policy, not a transaction deadline: it neither
+ * cancels the holder nor changes any RPC timeout. Meaningful write-stage
+ * progress refreshes the interval, so this value does not duplicate the V10
+ * retry/poll topology.
+ */
+export const TX_SERIALIZER_NO_PROGRESS_STALL_AFTER_MS = 10 * 60 * 1_000;
+
+/**
+ * Keep a receipt wait healthy through its configured inclusive deadline while
+ * retaining a useful minimum for adapters configured with a very short receipt
+ * timeout. The `+ 1` makes the boundary unambiguous.
+ */
+export function resolveTxSerializerStallAfterMs(
+  receiptTimeoutMs: number,
+): number {
+  return Math.max(receiptTimeoutMs, TX_SERIALIZER_NO_PROGRESS_STALL_AFTER_MS) + 1;
+}

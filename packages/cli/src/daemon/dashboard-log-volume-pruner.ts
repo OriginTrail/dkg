@@ -22,10 +22,9 @@ export interface DashboardLogVolumePrunerHandle {
 }
 
 /**
- * Own the incremental dashboard-log cleanup lifecycle outside the daemon
- * bootstrap. The database decides what one bounded maintenance step did; this
- * helper decides when the next step runs, aggregates deletion telemetry, and
- * guarantees shutdown clears the recursive timeout.
+ * Own the count-cap maintenance lifecycle independently of logging. Historical
+ * daemon and compatibility rows have no durable ownership marker, so the DB
+ * applies only the published, ownership-neutral row cap and time retention.
  */
 export function startDashboardLogVolumePruner(opts: {
   dashDb: Pick<DashboardDB, 'pruneLogVolumeBatch'>;

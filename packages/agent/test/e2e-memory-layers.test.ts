@@ -873,12 +873,6 @@ describe('rootless graph-scoped KA lifecycle', () => {
       graph: contextGraphSharedMemoryMetaUri(CG_ID),
       subject: operationSubject,
     });
-    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
-      ...recoveryInput,
-      request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
-    } as any)).rejects.toMatchObject({
-      code: 'KA_OPERATION_PUBLIC_SNAPSHOT_NOT_FOUND',
-    });
 
     // r29 (🔴 3822354184 / 🔴 3822354192) — the deadline at the REAL mutation boundary, on the
     // CURRENT-version path. The previous row stopped inside the read-only normalizer, which cannot
@@ -923,7 +917,14 @@ describe('rootless graph-scoped KA lifecycle', () => {
       }
     }
 
-    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    // Confirmed publishes always remove their exact SWM operation metadata;
+    // `clearSharedMemoryAfter=false` only preserves OTHER unpublished content.
+    // Recovery must therefore accept the immutable seal envelope after strict
+    // chain proof even when the operator did not request a family-wide clear.
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
+    } as any);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     expect(recoveryCleanup).not.toHaveBeenCalled();
 
