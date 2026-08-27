@@ -176,27 +176,31 @@ describe('chain-attested public metadata projection repair', () => {
   it('backfills creatorless legacy metadata after exact active-public chain proof', async () => {
     const store = new OxigraphStore();
     const contextGraphId = '0x1234567890123456789012345678901234567890/legacy-public';
+    let proofResolutions = 0;
+    const resolveActivePublicBinding = async () => {
+      proofResolutions += 1;
+      return { state: 'public' } as const;
+    };
     try {
       const first = await repairChainAttestedPublicMetaProjection(
         store,
         contextGraphId,
-        async () => ({ state: 'public' }),
+        resolveActivePublicBinding,
       );
       const second = await repairChainAttestedPublicMetaProjection(
         store,
         contextGraphId,
-        async () => ({ state: 'public' }),
+        resolveActivePublicBinding,
       );
 
       expect(first).toEqual({
         outcome: 'projection-complete',
-        chainProof: { state: 'public' },
       });
       expect(second).toEqual({
         outcome: 'already-complete',
-        chainProof: { state: 'not-requested' },
       });
       expect(await hasPublicProof(store, contextGraphId)).toBe(true);
+      expect(proofResolutions).toBe(1);
     } finally {
       await store.close();
     }
@@ -241,7 +245,6 @@ describe('chain-attested public metadata projection repair', () => {
 
       expect(repaired).toEqual({
         outcome: 'conflicting-policy',
-        chainProof: { state: 'public' },
       });
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
     } finally {
@@ -269,7 +272,6 @@ describe('chain-attested public metadata projection repair', () => {
 
       expect(repaired).toEqual({
         outcome: 'conflicting-policy',
-        chainProof: { state: 'public' },
       });
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
       const typeResult = await store.query(`ASK WHERE {

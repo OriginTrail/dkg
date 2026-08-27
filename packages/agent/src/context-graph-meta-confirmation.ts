@@ -16,18 +16,16 @@ import { buildAuthoritativePublicMetaAskQuery } from
   './context-graph-public-meta-proof.js';
 import type { ActivePublicContextGraphChainProof } from
   './active-public-context-graph-chain-proof.js';
+import { isPublicMetaDurabilityPending } from
+  './context-graph-public-meta-repair.js';
 
 export interface ConfirmContextGraphMetadataInput {
   readonly rejectUnregisteredPlaceholder?: boolean;
-  /** Exact proof already obtained by the caller; absence permits one strict lookup. */
-  readonly activePublicChainProof?: ActivePublicContextGraphChainProof;
 }
 
 export interface ContextGraphMetadataConfirmationDependencies {
   readonly chain: ChainAdapter;
-  readonly resolveActivePublicChainProof: (
-    contextGraphId: string,
-  ) => Promise<ActivePublicContextGraphChainProof>;
+  readonly resolveActivePublicChainProof: () => Promise<ActivePublicContextGraphChainProof>;
   readonly isPrivateContextGraph: (contextGraphId: string) => Promise<boolean>;
   readonly localApprovedAgentByContextGraph: ReadonlyMap<string, string>;
   readonly peerId: string;
@@ -44,6 +42,9 @@ export async function confirmContextGraphMetadataV1(
   if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
     return true;
   }
+  if (isPublicMetaDurabilityPending(dependencies.store, contextGraphId)) {
+    return false;
+  }
 
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
@@ -57,17 +58,13 @@ export async function confirmContextGraphMetadataV1(
   );
   const hasUnregisteredPlaceholder = unregisteredPlaceholderResult.type === 'boolean'
     && unregisteredPlaceholderResult.value === true;
-  const priorChainProof = input.activePublicChainProof;
-  let hasActivePublicOnChainProof = priorChainProof === undefined
-    ? undefined
-    : priorChainProof.state === 'public';
+  let hasActivePublicOnChainProof: boolean | undefined;
   if (
     hasUnregisteredPlaceholder
     && input.rejectUnregisteredPlaceholder === true
-    && priorChainProof === undefined
   ) {
     hasActivePublicOnChainProof = await dependencies
-      .resolveActivePublicChainProof(contextGraphId)
+      .resolveActivePublicChainProof()
       .then((proof) => proof.state === 'public')
       .catch(() => false);
   }
@@ -118,7 +115,7 @@ export async function confirmContextGraphMetadataV1(
   }
 
   if (hasActivePublicOnChainProof === undefined) {
-    hasActivePublicOnChainProof = await dependencies.resolveActivePublicChainProof(contextGraphId)
+    hasActivePublicOnChainProof = await dependencies.resolveActivePublicChainProof()
       .then((proof) => proof.state === 'public')
       .catch(() => false);
   }

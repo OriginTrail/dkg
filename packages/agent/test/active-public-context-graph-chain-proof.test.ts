@@ -3,6 +3,7 @@ import { ethers } from 'ethers';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
+  memoizeActivePublicContextGraphChainProof,
   resolveActivePublicContextGraphChainProof,
   type OnChainAccessPolicyState,
 } from '../src/active-public-context-graph-chain-proof.js';
@@ -39,11 +40,27 @@ function resolveStrictPublicProof(
     ),
     contextGraphId,
     createOperationContext('init'),
-    'chain-attested-repair',
   );
 }
 
 describe('active-public Context Graph chain proof', () => {
+  it('binds one memoized proof to one graph across init and sync consumers', async () => {
+    const resolveProof = vi.fn(async () => ({ state: 'public' } as const));
+    const boundProof = memoizeActivePublicContextGraphChainProof(
+      'graph-a',
+      resolveProof,
+    );
+
+    await expect(boundProof(createOperationContext('init'))).resolves.toEqual({
+      state: 'public',
+    });
+    await expect(boundProof(createOperationContext('sync'))).resolves.toEqual({
+      state: 'public',
+    });
+    expect(resolveProof).toHaveBeenCalledTimes(1);
+    expect(resolveProof).toHaveBeenCalledWith('graph-a', expect.any(Object));
+  });
+
   it.each([
     [0, { state: 'public' }],
     [1, { state: 'not-public', reason: 'private' }],
@@ -59,7 +76,6 @@ describe('active-public Context Graph chain proof', () => {
         resolvePolicyState,
         'test-context-graph',
         operationContext,
-        'chain-attested-repair',
       )).resolves.toEqual(expected);
       expect(resolvePolicyState).toHaveBeenCalledWith(
         'test-context-graph',
@@ -69,7 +85,7 @@ describe('active-public Context Graph chain proof', () => {
     },
   );
 
-  it('propagates name-hash transport failures for RPC classification', async () => {
+  it('classifies a name-hash transport failure as one RPC-failure proof', async () => {
     const getContextGraphNameHash = vi.fn(async () => {
       throw Object.assign(new Error('RPC endpoints exhausted'), {
         code: 'RPC_ENDPOINTS_EXHAUSTED',
@@ -85,8 +101,11 @@ describe('active-public Context Graph chain proof', () => {
       getContextGraphOnChainId: async () => '42',
     });
 
-    await expect(resolveStrictPublicProof(agent, 'hash-rpc-failure'))
-      .rejects.toThrow('RPC endpoints exhausted');
+    await expect(resolveStrictPublicProof(agent, 'hash-rpc-failure')).resolves.toEqual({
+      state: 'unknown',
+      reason: 'rpc-failure',
+      detail: 'RPC endpoints exhausted',
+    });
     expect(getContextGraphNameHash).toHaveBeenCalledWith(42n);
     expect(getContextGraphAccessPolicy).not.toHaveBeenCalled();
   });

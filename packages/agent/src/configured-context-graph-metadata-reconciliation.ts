@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { createOperationContext } from '@origintrail-official/dkg-core';
 
 import type { ConfirmContextGraphMetadataInput } from
   './context-graph-meta-confirmation.js';
@@ -8,8 +9,11 @@ import {
   repairChainAttestedPublicMetaProjection,
   type ChainAttestedPublicMetaRepairResult,
 } from './context-graph-public-meta-repair.js';
-import type { ActivePublicContextGraphChainProof } from
-  './active-public-context-graph-chain-proof.js';
+import {
+  memoizeActivePublicContextGraphChainProof,
+  type ActivePublicContextGraphChainProof,
+  type OperationAwareActivePublicChainProofResolver,
+} from './active-public-context-graph-chain-proof.js';
 
 type PublicMetaRepairDiagnostic = ChainAttestedPublicMetaRepairResult;
 
@@ -62,13 +66,12 @@ function reconciliationDiagnostic(
 
 export interface ConfiguredContextGraphMetadataReconciliationDependencies {
   readonly store: TripleStore;
-  readonly resolveActivePublicChainProof: (
-    contextGraphId: string,
-  ) => Promise<ActivePublicContextGraphChainProof>;
+  readonly resolveActivePublicChainProof: OperationAwareActivePublicChainProofResolver;
   readonly isLocallyCurated: (contextGraphId: string) => Promise<boolean>;
   readonly confirmMetadata: (
     contextGraphId: string,
     input: ConfirmContextGraphMetadataInput,
+    resolveActivePublicChainProof: () => Promise<ActivePublicContextGraphChainProof>,
   ) => Promise<boolean>;
 }
 
@@ -89,33 +92,21 @@ export async function reconcileConfiguredContextGraphMetadataV1(
     };
   }
 
+  const resolveActivePublicChainProof = memoizeActivePublicContextGraphChainProof(
+    contextGraphId,
+    dependencies.resolveActivePublicChainProof,
+  );
   let repair: PublicMetaRepairDiagnostic;
-  let activePublicChainProof: ActivePublicContextGraphChainProof | undefined;
   try {
-    const repaired = await repairChainAttestedPublicMetaProjection(
+    repair = await repairChainAttestedPublicMetaProjection(
       dependencies.store,
       contextGraphId,
-      async () => {
-        try {
-          return await dependencies.resolveActivePublicChainProof(contextGraphId);
-        } catch (error) {
-          return {
-            state: 'unknown',
-            reason: 'rpc-failure',
-            detail: error instanceof Error ? error.message : String(error),
-          };
-        }
-      },
+      () => resolveActivePublicChainProof(createOperationContext('init')),
     );
-    if (repaired.chainProof.state !== 'not-requested') {
-      activePublicChainProof = repaired.chainProof;
-    }
-    repair = repaired;
   } catch (error) {
     repair = {
       outcome: 'repair-failed',
       failureStage: 'pre-mutation',
-      chainProof: { state: 'not-requested' },
       detail: error instanceof Error ? error.message : String(error),
     };
   }
@@ -139,8 +130,7 @@ export async function reconcileConfiguredContextGraphMetadataV1(
     .catch(() => false);
   const hasConfirmedMeta = await dependencies.confirmMetadata(contextGraphId, {
     rejectUnregisteredPlaceholder: !locallyCurated,
-    ...(activePublicChainProof === undefined ? {} : { activePublicChainProof }),
-  }).catch(() => false);
+  }, () => resolveActivePublicChainProof(createOperationContext('sync'))).catch(() => false);
   const diagnostic = reconciliationDiagnostic(repair);
   return hasConfirmedMeta
     ? {

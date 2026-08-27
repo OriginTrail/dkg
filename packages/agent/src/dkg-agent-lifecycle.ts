@@ -168,9 +168,6 @@ import {
   repairCreatorPublicMetaProjections,
 } from './context-graph-public-meta-repair.js';
 import {
-  resolveActivePublicContextGraphChainProof,
-} from './active-public-context-graph-chain-proof.js';
-import {
   reconcileConfiguredContextGraphMetadataV1,
   type ConfiguredContextGraphMetadataReconciliationResult,
 } from './configured-context-graph-metadata-reconciliation.js';
@@ -9659,35 +9656,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<ConfiguredContextGraphMetadataReconciliationResult> {
-    const resolveActivePublicChainProof = (
-      normalizedContextGraphId: string,
-      operationContext: OperationContext,
-    ) =>
-      resolveActivePublicContextGraphChainProof(
-        (id, resolverOperationContext, options) => this.resolveOnChainAccessPolicyState(
-          id,
-          resolverOperationContext,
-          options,
-        ),
-        normalizedContextGraphId,
-        operationContext,
-        'chain-attested-repair',
-      );
     return reconcileConfiguredContextGraphMetadataV1({
       store: this.store,
-      resolveActivePublicChainProof: (id) => resolveActivePublicChainProof(
-        id,
-        createOperationContext('init'),
-      ),
+      resolveActivePublicChainProof: (id, operationContext) =>
+        this.resolveActivePublicContextGraphChainProof(id, operationContext),
       isLocallyCurated: (normalizedContextGraphId) =>
         this.isCuratorOf(normalizedContextGraphId),
-      confirmMetadata: (normalizedContextGraphId, input) =>
+      confirmMetadata: (normalizedContextGraphId, input, resolveActivePublicChainProof) =>
         confirmContextGraphMetadataV1({
           chain: this.chain,
-          resolveActivePublicChainProof: (id) => resolveActivePublicChainProof(
-            id,
-            createOperationContext('sync'),
-          ),
+          resolveActivePublicChainProof,
           isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
           localApprovedAgentByContextGraph: this.localApprovedAgentByCG,
           peerId: this.peerId,
@@ -9705,19 +9683,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<boolean> {
     return confirmContextGraphMetadataV1({
       chain: this.chain,
-      resolveActivePublicChainProof: async (id) => {
-        return resolveActivePublicContextGraphChainProof(
-          (contextGraphId, operationContext, options) =>
-            this.resolveOnChainAccessPolicyState(
-              contextGraphId,
-              operationContext,
-              options,
-            ),
-          id,
-          createOperationContext('sync'),
-          'chain-attested-repair',
-        );
-      },
+      resolveActivePublicChainProof: () => this.resolveActivePublicContextGraphChainProof(
+        contextGraphId,
+        createOperationContext('sync'),
+      ),
       isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
       localApprovedAgentByContextGraph: this.localApprovedAgentByCG,
       peerId: this.peerId,

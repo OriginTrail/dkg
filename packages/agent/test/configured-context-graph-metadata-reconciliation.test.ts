@@ -7,9 +7,14 @@ import {
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { buildAuthoritativePublicMetaAskQuery } from
   '../src/context-graph-public-meta-proof.js';
-import type { ConfirmContextGraphMetadataInput } from
+import { confirmContextGraphMetadataV1 } from
   '../src/context-graph-meta-confirmation.js';
-import { reconcileConfiguredContextGraphMetadataV1 } from
+import { resolveActivePublicContextGraphChainProof } from
+  '../src/active-public-context-graph-chain-proof.js';
+import {
+  reconcileConfiguredContextGraphMetadataV1,
+  type ConfiguredContextGraphMetadataReconciliationDependencies,
+} from
   '../src/configured-context-graph-metadata-reconciliation.js';
 
 function overrideStore(
@@ -35,18 +40,27 @@ async function hasPublicProof(
   return result.type === 'boolean' && result.value;
 }
 
+function realConfirmMetadata(
+  store: TripleStore,
+): ConfiguredContextGraphMetadataReconciliationDependencies['confirmMetadata'] {
+  return (contextGraphId, input, resolveActivePublicChainProof) =>
+    confirmContextGraphMetadataV1({
+      chain: {} as never,
+      resolveActivePublicChainProof,
+      isPrivateContextGraph: async () => false,
+      localApprovedAgentByContextGraph: new Map(),
+      peerId: '12D3KooWConfiguredMetadataReconciliation',
+      store,
+      subscriptions: new Map(),
+    }, contextGraphId, input);
+}
+
 describe('configured Context Graph metadata reconciliation', () => {
   it('reuses one active-public proof for placeholder repair and confirmation', async () => {
     const store = new OxigraphStore();
     const contextGraphId = 'single-proof';
     const resolveActivePublicChainProof = vi.fn(async () => ({ state: 'public' } as const));
-    const confirmMetadata = vi.fn(async (
-      _id: string,
-      input: ConfirmContextGraphMetadataInput,
-    ) => (
-      input.activePublicChainProof?.state === 'public'
-      && hasPublicProof(store, contextGraphId)
-    ));
+    const confirmMetadata = vi.fn(realConfirmMetadata(store));
     try {
       await store.insert([{
         subject: contextGraphDataGraphUri(contextGraphId),
@@ -67,10 +81,11 @@ describe('configured Context Graph metadata reconciliation', () => {
         diagnostic: { kind: 'public-metadata-projection-completed' },
       });
       expect(resolveActivePublicChainProof).toHaveBeenCalledTimes(1);
-      expect(confirmMetadata).toHaveBeenCalledWith(contextGraphId, {
-        rejectUnregisteredPlaceholder: true,
-        activePublicChainProof: { state: 'public' },
-      });
+      expect(confirmMetadata).toHaveBeenCalledWith(
+        contextGraphId,
+        { rejectUnregisteredPlaceholder: true },
+        expect.any(Function),
+      );
       expect(await hasPublicProof(store, contextGraphId)).toBe(true);
     } finally {
       await store.close();
@@ -83,13 +98,7 @@ describe('configured Context Graph metadata reconciliation', () => {
     const resolveActivePublicChainProof = vi.fn()
       .mockResolvedValueOnce({ state: 'not-public', reason: 'private' })
       .mockResolvedValueOnce({ state: 'public' });
-    const confirmMetadata = vi.fn(async (
-      _id: string,
-      input: ConfirmContextGraphMetadataInput,
-    ) => (
-      input.activePublicChainProof?.state === 'public'
-      && hasPublicProof(store, contextGraphId)
-    ));
+    const confirmMetadata = vi.fn(realConfirmMetadata(store));
     try {
       const dependencies = {
         store,
@@ -124,13 +133,19 @@ describe('configured Context Graph metadata reconciliation', () => {
   it('preserves a resolver rejection as an unknown RPC chain proof', async () => {
     const store = new OxigraphStore();
     const contextGraphId = 'rpc-failure';
-    const confirmMetadata = vi.fn(async () => false);
+    const resolvePolicyState = vi.fn(async () => {
+      throw new Error('temporary RPC outage');
+    });
+    const confirmMetadata = vi.fn(realConfirmMetadata(store));
     try {
       const result = await reconcileConfiguredContextGraphMetadataV1({
         store,
-        resolveActivePublicChainProof: async () => {
-          throw new Error('temporary RPC outage');
-        },
+        resolveActivePublicChainProof: (id, operationContext) =>
+          resolveActivePublicContextGraphChainProof(
+            resolvePolicyState,
+            id,
+            operationContext,
+          ),
         isLocallyCurated: async () => false,
         confirmMetadata,
       }, contextGraphId);
@@ -144,38 +159,42 @@ describe('configured Context Graph metadata reconciliation', () => {
           detail: 'temporary RPC outage',
         },
       });
-      expect(confirmMetadata).toHaveBeenCalledWith(contextGraphId, {
-        rejectUnregisteredPlaceholder: true,
-        activePublicChainProof: {
-          state: 'unknown',
-          reason: 'rpc-failure',
-          detail: 'temporary RPC outage',
-        },
-      });
+      expect(resolvePolicyState).toHaveBeenCalledTimes(1);
+      expect(confirmMetadata).toHaveBeenCalledWith(
+        contextGraphId,
+        { rejectUnregisteredPlaceholder: true },
+        expect.any(Function),
+      );
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
     } finally {
       await store.close();
     }
   });
 
-  it('fails closed when a repair is query-visible but its durability flush rejects', async () => {
+  it('quarantines a query-visible repair until a later durability flush succeeds', async () => {
     const baseStore = new OxigraphStore();
     const contextGraphId = 'public-meta-flush-failure';
-    const flush = vi.fn(async () => {
-      throw new Error('ENOSPC during public metadata flush');
-    });
+    const flush = vi.fn()
+      .mockRejectedValueOnce(new Error('ENOSPC during public metadata flush'))
+      .mockRejectedValueOnce(new Error('ENOSPC during public metadata flush'))
+      .mockResolvedValueOnce(undefined);
     const store = overrideStore(baseStore, { flush });
-    const confirmMetadata = vi.fn(async () => hasPublicProof(store, contextGraphId));
+    const resolveActivePublicChainProof = vi.fn(async () => ({ state: 'public' } as const));
+    const confirmMetadata = vi.fn(realConfirmMetadata(store));
     const isLocallyCurated = vi.fn(async () => false);
+    const dependencies = {
+      store,
+      resolveActivePublicChainProof,
+      isLocallyCurated,
+      confirmMetadata,
+    };
     try {
-      const result = await reconcileConfiguredContextGraphMetadataV1({
-        store,
-        resolveActivePublicChainProof: async () => ({ state: 'public' }),
-        isLocallyCurated,
-        confirmMetadata,
-      }, contextGraphId);
+      const first = await reconcileConfiguredContextGraphMetadataV1(
+        dependencies,
+        contextGraphId,
+      );
 
-      expect(result).toEqual({
+      expect(first).toEqual({
         outcome: 'pending',
         reason: 'missing-metadata',
         diagnostic: {
@@ -187,6 +206,41 @@ describe('configured Context Graph metadata reconciliation', () => {
       expect(await hasPublicProof(store, contextGraphId)).toBe(true);
       expect(confirmMetadata).not.toHaveBeenCalled();
       expect(isLocallyCurated).not.toHaveBeenCalled();
+
+      const unrelatedResolve = vi.fn(async () => ({ state: 'public' } as const));
+      await expect(confirmContextGraphMetadataV1({
+        chain: {} as never,
+        resolveActivePublicChainProof: unrelatedResolve,
+        isPrivateContextGraph: async () => false,
+        localApprovedAgentByContextGraph: new Map(),
+        peerId: '12D3KooWDurabilityQuarantine',
+        store,
+        subscriptions: new Map(),
+      }, contextGraphId)).resolves.toBe(false);
+      expect(unrelatedResolve).not.toHaveBeenCalled();
+
+      await expect(reconcileConfiguredContextGraphMetadataV1(
+        dependencies,
+        contextGraphId,
+      )).resolves.toEqual({
+        outcome: 'pending',
+        reason: 'missing-metadata',
+        diagnostic: {
+          kind: 'public-metadata-repair-failed',
+          detail: 'ENOSPC during public metadata flush',
+        },
+      });
+      expect(flush).toHaveBeenCalledTimes(2);
+      expect(resolveActivePublicChainProof).toHaveBeenCalledTimes(1);
+      expect(confirmMetadata).not.toHaveBeenCalled();
+
+      await expect(reconcileConfiguredContextGraphMetadataV1(
+        dependencies,
+        contextGraphId,
+      )).resolves.toEqual({ outcome: 'authoritative' });
+      expect(flush).toHaveBeenCalledTimes(3);
+      expect(resolveActivePublicChainProof).toHaveBeenCalledTimes(1);
+      expect(confirmMetadata).toHaveBeenCalledTimes(1);
     } finally {
       await baseStore.close();
     }

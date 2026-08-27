@@ -20,6 +20,27 @@ import type { ActivePublicContextGraphChainProof } from
   './active-public-context-graph-chain-proof.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
+const DURABILITY_PENDING_PUBLIC_META = new WeakMap<TripleStore, Set<string>>();
+
+function markPublicMetaDurabilityPending(store: TripleStore, contextGraphId: string): void {
+  const pending = DURABILITY_PENDING_PUBLIC_META.get(store) ?? new Set<string>();
+  pending.add(contextGraphId);
+  DURABILITY_PENDING_PUBLIC_META.set(store, pending);
+}
+
+function clearPublicMetaDurabilityPending(store: TripleStore, contextGraphId: string): void {
+  const pending = DURABILITY_PENDING_PUBLIC_META.get(store);
+  if (!pending) return;
+  pending.delete(contextGraphId);
+  if (pending.size === 0) DURABILITY_PENDING_PUBLIC_META.delete(store);
+}
+
+export function isPublicMetaDurabilityPending(
+  store: TripleStore,
+  contextGraphId: string,
+): boolean {
+  return DURABILITY_PENDING_PUBLIC_META.get(store)?.has(contextGraphId) === true;
+}
 
 export interface PublicMetaRepairResult {
   candidates: number;
@@ -29,17 +50,16 @@ export interface PublicMetaRepairResult {
 }
 
 export type ChainAttestedPublicMetaRepairResult =
-  | { outcome: 'already-complete'; chainProof: { state: 'not-requested' } }
+  | { outcome: 'already-complete' }
   | {
       outcome: 'not-chain-attested';
       chainProof: Exclude<ActivePublicContextGraphChainProof, { state: 'public' }>;
     }
-  | { outcome: 'conflicting-policy'; chainProof: { state: 'public' } }
-  | { outcome: 'projection-complete'; chainProof: { state: 'public' } }
+  | { outcome: 'conflicting-policy' }
+  | { outcome: 'projection-complete' }
   | {
       outcome: 'repair-failed';
       failureStage: 'pre-mutation' | 'mutation-or-durability';
-      chainProof: { state: 'not-requested' } | { state: 'public' };
       detail: string;
     };
 
@@ -163,6 +183,22 @@ export async function repairChainAttestedPublicMetaProjection(
   contextGraphId: string,
   resolveActivePublicBinding: () => Promise<ActivePublicContextGraphChainProof>,
 ): Promise<ChainAttestedPublicMetaRepairResult> {
+  // A prior UPDATE may be visible in memory even though its durability flush
+  // failed. Retry durability before any inspection so those facts cannot take
+  // the already-complete shortcut. Confirmation consults the same quarantine.
+  const resumedPendingDurability = isPublicMetaDurabilityPending(store, contextGraphId);
+  if (resumedPendingDurability) {
+    try {
+      await store.flush?.();
+    } catch (error) {
+      return {
+        outcome: 'repair-failed',
+        failureStage: 'mutation-or-durability',
+        detail: errorDetail(error),
+      };
+    }
+  }
+
   // Canonical metadata needs no repair and therefore no chain RPC. This keeps
   // normal restarts cheap once a legacy graph has been healed.
   let inspection: Awaited<ReturnType<typeof inspectPublicMetaProjection>>;
@@ -171,13 +207,20 @@ export async function repairChainAttestedPublicMetaProjection(
   } catch (error) {
     return {
       outcome: 'repair-failed',
-      failureStage: 'pre-mutation',
-      chainProof: { state: 'not-requested' },
+      failureStage: resumedPendingDurability
+        ? 'mutation-or-durability'
+        : 'pre-mutation',
       detail: errorDetail(error),
     };
   }
   if (!inspection.conflictingPolicy && inspection.missing.length === 0) {
-    return { outcome: 'already-complete', chainProof: { state: 'not-requested' } };
+    if (resumedPendingDurability) {
+      clearPublicMetaDurabilityPending(store, contextGraphId);
+    }
+    return { outcome: 'already-complete' };
+  }
+  if (resumedPendingDurability) {
+    clearPublicMetaDurabilityPending(store, contextGraphId);
   }
 
   let chainProof: ActivePublicContextGraphChainProof;
@@ -187,16 +230,19 @@ export async function repairChainAttestedPublicMetaProjection(
     return {
       outcome: 'repair-failed',
       failureStage: 'pre-mutation',
-      chainProof: { state: 'not-requested' },
       detail: errorDetail(error),
     };
   }
   if (chainProof.state !== 'public') {
     return { outcome: 'not-chain-attested', chainProof };
   }
+  if (inspection.conflictingPolicy) {
+    return { outcome: 'conflicting-policy' };
+  }
 
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   let updated: boolean;
+  markPublicMetaDurabilityPending(store, contextGraphId);
   try {
     updated = await tryUpdateWithTouchedGraphs(
       store,
@@ -208,15 +254,14 @@ export async function repairChainAttestedPublicMetaProjection(
     return {
       outcome: 'repair-failed',
       failureStage: 'mutation-or-durability',
-      chainProof,
       detail: errorDetail(error),
     };
   }
   if (!updated) {
+    clearPublicMetaDurabilityPending(store, contextGraphId);
     return {
       outcome: 'repair-failed',
       failureStage: 'pre-mutation',
-      chainProof,
       detail: 'Triple store does not support atomic public metadata repair',
     };
   }
@@ -224,23 +269,23 @@ export async function repairChainAttestedPublicMetaProjection(
     await store.flush?.();
     const finalInspection = await inspectPublicMetaProjection(store, contextGraphId);
     if (finalInspection.conflictingPolicy) {
-      return { outcome: 'conflicting-policy', chainProof };
+      clearPublicMetaDurabilityPending(store, contextGraphId);
+      return { outcome: 'conflicting-policy' };
     }
     if (finalInspection.missing.length > 0) {
       return {
         outcome: 'repair-failed',
         failureStage: 'mutation-or-durability',
-        chainProof,
         detail: 'Atomic public metadata repair completed without the canonical proof',
       };
     }
+    clearPublicMetaDurabilityPending(store, contextGraphId);
   } catch (error) {
     return {
       outcome: 'repair-failed',
       failureStage: 'mutation-or-durability',
-      chainProof,
       detail: errorDetail(error),
     };
   }
-  return { outcome: 'projection-complete', chainProof };
+  return { outcome: 'projection-complete' };
 }

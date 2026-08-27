@@ -132,8 +132,10 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-import type { ActivePublicChainProofSlotBindingMode } from
-  './active-public-context-graph-chain-proof.js';
+import {
+  resolveActivePublicContextGraphChainProof as resolveStrictActivePublicChainProof,
+  type ActivePublicContextGraphChainProof,
+} from './active-public-context-graph-chain-proof.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -431,7 +433,10 @@ export type ContextGraphSlotBindingMode =
   | 'chain-attested-repair'
   | 'retryable-durable';
 
-type PublicPolicySlotBindingMode = ActivePublicChainProofSlotBindingMode;
+type PublicPolicySlotBindingMode = Exclude<
+  ContextGraphSlotBindingMode,
+  'retryable-durable'
+>;
 
 function mapContextGraphSlotBindingOutcome(
   outcome: ContextGraphSlotBindingOutcome,
@@ -878,6 +883,22 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return policy;
     }
     return null;
+  }
+
+  async resolveActivePublicContextGraphChainProof(
+    this: DKGAgent,
+    contextGraphId: string,
+    operationContext: OperationContext,
+  ): Promise<ActivePublicContextGraphChainProof> {
+    return resolveStrictActivePublicChainProof(
+      (id, resolverOperationContext, options) => this.resolveOnChainAccessPolicyState(
+        id,
+        resolverOperationContext,
+        options,
+      ),
+      contextGraphId,
+      operationContext,
+    );
   }
 
   /**

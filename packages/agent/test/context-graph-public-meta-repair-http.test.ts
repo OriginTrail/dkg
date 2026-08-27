@@ -91,7 +91,6 @@ describe('creator-owned public metadata repair over SPARQL HTTP', () => {
 
       expect(repaired).toEqual({
         outcome: 'projection-complete',
-        chainProof: { state: 'public' },
       });
       expect(proof).toEqual({ type: 'boolean', value: true });
     } finally {
@@ -131,7 +130,6 @@ describe('creator-owned public metadata repair over SPARQL HTTP', () => {
 
       expect(repaired).toEqual({
         outcome: 'conflicting-policy',
-        chainProof: { state: 'public' },
       });
       expect(facts).toEqual({
         type: 'bindings',
