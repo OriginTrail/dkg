@@ -102,6 +102,7 @@ const CLI_BODY_MS = Object.freeze({
   'test/daemon/plugin-routes-api.e2e.test.ts': 5353,
   'test/daemon/routes/plugins.test.ts': 10,
   'test/daemon/routes/query.test.ts': 3285,
+  'test/log-lifecycle.test.ts': 5,
   'test/dashboard-log-volume-pruner.test.ts': 5,
   'test/devnet-publish-helpers-smoke.test.ts': 12027,
   'test/dkg-doctor.test.ts': 16,

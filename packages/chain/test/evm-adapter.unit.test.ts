@@ -33,6 +33,7 @@ import {
   requiredHeadBlockForReceipt,
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
+  resolveTxSerializerStallAfterMs,
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS,
   RPC_RECEIPT_POLL_INTERVAL_MS,
@@ -56,6 +57,16 @@ it('defaults an omitted receipt deadline to ten minutes', () => {
 it('rejects an explicitly invalid receipt deadline at the adapter boundary', () => {
   expect(() => new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 999 })))
     .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
+});
+
+it('derives the signer-lane no-progress threshold from the receipt deadline', () => {
+  const a = new EVMChainAdapter(minimalConfig({
+    receiptTimeoutMs: 1_000,
+    rpcUrls: ['http://127.0.0.1:59997'],
+  }));
+  expect((a as any).signerTxSerializer.options.stallAfterMs).toBe(
+    resolveTxSerializerStallAfterMs(1_000),
+  );
 });
 
 it('defaults mined-receipt finality to one confirmation', () => {
@@ -4707,7 +4718,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
-      void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+      void (a as any).signerTxSerializer.run(walletA.address, () => gate, 'test hold');
       try {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletA.address); // registered pool[0], despite gas-poor + busy
@@ -4721,7 +4732,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       // Both funded (helper default). Hold walletA (the round-robin head) busy.
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
-      void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+      void (a as any).signerTxSerializer.run(walletA.address, () => gate, 'test hold');
       try {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletB.address); // idle wallet preferred over the busy head
@@ -4734,11 +4745,60 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       let releaseA!: () => void; let releaseB!: () => void;
       const gA = new Promise<void>((r) => { releaseA = r; });
       const gB = new Promise<void>((r) => { releaseB = r; });
-      void (a as any).signerTxSerializer.run(walletA.address, () => gA);
-      void (a as any).signerTxSerializer.run(walletB.address, () => gB);
+      void (a as any).signerTxSerializer.run(walletA.address, () => gA, 'test hold A');
+      void (a as any).signerTxSerializer.run(walletB.address, () => gB, 'test hold B');
       try {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletA.address); // both busy → first funded (head), not excluded
+      } finally { releaseA(); releaseB(); }
+    });
+
+    // GH#1574 — when EVERY funded wallet is busy, the old rule fell through to
+    // the round-robin head. If that head's lane is WEDGED, the new write
+    // inherits the wedge invisibly — the exact failure the issue reports.
+    // A stalled lane is now ranked below a merely-busy one.
+    it('prefers a busy wallet over one whose lane has stalled', async () => {
+      const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      // Drive the serializer's own clock so one lane can be aged past the
+      // canonical no-progress threshold while the other is not.
+      let clock = 0;
+      const stallAfterMs = resolveTxSerializerStallAfterMs(
+        (a as any).receiptTimeoutMs,
+        (a as any).rpcUrls.length,
+      );
+      const Ctor = (a as any).signerTxSerializer.constructor;
+      (a as any).signerTxSerializer = new Ctor({
+        observeAfterMs: 30_000,
+        observeIntervalMs: 60_000,
+        stallAfterMs,
+        now: () => clock,
+        onObserve: () => {},
+      });
+
+      let releaseA!: () => void; let releaseB!: () => void;
+      const gA = new Promise<void>((r) => { releaseA = r; });
+      const gB = new Promise<void>((r) => { releaseB = r; });
+
+      // A is the round-robin head, and it wedges FIRST.
+      void (a as any).signerTxSerializer.run(walletA.address, () => gA, 'wedged publish');
+      await Promise.resolve(); await Promise.resolve();
+
+      try {
+        // Age A past the threshold BEFORE B ever starts, so only A is stalled.
+        clock += stallAfterMs;
+        void (a as any).signerTxSerializer.run(walletB.address, () => gB, 'healthy publish');
+        await Promise.resolve(); await Promise.resolve();
+
+        expect((a as any).signerTxSerializer.state(walletA.address)).toBe('stalled');
+        expect((a as any).signerTxSerializer.state(walletB.address)).toBe('busy');
+
+        // Neither is idle, so the old rule would return the head (A) and
+        // queue the new write behind the wedge. It must pick B.
+        const chosen = await (a as any).selectSigner({
+          txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true,
+        });
+        expect(chosen.address).toBe(walletB.address);
       } finally { releaseA(); releaseB(); }
     });
 
@@ -4834,7 +4894,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
         registerPool(a);
         let release!: () => void;
         const gate = new Promise<void>((r) => { release = r; });
-        void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+        void (a as any).signerTxSerializer.run(walletA.address, () => gate, 'test hold');
         try {
           const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
           expect(chosen.address).toBe(walletA.address); // idle bias disabled → busy head still chosen
@@ -4910,6 +4970,36 @@ function makeV10AdapterWithAllowanceSequence(values: bigint[]) {
 }
 
 describe('ensureV10ApproveTrac — forced re-approve + visibility poll (#888)', () => {
+
+  it('allows a healthy single-RPC allowance read to finish after the failover stall interval', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = new EVMChainAdapter(minimalConfig());
+      const signer = new ethers.Wallet(DEPLOYER_PK);
+      const tokenWithSigner = connectable({
+        allowance: recorder(() => new Promise<bigint>((resolve) => {
+          setTimeout(() => resolve(1n), RPC_READ_STALL_TIMEOUT_MS + 100);
+        })),
+        approve: recorder(() => undefined),
+      });
+      (a as any).contracts.token = { connect: () => tokenWithSigner };
+
+      const approval = (a as any).ensureV10ApproveTrac(
+        signer,
+        V10_KA_ADDRESS,
+        0n,
+        'approve V10 publish TRAC',
+      );
+      await flushAsyncWork();
+      await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 100);
+
+      await expect(approval).resolves.toBeUndefined();
+      expect(tokenWithSigner.allowance.calls).toHaveLength(1);
+      expect(tokenWithSigner.approve.calls).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('force=true re-approves even when the gating read says the allowance is already sufficient (stale-high skip)', async () => {
     // The "stale-high" sub-race: the per-publish 1-wei floor consumed by

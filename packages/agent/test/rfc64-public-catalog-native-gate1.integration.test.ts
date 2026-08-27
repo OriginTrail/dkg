@@ -1156,6 +1156,30 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     }
   }, 30_000);
 
+  it('rejects a genesis head with no delegation without staging it durably', async () => {
+    const fixture = await setupLiveReceiver();
+    const observed = fixture.createCasObservedReceiver();
+
+    await expect(fixture.bootstrap(
+      fixture.missingDelegationGenesisAnnouncement,
+      observed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-not-found' });
+
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    await expect(fixture.receiverPersistence.controlObjects.getVerifiedObject({
+      objectDigest: fixture.missingDelegationGenesisAnnouncement.catalogHeadObjectDigest,
+      signatureVariantDigest:
+        fixture.missingDelegationGenesisAnnouncement.signatureVariantDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    })).resolves.toBeNull();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toBeNull();
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+  }, 30_000);
+
   it('retries genesis idempotently after verified staging wins but its CAS crashes', async () => {
     const fixture = await setupLiveReceiver();
     const rollback = vi.fn(async () => {});
@@ -2024,31 +2048,36 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     successor.head,
     MISSING_DELEGATION_DIGEST,
   );
+  const missingDelegationGenesisHead = await rewriteCatalogHeadDelegation(
+    genesis.head,
+    MISSING_DELEGATION_DIGEST,
+  );
   const invalidGenesis = await buildInvalidEmptyGenesis(
     genesis.head,
     successor.directoryPath[0]!,
   );
+  const authorEnvelopes: readonly SignedControlEnvelopeV1[] = Object.freeze([
+    catalogIssuerDelegation,
+    governedCatalogIssuerDelegation,
+    crossLaneDelegation,
+    expiredDelegation,
+    ...genesis.stagedObjects,
+    ...governedGenesis.stagedObjects,
+    ...invalidGenesis.stagedObjects,
+    ...successor.stagedObjects,
+    ...multiAssetSuccessor.stagedObjects,
+    ...removalSuccessor.stagedObjects,
+    ...threeAssetSuccessor.stagedObjects,
+    ...replacementSuccessor.stagedObjects,
+    ...governedSuccessor.stagedObjects,
+    ...competingSuccessor.stagedObjects,
+    crossLaneHead,
+    expiredHead,
+    missingDelegationHead,
+    missingDelegationGenesisHead,
+  ]);
   const authorObjects = new Map<string, SignedControlEnvelopeV1>(
-    [
-      catalogIssuerDelegation,
-      governedCatalogIssuerDelegation,
-      crossLaneDelegation,
-      expiredDelegation,
-      ...genesis.stagedObjects,
-      ...governedGenesis.stagedObjects,
-      ...invalidGenesis.stagedObjects,
-      ...successor.stagedObjects,
-      ...multiAssetSuccessor.stagedObjects,
-      ...removalSuccessor.stagedObjects,
-      ...threeAssetSuccessor.stagedObjects,
-      ...replacementSuccessor.stagedObjects,
-      ...governedSuccessor.stagedObjects,
-      ...competingSuccessor.stagedObjects,
-      crossLaneHead,
-      expiredHead,
-      missingDelegationHead,
-    ]
-      .map((envelope) => [envelope.objectDigest, envelope]),
+    authorEnvelopes.map((envelope) => [envelope.objectDigest, envelope]),
   );
   const authorObjectRead = vi.fn(async (digest: Digest32V1) =>
     authorObjects.get(digest) ?? null);
@@ -2060,93 +2089,16 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const authorBundleRead = vi.fn(async (digest: Digest32V1) =>
     bundleBytesByDigest.get(digest) ?? null);
   const verifiedObjects = await Promise.all(
-    [
-      catalogIssuerDelegation,
-      governedCatalogIssuerDelegation,
-      crossLaneDelegation,
-      expiredDelegation,
-      ...genesis.stagedObjects,
-      ...governedGenesis.stagedObjects,
-      ...invalidGenesis.stagedObjects,
-      ...successor.stagedObjects,
-      ...multiAssetSuccessor.stagedObjects,
-      ...removalSuccessor.stagedObjects,
-      ...threeAssetSuccessor.stagedObjects,
-      ...replacementSuccessor.stagedObjects,
-      ...governedSuccessor.stagedObjects,
-      ...competingSuccessor.stagedObjects,
-      crossLaneHead,
-      expiredHead,
-      missingDelegationHead,
-    ]
-      .map(async (envelope) => ({
+    authorEnvelopes.map(async (envelope) => ({
       envelope,
       issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
-      })),
+    })),
   );
-  const stagedObjects: Array<{
-    readonly objectDigest: Digest32V1;
-    readonly signatureVariantDigest: Digest32V1;
-  }> = [];
   for (let offset = 0; offset < verifiedObjects.length; offset += 16) {
-    const stagedBatch = await authorPersistence.controlObjects.stageVerifiedObjects(
+    await authorPersistence.controlObjects.stageVerifiedObjects(
       verifiedObjects.slice(offset, offset + 16),
     );
-    stagedObjects.push(...stagedBatch.objects);
   }
-  const staged = { objects: stagedObjects };
-  const headKeys = staged.objects.find(
-    (keys) => keys.objectDigest === successor.head.objectDigest,
-  );
-  const genesisHeadKeys = staged.objects.find(
-    (keys) => keys.objectDigest === genesis.head.objectDigest,
-  );
-  const multiAssetHeadKeys = staged.objects.find(
-    (keys) => keys.objectDigest === multiAssetSuccessor.head.objectDigest,
-  );
-  const removalHeadKeys = staged.objects.find(
-    (keys) => keys.objectDigest === removalSuccessor.head.objectDigest,
-  );
-  const replacementHeadKeys = staged.objects.find(
-    (keys) => keys.objectDigest === replacementSuccessor.head.objectDigest,
-  );
-  const threeAssetHeadKeys = staged.objects.find(
-    (keys) => keys.objectDigest === threeAssetSuccessor.head.objectDigest,
-  );
-  const governedGenesisHeadKeys = staged.objects.find(
-    (keys) => keys.objectDigest === governedGenesis.head.objectDigest,
-  );
-  const governedSuccessorHeadKeys = staged.objects.find(
-    (keys) => keys.objectDigest === governedSuccessor.head.objectDigest,
-  );
-  const invalidGenesisHeadKeys = staged.objects.find(
-    (keys) => keys.objectDigest === invalidGenesis.head.objectDigest,
-  );
-  const competingHeadKeys = staged.objects.find(
-    (keys) => keys.objectDigest === competingSuccessor.head.objectDigest,
-  );
-  const crossLaneHeadKeys = staged.objects.find(
-    (keys) => keys.objectDigest === crossLaneHead.objectDigest,
-  );
-  const expiredHeadKeys = staged.objects.find(
-    (keys) => keys.objectDigest === expiredHead.objectDigest,
-  );
-  const missingDelegationHeadKeys = staged.objects.find(
-    (keys) => keys.objectDigest === missingDelegationHead.objectDigest,
-  );
-  if (headKeys === undefined) throw new Error('successor head was not staged');
-  if (genesisHeadKeys === undefined) throw new Error('genesis head was not staged');
-  if (multiAssetHeadKeys === undefined) throw new Error('multi-asset successor head was not staged');
-  if (removalHeadKeys === undefined) throw new Error('removal successor head was not staged');
-  if (replacementHeadKeys === undefined) throw new Error('replacement successor head was not staged');
-  if (threeAssetHeadKeys === undefined) throw new Error('three-asset successor head was not staged');
-  if (governedGenesisHeadKeys === undefined) throw new Error('governed genesis head was not staged');
-  if (governedSuccessorHeadKeys === undefined) throw new Error('governed successor head was not staged');
-  if (invalidGenesisHeadKeys === undefined) throw new Error('invalid genesis head was not staged');
-  if (competingHeadKeys === undefined) throw new Error('competing successor head was not staged');
-  if (crossLaneHeadKeys === undefined) throw new Error('cross-lane successor head was not staged');
-  if (expiredHeadKeys === undefined) throw new Error('expired-delegation head was not staged');
-  if (missingDelegationHeadKeys === undefined) throw new Error('missing-delegation head was not staged');
   const receivedAnnouncements: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
   const openPolicy = async () => Object.freeze({
     accessPolicy: 0 as const,
@@ -2265,83 +2217,34 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   receiverHeadTransport.start();
   authorNativeTransport.start();
   receiverNativeTransport.start();
-  const announcement = Object.freeze({
+  const announcementFor = (
+    head: Readonly<SignedAuthorCatalogHeadEnvelopeV1>,
+  ): Readonly<Rfc64PublicCatalogHeadAnnouncementV1> => Object.freeze({
     kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
-    networkId: successor.head.payload.networkId,
-    contextGraphId: successor.head.payload.contextGraphId,
-    subGraphName: successor.head.payload.subGraphName,
-    authorAddress: successor.head.payload.authorAddress,
-    catalogEra: successor.head.payload.era,
-    catalogVersion: successor.head.payload.version,
+    networkId: head.payload.networkId,
+    contextGraphId: head.payload.contextGraphId,
+    subGraphName: head.payload.subGraphName,
+    authorAddress: head.payload.authorAddress,
+    catalogEra: head.payload.era,
     policyDigest: POLICY_DIGEST,
-    catalogHeadObjectDigest: headKeys.objectDigest,
-    signatureVariantDigest: headKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
-  const genesisAnnouncement = Object.freeze({
-    ...announcement,
-    catalogVersion: genesis.head.payload.version,
-    catalogHeadObjectDigest: genesisHeadKeys.objectDigest,
-    signatureVariantDigest: genesisHeadKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
-  const multiAssetAnnouncement = Object.freeze({
-    ...announcement,
-    catalogVersion: multiAssetSuccessor.head.payload.version,
-    catalogHeadObjectDigest: multiAssetHeadKeys.objectDigest,
-    signatureVariantDigest: multiAssetHeadKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
-  const removalAnnouncement = Object.freeze({
-    ...announcement,
-    catalogVersion: removalSuccessor.head.payload.version,
-    catalogHeadObjectDigest: removalHeadKeys.objectDigest,
-    signatureVariantDigest: removalHeadKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
-  const replacementAnnouncement = Object.freeze({
-    ...announcement,
-    catalogVersion: replacementSuccessor.head.payload.version,
-    catalogHeadObjectDigest: replacementHeadKeys.objectDigest,
-    signatureVariantDigest: replacementHeadKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
-  const threeAssetAnnouncement = Object.freeze({
-    ...announcement,
-    catalogVersion: threeAssetSuccessor.head.payload.version,
-    catalogHeadObjectDigest: threeAssetHeadKeys.objectDigest,
-    signatureVariantDigest: threeAssetHeadKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
-  const competingAnnouncement = Object.freeze({
-    ...announcement,
-    catalogHeadObjectDigest: competingHeadKeys.objectDigest,
-    signatureVariantDigest: competingHeadKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
-  const governedGenesisAnnouncement = Object.freeze({
-    ...genesisAnnouncement,
-    catalogHeadObjectDigest: governedGenesisHeadKeys.objectDigest,
-    signatureVariantDigest: governedGenesisHeadKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
-  const governedSuccessorAnnouncement = Object.freeze({
-    ...announcement,
-    catalogHeadObjectDigest: governedSuccessorHeadKeys.objectDigest,
-    signatureVariantDigest: governedSuccessorHeadKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
-  const crossLaneAnnouncement = Object.freeze({
-    ...announcement,
-    catalogHeadObjectDigest: crossLaneHeadKeys.objectDigest,
-    signatureVariantDigest: crossLaneHeadKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
-  const expiredAnnouncement = Object.freeze({
-    ...announcement,
-    catalogHeadObjectDigest: expiredHeadKeys.objectDigest,
-    signatureVariantDigest: expiredHeadKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
-  const missingDelegationAnnouncement = Object.freeze({
-    ...announcement,
-    catalogHeadObjectDigest: missingDelegationHeadKeys.objectDigest,
-    signatureVariantDigest: missingDelegationHeadKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
-  const invalidGenesisAnnouncement = Object.freeze({
-    ...genesisAnnouncement,
-    catalogHeadObjectDigest: invalidGenesisHeadKeys.objectDigest,
-    signatureVariantDigest: invalidGenesisHeadKeys.signatureVariantDigest,
-  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+    catalogVersion: head.payload.version,
+    catalogHeadObjectDigest: head.objectDigest,
+    signatureVariantDigest: rfc64CatalogSignatureVariantDigestV1(head),
+  });
+  const announcement = announcementFor(successor.head);
+  const genesisAnnouncement = announcementFor(genesis.head);
+  const multiAssetAnnouncement = announcementFor(multiAssetSuccessor.head);
+  const removalAnnouncement = announcementFor(removalSuccessor.head);
+  const replacementAnnouncement = announcementFor(replacementSuccessor.head);
+  const threeAssetAnnouncement = announcementFor(threeAssetSuccessor.head);
+  const competingAnnouncement = announcementFor(competingSuccessor.head);
+  const governedGenesisAnnouncement = announcementFor(governedGenesis.head);
+  const governedSuccessorAnnouncement = announcementFor(governedSuccessor.head);
+  const crossLaneAnnouncement = announcementFor(crossLaneHead);
+  const expiredAnnouncement = announcementFor(expiredHead);
+  const missingDelegationAnnouncement = announcementFor(missingDelegationHead);
+  const missingDelegationGenesisAnnouncement = announcementFor(missingDelegationGenesisHead);
+  const invalidGenesisAnnouncement = announcementFor(invalidGenesis.head);
   await authorHeadTransport.announceCatalogHead(receiverNode.peerId, genesisAnnouncement);
   await authorHeadTransport.announceCatalogHead(receiverNode.peerId, announcement);
   expect(receivedAnnouncements).toEqual([genesisAnnouncement, announcement]);
@@ -2458,6 +2361,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     receiver,
     receiverBundleFetch,
     missingDelegationAnnouncement,
+    missingDelegationGenesisAnnouncement,
     multiAssetAnnouncement,
     multiAssetSuccessor,
     removalAnnouncement,

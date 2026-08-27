@@ -275,6 +275,10 @@ describe('RFC-64 finalized VM placement composition', () => {
     } satisfies ComposeFinalizedVmSetRequestV1;
 
     expect(composeFinalizedVmSetV1(publicRequest).rows).toHaveLength(1);
+    expect(composeFinalizedVmSetV1({
+      ...publicRequest,
+      requireCompleteAuthorSet: true,
+    }).rows).toHaveLength(1);
     expect(() => composeFinalizedVmSetV1({
       ...publicRequest,
       finalizedContextGraph: {

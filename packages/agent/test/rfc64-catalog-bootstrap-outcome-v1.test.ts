@@ -3,7 +3,10 @@
 import { describe, expect, it } from 'vitest';
 
 import { classifyRfc64CatalogBootstrapFailureV1 } from '../src/dkg-agent-rfc64-catalog-bootstrap.js';
-import { Rfc64CatalogReconciliationTerminalErrorV1 } from '../src/index.js';
+import {
+  Rfc64CatalogReconciliationTerminalErrorV1,
+  Rfc64CatalogSynchronizationErrorV1,
+} from '../src/index.js';
 import { FinalizedVmCompositionErrorV1 } from '../src/rfc64/finalized-vm-composer-v1.js';
 import { Rfc64PublicCatalogNativeReceiverErrorV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import {
@@ -57,6 +60,27 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
       outcome: 'known-incomplete',
       completionReason: 'no-authorized-provider',
     });
+  });
+
+  it('recognizes legacy synchronization terminal reasons directly and through causes', () => {
+    const legacyFailure = new Rfc64CatalogSynchronizationErrorV1(
+      'no-authorized-provider',
+      'legacy-code',
+    );
+    const wrappedLegacyFailure = new Error('catalog synchronization failed', {
+      cause: legacyFailure,
+    });
+
+    for (const failure of [legacyFailure, wrappedLegacyFailure]) {
+      expect(classifyRfc64CatalogBootstrapFailureV1(true, failure)).toEqual({
+        outcome: 'known-incomplete',
+        completionReason: 'no-authorized-provider',
+      });
+      expect(classifyRfc64CatalogBootstrapFailureV1(false, failure)).toEqual({
+        outcome: 'failed',
+        completionReason: null,
+      });
+    }
   });
 
   it('classifies a signed catalog row with unavailable bytes as known-incomplete for private VM', () => {

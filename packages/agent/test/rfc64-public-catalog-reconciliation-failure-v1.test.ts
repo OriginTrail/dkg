@@ -5,6 +5,7 @@ import { Rfc64PublicCatalogNativeReceiverErrorV1 } from '../src/rfc64/public-cat
 import { FinalizedVmCompositionErrorV1 } from '../src/rfc64/finalized-vm-composer-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+  Rfc64CatalogReconciliationTerminalErrorV1,
   Rfc64PublicCatalogReconciliationFailureRegistryV1,
   classifyRfc64CatalogReconciliationTerminalReasonV1,
 } from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
@@ -60,6 +61,21 @@ describe('RFC-64 public catalog terminal failure registry v1', () => {
     registry.clear();
     expect(registry.size).toBe(0);
     expect(registry.read(digest(1))).toBeNull();
+  });
+
+  it('shares safe code access while stabilizing only diagnostic tokens', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const cause = Object.assign(new Error('compatibility code'), {
+      code: 'contains spaces',
+    });
+    const terminal = new Rfc64CatalogReconciliationTerminalErrorV1({
+      outcome: 'failed',
+      error: cause,
+    });
+    registry.record(digest(1), cause);
+
+    expect(terminal.code).toBe('contains spaces');
+    expect(registry.read(digest(1))?.errorCode).toBeNull();
   });
 
   it('retains one stable typed cause code without retaining cause text', () => {

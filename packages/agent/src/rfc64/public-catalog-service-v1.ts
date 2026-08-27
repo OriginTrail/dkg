@@ -62,11 +62,14 @@ import {
 } from './catalog-access-policy-v1.js';
 import {
   Rfc64PublicCatalogReceiverV1,
-  type Rfc64PublicCatalogReceiverCompletionOutcomeV1,
   type Rfc64PublicCatalogReceiverReconcilerV1,
   type Rfc64PublicCatalogReceiverOptionsV1,
   type Rfc64PublicCatalogReceiverStatsV1,
 } from './public-catalog-receiver-v1.js';
+import {
+  isRfc64PublicCatalogReceiverSuccessCompletionV1,
+  type Rfc64PublicCatalogReceiverCompletionOutcomeV1,
+} from './public-catalog-reconciliation-outcome-v1.js';
 import {
   Rfc64CatalogReconciliationTerminalErrorV1,
 } from './public-catalog-reconciliation-failure-v1.js';
@@ -689,11 +692,8 @@ export class Rfc64PublicCatalogServiceV1 {
       announcement: discovered.announcement,
       remotePeerId,
     }]);
-    if (completion.outcome !== 'applied' && completion.outcome !== 'already-applied') {
-      throw new Rfc64CatalogReconciliationTerminalErrorV1({
-        outcome: completion.outcome,
-        error: completion.error,
-      });
+    if (!isRfc64PublicCatalogReceiverSuccessCompletionV1(completion)) {
+      throw new Rfc64CatalogReconciliationTerminalErrorV1(completion);
     }
     return discovered;
   }
@@ -769,6 +769,9 @@ export class Rfc64PublicCatalogServiceV1 {
       announcement: discovered.announcement,
     })));
     const providerPeerIds = Object.freeze(selected.map(({ remotePeerId }) => remotePeerId));
+    if (!isRfc64PublicCatalogReceiverSuccessCompletionV1(completion)) {
+      throw new Rfc64CatalogReconciliationTerminalErrorV1(completion);
+    }
     if (
       completion.appliedProviderPeerId !== null
       && !providerPeerIds.includes(completion.appliedProviderPeerId)
@@ -776,12 +779,6 @@ export class Rfc64PublicCatalogServiceV1 {
       throw new Error(
         'RFC-64 receiver completed through a provider outside the requested failover set',
       );
-    }
-    if (completion.outcome !== 'applied' && completion.outcome !== 'already-applied') {
-      throw new Rfc64CatalogReconciliationTerminalErrorV1({
-        outcome: completion.outcome,
-        error: completion.error,
-      });
     }
     return Object.freeze({
       current: selected[0]!.discovered,

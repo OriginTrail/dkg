@@ -82,6 +82,140 @@ function abortDuringListenerRegistration(message: string): AbortSignal {
 const BUSY_QUERY = 'ASK { GRAPH <urn:test:g> { ?s ?p ?o } }';
 
 describe('OxigraphWorkerStore resilience', () => {
+  const GRAPH_A = 'urn:test:tracked:a';
+  const GRAPH_B = 'urn:test:tracked:b';
+  const GRAPH_C = 'urn:test:tracked:c';
+  const quadFor = (graph: string): Quad => ({
+    subject: `urn:test:subject:${graph}`,
+    predicate: 'urn:test:predicate',
+    object: '"value"',
+    graph,
+  });
+  const mutationCases: Array<{
+    name: string;
+    affected: string[];
+    invoke: (store: OxigraphWorkerStore) => Promise<unknown>;
+  }> = [
+    {
+      name: 'multi-graph insert',
+      affected: [GRAPH_A, GRAPH_B],
+      invoke: (store) => store.insert([quadFor(GRAPH_A), quadFor(GRAPH_B)]),
+    },
+    {
+      name: 'multi-graph delete',
+      affected: [GRAPH_A, GRAPH_B],
+      invoke: (store) => store.delete([quadFor(GRAPH_A), quadFor(GRAPH_B)]),
+    },
+    {
+      name: 'scoped pattern delete',
+      affected: [GRAPH_A],
+      invoke: (store) => store.deleteByPattern({ graph: GRAPH_A }),
+    },
+    {
+      name: 'unscoped pattern delete',
+      affected: [GRAPH_A, GRAPH_B, GRAPH_C],
+      invoke: (store) => store.deleteByPattern({ predicate: 'urn:test:predicate' }),
+    },
+    {
+      name: 'one-graph replace',
+      affected: [GRAPH_A],
+      invoke: (store) => store.replaceGraph(GRAPH_A, []),
+    },
+    {
+      name: 'two-graph atomic replace',
+      affected: [GRAPH_A, GRAPH_B],
+      invoke: (store) => store.replaceGraphAndSubject(
+        GRAPH_A,
+        [],
+        GRAPH_B,
+        'urn:test:metadata-subject',
+        [],
+      ),
+    },
+    {
+      name: 'subject replace',
+      affected: [GRAPH_A],
+      invoke: (store) => store.replaceSubject(GRAPH_A, 'urn:test:subject', []),
+    },
+    {
+      name: 'graph drop',
+      affected: [GRAPH_A],
+      invoke: (store) => store.dropGraph(GRAPH_A),
+    },
+    {
+      name: 'subject-prefix delete',
+      affected: [GRAPH_A],
+      invoke: (store) => store.deleteBySubjectPrefix(GRAPH_A, 'urn:test:subject:'),
+    },
+    {
+      name: 'unscoped raw update',
+      affected: [GRAPH_A, GRAPH_B, GRAPH_C],
+      invoke: (store) => store.update('CLEAR ALL'),
+    },
+  ];
+
+  it.each(mutationCases.flatMap((mutation) => [
+    { ...mutation, outcome: 'resolve' as const },
+    { ...mutation, outcome: 'reject' as const },
+  ]))('tracks $name through a worker $outcome', async ({ affected, invoke, outcome }) => {
+    const store = makeStore({ operationTimeoutMs: 60_000 });
+    const internals = store as unknown as {
+      call(method: string, ...args: unknown[]): Promise<unknown>;
+    };
+    const originalCall = internals.call;
+    let resolveCall!: () => void;
+    let rejectCall!: (error: Error) => void;
+    const pendingCall = new Promise<void>((resolve, reject) => {
+      resolveCall = resolve;
+      rejectCall = reject;
+    });
+    internals.call = () => pendingCall;
+    try {
+      const prefixes = [GRAPH_A, GRAPH_B, GRAPH_C];
+      const before = new Map(prefixes.map((prefix) => [
+        prefix,
+        store.getWriteRevision(prefix),
+      ]));
+      const mutation = invoke(store);
+
+      for (const prefix of prefixes) {
+        const pending = store.getWriteRevision(prefix);
+        const previous = before.get(prefix)!;
+        if (affected.includes(prefix)) {
+          expect(pending.generation).toBeGreaterThan(previous.generation);
+          expect(pending.stable).toBe(false);
+        } else {
+          expect(pending).toEqual(previous);
+        }
+      }
+
+      if (outcome === 'resolve') {
+        resolveCall();
+        await expect(mutation).resolves.toBeUndefined();
+      } else {
+        rejectCall(new Error('worker mutation rejected'));
+        await expect(mutation).rejects.toThrow('worker mutation rejected');
+      }
+
+      for (const prefix of prefixes) {
+        const settled = store.getWriteRevision(prefix);
+        const previous = before.get(prefix)!;
+        if (affected.includes(prefix)) {
+          expect(settled.generation).toBeGreaterThan(previous.generation);
+        } else {
+          expect(settled.generation).toBe(previous.generation);
+        }
+        // A returned worker error is determinate: the atomic message settled,
+        // so rejection must release the active scope rather than poisoning the
+        // cache revision indefinitely.
+        expect(settled.stable).toBe(true);
+      }
+    } finally {
+      internals.call = originalCall;
+      await closeQuietly(store);
+    }
+  });
+
   it('rejects a READ queued behind a busy worker after operationTimeoutMs', async () => {
     // 50k inserts take hundreds of ms; a 5ms bound on the queued read must
     // reject well before the worker frees up.

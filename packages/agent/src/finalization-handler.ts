@@ -22,12 +22,12 @@ import {
   GraphManager,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
-  asGraphWriteGenSource,
+  asGraphWriteRevisionSource,
   resolveGraphScopedOrLegacyMetadata,
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
   StoreSchedulerBusyError,
-  type GraphWriteGenSource,
+  type GraphWriteRevisionSource,
   type SharedMemoryResultBudget,
   type SwmKaGraphBound,
   type TripleStore,
@@ -418,7 +418,7 @@ export class FinalizationHandler {
   // the negative reconcile memo below. `null` when the store's adapter doesn't
   // track write generations — the memo is then DISABLED and every reconcile
   // scans (fail-open), matching pre-memo behavior.
-  private readonly graphWriteGen: GraphWriteGenSource | null;
+  private readonly graphWriteGen: GraphWriteRevisionSource | null;
   // Negative memo for `findSwmSnapshotForMerkleRoot`: "this (cg, namespace,
   // root) had NO matching local SWM snapshot at write generation G". Unlike
   // `chainCgIdByLookupId` above, caching the negative here is sound BECAUSE it
@@ -459,7 +459,7 @@ export class FinalizationHandler {
       legacyLifecycleLogOptions,
     );
     this.store = store;
-    this.graphWriteGen = asGraphWriteGenSource(store);
+    this.graphWriteGen = asGraphWriteRevisionSource(store);
     this.chain = chain;
     this.eventBus = options.eventBus;
     this.resolveContextGraphOnChainId = options.resolveContextGraphOnChainId;
@@ -2653,7 +2653,9 @@ export class FinalizationHandler {
   ): Promise<{ quads: Quad[]; matched: Quad[] | null }> {
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return { quads: [], matched: null };
-    const writeGen = this.graphWriteGen?.getWriteGen(`${contextGraphDataUri(contextGraphId)}/`);
+    const writeRevision = this.graphWriteGen?.getWriteRevision(
+      `${contextGraphDataUri(contextGraphId)}/`,
+    );
     const key = [
       'finalization',
       contextGraphId,
@@ -2661,7 +2663,9 @@ export class FinalizationHandler {
       safeRoots.slice().sort().join('\u0001'),
       kaGraphBound ? `${kaGraphBound.agentAddress}:${kaGraphBound.startNumber}:${kaGraphBound.endNumber}` : '*',
       ethers.hexlify(expectedMerkleRoot),
-      String(writeGen ?? 'unknown'),
+      writeRevision
+        ? `${writeRevision.generation}:${writeRevision.stable ? 'stable' : 'unstable'}`
+        : 'unknown',
     ].join('\u0000');
     return this.runScanSingleFlight(key, async () => {
       const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
@@ -3351,8 +3355,9 @@ export class FinalizationHandler {
     // write invalidates) — that only costs an extra rescan.
     const memoKey = `${contextGraphId}\0${subGraphName ?? ''}\0${ethers.hexlify(merkleRoot)}`;
     const swmWritePrefix = `${contextGraphDataUri(contextGraphId)}/`;
-    const preScanGen = this.graphWriteGen?.getWriteGen(swmWritePrefix);
-    if (preScanGen !== undefined) {
+    const preScanRevision = this.graphWriteGen?.getWriteRevision(swmWritePrefix);
+    const preScanGen = preScanRevision?.generation;
+    if (preScanRevision?.stable) {
       const memo = this.negativeSnapshotMemo.get(memoKey);
       if (memo) {
         if (
@@ -3380,12 +3385,12 @@ export class FinalizationHandler {
     );
     if (hit) return hit;
 
-    if (preScanGen !== undefined) {
+    if (preScanRevision?.stable) {
       // Record at the PRE-scan generation: any write that raced the scan (or
       // the scan's own best-effort restamps) flips the gate above, so the next
       // call rescans rather than replaying a verdict that may predate the write.
       this.negativeSnapshotMemo.set(memoKey, {
-        writeGen: preScanGen,
+        writeGen: preScanRevision.generation,
         recordedAt: Date.now(),
         allowGeneratedCatalogFloor,
       });

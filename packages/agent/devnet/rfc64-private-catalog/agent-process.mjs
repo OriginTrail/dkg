@@ -1,23 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { multiaddr } from '@multiformats/multiaddr';
 import {
-  MemoryLayer,
   computeAuthorCatalogScopeDigestV1,
   computeNetworkId,
-  contextGraphLayerUri,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
-import {
-  OxigraphStore,
-  quadsToNQuads,
-  readExactGraphPagedWithDiscoveredCount,
-} from '@origintrail-official/dkg-storage';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
 import {
   Rfc64PrivateDevnetChainAdapter,
@@ -37,6 +30,7 @@ import {
 } from './fixture.mjs';
 import { classifyExpectedPrivateCatalogDenialV1 } from './denial-evidence.mjs';
 import { sealExecutedRuntimeManifestV1 } from '../../../../devnet/rfc64-runtime-load-hook.mts';
+import { readPrivateCatalogGraphCountEvidence } from './memory-evidence.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
@@ -296,26 +290,11 @@ async function inspect(expectedHeadDigest) {
     catalogScopeDigest: scopeDigest,
     authorAddress,
   });
-  const graphCounts = [];
-  for (const kaNumber of ASSET_NUMBERS) {
-    const swmGraph = contextGraphLayerUri(
-      CONTEXT_GRAPH_ID,
-      MemoryLayer.SharedWorkingMemory,
-      authorAddress,
-      kaNumber,
-    );
-    const vmGraph = contextGraphLayerUri(
-      CONTEXT_GRAPH_ID,
-      MemoryLayer.VerifiableMemory,
-      authorAddress,
-      kaNumber,
-    );
-    graphCounts.push({
-      kaNumber,
-      ...(await exactGraphEvidence(swmGraph, 'swm')),
-      ...(await exactGraphEvidence(vmGraph, 'vm')),
-    });
-  }
+  const graphCounts = await readPrivateCatalogGraphCountEvidence(agent.store, {
+    assetNumbers: ASSET_NUMBERS,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    authorAddress,
+  });
   const outsiderResult = ROLE === 'outsider'
     ? null
     : await agent.query(
@@ -369,19 +348,6 @@ async function proveDenied(command, requestId) {
       ...denial,
     });
   }
-}
-
-async function exactGraphEvidence(graph, prefix) {
-  const quads = await readExactGraphPagedWithDiscoveredCount(agent.store, graph, {
-    maxQuadCount: 16,
-    maxNQuadsBytes: 64 * 1024,
-    outputGraph: '',
-  });
-  const canonical = quadsToNQuads(quads).split('\n').sort().join('\n');
-  return {
-    [prefix]: quads.length,
-    [`${prefix}Digest`]: createHash('sha256').update(canonical, 'utf8').digest('hex'),
-  };
 }
 
 function seededSubscriptionStore(contextGraphId) {

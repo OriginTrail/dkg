@@ -2,50 +2,52 @@
 
 import type { Digest32V1 } from '@origintrail-official/dkg-core';
 
+import { Rfc64CatalogSynchronizationErrorV1 } from './catalog-synchronization-error-v1.js';
 import { FinalizedVmCompositionErrorV1 } from './finalized-vm-composer-v1.js';
 import { Rfc64PublicCatalogNativeReceiverErrorV1 } from './public-catalog-native-receiver-v1.js';
+import {
+  isRfc64CatalogReconciliationFailureOutcomeV1,
+  type Rfc64CatalogReconciliationFailureCompletionV1,
+  type Rfc64CatalogReconciliationFailureOutcomeV1,
+  type Rfc64CatalogReconciliationTerminalReasonV1,
+} from './public-catalog-reconciliation-outcome-v1.js';
 
-/** User-visible terminal meanings emitted once at the receiver boundary. */
-export type Rfc64CatalogReconciliationTerminalReasonV1 =
-  | 'no-authorized-provider';
-
-export type Rfc64CatalogReconciliationFailureOutcomeV1 =
-  | 'staged-only'
-  | 'not-found'
-  | 'failed'
-  | 'dropped'
-  | 'closed';
-
-export interface Rfc64CatalogReconciliationFailureCompletionV1 {
-  readonly outcome: Rfc64CatalogReconciliationFailureOutcomeV1;
-  readonly error: unknown | null;
-}
-
-const FAILURE_OUTCOMES_V1 = new Set<Rfc64CatalogReconciliationFailureOutcomeV1>([
-  'staged-only',
-  'not-found',
-  'failed',
-  'dropped',
-  'closed',
-]);
+export type {
+  Rfc64CatalogReconciliationFailureCompletionV1,
+  Rfc64CatalogReconciliationFailureOutcomeV1,
+  Rfc64CatalogReconciliationTerminalReasonV1,
+} from './public-catalog-reconciliation-outcome-v1.js';
 
 /** Exact, public semantic failure returned by one scheduled reconciliation task. */
-export class Rfc64CatalogReconciliationTerminalErrorV1 extends Error {
+export class Rfc64CatalogReconciliationTerminalErrorV1
+  extends Rfc64CatalogSynchronizationErrorV1 {
   readonly outcome: Rfc64CatalogReconciliationFailureOutcomeV1;
-  readonly terminalReason: Rfc64CatalogReconciliationTerminalReasonV1 | null;
 
   constructor(completion: Rfc64CatalogReconciliationFailureCompletionV1) {
-    if (!FAILURE_OUTCOMES_V1.has(completion?.outcome)) {
+    if (!isRfc64CatalogReconciliationFailureOutcomeV1(completion?.outcome)) {
       throw new TypeError('RFC-64 reconciliation terminal error requires a non-success outcome');
     }
     const cause = completion.error;
     super(
-      `RFC-64 current-head synchronization ended with ${completion.outcome}`,
+      classifyRfc64CatalogReconciliationTerminalReasonV1(cause),
+      readStringErrorCodeV1(cause),
       cause === null ? {} : { cause },
     );
     this.name = 'Rfc64CatalogReconciliationTerminalErrorV1';
+    this.message = `RFC-64 current-head synchronization ended with ${completion.outcome}`;
     this.outcome = completion.outcome;
-    this.terminalReason = classifyRfc64CatalogReconciliationTerminalReasonV1(cause);
+  }
+}
+
+function readStringErrorCodeV1(error: unknown): string | null {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    return null;
+  }
+  try {
+    const code = (error as { readonly code?: unknown }).code;
+    return typeof code === 'string' ? code : null;
+  } catch {
+    return null;
   }
 }
 
@@ -149,16 +151,7 @@ function stableErrorNameV1(error: unknown): string {
 }
 
 function stableErrorCodeV1(error: unknown): string | null {
-  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
-    return null;
-  }
-  let candidate: unknown;
-  try {
-    candidate = (error as { readonly code?: unknown }).code;
-  } catch {
-    return null;
-  }
-  return stableErrorTokenV1(candidate);
+  return stableErrorTokenV1(readStringErrorCodeV1(error));
 }
 
 function stableImmediateCauseCodeV1(error: unknown): string | null {

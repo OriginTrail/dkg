@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = await import('@origintrail-official/dkg-agent');
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
+const legacyCatalogSync = await import(
+  '@origintrail-official/dkg-agent/dist/dkg-agent-rfc64-catalog-sync.js'
+);
 const publicCatalogActivation = await import(
   '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
 );
@@ -15,6 +18,15 @@ const expectedRfc64PolicyCells = [
   'public-curated',
   'private-open',
   'private-curated',
+];
+const expectedRfc64PublicCatalogReconciliationOutcomes = [
+  'already-applied',
+  'applied',
+  'staged-only',
+  'not-found',
+  'failed',
+  'dropped',
+  'closed',
 ];
 
 if (
@@ -31,8 +43,32 @@ if (
   || typeof root.removeRfc64SwmAuthorInventoryRowV1 !== 'function'
   || typeof root.Rfc64SwmAuthorInventoryProducerErrorV1 !== 'function'
   || typeof root.Rfc64CatalogReconciliationTerminalErrorV1 !== 'function'
+  || typeof root.Rfc64CatalogSynchronizationErrorV1 !== 'function'
+  || typeof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
+}
+const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
+  'no-authorized-provider',
+  'legacy-code',
+);
+if (
+  legacySynchronizationError.terminalReason !== 'no-authorized-provider'
+  || legacySynchronizationError.code !== 'legacy-code'
+) {
+  throw new Error('historical catalog synchronization error fields changed');
+}
+const modernSynchronizationError = new root.Rfc64CatalogReconciliationTerminalErrorV1({
+  outcome: 'failed',
+  error: Object.assign(new Error('modern failure'), { code: 'modern-code' }),
+});
+if (
+  !(modernSynchronizationError
+    instanceof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1)
+  || modernSynchronizationError.code !== 'modern-code'
+  || modernSynchronizationError.outcome !== 'failed'
+) {
+  throw new Error('terminal reconciliation errors lost synchronization compatibility');
 }
 try {
   root.assertRecoverableAuthorAttestationV1({
@@ -74,6 +110,25 @@ if (
   )
 ) {
   throw new Error('package root did not expose the closed RFC-64 policy-cell list');
+}
+if (
+  !Array.isArray(root.RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1)
+  || !Object.isFrozen(root.RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1)
+  || root.RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1.length
+    !== expectedRfc64PublicCatalogReconciliationOutcomes.length
+  || root.RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1.some(
+    (outcome, index) => outcome !== expectedRfc64PublicCatalogReconciliationOutcomes[index]
+  )
+) {
+  throw new Error('package root did not expose the closed RFC-64 reconciliation outcome list');
+}
+if (
+  typeof root.isRfc64CatalogReconciliationSuccessOutcomeV1 !== 'function'
+  || typeof root.isRfc64CatalogReconciliationFailureOutcomeV1 !== 'function'
+  || typeof root.isRfc64PublicCatalogReceiverSuccessCompletionV1 !== 'function'
+  || typeof root.isRfc64PublicCatalogReceiverFailureCompletionV1 !== 'function'
+) {
+  throw new Error('package root did not expose RFC-64 reconciliation outcome guards');
 }
 if (packageManifest.name !== '@origintrail-official/dkg-agent') {
   throw new Error('historical package.json subpath no longer resolves');
@@ -121,6 +176,7 @@ const publicRfc64Modules = [
   'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
+  'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
   'catalog-native-scoped-read-capability-v1-internal.js',
@@ -159,6 +215,7 @@ const blockedRfc64Modules = [
   'public-catalog-native-transport-v1.js',
   'public-open-catalog-scope-v1.js',
   'public-catalog-reconciliation-failure-v1.js',
+  'public-catalog-reconciliation-outcome-v1.js',
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
   'public-catalog-issuer-delegation-v1.js',
