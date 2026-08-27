@@ -74,16 +74,28 @@ export function filterExactAssetDurablePayload(
   dataQuads: readonly Quad[],
   metaQuads: readonly Quad[],
   selection: ExactAssetSelection,
-): { dataQuads: Quad[]; metaQuads: Quad[]; descriptorCoverageComplete: boolean } {
+): {
+  dataQuads: Quad[];
+  metaQuads: Quad[];
+  descriptorCoverageComplete: boolean;
+  missingDescriptorUals: string[];
+  mismatchedDescriptorUals: string[];
+} {
   const assetUals = exactAssetUalsForSelection(selection);
   const exactUals = new Set(assetUals);
   const commitments = new Map(
     exactAssetCommitmentsForSelection(selection)
       ?.map((commitment) => [commitment.assetUal, commitment]) ?? [],
   );
+  const mismatchedDescriptorUals: string[] = [];
   const admittedUals = new Set([...exactUals].filter((ual) => {
     const commitment = commitments.get(ual);
-    return commitment === undefined || descriptorMatchesCommitment(metaQuads, commitment);
+    if (commitment === undefined) return true;
+    const descriptorRows = metaQuads.filter((quad) => quad.subject === ual);
+    if (descriptorRows.length === 0) return false;
+    if (descriptorMatchesCommitment(descriptorRows, commitment)) return true;
+    mismatchedDescriptorUals.push(ual);
+    return false;
   }));
   const exactMeta = metaQuads.filter((quad) => admittedUals.has(quad.subject));
   const returnedDescriptors = new Set(
@@ -99,12 +111,17 @@ export function filterExactAssetDurablePayload(
       .filter((quad) => quad.predicate === ASSERTION_GRAPH)
       .map((quad) => quad.object),
   );
+  const missingDescriptorUals = [...exactUals].filter((ual) => (
+    !mismatchedDescriptorUals.includes(ual)
+    && !returnedDescriptors.has(ual)
+  ));
   return {
     metaQuads: exactMeta,
     dataQuads: dataQuads.filter((quad) => exactGraphs.has(quad.graph)),
-    descriptorCoverageComplete: admittedUals.size === exactUals.size
-      && returnedDescriptors.size === exactUals.size
-      && [...exactUals].every((ual) => returnedDescriptors.has(ual)),
+    descriptorCoverageComplete:
+      missingDescriptorUals.length === 0 && mismatchedDescriptorUals.length === 0,
+    missingDescriptorUals,
+    mismatchedDescriptorUals,
   };
 }
 

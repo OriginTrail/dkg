@@ -6,6 +6,7 @@ import {
   tripleContentV10,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
+import { createRandomSamplingRepairOperation } from '@origintrail-official/dkg-random-sampling';
 import {
   computeFlatKCRootV10,
   generateGraphKnowledgeAssetMetadata,
@@ -16,8 +17,12 @@ import {
   LifecycleSyncMethods,
   authenticateChallengePinnedGraphScopedAssetWithinDeadline,
 } from '../src/dkg-agent-lifecycle.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
-import { runRandomSamplingExactRepair } from '../src/sync/recovery/random-sampling-exact-repair.js';
+import {
+  runRandomSamplingExactRepair,
+  startRandomSamplingExactRepair,
+} from '../src/sync/recovery/random-sampling-exact-repair.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
@@ -101,10 +106,12 @@ describe('Random Sampling proof-time exact repair', () => {
     const kaId = (0x1234n << 96n) | 7n;
     const expectedRoot = new Uint8Array(32).fill(0x11);
 
-    await expect((LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
-      agentLike,
-      { kaId, cgId: 1n, expectedRoot, expectedLeafCount: 12n },
-    )).resolves.toEqual(proofMaterial);
+    await expect(
+      (LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
+        agentLike,
+        { kaId, cgId: 1n, expectedRoot, expectedLeafCount: 12n },
+      ).result,
+    ).resolves.toEqual(proofMaterial);
 
     expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledTimes(3);
     expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
@@ -177,15 +184,17 @@ describe('Random Sampling proof-time exact repair', () => {
       syncExactKnowledgeAssetsFromPeerDetailed,
     };
 
-    await expect((LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
-      agentLike,
-      {
-        kaId: (0x1234n << 96n) | 7n,
-        cgId: 1n,
-        expectedRoot: new Uint8Array(32).fill(0x11),
-        expectedLeafCount: 1n,
-      },
-    )).resolves.toEqual({ contents: [], privateRoots: [] });
+    await expect(
+      (LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
+        agentLike,
+        {
+          kaId: (0x1234n << 96n) | 7n,
+          cgId: 1n,
+          expectedRoot: new Uint8Array(32).fill(0x11),
+          expectedLeafCount: 1n,
+        },
+      ).result,
+    ).resolves.toEqual({ contents: [], privateRoots: [] });
 
     expect(resolveCuratorPeerIdsForCg).toHaveBeenCalledWith(
       'food-safety',
@@ -449,7 +458,7 @@ describe('Random Sampling proof-time exact repair', () => {
     const repaired = await LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset.call(
       clean.agentLike,
       { kaId, cgId: 14n, expectedRoot, expectedLeafCount: 1n },
-    );
+    ).result;
 
     expect(repaired.contents).toEqual([
       tripleContentV10(
@@ -466,7 +475,7 @@ describe('Random Sampling proof-time exact repair', () => {
     await expect(LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset.call(
       tampered.agentLike,
       { kaId, cgId: 14n, expectedRoot, expectedLeafCount: 1n },
-    )).rejects.toThrow('did not recover');
+    ).result).rejects.toThrow('did not recover');
     expect(tampered.agentLike.chain.getKAContextGraphId).not.toHaveBeenCalled();
     expect(tampered.submitProof).not.toHaveBeenCalled();
     expect(tampered.insertSyncedQuadsAndInvalidateListCache).not.toHaveBeenCalled();
@@ -489,7 +498,7 @@ describe('Random Sampling proof-time exact repair', () => {
           expectedRoot: new Uint8Array(32),
           expectedLeafCount: 1n,
         },
-      ),
+      ).result,
     ).rejects.toThrow('cannot resolve local CG 1');
   });
 
@@ -557,14 +566,12 @@ describe('Random Sampling proof-time exact repair', () => {
     expect(addressSignal?.aborted).toBe(true);
   });
 
-  it('reports owner abort promptly while tracking the ignored dependency until it settles', async () => {
-    const owner = new AbortController();
+  it('reports owner cancellation promptly while exposing one physical settlement boundary', async () => {
     let addressStarted!: () => void;
     const started = new Promise<void>((resolve) => { addressStarted = resolve; });
     let settleAddress!: (address: string) => void;
-    const physicalOperations = new Set<Promise<unknown>>();
     const resolveCandidatePeerIds = vi.fn(async () => ['unreachable']);
-    const repair = runRandomSamplingExactRepair({
+    const repair = startRandomSamplingExactRepair({
       chainId: 'base:8453',
       maxPeers: 1,
       timeoutMs: 60_000,
@@ -586,31 +593,111 @@ describe('Random Sampling proof-time exact repair', () => {
       cgId: 1n,
       expectedRoot: new Uint8Array(32),
       expectedLeafCount: 1n,
-      signal: owner.signal,
-      registerPhysicalOperation: (operation) => {
-        physicalOperations.add(operation);
-        void operation.then(
-          () => physicalOperations.delete(operation),
-          () => physicalOperations.delete(operation),
-        );
-      },
     });
 
     await started;
     const reason = new Error('prover stopped');
-    owner.abort(reason);
-    await expect(repair).rejects.toThrow('prover stopped');
-    expect(physicalOperations.size).toBe(1);
+    repair.cancel(reason);
+    await expect(repair.result).rejects.toThrow('prover stopped');
+    await expect(Promise.race([
+      repair.settled.then(() => 'settled'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 20)),
+    ])).resolves.toBe('pending');
     settleAddress('0x00000000000000000000000000000000000000aa');
-    await vi.waitFor(() => expect(physicalOperations.size).toBe(0));
+    await expect(repair.settled).resolves.toBeUndefined();
     expect(resolveCandidatePeerIds).not.toHaveBeenCalled();
+  });
+
+  it('keeps a timed-out prover installed and starts only a later replacement after it settles', async () => {
+    const originalTimeout = DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS;
+    Object.defineProperty(DKGAgentBase, 'RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS', {
+      configurable: true,
+      value: 10,
+    });
+    let settleOld!: () => void;
+    const oldSettled = new Promise<void>((resolve) => { settleOld = resolve; });
+    const oldStop = vi.fn(() => oldSettled);
+    const oldHandle = {
+      enabled: true,
+      start: vi.fn(),
+      stop: oldStop,
+      getStatus: vi.fn(() => ({ disabledReason: null })),
+    };
+    const freshAfterTimeout = {
+      enabled: true,
+      start: vi.fn(),
+      stop: vi.fn(async () => undefined),
+      getStatus: vi.fn(() => ({ disabledReason: null })),
+    };
+    const installedReplacement = {
+      enabled: true,
+      start: vi.fn(),
+      stop: vi.fn(async () => undefined),
+      getStatus: vi.fn(() => ({ disabledReason: null })),
+    };
+    const createRandomSamplingHandle = vi.fn()
+      .mockResolvedValueOnce(freshAfterTimeout)
+      .mockResolvedValueOnce(installedReplacement);
+    const agentLike = {
+      started: true,
+      config: { nodeRole: 'core' },
+      chain: {
+        chainId: 'base:8453',
+        isRandomSamplingReady: () => true,
+        getIdentityId: vi.fn(async () => 42n),
+        isShardingTableMember: vi.fn(async () => true),
+      },
+      store: {},
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      randomSamplingHandle: oldHandle,
+      randomSamplingIdentityId: 0n,
+      randomSamplingDisabledReason: 'not_started',
+      randomSamplingLogger: vi.fn(() => ({
+        info: vi.fn(), warn: vi.fn(), error: vi.fn(),
+      })),
+      createRandomSamplingHandle,
+      repairRandomSamplingKnowledgeAsset: vi.fn(),
+      clearRandomSamplingBindRetry: vi.fn(),
+    };
+
+    try {
+      await expect(
+        (LifecycleSyncMethods.prototype.tryStartRandomSamplingProver as any).call(
+          agentLike,
+          { operation: 'start', id: 'rs-replacement-timeout' },
+          false,
+        ),
+      ).resolves.toBe('retryable');
+      expect(agentLike.randomSamplingHandle).toBe(oldHandle);
+      expect(oldStop).toHaveBeenCalledOnce();
+      expect(freshAfterTimeout.stop).toHaveBeenCalledOnce();
+      expect(freshAfterTimeout.start).not.toHaveBeenCalled();
+
+      settleOld();
+      await expect(
+        (LifecycleSyncMethods.prototype.tryStartRandomSamplingProver as any).call(
+          agentLike,
+          { operation: 'start', id: 'rs-replacement-retry' },
+          false,
+        ),
+      ).resolves.toBe('started');
+      expect(oldStop).toHaveBeenCalledTimes(2);
+      expect(agentLike.randomSamplingHandle).toBe(installedReplacement);
+      expect(installedReplacement.start).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS', {
+        configurable: true,
+        value: originalTimeout,
+      });
+    }
   });
 
   it('wires the lifecycle repair callback through the production prover binding', async () => {
     const expectedRoot = new Uint8Array(32).fill(0x33);
-    const repairRandomSamplingKnowledgeAsset = vi.fn(async () => {
-      throw new Error('expected test repair miss');
-    });
+    const repairRandomSamplingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation(async () => {
+        throw new Error('expected test repair miss');
+      }));
     const agentLike = {
       started: true,
       config: {
@@ -656,6 +743,7 @@ describe('Random Sampling proof-time exact repair', () => {
       randomSamplingIdentityId: 0n,
       randomSamplingDisabledReason: 'not_started',
       randomSamplingLogger: LifecycleSyncMethods.prototype.randomSamplingLogger,
+      createRandomSamplingHandle: LifecycleSyncMethods.prototype.createRandomSamplingHandle,
       repairRandomSamplingKnowledgeAsset,
       clearRandomSamplingBindRetry: vi.fn(),
     };
@@ -673,8 +761,6 @@ describe('Random Sampling proof-time exact repair', () => {
       cgId: 1n,
       expectedRoot,
       expectedLeafCount: 1n,
-      signal: expect.any(AbortSignal),
-      registerPhysicalOperation: expect.any(Function),
     });
     await agentLike.randomSamplingHandle!.stop();
   });

@@ -241,6 +241,7 @@ interface PreparedDurableMeta {
   readonly metaForManifest: SyncPageResult;
   readonly manifestPlan: GraphScopedDurableManifestPlan | null;
   readonly exactDescriptorCoverageComplete: boolean;
+  readonly exactMismatchedDescriptorUals: readonly string[];
   readonly forceFreshUnboundDataSession: boolean;
 }
 
@@ -270,6 +271,7 @@ function prepareDurableMeta(input: {
     metaForManifest,
     manifestPlan,
     exactDescriptorCoverageComplete: exact?.descriptorCoverageComplete ?? true,
+    exactMismatchedDescriptorUals: exact?.mismatchedDescriptorUals ?? [],
     forceFreshUnboundDataSession: input.buildsManifest && manifestPlan === null,
   };
 }
@@ -980,9 +982,7 @@ async function runDurableSyncWithBudget(
       if (
         exactAssetSelection !== undefined
         && exactAssetSelection.kind === 'challenge-pinned'
-        && !preparedMeta.exactDescriptorCoverageComplete
-        && exactAssetUals!.some((assetUal) =>
-          metaResult.quads.some((quad) => quad.subject === assetUal))
+        && preparedMeta.exactMismatchedDescriptorUals.length > 0
       ) {
         throw Object.assign(
           new Error(

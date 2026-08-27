@@ -99,7 +99,7 @@ import {
   tripleContentV10,
   withRetry,
 } from '@origintrail-official/dkg-core';
-import type { RandomSamplingRepairMaterial } from '@origintrail-official/dkg-random-sampling';
+import type { RandomSamplingRepairOperation } from '@origintrail-official/dkg-random-sampling';
 import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
@@ -170,7 +170,7 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { repairCreatorPublicMetaProjections } from './context-graph-public-meta-repair.js';
 import {
-  runRandomSamplingExactRepair,
+  startRandomSamplingExactRepair,
   type RandomSamplingExactRepairDependencies,
   type RandomSamplingExactRepairInput,
 } from './sync/recovery/random-sampling-exact-repair.js';
@@ -4103,11 +4103,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
   }
 
+  /** Bind fresh resources before the lifecycle takes replacement ownership. */
+  createRandomSamplingHandle(
+    this: DKGAgent,
+    options: Parameters<typeof bindRandomSampling>[0],
+  ): ReturnType<typeof bindRandomSampling> {
+    return bindRandomSampling(options);
+  }
+
   /** Thin lifecycle adapter for the bounded proof-time exact-repair runner. */
-  async repairRandomSamplingKnowledgeAsset(
+  repairRandomSamplingKnowledgeAsset(
     this: DKGAgent,
     input: RandomSamplingExactRepairInput,
-  ): Promise<RandomSamplingRepairMaterial> {
+  ): RandomSamplingRepairOperation {
     const ctx = createOperationContext('sync');
     const dependencies = {
       chainId: this.chain.chainId,
@@ -4205,7 +4213,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       logInfo: (message) => this.log.info(ctx, message),
     } satisfies RandomSamplingExactRepairDependencies;
-    return runRandomSamplingExactRepair(dependencies, input);
+    return startRandomSamplingExactRepair(dependencies, input);
   }
 
   async tryStartRandomSamplingProver(this: DKGAgent,
@@ -4315,7 +4323,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.started) return 'disabled';
 
     try {
-      const handle = await bindRandomSampling({
+      const handle = await this.createRandomSamplingHandle({
         role: rsRole,
         chain: this.chain,
         store: this.store,

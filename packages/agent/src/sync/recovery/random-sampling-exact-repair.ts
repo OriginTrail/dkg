@@ -1,4 +1,8 @@
-import type { RandomSamplingRepairMaterial } from '@origintrail-official/dkg-random-sampling';
+import {
+  createRandomSamplingRepairOperation,
+  type RandomSamplingRepairMaterial,
+  type RandomSamplingRepairOperation,
+} from '@origintrail-official/dkg-random-sampling';
 import { buildReconciledKnowledgeAssetUal } from '../../ka-identity.js';
 import type { ExactAssetCommitment } from '../exact-assets.js';
 import { runBoundedPreparedPeerTraversal } from '../prepared-peer-traversal.js';
@@ -8,10 +12,6 @@ export interface RandomSamplingExactRepairInput {
   readonly cgId: bigint;
   readonly expectedRoot: Uint8Array;
   readonly expectedLeafCount: bigint;
-  /** Lifetime of the owning prover handle. */
-  readonly signal?: AbortSignal;
-  /** Physical dependency work that prover close must drain after logical abort. */
-  readonly registerPhysicalOperation?: (operation: Promise<unknown>) => void;
 }
 
 export type RandomSamplingExactRepairResult =
@@ -61,65 +61,28 @@ function abortReason(signal: AbortSignal): Error {
   return error;
 }
 
-function raceWithAbort<T>(
-  operation: Promise<T>,
-  signal: AbortSignal,
-  registerPhysicalOperation?: (operation: Promise<unknown>) => void,
-): Promise<T> {
-  registerPhysicalOperation?.(operation);
-  if (signal.aborted) return Promise.reject(abortReason(signal));
-  return new Promise<T>((resolve, reject) => {
-    const cleanup = () => signal.removeEventListener('abort', onAbort);
-    const onAbort = () => {
-      cleanup();
-      reject(abortReason(signal));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    operation.then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error) => {
-        cleanup();
-        reject(error);
-      },
-    );
-    if (signal.aborted) onAbort();
-  });
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw abortReason(signal);
 }
 
 /**
  * Bounded proof-time recovery coordinator. The challenge commitment is applied
  * to the exact descriptor before the peer payload can become ephemeral proof input.
  */
-export async function runRandomSamplingExactRepair(
+async function executeRandomSamplingExactRepair(
   deps: RandomSamplingExactRepairDependencies,
   input: RandomSamplingExactRepairInput,
+  signal: AbortSignal,
 ): Promise<RandomSamplingRepairMaterial> {
-  const timeoutSignal = (deps.createTimeoutSignal ?? AbortSignal.timeout)(
-    deps.timeoutMs ?? 90_000,
-  );
-  const activeSignals = [
-    input.signal,
-    deps.stopSignal,
-    timeoutSignal,
-  ].filter((candidate): candidate is AbortSignal => candidate !== undefined);
-  const signal = activeSignals.length === 1
-    ? activeSignals[0]!
-    : AbortSignal.any(activeSignals);
-  if (signal.aborted) throw abortReason(signal);
+  throwIfAborted(signal);
 
   const localContextGraphId = deps.resolveLocalContextGraphId(input.cgId);
   if (!localContextGraphId) {
     throw new Error(`Random Sampling repair cannot resolve local CG ${input.cgId}`);
   }
 
-  const storageAddress = await raceWithAbort(
-    deps.resolveStorageAddress(signal),
-    signal,
-    input.registerPhysicalOperation,
-  );
+  const storageAddress = await deps.resolveStorageAddress(signal);
+  throwIfAborted(signal);
   const assetUal = buildReconciledKnowledgeAssetUal(
     deps.chainId,
     storageAddress,
@@ -130,11 +93,8 @@ export async function runRandomSamplingExactRepair(
     merkleRootHex: hex(input.expectedRoot),
     merkleLeafCount: input.expectedLeafCount,
   };
-  const candidatePeerIds = await raceWithAbort(
-    deps.resolveCandidatePeerIds(localContextGraphId, signal),
-    signal,
-    input.registerPhysicalOperation,
-  );
+  const candidatePeerIds = await deps.resolveCandidatePeerIds(localContextGraphId, signal);
+  throwIfAborted(signal);
   if (candidatePeerIds.length === 0) {
     throw new Error(`Random Sampling repair found no providers for ${localContextGraphId}`);
   }
@@ -149,20 +109,16 @@ export async function runRandomSamplingExactRepair(
       maxPeers,
       peerRotationKey: `rs-proof:${localContextGraphId}`,
     }),
-    preparePeer: (peerId) => raceWithAbort(
-      deps.preparePeer(peerId, signal),
-      signal,
-      input.registerPhysicalOperation,
-    ),
+    preparePeer: (peerId) => deps.preparePeer(peerId, signal),
     attemptPeer: async (peerId) => {
       let result: RandomSamplingExactRepairResult;
       try {
-        result = await raceWithAbort(deps.fetchExactKnowledgeAsset(
+        result = await deps.fetchExactKnowledgeAsset(
           peerId,
           localContextGraphId,
           expectedCommitment,
           signal,
-        ), signal, input.registerPhysicalOperation);
+        );
       } catch (error) {
         if (signal.aborted) throw abortReason(signal);
         return { kind: 'continue', error };
@@ -189,4 +145,28 @@ export async function runRandomSamplingExactRepair(
         ? traversal.attemptedPeerIds.map((peerId) => peerId.slice(-8)).join(',')
         : 'the bounded provider window'}`,
   );
+}
+
+/** Start one explicitly owned repair task for the prover lifecycle. */
+export function startRandomSamplingExactRepair(
+  deps: RandomSamplingExactRepairDependencies,
+  input: RandomSamplingExactRepairInput,
+): RandomSamplingRepairOperation {
+  const timeoutSignal = (deps.createTimeoutSignal ?? AbortSignal.timeout)(
+    deps.timeoutMs ?? 90_000,
+  );
+  const externalSignals = [deps.stopSignal, timeoutSignal]
+    .filter((candidate): candidate is AbortSignal => candidate !== undefined);
+  return createRandomSamplingRepairOperation(
+    (signal) => executeRandomSamplingExactRepair(deps, input, signal),
+    externalSignals,
+  );
+}
+
+/** Convenience wrapper for callers that only consume the logical result. */
+export function runRandomSamplingExactRepair(
+  deps: RandomSamplingExactRepairDependencies,
+  input: RandomSamplingExactRepairInput,
+): Promise<RandomSamplingRepairMaterial> {
+  return startRandomSamplingExactRepair(deps, input).result;
 }

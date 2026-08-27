@@ -36,6 +36,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
+  createRandomSamplingRepairOperation,
   InMemoryProverWal,
   RandomSamplingProver,
   startProverLoop,
@@ -1031,14 +1032,15 @@ describe('RandomSamplingProver — short-circuits', () => {
       cgIdForKc: fixture.cgId,
       submitProof,
     });
-    const repairMissingKnowledgeAsset = vi.fn(async () => ({
-      contents: fixture.publicTriples.map((triple) => tripleContentV10(
-        triple.subject,
-        triple.predicate,
-        triple.object,
-      )),
-      privateRoots: [],
-    }));
+    const repairMissingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation(async () => ({
+        contents: fixture.publicTriples.map((triple) => tripleContentV10(
+          triple.subject,
+          triple.predicate,
+          triple.object,
+        )),
+        privateRoots: [],
+      })));
     const wal = new InMemoryProverWal();
     const prover = new RandomSamplingProver({
       chain,
@@ -1056,8 +1058,6 @@ describe('RandomSamplingProver — short-circuits', () => {
       cgId: fixture.cgId,
       expectedRoot: root,
       expectedLeafCount: BigInt(leafCount),
-      signal: expect.any(AbortSignal),
-      registerPhysicalOperation: expect.any(Function),
     });
     expect(outcome).toMatchObject({
       kind: 'submitted',
@@ -1093,18 +1093,19 @@ describe('RandomSamplingProver — short-circuits', () => {
     const started = new Promise<void>((resolve) => { repairStarted = resolve; });
     let repairSignal: AbortSignal | undefined;
     let repairSettled = false;
-    const repairMissingKnowledgeAsset = vi.fn((input: { signal: AbortSignal }) => {
-      repairSignal = input.signal;
-      repairStarted();
-      return new Promise<never>((_resolve, reject) => {
-        const rejectOnAbort = () => {
-          repairSettled = true;
-          reject(input.signal.reason);
-        };
-        if (input.signal.aborted) rejectOnAbort();
-        else input.signal.addEventListener('abort', rejectOnAbort, { once: true });
-      });
-    });
+    const repairMissingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation((signal) => {
+        repairSignal = signal;
+        repairStarted();
+        return new Promise<never>((_resolve, reject) => {
+          const rejectOnAbort = () => {
+            repairSettled = true;
+            reject(signal.reason);
+          };
+          if (signal.aborted) rejectOnAbort();
+          else signal.addEventListener('abort', rejectOnAbort, { once: true });
+        });
+      }));
     const build = vi.fn();
     const closeBuilder = vi.fn(async () => {
       expect(repairSettled).toBe(true);
@@ -1155,13 +1156,14 @@ describe('RandomSamplingProver — short-circuits', () => {
     const started = new Promise<void>((resolve) => { repairStarted = resolve; });
     let settleRepair!: (material: RandomSamplingRepairMaterial) => void;
     let repairSignal: AbortSignal | undefined;
-    const repairMissingKnowledgeAsset = vi.fn((input: { signal: AbortSignal }) => {
-      repairSignal = input.signal;
-      repairStarted();
-      return new Promise<RandomSamplingRepairMaterial>((resolve) => {
-        settleRepair = resolve;
-      });
-    });
+    const repairMissingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation((signal) => {
+        repairSignal = signal;
+        repairStarted();
+        return new Promise<RandomSamplingRepairMaterial>((resolve) => {
+          settleRepair = resolve;
+        });
+      }));
     const build = vi.fn();
     const closeBuilder = vi.fn(async () => undefined);
     const onTick = vi.fn();
@@ -1236,10 +1238,11 @@ describe('RandomSamplingProver — short-circuits', () => {
       cgIdForKc: fixture.cgId,
       submitProof,
     });
-    const repairMissingKnowledgeAsset = vi.fn(async () => ({
-      contents: historicalContents,
-      privateRoots: [],
-    }));
+    const repairMissingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation(async () => ({
+        contents: historicalContents,
+        privateRoots: [],
+      })));
     const prover = new RandomSamplingProver({
       chain,
       store,
@@ -1293,9 +1296,10 @@ describe('RandomSamplingProver — short-circuits', () => {
       cgIdForKc: fixture.cgId,
       submitProof,
     });
-    const repairMissingKnowledgeAsset = vi.fn(async () => {
-      throw new Error('terminal response timed out');
-    });
+    const repairMissingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation(async () => {
+        throw new Error('terminal response timed out');
+      }));
     const log = {
       info: vi.fn(),
       warn: vi.fn(),
@@ -1355,14 +1359,15 @@ describe('RandomSamplingProver — short-circuits', () => {
       cgIdForKc: fixture.cgId,
       submitProof,
     });
-    const repairMissingKnowledgeAsset = vi.fn(async () => ({
-      contents: fixture.publicTriples.map((triple) => tripleContentV10(
-        triple.subject,
-        triple.predicate,
-        triple.object,
-      )),
-      privateRoots: [],
-    }));
+    const repairMissingKnowledgeAsset = vi.fn(() =>
+      createRandomSamplingRepairOperation(async () => ({
+        contents: fixture.publicTriples.map((triple) => tripleContentV10(
+          triple.subject,
+          triple.predicate,
+          triple.object,
+        )),
+        privateRoots: [],
+      })));
     const prover = new RandomSamplingProver({
       chain,
       store,

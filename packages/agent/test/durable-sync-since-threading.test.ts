@@ -105,12 +105,15 @@ describe('exact-asset rolling-upgrade filter', () => {
       { subject: wanted, predicate: 'http://dkg.io/ontology/kaUal', object: wanted, graph: 'did:dkg:context-graph:cg/_meta' },
     ] as Quad[];
 
-    expect(filterExactAssetDurablePayload(
+    const filtered = filterExactAssetDurablePayload(
       [],
       meta,
       createUalOnlyExactAssetSelection([wanted, missing]),
-    )).toMatchObject({
+    );
+    expect(filtered).toMatchObject({
       descriptorCoverageComplete: false,
+      missingDescriptorUals: [missing],
+      mismatchedDescriptorUals: [],
     });
   });
 
@@ -149,6 +152,8 @@ describe('exact-asset rolling-upgrade filter', () => {
       dataQuads: [],
       metaQuads: [],
       descriptorCoverageComplete: false,
+      missingDescriptorUals: [],
+      mismatchedDescriptorUals: [wanted],
     });
 
     const matching = filterExactAssetDurablePayload(data, descriptor('11'.repeat(32)), createChallengePinnedExactAssetSelection([{
@@ -278,6 +283,64 @@ describe('exact-asset rolling-upgrade filter', () => {
     ));
     expect(matching.calls.map((call) => call.phase)).toEqual(['meta', 'data']);
     expect(matching.processCalls).toHaveLength(1);
+  });
+
+  it('accepts a valid partial multi-asset challenge response as incomplete', async () => {
+    const firstUal = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const absentUal = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const graph = knowledgeAssetLayerGraphUri(
+      'mfacts',
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(firstUal, '1'),
+    );
+    const data = [{
+      subject: 'urn:first',
+      predicate: 'urn:value',
+      object: '"valid"',
+      graph,
+    }] as Quad[];
+    const meta = generateGraphKnowledgeAssetMetadata({
+      ual: firstUal,
+      contextGraphId: 'mfacts',
+      merkleRoot: new Uint8Array(32).fill(0x11),
+      publisherPeerId: 'peer',
+      accessPolicy: 'public',
+      timestamp: new Date(0),
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      assertionGraph: graph,
+    }, { status: 'tentative' });
+    const selection = createChallengePinnedExactAssetSelection([
+      {
+        assetUal: firstUal,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 1n,
+      },
+      {
+        assetUal: absentUal,
+        merkleRootHex: '22'.repeat(32),
+        merkleLeafCount: 1n,
+      },
+    ]);
+    const { context, calls, processCalls } = makeContext({
+      pageQuads: { data, meta },
+      processResult: {
+        verifiedData: data,
+        verifiedMeta: meta,
+        verifiedGraphScopedDataGraphs: [graph],
+      },
+    });
+
+    const result = await runChallengeExactAssetFetch(challengeContext(
+      context,
+      selection,
+    ));
+
+    expect(result.disposition).toBe('incomplete');
+    expect(result.authenticatedAssets.map(({ asset }) => asset.ual)).toEqual([firstUal]);
+    expect(calls.map(({ phase }) => phase)).toEqual(['meta', 'data']);
+    expect(processCalls).toHaveLength(1);
   });
 
   it('returns every authenticated challenge asset explicitly without materializing live state', async () => {

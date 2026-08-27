@@ -97,17 +97,24 @@ export interface RandomSamplingProverDeps {
     /** Immutable content identity captured by the active challenge. */
     expectedRoot: Uint8Array;
     expectedLeafCount: bigint;
-    /** Lifetime of the owning prover handle; aborted before handle shutdown drains the tick. */
-    signal: AbortSignal;
-    /** Register dependency work that may outlive prompt logical cancellation. */
-    registerPhysicalOperation(operation: Promise<unknown>): void;
-  }) => Promise<RandomSamplingRepairMaterial>;
+  }) => RandomSamplingRepairOperation;
 }
 
 /** Challenge-scoped proof input returned without mutating the live KA view. */
 export interface RandomSamplingRepairMaterial {
   readonly contents: readonly Uint8Array[];
   readonly privateRoots: readonly Uint8Array[];
+}
+
+/**
+ * One explicitly owned repair task. `result` is the prompt logical outcome
+ * consumed by the tick, while `settled` is the physical completion boundary
+ * that handle shutdown must drain even when a dependency ignores abort.
+ */
+export interface RandomSamplingRepairOperation {
+  readonly result: Promise<RandomSamplingRepairMaterial>;
+  readonly settled: Promise<void>;
+  cancel(reason?: unknown): void;
 }
 
 export interface ProverLogger {
@@ -153,6 +160,37 @@ function raceWithLifecycleAbort<T>(work: Promise<T>, signal: AbortSignal): Promi
 }
 
 /**
+ * Build a repair operation around one physical execution. Consumers cancel a
+ * single task and drain a single completion boundary; dependency promises do
+ * not leak through the public ownership protocol.
+ */
+export function createRandomSamplingRepairOperation(
+  execute: (signal: AbortSignal) => Promise<RandomSamplingRepairMaterial>,
+  externalSignals: readonly AbortSignal[] = [],
+): RandomSamplingRepairOperation {
+  const controller = new AbortController();
+  const signals = [controller.signal, ...externalSignals];
+  const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
+  const physicalResult = Promise.resolve().then(() => {
+    if (signal.aborted) throw lifecycleAbortReason(signal);
+    return execute(signal);
+  });
+  return {
+    result: raceWithLifecycleAbort(physicalResult, signal),
+    settled: physicalResult.then(
+      () => undefined,
+      () => undefined,
+    ),
+    cancel: (reason = new DOMException(
+      'Random Sampling repair cancelled',
+      'AbortError',
+    )) => {
+      if (!controller.signal.aborted) controller.abort(reason);
+    },
+  };
+}
+
+/**
  * Single-period prover orchestrator. One instance per node — it owns
  * the WAL handle and (optionally) the worker_threads-backed builder.
  *
@@ -171,7 +209,7 @@ export class RandomSamplingProver {
   private readonly repairMissingKnowledgeAsset?: RandomSamplingProverDeps['repairMissingKnowledgeAsset'];
   private readonly lifecycleController = new AbortController();
   private inflight: Promise<TickOutcome> | null = null;
-  private readonly physicalRepairOperations = new Set<Promise<unknown>>();
+  private readonly repairOperations = new Set<RandomSamplingRepairOperation>();
 
   /**
    * Proof material pinned for the active proof period. The prover already pins
@@ -221,13 +259,14 @@ export class RandomSamplingProver {
     if (!this.lifecycleController.signal.aborted) {
       this.lifecycleController.abort(reason);
     }
+    for (const operation of this.repairOperations) operation.cancel(reason);
   }
 
-  private registerPhysicalRepairOperation(operation: Promise<unknown>): void {
-    this.physicalRepairOperations.add(operation);
-    void operation.then(
-      () => this.physicalRepairOperations.delete(operation),
-      () => this.physicalRepairOperations.delete(operation),
+  private trackRepairOperation(operation: RandomSamplingRepairOperation): void {
+    this.repairOperations.add(operation);
+    void operation.settled.then(
+      () => this.repairOperations.delete(operation),
+      () => this.repairOperations.delete(operation),
     );
   }
 
@@ -236,8 +275,10 @@ export class RandomSamplingProver {
     this.cancel();
     const running = this.inflight;
     if (running) await running.catch(() => undefined);
-    while (this.physicalRepairOperations.size > 0) {
-      await Promise.allSettled(this.physicalRepairOperations);
+    while (this.repairOperations.size > 0) {
+      await Promise.allSettled(
+        [...this.repairOperations].map((operation) => operation.settled),
+      );
     }
     await this.builder.close();
     await this.wal.close();
@@ -392,13 +433,9 @@ export class RandomSamplingProver {
         cgId: input.cgId,
         expectedRoot: input.expectedRoot,
         expectedLeafCount: input.expectedLeafCount,
-        signal,
-        registerPhysicalOperation: (operation) => {
-          this.registerPhysicalRepairOperation(operation);
-        },
       });
-      this.registerPhysicalRepairOperation(repairOperation);
-      const repaired = await raceWithLifecycleAbort(repairOperation, signal);
+      this.trackRepairOperation(repairOperation);
+      const repaired = await repairOperation.result;
       if (signal.aborted) throw lifecycleAbortReason(signal);
       this.log.info('rs.tick.kc-repaired', {
         kaId: input.kaId.toString(),
