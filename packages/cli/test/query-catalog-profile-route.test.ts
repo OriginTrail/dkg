@@ -193,12 +193,36 @@ describe('/api/profile/query-catalog/read', () => {
       result: {
         type: 'bindings',
         bindings: [expect.objectContaining({
-          q: 'urn:dkg:profile:kamstrup-testnet:query:trace',
-          queryParameters: '[{"name":"configurationId","type":"string"}]',
-          executionView: 'verifiable-memory',
+          q: { value: 'urn:dkg:profile:kamstrup-testnet:query:trace' },
+          queryParameters: { value: '[{"name":"configurationId","type":"string"}]' },
+          executionView: { value: 'verifiable-memory' },
         })],
       },
     });
+  });
+
+  it('preserves quoted, typed, and duplicate raw rows in the legacy bindings field', async () => {
+    const rawRow = {
+      q: 'urn:dkg:profile:test:query:trace',
+      subGraph: '"__context_graph"',
+      name: '"Trace"',
+      sparql: '"SELECT * WHERE {}"',
+      rank: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    };
+    const rawBindings = [rawRow, { ...rawRow }];
+    const { context, response } = queryCatalogReadContext({
+      store: {
+        query: vi.fn(async () => ({ type: 'bindings' as const, bindings: rawBindings })),
+      },
+    });
+
+    await handleMemoryRoutes(context);
+
+    expect(response.statusCode).toBe(200);
+    const payload = JSON.parse(response.body);
+    expect(payload.result).toEqual({ type: 'bindings', bindings: rawBindings });
+    expect(payload.items).toHaveLength(1);
+    expect(payload.items[0]).toMatchObject({ slug: 'trace', name: 'Trace', rank: 1 });
   });
 
   it('returns 422 for invalid or conflicting stored execution views', async () => {
@@ -226,7 +250,7 @@ describe('/api/profile/query-catalog/read', () => {
     }
   });
 
-  it('normalizes legacy ListenerBoi entries for canonical and base binding clients', async () => {
+  it('normalizes legacy ListenerBoi entries only in canonical items', async () => {
     const bindings = [{
       q: 'urn:listenerboi:query:open-incidents',
       catalog: 'urn:listenerboi:catalog:investigations',
@@ -243,7 +267,7 @@ describe('/api/profile/query-catalog/read', () => {
     expect(JSON.parse(response.body)).toMatchObject({
       items: [expect.objectContaining({ view: 'working-memory' })],
       result: {
-        bindings: [expect.objectContaining({ executionView: 'working-memory' })],
+        bindings,
       },
     });
   });

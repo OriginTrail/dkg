@@ -65,7 +65,6 @@ import {
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC, getMetrics } from '@origintrail-official/dkg-core';
 import {
   decodeQueryCatalogBindings,
-  encodeQueryCatalogBindings,
   QUERY_CATALOG_READ_CAPABILITIES,
   QUERY_CATALOG_SCHEMA_VERSION,
 } from '@origintrail-official/dkg-core/query-catalog';
@@ -753,7 +752,6 @@ LIMIT 5001`;
         code: 'QUERY_CATALOG_INVALID_DATA',
       });
     }
-    const bindings = encodeQueryCatalogBindings(items);
     const payload = {
       schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
       capabilities: QUERY_CATALOG_READ_CAPABILITIES,
@@ -762,7 +760,10 @@ LIMIT 5001`;
       items,
       result: {
         type: "bindings" as const,
-        bindings,
+        // Additive compatibility field: preserve the exact SELECT rows older
+        // clients received, including RDF lexical forms and duplicates. The
+        // decoded/deduplicated contract lives exclusively in `items`.
+        bindings: rawBindings,
       },
     };
     const responseBytes = Buffer.byteLength(JSON.stringify(payload));
