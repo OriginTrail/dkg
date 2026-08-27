@@ -12,11 +12,15 @@ export interface RandomSamplingExactRepairInput {
   readonly signal?: AbortSignal;
 }
 
-export interface RandomSamplingExactRepairResult {
-  readonly disposition: 'found' | 'clean-absent' | 'incomplete';
-  readonly insertedTriples: number;
-  readonly proofMaterial?: RandomSamplingRepairMaterial;
-}
+export type RandomSamplingExactRepairResult =
+  | {
+      readonly kind: 'found';
+      readonly material: RandomSamplingRepairMaterial;
+    }
+  | {
+      readonly kind: 'miss';
+      readonly disposition: 'clean-absent' | 'incomplete';
+    };
 
 export interface RandomSamplingExactRepairDependencies {
   readonly chainId: string;
@@ -38,7 +42,6 @@ export interface RandomSamplingExactRepairDependencies {
   fetchExactKnowledgeAsset(
     peerId: string,
     localContextGraphId: string,
-    assetUal: string,
     expectedCommitment: ExactAssetCommitment,
     signal: AbortSignal,
   ): Promise<RandomSamplingExactRepairResult>;
@@ -129,7 +132,6 @@ export async function runRandomSamplingExactRepair(
         result = await raceWithAbort(deps.fetchExactKnowledgeAsset(
           peerId,
           localContextGraphId,
-          assetUal,
           expectedCommitment,
           signal,
         ), signal);
@@ -139,16 +141,18 @@ export async function runRandomSamplingExactRepair(
       }
       deps.logInfo(
         `RS exact repair for ${assetUal} from ${peerId.slice(-8)}: `
-          + `disposition=${result.disposition} inserted=${result.insertedTriples}`,
+          + (result.kind === 'found'
+            ? 'outcome=found'
+            : `outcome=miss disposition=${result.disposition}`),
       );
-      return result.disposition === 'found' && result.proofMaterial !== undefined
+      return result.kind === 'found'
         ? { kind: 'done', result }
         : { kind: 'continue' };
     },
     log: deps.logInfo,
   });
-  if (traversal.completion === 'done' && traversal.result?.proofMaterial !== undefined) {
-    return traversal.result.proofMaterial;
+  if (traversal.completion === 'done' && traversal.result?.kind === 'found') {
+    return traversal.result.material;
   }
 
   throw new Error(

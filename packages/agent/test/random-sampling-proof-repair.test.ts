@@ -307,12 +307,11 @@ describe('Random Sampling proof-time exact repair', () => {
         if (peerId === 'peer-0001') throw new Error('connection reset');
         return true;
       },
-      fetchExactKnowledgeAsset: async (_peerId, _cgId, _ual, _commitment, signal) => {
+      fetchExactKnowledgeAsset: async (_peerId, _cgId, _commitment, signal) => {
         observedSignals.push(signal);
         return {
-          disposition: 'found',
-          insertedTriples: 0,
-          proofMaterial,
+          kind: 'found',
+          material: proofMaterial,
         };
       },
       logInfo,
@@ -513,8 +512,8 @@ describe('Random Sampling proof-time exact repair', () => {
         return true;
       },
       fetchExactKnowledgeAsset: async () => ({
-        disposition: 'found',
-        insertedTriples: 1,
+        kind: 'found',
+        material: { contents: [], privateRoots: [] },
       }),
       logInfo: vi.fn(),
     }, {
@@ -543,8 +542,8 @@ describe('Random Sampling proof-time exact repair', () => {
       selectPeerWindow: (peers) => peers,
       preparePeer: async () => true,
       fetchExactKnowledgeAsset: async () => ({
+        kind: 'miss',
         disposition: 'clean-absent',
-        insertedTriples: 0,
       }),
       logInfo: vi.fn(),
     }, {
@@ -575,8 +574,8 @@ describe('Random Sampling proof-time exact repair', () => {
       selectPeerWindow: (peers) => peers,
       preparePeer: async () => true,
       fetchExactKnowledgeAsset: async () => ({
+        kind: 'miss',
         disposition: 'clean-absent',
-        insertedTriples: 0,
       }),
       logInfo: vi.fn(),
     }, {

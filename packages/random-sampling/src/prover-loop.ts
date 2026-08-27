@@ -45,17 +45,28 @@ export interface ProverLoopOptions {
   prover: TickableProver;
   /** Tick cadence in ms. */
   intervalMs: number;
+  /** Maximum time stop() waits for the active tick and resource close. */
+  shutdownTimeoutMs?: number;
   /** Fired after every tick (success or mapped failure) — observability only. */
   onTick?: (outcome: TickOutcome) => void;
   log?: ProverLogger;
+}
+
+export class ProverLoopShutdownTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Random Sampling prover did not drain and close within ${timeoutMs}ms`);
+    this.name = 'ProverLoopShutdownTimeoutError';
+  }
 }
 
 export interface ProverLoopHandle {
   /** Idempotent: subsequent calls are no-ops. */
   start(): void;
   /**
-   * Idempotent. Cancels the timer and handle-owned work, drains the exact
-   * in-flight tick, then closes the prover (releases worker thread / WAL handles).
+   * Idempotent. Cancels the timer and handle-owned work, then safely closes the
+   * prover after the exact in-flight tick settles. Rejects at the shutdown bound
+   * instead of blocking node shutdown forever; a late tick still closes before
+   * any owned resource is released.
    */
   stop(): Promise<void>;
   /** Snapshot of recent activity for observability surfaces. */
@@ -63,6 +74,11 @@ export interface ProverLoopHandle {
 }
 
 export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
+  const shutdownTimeoutMs = Number.isFinite(opts.shutdownTimeoutMs)
+    && Number.isInteger(opts.shutdownTimeoutMs)
+    && opts.shutdownTimeoutMs! > 0
+    ? opts.shutdownTimeoutMs!
+    : 5_000;
   let timer: ReturnType<typeof setInterval> | null = null;
   let started = false;
   let stopping = false;
@@ -140,19 +156,46 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
     stop() {
       if (stopPromise) return stopPromise;
       stopping = true;
-      stopPromise = (async () => {
-        if (timer) {
-          clearInterval(timer);
-          timer = null;
-        }
-        opts.prover.cancel?.(new DOMException(
-          'Random Sampling prover loop stopped',
-          'AbortError',
-        ));
-        const running = inflightRun;
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      opts.prover.cancel?.(new DOMException(
+        'Random Sampling prover loop stopped',
+        'AbortError',
+      ));
+      const running = inflightRun;
+      const shutdown = (async () => {
+        // Never release builder / WAL resources underneath a tick. If a custom
+        // dependency ignores cancellation and settles after the stop bound, this
+        // continuation performs the close then, while stop() has already rejected
+        // so the rest of node shutdown is not held hostage indefinitely.
         if (running) await running;
         await opts.prover.close();
       })();
+      void shutdown.catch((err) => {
+        opts.log?.error('rs.loop.shutdown-late-failure', {
+          err: err instanceof Error ? err.message : String(err),
+        });
+      });
+      stopPromise = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new ProverLoopShutdownTimeoutError(shutdownTimeoutMs));
+        }, shutdownTimeoutMs);
+        if (typeof (timeout as { unref?: () => void }).unref === 'function') {
+          (timeout as { unref?: () => void }).unref?.();
+        }
+        shutdown.then(
+          () => {
+            clearTimeout(timeout);
+            resolve();
+          },
+          (error) => {
+            clearTimeout(timeout);
+            reject(error);
+          },
+        );
+      });
       return stopPromise;
     },
     getStatus(): ProverLoopStatus {

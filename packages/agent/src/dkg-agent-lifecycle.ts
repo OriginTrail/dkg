@@ -4161,7 +4161,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       fetchExactKnowledgeAsset: async (
         peerId,
         localContextGraphId,
-        _assetUal,
         expectedCommitment,
         signal,
       ) => {
@@ -4177,18 +4176,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const authenticated = result.authenticatedAssets?.find(
           ({ asset }) => asset.ual === expectedCommitment.assetUal,
         );
-        const proofMaterial = authenticated === undefined
-          ? undefined
-          : Object.freeze({
+        if (authenticated !== undefined) {
+          return {
+            kind: 'found' as const,
+            material: Object.freeze({
               contents: Object.freeze(authenticated.asset.dataQuads.map((quad) => (
                 tripleContentV10(quad.subject, quad.predicate, quad.object)
               ))),
               privateRoots: Object.freeze([...authenticated.privateRoots]),
-            });
+            }),
+          };
+        }
         return {
-          disposition: result.disposition,
-          insertedTriples: result.result.insertedTriples,
-          ...(proofMaterial === undefined ? {} : { proofMaterial }),
+          kind: 'miss' as const,
+          // A durable fetch can report `found` based on storage progress even
+          // when it produced no challenge-authenticated material. At this
+          // proof boundary that is necessarily an incomplete miss.
+          disposition: result.disposition === 'clean-absent'
+            ? 'clean-absent' as const
+            : 'incomplete' as const,
         };
       },
       logInfo: (message) => this.log.info(ctx, message),

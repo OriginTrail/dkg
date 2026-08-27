@@ -59,6 +59,7 @@ export {
 
 export {
   startProverLoop,
+  ProverLoopShutdownTimeoutError,
   type ProverLoopOptions,
   type ProverLoopHandle,
   type ProverLoopStatus,

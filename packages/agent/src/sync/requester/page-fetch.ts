@@ -1134,6 +1134,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
       && !recovery
       && responsePages > 0
       && allQuads.length > 0
+      && signal?.aborted !== true
       && isSyncBackoffWorthyError(err)
     ) {
       logWarn(

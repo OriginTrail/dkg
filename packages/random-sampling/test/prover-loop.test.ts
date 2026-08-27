@@ -82,6 +82,31 @@ describe('startProverLoop', () => {
     await loop.stop();
   });
 
+  it('bounds a non-cancellable tick without closing resources underneath it', async () => {
+    let settleTick!: (outcome: TickOutcome) => void;
+    const tick = vi.fn(() => new Promise<TickOutcome>((resolve) => {
+      settleTick = resolve;
+    }));
+    const close = vi.fn(async () => undefined);
+    const prover: TickableProver = { tick, close };
+    const loop = startProverLoop({
+      prover,
+      intervalMs: 60_000,
+      shutdownTimeoutMs: 20,
+    });
+    loop.start();
+    await vi.waitFor(() => expect(tick).toHaveBeenCalledOnce());
+
+    await expect(loop.stop()).rejects.toMatchObject({
+      name: 'ProverLoopShutdownTimeoutError',
+      timeoutMs: 20,
+    });
+    expect(close).not.toHaveBeenCalled();
+
+    settleTick({ kind: 'period-closed' });
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+  });
+
   it('catches tick rejections and keeps the loop alive', async () => {
     let throwOnce = true;
     const prover = fakeProver(async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   exactAssetFilterKey,
   MAX_EXACT_SYNC_PHASE_BYTES_PER_ASSET,
@@ -69,20 +69,72 @@ describe('exact sync accumulation limits', () => {
         requesterScope,
       );
       const controller = new AbortController();
-      if (terminal === 'abort') controller.abort(new Error('proof attempt stopped'));
+      const setResponderSession = vi.spyOn(checkpointStore, 'setResponderSession');
+      let sends = 0;
+      const requestedOffsets: number[] = [];
+      const responderSessionIds: Array<string | undefined> = [];
+      let markSecondRequestStarted!: () => void;
+      const secondRequestStarted = new Promise<void>((resolve) => {
+        markSecondRequestStarted = resolve;
+      });
       const fetch = fetchSyncPages(fetchParams({
         checkpointStore,
         requesterScope,
         ephemeralRequesterState: true,
         forceFreshSession: true,
         signal: controller.signal,
-        send: terminal === 'failure'
-          ? async () => { throw new Error('proof transport failed'); }
-          : async () => new Uint8Array(),
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          requestedOffsets.push(offset);
+          responderSessionIds.push(syncSessionId);
+          return encoder.encode('request');
+        },
+        parseAndFilter: async () => ({
+          quads: [{
+            subject: 'urn:proof-prefix',
+            predicate: 'urn:p',
+            object: '"retained-before-abort"',
+            graph: 'urn:data',
+          }],
+          totalQuads: 1,
+        }),
+        send: async () => {
+          sends += 1;
+          if (terminal === 'failure') throw new Error('proof transport failed');
+          if (terminal !== 'abort') return new Uint8Array();
+          if (sends === 1) return encoder.encode('accepted-proof-page');
+          markSecondRequestStarted();
+          return new Promise<Uint8Array>((_resolve, reject) => {
+            const rejectOnAbort = () => reject(controller.signal.reason);
+            if (controller.signal.aborted) rejectOnAbort();
+            else controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
+          });
+        },
       }));
 
       if (terminal === 'success') await expect(fetch).resolves.toBeDefined();
-      else await expect(fetch).rejects.toThrow();
+      else if (terminal === 'failure') await expect(fetch).rejects.toThrow();
+      else {
+        await secondRequestStarted;
+        expect(requestedOffsets).toEqual([0, 1]);
+        expect(responderSessionIds[0]).toEqual(expect.any(String));
+        expect(responderSessionIds[1]).toBe(responderSessionIds[0]);
+        controller.abort(new Error('proof attempt stopped'));
+        await expect(fetch).rejects.toThrow('proof attempt stopped');
+        expect(setResponderSession).toHaveBeenCalled();
+        const retainedSession = setResponderSession.mock.calls.at(-1);
+        expect(retainedSession?.[0]).toBe(checkpointKey);
+        expect(retainedSession?.[1]).toBe(responderSessionIds[0]);
+      }
       expect(checkpointStore.get(checkpointKey)).toBeUndefined();
 
       // A store-only offset makes any leaked compatibility-cache token visible
