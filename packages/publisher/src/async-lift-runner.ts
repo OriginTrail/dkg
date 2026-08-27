@@ -12,6 +12,10 @@ export interface AsyncLiftRunnerConfig {
    * proof. `recoveryIntervalMs` stays the idle sweep for work no wake-up can announce (crash
    * recovery, jobs stranded by a listener that never fired). Only consulted when the publisher
    * implements the `reconciliationScheduling` capability.
+   *
+   * When omitted, the effective active cadence is `min(recoveryIntervalMs, 5000)`: never slower
+   * than the 5s default, and never slower than an explicitly configured `recoveryIntervalMs` —
+   * a consumer that already checks pending transactions faster than 5s keeps that rate.
    */
   readonly activeRecoveryIntervalMs?: number;
   /** Start recovery, but do not claim accepted jobs until an operator restarts unpaused. */
@@ -36,19 +40,17 @@ export class AsyncLiftRunner {
   private recoveryInFlight?: Promise<void>;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   /**
-   * r2-2 (🟡 3872744751) — ONE invariant, two monotonic cursors: demand is pending exactly while
-   * `servedDemandGeneration < demandedGeneration`. A poke advances `demanded`; only a pass that
-   * SUCCEEDS advances `served`, and only to the generation it captured at start — so a failed
-   * pass leaves the demand standing (retried on the errorBackoffMs floor) and a poke landing
-   * mid-pass stays ahead of the pass that may already be past its job. No separate boolean can
-   * drift out of sync, because the pending state is derived, never stored.
+   * Demand invariant: pending exactly while `served < demanded`. A poke advances `demanded`;
+   * only a SUCCESSFUL pass advances `served`, and only to the generation it captured at start —
+   * so a failed pass keeps the demand due (retried on the errorBackoffMs floor) and a mid-pass
+   * poke survives the pass that may already be past its job. Pending is derived, never stored.
    */
   private demandedGeneration = 0;
   private servedDemandGeneration = 0;
   private get reconciliationDemanded(): boolean {
     return this.servedDemandGeneration < this.demandedGeneration;
   }
-  /** Last answer from the publisher's `reconciliationScheduling.hasPendingWork`; selects active vs idle cadence. */
+  /** Whether unresolved tx work remains, from the last pass outcome (boot-seeded); selects active vs idle cadence. */
   private pendingReconciliation = false;
   private unsubscribeReconciliationDemand?: () => void;
 
@@ -57,7 +59,11 @@ export class AsyncLiftRunner {
     this.errorBackoffMs = config.errorBackoffMs ?? 1000;
     this.recoveryIntervalMs = config.recoveryIntervalMs ?? 60_000;
     assertNodeTimerDelayMs(this.recoveryIntervalMs, 'AsyncLiftRunner recoveryIntervalMs');
-    this.activeRecoveryIntervalMs = config.activeRecoveryIntervalMs ?? 5_000;
+    // The active cadence must never be SLOWER than an explicitly configured recoveryIntervalMs:
+    // that setting was a consumer's pending-transaction check rate before the active/idle split
+    // existed, and the new default must not override a faster explicit choice.
+    this.activeRecoveryIntervalMs = config.activeRecoveryIntervalMs
+      ?? Math.min(config.recoveryIntervalMs ?? 5_000, 5_000);
     assertNodeTimerDelayMs(this.activeRecoveryIntervalMs, 'AsyncLiftRunner activeRecoveryIntervalMs');
     this.sleep = config.sleep ?? defaultSleep;
     this.onError = config.onError;
@@ -192,19 +198,16 @@ export class AsyncLiftRunner {
 
   private startTransactionReconciliation(): void {
     if (this.stopped || this.recoveryInFlight) return;
-    // r2 (🔴 3872361404) — the demand is served only by a pass that SUCCEEDS: `served` advances
-    // to the generation captured here, never past it. Consuming demand at pass start let one
-    // transient reconcile error spend the only wake-up and park the job for the idle interval;
-    // a failed pass now leaves `served` behind `demanded`, so the demand stays due on the
-    // errorBackoffMs floor, and a poke landing mid-pass keeps `demanded` ahead of this capture.
+    // Demand is served only by a pass that SUCCEEDS: `served` advances to the generation
+    // captured here, never past it. A failed pass keeps the demand due (errorBackoffMs floor);
+    // a poke landing mid-pass keeps `demanded` ahead of this capture.
     const generationAtStart = this.demandedGeneration;
     this.lastRecoveryAttemptAt = Date.now();
     const scheduling = this.config.publisher.reconciliationScheduling;
-    // r3-red (🔴 3872934465) — the outlook arrives IN the pass result, so acknowledging the
-    // demand and learning whether work remains are one atomic step: there is no separate
-    // post-pass queue read that can fail after a successful pass, silently park an unresolved
-    // transaction on the idle cadence, and leave the demand already spent. A publisher without
-    // the capability has no outlook to report; its passes keep the seeded (idle) cadence.
+    // The outlook arrives IN the pass result: serving the demand and learning whether work
+    // remains are one atomic step, so no separate post-pass queue read exists to fail after a
+    // successful pass and park an unresolved transaction on the idle cadence. A publisher
+    // without the capability has no outlook to report; its passes keep the seeded cadence.
     const pass: Promise<{ reconciled: number; pendingWork: boolean }> = scheduling
       ? scheduling.reconcile()
       : (this.config.publisher.reconcileTransactions?.() ?? this.config.publisher.recover())

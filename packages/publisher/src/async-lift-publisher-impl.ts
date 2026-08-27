@@ -824,19 +824,12 @@ export class TripleStoreAsyncLiftPublisher
       processed = await this.jobHandlerFor(claimed.request).process(claimed, walletId);
     } finally {
       this.activeProcessJobIds.delete(claimed.jobId);
-      // r1 (🔴 3872361393) — the demand poke belongs on the OWNERSHIP BOUNDARY, after the
-      // marker above is gone. Poking from inside a processing path (as the ambiguous-broadcast
-      // catch first did) let the invited pass run while the job still read as executor-owned:
-      // the pass skipped it, the outlook answered false, and the one-shot demand was spent —
-      // parking the job for the idle sweep. Here the job is provably past every ownership
-      // marker the pass checks, so an invited pass can always act.
-      //
-      // r3 (🟡 3873024814, branarakic) — an ESCAPED processing fault pokes too. A durably
-      // recorded broadcast may already exist when a secondary read/write throws (store
-      // pressure), and asking the queue what state the job is in would use the same store that
-      // just failed. The poke is scheduling-only — the invited pass re-reads canonical job and
-      // chain state before acting — so over-inviting on the error path costs one empty pass,
-      // while under-inviting recreates the idle-sweep wallet hold this PR removes.
+      // Invariant: the demand poke fires only at the OWNERSHIP BOUNDARY — after the marker
+      // above is deleted — so an invited pass can always act on the announced job. An ESCAPED
+      // processing fault pokes unconditionally: a durable broadcast may already exist, reading
+      // the job state back would use the store that just failed, and the poke is scheduling-only
+      // (the pass re-reads canonical state before acting) — an unneeded invite costs one empty
+      // pass, a missed one parks the wallet until the idle sweep.
       if (processed === undefined || this.isReconciliationActionable(processed)) {
         this.notifyReconciliationDemand();
       }
@@ -1046,7 +1039,7 @@ export class TripleStoreAsyncLiftPublisher
         // UNKNOWN, not failed. The tx-bearing job retains the wallet until
         // chain proof finalizes, proves a revert, or proves create absence. The reconciliation
         // demand poke for this job fires at the processNext ownership boundary, not here —
-        // this frame still holds the job's activeProcessJobIds marker (r1 🔴 3872361393).
+        // this frame still holds the job's activeProcessJobIds marker.
         return await this.getRequiredJob(claimed.jobId);
       }
       // #1867 — either the tx never left ('not-reached' / 'rolled-back-pre-send'), or a
@@ -1151,22 +1144,19 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   readonly reconciliationScheduling = {
-    // r2-1 (🟡 3872744747) — an EXCLUSIVE attachment, named as one: reconciliation demand has
-    // exactly one owner (the scheduling runner), so attaching takes over from the previous
-    // owner rather than joining a subscriber set nothing in production would ever have two of.
-    // See the interface doc for the ownership/handover contract.
+    // Exclusive attachment: reconciliation demand has exactly one owner (the scheduling
+    // runner); attaching takes over. See the interface doc for the ownership/handover contract.
     attachDemandListener: (listener: () => void): (() => void) => {
       this.reconciliationDemandListener = listener;
       return () => {
-        // Detaches only THIS attachment: a superseding owner must not be torn down by a stale
-        // detach from the runner incarnation it replaced — that is the safe handover.
+        // Detaches only THIS attachment — a stale detach from a superseded owner is a no-op.
         if (this.reconciliationDemandListener === listener) {
           this.reconciliationDemandListener = undefined;
         }
       };
     },
-    // r3-1 (🟡 3872935134) — the scheduling caller's per-tick operation: one pass, one atomic
-    // answer. `hasPendingWork` below remains for the boot-time seed and diagnostics only.
+    // The scheduling caller's per-tick operation: one pass, one atomic answer.
+    // `hasPendingWork` below is the boot-time seed and diagnostic probe only.
     reconcile: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.runReconciliationPass(),
     hasPendingWork: async (): Promise<boolean> => {
       await this.ensureGraph();
@@ -1699,22 +1689,19 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   /**
-   * r3-1 (🟡 3872935134) — ONE canonical pass that reports both what it settled and whether
-   * actionable live work remains, computed DURING the walk (per-job, from the same under-lock
-   * re-reads the pass already pays for) rather than by a second queue inventory afterwards.
-   * The scheduling caller consumes this outcome atomically, so there is no separate outlook
-   * read that can fail after a successful pass and strand a served demand on the idle cadence
-   * (r3-red 3872934465). `reconcileTransactions`/`recover` remain the wire-stable numeric
-   * surface over the same pass.
+   * The ONE canonical pass: reports both what it settled and whether actionable live work
+   * remains, computed DURING the walk (per-job, from the under-lock re-reads the pass already
+   * pays for) — never by a second queue inventory afterwards. The scheduling caller consumes
+   * this outcome atomically, so no separate outlook read exists to fail after a successful
+   * pass and strand a served demand on the idle cadence. `reconcileTransactions`/`recover`
+   * remain the wire-stable numeric surface over the same pass.
    */
   private async runReconciliationPass(): Promise<{ reconciled: number; pendingWork: boolean }> {
     await this.ensureGraph();
-    // r3-1 follow-up (branarakic 3873026014, production evidence) — ONE queue inventory per
-    // pass, partitioned in memory across the three lanes. The lanes previously each ran their
-    // own all-job read (pre-broadcast, live, failed): at a 5s active cadence over a large queue
-    // that moved the bottleneck from wallet scheduling into store/control-plane work. Each lane
-    // still re-reads its jobs individually under the transition lock before acting, so the
-    // shared snapshot only selects candidates and staleness cannot change a disposition.
+    // ONE queue inventory per pass, partitioned in memory across the three lanes — per-lane
+    // full reads at an active cadence move the bottleneck into store/control-plane work. Each
+    // lane re-reads its candidates under the transition lock before acting, so the shared
+    // snapshot only selects candidates and staleness cannot change a disposition.
     const inventory = await this.list();
     let reconciled = await this.recoverInterruptedPreBroadcastJobs(inventory);
     // Same actionability rule the scheduling outlook answers with: executor-owned jobs are
@@ -1869,8 +1856,8 @@ export class TripleStoreAsyncLiftPublisher
     // bounds apply, and none of them changes a job's DISPOSITION: a job that is not asked is left
     // exactly as held, so no bound can authorize a resend.
     const startedAt = this.now();
-    // Candidates from the pass's shared inventory snapshot (branarakic 3873026014 — one read
-    // per pass); dispositions still act only on state re-read via each job's own turn.
+    // Candidates from the pass's shared inventory snapshot (one read per pass); dispositions
+    // still act only on state re-read in each job's own turn.
     const heldJobs = inventory
       .filter((job) => job.status === 'failed')
       .filter(isFailedJob)

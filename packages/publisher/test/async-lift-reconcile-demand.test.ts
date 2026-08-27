@@ -289,6 +289,47 @@ describe('async-lift reconciliation demand channel', () => {
     await expect(outlookAtPoke[0]).resolves.toBe(true);
   });
 
+  it('reports pendingWork for the unresolved job even when the same pass settles another', async () => {
+    // A pass may both settle and leave work: settling one job must not report the queue quiet
+    // while another transaction still awaits proof.
+    const txA = `0x${'aa'.repeat(32)}` as `0x${string}`;
+    const txB = `0x${'bb'.repeat(32)}` as `0x${string}`;
+    const publisher = createPublisher({
+      chainProofResolver: async (lookup) => {
+        const txHash = (lookup as { txHash?: string }).txHash;
+        if (txHash === txA) return { status: 'recovered', recovery: { txHash: txA } } as never;
+        return { status: 'pending' };
+      },
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: txA },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
+      knowledgeAssetVmPublishHandler: {
+        execute: async () => { throw new Error('executor must not run in this test'); },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+
+    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-a');
+    await publisher.update(jobA, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobA, 'broadcast', {
+      broadcast: { txHash: txA, walletId: 'wallet-a', operationKind: 'create' },
+    });
+    const jobB = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'albums-pending' }));
+    await publisher.claimNext('wallet-b');
+    await publisher.update(jobB, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobB, 'broadcast', {
+      broadcast: { txHash: txB, walletId: 'wallet-b', operationKind: 'create' },
+    });
+
+    const outcome = await publisher.reconciliationScheduling.reconcile();
+    expect(outcome).toEqual({ reconciled: 1, pendingWork: true });
+    expect((await publisher.getStatus(jobA))?.status).toBe('finalized');
+    expect((await publisher.getStatus(jobB))?.status).toBe('broadcast');
+  });
+
   it('runs exactly one queue inventory per reconcile pass across all three lanes', async () => {
     // r3-1 follow-up (branarakic 3873026014) — the lanes share one list() snapshot; per-tick
     // inventory cost must not scale with the number of lanes.

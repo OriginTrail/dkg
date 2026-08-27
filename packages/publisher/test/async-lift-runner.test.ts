@@ -729,6 +729,46 @@ describe('AsyncLiftRunner', () => {
     }
   });
 
+  it('inherits an explicitly faster recoveryIntervalMs as the active cadence when the new knob is unset', async () => {
+    // A consumer that configured recoveryIntervalMs below 5s already had that pending-check
+    // rate; the new active default must not slow them down on upgrade.
+    vi.useFakeTimers();
+    const blockedSleeps: Array<() => void> = [];
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachDemandListener: () => () => {},
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: true };
+        },
+        hasPendingWork: async () => true,
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      recoveryIntervalMs: 1_000,
+      errorBackoffMs: 1,
+      sleep: () => new Promise<void>((resolve) => { blockedSleeps.push(resolve); }),
+    });
+    try {
+      await runner.start();
+      expect(reconciliationCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(reconciliationCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(reconciliationCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(reconciliationCalls).toBe(2);
+    } finally {
+      const stopping = runner.stop();
+      blockedSleeps.forEach((resolve) => resolve());
+      await stopping;
+      vi.useRealTimers();
+    }
+  });
+
   it('continues startup and scheduling when the boot-time pending probe rejects', async () => {
     let demand!: () => void;
     let reconciliationCalls = 0;
