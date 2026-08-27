@@ -69,6 +69,41 @@ describe('AsyncLiftRunner', () => {
     await expect(runner.stop()).resolves.toBeUndefined();
   });
 
+  it('degrades to cadence-and-poll scheduling for a pre-scheduler capability object', async () => {
+    // The advertised runtime-compat path for the capability shape from before attachScheduler:
+    // reconcile/recover exist but the attachment method does not. start() must not throw on the
+    // missing method, and both the poll loop and the reconcile cadence must keep running.
+    let processCalls = 0;
+    let reconcileCalls = 0;
+    const publisher = createPublisher({
+      processNext: async () => {
+        processCalls += 1;
+        return null;
+      },
+      reconciliationScheduling: {
+        attachDemandListener: () => () => {},
+        reconcile: async () => {
+          reconcileCalls += 1;
+          return { reconciled: 0, pendingWork: false };
+        },
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
+      },
+    } as never);
+
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 5,
+    });
+    await runner.start();
+    await waitFor(() => {
+      expect(processCalls).toBeGreaterThanOrEqual(2);
+      expect(reconcileCalls).toBeGreaterThanOrEqual(1);
+    });
+    await expect(runner.stop()).resolves.toBeUndefined();
+  });
+
   it('can recover in paused maintenance mode before wallet processing starts', async () => {
     const order: string[] = [];
     let paused = false;

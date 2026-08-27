@@ -1235,8 +1235,11 @@ export class TripleStoreAsyncLiftPublisher
       // stays where it is, transaction-bearing and unclaimable, until a node with a chain-proof
       // resolver reconciles it or an operator clears it by id.
       if (job.status === 'broadcast' && !getLiftJobTransactionEvidence(job)) {
-        await this.releaseWalletLockForJob(job);
+        // Reset BEFORE release: the release poke is a one-shot claim invitation, so the
+        // accepted state must already be claim-visible when it fires — the reverse order let
+        // the woken loop find nothing and park while the reset committed unannounced.
         await this.writeJob(this.resetJobToAccepted(job, 'broadcast', undefined), 'recover-reset');
+        await this.releaseWalletLockForJob(job);
         return true;
       }
       // Evidence-bearing (or 'included'): keep the signing wallet reserved.
@@ -1326,7 +1329,7 @@ export class TripleStoreAsyncLiftPublisher
         return true;
       }
       if (resolution.status === 'not-found' && queuedLiftOperationKind(recoverable) === 'create') {
-        await this.releaseWalletLockForJob(recoverable);
+        // Reset BEFORE release — see the evidence-free reset above for why the order matters.
         await this.writeJob(buildLiftJobAcceptedReset(recoverable, {
           now: this.now(),
           recoveredFrom: recoverable.status,
@@ -1339,6 +1342,7 @@ export class TripleStoreAsyncLiftPublisher
             ? { nonceChecked: recoverable.broadcast.nonce }
             : {}),
         }), 'recover-reset');
+        await this.releaseWalletLockForJob(recoverable);
         return true;
       }
       // Pending, unrecognized, inconclusive, and update absence establish no
@@ -1833,11 +1837,12 @@ export class TripleStoreAsyncLiftPublisher
         const current = await this.getStatus(snapshot.jobId);
         if (!current || (current.status !== 'claimed' && current.status !== 'validated')) return;
         if (this.activeProcessJobIds.has(current.jobId)) return;
-        await this.releaseWalletLockForJob(current);
+        // Reset BEFORE release — the release poke must find the accepted state claim-visible.
         await this.writeJob(
           this.resetJobToAccepted(current, current.status, getLiftJobTransactionEvidence(current)),
           'recover-reset',
         );
+        await this.releaseWalletLockForJob(current);
         recovered += 1;
       });
     }
@@ -2104,11 +2109,12 @@ export class TripleStoreAsyncLiftPublisher
         // has just proven does not exist: it could never be proven a second time, because nothing
         // new was ever sent. A later attempt that actually signs something records fresh broadcast
         // evidence, and that holds unconditionally.
-        await this.releaseWalletLockForJob(job);
+        // Reset BEFORE release — the release poke must find the accepted state claim-visible.
         await this.writeJob(
           resetFailedLiftJobToAccepted(job, this.now(), { txHashAccounted: true }),
           'recover-reset',
         );
+        await this.releaseWalletLockForJob(job);
         return 1;
       }
       case 'hold':

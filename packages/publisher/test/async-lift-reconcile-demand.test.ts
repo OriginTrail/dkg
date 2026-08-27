@@ -803,4 +803,67 @@ describe('async-lift reconciliation demand channel', () => {
     }
     expect((await publisher.getStatus(job1))?.status).toBe('finalized');
   });
+  it('reclaims a proof-driven reset promptly: the release poke fires only after the reset is claim-visible', async () => {
+    // r2 (🔴 3874704509) - lock deletion and the job reset are separate writes, and the wake is a
+    // one-shot. If the poke fired on lock deletion BEFORE the reset write, the woken loop would
+    // find nothing accepted, park, and the reset would then land unannounced - idling out the
+    // (parked) poll. This row pins the ordering end to end: one create job whose transaction is
+    // proven not-found, no other accepted work, poll parked at ten minutes. The executor can only
+    // run a second time if the reset-site poke found the reset already claim-visible.
+    let executions = 0;
+    const publisher = createPublisher({
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => ({ status: 'not-found' }),
+      // Never invoked for a not-found proof, but its presence gates detached receipt
+      // reconciliation - without it the executor is never detached and no boundary poke fires.
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          executions += 1;
+          if (executions === 1) {
+            // The write-ahead stamps the durable signed-operation marker: not-found release is
+            // create-only, and queuedLiftOperationKind answers 'update' for an unmarked record.
+            await input.publishOptions.onBeforeBroadcast?.({
+              txHash: KA_VM_EXECUTOR_TX_HASH,
+              operationKind: 'create',
+            });
+            input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            throw new Error('detached send fails after broadcast: proof must decide');
+          }
+          throw new Error('second attempt reached the executor: the reset was reclaimed');
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    const job = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 600_000,
+      recoveryIntervalMs: 600_000,
+      activeRecoveryIntervalMs: 10,
+      errorBackoffMs: 10,
+    });
+    await runner.start();
+    try {
+      const deadline = Date.now() + 15_000;
+      while (executions < 2) {
+        if (Date.now() > deadline) {
+          throw new Error(
+            `the reset job was never reclaimed through the release poke (status: ${(await publisher.getStatus(job))?.status}, executions: ${executions})`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } finally {
+      await runner.stop();
+    }
+  });
+
 });
