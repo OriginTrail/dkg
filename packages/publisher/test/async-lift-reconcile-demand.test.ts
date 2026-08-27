@@ -61,7 +61,10 @@ describe('async-lift reconciliation demand channel', () => {
   }
 
   it('reports pass outcomes that track each job state: pendingWork only for unowned live transactions', async () => {
-    const publisher = createPublisher();
+    const publisher = createPublisher({
+      chainProofResolver: async () => ({ status: 'pending' }),
+      knowledgeAssetVmPublishRecoveryResolver: async () => null,
+    });
     await stageShareSnapshot();
     const reconcile = () => publisher.reconciliationScheduling.reconcile();
 
@@ -99,6 +102,32 @@ describe('async-lift reconciliation demand channel', () => {
       errorPayloadRef: `urn:dkg:test:error:${jobId}`,
     });
     expect(await reconcile()).toEqual({ reconciled: 0, pendingWork: false });
+  });
+
+  it('does not advertise a named-KA broadcast as active work when no recovery lane can move it', async () => {
+    // The degraded configuration: a persisted named-KA broadcast on a publisher with NEITHER
+    // the chain-proof resolver NOR the named recovery resolver. The record is deliberately held
+    // for safety and no pass can ever transition it — reporting it as pending would pin the
+    // scheduling caller to the active cadence (a full inventory per tick) forever. It stays
+    // eligible for the idle crash-recovery sweep and counts again once a resolver is configured.
+    const publisher = createPublisher();
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-1', operationKind: 'create' },
+    });
+
+    expect(await publisher.reconciliationScheduling.reconcile()).toEqual({ reconciled: 0, pendingWork: false });
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+
+    // The same record on a resolver-equipped publisher over the same store IS active work.
+    const equipped = createPublisher({
+      chainProofResolver: async () => ({ status: 'pending' }),
+      knowledgeAssetVmPublishRecoveryResolver: async () => null,
+    });
+    expect(await equipped.reconciliationScheduling.reconcile()).toEqual({ reconciled: 0, pendingWork: true });
   });
 
   it('excludes an executor-owned detached job from pending work and pokes the listener when it settles', async () => {
@@ -145,6 +174,8 @@ describe('async-lift reconciliation demand channel', () => {
 
   it('pokes the listener for an ambiguous post-write-ahead failure only at the ownership boundary', async () => {
     const publisher = createPublisher({
+      chainProofResolver: async () => ({ status: 'pending' }),
+      knowledgeAssetVmPublishRecoveryResolver: async () => null,
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           await input.publishOptions.onBeforeBroadcast?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
@@ -175,6 +206,8 @@ describe('async-lift reconciliation demand channel', () => {
 
   it('a stale detach from a superseded owner does not tear down the current attachment', async () => {
     const publisher = createPublisher({
+      chainProofResolver: async () => ({ status: 'pending' }),
+      knowledgeAssetVmPublishRecoveryResolver: async () => null,
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           await input.publishOptions.onBeforeBroadcast?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
@@ -199,6 +232,8 @@ describe('async-lift reconciliation demand channel', () => {
 
   it('survives a listener that throws without touching job state', async () => {
     const publisher = createPublisher({
+      chainProofResolver: async () => ({ status: 'pending' }),
+      knowledgeAssetVmPublishRecoveryResolver: async () => null,
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           await input.publishOptions.onBeforeBroadcast?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
@@ -281,6 +316,8 @@ describe('async-lift reconciliation demand channel', () => {
     const publisher = new TripleStoreAsyncLiftPublisher(saturatedStore, {
       now: () => ++now,
       idGenerator: () => `job-${++ids}`,
+      chainProofResolver: async () => ({ status: 'pending' }),
+      knowledgeAssetVmPublishRecoveryResolver: async () => null,
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           await input.publishOptions.onBeforeBroadcast?.({ txHash: KA_VM_EXECUTOR_TX_HASH });

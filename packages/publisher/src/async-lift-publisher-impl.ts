@@ -1163,17 +1163,37 @@ export class TripleStoreAsyncLiftPublisher
   };
 
   /**
-   * The ONE definition of "reconciliation can act on this job now": live tx-bearing state with
-   * no executor ownership marker. Shared by the outlook above, the reconcile pass pre-filter,
-   * and the ownership-boundary demand poke, so the three cannot drift. The deeper per-job
-   * re-checks under the transition lock remain authoritative; this is the coherent pre-answer.
+   * The ONE definition of "reconciliation can act on this job now": live tx-bearing state, no
+   * executor ownership marker, and a lane that can actually move the record as THIS publisher
+   * is wired. Shared by the outlook, the reconcile pass pre-filter, and the ownership-boundary
+   * demand poke, so the three cannot drift. The deeper per-job re-checks under the transition
+   * lock remain authoritative; this is the coherent pre-answer.
    */
   private isReconciliationActionable(job: LiftJob): boolean {
     return (
       (job.status === 'broadcast' || job.status === 'included')
       && !this.detachedExecutions.has(job.jobId)
       && !this.activeProcessJobIds.has(job.jobId)
+      && this.canReconciliationProgress(job)
     );
+  }
+
+  /**
+   * Whether any configured lane can ever TRANSITION this live record. A named-KA job with
+   * neither the chain-proof resolver nor the named recovery resolver has no path that changes
+   * it — it is deliberately held for safety — so advertising it as active work would pin the
+   * scheduling caller to the active cadence (a full inventory per tick) forever, in exactly the
+   * degraded configuration where recovery is unavailable. Such records stay eligible for the
+   * idle crash-recovery sweep and become actionable the moment a resolver is configured again.
+   * The raw lane always has a transition available (evidence-free reset, or the inconclusive
+   * timeout into the held-failed state), so its jobs always count.
+   */
+  private canReconciliationProgress(job: LiftJob): boolean {
+    if (isKnowledgeAssetVmPublishJobRequest(job.request)) {
+      return this.chainProofResolver !== undefined
+        || this.knowledgeAssetVmPublishRecoveryResolver !== undefined;
+    }
+    return true;
   }
 
   /**
