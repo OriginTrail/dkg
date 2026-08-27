@@ -21,6 +21,7 @@ import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import {
   assertQuadLiteralsMutf8Safe,
+  classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
 } from '@origintrail-official/dkg-core';
@@ -474,9 +475,13 @@ export class BlazegraphStore implements TripleStore {
     storeOperation?: StoreOperation,
   ): Promise<QueryResult> {
     const trimmed = sparql.trim();
-    const upper = trimmed.toUpperCase();
-    const isAsk = upper.startsWith('ASK');
-    const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+    // PREFIX / BASE prologues precede the query form. Classify through the
+    // shared scanner so graph-producing queries still negotiate N-Quads
+    // instead of being sent with the SELECT/ASK JSON Accept header.
+    const operation = classifySparqlOperation(trimmed);
+    const isAsk = operation.kind === 'read' && operation.form === 'ASK';
+    const isConstruct = operation.kind === 'read'
+      && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
     return this.runStoreWork(
       storeOperation ?? (isConstruct ? 'construct' : 'query'),
       options,
