@@ -115,6 +115,22 @@ export interface AsyncLiftPublisher {
   reconcileTransactions?(): Promise<number>;
   /** Wait until every receipt task detached after RPC acceptance has stopped. Older implementations can omit it. */
   drainDetachedExecutions?(): Promise<void>;
+  /**
+   * Register the single listener poked when transaction reconciliation gains actionable work —
+   * a detached receipt execution settles, or an ambiguous broadcast is left behind for chain
+   * proof. A later registration replaces the earlier listener. The poke carries no payload and
+   * establishes nothing about the queue; it only invites the caller to run
+   * {@link reconcileTransactions} sooner than its idle cadence would. Older implementations can
+   * omit it, and a caller that never registers loses nothing but latency.
+   */
+  setReconciliationDemandListener?(listener: () => void): void;
+  /**
+   * Whether any transaction-bearing job currently awaits chain-proof reconciliation — live
+   * `broadcast`/`included` state with no executor (in-process or detached) still owning it.
+   * Lets the caller hold a short reconcile cadence exactly while an unresolved chain question
+   * exists and fall back to its idle sweep otherwise. Older implementations can omit it.
+   */
+  hasPendingTransactionReconciliation?(): Promise<boolean>;
   getStats(): Promise<Record<LiftJobState, number>>;
   pause(): Promise<void>;
   resume(): Promise<void>;

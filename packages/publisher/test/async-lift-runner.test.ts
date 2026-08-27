@@ -466,6 +466,174 @@ describe('AsyncLiftRunner', () => {
     );
   });
 
+  it('runs reconciliation promptly on a demand poke instead of waiting out the idle cadence', async () => {
+    let demand: (() => void) | undefined;
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconcileTransactions: async () => {
+        reconciliationCalls += 1;
+        return 0;
+      },
+      setReconciliationDemandListener: (listener: () => void) => {
+        demand = listener;
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      // Ten minutes out: any pass inside this test can only have come from the poke.
+      recoveryIntervalMs: 600_000,
+    });
+
+    await runner.start();
+    expect(demand).toBeDefined();
+    expect(reconciliationCalls).toBe(0);
+    demand!();
+    await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(1));
+    await runner.stop();
+  });
+
+  it('coalesces demand pokes that arrive during an in-flight pass into one follow-up pass', async () => {
+    let demand!: () => void;
+    let releaseFirstPass!: () => void;
+    const firstPassGate = new Promise<void>((resolve) => { releaseFirstPass = resolve; });
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconcileTransactions: async () => {
+        reconciliationCalls += 1;
+        if (reconciliationCalls === 1) await firstPassGate;
+        return 0;
+      },
+      setReconciliationDemandListener: (listener: () => void) => {
+        demand = listener;
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 600_000,
+      // Keep the attempt floor out of the way so the assertion measures coalescing, not backoff.
+      errorBackoffMs: 5,
+    });
+
+    await runner.start();
+    demand();
+    await waitFor(() => expect(reconciliationCalls).toBe(1));
+    demand();
+    demand();
+    demand();
+    releaseFirstPass();
+    await waitFor(() => expect(reconciliationCalls).toBe(2));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(reconciliationCalls).toBe(2);
+    await runner.stop();
+  });
+
+  it('holds the active cadence while pending work remains and returns to the idle sweep when none does', async () => {
+    let pending = true;
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconcileTransactions: async () => {
+        reconciliationCalls += 1;
+        return 0;
+      },
+      hasPendingTransactionReconciliation: async () => pending,
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 600_000,
+      activeRecoveryIntervalMs: 5,
+      // Keep the attempt floor below the active cadence so the assertion measures the cadence.
+      errorBackoffMs: 1,
+    });
+
+    await runner.start();
+    // Pending was seeded before the first schedule, so passes run on the active cadence.
+    await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(3));
+    pending = false;
+    // Let the already-due pass observe the flip, then require the cadence to go quiet.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const settledCalls = reconciliationCalls;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(reconciliationCalls).toBe(settledCalls);
+    await runner.stop();
+  });
+
+  it('keeps the error backoff as the floor for demanded reconciliation', async () => {
+    let demand!: () => void;
+    let reconciliationCalls = 0;
+    const errors: unknown[] = [];
+    const publisher = createPublisher({
+      reconcileTransactions: async () => {
+        reconciliationCalls += 1;
+        throw new Error('reconciliation keeps failing');
+      },
+      setReconciliationDemandListener: (listener: () => void) => {
+        demand = listener;
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 600_000,
+      errorBackoffMs: 100,
+      onError: (error) => { errors.push(error); },
+    });
+
+    await runner.start();
+    const pokeUntil = Date.now() + 250;
+    while (Date.now() < pokeUntil) {
+      demand();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    // 250ms of continuous pokes over a 100ms floor allows the initial pass plus at most a few
+    // backed-off retries — a hot loop would have produced dozens.
+    expect(reconciliationCalls).toBeGreaterThanOrEqual(1);
+    expect(reconciliationCalls).toBeLessThanOrEqual(5);
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    await runner.stop();
+  });
+
+  it('ignores demand pokes after stop', async () => {
+    let demand!: () => void;
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconcileTransactions: async () => {
+        reconciliationCalls += 1;
+        return 0;
+      },
+      setReconciliationDemandListener: (listener: () => void) => {
+        demand = listener;
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 600_000,
+    });
+
+    await runner.start();
+    await runner.stop();
+    const callsAfterStop = reconciliationCalls;
+    demand();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(reconciliationCalls).toBe(callsAfterStop);
+  });
+
+  it('rejects an active recovery interval above the Node.js timer limit', () => {
+    expect(() => new AsyncLiftRunner({
+      publisher: createPublisher(),
+      walletIds: ['wallet-1'],
+      activeRecoveryIntervalMs: 2_147_483_648,
+    })).toThrow(/1 through 2147483647 ms/);
+  });
+
   it('stops cleanly while idle without scheduling extra work', async () => {
     const processNextCalls: unknown[][] = [];
     const sleepCalls: unknown[][] = [];

@@ -470,6 +470,15 @@ export class TripleStoreAsyncLiftPublisher
   private readonly activeProcessJobIds = new Set<string>();
   /** Receipt tasks that continue after the RPC-acceptance fast return. */
   private readonly detachedExecutions = new Map<string, Promise<void>>();
+  /** Poked when a tx-bearing job stops being executor-owned; see setReconciliationDemandListener. */
+  private reconciliationDemandListener?: () => void;
+  /**
+   * Rotates the live-lane iteration start across passes. The pass deadline may truncate the walk,
+   * and `list()` order is stable, so without rotation the same head jobs would be re-asked every
+   * pass while the tail starved behind a slow resolver. In-memory for the same reason as
+   * `chainProofNextDueAt`: a restart resetting the rotation is safe, skipping is a pure no-op.
+   */
+  private reconcilePassOffset = 0;
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   private readonly detachReceiptReconciliation: boolean;
   /** 3825614002 — this instance's ROLE, resolved once from its wiring. */
@@ -1018,6 +1027,7 @@ export class TripleStoreAsyncLiftPublisher
         // interrupted-broadcast path reconciles it on chain, never resend. Receipt timeout is
         // UNKNOWN, not failed. The tx-bearing job retains the wallet until
         // chain proof finalizes, proves a revert, or proves create absence.
+        this.notifyReconciliationDemand();
         return await this.getRequiredJob(claimed.jobId);
       }
       // #1867 — either the tx never left ('not-reached' / 'rolled-back-pre-send'), or a
@@ -1107,6 +1117,10 @@ export class TripleStoreAsyncLiftPublisher
       if (this.detachedExecutions.get(jobId) === tracked) {
         this.detachedExecutions.delete(jobId);
       }
+      // The job just stopped being executor-owned (line-of-ownership: reconciliation skips jobs
+      // in this map). Whatever the execution's outcome, only chain proof can settle the record
+      // now, so invite the reconcile pass instead of leaving the job to the idle sweep.
+      this.notifyReconciliationDemand();
     });
     this.detachedExecutions.set(jobId, tracked);
   }
@@ -1114,6 +1128,34 @@ export class TripleStoreAsyncLiftPublisher
   async drainDetachedExecutions(): Promise<void> {
     while (this.detachedExecutions.size > 0) {
       await Promise.all([...this.detachedExecutions.values()]);
+    }
+  }
+
+  setReconciliationDemandListener(listener: () => void): void {
+    this.reconciliationDemandListener = listener;
+  }
+
+  async hasPendingTransactionReconciliation(): Promise<boolean> {
+    await this.ensureGraph();
+    const jobs = await this.list();
+    return jobs.some(
+      (job) =>
+        (job.status === 'broadcast' || job.status === 'included')
+        && !this.detachedExecutions.has(job.jobId)
+        && !this.activeProcessJobIds.has(job.jobId),
+    );
+  }
+
+  /**
+   * A scheduling poke, not a state transition: it must never throw into a job's own control flow,
+   * and it establishes nothing — the reconcile pass re-reads the queue and remains the only judge
+   * of what is actionable.
+   */
+  private notifyReconciliationDemand(): void {
+    try {
+      this.reconciliationDemandListener?.();
+    } catch {
+      // The listener belongs to the caller's scheduler; its failure must not touch job state.
     }
   }
 
@@ -1616,6 +1658,12 @@ export class TripleStoreAsyncLiftPublisher
     const txBearing = (await this.list()).filter(
       (job) => job.status === 'broadcast' || job.status === 'included',
     );
+    // The pass deadline below may truncate this walk, and `list()` order is stable — without
+    // rotation a head job behind a slow resolver would be re-asked every pass while the tail
+    // starved. Rotating the start bounds every job's wait to at most `txBearing.length` passes.
+    // (The failed-job lane needs no rotation: its per-job due times already rotate the batch.)
+    const offset = txBearing.length > 0 ? this.reconcilePassOffset++ % txBearing.length : 0;
+    const rotatedTxBearing = txBearing.slice(offset).concat(txBearing.slice(0, offset));
 
     const deadline = new AbortController();
     const deadlineTimer = setTimeout(
@@ -1623,7 +1671,7 @@ export class TripleStoreAsyncLiftPublisher
       Math.max(0, this.chainProofDispatchTimeBudgetMs),
     );
     try {
-      for (const snapshot of txBearing) {
+      for (const snapshot of rotatedTxBearing) {
         if (deadline.signal.aborted) break;
         await this.withJobTransitionLock(snapshot.jobId, async () => {
           const current = await this.getStatus(snapshot.jobId);

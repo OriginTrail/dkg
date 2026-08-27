@@ -243,11 +243,18 @@ export async function startPublisherRuntimeIfEnabled(args: {
       pollIntervalMs: args.config.publisher.pollIntervalMs,
       errorBackoffMs: args.config.publisher.errorBackoffMs,
       recoveryIntervalMs: args.config.publisher.recoveryIntervalMs,
+      activeRecoveryIntervalMs: args.config.publisher.activeRecoveryIntervalMs,
       maxRetries: args.config.publisher.maxRetries,
       // GH#2270 — this is the ONE runtime whose retry scheduler and claim-time
       // sweep actually run, so the kill-switch and backoff knobs are dead
       // config unless they travel this hop (the #1836 bug class).
       retryTuning: resolvePublisherRetryTuning(args.config.publisher),
+      // Runner errors (wallet loop + reconciliation) were previously swallowed after their
+      // backoff; a chronically failing reconcile pass then looks exactly like a slow publisher.
+      onRunnerError: (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        args.log(`[publisher] runner error: ${message}`);
+      },
       config: args.config,
       ackTransportFactory: args.ackTransportFactory,
       publishEncryptionFactory: args.publishEncryptionFactory,
@@ -355,9 +362,16 @@ interface PublisherRuntimeBaseArgs {
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   recoveryIntervalMs?: number;
+  activeRecoveryIntervalMs?: number;
   maxRetries?: number;
   /** GH#2270 — validated `config.publisher` retry knobs; unset knobs keep the library defaults. */
   retryTuning?: PublisherRetryTuning;
+  /**
+   * Receives wallet-loop and reconciliation errors from the runner. Without it those errors are
+   * swallowed after their backoff, which turns a chronically failing reconcile pass into a silent
+   * publishing slowdown.
+   */
+  onRunnerError?: (error: unknown) => void;
   ackTransportFactory?: ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
@@ -376,6 +390,7 @@ export async function createPublisherRuntime(args: {
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   recoveryIntervalMs?: number;
+  activeRecoveryIntervalMs?: number;
   maxRetries?: number;
 }): Promise<PublisherRuntime> {
   const publisherWallets = await loadPublisherWallets(args.dataDir);
@@ -402,6 +417,7 @@ export async function createPublisherRuntime(args: {
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
     recoveryIntervalMs: args.recoveryIntervalMs ?? args.config.publisher?.recoveryIntervalMs,
+    activeRecoveryIntervalMs: args.activeRecoveryIntervalMs ?? args.config.publisher?.activeRecoveryIntervalMs,
     maxRetries: args.maxRetries ?? args.config.publisher?.maxRetries,
     retryTuning: resolvePublisherRetryTuning(args.config.publisher),
     publicSnapshotStore,
@@ -515,8 +531,10 @@ export async function createPublisherRuntimeFromAgent(args: {
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   recoveryIntervalMs?: number;
+  activeRecoveryIntervalMs?: number;
   maxRetries?: number;
   retryTuning?: PublisherRetryTuning;
+  onRunnerError?: (error: unknown) => void;
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>;
   ackTransportFactory?: ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
@@ -533,8 +551,10 @@ export async function createPublisherRuntimeFromAgent(args: {
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
     recoveryIntervalMs: args.recoveryIntervalMs,
+    activeRecoveryIntervalMs: args.activeRecoveryIntervalMs,
     maxRetries: args.maxRetries,
     retryTuning: args.retryTuning,
+    onRunnerError: args.onRunnerError,
     ackTransportFactory: args.ackTransportFactory,
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     publishEncryptionFactory: args.publishEncryptionFactory,
@@ -692,6 +712,8 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
     recoveryIntervalMs: args.recoveryIntervalMs,
+    activeRecoveryIntervalMs: args.activeRecoveryIntervalMs,
+    onError: args.onRunnerError,
     // Operator-only maintenance seam. Recovery still reconciles signed transactions, but wallet
     // loops cannot claim released jobs while a closed run is being removed from the queue.
     startPaused: args.startPaused ?? false,
