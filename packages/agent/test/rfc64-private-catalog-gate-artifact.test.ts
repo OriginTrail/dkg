@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -11,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   RFC64_RUNTIME_EVIDENCE_V1,
+  RUNTIME_PACKAGE_CLOSURE,
   assertExecutedRuntimeMatchesBuildV1,
   buildExecutedRuntimeManifestV1,
   buildRuntimeManifestFromEntriesV1,
@@ -520,6 +522,59 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
 });
 
 describe('RFC-64 private release gate process and denial evidence', () => {
+  it('returns and seals the exact source bytes without delegating to a downstream loader', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rfc64-runtime-load-source-binding-'));
+    temporaryRoots.push(root);
+    const artifactPath = join(root, 'packages', 'agent', 'dist', 'index.js');
+    await mkdir(dirname(artifactPath), { recursive: true });
+    const source = Buffer.from('export const marker = "sealed";\n');
+    writeFileSync(artifactPath, source);
+    const artifactUrl = pathToFileURL(artifactPath).href;
+    const evidence = createRuntimeLoadEvidenceV1({
+      repoRoot: root,
+      sourceCommit: '9'.repeat(40),
+    });
+    evidence.resolve(artifactUrl, {} as never, () => ({
+      format: 'module',
+      url: artifactUrl,
+    }));
+    const nextLoad = vi.fn(() => ({
+      format: 'module' as const,
+      source: Buffer.from('export const marker = "tampered";\n'),
+    }));
+
+    const loaded = evidence.load(artifactUrl, { format: 'module' } as never, nextLoad);
+    expect(nextLoad).not.toHaveBeenCalled();
+    expect(loaded).toMatchObject({ format: 'module', shortCircuit: true });
+    expect(Buffer.from(loaded.source as Uint8Array)).toEqual(source);
+    const manifest = evidence.createSealer(RFC64_RUNTIME_EVIDENCE_V1)();
+    expect(manifest.runtimeFiles).toEqual([{
+      byteLength: source.byteLength,
+      path: 'packages/agent/dist/index.js',
+      sha256: `0x${createHash('sha256').update(source).digest('hex')}`,
+    }]);
+  });
+
+  it('rejects a package closure root symlink before measuring external runtime bytes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rfc64-runtime-closure-symlink-'));
+    temporaryRoots.push(root);
+    for (const pkg of RUNTIME_PACKAGE_CLOSURE) {
+      const directory = join(root, pkg.path);
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, 'index.js'), `export const packageName = ${JSON.stringify(pkg.name)};\n`);
+    }
+    const external = await mkdtemp(join(tmpdir(), 'rfc64-runtime-external-'));
+    temporaryRoots.push(external);
+    await writeFile(join(external, 'index.js'), 'export const injected = true;\n');
+    const queryDist = join(root, 'packages', 'query', 'dist');
+    await rm(queryDist, { recursive: true });
+    await symlink(external, queryDist, 'dir');
+
+    expect(() => buildRuntimeManifestV1(root, '8'.repeat(40))).toThrow(
+      /closure root is a symbolic link/u,
+    );
+  });
+
   it('rejects runtime bytes replaced between resolution and the exact load boundary', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rfc64-runtime-load-race-'));
     temporaryRoots.push(root);

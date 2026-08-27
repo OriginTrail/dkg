@@ -2,7 +2,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
 
 import { canonicalize, type CanonicalValue } from './rfc64-runtime-canonical.mts';
@@ -227,10 +227,17 @@ function buildRuntimeManifestForProfileV1<Profile extends RuntimeEvidenceProfile
   sourceCommit: string,
   profile: Readonly<Profile>,
 ): Readonly<RuntimeManifestForProfileV1<Profile>> {
-  const repoRoot = resolve(repoRootInput);
+  const repoRoot = realpathSync.native(resolve(repoRootInput));
   const entries: RuntimeFileEvidenceV1[] = [];
   for (const pkg of profile.packageClosure) {
-    collectRuntimeFiles(repoRoot, resolve(repoRoot, pkg.path), entries);
+    const closureRoot = resolve(repoRoot, pkg.path);
+    if (lstatSync(closureRoot).isSymbolicLink()) {
+      throw new Error(`runtime artifact closure root is a symbolic link: ${pkg.path}`);
+    }
+    if (realpathSync.native(closureRoot) !== closureRoot) {
+      throw new Error(`runtime artifact closure root resolves through a symbolic link: ${pkg.path}`);
+    }
+    collectRuntimeFiles(repoRoot, closureRoot, entries);
   }
   return buildRuntimeManifestFromEntriesForProfileV1(sourceCommit, entries, profile);
 }

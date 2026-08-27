@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
 import type { LoadHookSync, ResolveHookSync } from 'node:module';
-import { relative, sep } from 'node:path';
+import { relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type {
@@ -32,7 +32,8 @@ export function createRuntimeLoadEvidenceV1(input: Readonly<{
   readonly repoRoot: string;
   readonly sourceCommit: string;
 }>): RuntimeLoadEvidenceV1 {
-  const repoRoot = realpathSync.native(input.repoRoot);
+  const lexicalRepoRoot = resolve(input.repoRoot);
+  const repoRoot = realpathSync.native(lexicalRepoRoot);
   const resolved = new Map<string, RuntimeFileEvidenceV1>();
   const loaded = new Map<string, RuntimeFileEvidenceV1>();
   let sealed = false;
@@ -117,9 +118,17 @@ export function createRuntimeLoadEvidenceV1(input: Readonly<{
     path: string;
   }> | null {
     if (!url.startsWith('file:')) return null;
-    const absolutePath = realpathSync.native(fileURLToPath(url));
-    const path = relative(repoRoot, absolutePath).split(sep).join('/');
-    return RUNTIME_PATH.test(path) ? Object.freeze({ absolutePath, path }) : null;
+    // Classify the lexical workspace path before following links. Node may
+    // otherwise resolve a package dist symlink to an external URL and make an
+    // executable workspace import appear unrelated to the measured closure.
+    const lexicalAbsolutePath = resolve(fileURLToPath(url));
+    const path = relative(lexicalRepoRoot, lexicalAbsolutePath).split(sep).join('/');
+    if (!RUNTIME_PATH.test(path)) return null;
+    const absolutePath = realpathSync.native(lexicalAbsolutePath);
+    if (absolutePath !== resolve(repoRoot, path)) {
+      throw new Error(`workspace runtime artifact resolves through a symbolic link: ${path}`);
+    }
+    return Object.freeze({ absolutePath, path });
   }
 }
 
