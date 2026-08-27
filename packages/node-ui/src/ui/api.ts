@@ -10,6 +10,12 @@ import {
   del,
 } from './http.js';
 import type { GetView } from '@origintrail-official/dkg-core';
+import { classifySparqlOperation } from '@origintrail-official/dkg-core/dist/sparql-operation.js';
+import type {
+  PublicQueryQuad,
+  PublicQueryResponse,
+  PublicQueryResult,
+} from '@origintrail-official/dkg-core/query-result';
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 
 // Re-export the shared transport so existing `../api.js` consumers of these
@@ -602,28 +608,51 @@ export async function importFile(
 // identical `/api/query` POSTs for the WM/SWM/VM fan-out against a
 // multi-GB Oxigraph store. Each duplicate adds seconds of wall time on
 // large stores. Inflight dedup collapses the dupes to one.
-export type QueryExecutionResult =
-  | {
-      type: 'bindings';
-      bindings: Array<Record<string, unknown>>;
-      quads?: never;
-      value?: never;
-    }
-  | {
-      type: 'quads';
-      bindings?: never;
-      quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>;
-      value?: never;
-    }
-  | {
-      type: 'boolean';
-      bindings?: never;
-      quads?: never;
-      value: boolean;
-    };
+export type QueryExecutionResult = PublicQueryResult;
+export type QueryExecutionResponse = PublicQueryResponse;
 
-export interface QueryExecutionResponse {
-  result: QueryExecutionResult;
+export function normalizeQueryExecutionResponse(
+  response: unknown,
+  sparql: string,
+): QueryExecutionResponse {
+  const envelope = response && typeof response === 'object' && !Array.isArray(response)
+    ? response as Record<string, unknown>
+    : {};
+  const candidate = envelope.result ?? envelope.results;
+  const raw = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+    ? candidate as Record<string, unknown>
+    : {};
+
+  if (raw.type === 'boolean' && typeof raw.value === 'boolean') {
+    return { result: { type: 'boolean', value: raw.value } };
+  }
+  if (raw.type === 'quads' && Array.isArray(raw.quads)) {
+    return { result: { type: 'quads', quads: raw.quads as PublicQueryQuad[] } };
+  }
+  if (raw.type === 'bindings' && Array.isArray(raw.bindings)) {
+    return { result: { type: 'bindings', bindings: raw.bindings as Array<Record<string, unknown>> } };
+  }
+
+  const operation = classifySparqlOperation(sparql);
+  const bindings = Array.isArray(raw.bindings)
+    ? raw.bindings as Array<Record<string, unknown>>
+    : [];
+  if (operation.kind === 'read' && operation.form === 'ASK') {
+    const term = bindings[0]?.result;
+    const value = term && typeof term === 'object' && !Array.isArray(term)
+      ? (term as { value?: unknown }).value
+      : term;
+    return { result: { type: 'boolean', value: String(value).toLowerCase() === 'true' } };
+  }
+  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
+    return {
+      result: {
+        type: 'quads',
+        quads: Array.isArray(raw.quads) ? raw.quads as PublicQueryQuad[] : [],
+      },
+    };
+  }
+  return { result: { type: 'bindings', bindings } };
 }
 
 const inflightQuery = new Map<string, Promise<QueryExecutionResponse>>();
@@ -643,7 +672,7 @@ export function postQueryDeduped(body: Record<string, unknown>): Promise<QueryEx
       const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
       throw new HttpError(res.status, msg, errBody);
     }
-    return res.json() as Promise<QueryExecutionResponse>;
+    return normalizeQueryExecutionResponse(await res.json(), String(body.sparql ?? ''));
   })().finally(() => {
     inflightQuery.delete(key);
   });

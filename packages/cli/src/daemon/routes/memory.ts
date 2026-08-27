@@ -69,6 +69,16 @@ import {
   QUERY_CATALOG_READ_CAPABILITIES,
   QUERY_CATALOG_SCHEMA_VERSION,
 } from '@origintrail-official/dkg-core/query-catalog';
+
+function listenerBoiLegacyQueryCatalogView(
+  queryIri: string,
+  catalogIri: string,
+): import('@origintrail-official/dkg-core').GetView | undefined {
+  return queryIri.startsWith('urn:listenerboi:query:')
+    || catalogIri.startsWith('urn:listenerboi:catalog:')
+    ? 'working-memory'
+    : undefined;
+}
 import {
   QUERY_CATALOG_ATOMIC_UPSERT_UNSUPPORTED,
   writeQueryCatalog,
@@ -642,6 +652,23 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const contextGraphId = parsed.contextGraphId;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
 
+    const catalogReadCallerAgentAddress = requestToken
+      ? agent.resolveAgentByToken(requestToken)
+      : undefined;
+    const catalogReadIsNodeAdmin = !!requestToken
+      && validTokens.has(requestToken)
+      && catalogReadCallerAgentAddress === undefined;
+    if (
+      !catalogReadIsNodeAdmin
+      && !(await agent.canReadContextGraph(contextGraphId, {
+        callerAgentAddress: catalogReadCallerAgentAddress,
+      }))
+    ) {
+      return jsonResponse(res, 403, {
+        error: `Not authorized to read query catalog for context graph "${contextGraphId}".`,
+      });
+    }
+
     const graph = `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
     const query = `PREFIX prof: <http://dkg.io/ontology/profile/>
 PREFIX schema: <http://schema.org/>
@@ -717,7 +744,9 @@ LIMIT 5001`;
     }
     let items;
     try {
-      items = decodeQueryCatalogBindings(rawBindings);
+      items = decodeQueryCatalogBindings(rawBindings, {
+        legacyView: listenerBoiLegacyQueryCatalogView,
+      });
     } catch (err: any) {
       return jsonResponse(res, 422, {
         error: err?.message ?? 'Stored query catalog data is invalid',

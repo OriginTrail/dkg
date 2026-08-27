@@ -20,32 +20,6 @@ export class QueryCatalogAtomicUpsertUnsupportedError extends Error {
   }
 }
 
-// Serialize complete catalog writes per reserved profile graph. The storage
-// primitive provides the commit boundary; this lock preserves request order
-// when several daemon callers save the same catalog concurrently.
-const queryCatalogWriteLocks = new Map<string, Promise<void>>();
-
-async function withQueryCatalogWriteLock<T>(
-  graph: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const previous = queryCatalogWriteLocks.get(graph) ?? Promise.resolve();
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  const safePrevious = previous.catch(() => undefined);
-  const current = safePrevious.then(() => gate);
-  queryCatalogWriteLocks.set(graph, current);
-  await safePrevious;
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (queryCatalogWriteLocks.get(graph) === current) {
-      queryCatalogWriteLocks.delete(graph);
-    }
-  }
-}
-
 function assertManagedQueryCatalogSubject(subject: string, contextGraphId: string): void {
   const base = `urn:dkg:profile:${encodeURIComponent(contextGraphId)}:`;
   const catalogPrefix = `${base}catalog:`;
@@ -87,20 +61,18 @@ export async function writeQueryCatalog(
   quads: Quad[],
   mode: QueryCatalogWriteMode,
 ): Promise<{ subjectsUpserted?: number }> {
-  return withQueryCatalogWriteLock(graph, async () => {
-    if (mode === 'insert') {
-      await store.insert(quads, { source: 'daemon.profile.queryCatalog.insert' });
-      return {};
-    }
+  if (mode === 'insert') {
+    await store.insert(quads, { source: 'daemon.profile.queryCatalog.insert' });
+    return {};
+  }
 
-    const replacements = groupSubjectReplacements(graph, contextGraphId, quads);
-    const replaced = await tryReplaceSubjectsAtomically(
-      store,
-      graph,
-      replacements,
-      { source: 'daemon.profile.queryCatalog.upsert' },
-    );
-    if (!replaced) throw new QueryCatalogAtomicUpsertUnsupportedError();
-    return { subjectsUpserted: replacements.length };
-  });
+  const replacements = groupSubjectReplacements(graph, contextGraphId, quads);
+  const replaced = await tryReplaceSubjectsAtomically(
+    store,
+    graph,
+    replacements,
+    { source: 'daemon.profile.queryCatalog.upsert' },
+  );
+  if (!replaced) throw new QueryCatalogAtomicUpsertUnsupportedError();
+  return { subjectsUpserted: replacements.length };
 }

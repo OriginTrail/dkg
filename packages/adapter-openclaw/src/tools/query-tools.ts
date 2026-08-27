@@ -106,6 +106,11 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
               type: ['string', 'number', 'boolean'],
             },
           },
+          agent_address: {
+            type: 'string',
+            description:
+              'Agent identity used by working-memory saved queries. Defaults to current_agent_address, then the node peer ID.',
+          },
         },
         required: ['context_graph_id', 'query'],
       },

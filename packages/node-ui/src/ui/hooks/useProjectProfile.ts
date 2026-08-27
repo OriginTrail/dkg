@@ -18,12 +18,21 @@ import {
   decodeQueryCatalogBindings,
   decodeQueryCatalogReadResponse,
   groupQueryCatalogItems,
-  legacyQueryCatalogExecutionView,
   queryCatalogBindingValue,
   type QueryCatalogItem,
 } from '@origintrail-official/dkg-core/query-catalog';
 import { executeQuery, readProfileQueryCatalog, type QueryExecutionView } from '../api.js';
 import { ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
+
+function listenerBoiLegacyQueryCatalogView(
+  queryIri: string,
+  catalogIri: string,
+): QueryExecutionView | undefined {
+  return queryIri.startsWith('urn:listenerboi:query:')
+    || catalogIri.startsWith('urn:listenerboi:catalog:')
+    ? 'working-memory'
+    : undefined;
+}
 
 async function runProjectQuery(
   sparql: string,
@@ -41,7 +50,10 @@ async function readProjectQueryCatalog(
   contextGraphId: string,
 ): Promise<QueryCatalogItem[]> {
   const response = await readProfileQueryCatalog(contextGraphId);
-  return decodeQueryCatalogReadResponse(response);
+  return decodeQueryCatalogReadResponse(response).map((item) => item.view ? item : {
+    ...item,
+    view: listenerBoiLegacyQueryCatalogView(item.queryIri, item.catalogIri),
+  });
 }
 
 export interface SubGraphBinding {
@@ -324,7 +336,7 @@ export function buildQueryCatalogState(
     };
   });
   const decoded = decodeQueryCatalogBindings(enrichedRows, {
-    legacyView: legacyQueryCatalogExecutionView,
+    legacyView: listenerBoiLegacyQueryCatalogView,
   }).map((query) => query.catalogIri ? query : {
     ...query,
     catalogSlug: `default:${query.subGraph}`,

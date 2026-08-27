@@ -47,10 +47,16 @@ function queryCatalogReadContext(agent: Record<string, unknown>): {
     context: {
       req: request,
       res: response,
-      agent,
+      agent: {
+        resolveAgentByToken: vi.fn(() => undefined),
+        canReadContextGraph: vi.fn(async () => true),
+        ...agent,
+      },
       url,
       path: url.pathname,
       requestToken: undefined,
+      requestAgentAddress: '',
+      validTokens: new Set<string>(),
     } as unknown as RequestContext,
     response,
   };
@@ -101,6 +107,46 @@ async function ask(store: TripleStore, graph: string, subject: string, predicate
 }
 
 describe('/api/profile/query-catalog/read', () => {
+  it('denies an agent-scoped private catalog read before querying the store', async () => {
+    const query = vi.fn();
+    const resolveAgentByToken = vi.fn(() => '0x1111111111111111111111111111111111111111');
+    const canReadContextGraph = vi.fn(async () => false);
+    const { context, response } = queryCatalogReadContext({
+      store: { query },
+      resolveAgentByToken,
+      canReadContextGraph,
+    });
+    context.requestToken = 'agent-token';
+    context.requestAgentAddress = '0x1111111111111111111111111111111111111111';
+    context.validTokens = new Set(['agent-token']);
+
+    await handleMemoryRoutes(context);
+
+    expect(response.statusCode).toBe(403);
+    expect(canReadContextGraph).toHaveBeenCalledWith('kamstrup-testnet', {
+      callerAgentAddress: '0x1111111111111111111111111111111111111111',
+    });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('preserves node-admin catalog reads', async () => {
+    const query = vi.fn(async () => ({ type: 'bindings' as const, bindings: [] }));
+    const canReadContextGraph = vi.fn(async () => false);
+    const { context, response } = queryCatalogReadContext({
+      store: { query },
+      resolveAgentByToken: vi.fn(() => undefined),
+      canReadContextGraph,
+    });
+    context.requestToken = 'node-admin-token';
+    context.validTokens = new Set(['node-admin-token']);
+
+    await handleMemoryRoutes(context);
+
+    expect(response.statusCode).toBe(200);
+    expect(canReadContextGraph).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
   it('returns explicit and legacy execution-view bindings for generic saved queries', async () => {
     const bindings = [{
       q: { value: 'urn:dkg:profile:kamstrup-testnet:query:trace' },
@@ -227,7 +273,7 @@ describe('/api/profile/query-catalog/read', () => {
     const { context, response } = queryCatalogReadContext({ store: { query } });
 
     const running = handleMemoryRoutes(context);
-    await Promise.resolve();
+    await vi.waitFor(() => expect(query).toHaveBeenCalledTimes(1));
     (context.req as unknown as EventEmitter).emit('aborted');
     await running;
 

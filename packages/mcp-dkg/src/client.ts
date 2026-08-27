@@ -6,7 +6,11 @@
  * `/api/context-graph/*`).
  */
 import type { DkgConfig } from './config.js';
-import { classifySparqlOperation } from '@origintrail-official/dkg-core';
+import {
+  classifySparqlOperation,
+  type PublicQueryResponse,
+  type PublicQueryResult,
+} from '@origintrail-official/dkg-core';
 
 export interface SparqlBinding {
   [key: string]: {
@@ -24,38 +28,8 @@ export interface SparqlQuad {
   graph?: string;
 }
 
-export type SparqlResult =
-  | {
-      type: 'bindings';
-      head?: { vars?: string[] };
-      bindings: SparqlBinding[];
-      quads?: never;
-      value?: never;
-    }
-  | {
-      type: 'quads';
-      head?: never;
-      bindings?: SparqlBinding[];
-      quads: Array<{
-    subject: string;
-    predicate: string;
-    object: string;
-    graph?: string;
-      }>;
-      value?: never;
-    }
-  | {
-      type: 'boolean';
-      head?: never;
-      bindings?: SparqlBinding[];
-      quads?: never;
-      value: boolean;
-    };
-
-export interface QueryResponse {
-  result: SparqlResult;
-  phases?: Record<string, number>;
-}
+export type SparqlResult = PublicQueryResult<SparqlBinding, SparqlQuad>;
+export type QueryResponse = PublicQueryResponse<SparqlBinding, SparqlQuad>;
 
 function normalizeDaemonQueryResult(result: unknown, sparql: string): SparqlResult {
   const raw = result && typeof result === 'object' && !Array.isArray(result)

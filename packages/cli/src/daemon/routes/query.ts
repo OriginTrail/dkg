@@ -366,20 +366,10 @@ type LegacyApiQueryResult = {
   quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
 };
 
-export type PublicApiQueryResult =
-  | { type: 'bindings'; bindings: Array<Record<string, string>> }
-  | {
-      type: 'quads';
-      quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
-      /** Compatibility field retained for pre-discriminant clients. */
-      bindings: [];
-    }
-  | {
-      type: 'boolean';
-      value: boolean;
-      /** Compatibility field retained for pre-discriminant clients. */
-      bindings: Array<{ result: string }>;
-    };
+export type PublicApiQueryResult = import('@origintrail-official/dkg-core').PublicQueryResult<
+  Record<string, string>,
+  { subject: string; predicate: string; object: string; graph: string }
+>;
 
 /** Normalize the legacy engine shape at the public daemon boundary. */
 export function normalizePublicApiQueryResult(

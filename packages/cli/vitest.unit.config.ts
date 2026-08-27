@@ -36,6 +36,7 @@ export default defineConfig({
           'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',
       'test/query-route-lifecycle.test.ts',
+      'test/query-catalog-profile-route.test.ts',
       'test/store-unavailable-response.test.ts',
           'test/status-command-store.test.ts',
           'test/memory-graph-events.test.ts',

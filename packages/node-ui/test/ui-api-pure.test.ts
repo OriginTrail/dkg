@@ -834,8 +834,30 @@ describe('UI API tests', () => {
       expect(queryCalls).toHaveLength(1);
       expect(results).toHaveLength(5);
       for (const r of results) {
-        expect(r).toEqual({ result: { bindings: [] } });
+        expect(r).toEqual({ result: { type: 'bindings', bindings: [] } });
       }
+    });
+
+    it('normalizes current and legacy query result shapes at the API boundary', async () => {
+      responseOverrides.push(
+        {
+          match: (url) => url.startsWith('/api/query'),
+          status: 200,
+          body: { result: { bindings: [{ result: 'false' }] } },
+        },
+        {
+          match: (url) => url.startsWith('/api/query'),
+          status: 200,
+          body: { result: { type: 'quads', quads: [{ subject: 's', predicate: 'p', object: 'o' }] } },
+        },
+      );
+
+      await expect(executeQuery('ASK { ?s ?p ?o }')).resolves.toEqual({
+        result: { type: 'boolean', value: false },
+      });
+      await expect(executeQuery('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }')).resolves.toEqual({
+        result: { type: 'quads', quads: [{ subject: 's', predicate: 'p', object: 'o' }] },
+      });
     });
 
     it('does not coalesce when args differ', async () => {

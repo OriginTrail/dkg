@@ -173,6 +173,34 @@ describe("DkgNodePlugin", () => {
     ]);
   });
 
+  it('forwards the resolved agent identity for a saved working-memory query', async () => {
+    const query = vi.fn(async () => ({ result: { type: 'bindings', bindings: [] } }));
+    const plugin = new DkgNodePlugin();
+    (plugin as any).client = {
+      readQueryCatalog: vi.fn(async () => queryCatalogEnvelope([{
+        q: 'urn:dkg:profile:cg-1:query:drafts',
+        catalog: 'urn:dkg:profile:cg-1:catalog:saved',
+        name: 'Drafts',
+        sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+        executionView: 'working-memory',
+        subGraph: '__context_graph',
+      }])),
+      query,
+    };
+
+    await (plugin as any).handleQueryCatalogRun({
+      context_graph_id: 'cg-1',
+      query: 'drafts',
+      agent_address: 'did:dkg:agent:peer-session',
+    });
+
+    expect(query).toHaveBeenCalledWith('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId: 'cg-1',
+      view: 'working-memory',
+      agentAddress: 'peer-session',
+    });
+  });
+
 
   it('saves query catalog timestamp ranks as unbounded integer literals', async () => {
     const rank = 1_714_000_000_000;

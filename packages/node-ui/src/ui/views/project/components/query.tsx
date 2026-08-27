@@ -351,24 +351,17 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       return false;
     }
   }, [activeExecution, session]);
-  const queryResult = executionMatchesSession
-    ? (data as any)?.result ?? (data as any)?.results
-    : undefined;
-  const resultType = queryResult?.type
-    ?? (Array.isArray(queryResult?.quads)
-      ? 'quads'
-      : typeof queryResult?.value === 'boolean'
-        ? 'boolean'
-        : 'bindings');
+  const queryResult = executionMatchesSession ? data?.result : undefined;
+  const resultType = queryResult?.type;
   const rows = useMemo(
     () => resultType === 'quads'
-      ? queryResult?.quads ?? []
+      ? queryResult.quads
       : resultType === 'bindings'
-        ? queryResult?.bindings ?? []
+        ? queryResult.bindings
         : [],
     [queryResult, resultType],
   );
-  const booleanResult = resultType === 'boolean' && typeof queryResult?.value === 'boolean'
+  const booleanResult = resultType === 'boolean'
     ? queryResult.value
     : undefined;
 

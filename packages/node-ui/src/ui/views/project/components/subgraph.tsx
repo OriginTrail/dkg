@@ -1426,20 +1426,15 @@ export function SubGraphDetailView({
         view: execution.view,
         subGraphName: execution.subGraphName,
       });
-      const result = (r as any)?.result;
-      const resultType = result?.type
-        ?? (Array.isArray(result?.quads)
-          ? 'quads'
-          : typeof result?.value === 'boolean'
-            ? 'boolean'
-            : 'bindings');
+      const result = r.result;
+      const resultType = result.type;
       if (resultType !== 'bindings') {
         throw new Error(
           `${q.name} returns ${resultType === 'boolean' ? 'an ASK result' : 'graph quads'} `
           + 'and cannot be used as an entity filter. Open it in Query Catalogue instead.',
         );
       }
-      const bindings = result?.bindings ?? [];
+      const bindings = result.bindings;
       const col = q.resultColumn || 'uri';
       const ids = new Set<string>();
       for (const row of bindings) {

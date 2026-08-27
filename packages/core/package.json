@@ -25,6 +25,11 @@
       "import": "./dist/query-catalog.js",
       "default": "./dist/query-catalog.js"
     },
+    "./query-result": {
+      "types": "./dist/query-result.d.ts",
+      "import": "./dist/query-result.js",
+      "default": "./dist/query-result.js"
+    },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"
   },

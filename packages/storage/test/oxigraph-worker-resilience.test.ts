@@ -138,6 +138,14 @@ describe('OxigraphWorkerStore resilience', () => {
       invoke: (store) => store.replaceSubject(GRAPH_A, 'urn:test:subject', []),
     },
     {
+      name: 'multi-subject replace',
+      affected: [GRAPH_A],
+      invoke: (store) => store.replaceSubjects(GRAPH_A, [
+        { subject: 'urn:test:subject:a', quads: [] },
+        { subject: 'urn:test:subject:b', quads: [] },
+      ]),
+    },
+    {
       name: 'graph drop',
       affected: [GRAPH_A],
       invoke: (store) => store.dropGraph(GRAPH_A),

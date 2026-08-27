@@ -142,7 +142,7 @@ function oneValue(
 
 function parseRank(value: string, fallback: number): number {
   const rank = Number.parseInt(value, 10);
-  return Number.isFinite(rank) && rank !== 0 ? rank : fallback;
+  return Number.isFinite(rank) ? rank : fallback;
 }
 
 function parseView(value: string): GetView | undefined {
@@ -156,17 +156,6 @@ function parseStoredView(value: string, field: string, queryIri: string): GetVie
     throw new Error(`Saved query ${queryIri} has unsupported ${field} value: ${value}.`);
   }
   return parsed;
-}
-
-/** Migration rule for catalogs authored before executionView was persisted. */
-export function legacyQueryCatalogExecutionView(
-  queryIri: string,
-  catalogIri: string,
-): GetView | undefined {
-  return queryIri.startsWith('urn:listenerboi:query:')
-    || catalogIri.startsWith('urn:listenerboi:catalog:')
-    ? 'working-memory'
-    : undefined;
 }
 
 export function decodeQueryCatalogBindings(
@@ -224,9 +213,7 @@ export function decodeQueryCatalogBindings(
       parameters: parseQueryCatalogParameters(
         oneValue(rows, 'queryParameters', queryIri) || undefined,
       ),
-      view: explicitView
-        ?? options.legacyView?.(queryIri, catalogIri)
-        ?? legacyQueryCatalogExecutionView(queryIri, catalogIri),
+      view: explicitView ?? options.legacyView?.(queryIri, catalogIri),
     });
   }
 

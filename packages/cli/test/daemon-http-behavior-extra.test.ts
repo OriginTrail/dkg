@@ -2023,6 +2023,7 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
         agentAddress: defaultAgentAddress,
       });
       expect(askRes.status).toBe(200);
+      expect(askRes.body?.result).toMatchObject({ type: 'boolean', value: false });
       expect(
         askRes.body?.result?.bindings,
         `ASK deny should be shaped as [{result:'false'}] — got ${JSON.stringify(askRes.body?.result)}`,
@@ -2039,6 +2040,7 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
         agentAddress: defaultAgentAddress,
       });
       expect(constructRes.status).toBe(200);
+      expect(constructRes.body?.result?.type).toBe('quads');
       expect(constructRes.body?.result?.bindings ?? []).toEqual([]);
       expect(
         constructRes.body?.result?.quads,
@@ -2053,6 +2055,7 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
         agentAddress: defaultAgentAddress,
       });
       expect(selectRes.status).toBe(200);
+      expect(selectRes.body?.result?.type).toBe('bindings');
       expect(selectRes.body?.result?.bindings ?? null).toEqual([]);
     },
     60_000,

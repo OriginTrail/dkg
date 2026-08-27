@@ -52,13 +52,17 @@ describe('query catalog codec', () => {
     ])).toThrow(/conflicting sparql values/);
   });
 
-  it('normalizes legacy ListenerBoi catalogs to their working-memory execution view', () => {
-    expect(decodeQueryCatalogBindings([{
+  it('keeps product-specific legacy view migration opt-in', () => {
+    const row = {
       q: 'urn:listenerboi:query:open-incidents',
       catalog: 'urn:listenerboi:catalog:investigations',
       sparql: 'SELECT * WHERE {}',
       subGraph: 'incidents',
-    }])[0]?.view).toBe('working-memory');
+    };
+    expect(decodeQueryCatalogBindings([row])[0]?.view).toBeUndefined();
+    expect(decodeQueryCatalogBindings([row], {
+      legacyView: () => 'working-memory',
+    })[0]?.view).toBe('working-memory');
   });
 
   it('rejects invalid and conflicting persisted execution views', () => {
@@ -98,6 +102,19 @@ describe('query catalog codec', () => {
       queryParameters: '[{"name":"id","type":"string"}]',
     });
     expect(decodeQueryCatalogBindings(encoded)).toEqual(decoded);
+  });
+
+  it('preserves zero query and catalog ranks across a codec round trip', () => {
+    const decoded = decodeQueryCatalogBindings([{
+      q: 'urn:dkg:profile:test:query:first',
+      catalog: 'urn:dkg:profile:test:catalog:first',
+      sparql: 'SELECT * WHERE {}',
+      subGraph: '__context_graph',
+      rank: '0',
+      catalogRank: '0',
+    }]);
+    expect(decoded[0]).toMatchObject({ rank: 0, catalogRank: 0 });
+    expect(decodeQueryCatalogBindings(encodeQueryCatalogBindings(decoded))).toEqual(decoded);
   });
 
   it('builds the same typed item and RDF write contract', () => {
