@@ -139,11 +139,21 @@ export interface AsyncLiftPublisher {
      */
     attachDemandListener(listener: () => void): () => void;
     /**
+     * Run one reconcile pass and report BOTH what it settled and whether actionable live work
+     * remains — one operation, one atomic answer, computed during the pass's own walk rather
+     * than by a second queue inventory. This is what the scheduling caller consumes per tick
+     * to pick its next cadence: a separate post-pass outlook query could fail after the pass
+     * succeeded and strand an already-served demand on the idle cadence. Identical pass
+     * semantics to {@link reconcileTransactions}, which stays the wire-stable numeric surface
+     * over the same pass.
+     */
+    reconcile(): Promise<{ reconciled: number; pendingWork: boolean }>;
+    /**
      * Whether any transaction-bearing job currently awaits chain-proof reconciliation — live
      * `broadcast`/`included` state with no executor (in-process or detached) still owning it,
-     * the same actionability rule the reconcile pass itself applies. Lets the caller hold a
-     * short reconcile cadence exactly while an unresolved chain question exists and fall back
-     * to its idle sweep otherwise.
+     * the same actionability rule the reconcile pass itself applies. A read-only probe for the
+     * caller's boot-time cadence seed and for diagnostics; the scheduling loop itself consumes
+     * {@link reconcile}'s outcome instead of pairing this query with the pass.
      */
     hasPendingWork(): Promise<boolean>;
   };

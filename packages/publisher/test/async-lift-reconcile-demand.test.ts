@@ -230,9 +230,12 @@ describe('async-lift reconciliation demand channel', () => {
       });
     }
 
-    await publisher.reconcileTransactions();
-    await publisher.reconcileTransactions();
-    await publisher.reconcileTransactions();
+    // Each budget-truncated pass reports its remaining work atomically in its own outcome —
+    // the probed job stays pending and the deadline-skipped tail counts as remaining too.
+    for (let pass = 0; pass < 3; pass += 1) {
+      const outcome = await publisher.reconciliationScheduling.reconcile();
+      expect(outcome).toEqual({ reconciled: 0, pendingWork: true });
+    }
 
     expect(asked.length).toBe(3);
     expect(new Set(asked).size).toBe(3);
@@ -284,7 +287,8 @@ describe('async-lift reconciliation demand channel', () => {
     // pass now reaches the chain-proof resolver for this job.
     expect(outlookAtPoke).toHaveLength(1);
     await expect(outlookAtPoke[0]).resolves.toBe(true);
-    await publisher.reconcileTransactions();
+    const outcome = await publisher.reconciliationScheduling.reconcile();
+    expect(outcome).toEqual({ reconciled: 0, pendingWork: true });
     expect(resolverAsks).toEqual([KA_VM_EXECUTOR_TX_HASH]);
   });
 
@@ -352,6 +356,8 @@ describe('async-lift reconciliation demand channel', () => {
     // wallet lock gone — chain proof released it, so the next job could claim this wallet.
     expect(executions).toEqual(['wallet-1']);
     expect(proofAsks).toBeGreaterThanOrEqual(2);
+    // The settled queue reports no remaining live work — the false polarity of the atomic outcome.
+    expect(await publisher.reconciliationScheduling.reconcile()).toEqual({ reconciled: 0, pendingWork: false });
     const lock = await store.query(`SELECT ?job WHERE {
       GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
         <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?job .

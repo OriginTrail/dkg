@@ -96,7 +96,7 @@ export class AsyncLiftRunner {
       ?.attachDemandListener(() => this.demandTransactionReconciliation());
     // Startup recovery may have left unresolved tx-bearing jobs behind (chain proof still
     // pending); seed the cadence choice from the queue rather than assuming idle.
-    await this.refreshPendingReconciliation();
+    await this.seedPendingReconciliation();
     this.scheduleTransactionReconciliation();
     this.running = Promise.all(
       this.config.walletIds.map((walletId) => this.walletLoop(walletId)),
@@ -156,13 +156,23 @@ export class AsyncLiftRunner {
     this.scheduleTransactionReconciliation();
   }
 
-  private async refreshPendingReconciliation(): Promise<void> {
+  /**
+   * BOOT-TIME cadence seed only — the per-tick outlook comes atomically out of the pass itself
+   * (see startTransactionReconciliation). Fail-open by design: a probe that cannot read the
+   * queue must neither abort startup nor stop scheduling; it reports through onError, keeps
+   * the previous (idle) cadence, and lets the idle sweep bound the staleness.
+   */
+  private async seedPendingReconciliation(): Promise<void> {
     const scheduling = this.config.publisher.reconciliationScheduling;
     if (!scheduling) return;
     try {
       this.pendingReconciliation = await scheduling.hasPendingWork();
-    } catch {
-      // An unanswerable queue read keeps the previous cadence; the idle sweep bounds staleness.
+    } catch (error) {
+      try {
+        await this.onError?.(error);
+      } catch {
+        // Error reporting must not turn the fail-open probe into a startup failure.
+      }
     }
   }
 
@@ -189,11 +199,21 @@ export class AsyncLiftRunner {
     // errorBackoffMs floor, and a poke landing mid-pass keeps `demanded` ahead of this capture.
     const generationAtStart = this.demandedGeneration;
     this.lastRecoveryAttemptAt = Date.now();
-    const recovery = (this.config.publisher.reconcileTransactions?.() ?? this.config.publisher.recover())
-      .then(async () => {
+    const scheduling = this.config.publisher.reconciliationScheduling;
+    // r3-red (🔴 3872934465) — the outlook arrives IN the pass result, so acknowledging the
+    // demand and learning whether work remains are one atomic step: there is no separate
+    // post-pass queue read that can fail after a successful pass, silently park an unresolved
+    // transaction on the idle cadence, and leave the demand already spent. A publisher without
+    // the capability has no outlook to report; its passes keep the seeded (idle) cadence.
+    const pass: Promise<{ reconciled: number; pendingWork: boolean }> = scheduling
+      ? scheduling.reconcile()
+      : (this.config.publisher.reconcileTransactions?.() ?? this.config.publisher.recover())
+        .then((reconciled) => ({ reconciled, pendingWork: this.pendingReconciliation }));
+    const recovery = pass
+      .then((outcome) => {
         this.lastRecoveryAt = Date.now();
+        this.pendingReconciliation = outcome.pendingWork;
         this.servedDemandGeneration = Math.max(this.servedDemandGeneration, generationAtStart);
-        await this.refreshPendingReconciliation();
       })
       .catch(async (error) => {
         try {

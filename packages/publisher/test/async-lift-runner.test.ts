@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AsyncLiftPublisher, LiftJob } from '../src/index.js';
 import { AsyncLiftRunner } from '../src/index.js';
 
@@ -470,14 +470,14 @@ describe('AsyncLiftRunner', () => {
     let demand: (() => void) | undefined;
     let reconciliationCalls = 0;
     const publisher = createPublisher({
-      reconcileTransactions: async () => {
-        reconciliationCalls += 1;
-        return 0;
-      },
       reconciliationScheduling: {
         attachDemandListener: (listener: () => void) => {
           demand = listener;
           return () => { demand = undefined; };
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: false };
         },
         hasPendingWork: async () => false,
       },
@@ -504,15 +504,15 @@ describe('AsyncLiftRunner', () => {
     const firstPassGate = new Promise<void>((resolve) => { releaseFirstPass = resolve; });
     let reconciliationCalls = 0;
     const publisher = createPublisher({
-      reconcileTransactions: async () => {
-        reconciliationCalls += 1;
-        if (reconciliationCalls === 1) await firstPassGate;
-        return 0;
-      },
       reconciliationScheduling: {
         attachDemandListener: (listener: () => void) => {
           demand = listener;
           return () => {};
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          if (reconciliationCalls === 1) await firstPassGate;
+          return { reconciled: 0, pendingWork: false };
         },
         hasPendingWork: async () => false,
       },
@@ -543,12 +543,12 @@ describe('AsyncLiftRunner', () => {
     let pending = true;
     let reconciliationCalls = 0;
     const publisher = createPublisher({
-      reconcileTransactions: async () => {
-        reconciliationCalls += 1;
-        return 0;
-      },
       reconciliationScheduling: {
         attachDemandListener: () => () => {},
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: pending };
+        },
         hasPendingWork: async () => pending,
       },
     } as any);
@@ -579,14 +579,14 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const errors: unknown[] = [];
     const publisher = createPublisher({
-      reconcileTransactions: async () => {
-        reconciliationCalls += 1;
-        throw new Error('reconciliation keeps failing');
-      },
       reconciliationScheduling: {
         attachDemandListener: (listener: () => void) => {
           demand = listener;
           return () => {};
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          throw new Error('reconciliation keeps failing');
         },
         hasPendingWork: async () => false,
       },
@@ -618,14 +618,14 @@ describe('AsyncLiftRunner', () => {
     let demand: (() => void) | undefined;
     let reconciliationCalls = 0;
     const publisher = createPublisher({
-      reconcileTransactions: async () => {
-        reconciliationCalls += 1;
-        return 0;
-      },
       reconciliationScheduling: {
         attachDemandListener: (listener: () => void) => {
           demand = listener;
           return () => { demand = undefined; };
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: false };
         },
         hasPendingWork: async () => false,
       },
@@ -655,15 +655,15 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const errors: unknown[] = [];
     const publisher = createPublisher({
-      reconcileTransactions: async () => {
-        reconciliationCalls += 1;
-        if (reconciliationCalls === 1) throw new Error('transient reconcile failure');
-        return 0;
-      },
       reconciliationScheduling: {
         attachDemandListener: (listener: () => void) => {
           demand = listener;
           return () => {};
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          if (reconciliationCalls === 1) throw new Error('transient reconcile failure');
+          return { reconciled: 0, pendingWork: false };
         },
         hasPendingWork: async () => false,
       },
@@ -683,6 +683,86 @@ describe('AsyncLiftRunner', () => {
     demand();
     await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(2));
     expect(errors).toHaveLength(1);
+    await runner.stop();
+  });
+
+  it('holds the documented 5000ms default active cadence when activeRecoveryIntervalMs is unset', async () => {
+    vi.useFakeTimers();
+    const blockedSleeps: Array<() => void> = [];
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachDemandListener: () => () => {},
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: true };
+        },
+        hasPendingWork: async () => true,
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      // No activeRecoveryIntervalMs: the row pins the library DEFAULT the slowdown fix relies
+      // on — a regression to a longer default would leave every override-based row green.
+      recoveryIntervalMs: 600_000,
+      errorBackoffMs: 1,
+      // Park the wallet loop without real timers: each idle turn blocks until stop.
+      sleep: () => new Promise<void>((resolve) => { blockedSleeps.push(resolve); }),
+    });
+    try {
+      await runner.start();
+      expect(reconciliationCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(reconciliationCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(reconciliationCalls).toBe(1);
+      // Repeats on the same default while pending work remains — the ACTIVE cadence, not the
+      // parked 600s idle sweep.
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(reconciliationCalls).toBe(2);
+    } finally {
+      const stopping = runner.stop();
+      blockedSleeps.forEach((resolve) => resolve());
+      await stopping;
+      vi.useRealTimers();
+    }
+  });
+
+  it('continues startup and scheduling when the boot-time pending probe rejects', async () => {
+    let demand!: () => void;
+    let reconciliationCalls = 0;
+    const errors: unknown[] = [];
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachDemandListener: (listener: () => void) => {
+          demand = listener;
+          return () => {};
+        },
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: false };
+        },
+        hasPendingWork: async () => {
+          throw new Error('store read failed during boot probe');
+        },
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 600_000,
+      onError: (error) => { errors.push(error); },
+    });
+
+    // Fail-open: the rejecting probe must neither abort startup...
+    await runner.start();
+    expect(errors).toHaveLength(1);
+    expect(reconciliationCalls).toBe(0);
+    // ...nor stop the scheduling loop that follows it.
+    demand();
+    await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(1));
     await runner.stop();
   });
 

@@ -1160,6 +1160,9 @@ export class TripleStoreAsyncLiftPublisher
         }
       };
     },
+    // r3-1 (🟡 3872935134) — the scheduling caller's per-tick operation: one pass, one atomic
+    // answer. `hasPendingWork` below remains for the boot-time seed and diagnostics only.
+    reconcile: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.runReconciliationPass(),
     hasPendingWork: async (): Promise<boolean> => {
       await this.ensureGraph();
       return (await this.list()).some((job) => this.isReconciliationActionable(job));
@@ -1683,10 +1686,23 @@ export class TripleStoreAsyncLiftPublisher
   async recover(): Promise<number> {
     await this.ensureGraph();
     await this.sweepStaleWalletLocks();
-    return await this.reconcileTransactions();
+    return (await this.runReconciliationPass()).reconciled;
   }
 
   async reconcileTransactions(): Promise<number> {
+    return (await this.runReconciliationPass()).reconciled;
+  }
+
+  /**
+   * r3-1 (🟡 3872935134) — ONE canonical pass that reports both what it settled and whether
+   * actionable live work remains, computed DURING the walk (per-job, from the same under-lock
+   * re-reads the pass already pays for) rather than by a second queue inventory afterwards.
+   * The scheduling caller consumes this outcome atomically, so there is no separate outlook
+   * read that can fail after a successful pass and strand a served demand on the idle cadence
+   * (r3-red 3872934465). `reconcileTransactions`/`recover` remain the wire-stable numeric
+   * surface over the same pass.
+   */
+  private async runReconciliationPass(): Promise<{ reconciled: number; pendingWork: boolean }> {
     await this.ensureGraph();
     let reconciled = await this.recoverInterruptedPreBroadcastJobs();
     // Same actionability rule the scheduling outlook answers with: executor-owned jobs are
@@ -1699,20 +1715,31 @@ export class TripleStoreAsyncLiftPublisher
     const offset = txBearing.length > 0 ? this.reconcilePassOffset++ % txBearing.length : 0;
     const rotatedTxBearing = txBearing.slice(offset).concat(txBearing.slice(0, offset));
 
+    // Live jobs this pass could not settle: still awaiting proof after their turn, or not
+    // reached before the deadline. Held-failed jobs are deliberately NOT counted — the
+    // failed-job dispatcher paces itself with per-job due times.
+    let remainingLive = 0;
     const deadline = new AbortController();
     const deadlineTimer = setTimeout(
       () => deadline.abort(),
       Math.max(0, this.chainProofDispatchTimeBudgetMs),
     );
     try {
-      for (const snapshot of rotatedTxBearing) {
-        if (deadline.signal.aborted) break;
+      for (let i = 0; i < rotatedTxBearing.length; i += 1) {
+        if (deadline.signal.aborted) {
+          remainingLive += rotatedTxBearing.length - i;
+          break;
+        }
+        const snapshot = rotatedTxBearing[i];
         await this.withJobTransitionLock(snapshot.jobId, async () => {
           const current = await this.getStatus(snapshot.jobId);
+          // Settled or re-owned since the pre-filter: no longer this pass's remaining work.
           if (!current || (current.status !== 'broadcast' && current.status !== 'included')) return;
           if (this.activeProcessJobIds.has(current.jobId)) return;
           if (await this.jobHandlerFor(current.request).recoverInterrupted(current, { signal: deadline.signal })) {
             reconciled += 1;
+          } else {
+            remainingLive += 1;
           }
         });
       }
@@ -1722,7 +1749,7 @@ export class TripleStoreAsyncLiftPublisher
     }
 
     reconciled += await this.dispatchFailedJobsOnChainProof();
-    return reconciled;
+    return { reconciled, pendingWork: remainingLive > 0 };
   }
 
   private async resolveChainProofWithinSignal(
