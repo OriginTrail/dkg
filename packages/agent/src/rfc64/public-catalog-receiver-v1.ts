@@ -23,8 +23,9 @@ import {
   Rfc64CatalogProviderFailureAggregateV1,
   type Rfc64CatalogProviderTerminalFailureV1,
 } from './public-catalog-reconciliation-failure-v1.js';
-import type {
-  Rfc64PublicCatalogReceiverCompletionV1,
+import {
+  createRfc64PublicCatalogReceiverCompletionV1,
+  type Rfc64PublicCatalogReceiverCompletionV1,
 } from './public-catalog-reconciliation-outcome-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
@@ -373,11 +374,9 @@ export class Rfc64PublicCatalogReceiverV1 {
     exactCompletionProviderKeys?: ReadonlySet<string>,
   ): void {
     if (this.#closed) {
-      completion?.(receiverCompletion({
+      completion?.(createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'closed',
-        appliedProviderPeerId: null,
         providerAttempts: 0,
-        error: null,
       }));
       return;
     }
@@ -425,11 +424,9 @@ export class Rfc64PublicCatalogReceiverV1 {
       if (this.#queue.length >= this.#maxQueue) {
         this.#droppedQueueFull += 1;
         if (!completionAttached && completion !== undefined) {
-          completion(receiverCompletion({
+          completion(createRfc64PublicCatalogReceiverCompletionV1({
             outcome: 'dropped',
-            appliedProviderPeerId: null,
             providerAttempts: 0,
-            error: null,
           }));
           completionAttached = true;
         }
@@ -477,11 +474,9 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));
     if (this.#queue.length >= this.#maxQueue) {
       this.#droppedQueueFull += 1;
-      completion(receiverCompletion({
+      completion(createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'dropped',
-        appliedProviderPeerId: null,
         providerAttempts: 0,
-        error: null,
       }));
       return;
     }
@@ -533,22 +528,18 @@ export class Rfc64PublicCatalogReceiverV1 {
     for (const timer of this.#deferralTimers) clearTimeout(timer);
     this.#deferralTimers.clear();
     for (const task of this.#deferred) {
-      this.#finishTask(task, receiverCompletion({
+      this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'closed',
-        appliedProviderPeerId: null,
         providerAttempts: task.providerAttempts ?? 0,
-        error: null,
       }));
       this.#pendingByKey.delete(task.key);
     }
     this.#deferred.clear();
     const abandoned = this.#queue.splice(0);
     for (const task of abandoned) {
-      this.#finishTask(task, receiverCompletion({
+      this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'closed',
-        appliedProviderPeerId: null,
         providerAttempts: task.providerAttempts ?? 0,
-        error: null,
       }));
       this.#pendingByKey.delete(task.key);
     }
@@ -612,11 +603,9 @@ export class Rfc64PublicCatalogReceiverV1 {
           case 'already-applied':
             this.#dedupedAlreadyApplied += 1;
             this.#finishSuccessfulReconciliationAttempt(task, outcome.announcement);
-            this.#finishTask(task, receiverCompletion({
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
               outcome: 'already-applied',
-              appliedProviderPeerId: null,
               providerAttempts: task.providerAttempts ?? 0,
-              error: null,
             }));
             break;
           case 'applied':
@@ -627,29 +616,24 @@ export class Rfc64PublicCatalogReceiverV1 {
               outcome.peerId,
             ));
             this.#finishSuccessfulReconciliationAttempt(task, outcome.announcement);
-            this.#finishTask(task, receiverCompletion({
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
               outcome: 'applied',
               appliedProviderPeerId: outcome.peerId,
               providerAttempts: task.providerAttempts ?? 0,
-              error: null,
             }));
             break;
           case 'staged-only':
             this.#stagedOnly += 1;
-            this.#finishTask(task, receiverCompletion({
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
               outcome: 'staged-only',
-              appliedProviderPeerId: null,
               providerAttempts: task.providerAttempts ?? 0,
-              error: null,
             }));
             break;
           case 'not-found':
             this.#notFound += 1;
-            this.#finishTask(task, receiverCompletion({
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
               outcome: 'not-found',
-              appliedProviderPeerId: null,
               providerAttempts: task.providerAttempts ?? 0,
-              error: null,
             }));
             break;
           case 'failed':
@@ -659,20 +643,17 @@ export class Rfc64PublicCatalogReceiverV1 {
               outcome.error,
               task.reconciliationAttemptToken ?? null,
             ));
-            this.#finishTask(task, receiverCompletion({
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
               outcome: 'failed',
-              appliedProviderPeerId: null,
               providerAttempts: task.providerAttempts ?? 0,
               error: outcome.error,
             }));
             break;
           case 'aborted':
           case 'defer-admission':
-            this.#finishTask(task, receiverCompletion({
+            this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
               outcome: 'closed',
-              appliedProviderPeerId: null,
               providerAttempts: task.providerAttempts ?? 0,
-              error: null,
             }));
             break;
         }
@@ -708,9 +689,8 @@ export class Rfc64PublicCatalogReceiverV1 {
         new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
         task.reconciliationAttemptToken ?? null,
       ));
-      this.#finishTask(task, receiverCompletion({
+      this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'failed',
-        appliedProviderPeerId: null,
         providerAttempts: task.providerAttempts ?? 0,
         error: new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
       }));
@@ -724,11 +704,9 @@ export class Rfc64PublicCatalogReceiverV1 {
       this.#deferralTimers.delete(timer);
       this.#deferred.delete(task);
       if (this.#closed || this.#closing.signal.aborted) {
-        this.#finishTask(task, receiverCompletion({
+        this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
           outcome: 'closed',
-          appliedProviderPeerId: null,
           providerAttempts: task.providerAttempts ?? 0,
-          error: null,
         }));
         this.#pendingByKey.delete(task.key);
         if (this.#isIdle()) this.#resolveIdle();
@@ -1001,12 +979,6 @@ function positiveInt(value: number | undefined, fallback: number): number {
 
 function nonNegativeInt(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : fallback;
-}
-
-function receiverCompletion(
-  completion: Rfc64PublicCatalogReceiverCompletionV1,
-): Rfc64PublicCatalogReceiverCompletionV1 {
-  return Object.freeze(completion);
 }
 
 function providerFailureV1(

@@ -65,6 +65,39 @@ export type Rfc64PublicCatalogReceiverCompletionV1 =
   | Rfc64PublicCatalogReceiverSuccessCompletionV1
   | Rfc64PublicCatalogReceiverFailureCompletionV1;
 
+export type Rfc64PublicCatalogReceiverCompletionInputV1 =
+  | Readonly<Rfc64PublicCatalogReceiverCompletionBaseV1 & {
+      readonly outcome: 'applied';
+      readonly appliedProviderPeerId: string;
+    }>
+  | Readonly<Rfc64PublicCatalogReceiverCompletionBaseV1 & {
+      readonly outcome: 'failed';
+      readonly error: unknown;
+    }>
+  | Readonly<Rfc64PublicCatalogReceiverCompletionBaseV1 & {
+      readonly outcome: Exclude<
+        Rfc64PublicCatalogReceiverCompletionOutcomeV1,
+        'applied' | 'failed'
+      >;
+    }>;
+
+/** Materialize the invariant fields for every receiver terminal outcome in one place. */
+export function createRfc64PublicCatalogReceiverCompletionV1(
+  input: Rfc64PublicCatalogReceiverCompletionInputV1,
+): Rfc64PublicCatalogReceiverCompletionV1 {
+  if (input.outcome === 'applied') {
+    return Object.freeze({ ...input, error: null });
+  }
+  if (input.outcome === 'failed') {
+    return Object.freeze({ ...input, appliedProviderPeerId: null });
+  }
+  return Object.freeze({
+    ...input,
+    appliedProviderPeerId: null,
+    error: null,
+  });
+}
+
 type FailureErrorPayload<Completion> = Completion extends {
   readonly outcome: infer Outcome;
   readonly error: infer ErrorValue;

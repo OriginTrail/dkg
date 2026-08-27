@@ -9,6 +9,7 @@ import {
   RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_OUTCOMES_V1,
   RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1,
   RFC64_PUBLIC_CATALOG_RECONCILIATION_SUCCESS_OUTCOMES_V1,
+  createRfc64PublicCatalogReceiverCompletionV1,
   isRfc64CatalogReconciliationFailureOutcomeV1,
   isRfc64CatalogReconciliationSuccessOutcomeV1,
   isRfc64PublicCatalogReceiverFailureCompletionV1,
@@ -69,6 +70,53 @@ describe('RFC-64 canonical reconciliation outcome v1', () => {
     expect(isRfc64PublicCatalogReceiverFailureCompletionV1(success)).toBe(false);
     expect(isRfc64PublicCatalogReceiverSuccessCompletionV1(failure)).toBe(false);
     expect(isRfc64PublicCatalogReceiverFailureCompletionV1(failure)).toBe(true);
+  });
+
+  it('materializes every frozen terminal payload from outcome-specific inputs', () => {
+    const failure = new Error('receiver failed');
+    const completions = [
+      createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'already-applied',
+        providerAttempts: 0,
+      }),
+      createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'applied',
+        appliedProviderPeerId: 'provider-peer',
+        providerAttempts: 1,
+      }),
+      createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'staged-only',
+        providerAttempts: 2,
+      }),
+      createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'not-found',
+        providerAttempts: 3,
+      }),
+      createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'failed',
+        providerAttempts: 4,
+        error: failure,
+      }),
+      createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'dropped',
+        providerAttempts: 0,
+      }),
+      createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'closed',
+        providerAttempts: 5,
+      }),
+    ];
+
+    expect(completions).toEqual([
+      { outcome: 'already-applied', providerAttempts: 0, appliedProviderPeerId: null, error: null },
+      { outcome: 'applied', appliedProviderPeerId: 'provider-peer', providerAttempts: 1, error: null },
+      { outcome: 'staged-only', providerAttempts: 2, appliedProviderPeerId: null, error: null },
+      { outcome: 'not-found', providerAttempts: 3, appliedProviderPeerId: null, error: null },
+      { outcome: 'failed', providerAttempts: 4, error: failure, appliedProviderPeerId: null },
+      { outcome: 'dropped', providerAttempts: 0, appliedProviderPeerId: null, error: null },
+      { outcome: 'closed', providerAttempts: 5, appliedProviderPeerId: null, error: null },
+    ]);
+    expect(completions.every(Object.isFrozen)).toBe(true);
   });
 
   it('keeps modern terminal errors compatible with the historical class and fields', () => {
