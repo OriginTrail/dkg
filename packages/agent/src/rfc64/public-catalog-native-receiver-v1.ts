@@ -189,11 +189,7 @@ export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
   (
     plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
     signal: AbortSignal,
-  ): Promise<
-    | void
-    | Rfc64PublicCatalogNativePrecommitTransactionV1
-    | Rfc64PublicCatalogNativeAppliedHeadLifecycleV1
-  >;
+  ): Promise<Rfc64PublicCatalogNativeAppliedHeadLifecycleV1>;
 }
 
 /** Side effects that become durable only when the catalog head CAS succeeds. */
@@ -218,9 +214,16 @@ export interface Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
  * reported without predecessor rollback and an exact replay retries the hook.
  */
 export interface Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 {
-  readonly transaction?: Rfc64PublicCatalogNativePrecommitTransactionV1;
-  readonly afterAppliedHead?: () => void | Promise<void>;
+  readonly kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1';
+  readonly transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null;
+  readonly afterAppliedHead: (() => void | Promise<void>) | null;
 }
+
+const NO_APPLIED_HEAD_LIFECYCLE_V1 = Object.freeze({
+  kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',
+  transaction: null,
+  afterAppliedHead: null,
+} satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1);
 
 export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
   /** Digest computed from the exact semantic projection+seal post-read. */
@@ -381,37 +384,23 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     let afterAppliedHead: (() => void | Promise<void>) | null = null;
     try {
       throwIfAborted(precommitSignal);
-      const returned = await this.options.beforeAppliedHeadCommit?.(
-        Object.freeze(plan),
-        precommitSignal,
-      );
-      if (returned !== undefined) {
-        if (isPrecommitTransactionV1(returned)) {
-          transaction = returned;
-        } else if (
-          returned !== null
-          && typeof returned === 'object'
-          && ('transaction' in returned || 'afterAppliedHead' in returned)
-        ) {
-          const lifecycle = returned as Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
-          if (
-            lifecycle.transaction !== undefined
-            && !isPrecommitTransactionV1(lifecycle.transaction)
-          ) {
-            throw new TypeError('catalog applied-head lifecycle returned an invalid transaction');
-          }
-          if (
-            lifecycle.afterAppliedHead !== undefined
-            && typeof lifecycle.afterAppliedHead !== 'function'
-          ) {
-            throw new TypeError('catalog applied-head lifecycle returned an invalid post-head hook');
-          }
-          transaction = lifecycle.transaction ?? null;
-          afterAppliedHead = lifecycle.afterAppliedHead ?? null;
-        } else {
-          throw new TypeError('catalog applied-head precommit returned an invalid transaction');
-        }
+      const returned = this.options.beforeAppliedHeadCommit === undefined
+        ? NO_APPLIED_HEAD_LIFECYCLE_V1
+        : await this.options.beforeAppliedHeadCommit(Object.freeze(plan), precommitSignal);
+      if (
+        returned === null
+        || typeof returned !== 'object'
+        || returned.kind !== 'rfc64-public-catalog-native-applied-head-lifecycle-v1'
+        || (returned.transaction !== null && !isPrecommitTransactionV1(returned.transaction))
+        || (
+          returned.afterAppliedHead !== null
+          && typeof returned.afterAppliedHead !== 'function'
+        )
+      ) {
+        throw new TypeError('catalog applied-head precommit returned an invalid lifecycle');
       }
+      transaction = returned.transaction;
+      afterAppliedHead = returned.afterAppliedHead;
       throwIfAborted(precommitSignal);
       return Object.freeze({ transaction, afterAppliedHead });
     } catch (cause) {

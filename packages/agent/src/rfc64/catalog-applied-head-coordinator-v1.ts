@@ -52,28 +52,29 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
     }
     const retirementAuthorized = accepted.policy.accessPolicy === 1
       && accepted.policy.source.kind === 'finalized-chain';
-    if (!retirementAuthorized) return primaryTransaction;
-
-    const catalogProjectionEvidence = plan.rows.map((row) => {
-      const binding = readVerifiedCatalogSealBindingV1(row.sealBinding);
-      const subGraphName = plan.catalogScope.subGraphName ?? undefined;
-      return Object.freeze({
-        contextGraphId: plan.catalogScope.contextGraphId,
-        ...(subGraphName === undefined ? {} : { subGraphName }),
-        kaUal: binding.seal.kaUal,
-        assertionVersion: binding.seal.assertionVersion,
-        publicQuadsDigest: row.publicQuadsDigest,
-        publicQuadsCount: Number(binding.seal.publicTripleCount),
-        privateTripleCount: Number(binding.seal.privateTripleCount),
-        ...(binding.seal.privateMerkleRoot === null
-          ? {}
-          : { privateMerkleRoot: binding.seal.privateMerkleRoot }),
-        expectedMerkleRoot: binding.seal.assertionMerkleRoot,
-      });
-    });
+    const catalogProjectionEvidence = retirementAuthorized
+      ? plan.rows.map((row) => {
+        const binding = readVerifiedCatalogSealBindingV1(row.sealBinding);
+        const subGraphName = plan.catalogScope.subGraphName ?? undefined;
+        return Object.freeze({
+          contextGraphId: plan.catalogScope.contextGraphId,
+          ...(subGraphName === undefined ? {} : { subGraphName }),
+          kaUal: binding.seal.kaUal,
+          assertionVersion: binding.seal.assertionVersion,
+          publicQuadsDigest: row.publicQuadsDigest,
+          publicQuadsCount: Number(binding.seal.publicTripleCount),
+          privateTripleCount: Number(binding.seal.privateTripleCount),
+          ...(binding.seal.privateMerkleRoot === null
+            ? {}
+            : { privateMerkleRoot: binding.seal.privateMerkleRoot }),
+          expectedMerkleRoot: binding.seal.assertionMerkleRoot,
+        });
+      })
+      : [];
     return Object.freeze({
-      ...(primaryTransaction === undefined ? {} : { transaction: primaryTransaction }),
-      afterAppliedHead: async () => {
+      kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',
+      transaction: primaryTransaction ?? null,
+      afterAppliedHead: retirementAuthorized ? async () => {
         const ctx = createOperationContext('sync');
         let retired = 0;
         for (const evidence of catalogProjectionEvidence) {
@@ -91,7 +92,7 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
             `Retired ${retired} byte-identical finalized SWM catalog twin(s) after applied-head commit`,
           );
         }
-      },
+      } : null,
     } satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1);
   });
 }

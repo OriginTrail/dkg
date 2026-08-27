@@ -175,6 +175,34 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     expect(result.insertedMetaQuads).toBe(curatorEquivalent.meta.length - 1);
   });
 
+  it('does not treat an absent private-only control plane as a materialized empty graph', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const descriptor = parseGraphScopedSwmRecoveryDescriptors({
+      contextGraphId: CG,
+      metaQuads: curatorPrivateOnly.meta,
+    })[0]!;
+    const deps = identityDeps(store, [...curatorPrivateOnly.meta]);
+
+    expect(await deps.snapshotMaterializer.readStoredHead(descriptor)).toEqual({
+      version: null,
+      needsRepair: false,
+      shareOperationId: null,
+    });
+    expect(await deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)).toBe(false);
+
+    const result = await recoverContextGraphSwm(deps);
+    expect(result.completed).toBe(true);
+    expect(await opSubjectExists(store, curatorPrivateOnly.operationSubject)).toBe(true);
+    const head = await store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${WS_META}> { `
+      + `<${curatorPrivateOnly.headSubject}> <${DKG}shareOperationId> ?op } }`,
+    );
+    expect(head.type === 'bindings' ? head.bindings.map((row) => String(row['op'])) : [])
+      .toEqual(['"private-curator"']);
+    expect(await deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+  });
+
   it('preserves a healthy private-only asset with the canonical empty public projection', async () => {
     const store = new OxigraphStore();
     stores.push(store);

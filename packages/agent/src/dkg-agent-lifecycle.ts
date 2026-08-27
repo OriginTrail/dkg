@@ -638,10 +638,12 @@ import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './star
 import {
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
   resolveRfc64SelectedRecoveryContextGraphIdsV1,
+  resolveRfc64PeerSwmRecoveryPlanV1,
   resolveRfc64SwmRecoveryLaneV1,
   type Rfc64PeerSwmRecoveryPlanV1,
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
 import {
+  canonicalizeRfc64SwmRecoveryTargetsV1,
   Rfc64SwmRecoveryCoordinatorV1,
   type Rfc64AuthorizedSwmRecoveryPlanV1,
 } from './rfc64/swm-recovery-coordinator-v1.js';
@@ -682,13 +684,11 @@ interface SharedMemorySyncFromPeerOptions {
   source?: SyncAdmissionSource;
   /** Internal execution selector; excluded from the ordinary public method. */
   selectedSwmPriority?: boolean;
-  /** One admitted config-bound request; its typed lanes are already authoritative. */
-  authorizedRfc64RecoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
 }
 
 type OrdinarySharedMemorySyncFromPeerOptions = Omit<
 SharedMemorySyncFromPeerOptions,
-'selectedSwmPriority' | 'authorizedRfc64RecoveryPlan'
+'selectedSwmPriority'
 >;
 
 interface SelectedSharedMemorySyncFromPeerOptions extends Omit<
@@ -1258,6 +1258,18 @@ type SharedMemorySyncContextGraphPlan = {
   privateRecoverFromCurator: string[];
   eligibleContextGraphIds: string[];
 };
+
+function sameRfc64SwmRecoveryTargetsV1(
+  left: Rfc64AuthorizedSwmRecoveryPlanV1['targets'],
+  right: Rfc64AuthorizedSwmRecoveryPlanV1['targets'],
+): boolean {
+  return left.length === right.length && left.every((target, index) => {
+    const expected = right[index];
+    return expected !== undefined
+      && target.contextGraphId === expected.contextGraphId
+      && target.lane === expected.lane;
+  });
+}
 
 function enforceRfc64CompleteProviderAuthority(
   plan: SharedMemorySyncContextGraphPlan,
@@ -4258,22 +4270,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ),
       syncingPeers: this.syncingPeers,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
-      syncAuthorizedPlan: (plan) => this.syncSelectedSharedMemoryFromPeerDetailed(
-        plan.providerPeerId,
-        [...plan.eligibleContextGraphIds],
-        {
-          stopOnBackoffWorthyFailure: true,
-          source: 'on-connect',
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [...plan.publicContextGraphIds],
-            privateRecoverFromCurator: [...plan.privateRecoverFromCurator],
-            eligibleContextGraphIds: [...plan.eligibleContextGraphIds],
-          },
-          priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
-          selectedSwmPriority: true,
-          authorizedRfc64RecoveryPlan: plan,
-        },
-      ),
+      syncAuthorizedPlan: (plan) => this.syncRfc64AuthorizedSwmRecoveryPlanV1(plan),
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => this.skippedNoSyncPeers.add(peerId),
       onPeerSynced: (peerId, outcome, onSyncAccounting) => {
@@ -6880,6 +6877,79 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return execution.shared;
   }
 
+  /**
+   * Execute one coordinator-admitted RFC-64 plan only after re-resolving its
+   * exact provider and lanes from current configuration. The structural input
+   * is never itself an authority token; ordinary sync still applies its own
+   * complete-provider enforcement after this dedicated boundary.
+   */
+  async syncRfc64AuthorizedSwmRecoveryPlanV1(
+    this: DKGAgent,
+    authorized: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
+  ): Promise<SelectedSharedMemorySyncResult> {
+    if (
+      !this.started
+      || !this.networkAdmissionCoordinator.isAcceptedPeer(authorized.providerPeerId)
+    ) {
+      throw new Error('RFC-64 SWM recovery provider is not admitted');
+    }
+    const configured = resolveRfc64PeerSwmRecoveryPlanV1(
+      this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+      authorized.providerPeerId,
+    );
+    const selectedPublic = new Set(this.config.syncContextGraphs ?? []);
+    const configuredPublicTargets = configured.targets.filter(
+      ({ contextGraphId, lane }) => lane === 'selected-public'
+        && selectedPublic.has(contextGraphId),
+    );
+    const configuredPublicIds = configuredPublicTargets.map(
+      ({ contextGraphId }) => contextGraphId,
+    );
+    const admission = this.selectedSwmBootstrapAdmission.snapshot(
+      authorized.providerPeerId,
+    );
+    const admittedPublicTargets = admission?.phase === 'retry-required'
+      && sameStringArray(admission.contextGraphIds, configuredPublicIds)
+      ? configuredPublicTargets
+      : [];
+    const expectedTargets = canonicalizeRfc64SwmRecoveryTargetsV1([
+      ...configured.targets.filter(({ lane }) => lane === 'ordinary-private'),
+      ...admittedPublicTargets,
+    ]);
+    const suppliedTargets = canonicalizeRfc64SwmRecoveryTargetsV1(authorized.targets);
+    if (
+      authorized.kind !== 'rfc64-authorized-swm-recovery-v1'
+      || expectedTargets === null
+      || suppliedTargets === null
+      || !sameRfc64SwmRecoveryTargetsV1(suppliedTargets, expectedTargets)
+    ) {
+      throw new Error('RFC-64 SWM recovery plan is not authorized by current configuration');
+    }
+
+    const publicContextGraphIds = suppliedTargets
+      .filter(({ lane }) => lane === 'selected-public')
+      .map(({ contextGraphId }) => contextGraphId);
+    const privateRecoverFromCurator = suppliedTargets
+      .filter(({ lane }) => lane === 'ordinary-private')
+      .map(({ contextGraphId }) => contextGraphId);
+    const eligibleContextGraphIds = suppliedTargets.map(({ contextGraphId }) => contextGraphId);
+    return this.syncSelectedSharedMemoryFromPeerDetailed(
+      authorized.providerPeerId,
+      eligibleContextGraphIds,
+      {
+        stopOnBackoffWorthyFailure: true,
+        source: 'on-connect',
+        sharedMemorySyncPlan: {
+          publicContextGraphIds,
+          privateRecoverFromCurator,
+          eligibleContextGraphIds,
+        },
+        priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
+        selectedSwmPriority: true,
+      },
+    );
+  }
+
   async syncSelectedSharedMemoryFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphIds: string[],
@@ -6957,40 +7027,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const initialPlan = planned && sameStringArray(planned.eligibleContextGraphIds, contextGraphIds)
       ? planned
       : await this.planSharedMemorySyncContextGraphs(remotePeerId, contextGraphIds, ctx);
-    // Ordinary caller-supplied plans remain optimization snapshots and pass
-    // through source-authority enforcement. The only bypass is the dedicated
-    // coordinator's typed request, whose provider and exact lanes must match
-    // this invocation before its already-admitted plan can execute.
-    const authorizedRecoveryPlan = options?.authorizedRfc64RecoveryPlan;
-    if (
-      authorizedRecoveryPlan !== undefined
-      && (
-        authorizedRecoveryPlan.kind !== 'rfc64-authorized-swm-recovery-v1'
-        || authorizedRecoveryPlan.providerPeerId !== remotePeerId
-        || !sameStringArray(authorizedRecoveryPlan.eligibleContextGraphIds, contextGraphIds)
-        || !sameStringArray(
-          authorizedRecoveryPlan.publicContextGraphIds,
-          initialPlan.publicContextGraphIds,
-        )
-        || !sameStringArray(
-          authorizedRecoveryPlan.privateRecoverFromCurator,
-          initialPlan.privateRecoverFromCurator,
-        )
-      )
-    ) {
-      throw new Error('RFC-64 authorized SWM recovery request does not match its execution plan');
-    }
-    const plan = authorizedRecoveryPlan === undefined
-      ? enforceRfc64CompleteProviderAuthority(
-        initialPlan,
-        remotePeerId,
-        (contextGraphId) => this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId),
-        (contextGraphId, peerId) => this.log.debug(
-          ctx,
-          `SWM sync: rejecting preplanned "${contextGraphId}" from ${peerId.slice(-8)} — RFC-64 complete provider selected`,
-        ),
-      )
-      : initialPlan;
+    // Every plan, including a dedicated RFC-64 execution, passes the ordinary
+    // source-authority guard. The RFC-64 boundary adds current-config proof;
+    // it does not create a parallel bypass mode inside generic synchronization.
+    const plan = enforceRfc64CompleteProviderAuthority(
+      initialPlan,
+      remotePeerId,
+      (contextGraphId) => this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId),
+      (contextGraphId, peerId) => this.log.debug(
+        ctx,
+        `SWM sync: rejecting preplanned "${contextGraphId}" from ${peerId.slice(-8)} — RFC-64 complete provider selected`,
+      ),
+    );
     const publicContextGraphIds = orderContextGraphIdsByPriority(
       plan.publicContextGraphIds,
       this.config.syncContextGraphPriorities,

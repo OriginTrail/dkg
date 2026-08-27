@@ -80,9 +80,10 @@ describe('RFC-64 SWM recovery coordinator', () => {
     expect(coordinator.authorize(mixedPlan())).toEqual({
       kind: 'rfc64-authorized-swm-recovery-v1',
       providerPeerId: PROVIDER,
-      publicContextGraphIds: [PUBLIC],
-      privateRecoverFromCurator: [PRIVATE],
-      eligibleContextGraphIds: [PUBLIC, PRIVATE],
+      targets: [
+        { contextGraphId: PRIVATE, lane: 'ordinary-private' },
+        { contextGraphId: PUBLIC, lane: 'selected-public' },
+      ],
     });
     expect(deps.requestSelectedPublicAdmission).toHaveBeenCalledOnce();
     expect(deps.requestSelectedPublicAdmission).toHaveBeenCalledWith(PROVIDER, [PUBLIC]);
@@ -96,13 +97,11 @@ describe('RFC-64 SWM recovery coordinator', () => {
     expect(coordinator.authorize(mixedPlan())).toEqual({
       kind: 'rfc64-authorized-swm-recovery-v1',
       providerPeerId: PROVIDER,
-      publicContextGraphIds: [],
-      privateRecoverFromCurator: [PRIVATE],
-      eligibleContextGraphIds: [PRIVATE],
+      targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
     });
   });
 
-  it('queues explicit private recovery independently of the generic mode switch', () => {
+  it('drives queued private recovery through accounting and synchronization', async () => {
     let scheduled: (() => void) | undefined;
     const schedule = vi.fn((run: () => void) => { scheduled = run; });
     const deps = dependencies({ schedule });
@@ -116,6 +115,36 @@ describe('RFC-64 SWM recovery coordinator', () => {
     expect(schedule).toHaveBeenCalledOnce();
     expect(deps.recordQueuedAt).toHaveBeenCalledWith(PROVIDER, 100_000);
     expect(scheduled).toBeTypeOf('function');
+    scheduled!();
+    await vi.waitFor(() => expect(deps.syncAuthorizedPlan).toHaveBeenCalledOnce());
+    expect(deps.getProbe).toHaveBeenCalledWith(PROVIDER);
+    expect(deps.accountAttempt).toHaveBeenCalledOnce();
+    expect(deps.syncAuthorizedPlan).toHaveBeenCalledWith({
+      kind: 'rfc64-authorized-swm-recovery-v1',
+      providerPeerId: PROVIDER,
+      targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
+    });
+    expect(handleError).not.toHaveBeenCalled();
+  });
+
+  it('forwards a queued run failure with its exact provider', async () => {
+    let scheduled: (() => void) | undefined;
+    const failure = new Error('probe failed');
+    const deps = dependencies({
+      schedule: (run) => { scheduled = run; },
+      getProbe: vi.fn(async () => Promise.reject(failure)),
+    });
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
+    const handleError = vi.fn();
+
+    expect(coordinator.queue({
+      providerPeerId: PROVIDER,
+      targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
+    }, handleError, 0)).toBe(true);
+    scheduled!();
+    await vi.waitFor(() => expect(handleError).toHaveBeenCalledWith(PROVIDER, failure));
+    expect(deps.accountAttempt).not.toHaveBeenCalled();
+    expect(deps.syncAuthorizedPlan).not.toHaveBeenCalled();
   });
 
   it('executes the real mixed-plan runner with one typed authorized request', async () => {
@@ -131,9 +160,10 @@ describe('RFC-64 SWM recovery coordinator', () => {
     expect(syncAuthorizedPlan).toHaveBeenCalledWith({
       kind: 'rfc64-authorized-swm-recovery-v1',
       providerPeerId: PROVIDER,
-      publicContextGraphIds: [PUBLIC],
-      privateRecoverFromCurator: [PRIVATE],
-      eligibleContextGraphIds: [PUBLIC, PRIVATE],
+      targets: [
+        { contextGraphId: PRIVATE, lane: 'ordinary-private' },
+        { contextGraphId: PUBLIC, lane: 'selected-public' },
+      ],
     });
   });
 });

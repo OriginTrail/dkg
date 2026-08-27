@@ -20,7 +20,6 @@ import {
   reconcileFinalizedSwmTwinFromCatalogProjection,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import type {
-  Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
   Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import {
@@ -146,8 +145,11 @@ describe('RFC-64 catalog applied-head coordinator', () => {
       retire: vi.fn(async () => {}),
     });
 
-    const returned = await handler(rfc64FinalizedVmPrecommitPlan(), new AbortController().signal);
-    const lifecycle = returned as Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
+    const lifecycle = await handler(
+      rfc64FinalizedVmPrecommitPlan(),
+      new AbortController().signal,
+    );
+    expect(lifecycle.kind).toBe('rfc64-public-catalog-native-applied-head-lifecycle-v1');
     expect(lifecycle.transaction).toBe(primary);
     expect(events).toEqual([]);
     await lifecycle.transaction!.commit();
@@ -168,8 +170,10 @@ describe('RFC-64 catalog applied-head coordinator', () => {
       writeLocks: new Map(),
       retire: vi.fn(async () => {}),
     });
-    const returned = await handler(rfc64FinalizedVmPrecommitPlan(), new AbortController().signal);
-    const lifecycle = returned as Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
+    const lifecycle = await handler(
+      rfc64FinalizedVmPrecommitPlan(),
+      new AbortController().signal,
+    );
     const cause = new Error('applied-head CAS rejected');
     await lifecycle.transaction!.rollback(cause);
 
@@ -196,9 +200,13 @@ describe('RFC-64 catalog applied-head coordinator', () => {
       retire,
     });
 
-    const returned = await handler(staleTwin.plan, new AbortController().signal);
-    expect(returned).toBe(primary);
-    await primary.commit();
+    const lifecycle = await handler(staleTwin.plan, new AbortController().signal);
+    expect(lifecycle).toEqual({
+      kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',
+      transaction: primary,
+      afterAppliedHead: null,
+    });
+    await lifecycle.transaction!.commit();
     expect(finalizedPolicyPrecommit).toHaveBeenCalledOnce();
     expect(finalizedVmPrecommit).not.toHaveBeenCalled();
     expect(retire).not.toHaveBeenCalled();

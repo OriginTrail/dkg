@@ -3,7 +3,10 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../dkg-agent-constants.js';
-import type { Rfc64PeerSwmRecoveryPlanV1 } from
+import type {
+  Rfc64PeerSwmRecoveryPlanV1,
+  Rfc64SwmRecoveryTargetV1,
+} from
   '../dkg-agent-rfc64-catalog-bootstrap.js';
 import type { SyncReconcilerProbe } from '../dkg-agent-types.js';
 import {
@@ -16,9 +19,8 @@ import type { SelectedSharedMemorySyncResult } from '../sync/shared-memory-fresh
 export interface Rfc64AuthorizedSwmRecoveryPlanV1 {
   readonly kind: 'rfc64-authorized-swm-recovery-v1';
   readonly providerPeerId: string;
-  readonly publicContextGraphIds: readonly string[];
-  readonly privateRecoverFromCurator: readonly string[];
-  readonly eligibleContextGraphIds: readonly string[];
+  /** The single canonical authority model; execution derives all lane views. */
+  readonly targets: readonly Readonly<Rfc64SwmRecoveryTargetV1>[];
 }
 
 export interface Rfc64SwmRecoveryCoordinatorDependenciesV1 {
@@ -68,7 +70,9 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
     recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
   ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
     const selectedPublic = new Set(this.deps.selectedPublicContextGraphIds());
-    const eligible = recoveryPlan.targets.filter(({ contextGraphId, lane }) => (
+    const canonicalTargets = canonicalizeRfc64SwmRecoveryTargetsV1(recoveryPlan.targets);
+    if (canonicalTargets === null) return null;
+    const eligible = canonicalTargets.filter(({ contextGraphId, lane }) => (
       lane === 'ordinary-private' || selectedPublic.has(contextGraphId)
     ));
     if (eligible.length === 0) return null;
@@ -84,20 +88,10 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       ({ lane }) => lane === 'ordinary-private' || publicAccepted,
     );
     if (acceptedTargets.length === 0) return null;
-    const publicContextGraphIds = acceptedTargets
-      .filter(({ lane }) => lane === 'selected-public')
-      .map(({ contextGraphId }) => contextGraphId);
-    const privateRecoverFromCurator = acceptedTargets
-      .filter(({ lane }) => lane === 'ordinary-private')
-      .map(({ contextGraphId }) => contextGraphId);
     return Object.freeze({
       kind: 'rfc64-authorized-swm-recovery-v1',
       providerPeerId: recoveryPlan.providerPeerId,
-      publicContextGraphIds: Object.freeze(publicContextGraphIds),
-      privateRecoverFromCurator: Object.freeze(privateRecoverFromCurator),
-      eligibleContextGraphIds: Object.freeze(acceptedTargets.map(
-        ({ contextGraphId }) => contextGraphId,
-      )),
+      targets: Object.freeze(acceptedTargets),
     });
   }
 
@@ -106,8 +100,9 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
     handleSyncError: (providerPeerId: string, error: unknown) => void,
     delayMs = 3_000,
   ): boolean {
+    if (!this.deps.isPeerAccepted(recoveryPlan.providerPeerId)) return false;
     const authorized = this.authorize(recoveryPlan);
-    if (authorized === null || !this.deps.isPeerAccepted(authorized.providerPeerId)) return false;
+    if (authorized === null) return false;
     const now = (this.deps.now ?? Date.now)();
     const disconnectBoundary = this.deps.disconnectBoundary(authorized.providerPeerId, now);
     const lastQueued = this.deps.lastQueuedAt(authorized.providerPeerId);
@@ -155,7 +150,7 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       syncingPeers: this.deps.syncingPeers,
       getPeerProtocols: this.deps.getPeerProtocols,
       selectedSharedMemoryLane: {
-        getContextGraphIds: () => [...authorized.eligibleContextGraphIds],
+        getContextGraphIds: () => authorized.targets.map(({ contextGraphId }) => contextGraphId),
         syncFromPeer: () => this.deps.syncAuthorizedPlan(authorized),
       },
       logInfo: this.deps.logInfo,
@@ -165,4 +160,19 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       },
     });
   }
+}
+
+/** Reject contradictory lanes and produce one stable target per Context Graph. */
+export function canonicalizeRfc64SwmRecoveryTargetsV1(
+  targets: readonly Readonly<Rfc64SwmRecoveryTargetV1>[],
+): readonly Readonly<Rfc64SwmRecoveryTargetV1>[] | null {
+  const lanes = new Map<string, Rfc64SwmRecoveryTargetV1['lane']>();
+  for (const { contextGraphId, lane } of targets) {
+    const current = lanes.get(contextGraphId);
+    if (current !== undefined && current !== lane) return null;
+    lanes.set(contextGraphId, lane);
+  }
+  return Object.freeze([...lanes]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([contextGraphId, lane]) => Object.freeze({ contextGraphId, lane })));
 }
