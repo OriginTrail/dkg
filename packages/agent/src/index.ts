@@ -152,7 +152,11 @@ export { DKGAgent } from './dkg-agent.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationResult,
   PublicMetaRepairDiagnostic,
-} from './dkg-agent-lifecycle.js';
+} from './configured-context-graph-metadata-reconciliation.js';
+export type {
+  ActivePublicContextGraphChainProof,
+  ChainAttestedPublicMetaRepairResult,
+} from './context-graph-public-meta-repair.js';
 export type {
   AcceptRfc64CatalogAccessSnapshotParamsV1,
   PublishAuthorCatalogExactSetSuccessorParamsV1,

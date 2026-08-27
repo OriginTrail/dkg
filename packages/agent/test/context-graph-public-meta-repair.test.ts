@@ -180,8 +180,11 @@ describe('chain-attested public metadata projection repair', () => {
     });
     const agentLike: any = {
       store,
+      chain: {},
+      peerId: CREATOR_PEER,
       resolveOnChainAccessPolicyState,
       isContextGraphPublicOnChain,
+      isPrivateContextGraph: vi.fn(async () => false),
       isCuratorOf: vi.fn(async () => false),
       hasConfirmedMetaState: LifecycleSyncMethods.prototype.hasConfirmedMetaState,
       localApprovedAgentByCG: new Map(),
@@ -201,9 +204,8 @@ describe('chain-attested public metadata projection repair', () => {
       expect(reconciliation).toEqual({
         outcome: 'authoritative',
         repair: {
-          status: 'completed',
           outcome: 'projection-complete',
-          chainEvidence: 'public',
+          chainProof: { state: 'public' },
         },
       });
       expect(resolveOnChainAccessPolicyState).toHaveBeenCalledTimes(1);
@@ -214,7 +216,7 @@ describe('chain-attested public metadata projection repair', () => {
     }
   });
 
-  it('wires lifecycle repair to the exact graph chain attestation before mutation', async () => {
+  it('reuses negative and positive chain evidence through the real confirmation path', async () => {
     const store = new OxigraphStore();
     const contextGraphId = '0x1234567890123456789012345678901234567890/lifecycle-wiring';
     const resolveOnChainAccessPolicyState = vi.fn()
@@ -222,9 +224,14 @@ describe('chain-attested public metadata projection repair', () => {
       .mockResolvedValueOnce(0);
     const agentLike = {
       store,
+      chain: {},
+      peerId: CREATOR_PEER,
       resolveOnChainAccessPolicyState,
+      isContextGraphPublicOnChain: vi.fn(async () => true),
+      isPrivateContextGraph: vi.fn(async () => false),
       isCuratorOf: vi.fn(async () => false),
-      hasConfirmedMetaState: vi.fn(async () => false),
+      localApprovedAgentByCG: new Map(),
+      subscribedContextGraphs: new Map(),
     };
     try {
       const first = await LifecycleSyncMethods.prototype
@@ -233,22 +240,20 @@ describe('chain-attested public metadata projection repair', () => {
         outcome: 'pending',
         reason: 'missing-metadata',
         repair: {
-          status: 'completed',
           outcome: 'not-chain-attested',
-          chainEvidence: 'private',
+          chainProof: { state: 'not-public', reason: 'private' },
         },
       });
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
+      expect(agentLike.isContextGraphPublicOnChain).not.toHaveBeenCalled();
 
       const second = await LifecycleSyncMethods.prototype
         .reconcileConfiguredContextGraphMetadata.call(agentLike as never, contextGraphId);
       expect(second).toEqual({
-        outcome: 'pending',
-        reason: 'missing-metadata',
+        outcome: 'authoritative',
         repair: {
-          status: 'completed',
           outcome: 'projection-complete',
-          chainEvidence: 'public',
+          chainProof: { state: 'public' },
         },
       });
       expect(await hasPublicProof(store, contextGraphId)).toBe(true);
@@ -256,6 +261,7 @@ describe('chain-attested public metadata projection repair', () => {
         contextGraphId,
         contextGraphId,
       ]);
+      expect(agentLike.isContextGraphPublicOnChain).not.toHaveBeenCalled();
     } finally {
       await store.close();
     }
@@ -272,9 +278,14 @@ describe('chain-attested public metadata projection repair', () => {
         .reconcileConfiguredContextGraphMetadata.call(
           {
             store,
+            chain: {},
+            peerId: CREATOR_PEER,
             resolveOnChainAccessPolicyState,
+            isContextGraphPublicOnChain: vi.fn(async () => false),
+            isPrivateContextGraph: vi.fn(async () => false),
             isCuratorOf: vi.fn(async () => false),
-            hasConfirmedMetaState: vi.fn(async () => false),
+            localApprovedAgentByCG: new Map(),
+            subscribedContextGraphs: new Map(),
           } as never,
           contextGraphId,
         );
@@ -283,13 +294,74 @@ describe('chain-attested public metadata projection repair', () => {
         outcome: 'pending',
         reason: 'missing-metadata',
         repair: {
-          status: 'completed',
           outcome: 'not-chain-attested',
-          chainEvidence: 'rpc-failure',
-          detail: 'temporary RPC outage',
+          chainProof: {
+            state: 'unknown',
+            reason: 'rpc-failure',
+            detail: 'temporary RPC outage',
+          },
         },
       });
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('classifies name-hash transport failures as rpc-failure without a second chain read', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = '0x1234567890123456789012345678901234567890/hash-rpc-failure';
+    const getContextGraphNameHash = vi.fn(async () => {
+      throw Object.assign(new Error('RPC endpoints exhausted'), {
+        code: 'RPC_ENDPOINTS_EXHAUSTED',
+      });
+    });
+    const isContextGraphPublicOnChain = vi.fn(
+      DKGAgent.prototype.isContextGraphPublicOnChain,
+    );
+    const agentLike: any = {
+      store,
+      chain: {
+        getContextGraphNameHash,
+        getContextGraphAccessPolicy: vi.fn(async () => 0 as const),
+        isContextGraphActiveOnChain: vi.fn(async () => true),
+      },
+      getContextGraphOnChainId: vi.fn(async () => '42'),
+      contextGraphExists: vi.fn(async () => false),
+      subscribedContextGraphs: new Map(),
+      wireIdToLocalCgId: new Map(),
+      onChainAccessPolicyCache: new Map(),
+      localApprovedAgentByCG: new Map(),
+      log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      peerId: CREATOR_PEER,
+      isCuratorOf: vi.fn(async () => false),
+      isPrivateContextGraph: vi.fn(async () => false),
+      isContextGraphPublicOnChain,
+    };
+    agentLike.resolveOnChainAccessPolicyState = DKGAgent.prototype.resolveOnChainAccessPolicyState;
+    agentLike.localCgMatchesOnChainSlot = DKGAgent.prototype.localCgMatchesOnChainSlot;
+    agentLike.isWireIdKeyedSubscription = DKGAgent.prototype.isWireIdKeyedSubscription;
+    agentLike.readLiveOnChainAccessPolicy = DKGAgent.prototype.readLiveOnChainAccessPolicy;
+    agentLike.raceChainPolicyRead = DKGAgent.prototype.raceChainPolicyRead;
+    try {
+      const reconciliation = await LifecycleSyncMethods.prototype
+        .reconcileConfiguredContextGraphMetadata.call(agentLike, contextGraphId);
+
+      expect(reconciliation).toEqual({
+        outcome: 'pending',
+        reason: 'missing-metadata',
+        repair: {
+          outcome: 'not-chain-attested',
+          chainProof: {
+            state: 'unknown',
+            reason: 'rpc-failure',
+            detail: 'RPC endpoints exhausted',
+          },
+        },
+      });
+      expect(getContextGraphNameHash).toHaveBeenCalledWith(42n);
+      expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+      expect(isContextGraphPublicOnChain).not.toHaveBeenCalled();
     } finally {
       await store.close();
     }
@@ -318,7 +390,9 @@ describe('chain-attested public metadata projection repair', () => {
       onChainAccessPolicyCache: new Map(),
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
       isCuratorOf: vi.fn(async () => false),
-      hasConfirmedMetaState: vi.fn(async () => false),
+      isPrivateContextGraph: vi.fn(async () => false),
+      localApprovedAgentByCG: new Map(),
+      peerId: CREATOR_PEER,
     };
     agentLike.isContextGraphPublicOnChain = DKGAgent.prototype.isContextGraphPublicOnChain;
     agentLike.resolveOnChainAccessPolicyState = DKGAgent.prototype.resolveOnChainAccessPolicyState;
@@ -334,9 +408,8 @@ describe('chain-attested public metadata projection repair', () => {
         outcome: 'pending',
         reason: 'missing-metadata',
         repair: {
-          status: 'completed',
           outcome: 'not-chain-attested',
-          chainEvidence: 'unprovable',
+          chainProof: { state: 'unknown', reason: 'unprovable' },
         },
       });
       expect(getContextGraphNameHash).toHaveBeenCalledWith(42n);
@@ -346,12 +419,10 @@ describe('chain-attested public metadata projection repair', () => {
       const rawSlotReconciliation = await LifecycleSyncMethods.prototype
         .reconcileConfiguredContextGraphMetadata.call(agentLike, contextGraphId);
       expect(rawSlotReconciliation).toEqual({
-        outcome: 'pending',
-        reason: 'missing-metadata',
+        outcome: 'authoritative',
         repair: {
-          status: 'completed',
           outcome: 'projection-complete',
-          chainEvidence: 'public',
+          chainProof: { state: 'public' },
         },
       });
       expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);

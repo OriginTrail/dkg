@@ -440,7 +440,7 @@ function mapContextGraphSlotBindingOutcome(
 ): boolean {
   if (outcome.kind === 'match') return true;
   if (outcome.kind === 'unprovable') return mode === 'legacy-policy';
-  if (outcome.kind === 'transportFailure' && mode === 'retryable-durable') {
+  if (outcome.kind === 'transportFailure' && mode !== 'legacy-policy') {
     throw outcome.error;
   }
   return false;

@@ -8,6 +8,7 @@ import {
   bootstrapConfiguredContextGraphs,
 } from '../src/daemon/lifecycle.js';
 import {
+  persistProjectSyncedReadiness,
   registerProjectSyncedReadinessPersistence,
 } from '../src/context-graph-readiness.js';
 
@@ -54,9 +55,8 @@ function createAgent(
   const reconcileConfiguredContextGraphMetadata = vi.fn(
     async (contextGraphId: string): Promise<ConfiguredContextGraphMetadataReconciliationResult> => {
       const repair = {
-        status: 'completed' as const,
         outcome: 'not-chain-attested' as const,
-        chainEvidence: 'unregistered' as const,
+        chainProof: { state: 'not-public' as const, reason: 'unregistered' as const },
       };
       return confirmedMeta[contextGraphId] ?? Boolean(creators[contextGraphId])
         ? { outcome: 'authoritative', repair }
@@ -237,9 +237,8 @@ describe('configured context graph daemon bootstrap', () => {
     fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
       outcome: 'authoritative',
       repair: {
-        status: 'completed',
         outcome: 'projection-complete',
-        chainEvidence: 'public',
+        chainProof: { state: 'public' },
       },
     });
     const log = vi.fn();
@@ -280,9 +279,8 @@ describe('configured context graph daemon bootstrap', () => {
       outcome: 'pending',
       reason: 'conflicting-policy',
       repair: {
-        status: 'completed',
         outcome: 'conflicting-policy',
-        chainEvidence: 'public',
+        chainProof: { state: 'public' },
       },
     });
 
@@ -322,17 +320,15 @@ describe('configured context graph daemon bootstrap', () => {
         outcome: 'pending',
         reason: 'conflicting-policy',
         repair: {
-          status: 'completed',
           outcome: 'conflicting-policy',
-          chainEvidence: 'public',
+          chainProof: { state: 'public' },
         },
       })
       .mockResolvedValueOnce({
         outcome: 'authoritative',
         repair: {
-          status: 'completed',
           outcome: 'projection-complete',
-          chainEvidence: 'public',
+          chainProof: { state: 'public' },
         },
       });
 
@@ -355,7 +351,7 @@ describe('configured context graph daemon bootstrap', () => {
     });
   });
 
-  it('preserves authoritative metadata that arrives during the single locked reconciliation', async () => {
+  it('queues real PROJECT_SYNCED persistence behind the pending-state reset', async () => {
     const contextGraphId = '0x1234567890123456789012345678901234567890/late-authoritative';
     const fixture = createAgent(
       {
@@ -372,41 +368,61 @@ describe('configured context graph daemon bootstrap', () => {
     );
     let releaseReconciliation!: () => void;
     const reconciliationBlocked = new Promise<void>((resolve) => { releaseReconciliation = resolve; });
-    let authoritative = false;
     fixture.reconcileConfiguredContextGraphMetadata.mockImplementation(async () => {
       await reconciliationBlocked;
-      const repair = {
-        status: 'completed' as const,
-        outcome: 'not-chain-attested' as const,
-        chainEvidence: 'unprovable' as const,
+      return {
+        outcome: 'pending' as const,
+        reason: 'missing-metadata' as const,
+        repair: {
+          outcome: 'not-chain-attested' as const,
+          chainProof: { state: 'unknown' as const, reason: 'unprovable' as const },
+        },
       };
-      return authoritative
-        ? { outcome: 'authoritative' as const, repair }
-        : { outcome: 'pending' as const, reason: 'missing-metadata' as const, repair };
     });
+    const readinessWrites: Array<Readonly<{
+      durableVerified: boolean;
+      sharedMemoryVerified: boolean;
+    }>> = [];
+    const readinessStore = {
+      setContextGraphReadinessProvenance: vi.fn((_id, readiness) => {
+        readinessWrites.push({
+          durableVerified: readiness.durableVerified,
+          sharedMemoryVerified: readiness.sharedMemoryVerified,
+        });
+      }),
+    };
 
     const bootstrap = bootstrapConfiguredContextGraphs({
       agent: fixture.agent,
       configuredContextGraphIds: [contextGraphId],
       networkDefaultContextGraphIds: [],
+      readinessStore,
       log: vi.fn(),
     });
     await vi.waitFor(() => {
       expect(fixture.reconcileConfiguredContextGraphMetadata).toHaveBeenCalledTimes(1);
     });
-    authoritative = true;
+    const projectSynced = persistProjectSyncedReadiness({
+      agent: fixture.agent,
+      store: readinessStore,
+      contextGraphId,
+      dataSynced: 1,
+      sharedMemorySynced: 1,
+    });
+    expect(readinessWrites).toEqual([]);
     releaseReconciliation();
-    await bootstrap;
+    await Promise.all([bootstrap, projectSynced]);
 
     expect(fixture.reconcileConfiguredContextGraphMetadata).toHaveBeenCalledTimes(1);
-    expect(fixture.markContextGraphSubscriptionState).not.toHaveBeenCalledWith(
-      contextGraphId,
-      expect.objectContaining({ metaSynced: false }),
-    );
+    expect(readinessWrites).toEqual([
+      { durableVerified: false, sharedMemoryVerified: false },
+      { durableVerified: true, sharedMemoryVerified: true },
+    ]);
     expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
-      synced: true,
-      sharedMemorySynced: true,
-      metaSynced: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
     });
   });
 
@@ -429,10 +445,12 @@ describe('configured context graph daemon bootstrap', () => {
       outcome: 'pending',
       reason: 'missing-metadata',
       repair: {
-        status: 'completed',
         outcome: 'not-chain-attested',
-        chainEvidence: 'rpc-failure',
-        detail: 'temporary RPC outage',
+        chainProof: {
+          state: 'unknown',
+          reason: 'rpc-failure',
+          detail: 'temporary RPC outage',
+        },
       },
     });
 
@@ -482,7 +500,7 @@ describe('configured context graph daemon bootstrap', () => {
     fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
       outcome: 'pending',
       reason: 'missing-metadata',
-      repair: { status: 'failed', detail: 'simulated chain RPC failure' },
+      repair: { outcome: 'repair-failed', detail: 'simulated chain RPC failure' },
     });
     const log = vi.fn();
 
@@ -610,9 +628,8 @@ describe('configured context graph daemon bootstrap', () => {
     fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
       outcome: 'authoritative',
       repair: {
-        status: 'completed',
         outcome: 'already-complete',
-        chainEvidence: 'not-requested',
+        chainProof: { state: 'not-requested' },
       },
     });
     const readinessStore = {

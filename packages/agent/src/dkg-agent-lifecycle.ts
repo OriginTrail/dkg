@@ -165,11 +165,14 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePrivateMetaAskQuery } from './context-graph-private-meta-proof.js';
-import { buildAuthoritativePublicMetaAskQuery } from './context-graph-public-meta-proof.js';
 import {
-  repairChainAttestedPublicMetaProjection,
   repairCreatorPublicMetaProjections,
 } from './context-graph-public-meta-repair.js';
+import {
+  confirmConfiguredContextGraphMetadataV1,
+  reconcileConfiguredContextGraphMetadataV1,
+  type ConfiguredContextGraphMetadataReconciliationResult,
+} from './configured-context-graph-metadata-reconciliation.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -632,54 +635,6 @@ import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
 
-const ACTIVE_PUBLIC_CHAIN_EVIDENCE = Symbol('activePublicChainEvidence');
-
-type ChainAttestedPublicMetaRepairResult = Awaited<
-  ReturnType<typeof repairChainAttestedPublicMetaProjection>
->;
-type ActivePublicContextGraphChainProof = Awaited<
-  ReturnType<Parameters<typeof repairChainAttestedPublicMetaProjection>[2]>
->;
-
-export type PublicMetaRepairDiagnostic =
-  | {
-      status: 'completed';
-      outcome: ChainAttestedPublicMetaRepairResult['outcome'];
-      chainEvidence:
-        | 'not-requested'
-        | 'public'
-        | 'private'
-        | 'unregistered'
-        | 'unprovable'
-        | 'rpc-failure';
-      detail?: string;
-    }
-  | { status: 'failed'; detail: string };
-
-export type ConfiguredContextGraphMetadataReconciliationResult =
-  | { outcome: 'authoritative'; repair: PublicMetaRepairDiagnostic }
-  | {
-      outcome: 'pending';
-      reason: 'conflicting-policy' | 'missing-metadata';
-      repair: PublicMetaRepairDiagnostic;
-    };
-
-function publicMetaRepairDiagnostic(
-  result: ChainAttestedPublicMetaRepairResult,
-): PublicMetaRepairDiagnostic {
-  const { chainProof } = result;
-  const chainEvidence = chainProof.state === 'not-requested' || chainProof.state === 'public'
-    ? chainProof.state
-    : chainProof.reason;
-  return {
-    status: 'completed',
-    outcome: result.outcome,
-    chainEvidence,
-    ...(chainProof.state === 'unknown' && chainProof.detail
-      ? { detail: chainProof.detail }
-      : {}),
-  };
-}
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import {
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
@@ -9702,238 +9657,58 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<ConfiguredContextGraphMetadataReconciliationResult> {
-    const normalizedContextGraphId = contextGraphId.trim();
-    if (!normalizedContextGraphId) {
-      return {
-        outcome: 'pending',
-        reason: 'missing-metadata',
-        repair: { status: 'failed', detail: 'Context graph id is empty' },
-      };
-    }
-
-    let resolvedChainProof: ActivePublicContextGraphChainProof | undefined;
-    let repair: PublicMetaRepairDiagnostic;
-    try {
-      const repaired = await repairChainAttestedPublicMetaProjection(
-        this.store,
-        normalizedContextGraphId,
-        async (): Promise<ActivePublicContextGraphChainProof> => {
-          try {
-            const state = await this.resolveOnChainAccessPolicyState(
-              normalizedContextGraphId,
-              createOperationContext('init'),
-              { slotBindingMode: 'chain-attested-repair' },
-            );
-            resolvedChainProof = state === 0
-              ? { state: 'public' }
-              : state === 1
-                ? { state: 'not-public', reason: 'private' }
-                : state === 'unregistered'
-                  ? { state: 'not-public', reason: 'unregistered' }
-                  : { state: 'unknown', reason: 'unprovable' };
-          } catch (error) {
-            resolvedChainProof = {
-              state: 'unknown',
-              reason: 'rpc-failure',
-              detail: error instanceof Error ? error.message : String(error),
-            };
-          }
-          return resolvedChainProof;
-        },
-      );
-      if (repaired.chainProof.state !== 'not-requested') {
-        resolvedChainProof = repaired.chainProof;
-      }
-      repair = publicMetaRepairDiagnostic(repaired);
-    } catch (error) {
-      repair = {
-        status: 'failed',
-        detail: error instanceof Error ? error.message : String(error),
-      };
-    }
-
-    if (repair.status === 'completed' && repair.outcome === 'conflicting-policy') {
-      return { outcome: 'pending', reason: 'conflicting-policy', repair };
-    }
-
-    const locallyCurated = await this.isCuratorOf(normalizedContextGraphId).catch(() => false);
-    const hasConfirmedMeta = await this.hasConfirmedMetaState(
-      normalizedContextGraphId,
-      {
-        rejectUnregisteredPlaceholder: !locallyCurated,
-        ...(resolvedChainProof === undefined
-          ? {}
-          : { [ACTIVE_PUBLIC_CHAIN_EVIDENCE]: resolvedChainProof.state === 'public' }),
+    return reconcileConfiguredContextGraphMetadataV1({
+      store: this.store,
+      resolveActivePublicChainProof: async (normalizedContextGraphId) => {
+        const state = await this.resolveOnChainAccessPolicyState(
+          normalizedContextGraphId,
+          createOperationContext('init'),
+          { slotBindingMode: 'chain-attested-repair' },
+        );
+        return state === 0
+          ? { state: 'public' }
+          : state === 1
+            ? { state: 'not-public', reason: 'private' }
+            : state === 'unregistered'
+              ? { state: 'not-public', reason: 'unregistered' }
+              : { state: 'unknown', reason: 'unprovable' };
       },
-    ).catch(() => false);
-    if (hasConfirmedMeta) {
-      return { outcome: 'authoritative', repair };
-    }
-    return { outcome: 'pending', reason: 'missing-metadata', repair };
+      isLocallyCurated: (normalizedContextGraphId) =>
+        this.isCuratorOf(normalizedContextGraphId),
+      confirmMetadata: (normalizedContextGraphId, input) =>
+        confirmConfiguredContextGraphMetadataV1({
+          chain: this.chain,
+          isContextGraphPublicOnChain: (id) => this.isContextGraphPublicOnChain(
+            id,
+            createOperationContext('sync'),
+          ),
+          isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
+          localApprovedAgentByContextGraph: this.localApprovedAgentByCG,
+          peerId: this.peerId,
+          store: this.store,
+          subscriptions: this.subscribedContextGraphs,
+        }, normalizedContextGraphId, input),
+    }, contextGraphId);
   }
 
   async hasConfirmedMetaState(this: DKGAgent,
     contextGraphId: string,
     options?: {
       rejectUnregisteredPlaceholder?: boolean;
-      [ACTIVE_PUBLIC_CHAIN_EVIDENCE]?: boolean;
     },
   ): Promise<boolean> {
-    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
-      return true;
-    }
-
-    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-    // `ensureContextGraphLocal` historically wrote only this marker into
-    // `_meta`, then labelled the subscription `metaSynced=true`. That row is
-    // local bootstrap intent, not metadata learned from the curator. Exclude
-    // it from the positive proof and remember it so the ontology declaration
-    // below cannot turn the same shadow into a false-public confirmation.
-    const unregisteredPlaceholderResult = await this.store.query(
-      `ASK WHERE {
-        GRAPH <${metaGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "unregistered" .
-        }
-      }`,
-      { source: 'agent.contextGraph.confirmedMeta.unregisteredPlaceholder' },
-    );
-    const hasUnregisteredPlaceholder = unregisteredPlaceholderResult.type === 'boolean' &&
-      unregisteredPlaceholderResult.value === true;
-    const hasResolvedActivePublicChainEvidence = options !== undefined &&
-      Object.prototype.hasOwnProperty.call(options, ACTIVE_PUBLIC_CHAIN_EVIDENCE);
-    let hasActivePublicOnChainProof: boolean | undefined = hasResolvedActivePublicChainEvidence
-      ? options[ACTIVE_PUBLIC_CHAIN_EVIDENCE]
-      : undefined;
-    if (
-      hasUnregisteredPlaceholder &&
-      options?.rejectUnregisteredPlaceholder === true &&
-      !hasResolvedActivePublicChainEvidence
-    ) {
-      // Replicas do not rewrite the creator's local registrationStatus marker,
-      // so a legitimately registered public CG can still say "unregistered".
-      // Preserve that shape only on fresh positive chain proof (tracked
-      // non-zero id, active slot, accessPolicy=public); a legacy local shadow
-      // has no such proof, and a private slot cannot borrow its public ontology
-      // fallback.
-      hasActivePublicOnChainProof = await this.isContextGraphPublicOnChain(
-        contextGraphId,
+    return confirmConfiguredContextGraphMetadataV1({
+      chain: this.chain,
+      isContextGraphPublicOnChain: (id) => this.isContextGraphPublicOnChain(
+        id,
         createOperationContext('sync'),
-      ).catch(() => false);
-    }
-    // Curated/private CG creation in 10.0.6 emits this complete definition in
-    // `_meta`: type + private policy + creator peer DID + curator wallet DID.
-    // Requiring both identities prevents an incidental/provenance type triple
-    // (or a lone allowlist/policy write) from making bootstrap look complete.
-    const approvedAgentAddress = this.localApprovedAgentByCG.get(contextGraphId);
-    let expectedDelegateeOpKey: string | undefined;
-    if (approvedAgentAddress) {
-      try {
-        expectedDelegateeOpKey = await inferAdapterPublisherAddress(this.chain);
-      } catch {
-        // The libp2p peer binding remains sufficient when no op-key is exposed.
-      }
-    }
-    const authoritativeDefinitionResult = await this.store.query(
-      buildAuthoritativePrivateMetaAskQuery(
-        contextGraphId,
-        approvedAgentAddress
-          ? {
-              approvedAgentAddress,
-              expectedDelegateePeerId: this.peerId,
-              expectedDelegateeOpKey,
-            }
-          : undefined,
       ),
-      { source: 'agent.contextGraph.confirmedMeta.privateDefinition' },
-    );
-    if (
-      authoritativeDefinitionResult.type === 'boolean' &&
-      authoritativeDefinitionResult.value === true
-    ) {
-      return true;
-    }
-
-    // Public subscriptions have no member credential to prove. A complete
-    // root definition that explicitly says `accessPolicy="public"` is the
-    // corresponding authoritative metadata gate; publisher allowlists do not
-    // alter that read/subscription policy. Keep this separate from the private
-    // definition above so private bootstrap still requires the current local
-    // member delegation.
-    const authoritativePublicDefinitionResult = await this.store.query(
-      buildAuthoritativePublicMetaAskQuery(contextGraphId),
-      { source: 'agent.contextGraph.confirmedMeta.publicDefinition' },
-    );
-    if (
-      authoritativePublicDefinitionResult.type === 'boolean' &&
-      authoritativePublicDefinitionResult.value === true &&
-      // A replica may retain the creator's local-only placeholder. When the
-      // caller explicitly rejects that shape, preserve the existing fresh
-      // active-public chain requirement instead of trusting the shadow alone.
-      (!hasUnregisteredPlaceholder || options?.rejectUnregisteredPlaceholder !== true || hasActivePublicOnChainProof)
-    ) {
-      return true;
-    }
-
-    // A tracked, active registration with live accessPolicy=public is an
-    // independent authority. This covers chain-discovered subscriptions whose
-    // local ontology/control projection has not landed yet. The registry
-    // resolver is fail-closed: it requires an identity-bound on-chain id,
-    // liveness, and policy=public, so a private or stale slot cannot pass.
-    if (hasActivePublicOnChainProof === undefined) {
-      hasActivePublicOnChainProof = await this.isContextGraphPublicOnChain(
-        contextGraphId,
-        createOperationContext('sync'),
-      ).catch(() => false);
-    }
-    if (hasActivePublicOnChainProof) return true;
-
-    // `ensureContextGraphLocal` remains authoritative for explicit public
-    // network defaults, including namespaced defaults. Reject that otherwise-
-    // valid shape for trusted join/pending bootstrap state or when a caller
-    // explicitly classifies it as remote. The one remote exception requires
-    // fresh active-public chain proof; a slash heuristic or onChainId alone
-    // would break defaults or let a private slot borrow the public fallback.
-    if (
-      hasUnregisteredPlaceholder &&
-      (
-        this.localApprovedAgentByCG.has(contextGraphId) ||
-        (
-          !hasActivePublicOnChainProof &&
-          (
-            options?.rejectUnregisteredPlaceholder === true ||
-            this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta === true
-          )
-        )
-      )
-    ) {
-      return false;
-    }
-
-    // Ontology-only fallback: a CG declared `rdf:type dkg:ContextGraph` can be
-    // treated as confirmably-public for the gossip race-opener ONLY when
-    // no local evidence of a restriction exists. Raw contextGraph declaration
-    // is not enough on its own — `inviteToContextGraph` writes
-    // `dkg:allowedPeer` straight to `_meta` without updating ontology, so
-    // a CG that was announced publicly and later allowlisted would look
-    // "just a contextGraph" here even though the curator expects the allowlist
-    // to gate gossip. Require `isPrivateContextGraph()` (now also reads
-    // `DKG_ALLOWED_PEER`) to explicitly return false before honoring the
-    // bypass.
-    if (await this.isPrivateContextGraph(contextGraphId)) {
-      return false;
-    }
-
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const ontologyResult = await this.store.query(
-      `ASK WHERE {
-        GRAPH <${ontologyGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-        }
-      }`,
-      { source: 'agent.contextGraph.confirmedMeta.ontologyDeclaration' },
-    );
-    return ontologyResult.type === 'boolean' && ontologyResult.value === true;
+      isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
+      localApprovedAgentByContextGraph: this.localApprovedAgentByCG,
+      peerId: this.peerId,
+      store: this.store,
+      subscriptions: this.subscribedContextGraphs,
+    }, contextGraphId, options);
   }
 
   async hasConfirmedSharedMemoryMetaState(this: DKGAgent, contextGraphId: string): Promise<boolean> {

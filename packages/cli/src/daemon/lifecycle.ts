@@ -1097,7 +1097,7 @@ export async function bootstrapConfiguredContextGraphs(input: {
       store: input.readinessStore ?? {},
       contextGraphId,
     });
-    if (reconciliation.repair.status === 'failed') {
+    if (reconciliation.repair.outcome === 'repair-failed') {
       input.log(
         `Context graph "${contextGraphId}" public metadata repair failed: ${reconciliation.repair.detail} — continuing fail-closed`,
       );
@@ -1107,13 +1107,11 @@ export async function bootstrapConfiguredContextGraphs(input: {
       );
     } else if (
       reconciliation.repair.outcome === 'not-chain-attested'
-      && (
-        reconciliation.repair.chainEvidence === 'unprovable'
-        || reconciliation.repair.chainEvidence === 'rpc-failure'
-      )
+      && reconciliation.repair.chainProof.state === 'unknown'
     ) {
+      const { reason, detail } = reconciliation.repair.chainProof;
       input.log(
-        `Context graph "${contextGraphId}" public chain proof is unavailable (${reconciliation.repair.chainEvidence}${reconciliation.repair.detail ? `: ${reconciliation.repair.detail}` : ''}) — continuing fail-closed`,
+        `Context graph "${contextGraphId}" public chain proof is unavailable (${reason}${detail ? `: ${detail}` : ''}) — continuing fail-closed`,
       );
     }
     if (reconciliation.outcome === 'pending' && reconciliation.reason === 'conflicting-policy') {
