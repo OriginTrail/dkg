@@ -279,6 +279,7 @@ import {
   exactAssetFilterKey,
   exactSyncPhaseAccumulationLimits,
   requireExactAssetSelection,
+  type ExactAssetCommitment,
   type ExactAssetSelection,
 } from './sync/exact-assets.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
@@ -1460,6 +1461,75 @@ function raceAuthenticationWithSignal<T>(work: Promise<T>, signal: AbortSignal):
     );
     if (signal.aborted) onAbort();
   });
+}
+
+async function runAuthenticationWithinDeadline<T>(params: {
+  deadline: number;
+  deadlineError: Error;
+  signal?: AbortSignal;
+  operation(signal: AbortSignal): Promise<T>;
+}): Promise<T> {
+  const { deadline, deadlineError, signal, operation } = params;
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw deadlineError;
+
+  const controller = new AbortController();
+  const abortFromOperation = () => controller.abort(asSyncFetchAbortError(signal?.reason));
+  if (signal?.aborted) abortFromOperation();
+  else signal?.addEventListener('abort', abortFromOperation, { once: true });
+  const timer = setTimeout(() => controller.abort(deadlineError), remaining);
+  try {
+    if (controller.signal.aborted) {
+      throw controller.signal.reason ?? deadlineError;
+    }
+    return await raceAuthenticationWithSignal(
+      operation(controller.signal),
+      controller.signal,
+    );
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw controller.signal.reason ?? deadlineError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abortFromOperation);
+  }
+}
+
+export async function authenticateChallengePinnedGraphScopedAssetWithinDeadline(params: {
+  chain: ChainAdapter;
+  asset: VerifiedGraphScopedAsset;
+  commitment: ExactAssetCommitment;
+  verifyContextGraphBinding: VerifyContextGraphBinding;
+  authenticationDeadline: number;
+  signal?: AbortSignal;
+}): Promise<ChallengePinnedGraphScopedAsset> {
+  const {
+    chain,
+    asset,
+    commitment,
+    verifyContextGraphBinding,
+    authenticationDeadline,
+    signal,
+  } = params;
+  const deadlineError = createRpcTimeoutError(
+    `Challenge-pinned authentication for ${asset.ual} exceeded its deadline`,
+  );
+  const authenticated = await runAuthenticationWithinDeadline({
+    deadline: authenticationDeadline,
+    deadlineError,
+    signal,
+    operation: (authenticationSignal) => authenticateChallengePinnedGraphScopedAsset(
+      chain,
+      asset,
+      commitment,
+      verifyContextGraphBinding,
+      { signal: authenticationSignal },
+    ),
+  });
+  if (Date.now() >= authenticationDeadline) throw deadlineError;
+  return authenticated;
 }
 
 async function authenticateDurableGraphScopedAsset(params: {
@@ -4042,21 +4112,52 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         : this.chain.getKnowledgeAssetsLifecycleAddress(),
       resolveLocalContextGraphId: (cgId) =>
         this.resolveLocalCgIdByOnChainId(cgId) ?? undefined,
-      observedCandidatePeerIds: (localContextGraphId) =>
-        this.vmReconcileObservedCandidatePeerIds(localContextGraphId),
+      resolveCandidatePeerIds: async (localContextGraphId, signal) => {
+        const isCurrent = () => this.started && !signal.aborted;
+        const curatorResolution = await this.resolveCuratorPeerIdsForCg(
+          localContextGraphId,
+          {
+            maxPeerIds: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
+            signal,
+            isCurrent,
+          },
+        ).catch((error) => {
+          if (signal.aborted) throw signal.reason ?? error;
+          return { peerIds: [] as string[] };
+        });
+        if (!isCurrent()) {
+          throw signal.reason ?? asSyncFetchAbortError(new Error(
+            `Random Sampling provider discovery for ${localContextGraphId} is no longer current`,
+          ));
+        }
+        const observedPeerIds = this.vmReconcileObservedCandidatePeerIds(
+          localContextGraphId,
+        );
+        const connectedPeerIds = this.node.libp2p.getConnections()
+          .map((connection) => connection.remotePeer.toString());
+        return [...new Set([
+          ...curatorResolution.peerIds,
+          ...observedPeerIds,
+          this.preferredSyncPeers.get(localContextGraphId),
+          ...connectedPeerIds,
+        ].filter((peerId): peerId is string => Boolean(
+          peerId && peerId !== this.peerId,
+        )))];
+      },
       selectPeerWindow: (peerIds, options) => this.selectCatchupPeerWindow(
         peerIds.map((peerId) => ({ toString: () => peerId })),
         options,
       ).map((peer) => peer.toString()),
-      ensurePeerAdmitted: (peerId, signal) => this.ensurePeerAdmittedForRecovery(
-        peerId,
-        ctx,
-        'Random Sampling exact repair peer',
-        signal,
-      ),
-      ensurePeerConnected: (peerId, signal) => this.ensurePeerConnected(peerId, { signal }),
-      waitForSyncProtocol: (peerId, signal) =>
-        this.waitForSyncProtocol({ toString: () => peerId }, signal),
+      preparePeer: async (peerId, signal) => {
+        if (!(await this.ensurePeerAdmittedForRecovery(
+          peerId,
+          ctx,
+          'Random Sampling exact repair peer',
+          signal,
+        ))) return false;
+        await this.ensurePeerConnected(peerId, { signal });
+        return this.waitForSyncProtocol({ toString: () => peerId }, signal);
+      },
       fetchExactKnowledgeAsset: async (
         peerId,
         localContextGraphId,
@@ -5988,18 +6089,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 `Context graph binding for ${asset.contextGraphId} changed during challenge authentication`,
               )),
               operation: async ({ assertCurrent }) => {
-                if (Date.now() >= authenticationDeadline) {
-                  throw createRpcTimeoutError(
-                    `Challenge-pinned authentication for ${asset.ual} exceeded its deadline`,
-                  );
-                }
-                const authenticated = await authenticateChallengePinnedGraphScopedAsset(
-                  this.chain,
-                  asset,
-                  commitment,
-                  verifyContextGraphBinding,
-                  { signal: operationSignal },
-                );
+                const authenticated =
+                  await authenticateChallengePinnedGraphScopedAssetWithinDeadline({
+                    chain: this.chain,
+                    asset,
+                    commitment,
+                    verifyContextGraphBinding,
+                    authenticationDeadline,
+                    signal: operationSignal,
+                  });
                 assertCurrent();
                 return authenticated;
               },

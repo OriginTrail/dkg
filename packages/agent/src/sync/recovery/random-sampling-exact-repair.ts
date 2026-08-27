@@ -1,6 +1,7 @@
 import type { RandomSamplingRepairMaterial } from '@origintrail-official/dkg-random-sampling';
 import { buildReconciledKnowledgeAssetUal } from '../../ka-identity.js';
 import type { ExactAssetCommitment } from '../exact-assets.js';
+import { runBoundedPreparedPeerTraversal } from '../prepared-peer-traversal.js';
 
 export interface RandomSamplingExactRepairInput {
   readonly kaId: bigint;
@@ -23,14 +24,15 @@ export interface RandomSamplingExactRepairDependencies {
   readonly createTimeoutSignal?: (timeoutMs: number) => AbortSignal;
   resolveStorageAddress(signal: AbortSignal): Promise<string>;
   resolveLocalContextGraphId(onChainContextGraphId: bigint): string | undefined;
-  observedCandidatePeerIds(localContextGraphId: string): string[];
+  resolveCandidatePeerIds(
+    localContextGraphId: string,
+    signal: AbortSignal,
+  ): Promise<readonly string[]>;
   selectPeerWindow(
     peerIds: string[],
     options: { readonly maxPeers: number; readonly peerRotationKey: string },
   ): string[];
-  ensurePeerAdmitted(peerId: string, signal: AbortSignal): Promise<boolean>;
-  ensurePeerConnected(peerId: string, signal: AbortSignal): Promise<void>;
-  waitForSyncProtocol(peerId: string, signal: AbortSignal): Promise<boolean>;
+  preparePeer(peerId: string, signal: AbortSignal): Promise<boolean>;
   fetchExactKnowledgeAsset(
     peerId: string,
     localContextGraphId: string,
@@ -95,48 +97,52 @@ export async function runRandomSamplingExactRepair(
     merkleRootHex: hex(input.expectedRoot),
     merkleLeafCount: input.expectedLeafCount,
   };
-  const observedPeerIds = deps.observedCandidatePeerIds(localContextGraphId);
-  if (observedPeerIds.length === 0) {
+  const candidatePeerIds = await raceWithAbort(
+    deps.resolveCandidatePeerIds(localContextGraphId, signal),
+    signal,
+  );
+  if (candidatePeerIds.length === 0) {
     throw new Error(`Random Sampling repair found no providers for ${localContextGraphId}`);
   }
-  const peerWindow = deps.selectPeerWindow(observedPeerIds, {
+  const traversal = await runBoundedPreparedPeerTraversal<RandomSamplingExactRepairResult>({
+    candidatePeerIds,
     maxPeers: deps.maxPeers,
-    peerRotationKey: `rs-proof:${localContextGraphId}`,
-  });
-  const attempted: string[] = [];
-
-  for (const peerId of peerWindow) {
-    if (signal.aborted) throw abortReason(signal);
-    attempted.push(peerId.slice(-8));
-    try {
-      if (!(await deps.ensurePeerAdmitted(peerId, signal))) continue;
-      await deps.ensurePeerConnected(peerId, signal);
-      if (!(await deps.waitForSyncProtocol(peerId, signal))) continue;
-      const result = await deps.fetchExactKnowledgeAsset(
+    operationLabel: `RS exact repair for ${assetUal} from`,
+    assertCurrent: () => {
+      if (signal.aborted) throw abortReason(signal);
+    },
+    shouldContinue: () => true,
+    selectPeerWindow: (peerIds, { maxPeers }) => deps.selectPeerWindow(peerIds, {
+      maxPeers,
+      peerRotationKey: `rs-proof:${localContextGraphId}`,
+    }),
+    preparePeer: (peerId) => raceWithAbort(deps.preparePeer(peerId, signal), signal),
+    attemptPeer: async (peerId) => {
+      const result = await raceWithAbort(deps.fetchExactKnowledgeAsset(
         peerId,
         localContextGraphId,
         assetUal,
         expectedCommitment,
         signal,
-      );
+      ), signal);
       deps.logInfo(
         `RS exact repair for ${assetUal} from ${peerId.slice(-8)}: `
           + `disposition=${result.disposition} inserted=${result.insertedTriples}`,
       );
-      if (result.disposition === 'found' && result.proofMaterial !== undefined) {
-        return result.proofMaterial;
-      }
-    } catch (error) {
-      if (signal.aborted) throw abortReason(signal);
-      deps.logInfo(
-        `RS exact repair for ${assetUal} from ${peerId.slice(-8)} failed: `
-          + `${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+      return { result };
+    },
+    isSuccess: (result) => result?.disposition === 'found'
+      && result.proofMaterial !== undefined,
+    log: deps.logInfo,
+  });
+  if (traversal.succeeded && traversal.result?.proofMaterial !== undefined) {
+    return traversal.result.proofMaterial;
   }
 
   throw new Error(
     `Random Sampling exact repair did not recover ${assetUal} from `
-      + `${attempted.length > 0 ? attempted.join(',') : 'the bounded provider window'}`,
+      + `${traversal.attemptedPeerIds.length > 0
+        ? traversal.attemptedPeerIds.map((peerId) => peerId.slice(-8)).join(',')
+        : 'the bounded provider window'}`,
   );
 }

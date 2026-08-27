@@ -4,6 +4,7 @@ import { parseDeterministicKnowledgeAssetUal } from '@origintrail-official/dkg-c
 
 import { packKnowledgeAssetIdFromIdentity } from '../ka-identity.js';
 import { MAX_EXACT_SYNC_ASSETS } from './exact-assets.js';
+import { runBoundedPreparedPeerTraversal } from './prepared-peer-traversal.js';
 
 export const MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS = 5;
 
@@ -317,59 +318,51 @@ export async function runExactAssetFetch(
   }
 
   const candidates = requestedPeerIds ?? (
-    remaining.size === 0 ? [] : [...new Set(await deps.resolvePeerIds())]
-      .slice(0, MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS)
+    remaining.size === 0 ? [] : await deps.resolvePeerIds()
   );
   requireCurrent(deps);
-  let peerAttempts = 0;
-  for (const peerId of candidates) {
-    if (remaining.size === 0) break;
-    requireCurrent(deps);
-    let prepared = false;
-    try {
-      prepared = await deps.preparePeer(peerId);
-    } catch (error) {
-      requireCurrent(deps);
-      deps.log(
-        `Exact asset fetch peer ${peerId} could not be prepared: `
-          + `${error instanceof Error ? error.message : String(error)}`,
-      );
-      continue;
-    }
-    requireCurrent(deps);
-    if (!prepared) continue;
-    peerAttempts += 1;
-    try {
-      await deps.fetchFromPeer(peerId, [...remaining.keys()]);
-    } catch (error) {
-      requireCurrent(deps);
-      deps.log(
-        `Exact asset fetch from ${peerId} failed: `
-          + `${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    requireCurrent(deps);
-
-    // A peer fetch is not transactional. It can persist a strict prefix before
-    // it rejects, so inspect durable local state after every started attempt.
-    // Retain the rejection only as a diagnostic and continue failover with the
-    // exact unresolved suffix.
-    const nextRemaining = new Map<string, ExactAssetFetchEvidence>();
-    for (const item of remaining.values()) {
-      requireCurrent(deps);
-      const state = await deps.inspectLocal(item);
-      if (state === 'present' || state === 'materialized') {
-        itemResults.set(item.ual, {
-          ual: item.ual,
-          kaId: item.kaId.toString(),
-          status: 'fetched',
-        });
-      } else {
-        nextRemaining.set(item.ual, item);
+  const traversal = await runBoundedPreparedPeerTraversal({
+    candidatePeerIds: candidates,
+    maxPeers: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+    operationLabel: 'Exact asset fetch from',
+    assertCurrent: () => requireCurrent(deps),
+    shouldContinue: () => remaining.size > 0,
+    preparePeer: deps.preparePeer,
+    attemptPeer: async (peerId) => {
+      let failure: unknown;
+      try {
+        await deps.fetchFromPeer(peerId, [...remaining.keys()]);
+      } catch (error) {
+        failure = error;
       }
-    }
-    remaining = nextRemaining;
-  }
+      requireCurrent(deps);
+
+      // A peer fetch is not transactional. It can persist a strict prefix before
+      // it rejects, so inspect durable local state after every started attempt.
+      // Retain the rejection only as a diagnostic and continue failover with the
+      // exact unresolved suffix.
+      const nextRemaining = new Map<string, ExactAssetFetchEvidence>();
+      for (const item of remaining.values()) {
+        requireCurrent(deps);
+        const state = await deps.inspectLocal(item);
+        if (state === 'present' || state === 'materialized') {
+          itemResults.set(item.ual, {
+            ual: item.ual,
+            kaId: item.kaId.toString(),
+            status: 'fetched',
+          });
+        } else {
+          nextRemaining.set(item.ual, item);
+        }
+      }
+      remaining = nextRemaining;
+      return failure === undefined ? {} : { failure };
+    },
+    isSuccess: () => remaining.size === 0,
+    canContinueAfterThrownAttempt: () => false,
+    log: deps.log,
+  });
+  const peerAttempts = traversal.peerAttempts;
 
   for (const item of remaining.values()) {
     itemResults.set(item.ual, {
