@@ -1448,8 +1448,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       store,
       keypair,
       chainBase: undefined,
-      pollIntervalMs: 10,
-      errorBackoffMs: 10,
+      runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           executorCalls.push(input);
@@ -1583,8 +1582,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       store,
       keypair,
       chainBase: undefined,
-      pollIntervalMs: 10,
-      errorBackoffMs: 10,
+      runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
       knowledgeAssetVmPublishHandler: {
         execute: createKnowledgeAssetVmPublishHandler(fakeAgent as unknown as DKGAgent).execute,
       },
@@ -1695,8 +1693,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       store,
       keypair,
       chainBase: undefined,
-      pollIntervalMs: 10,
-      errorBackoffMs: 10,
+      runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
       knowledgeAssetVmPublishHandler: {
         execute: createKnowledgeAssetVmPublishHandler(fakeAgent as unknown as DKGAgent).execute,
       },

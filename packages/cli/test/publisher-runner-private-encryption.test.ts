@@ -83,8 +83,7 @@ describe('publisher runner — private (non-public) inline-encryption callback h
         store,
         keypair,
         chainBase: undefined,
-        pollIntervalMs: 10,
-        errorBackoffMs: 10,
+        runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
         publishEncryptionFactory: () => ({
           encryptInlinePayload: realInline,
           encryptInlineChunked: realChunked,

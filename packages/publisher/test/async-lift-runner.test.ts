@@ -474,8 +474,12 @@ describe('AsyncLiftRunner', () => {
         reconciliationCalls += 1;
         return 0;
       },
-      setReconciliationDemandListener: (listener: () => void) => {
-        demand = listener;
+      reconciliationScheduling: {
+        subscribeDemand: (listener: () => void) => {
+          demand = listener;
+          return () => { demand = undefined; };
+        },
+        hasPendingWork: async () => false,
       },
     } as any);
     const runner = new AsyncLiftRunner({
@@ -505,8 +509,12 @@ describe('AsyncLiftRunner', () => {
         if (reconciliationCalls === 1) await firstPassGate;
         return 0;
       },
-      setReconciliationDemandListener: (listener: () => void) => {
-        demand = listener;
+      reconciliationScheduling: {
+        subscribeDemand: (listener: () => void) => {
+          demand = listener;
+          return () => {};
+        },
+        hasPendingWork: async () => false,
       },
     } as any);
     const runner = new AsyncLiftRunner({
@@ -539,7 +547,10 @@ describe('AsyncLiftRunner', () => {
         reconciliationCalls += 1;
         return 0;
       },
-      hasPendingTransactionReconciliation: async () => pending,
+      reconciliationScheduling: {
+        subscribeDemand: () => () => {},
+        hasPendingWork: async () => pending,
+      },
     } as any);
     const runner = new AsyncLiftRunner({
       publisher,
@@ -572,8 +583,12 @@ describe('AsyncLiftRunner', () => {
         reconciliationCalls += 1;
         throw new Error('reconciliation keeps failing');
       },
-      setReconciliationDemandListener: (listener: () => void) => {
-        demand = listener;
+      reconciliationScheduling: {
+        subscribeDemand: (listener: () => void) => {
+          demand = listener;
+          return () => {};
+        },
+        hasPendingWork: async () => false,
       },
     } as any);
     const runner = new AsyncLiftRunner({
@@ -599,16 +614,20 @@ describe('AsyncLiftRunner', () => {
     await runner.stop();
   });
 
-  it('ignores demand pokes after stop', async () => {
-    let demand!: () => void;
+  it('disposes the demand subscription on stop and ignores pokes from a kept listener reference', async () => {
+    let demand: (() => void) | undefined;
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconcileTransactions: async () => {
         reconciliationCalls += 1;
         return 0;
       },
-      setReconciliationDemandListener: (listener: () => void) => {
-        demand = listener;
+      reconciliationScheduling: {
+        subscribeDemand: (listener: () => void) => {
+          demand = listener;
+          return () => { demand = undefined; };
+        },
+        hasPendingWork: async () => false,
       },
     } as any);
     const runner = new AsyncLiftRunner({
@@ -619,11 +638,52 @@ describe('AsyncLiftRunner', () => {
     });
 
     await runner.start();
+    expect(demand).toBeDefined();
+    const keptListener = demand!;
     await runner.stop();
+    // stop() disposed the subscription, so the publisher no longer holds the callback...
+    expect(demand).toBeUndefined();
     const callsAfterStop = reconciliationCalls;
-    demand();
+    // ...and even a reference someone kept anyway cannot poke the stopped runner into a pass.
+    keptListener();
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(reconciliationCalls).toBe(callsAfterStop);
+  });
+
+  it('retries a demanded pass on the error backoff after a transient failure instead of dropping the demand', async () => {
+    let demand!: () => void;
+    let reconciliationCalls = 0;
+    const errors: unknown[] = [];
+    const publisher = createPublisher({
+      reconcileTransactions: async () => {
+        reconciliationCalls += 1;
+        if (reconciliationCalls === 1) throw new Error('transient reconcile failure');
+        return 0;
+      },
+      reconciliationScheduling: {
+        subscribeDemand: (listener: () => void) => {
+          demand = listener;
+          return () => {};
+        },
+        hasPendingWork: async () => false,
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      // Ten minutes out with a short backoff: the ONE poke below must survive the failed first
+      // pass and produce the successful second pass on the backoff floor, not at the idle sweep.
+      recoveryIntervalMs: 600_000,
+      errorBackoffMs: 10,
+      onError: (error) => { errors.push(error); },
+    });
+
+    await runner.start();
+    demand();
+    await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(2));
+    expect(errors).toHaveLength(1);
+    await runner.stop();
   });
 
   it('rejects an active recovery interval above the Node.js timer limit', () => {

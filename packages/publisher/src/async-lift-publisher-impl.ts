@@ -819,11 +819,24 @@ export class TripleStoreAsyncLiftPublisher
     if (!claimed) {
       return null;
     }
+    let processed: LiftJob;
     try {
-      return await this.jobHandlerFor(claimed.request).process(claimed, walletId);
+      processed = await this.jobHandlerFor(claimed.request).process(claimed, walletId);
     } finally {
       this.activeProcessJobIds.delete(claimed.jobId);
     }
+    // r1 (🔴 3872361393) — the demand poke belongs on the OWNERSHIP BOUNDARY, after the marker
+    // above is gone. Poking from inside a processing path (as the ambiguous-broadcast catch
+    // first did) let the invited pass run while the job still read as executor-owned: the pass
+    // skipped it, the outlook answered false, and the one-shot demand was spent — parking the
+    // job for the idle sweep. Here the job is provably past every ownership marker the pass
+    // checks, so an invited pass can always act. (A process() that THROWS never reaches this;
+    // a tx-bearing job left behind by an escaped throw is the idle sweep's to find, which is
+    // the pre-existing contract for that path.)
+    if (this.isReconciliationActionable(processed)) {
+      this.notifyReconciliationDemand();
+    }
+    return processed;
   }
 
   private async processRawLift(claimed: LiftJob, walletId: string): Promise<LiftJob> {
@@ -1026,8 +1039,9 @@ export class TripleStoreAsyncLiftPublisher
         // Ambiguous post-write-ahead failure — leave the job in 'broadcast' so recovery's
         // interrupted-broadcast path reconciles it on chain, never resend. Receipt timeout is
         // UNKNOWN, not failed. The tx-bearing job retains the wallet until
-        // chain proof finalizes, proves a revert, or proves create absence.
-        this.notifyReconciliationDemand();
+        // chain proof finalizes, proves a revert, or proves create absence. The reconciliation
+        // demand poke for this job fires at the processNext ownership boundary, not here —
+        // this frame still holds the job's activeProcessJobIds marker (r1 🔴 3872361393).
         return await this.getRequiredJob(claimed.jobId);
       }
       // #1867 — either the tx never left ('not-reached' / 'rolled-back-pre-send'), or a
@@ -1131,18 +1145,34 @@ export class TripleStoreAsyncLiftPublisher
     }
   }
 
-  setReconciliationDemandListener(listener: () => void): void {
-    this.reconciliationDemandListener = listener;
-  }
+  readonly reconciliationScheduling = {
+    subscribeDemand: (listener: () => void): (() => void) => {
+      this.reconciliationDemandListener = listener;
+      return () => {
+        // Unsubscribes only THIS listener: a replacement subscription must not be torn down by
+        // a stale disposer from the runner incarnation it replaced.
+        if (this.reconciliationDemandListener === listener) {
+          this.reconciliationDemandListener = undefined;
+        }
+      };
+    },
+    hasPendingWork: async (): Promise<boolean> => {
+      await this.ensureGraph();
+      return (await this.list()).some((job) => this.isReconciliationActionable(job));
+    },
+  };
 
-  async hasPendingTransactionReconciliation(): Promise<boolean> {
-    await this.ensureGraph();
-    const jobs = await this.list();
-    return jobs.some(
-      (job) =>
-        (job.status === 'broadcast' || job.status === 'included')
-        && !this.detachedExecutions.has(job.jobId)
-        && !this.activeProcessJobIds.has(job.jobId),
+  /**
+   * The ONE definition of "reconciliation can act on this job now": live tx-bearing state with
+   * no executor ownership marker. Shared by the outlook above, the reconcile pass pre-filter,
+   * and the ownership-boundary demand poke, so the three cannot drift. The deeper per-job
+   * re-checks under the transition lock remain authoritative; this is the coherent pre-answer.
+   */
+  private isReconciliationActionable(job: LiftJob): boolean {
+    return (
+      (job.status === 'broadcast' || job.status === 'included')
+      && !this.detachedExecutions.has(job.jobId)
+      && !this.activeProcessJobIds.has(job.jobId)
     );
   }
 
@@ -1655,9 +1685,9 @@ export class TripleStoreAsyncLiftPublisher
   async reconcileTransactions(): Promise<number> {
     await this.ensureGraph();
     let reconciled = await this.recoverInterruptedPreBroadcastJobs();
-    const txBearing = (await this.list()).filter(
-      (job) => job.status === 'broadcast' || job.status === 'included',
-    );
+    // Same actionability rule the scheduling outlook answers with: executor-owned jobs are
+    // skipped up front rather than each burning a transition-lock turn to be skipped deeper in.
+    const txBearing = (await this.list()).filter((job) => this.isReconciliationActionable(job));
     // The pass deadline below may truncate this walk, and `list()` order is stable — without
     // rotation a head job behind a slow resolver would be re-asked every pass while the tail
     // starved. Rotating the start bounds every job's wait to at most `txBearing.length` passes.

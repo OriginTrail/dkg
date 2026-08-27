@@ -61,25 +61,25 @@ describe('async-lift reconciliation demand channel', () => {
     const publisher = createPublisher();
     await stageShareSnapshot();
 
-    expect(await publisher.hasPendingTransactionReconciliation()).toBe(false);
+    expect(await publisher.reconciliationScheduling.hasPendingWork()).toBe(false);
 
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
-    expect(await publisher.hasPendingTransactionReconciliation()).toBe(false);
+    expect(await publisher.reconciliationScheduling.hasPendingWork()).toBe(false);
 
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
-    expect(await publisher.hasPendingTransactionReconciliation()).toBe(false);
+    expect(await publisher.reconciliationScheduling.hasPendingWork()).toBe(false);
 
     await publisher.update(jobId, 'broadcast', {
       broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-1', operationKind: 'create' },
     });
-    expect(await publisher.hasPendingTransactionReconciliation()).toBe(true);
+    expect(await publisher.reconciliationScheduling.hasPendingWork()).toBe(true);
 
     await publisher.update(jobId, 'included', {
       broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-1' },
       inclusion: { txHash: KA_VM_EXECUTOR_TX_HASH, blockNumber: 42 },
     });
-    expect(await publisher.hasPendingTransactionReconciliation()).toBe(true);
+    expect(await publisher.reconciliationScheduling.hasPendingWork()).toBe(true);
 
     // A held failure hands the job to the failed-job dispatcher, whose per-job due times pace
     // themselves — it must not keep the caller on the active cadence.
@@ -88,7 +88,7 @@ describe('async-lift reconciliation demand channel', () => {
       failedFromState: 'included',
       errorPayloadRef: `urn:dkg:test:error:${jobId}`,
     });
-    expect(await publisher.hasPendingTransactionReconciliation()).toBe(false);
+    expect(await publisher.reconciliationScheduling.hasPendingWork()).toBe(false);
   });
 
   it('excludes an executor-owned detached job from pending work and pokes the listener when it settles', async () => {
@@ -107,8 +107,10 @@ describe('async-lift reconciliation demand channel', () => {
         },
       },
     });
-    let demandPokes = 0;
-    publisher.setReconciliationDemandListener(() => { demandPokes += 1; });
+    const outlookAtPoke: Promise<boolean>[] = [];
+    publisher.reconciliationScheduling.subscribeDemand(() => {
+      outlookAtPoke.push(publisher.reconciliationScheduling.hasPendingWork());
+    });
     await stageShareSnapshot();
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
 
@@ -117,16 +119,18 @@ describe('async-lift reconciliation demand channel', () => {
     expect(processed?.timestamps.rpcAcceptedAt).toBeDefined();
     // The receipt task still owns the job: reconciliation would skip it, so it must not count as
     // pending work, and RPC acceptance alone must not have poked the listener.
-    expect(await publisher.hasPendingTransactionReconciliation()).toBe(false);
-    expect(demandPokes).toBe(0);
+    expect(await publisher.reconciliationScheduling.hasPendingWork()).toBe(false);
+    expect(outlookAtPoke).toHaveLength(0);
 
     releaseExecution();
     await publisher.drainDetachedExecutions();
-    expect(demandPokes).toBe(1);
-    expect(await publisher.hasPendingTransactionReconciliation()).toBe(true);
+    expect(outlookAtPoke).toHaveLength(1);
+    // The settle poke fires after the detached-ownership marker is cleared, so the invited pass
+    // can already act.
+    await expect(outlookAtPoke[0]).resolves.toBe(true);
   });
 
-  it('pokes the listener when an ambiguous post-write-ahead failure leaves a live broadcast behind', async () => {
+  it('pokes the listener for an ambiguous post-write-ahead failure only at the ownership boundary', async () => {
     const publisher = createPublisher({
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
@@ -135,15 +139,46 @@ describe('async-lift reconciliation demand channel', () => {
         },
       },
     });
-    let demandPokes = 0;
-    publisher.setReconciliationDemandListener(() => { demandPokes += 1; });
+    // r1 (🔴 3872361393) — the poke must fire only once the invited pass can already act on the
+    // job. Reading the outlook FROM the listener pins that: a poke emitted while the job still
+    // held its activeProcessJobIds marker (the pre-fix placement, inside the ambiguous-broadcast
+    // catch) reads false here, spends the one-shot demand on a pass that skips the job, and
+    // parks it for the idle sweep.
+    const outlookAtPoke: Promise<boolean>[] = [];
+    publisher.reconciliationScheduling.subscribeDemand(() => {
+      outlookAtPoke.push(publisher.reconciliationScheduling.hasPendingWork());
+    });
     await stageShareSnapshot();
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
 
     const processed = await publisher.processNext('wallet-1');
     expect(processed?.status).toBe('broadcast');
-    expect(demandPokes).toBe(1);
-    expect(await publisher.hasPendingTransactionReconciliation()).toBe(true);
+    expect(outlookAtPoke).toHaveLength(1);
+    await expect(outlookAtPoke[0]).resolves.toBe(true);
+    expect(await publisher.reconciliationScheduling.hasPendingWork()).toBe(true);
+  });
+
+  it('a stale unsubscribe from a replaced listener does not tear down the current subscription', async () => {
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          throw new Error('socket hang up mid-send');
+        },
+      },
+    });
+    const pokes: string[] = [];
+    const disposeReplaced = publisher.reconciliationScheduling.subscribeDemand(() => pokes.push('replaced'));
+    publisher.reconciliationScheduling.subscribeDemand(() => pokes.push('current'));
+    // A restarted runner replaced the subscription; the old incarnation's disposer firing late
+    // (e.g. from a delayed stop()) must not silence the new one.
+    disposeReplaced();
+    await stageShareSnapshot();
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+    const processed = await publisher.processNext('wallet-1');
+    expect(processed?.status).toBe('broadcast');
+    expect(pokes).toEqual(['current']);
   });
 
   it('survives a listener that throws without touching job state', async () => {
@@ -155,7 +190,7 @@ describe('async-lift reconciliation demand channel', () => {
         },
       },
     });
-    publisher.setReconciliationDemandListener(() => {
+    publisher.reconciliationScheduling.subscribeDemand(() => {
       throw new Error('scheduler exploded');
     });
     await stageShareSnapshot();
@@ -163,7 +198,7 @@ describe('async-lift reconciliation demand channel', () => {
 
     const processed = await publisher.processNext('wallet-1');
     expect(processed?.status).toBe('broadcast');
-    expect(await publisher.hasPendingTransactionReconciliation()).toBe(true);
+    expect(await publisher.reconciliationScheduling.hasPendingWork()).toBe(true);
   });
 
   it('rotates the live reconcile walk so a budget-truncated pass cannot starve the tail', async () => {

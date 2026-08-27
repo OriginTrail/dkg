@@ -116,21 +116,32 @@ export interface AsyncLiftPublisher {
   /** Wait until every receipt task detached after RPC acceptance has stopped. Older implementations can omit it. */
   drainDetachedExecutions?(): Promise<void>;
   /**
-   * Register the single listener poked when transaction reconciliation gains actionable work —
-   * a detached receipt execution settles, or an ambiguous broadcast is left behind for chain
-   * proof. A later registration replaces the earlier listener. The poke carries no payload and
-   * establishes nothing about the queue; it only invites the caller to run
-   * {@link reconcileTransactions} sooner than its idle cadence would. Older implementations can
-   * omit it, and a caller that never registers loses nothing but latency.
+   * Demand-driven reconciliation scheduling. ONE optional capability rather than independent
+   * optional methods, so a publisher cannot implement the wake-up without the outlook (or the
+   * reverse) — the incoherent halves are unrepresentable. Older implementations omit the whole
+   * capability and a caller that never subscribes loses nothing but latency.
    */
-  setReconciliationDemandListener?(listener: () => void): void;
-  /**
-   * Whether any transaction-bearing job currently awaits chain-proof reconciliation — live
-   * `broadcast`/`included` state with no executor (in-process or detached) still owning it.
-   * Lets the caller hold a short reconcile cadence exactly while an unresolved chain question
-   * exists and fall back to its idle sweep otherwise. Older implementations can omit it.
-   */
-  hasPendingTransactionReconciliation?(): Promise<boolean>;
+  readonly reconciliationScheduling?: {
+    /**
+     * Register the single listener poked when transaction reconciliation gains actionable
+     * work — a tx-bearing job stops being executor-owned (a detached receipt execution
+     * settles, or `processNext` hands back a live broadcast after an ambiguous send). The poke
+     * carries no payload and establishes nothing about the queue; it only invites the caller
+     * to run {@link reconcileTransactions} sooner than its idle cadence would, and it fires
+     * only once the work is actually visible to that pass. A later subscription replaces the
+     * earlier listener. Returns the unsubscribe for THIS listener; calling it after a
+     * replacement is a no-op.
+     */
+    subscribeDemand(listener: () => void): () => void;
+    /**
+     * Whether any transaction-bearing job currently awaits chain-proof reconciliation — live
+     * `broadcast`/`included` state with no executor (in-process or detached) still owning it,
+     * the same actionability rule the reconcile pass itself applies. Lets the caller hold a
+     * short reconcile cadence exactly while an unresolved chain question exists and fall back
+     * to its idle sweep otherwise.
+     */
+    hasPendingWork(): Promise<boolean>;
+  };
   getStats(): Promise<Record<LiftJobState, number>>;
   pause(): Promise<void>;
   resume(): Promise<void>;
