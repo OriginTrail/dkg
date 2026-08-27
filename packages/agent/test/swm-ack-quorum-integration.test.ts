@@ -409,10 +409,20 @@ describe('DKGAgent SwmAckQuorum integration (rc.9 PR-D)', () => {
     install(agent);
 
     const internals = agent as unknown as {
-      publishWorkspaceGossip: (cgId: string, msg: Uint8Array, ctx: unknown, signer: unknown) => Promise<void>;
+      publishWorkspaceGossip: (
+        cgId: string,
+        payload: { mode: 'plaintext'; message: Uint8Array },
+        ctx: unknown,
+        signer: unknown,
+      ) => Promise<void>;
     };
     const dummyMessage = new TextEncoder().encode('not-a-real-wire-message');
-    await internals.publishWorkspaceGossip('cg-legacy-caller', dummyMessage, { operationId: 'test' }, null);
+    await internals.publishWorkspaceGossip(
+      'cg-legacy-caller',
+      { mode: 'plaintext', message: dummyMessage },
+      { operationId: 'test' },
+      null,
+    );
 
     const stats = agent.getSwmAckQuorumStats();
     expect(stats.tracked).toBe(0);

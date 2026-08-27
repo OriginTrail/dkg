@@ -62,6 +62,10 @@ let DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 let WORKSPACE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
 let WORKSPACE_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 const ENTITY = 'urn:test:entity:1';
+const SNAPSHOT_PEER_A = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const SNAPSHOT_PEER_B = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+const SNAPSHOT_SELF_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const SNAPSHOT_PEER_C = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 let _kav10Address: string;
 let _provider: ethers.JsonRpcProvider;
 const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
@@ -249,8 +253,8 @@ describe('Workspace: share', () => {
     const result = await publisher.share(CONTEXT_GRAPH, quads, opts);
 
     expect(result.shareOperationId).toMatch(/^swm-\d+-[a-z0-9]+$/);
-    expect(result.message).toBeInstanceOf(Uint8Array);
-    expect(result.message.length).toBeGreaterThan(0);
+    expect(result.gossipPayload.message).toBeInstanceOf(Uint8Array);
+    expect(result.gossipPayload.message.length).toBeGreaterThan(0);
 
     const workspaceResult = await store.query(
       `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
@@ -276,36 +280,44 @@ describe('Workspace: share', () => {
       requiresEncryption: true,
       recipients: [{
         agentAddress: senderAgentAddress,
-        peerId: contextGraphId === 'snapshot-a' ? 'peerA' : 'peerB',
+        peerId: contextGraphId === 'snapshot-a' ? SNAPSHOT_PEER_A : SNAPSHOT_PEER_B,
       }] as any,
     }));
     publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
       expect(input.resolution.recipients[0]?.peerId).toBe(
-        input.contextGraphId === 'snapshot-a' ? 'peerA' : 'peerB',
+        input.contextGraphId === 'snapshot-a' ? SNAPSHOT_PEER_A : SNAPSHOT_PEER_B,
       );
       return input.plaintext;
     });
 
     const [first, second] = await Promise.all([
       publisher.share('snapshot-a', [q('urn:test:snapshot-a', 'http://schema.org/name', '"A"')], {
-        publisherPeerId: 'selfPeer',
+        publisherPeerId: SNAPSHOT_SELF_PEER,
         senderAgentAddress,
       }),
       publisher.share('snapshot-b', [q('urn:test:snapshot-b', 'http://schema.org/name', '"B"')], {
-        publisherPeerId: 'selfPeer',
+        publisherPeerId: SNAPSHOT_SELF_PEER,
         senderAgentAddress,
       }),
     ]);
 
-    expect(first.gossipFanoutSnapshot).toEqual({
+    expect(first.gossipPayload).toEqual({
+      mode: 'agent-encrypted',
+      message: expect.any(Uint8Array),
+      fanoutSnapshot: {
       source: 'agent-roster',
-      members: ['peerA'],
+      members: [SNAPSHOT_PEER_A],
       complete: true,
+      },
     });
-    expect(second.gossipFanoutSnapshot).toEqual({
+    expect(second.gossipPayload).toEqual({
+      mode: 'agent-encrypted',
+      message: expect.any(Uint8Array),
+      fanoutSnapshot: {
       source: 'agent-roster',
-      members: ['peerB'],
+      members: [SNAPSHOT_PEER_B],
       complete: true,
+      },
     });
   });
 
@@ -315,7 +327,7 @@ describe('Workspace: share', () => {
       requiresEncryption: true,
       recipients: [{
         agentAddress: senderAgentAddress,
-        peerId: contextGraphId === 'snapshot-fail' ? 'peerFailed' : 'peerFresh',
+        peerId: contextGraphId === 'snapshot-fail' ? SNAPSHOT_PEER_B : SNAPSHOT_PEER_C,
       }] as any,
     }));
     publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
@@ -326,18 +338,69 @@ describe('Workspace: share', () => {
     await expect(publisher.share(
       'snapshot-fail',
       [q('urn:test:snapshot-fail', 'http://schema.org/name', '"fail"')],
-      { publisherPeerId: 'selfPeer', senderAgentAddress },
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
     )).rejects.toThrow('encryption failed');
 
     const recovered = await publisher.share(
       'snapshot-fresh',
       [q('urn:test:snapshot-fresh', 'http://schema.org/name', '"fresh"')],
-      { publisherPeerId: 'selfPeer', senderAgentAddress },
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
     );
-    expect(recovered.gossipFanoutSnapshot).toEqual({
+    expect(recovered.gossipPayload).toEqual({
+      mode: 'agent-encrypted',
+      message: expect.any(Uint8Array),
+      fanoutSnapshot: {
       source: 'agent-roster',
-      members: ['peerFresh'],
+      members: [SNAPSHOT_PEER_C],
       complete: true,
+      },
+    });
+  });
+
+  it('keeps gossip enabled when an unchanged encryption member advertises a malformed peer ID', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    const recipientId = `did:dkg:agent:${senderAgentAddress}`;
+    let advertisedPeerId = SNAPSHOT_PEER_A;
+    publisher.setWorkspaceAgentRecipientResolver(async () => ({
+      requiresEncryption: true,
+      recipients: [{
+        agentAddress: senderAgentAddress,
+        recipientId,
+        encryptionKeyId: `${recipientId}#stable-key`,
+        encryptionPublicKey: new Uint8Array(32).fill(7),
+        encryptionKeyAlgorithm: 'X25519',
+        peerId: advertisedPeerId,
+      }] as any,
+    }));
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => input.plaintext);
+
+    const first = await publisher.share(
+      'snapshot-malformed-peer',
+      [q('urn:test:snapshot-malformed-peer:first', 'http://schema.org/name', '"first"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+    advertisedPeerId = 'not-a-peer-id';
+    const second = await publisher.share(
+      'snapshot-malformed-peer',
+      [q('urn:test:snapshot-malformed-peer:second', 'http://schema.org/name', '"second"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+
+    expect(first.gossipPayload.mode).toBe('agent-encrypted');
+    expect(first.gossipPayload.mode === 'agent-encrypted'
+      ? first.gossipPayload.fanoutSnapshot
+      : null).toEqual({
+      source: 'agent-roster',
+      members: [SNAPSHOT_PEER_A],
+      complete: true,
+    });
+    expect(second.gossipPayload.mode).toBe('agent-encrypted');
+    expect(second.gossipPayload.mode === 'agent-encrypted'
+      ? second.gossipPayload.fanoutSnapshot
+      : null).toEqual({
+      source: 'agent-roster',
+      members: [],
+      complete: false,
     });
   });
 
@@ -600,8 +663,8 @@ describe('Workspace: publishFromSharedMemory', () => {
       graphlessQuads.slice(splitAt),
       { publisherPeerId: 'peer-aggregate-second' },
     );
-    expect(firstShare.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
-    expect(secondShare.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(firstShare.gossipPayload.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(secondShare.gossipPayload.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
 
     let receivedParams: V10ACKProviderParams | undefined;
     const stopAfterCapture = new Error('stop after over-limit ACK capture');
@@ -2554,8 +2617,8 @@ describe('Workspace: conditionalShare (CAS)', () => {
     // a dummy "success" shape) cannot pass.
     const casResult = await publisher.conditionalShare(CONTEXT_GRAPH, [], literalOpts);
     expect(casResult.shareOperationId).toMatch(/.+/);
-    expect(casResult.message).toBeInstanceOf(Uint8Array);
-    expect(casResult.message.length).toBeGreaterThan(0);
+    expect(casResult.gossipPayload.message).toBeInstanceOf(Uint8Array);
+    expect(casResult.gossipPayload.message.length).toBeGreaterThan(0);
   });
 
   it('serializes concurrent CAS writes to the same subject+predicate', async () => {

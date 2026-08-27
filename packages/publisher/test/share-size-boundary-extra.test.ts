@@ -78,10 +78,10 @@ describe('P-4: SWM share() 4 MiB gossip-message boundary', () => {
     // The encoded message is the protobuf payload the agent would gossip.
     // If this shape ever changes, update the assertion — but DO NOT drop it;
     // without this check the size-limit codepath would be untested.
-    expect(result.message).toBeDefined();
-    expect(result.message).toBeInstanceOf(Uint8Array);
-    expect(result.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
-    expect(result.message.length).toBeGreaterThan(1024 * 1024); // sanity: did we actually build big
+    expect(result.gossipPayload.message).toBeDefined();
+    expect(result.gossipPayload.message).toBeInstanceOf(Uint8Array);
+    expect(result.gossipPayload.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(result.gossipPayload.message.length).toBeGreaterThan(1024 * 1024); // sanity: did we actually build big
   });
 
   it('rejects a payload just over the 4 MiB cap with a clear, actionable error', async () => {
@@ -117,7 +117,7 @@ describe('P-4: SWM share() 4 MiB gossip-message boundary', () => {
 
     const ok = await publisher.share(CG, justUnder, { publisherPeerId: PEER });
     expect(ok).toBeDefined();
-    expect(ok.message.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(ok.gossipPayload.message.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
 
     await expect(
       publisher.share(CG, justOver, { publisherPeerId: PEER }),

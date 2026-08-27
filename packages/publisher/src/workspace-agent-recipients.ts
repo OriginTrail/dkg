@@ -1,4 +1,5 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { peerIdFromString } from '@libp2p/peer-id';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
@@ -43,6 +44,17 @@ export interface WorkspaceAgentRecipientPeerProjection {
   complete: boolean;
 }
 
+/** Parse and normalize a libp2p peer ID, rejecting arbitrary profile text. */
+export function canonicalWorkspacePeerId(value: string | undefined): string | null {
+  const candidate = value?.trim();
+  if (!candidate) return null;
+  try {
+    return peerIdFromString(candidate).toString();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Project a validated encryption snapshot to its reliable transport roster
  * while retaining whether the projection covers every authorized agent.
@@ -56,14 +68,15 @@ export function projectWorkspaceAgentRecipientFanout(
   const peers = new Set<string>();
   const agentsWithPeer = new Set<string>();
   const authorizedAgents = new Set<string>();
+  const canonicalSelfPeerId = canonicalWorkspacePeerId(selfPeerId);
   for (const recipient of resolution.recipients) {
     const agentAddress = recipient.agentAddress?.trim().toLowerCase() ?? '';
     if (agentAddress) authorizedAgents.add(agentAddress);
 
-    const peerId = recipient.peerId?.trim();
+    const peerId = canonicalWorkspacePeerId(recipient.peerId);
     if (!peerId) continue;
     if (agentAddress) agentsWithPeer.add(agentAddress);
-    if (peerId !== selfPeerId) peers.add(peerId);
+    if (peerId !== canonicalSelfPeerId) peers.add(peerId);
   }
 
   return {

@@ -172,7 +172,7 @@ import {
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
-  type WorkspaceGossipFanoutSnapshot,
+  type EncodedWorkspaceGossipPayload,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -834,7 +834,7 @@ function bytesEqual(left: Uint8Array | undefined, right: Uint8Array | undefined)
 export class PublishMethods extends DKGAgentBase {
   async publishWorkspaceGossip(this: DKGAgent,
     contextGraphId: string,
-    message: Uint8Array,
+    payload: EncodedWorkspaceGossipPayload,
     ctx: OperationContext,
     resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
     /**
@@ -853,9 +853,25 @@ export class PublishMethods extends DKGAgentBase {
      * from quorum tracking too.
      */
     shareOperationId?: string,
-    /** Exact encryption-time transport projection for this payload. */
-    gossipFanoutSnapshot?: WorkspaceGossipFanoutSnapshot,
   ): Promise<void> {
+    if (
+      !payload
+      || (payload.mode !== 'plaintext' && payload.mode !== 'agent-encrypted')
+      || !(payload.message instanceof Uint8Array)
+      || (
+        payload.mode === 'agent-encrypted'
+        && (
+          payload.fanoutSnapshot?.source !== 'agent-roster'
+          || !Array.isArray(payload.fanoutSnapshot.members)
+          || typeof payload.fanoutSnapshot.complete !== 'boolean'
+        )
+      )
+    ) {
+      throw new TypeError(
+        'publishWorkspaceGossip requires a complete encoded payload; encrypted bytes must carry their encryption-time fan-out snapshot',
+      );
+    }
+    const message = payload.message;
     // OT-RFC-38 / LU-6 Phase B — derive the wire-form id ONCE at the
     // publish-side boundary and use it consistently across the topic,
     // envelope, and signing payload. The curator's local id stays
@@ -928,11 +944,11 @@ export class PublishMethods extends DKGAgentBase {
     // next share to the same cgId pays the planning retry.
     let plan: FanOutPlan;
     try {
-      const enumeration = gossipFanoutSnapshot
+      const enumeration = payload.mode === 'agent-encrypted'
         ? {
           source: 'agent-roster' as const,
-          members: gossipFanoutSnapshot.members,
-          complete: gossipFanoutSnapshot.complete,
+          members: payload.fanoutSnapshot.members,
+          complete: payload.fanoutSnapshot.complete,
         }
         : await this.getOrCreateCGMemberEnumerator().enumerate(contextGraphId);
       plan = chooseFanOutTier({
@@ -1554,14 +1570,13 @@ export class PublishMethods extends DKGAgentBase {
     if (!promoted.shareOperationId) {
       throw new Error(`publishAsync did not produce an immutable SWM snapshot for ${assertionName}`);
     }
-    if (!opts?.localOnly && promoted.gossipMessage) {
+    if (!opts?.localOnly && promoted.gossipPayload) {
       await this.publishWorkspaceGossip(
         contextGraphId,
-        promoted.gossipMessage,
+        promoted.gossipPayload,
         ctx,
         gossipSigner,
         promoted.shareOperationId,
-        promoted.gossipFanoutSnapshot,
       );
     }
     await this.afterDurableSwmPromotionV1({
@@ -2364,7 +2379,7 @@ export class PublishMethods extends DKGAgentBase {
     // buildCuratorAckConfirmer). Undefined → legacy best-effort path.
     const confirmBeforeCommit = await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, opts, ctx);
 
-    const { shareOperationId, message, gossipFanoutSnapshot } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
+    const { shareOperationId, gossipPayload } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       subGraphName: opts?.subGraphName,
@@ -2387,11 +2402,10 @@ export class PublishMethods extends DKGAgentBase {
       // idempotent — swm.redundantApplies.)
       await this.publishWorkspaceGossip(
         contextGraphId,
-        message,
+        gossipPayload,
         ctx,
         gossipSigner,
         shareOperationId,
-        gossipFanoutSnapshot,
       );
     }
     return { shareOperationId };
@@ -2503,7 +2517,7 @@ export class PublishMethods extends DKGAgentBase {
     const gossipSigner = opts?.localOnly ? null : await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
     // Strict curator-ack gate — same seam as share() (both flow through _shareImpl).
     const confirmBeforeCommit = await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, opts, ctx);
-    const { shareOperationId, message, gossipFanoutSnapshot } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
+    const { shareOperationId, gossipPayload } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       conditions,
@@ -2520,11 +2534,10 @@ export class PublishMethods extends DKGAgentBase {
     if (!opts?.localOnly) {
       await this.publishWorkspaceGossip(
         contextGraphId,
-        message,
+        gossipPayload,
         ctx,
         gossipSigner,
         shareOperationId,
-        gossipFanoutSnapshot,
       );
     }
     return { shareOperationId };

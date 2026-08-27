@@ -28,6 +28,9 @@ const DKG = 'https://dkg.network/ontology#';
 const DKG_PUBLIC_ENCRYPTION_KEY = `${DKG}publicEncryptionKey`;
 const DKG_ENCRYPTION_KEY_ALGORITHM = `${DKG}encryptionKeyAlgorithm`;
 const DKG_ENCRYPTION_KEY_PROOF = `${DKG}encryptionKeyProof`;
+const PEER_A = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const PEER_B = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+const SELF_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 
 function agentUri(address: string): string {
   return `did:dkg:agent:${ethers.getAddress(address)}`;
@@ -177,16 +180,16 @@ describe('projectWorkspaceAgentRecipientPeers', () => {
     const resolution = {
       requiresEncryption: true,
       recipients: [
-        { peerId: ' peerA ' },
-        { peerId: 'peerA' },
-        { peerId: 'selfPeer' },
+        { peerId: ` ${PEER_A} ` },
+        { peerId: PEER_A },
+        { peerId: SELF_PEER },
         { peerId: '  ' },
         {},
-        { peerId: 'peerB' },
+        { peerId: PEER_B },
       ],
     } as unknown as WorkspaceAgentRecipientResolution;
 
-    expect(projectWorkspaceAgentRecipientPeers(resolution, 'selfPeer')).toEqual(['peerA', 'peerB']);
+    expect(projectWorkspaceAgentRecipientPeers(resolution, SELF_PEER)).toEqual([PEER_A, PEER_B]);
   });
 
   it('returns null for a plaintext recipient resolution', () => {
@@ -200,13 +203,13 @@ describe('projectWorkspaceAgentRecipientPeers', () => {
     const resolution = {
       requiresEncryption: true,
       recipients: [
-        { agentAddress: '0xaaa', peerId: 'peerA' },
+        { agentAddress: '0xaaa', peerId: PEER_A },
         { agentAddress: '0xbbb' },
       ],
     } as unknown as WorkspaceAgentRecipientResolution;
 
-    expect(projectWorkspaceAgentRecipientFanout(resolution, 'selfPeer')).toEqual({
-      peerIds: ['peerA'],
+    expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
+      peerIds: [PEER_A],
       complete: false,
     });
   });
@@ -215,14 +218,29 @@ describe('projectWorkspaceAgentRecipientPeers', () => {
     const resolution = {
       requiresEncryption: true,
       recipients: [
-        { agentAddress: '0xaaa', peerId: 'selfPeer' },
-        { agentAddress: '0xbbb', peerId: 'peerB' },
+        { agentAddress: '0xaaa', peerId: SELF_PEER },
+        { agentAddress: '0xbbb', peerId: PEER_B },
       ],
     } as unknown as WorkspaceAgentRecipientResolution;
 
-    expect(projectWorkspaceAgentRecipientFanout(resolution, 'selfPeer')).toEqual({
-      peerIds: ['peerB'],
+    expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
+      peerIds: [PEER_B],
       complete: true,
+    });
+  });
+
+  it('rejects malformed profile peer IDs and keeps the fallback-required projection incomplete', () => {
+    const resolution = {
+      requiresEncryption: true,
+      recipients: [
+        { agentAddress: '0xaaa', peerId: PEER_A },
+        { agentAddress: '0xbbb', peerId: 'not-a-peer-id' },
+      ],
+    } as unknown as WorkspaceAgentRecipientResolution;
+
+    expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
+      peerIds: [PEER_A],
+      complete: false,
     });
   });
 });

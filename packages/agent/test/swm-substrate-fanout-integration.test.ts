@@ -37,7 +37,7 @@ import { DKGAgent, FANOUT_RESPONSE_RETRYABLE } from '../src/index.js';
 import type { ReliableSendResult } from '../src/p2p/messenger.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
-const SELF_PEER = '12D3KooWSelfPubC';
+const SELF_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 
 class CapturingGossip {
   publishes: Array<{ topic: string; bytes: number }> = [];
@@ -286,7 +286,7 @@ describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {
     const gossip = new CapturingGossip();
     (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
 
-    const receiverPeerId = '12D3KooWPrivateReceiver';
+    const receiverPeerId = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
     const { calls, install } = stubMessengerSendReliable(new Map([
       [receiverPeerId, {
         delivered: true,
@@ -304,7 +304,7 @@ describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {
     const encryptedBody = new Uint8Array(180_000).fill(0xa5);
     await agent.publishWorkspaceGossip(
       'cg-private-agent-roster',
-      encryptedBody,
+      { mode: 'plaintext', message: encryptedBody },
       createOperationContext('share'),
       null,
     );
@@ -324,8 +324,8 @@ describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {
   it('refreshes the production private roster immediately after a real profile write', async () => {
     const agent = await createAgent('PrivateAgentRosterRefresh');
     const contextGraphId = 'cg-private-agent-roster-refresh';
-    const oldPeerId = '12D3KooWPrivateOld';
-    const newPeerId = '12D3KooWPrivateNew';
+    const oldPeerId = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+    const newPeerId = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
     const recipientId = await seedVerifiedPrivateAgentRoster(agent, contextGraphId, oldPeerId);
     const internals = agent as unknown as {
       store: TripleStore;
@@ -355,6 +355,24 @@ describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {
       members: [newPeerId],
       complete: true,
     });
+
+    await internals.store.deleteByPattern({
+      graph: 'did:dkg:system/agents',
+      subject: recipientId,
+      predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+    });
+    await internals.store.insert([{
+      subject: recipientId,
+      predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+      object: '"not-a-peer-id"',
+      graph: 'did:dkg:system/agents',
+    }]);
+
+    await expect(internals.getOrCreateCGMemberEnumerator().enumerate(contextGraphId)).resolves.toEqual({
+      source: 'agent-roster',
+      members: [],
+      complete: false,
+    });
   });
 
   it('uses the exact encrypted-operation recipient snapshot without resolving membership twice', async () => {
@@ -362,7 +380,7 @@ describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {
     const gossip = new CapturingGossip();
     (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
 
-    const receiverPeerId = '12D3KooWPrivateSnapshotReceiver';
+    const receiverPeerId = '12D3KooWRdP3mMN9KkQCWKFjFxhgpXp8Q2y8zQZkgRYfGQ4bQh3a';
     const { calls, install } = stubMessengerSendReliable(new Map([
       [receiverPeerId, {
         delivered: true,
@@ -384,11 +402,14 @@ describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {
     const encryptedBody = new Uint8Array(2_048).fill(0x5a);
     await agent.publishWorkspaceGossip(
       'cg-private-operation-snapshot',
-      encryptedBody,
+      {
+        mode: 'agent-encrypted',
+        message: encryptedBody,
+        fanoutSnapshot: { source: 'agent-roster', members: [receiverPeerId], complete: true },
+      },
       ctx,
       null,
       undefined,
-      { source: 'agent-roster', members: [receiverPeerId], complete: true },
     );
     await agent.awaitInFlightSubstrateFanOuts();
 
@@ -400,12 +421,26 @@ describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {
     expect(gossip.publishes).toEqual([]);
   });
 
+  it('rejects encrypted bytes that arrive without their associated fan-out snapshot', async () => {
+    const agent = await createAgent('PrivateSnapshotRequired');
+    const gossip = new CapturingGossip();
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+
+    await expect((agent.publishWorkspaceGossip as any)(
+      'cg-private-missing-operation-snapshot',
+      new Uint8Array(128).fill(0x7c),
+      createOperationContext('share'),
+      null,
+    )).rejects.toThrow(/requires a complete encoded payload/);
+    expect(gossip.publishes).toEqual([]);
+  });
+
   it('uses reliable delivery and gossip together for an incomplete mixed roster', async () => {
     const agent = await createAgent('PrivateMixedSnapshotFanout');
     const gossip = new CapturingGossip();
     (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
 
-    const knownPeerId = '12D3KooWPrivateMixedKnown';
+    const knownPeerId = '12D3KooWFHUALUrdSfrVHSxtCRCJC9xvxS7nYfM6T1sbYVak9HTu';
     const { calls, install } = stubMessengerSendReliable(new Map([
       [knownPeerId, {
         delivered: true,
@@ -419,11 +454,13 @@ describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {
     const encryptedBody = new Uint8Array(2_048).fill(0x6b);
     await agent.publishWorkspaceGossip(
       'cg-private-mixed-operation-snapshot',
-      encryptedBody,
+      {
+        mode: 'agent-encrypted',
+        message: encryptedBody,
+        fanoutSnapshot: { source: 'agent-roster', members: [knownPeerId], complete: false },
+      },
       createOperationContext('share'),
       null,
-      undefined,
-      { source: 'agent-roster', members: [knownPeerId], complete: false },
     );
     await agent.awaitInFlightSubstrateFanOuts();
 

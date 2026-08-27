@@ -1183,6 +1183,9 @@ importers:
 
   packages/publisher:
     dependencies:
+      '@libp2p/peer-id':
+        specifier: ^6.0.9
+        version: 6.0.9
       '@multiformats/multiaddr':
         specifier: ^13.0.3
         version: 13.0.3

@@ -38,8 +38,10 @@ const ACCESS_POLICY_PREDICATE = 'https://dkg.network/ontology#accessPolicy';
 const ALLOWED_AGENT_PREDICATE = 'https://dkg.network/ontology#allowedAgent';
 const AGENT = '0x1234567890abcdef1234567890abcdef12345678';
 const AGENT_B = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
-const PEER = '12D3KooWPromoteBoundary';
-const PEER_B = '12D3KooWPromoteBoundaryB';
+const PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const PEER_B = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const PROMOTE_RECIPIENT_PEER = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const PROMOTE_CHANGED_PEER = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
 const ASSERTION_NAME = 'my-assertion';
 const SHARE_OPERATION_ID_PREDICATE = 'http://dkg.io/ontology/shareOperationId';
 const PROMOTE_OPERATION_INTENT_PREDICATE = 'http://dkg.io/ontology/promoteOperationIntent';
@@ -622,7 +624,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     }]);
     await finalizeAssertion(name);
 
-    let advertisedPeer = 'peer-at-encryption';
+    let advertisedPeer = PROMOTE_RECIPIENT_PEER;
     let resolverCalls = 0;
     publisher.setWorkspaceAgentRecipientResolver(async () => {
       resolverCalls += 1;
@@ -632,8 +634,8 @@ describe('Working Memory Assertion Lifecycle', () => {
       };
     });
     publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
-      expect(input.resolution.recipients[0]?.peerId).toBe('peer-at-encryption');
-      advertisedPeer = 'peer-after-encryption';
+      expect(input.resolution.recipients[0]?.peerId).toBe(PROMOTE_RECIPIENT_PEER);
+      advertisedPeer = PROMOTE_CHANGED_PEER;
       return input.plaintext;
     });
 
@@ -643,10 +645,14 @@ describe('Working Memory Assertion Lifecycle', () => {
     });
 
     expect(resolverCalls).toBe(1);
-    expect(result.gossipFanoutSnapshot).toEqual({
+    expect(result.gossipPayload).toEqual({
+      mode: 'agent-encrypted',
+      message: expect.any(Uint8Array),
+      fanoutSnapshot: {
       source: 'agent-roster',
-      members: ['peer-at-encryption'],
+      members: [PROMOTE_RECIPIENT_PEER],
       complete: true,
+      },
     });
   });
 
@@ -831,7 +837,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     const second = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER });
     expect(second.promotedCount).toBe(0);
     expect(second.shareOperationId).toBe(first.shareOperationId);
-    expect(second.gossipMessage).toBeInstanceOf(Uint8Array);
+    expect(second.gossipPayload?.message).toBeInstanceOf(Uint8Array);
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
 
     await store.insert([{
@@ -1347,7 +1353,7 @@ describe('Working Memory Assertion Lifecycle', () => {
       promotedAllRoots: false,
       shareOperationId: promoted.shareOperationId,
     });
-    expect(retried.gossipMessage).toBeUndefined();
+    expect(retried.gossipPayload).toBeUndefined();
     expect(confirmationCalls).toBe(0);
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
   });
@@ -1645,7 +1651,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     );
     expect(repaired.promotedCount).toBe(0);
     expect(repaired.shareOperationId).toBeTruthy();
-    expect(repaired.gossipMessage).toBeInstanceOf(Uint8Array);
+    expect(repaired.gossipPayload?.message).toBeInstanceOf(Uint8Array);
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
 
     const graphManager = new GraphManager(store);
@@ -1972,9 +1978,9 @@ describe('Working Memory Assertion Lifecycle', () => {
     });
 
     expect(result.promotedCount).toBe(quads.length);
-    expect(result.gossipMessage).toBeInstanceOf(Uint8Array);
-    expect(result.gossipMessage!.length).toBeGreaterThan(512 * 1024);
-    expect(result.gossipMessage!.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(result.gossipPayload?.message).toBeInstanceOf(Uint8Array);
+    expect(result.gossipPayload!.message.length).toBeGreaterThan(512 * 1024);
+    expect(result.gossipPayload!.message.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
   });
 
   it('promote rejects payloads above 4 MiB before mutating WM or SWM', async () => {
