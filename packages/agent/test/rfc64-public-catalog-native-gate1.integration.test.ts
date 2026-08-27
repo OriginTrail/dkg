@@ -1666,6 +1666,56 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     expect(rollback).not.toHaveBeenCalled();
   }, 30_000);
 
+  it('finalizes the transaction before post-head cleanup and retries cleanup on exact replay', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const events: string[] = [];
+    const rollback = vi.fn();
+    let cleanupAttempts = 0;
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      async () => ({
+        transaction: {
+          commit: async () => { events.push('primary-commit'); },
+          rollback: async (cause) => { rollback(cause); },
+        },
+        afterAppliedHead: async () => {
+          cleanupAttempts += 1;
+          events.push(`after-head-${cleanupAttempts}`);
+          expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+            fixture.scopeDigest,
+            AUTHOR,
+          )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+          if (cleanupAttempts === 1) throw new Error('injected post-head cleanup failure');
+        },
+      }),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, receiver)).rejects.toThrow(
+      'injected post-head cleanup failure',
+    );
+    expect(events).toEqual(['primary-commit', 'after-head-1']);
+    expect(rollback).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+
+    await expect(fixture.synchronize(fixture.announcement, receiver)).resolves.toMatchObject({
+      appliedHeadStatus: 'existing',
+    });
+    expect(events).toEqual([
+      'primary-commit',
+      'after-head-1',
+      'primary-commit',
+      'after-head-2',
+    ]);
+    expect(rollback).not.toHaveBeenCalled();
+  }, 30_000);
+
   it('fences predecessor rollback when the head CAS and its reconciliation read both fail', async () => {
     const fixture = await setupLiveReceiver();
     await fixture.bootstrap();

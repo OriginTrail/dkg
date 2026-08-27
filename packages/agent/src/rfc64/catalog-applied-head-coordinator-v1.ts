@@ -10,7 +10,9 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
 import type {
+  Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
   Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
+  Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1,
   Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from './public-catalog-native-receiver-v1.js';
 import {
@@ -21,8 +23,8 @@ import {
 export interface Rfc64CatalogAppliedHeadCoordinatorOptionsV1 {
   readonly acceptedPolicySnapshotForCatalogScope:
     (scope: Readonly<AuthorCatalogScopeV1>) => AcceptedRfc64CatalogAccessSnapshotV1;
-  readonly finalizedPolicyPrecommit: Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1;
-  readonly finalizedVmPrecommit: Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1;
+  readonly finalizedPolicyPrecommit: Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1;
+  readonly finalizedVmPrecommit: Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1;
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly retire: (retirement: FinalizedSwmTwinRetirement, ctx: OperationContext) => Promise<void>;
@@ -48,7 +50,9 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
     } else {
       primaryTransaction = await options.finalizedPolicyPrecommit(plan, signal);
     }
-    if (accepted.policy.accessPolicy !== 1) return primaryTransaction;
+    const retirementAuthorized = accepted.policy.accessPolicy === 1
+      && accepted.policy.source.kind === 'finalized-chain';
+    if (!retirementAuthorized) return primaryTransaction;
 
     const catalogProjectionEvidence = plan.rows.map((row) => {
       const binding = readVerifiedCatalogSealBindingV1(row.sealBinding);
@@ -68,8 +72,8 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
       });
     });
     return Object.freeze({
-      commit: async () => {
-        await primaryTransaction?.commit();
+      ...(primaryTransaction === undefined ? {} : { transaction: primaryTransaction }),
+      afterAppliedHead: async () => {
         const ctx = createOperationContext('sync');
         let retired = 0;
         for (const evidence of catalogProjectionEvidence) {
@@ -88,7 +92,6 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
           );
         }
       },
-      rollback: (cause?: unknown) => primaryTransaction?.rollback(cause) ?? Promise.resolve(),
-    });
+    } satisfies Rfc64PublicCatalogNativeAppliedHeadLifecycleV1);
   });
 }

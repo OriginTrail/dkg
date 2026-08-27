@@ -189,18 +189,37 @@ export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
   (
     plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
     signal: AbortSignal,
-  ): Promise<void | Rfc64PublicCatalogNativePrecommitTransactionV1>;
+  ): Promise<
+    | void
+    | Rfc64PublicCatalogNativePrecommitTransactionV1
+    | Rfc64PublicCatalogNativeAppliedHeadLifecycleV1
+  >;
 }
 
 /** Side effects that become durable only when the catalog head CAS succeeds. */
 export interface Rfc64PublicCatalogNativePrecommitTransactionV1 {
-  /**
-   * Finalize side effects only after the exact applied head is known durable.
-   * Implementations may need an awaited post-commit cleanup (for example,
-   * retiring the SWM staging twin of an already-finalized VM asset).
-   */
+  /** Finalize rollback-capable side effects after the exact head is durable. */
   commit(): void | Promise<void>;
   rollback(cause?: unknown): Promise<void>;
+}
+
+/** A rollback-capable primary precommit, before any post-head coordination. */
+export interface Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
+  (
+    plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+    signal: AbortSignal,
+  ): Promise<void | Rfc64PublicCatalogNativePrecommitTransactionV1>;
+}
+
+/**
+ * Explicit two-domain lifecycle returned by a precommit coordinator.
+ * `transaction` owns only rollback-capable work. `afterAppliedHead` runs after
+ * the head, transaction, and durable post-read are final; a failure is
+ * reported without predecessor rollback and an exact replay retries the hook.
+ */
+export interface Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 {
+  readonly transaction?: Rfc64PublicCatalogNativePrecommitTransactionV1;
+  readonly afterAppliedHead?: () => void | Promise<void>;
 }
 
 export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
@@ -353,9 +372,13 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     signal: AbortSignal | undefined,
     failureMessage: string,
     rollback?: (cause: unknown) => Promise<void>,
-  ): Promise<Rfc64PublicCatalogNativePrecommitTransactionV1 | null> {
+  ): Promise<Readonly<{
+    transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null;
+    afterAppliedHead: (() => void | Promise<void>) | null;
+  }>> {
     const precommitSignal = signal ?? new AbortController().signal;
     let transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null = null;
+    let afterAppliedHead: (() => void | Promise<void>) | null = null;
     try {
       throwIfAborted(precommitSignal);
       const returned = await this.options.beforeAppliedHeadCommit?.(
@@ -363,18 +386,34 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         precommitSignal,
       );
       if (returned !== undefined) {
-        if (
-          returned === null
-          || typeof returned !== 'object'
-          || typeof returned.commit !== 'function'
-          || typeof returned.rollback !== 'function'
+        if (isPrecommitTransactionV1(returned)) {
+          transaction = returned;
+        } else if (
+          returned !== null
+          && typeof returned === 'object'
+          && ('transaction' in returned || 'afterAppliedHead' in returned)
         ) {
+          const lifecycle = returned as Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
+          if (
+            lifecycle.transaction !== undefined
+            && !isPrecommitTransactionV1(lifecycle.transaction)
+          ) {
+            throw new TypeError('catalog applied-head lifecycle returned an invalid transaction');
+          }
+          if (
+            lifecycle.afterAppliedHead !== undefined
+            && typeof lifecycle.afterAppliedHead !== 'function'
+          ) {
+            throw new TypeError('catalog applied-head lifecycle returned an invalid post-head hook');
+          }
+          transaction = lifecycle.transaction ?? null;
+          afterAppliedHead = lifecycle.afterAppliedHead ?? null;
+        } else {
           throw new TypeError('catalog applied-head precommit returned an invalid transaction');
         }
-        transaction = returned;
       }
       throwIfAborted(precommitSignal);
-      return transaction;
+      return Object.freeze({ transaction, afterAppliedHead });
     } catch (cause) {
       const rollbackFailures: unknown[] = [];
       try {
@@ -636,7 +675,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       fail('catalog-native-receiver-catalog', 'verified genesis objects could not be staged', cause);
     }
 
-    const precommitTransaction = await this.runBeforeAppliedHeadCommitV1(
+    const precommitLifecycle = await this.runBeforeAppliedHeadCommitV1(
       Object.freeze({
         catalogScope: trustedCatalogScope,
         policyDigest: announcement.policyDigest,
@@ -689,10 +728,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         );
       }
     } catch (cause) {
-      await this.rollbackAppliedHeadPrecommitV1(precommitTransaction, cause);
+      await this.rollbackAppliedHeadPrecommitV1(precommitLifecycle.transaction, cause);
       throw cause;
     }
-    await precommitTransaction?.commit();
+    await precommitLifecycle.transaction?.commit();
+    await precommitLifecycle.afterAppliedHead?.();
     return Object.freeze({
       inventoryDigest,
       catalogHeadDigest: head.objectDigest as Digest32V1,
@@ -1140,7 +1180,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       );
     }
 
-    const precommitTransaction = await this.runBeforeAppliedHeadCommitV1(
+    const precommitLifecycle = await this.runBeforeAppliedHeadCommitV1(
       Object.freeze({
         catalogScope: trustedCatalogScope,
         policyDigest: announcement.policyDigest,
@@ -1165,12 +1205,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       // Set the fence before invoking operator code. A throwing commit hook
       // cannot make a known-durable target safe to roll back to its predecessor.
       precommitFinalized = true;
-      await precommitTransaction?.commit();
+      await precommitLifecycle.transaction?.commit();
     };
     const rollbackRejectedTransition = async (cause: unknown): Promise<void> => {
       const rollbackFailures: unknown[] = [];
       try {
-        await this.rollbackAppliedHeadPrecommitV1(precommitTransaction, cause);
+        await this.rollbackAppliedHeadPrecommitV1(precommitLifecycle.transaction, cause);
       } catch (rollbackCause) {
         rollbackFailures.push(rollbackCause);
       }
@@ -1278,6 +1318,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       }
       throw cause;
     }
+
+    // This is intentionally outside the transaction/CAS catch. At this point
+    // the exact head and primary transaction are durable and the post-read has
+    // succeeded. A cleanup failure is retryable by replay, never by restoring
+    // the predecessor behind an already-committed head.
+    await precommitLifecycle.afterAppliedHead?.();
 
     if (activatedRows.length === 1) {
       const [only] = activatedRows;
@@ -2431,6 +2477,15 @@ export function assertRecoverableAuthorAttestationV1(
       cause,
     );
   }
+}
+
+function isPrecommitTransactionV1(
+  value: unknown,
+): value is Rfc64PublicCatalogNativePrecommitTransactionV1 {
+  return value !== null
+    && typeof value === 'object'
+    && typeof (value as Rfc64PublicCatalogNativePrecommitTransactionV1).commit === 'function'
+    && typeof (value as Rfc64PublicCatalogNativePrecommitTransactionV1).rollback === 'function';
 }
 
 function fail(

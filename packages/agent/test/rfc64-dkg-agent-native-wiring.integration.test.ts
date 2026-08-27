@@ -9,6 +9,7 @@ import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   MEMBER_ROSTER_OBJECT_TYPE_V1,
   MemoryLayer,
+  PROTOCOL_SYNC,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
@@ -1180,16 +1181,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   });
 
-  it('admits a shared provider once without public/private queue arbitration', () => {
+  it('delegates a shared provider plan to the RFC-64 recovery coordinator', () => {
     const providerPeerId = '12D3KooWSharedPlanAdmission';
     const privateContextGraphId =
       '0x2222222222222222222222222222222222222222/mixed-private-admission';
-    const request = vi.fn(() => true);
-    const queueSyncFromPeerOnConnect = vi.fn(() => true);
+    const queue = vi.fn(() => true);
     const scheduler = {
-      config: { syncContextGraphs: [CONTEXT_GRAPH_ID] },
-      selectedSwmBootstrapAdmission: { request },
-      queueSyncFromPeerOnConnect,
+      createRfc64SwmRecoveryCoordinatorV1: () => ({ queue }),
     } as unknown as DKGAgent;
     const handleError = vi.fn();
     const recoveryPlan = {
@@ -1206,69 +1204,50 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       handleError,
       0,
     )).toBe(true);
-    expect(request).toHaveBeenCalledOnce();
-    expect(request).toHaveBeenCalledWith(providerPeerId, [CONTEXT_GRAPH_ID]);
-    expect(queueSyncFromPeerOnConnect).toHaveBeenCalledOnce();
-    expect(queueSyncFromPeerOnConnect).toHaveBeenCalledWith(
-      providerPeerId,
+    expect(queue).toHaveBeenCalledOnce();
+    expect(queue).toHaveBeenCalledWith(
+      recoveryPlan,
       handleError,
       0,
-      { rfc64RecoveryPlan: recoveryPlan },
     );
   });
 
-  it('retains the private lane when the shared provider public scope is already terminal', () => {
+  it('leaves terminal-public filtering to the RFC-64 recovery coordinator', () => {
     const providerPeerId = '12D3KooWSharedPlanPrivateOnly';
     const privateContextGraphId =
       '0x2222222222222222222222222222222222222222/mixed-private-terminal';
-    const queueSyncFromPeerOnConnect = vi.fn(() => true);
+    const queue = vi.fn(() => true);
     const scheduler = {
-      config: { syncContextGraphs: [CONTEXT_GRAPH_ID] },
-      selectedSwmBootstrapAdmission: { request: vi.fn(() => false) },
-      queueSyncFromPeerOnConnect,
+      createRfc64SwmRecoveryCoordinatorV1: () => ({ queue }),
     } as unknown as DKGAgent;
     const handleError = vi.fn();
 
+    const recoveryPlan = {
+      providerPeerId,
+      targets: [
+        { contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' as const },
+        { contextGraphId: privateContextGraphId, lane: 'ordinary-private' as const },
+      ],
+    };
     expect(DKGAgent.prototype.queueRfc64SwmRecoveryPlanFromPeerOnConnect.call(
       scheduler,
-      {
-        providerPeerId,
-        targets: [
-          { contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' },
-          { contextGraphId: privateContextGraphId, lane: 'ordinary-private' },
-        ],
-      },
+      recoveryPlan,
       handleError,
       0,
     )).toBe(true);
-    expect(queueSyncFromPeerOnConnect).toHaveBeenCalledWith(
-      providerPeerId,
+    expect(queue).toHaveBeenCalledWith(
+      recoveryPlan,
       handleError,
       0,
-      {
-        rfc64RecoveryPlan: {
-          providerPeerId,
-          targets: [{ contextGraphId: privateContextGraphId, lane: 'ordinary-private' }],
-        },
-      },
     );
   });
 
-  it('admits an explicit private RFC-64 plan when broad on-connect sync is disabled', async () => {
+  it('routes explicit private recovery outside the generic on-connect switch', () => {
     const providerPeerId = '12D3KooWPrivatePlanKillSwitch';
-    const runPlan = vi.fn(async () => {});
+    const queue = vi.fn(() => true);
     const scheduler = {
-      config: {
-        syncOnConnectEnabled: false,
-        syncReconcilerTiming: { stalenessThresholdMs: 60_000 },
-      },
-      selectedSwmBootstrapAdmission: { isRetryRequired: () => false },
-      networkAdmissionCoordinator: { isAcceptedPeer: () => true },
-      syncOnConnectDisconnectBoundary: () => 0,
-      lastSuccessfulSyncAt: new Map(),
-      catchupOnConnectAt: new Map(),
-      syncReconcilerBackoff: new Map(),
-      runRfc64SwmRecoveryPlanFromPeerOnConnect: runPlan,
+      config: { syncOnConnectEnabled: false },
+      createRfc64SwmRecoveryCoordinatorV1: () => ({ queue }),
     } as unknown as DKGAgent;
     const recoveryPlan = {
       providerPeerId,
@@ -1278,17 +1257,88 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       }],
     };
 
-    expect(DKGAgent.prototype.queueSyncFromPeerOnConnect.call(
+    const handleError = vi.fn();
+    expect(DKGAgent.prototype.queueRfc64SwmRecoveryPlanFromPeerOnConnect.call(
       scheduler,
-      providerPeerId,
-      vi.fn(),
-      0,
-      { rfc64RecoveryPlan: recoveryPlan },
-    )).toBe(true);
-    await vi.waitFor(() => expect(runPlan).toHaveBeenCalledWith(
       recoveryPlan,
-      expect.any(Function),
-    ));
+      handleError,
+      0,
+    )).toBe(true);
+    expect(queue).toHaveBeenCalledWith(
+      recoveryPlan,
+      handleError,
+      0,
+    );
+  });
+
+  it('executes one authorized mixed plan through the real lifecycle sync adapter', async () => {
+    const providerPeerId = '12D3KooWMixedPlanExecution';
+    const privateContextGraphId =
+      '0x2222222222222222222222222222222222222222/mixed-private-execution';
+    const authorizedPlan = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId,
+      publicContextGraphIds: [CONTEXT_GRAPH_ID],
+      privateRecoverFromCurator: [privateContextGraphId],
+      eligibleContextGraphIds: [CONTEXT_GRAPH_ID, privateContextGraphId],
+    };
+    const syncSelectedSharedMemoryFromPeerDetailed = vi.fn(async () => ({
+      kind: 'selected-shared-memory' as const,
+      shared: {
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        insertedTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        timedOutPhases: 0,
+        completedPhases: 2,
+        checkpointAdvances: 0,
+        emptyResponses: 2,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+        failedPhases: 0,
+        deniedPhases: 0,
+      },
+      selectedScopeComplete: true,
+    }));
+    const scheduler = {
+      config: { syncContextGraphs: [CONTEXT_GRAPH_ID] },
+      selectedSwmBootstrapAdmission: { request: vi.fn(() => true) },
+      networkAdmissionCoordinator: { isAcceptedPeer: () => true },
+      started: true,
+      syncingPeers: new Set(),
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      syncSelectedSharedMemoryFromPeerDetailed,
+      skippedNoSyncPeers: new Set(),
+      syncReconcilerBackoff: new Map(),
+      lastSyncProgressAt: new Map(),
+      catchupOnConnectAt: new Map(),
+      syncOnConnectDisconnectBoundary: () => 0,
+      getSyncReconcilerProbe: vi.fn(async () => ({})),
+      accountSyncAttemptWithReconciler: vi.fn(),
+      log: { info: vi.fn() },
+    } as unknown as DKGAgent;
+    const coordinator = DKGAgent.prototype.createRfc64SwmRecoveryCoordinatorV1.call(scheduler);
+
+    await expect(coordinator.execute(authorizedPlan)).resolves.toBe('synced');
+    expect(syncSelectedSharedMemoryFromPeerDetailed).toHaveBeenCalledWith(
+      providerPeerId,
+      [CONTEXT_GRAPH_ID, privateContextGraphId],
+      {
+        stopOnBackoffWorthyFailure: true,
+        source: 'on-connect',
+        sharedMemorySyncPlan: {
+          publicContextGraphIds: [CONTEXT_GRAPH_ID],
+          privateRecoverFromCurator: [privateContextGraphId],
+          eligibleContextGraphIds: [CONTEXT_GRAPH_ID, privateContextGraphId],
+        },
+        priority: 2_000,
+        selectedSwmPriority: true,
+        authorizedRfc64RecoveryPlan: authorizedPlan,
+      },
+    );
   });
 
   it('dials and schedules every graph-complete SWM provider during bootstrap', async () => {
@@ -1455,11 +1505,18 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     agents.push(receiver);
     vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
-    const queue = vi.spyOn(receiver, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+    const authorizedPlans: unknown[] = [];
+    vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
+      .mockImplementation((plan) => {
+        const authorized = receiver.createRfc64SwmRecoveryCoordinatorV1().authorize(plan);
+        if (authorized === null) return false;
+        authorizedPlans.push(authorized);
+        return true;
+      });
 
     await receiver.start();
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
-    expect(queue).toHaveBeenCalledTimes(1);
+    expect(authorizedPlans).toHaveLength(1);
     expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
       .toBe(true);
 
@@ -1476,7 +1533,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     }, { timeout: 2_500, interval: 25 });
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 
-    expect(queue).toHaveBeenCalledTimes(1);
+    expect(authorizedPlans).toHaveLength(1);
     expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
       .toBe(false);
   });
@@ -1513,11 +1570,18 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     agents.push(receiver);
     vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
-    const queue = vi.spyOn(receiver, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+    const authorizedPlans: unknown[] = [];
+    vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
+      .mockImplementation((plan) => {
+        const authorized = receiver.createRfc64SwmRecoveryCoordinatorV1().authorize(plan);
+        if (authorized === null) return false;
+        authorizedPlans.push(authorized);
+        return true;
+      });
 
     await receiver.start();
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
-    expect(queue).toHaveBeenCalledTimes(1);
+    expect(authorizedPlans).toHaveLength(1);
     expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
       .toBe(true);
 
@@ -1526,7 +1590,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     }, { timeout: 2_500, interval: 25 });
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 
-    expect(queue).toHaveBeenCalledTimes(2);
+    expect(authorizedPlans).toHaveLength(2);
     expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
       .toBe(true);
   });
@@ -1571,11 +1635,18 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     agents.push(receiver);
     vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
-    const queue = vi.spyOn(receiver, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+    const authorizedPlans: Array<{ eligibleContextGraphIds: readonly string[] }> = [];
+    vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
+      .mockImplementation((plan) => {
+        const authorized = receiver.createRfc64SwmRecoveryCoordinatorV1().authorize(plan);
+        if (authorized === null) return false;
+        authorizedPlans.push(authorized);
+        return true;
+      });
 
     await receiver.start();
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
-    expect(queue).toHaveBeenCalledTimes(1);
+    expect(authorizedPlans).toHaveLength(1);
     const firstScopeOwner = (receiver as any).selectedSwmBootstrapAdmission.beginTransfer(
       providerPeerId,
       [CONTEXT_GRAPH_ID],
@@ -1588,7 +1659,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     }, { timeout: 2_500, interval: 25 });
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 
-    expect(queue).toHaveBeenCalledTimes(2);
+    expect(authorizedPlans).toHaveLength(2);
+    expect(authorizedPlans[1]?.eligibleContextGraphIds).toEqual(
+      [CONTEXT_GRAPH_ID, secondContextGraphId].sort(),
+    );
     expect((receiver as any).selectedSwmBootstrapAdmission.snapshot(providerPeerId)).toEqual({
       contextGraphIds: [CONTEXT_GRAPH_ID, secondContextGraphId].sort(),
       phase: 'retry-required',

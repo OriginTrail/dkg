@@ -139,6 +139,20 @@ describe('CanonicalGraphScopedAuthorSealV1 bytes and projection', () => {
     })).toEqual(finalizedAt);
     expect(canonicalizeAuthorSealStoreRoundTripRowV1({
       ...finalizedAt,
+      object: `"2026-07-19T13:34:56.7890+01:00"^^<${XSD}dateTime>`,
+    })).toEqual(finalizedAt);
+    for (const nonEquivalent of [
+      `"2026-07-19T12:34:56.7899Z"^^<${XSD}dateTime>`,
+      `"2026-07-19T12:34:56.789"^^<${XSD}dateTime>`,
+      `"2026-02-30T12:34:56.789Z"^^<${XSD}dateTime>`,
+    ]) {
+      expect(canonicalizeAuthorSealStoreRoundTripRowV1({
+        ...finalizedAt,
+        object: nonEquivalent,
+      }).object).toBe(nonEquivalent);
+    }
+    expect(canonicalizeAuthorSealStoreRoundTripRowV1({
+      ...finalizedAt,
       object: `"not-an-instant"^^<${XSD}dateTime>`,
     }).object).toBe(`"not-an-instant"^^<${XSD}dateTime>`);
   });

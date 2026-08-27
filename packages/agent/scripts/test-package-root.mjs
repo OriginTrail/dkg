@@ -224,6 +224,7 @@ const blockedRfc64Modules = [
   'public-catalog-transport-v1.js',
   'recoverable-author-attestation-v1.js',
   'secure-filesystem-policy-v1.js',
+  'swm-recovery-coordinator-v1.js',
   'swm-inventory-shadow-runtime-v1.js',
 ];
 const packageExports = packageManifest.exports;
