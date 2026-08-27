@@ -256,7 +256,10 @@ describe('Assertion promote gossip (2 nodes)', () => {
     expect(promoted.shareOperationId).toBeTruthy();
     const publishCall = publishWorkspaceGossip.mock.calls[0];
     expect(publishCall?.[0]).toBe(CG_ID);
-    expect(publishCall?.[1]).toBeInstanceOf(Uint8Array);
+    expect(publishCall?.[1]).toEqual({
+      mode: 'plaintext',
+      message: expect.any(Uint8Array),
+    });
     expect(publishCall?.[4]).toBe(promoted.shareOperationId);
 
     const deadline = Date.now() + 15_000;
