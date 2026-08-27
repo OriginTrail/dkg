@@ -1627,7 +1627,10 @@ function isDeterministicKaMetadataSubject(subject: string): boolean {
   return true;
 }
 
-function parseGraphScopedDescriptor(ual: string, rows: readonly Quad[]): GraphScopedDescriptor {
+export function parseGraphScopedDescriptor(
+  ual: string,
+  rows: readonly Quad[],
+): GraphScopedDescriptor {
   const requireSingle = (predicate: string, field: string): string => {
     const values = distinctObjects(rows, predicate);
     if (values.length !== 1) {

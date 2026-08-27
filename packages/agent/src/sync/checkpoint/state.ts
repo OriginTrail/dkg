@@ -28,7 +28,8 @@ export {
  */
 export type SyncCheckpointScope =
   | `selected-swm-meta:${string}`
-  | `durable-recovery-meta:${string}`;
+  | `durable-recovery-meta:${string}`
+  | `challenge-exact:${string}`;
 
 /** Runtime-distinct namespace owned only by retained selected-SWM metadata. */
 export type SelectedSwmMetaRetentionScope = `selected-swm-meta:retained:${string}`;

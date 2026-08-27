@@ -149,7 +149,13 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
-import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
+import {
+  bindRandomSampling,
+  RandomSamplingShutdownTimeoutError,
+  stopRandomSamplingHandleWithin,
+  type RandomSamplingHandle,
+  type RandomSamplingStatus,
+} from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
@@ -2014,8 +2020,34 @@ export class DKGAgent extends DKGAgentBase {
     this.clearStorageACKRegistrationRetry();
     this.storageACKRegistrationRetryInFlight = false;
     if (this.randomSamplingHandle) {
-      try { await this.randomSamplingHandle.stop(); } catch { /* swallow on shutdown */ }
-      this.randomSamplingHandle = null;
+      const handle = this.randomSamplingHandle;
+      try {
+        await stopRandomSamplingHandleWithin(
+          handle,
+          DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
+        );
+      } catch (error) {
+        if (error instanceof RandomSamplingShutdownTimeoutError) {
+          // The loop still owns a live tick and will close its builder/WAL only
+          // after that tick retires. Preserve the handle and quarantine the
+          // network/store boundary so a later stop() retry can observe the same
+          // physical shutdown instead of leaving the tick on torn-down hosts.
+          this.log.warn(
+            createOperationContext('system'),
+            `DKGAgent.stop: Random Sampling prover did not physically retire within `
+              + `${error.timeoutMs}ms; store/network teardown is blocked until stop() is retried`,
+          );
+          throw error;
+        }
+        this.log.warn(
+          createOperationContext('system'),
+          `DKGAgent.stop: Random Sampling prover close failed during shutdown: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (this.randomSamplingHandle === handle) {
+        this.randomSamplingHandle = null;
+      }
     }
     // rc.9 PR-G codex follow-up #G3: drain background substrate
     // fan-outs spawned by `publishWorkspaceGossip` (G2's

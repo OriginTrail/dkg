@@ -967,6 +967,8 @@ export class DKGAgentBase {
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_MAX_FOREGROUND_BURST']) || 8);
   static readonly VM_RECONCILE_SHUTDOWN_TIMEOUT_MS =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_SHUTDOWN_TIMEOUT_MS']) || 5_000);
+  static readonly RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS =
+    Math.max(1, Number(process.env['DKG_RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS']) || 5_000);
   static readonly CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS =
     Math.max(1, Number(process.env['DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS']) || 5_000);
   /**

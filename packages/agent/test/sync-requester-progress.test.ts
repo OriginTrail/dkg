@@ -1385,7 +1385,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-peer',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetUalsFor: () => [EXACT_UAL],
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
       fetchSyncPages: async ({ phase }) => {
         if (options.fetchError) throw options.fetchError;
         const page = pageResult('exact-cg', phase, {
@@ -1424,7 +1424,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-peer-public',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetUalsFor: () => [EXACT_UAL],
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
       fetchSyncPages: async ({ phase }) => pageResult('exact-cg', phase),
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -1508,7 +1508,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'legacy-exact-peer',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetUalsFor: () => [EXACT_UAL],
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
       fetchSyncPages,
       processDurableBatchInWorker,
       storeInsert,
@@ -1535,7 +1535,7 @@ describe('exact durable fetch disposition', () => {
       contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.AGENTS],
       syncAgentsMeta: false,
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetUalsFor: () => [EXACT_UAL],
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
       fetchSyncPages: async ({ contextGraphId, phase }) => {
         fetchedPhases.push(phase);
         return pageResult(contextGraphId, phase);
@@ -1559,7 +1559,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-multi-cg-peer',
       contextGraphIds: ['exact-incomplete-cg', 'exact-clean-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetUalsFor: () => [EXACT_UAL],
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
       fetchSyncPages: async ({ contextGraphId, phase }) => pageResult(contextGraphId, phase, {
         ...(contextGraphId === 'exact-incomplete-cg' && phase === 'data'
           ? { completed: false }

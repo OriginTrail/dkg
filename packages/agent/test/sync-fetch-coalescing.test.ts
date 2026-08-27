@@ -21,6 +21,10 @@ import {
   type SyncCheckpointScope,
 } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import {
+  createChallengePinnedExactAssetSelection,
+  createUalOnlyExactAssetSelection,
+} from '../src/sync/exact-assets.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import {
   VmReconcileQueueClosedError,
@@ -53,6 +57,9 @@ type FetchArgs = {
 
 const EXACT_UAL_7 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
 const EXACT_UAL_8 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+
+const exactSelection = (...assetUals: string[]) =>
+  createUalOnlyExactAssetSelection(assetUals);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -616,16 +623,32 @@ describe('DKGAgent sync fetch coalescing', () => {
 
     try {
       // Different exact batches: two separate runs (2 phases each).
-      const first = (agent as any).syncExactKnowledgeAssetsFromPeer(PEER_A, 'coalesced-cg', [EXACT_UAL_7]);
-      const second = (agent as any).syncExactKnowledgeAssetsFromPeer(PEER_A, 'coalesced-cg', [EXACT_UAL_8]);
+      const first = (agent as any).syncExactKnowledgeAssetsFromPeer(
+        PEER_A,
+        'coalesced-cg',
+        exactSelection(EXACT_UAL_7),
+      );
+      const second = (agent as any).syncExactKnowledgeAssetsFromPeer(
+        PEER_A,
+        'coalesced-cg',
+        exactSelection(EXACT_UAL_8),
+      );
       const [firstResult, secondResult] = await Promise.all([first, second]);
       expect(firstResult).not.toBe(secondResult);
       expect(fetchCalls).toBe(4);
 
       // The identical exact batch single-flights onto one run.
       fetchCalls = 0;
-      const third = (agent as any).syncExactKnowledgeAssetsFromPeer(PEER_A, 'coalesced-cg', [EXACT_UAL_7]);
-      const fourth = (agent as any).syncExactKnowledgeAssetsFromPeer(PEER_A, 'coalesced-cg', [EXACT_UAL_7]);
+      const third = (agent as any).syncExactKnowledgeAssetsFromPeer(
+        PEER_A,
+        'coalesced-cg',
+        exactSelection(EXACT_UAL_7),
+      );
+      const fourth = (agent as any).syncExactKnowledgeAssetsFromPeer(
+        PEER_A,
+        'coalesced-cg',
+        exactSelection(EXACT_UAL_7),
+      );
       const [thirdResult, fourthResult] = await Promise.all([third, fourth]);
       expect(thirdResult).toBe(fourthResult);
       expect(fetchCalls).toBe(2);
@@ -664,13 +687,13 @@ describe('DKGAgent sync fetch coalescing', () => {
       const publicResult = (agent as any).syncExactKnowledgeAssetsFromPeer(
         PEER_A,
         'coalesced-cg',
-        [EXACT_UAL_7],
+        exactSelection(EXACT_UAL_7),
       );
       await waitFor(() => fetchCalls === 1);
       const detailedResult = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
         PEER_A,
         'coalesced-cg',
-        [EXACT_UAL_7],
+        exactSelection(EXACT_UAL_7),
       );
       firstMetaFetch.resolve(emptySyncPage('meta'));
 
@@ -684,12 +707,12 @@ describe('DKGAgent sync fetch coalescing', () => {
       const firstDetailed = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
         PEER_A,
         'coalesced-cg',
-        [EXACT_UAL_7],
+        exactSelection(EXACT_UAL_7),
       );
       const secondDetailed = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
         PEER_A,
         'coalesced-cg',
-        [EXACT_UAL_7],
+        exactSelection(EXACT_UAL_7),
       );
       const [first, second] = await Promise.all([firstDetailed, secondDetailed]);
       expect(fetchCalls).toBe(2);
@@ -701,17 +724,72 @@ describe('DKGAgent sync fetch coalescing', () => {
       const forwardOrder = (agent as any).syncExactKnowledgeAssetsFromPeer(
         PEER_A,
         'coalesced-cg',
-        [EXACT_UAL_7, EXACT_UAL_8],
+        exactSelection(EXACT_UAL_7, EXACT_UAL_8),
       );
       const reverseOrder = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
         PEER_A,
         'coalesced-cg',
-        [EXACT_UAL_8, EXACT_UAL_7],
+        exactSelection(EXACT_UAL_8, EXACT_UAL_7),
       );
       const [forward, reverse] = await Promise.all([forwardOrder, reverseOrder]);
       expect(fetchCalls).toBe(2);
       expect(forward).toBe(reverse.result);
       expect(reverse.disposition).toBe('clean-absent');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('never coalesces challenge-pinned fetches whose commitments differ', async () => {
+    const firstMetaFetch = deferred<SyncPageResult>();
+    const requesterScopes: Array<SyncCheckpointScope | undefined> = [];
+    let fetchCalls = 0;
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    stubLifecycleFetch(agent, async ({ phase, requesterScope }) => {
+      fetchCalls += 1;
+      if (phase === 'meta') requesterScopes.push(requesterScope);
+      if (fetchCalls === 1) return firstMetaFetch.promise;
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      consumedUnpersistedMetaTriples: 0,
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+    const pinnedSelection = (rootByte: string) => createChallengePinnedExactAssetSelection([{
+      assetUal: EXACT_UAL_7,
+      merkleRootHex: rootByte.repeat(64),
+      merkleLeafCount: 1n,
+    }]);
+
+    try {
+      const first = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        'challenge-isolated-cg',
+        pinnedSelection('1'),
+      );
+      await waitFor(() => fetchCalls === 1);
+      const second = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        'challenge-isolated-cg',
+        pinnedSelection('2'),
+      );
+      firstMetaFetch.resolve(emptySyncPage('meta'));
+
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(fetchCalls).toBe(4);
+      expect(firstResult.result).not.toBe(secondResult.result);
+      expect(requesterScopes).toHaveLength(2);
+      expect(requesterScopes[0]).not.toBe(requesterScopes[1]);
+      expect(requesterScopes.every((scope) => scope?.startsWith('challenge-exact:')))
+        .toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }

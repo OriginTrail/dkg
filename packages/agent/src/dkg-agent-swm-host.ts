@@ -263,7 +263,10 @@ import {
   type VmRecoveryProviderAttempt,
   type VmRecoveryUalDisposition,
 } from './vm-recovery-provider-policy.js';
-import { encodeExactAssetUals, MAX_EXACT_SYNC_ASSETS } from './sync/exact-assets.js';
+import {
+  encodeExactAssetUals,
+  MAX_EXACT_SYNC_ASSETS,
+} from './sync/exact-assets.js';
 import {
   MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
   ExactAssetFetchLifecycleClosedError,
