@@ -86,7 +86,7 @@
     "benchmark:sync-responder-pages": "node --expose-gc scripts/sync-responder-page-benchmark.cjs",
     "benchmark:sync-worker": "node scripts/sync-worker-benchmark.cjs",
     "benchmark:sync-worker-responsiveness": "node scripts/sync-worker-responsiveness-benchmark.cjs",
-    "devnet:rfc64-private-release-gate": "node devnet/rfc64-private-catalog/run.mjs",
+    "devnet:rfc64-private-release-gate": "node --import tsx devnet/rfc64-private-catalog/launch-live.ts",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:rfc64-m0-recovery:unit": "node --test scripts/run-rfc64-m0-recovery-scenario.test.mjs",

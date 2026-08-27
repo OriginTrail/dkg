@@ -169,6 +169,7 @@ function strictContextGraphBindingVerifier(
     log: { info: () => {}, warn: () => {}, debug: () => {} },
   };
   agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
+  agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
   agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
   return (localId, onChainId, signal) => (
     DKGAgent.prototype as any

@@ -88,8 +88,8 @@ import {
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
-import type {
-  Rfc64PublicCatalogReconciliationFailureV1,
+import {
+  type Rfc64PublicCatalogReconciliationFailureV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import {
   Rfc64PublicCatalogSuccessorProducerV1,

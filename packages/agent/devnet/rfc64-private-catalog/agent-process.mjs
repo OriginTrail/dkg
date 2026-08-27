@@ -29,11 +29,13 @@ import {
   roleAgentAddress,
 } from './fixture.mjs';
 import { classifyExpectedPrivateCatalogDenialV1 } from './denial-evidence.mjs';
+import { sealExecutedRuntimeManifestV1 } from '../../../../devnet/rfc64-runtime-load-hook.mts';
 import { readPrivateCatalogGraphCountEvidence } from './memory-evidence.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
 const DATA_DIR = requiredEnv('DKG_RFC64_PRIVATE_DATA_DIR');
+const RUNTIME_MANIFEST_DIGEST = requiredEnv('DKG_RFC64_RUNTIME_MANIFEST_DIGEST');
 const MANIFEST_PATH = process.env.DKG_RFC64_PRIVATE_MANIFEST;
 
 let agent;
@@ -54,7 +56,6 @@ async function boot() {
     agent = await createAgent(undefined, false);
     await agent.start();
     emit('ready', undefined, readyFields());
-    await shutdown(0);
     return;
   }
   if (MODE !== 'run' || MANIFEST_PATH === undefined) {
@@ -177,6 +178,7 @@ function readyFields() {
     peerId: agent.peerId,
     multiaddr: address,
     catalogServiceStarted: agent.rfc64PublicCatalogStatsV1()?.started === true,
+    runtimeBuildManifestDigest: RUNTIME_MANIFEST_DIGEST,
   };
 }
 
@@ -200,8 +202,7 @@ async function handle(command) {
       await proveDenied(command, requestId);
       return;
     case 'stop':
-      emit('stopping', requestId);
-      await shutdown(0);
+      await shutdown(0, requestId);
       return;
     default:
       throw new Error(`unknown command ${String(command.cmd)}`);
@@ -364,12 +365,29 @@ function seededSubscriptionStore(contextGraphId) {
   };
 }
 
-async function shutdown(code) {
+async function shutdown(code, requestId) {
   if (stopping) return;
   stopping = true;
   try { await agent?.stop(); } catch { /* best effort */ }
   try { await rpc?.close(); } catch { /* best effort */ }
+  await emitAndFlush('stopping', requestId, {
+    executedRuntimeManifest: sealExecutedRuntimeManifestV1(),
+  });
   process.exit(code);
+}
+
+function emitAndFlush(event, requestId, fields = {}) {
+  return new Promise((resolve, reject) => {
+    process.stdout.write(`RFC64_PRIVATE_EVENT ${JSON.stringify({
+      event,
+      role: ROLE,
+      ...(requestId === undefined ? {} : { requestId }),
+      ...fields,
+    })}\n`, (error) => {
+      if (error === null || error === undefined) resolve();
+      else reject(error);
+    });
+  });
 }
 
 function requiredEnv(name) {

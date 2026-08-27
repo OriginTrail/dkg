@@ -118,21 +118,24 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
       }),
       materialize: materializer,
     });
+    // Runtime materialization owns rollback for failures in its own execution.
+    // Only a failure after a successful runtime reaches this layer's rollback,
+    // so each failed precommit has exactly one transaction cleanup owner.
+    await runtime({
+      catalogLane: Object.freeze({
+        contextGraphId: plan.catalogScope.contextGraphId,
+        subGraphName: plan.catalogScope.subGraphName,
+      }),
+      catalogAuthorAddress: plan.catalogScope.authorAddress,
+      onChainContextGraphId: resolved.onChainContextGraphId,
+      acceptedPolicy: resolved.acceptedPolicy,
+      placements: Object.freeze(plan.rows.map((row) => Object.freeze({
+        authorship: row.authorship,
+        sealBinding: row.sealBinding,
+      }))),
+      signal,
+    });
     try {
-      await runtime({
-        catalogLane: Object.freeze({
-          contextGraphId: plan.catalogScope.contextGraphId,
-          subGraphName: plan.catalogScope.subGraphName,
-        }),
-        catalogAuthorAddress: plan.catalogScope.authorAddress,
-        onChainContextGraphId: resolved.onChainContextGraphId,
-        acceptedPolicy: resolved.acceptedPolicy,
-        placements: Object.freeze(plan.rows.map((row) => Object.freeze({
-          authorship: row.authorship,
-          sealBinding: row.sealBinding,
-        }))),
-        signal,
-      });
       assertRfc64FinalizedPolicyAgentPrecommitSnapshotCurrentV1(
         options,
         plan,
