@@ -20,7 +20,10 @@ import {
 } from '../src/index.js';
 import {
   CONTROL_LOCKED_JOB,
+  CONTROL_STATUS,
+  DEFAULT_CONTROL_GRAPH_URI,
   DEFAULT_WALLET_LOCK_GRAPH_URI,
+  jobSubject,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
 import {
@@ -863,6 +866,57 @@ describe('async-lift reconciliation demand channel', () => {
       }
     } finally {
       await runner.stop();
+    }
+  });
+
+  it('fires the release poke only after the reset transition is claim-visible in the store', async () => {
+    // r2 (🔴 3874704509) - the direct ordering oracle behind the reclaim row above. The wake is
+    // a one-shot claim invitation, so at the instant it fires the reset must already be readable
+    // by a claimer. The end-to-end row cannot pin that by itself: against this in-memory store
+    // the reset write usually wins the race in either order, hiding exactly the bug the order
+    // exists to prevent. OxigraphStore.query executes the native query synchronously before its
+    // first await, so a query promise CAPTURED inside the listener reads the store as it stood
+    // at poke time - no race, no timing assumptions.
+    const txA = `0x${'ab'.repeat(32)}` as `0x${string}`;
+    const publisher = createPublisher({
+      chainProofResolver: async () => ({ status: 'not-found' }),
+      knowledgeAssetVmPublishHandler: {
+        execute: async () => { throw new Error('executor must not run in this test'); },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-a');
+    await publisher.update(jobA, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobA, 'broadcast', {
+      broadcast: { txHash: txA, walletId: 'wallet-a', operationKind: 'create' },
+    });
+
+    const statusAtPoke: Array<ReturnType<typeof store.query>> = [];
+    const detach = publisher.reconciliationScheduling.attachScheduler({
+      onReconciliationDemand: () => {},
+      onWalletRelease: () => {
+        statusAtPoke.push(store.query(`SELECT ?status WHERE {
+          GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> {
+            <${jobSubject(jobA)}> <${CONTROL_STATUS}> ?status .
+          }
+        }`));
+      },
+    });
+    try {
+      expect(await publisher.reconciliationScheduling.reconcile())
+        .toEqual({ reconciled: 1, pendingWork: false });
+    } finally {
+      detach();
+    }
+
+    expect(statusAtPoke).toHaveLength(1);
+    const status = await statusAtPoke[0];
+    expect(status.type).toBe('bindings');
+    if (status.type === 'bindings') {
+      // Bindings carry N-Triples-serialized terms, so the literal arrives quoted.
+      expect(status.bindings[0]?.['status']).toBe('"accepted"');
     }
   });
 
