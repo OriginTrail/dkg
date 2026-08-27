@@ -154,6 +154,62 @@ export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
 
+export type Rfc64SwmRecoveryLaneV1 = 'ordinary-private' | 'selected-public';
+
+export interface Rfc64SwmRecoveryTargetV1 {
+  readonly contextGraphId: string;
+  readonly lane: Rfc64SwmRecoveryLaneV1;
+}
+
+export interface Rfc64PeerSwmRecoveryPlanV1 {
+  readonly providerPeerId: string;
+  readonly targets: readonly Readonly<Rfc64SwmRecoveryTargetV1>[];
+}
+
+/**
+ * Snapshot one provider's complete RFC-64 recovery authority at the config
+ * boundary. Downstream schedulers consume the lane labels directly instead
+ * of re-inferring private/public policy from an empty local store.
+ */
+export function resolveRfc64PeerSwmRecoveryPlanV1(
+  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
+    | undefined,
+  providerPeerId: string,
+): Readonly<Rfc64PeerSwmRecoveryPlanV1> {
+  const byContextGraph = new Map<string, Rfc64SwmRecoveryLaneV1>();
+  if (config !== undefined) {
+    for (const { policyEnvelope, completeSwmProviders = [] } of acceptedPoliciesV1(config)) {
+      if (!completeSwmProviders.includes(providerPeerId)) continue;
+      byContextGraph.set(
+        policyEnvelope.payload.contextGraphId,
+        policyEnvelope.payload.accessPolicy === 1 ? 'ordinary-private' : 'selected-public',
+      );
+    }
+  }
+  return Object.freeze({
+    providerPeerId,
+    targets: Object.freeze([...byContextGraph]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([contextGraphId, lane]) => Object.freeze({ contextGraphId, lane }))),
+  });
+}
+
+/** Accepted RFC-64 lane for a graph, independent of local store contents. */
+export function resolveRfc64SwmRecoveryLaneV1(
+  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
+    | undefined,
+  contextGraphId: string,
+): Rfc64SwmRecoveryLaneV1 | undefined {
+  if (config === undefined) return undefined;
+  const policy = acceptedPoliciesV1(config).find(
+    ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
+  );
+  if (policy === undefined) return undefined;
+  return policy.policyEnvelope.payload.accessPolicy === 1
+    ? 'ordinary-private'
+    : 'selected-public';
+}
+
 /** Selected recovery scopes for which one peer is explicitly graph-complete. */
 export function resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
   config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
@@ -337,20 +393,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           ({ completeSwmProviders: providers = [] }) => providers,
         ),
       )];
-      const publicCompleteSwmProviders = new Set(
-        state.config.acceptedPolicies.flatMap(
-          ({ policyEnvelope, completeSwmProviders: providers = [] }) => (
-            policyEnvelope.payload.accessPolicy === 0 ? providers : []
-          ),
-        ),
-      );
-      const privateCompleteSwmProviders = new Set(
-        state.config.acceptedPolicies.flatMap(
-          ({ policyEnvelope, completeSwmProviders: providers = [] }) => (
-            policyEnvelope.payload.accessPolicy === 1 ? providers : []
-          ),
-        ),
-      );
       await mapWithConcurrency(
         completeSwmProviders,
         MAX_CONCURRENT_TARGETS_V1,
@@ -360,37 +402,19 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
             await this.connectToPeerId(providerPeerId, {
               timeoutMs: COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1,
             });
-            // A pre-existing connection has no new connection:open event. Ask
-            // the lifecycle scheduler to seed or resume the selected lane; it
-            // owns the seed/incomplete/complete state transition and becomes a
-            // no-op after exact plane proof.
-            // Private SWM replacement deliberately stays on the ordinary lane;
-            // it must not inherit public selected-snapshot semantics. Queue that
-            // broad lane first when the provider connection already existed, so
-            // its per-peer cooldown cannot be consumed by the public-only retry.
-            const queuedPrivateRecovery = privateCompleteSwmProviders.has(providerPeerId)
-              && this.queueSyncFromPeerOnConnect(
-                providerPeerId,
-                (_peerId, error) => {
-                  this.log.warn(
-                    state.ctx,
-                    `RFC-64 private complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
-                  );
-                },
-                0,
-              );
-            if (publicCompleteSwmProviders.has(providerPeerId) && !queuedPrivateRecovery) {
-              this.queueSelectedSwmFromPeerOnConnect(
-                providerPeerId,
-                (_peerId, error) => {
-                  this.log.warn(
-                    state.ctx,
-                    `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
-                  );
-                },
-                0,
-              );
-            }
+            // A pre-existing connection has no new connection:open event. One
+            // immutable provider plan owns admission for every selected graph,
+            // including mixed public/private providers.
+            this.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+              resolveRfc64PeerSwmRecoveryPlanV1(state.config, providerPeerId),
+              (_peerId, error) => {
+                this.log.warn(
+                  state.ctx,
+                  `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
+                );
+              },
+              0,
+            );
           } catch (error) {
             this.log.warn(
               state.ctx,

@@ -27,9 +27,7 @@ import {
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
   computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
-  createOperationContext,
   deriveAuthorCatalogScopeFromHeadV1,
-  readVerifiedCatalogSealBindingV1,
   type AssertionCoordinateV1,
   type ByteLengthV1,
   type CanonicalGraphScopedAuthorSealV1,
@@ -49,7 +47,6 @@ import {
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { invalidateSwmMaterializationWitness } from '@origintrail-official/dkg-storage';
 import {
   resolveRpcUrls,
   verifyControlEnvelopeIssuerSignatureV1,
@@ -86,7 +83,7 @@ import {
 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { createRfc64FinalizedPolicyAgentPrecommitV1 } from './rfc64/finalized-policy-agent-precommit-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
-import { reconcileFinalizedSwmTwinFromCatalogProjection } from './sync/requester/finalized-swm-twin-reconciliation.js';
+import { createRfc64CatalogAppliedHeadCoordinatorV1 } from './rfc64/catalog-applied-head-coordinator-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
@@ -821,103 +818,27 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           getKnowledgeAssetsLifecycleAddress: () =>
             this.chain.getKnowledgeAssetsLifecycleAddress(),
           store: this.store,
-          retireFinalizedSwm: async (retirement) => {
-            await this.publisher.clearPublishedKnowledgeAssetSwm(
-              retirement.contextGraphId,
-              {
-                kind: 'named-lifecycle',
-                identity: {
-                  agentAddress: retirement.agentAddress,
-                  kaNumber: retirement.kaNumber,
-                },
-              },
-              retirement.subGraphName,
-              createOperationContext('sync'),
-              retirement.kaUal,
-            );
-            await invalidateSwmMaterializationWitness(
-              this.store,
-              retirement.swmGraph,
-              {
-                priority: 'background',
-                source: 'agent.rfc64.finalizedVmPrecommit.witnessInvalidate',
-              },
-            ).catch(() => {});
-          },
         });
-        const beforeAppliedHeadCommit = Object.freeze(async (
-          plan: Parameters<typeof finalizedPolicyPrecommit>[0],
-          signal: AbortSignal,
-        ): ReturnType<typeof finalizedVmPrecommit> => {
-          const accepted = acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
-          let primaryTransaction: Awaited<ReturnType<typeof finalizedVmPrecommit>> = undefined;
-          if (
-            accepted.policy.accessPolicy === 1
-            && accepted.policy.source.kind === 'finalized-chain'
-          ) {
-            primaryTransaction = await finalizedVmPrecommit(plan, signal);
-          } else {
-            await finalizedPolicyPrecommit(plan, signal);
-          }
-          if (accepted.policy.accessPolicy !== 1) return primaryTransaction;
-
-          const catalogProjectionEvidence = plan.rows.map((row) => {
-            if (row.publicQuadsDigest === undefined) {
-              throw new Error(
-                'RFC-64 private catalog precommit is missing its exact activated projection digest',
-              );
-            }
-            const binding = readVerifiedCatalogSealBindingV1(row.sealBinding);
-            const subGraphName = plan.catalogScope.subGraphName ?? undefined;
-            return Object.freeze({
-              contextGraphId: plan.catalogScope.contextGraphId,
-              ...(subGraphName === undefined ? {} : { subGraphName }),
-              kaUal: binding.seal.kaUal,
-              assertionVersion: binding.seal.assertionVersion,
-              publicQuadsDigest: row.publicQuadsDigest,
-              publicQuadsCount: Number(binding.seal.publicTripleCount),
-              privateTripleCount: Number(binding.seal.privateTripleCount),
-              ...(binding.seal.privateMerkleRoot === null
-                ? {}
-                : { privateMerkleRoot: binding.seal.privateMerkleRoot }),
-              expectedMerkleRoot: binding.seal.assertionMerkleRoot,
-            });
-          });
-          return Object.freeze({
-            commit: async () => {
-              await primaryTransaction?.commit();
-              const ctx = createOperationContext('sync');
-              let retired = 0;
-              for (const evidence of catalogProjectionEvidence) {
-                const outcome = await reconcileFinalizedSwmTwinFromCatalogProjection({
-                  store: this.store,
-                  writeLocks: this.writeLocks,
-                  evidence,
-                  retire: (retirement) => this.publisher.clearPublishedKnowledgeAssetSwm(
-                    retirement.contextGraphId,
-                    {
-                      kind: 'named-lifecycle',
-                      identity: {
-                        agentAddress: retirement.agentAddress,
-                        kaNumber: retirement.kaNumber,
-                      },
-                    },
-                    retirement.subGraphName,
-                    ctx,
-                    retirement.kaUal,
-                  ),
-                });
-                if (outcome === 'retired') retired += 1;
-              }
-              if (retired > 0) {
-                this.log.info(
-                  ctx,
-                  `Retired ${retired} byte-identical finalized SWM catalog twin(s) after applied-head commit`,
-                );
-              }
+        const beforeAppliedHeadCommit = createRfc64CatalogAppliedHeadCoordinatorV1({
+          acceptedPolicySnapshotForCatalogScope,
+          finalizedPolicyPrecommit,
+          finalizedVmPrecommit,
+          store: this.store,
+          writeLocks: this.writeLocks,
+          retire: (retirement, ctx) => this.publisher.clearPublishedKnowledgeAssetSwm(
+            retirement.contextGraphId,
+            {
+              kind: 'named-lifecycle',
+              identity: {
+                agentAddress: retirement.agentAddress,
+                kaNumber: retirement.kaNumber,
+              },
             },
-            rollback: (cause?: unknown) => primaryTransaction?.rollback(cause) ?? Promise.resolve(),
-          });
+            retirement.subGraphName,
+            ctx,
+            retirement.kaUal,
+          ),
+          logInfo: (ctx, message) => this.log.info(ctx, message),
         });
         const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
           headTransport: clients.headTransport,

@@ -107,7 +107,7 @@ export interface RecoverContextGraphSwmDeps {
   /**
    * GH#2273 — skipping an already-materialized KA and deciding whether its
    * stored operation identity may be preserved are ONE capability, and the
-   * materializer OWNS both halves (`hasGraphAssetMarker` +
+   * materializer OWNS both halves (`isGraphAssetMaterialized` +
    * `preserveStoredIdentityForSkippedAsset`) over one store and one lock
    * map — a config that could skip but not decide, or pair a predicate from
    * one store with a materializer over another, is unrepresentable. Absent
@@ -333,7 +333,7 @@ export async function recoverContextGraphSwm(
     for (const descriptor of snapshotDescriptorsByRef.get(snapshotRef) ?? []) {
       const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
       if (incrementallyReadyGraphs.has(graphKey)) continue;
-      if (await deps.snapshotMaterializer?.hasGraphAssetMarker(descriptor)) {
+      if (await deps.snapshotMaterializer?.isGraphAssetMaterialized(descriptor)) {
         incrementallyReadyGraphs.add(graphKey);
         continue;
       }

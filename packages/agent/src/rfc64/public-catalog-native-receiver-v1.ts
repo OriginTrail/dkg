@@ -33,6 +33,7 @@ import {
   assertSignedAuthorCatalogHeadEnvelopeV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
+  canonicalizeAuthorSealStoreRoundTripRowV1,
   computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
   contextGraphWorkspaceGraphUri,
@@ -170,7 +171,7 @@ export interface Rfc64PublicCatalogNativePrecommitRowPlanV1 {
   readonly authorship: VerifiedAuthorCatalogRowAuthorshipV1;
   readonly sealBinding: VerifiedCatalogSealBindingV1;
   /** Exact graph-neutral digest of the verified projection activated into SWM. */
-  readonly publicQuadsDigest?: string;
+  readonly publicQuadsDigest: string;
 }
 
 /** Generic same-process barrier plan executed after semantic post-read and before head CAS. */
@@ -231,6 +232,8 @@ export interface Rfc64PublicCatalogNativeRemovedRowEvidenceV1 {
 export interface Rfc64PublicCatalogNativeActivatedRowEvidenceV1
   extends Rfc64PublicCatalogInventoryEvidenceRowV1 {
   readonly swmGraph: string;
+  /** Exact graph-neutral digest of the activated public projection. */
+  readonly publicQuadsDigest: string;
   /** Exact signed delegation/head/path/bucket/row authorization closure. */
   readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
 }
@@ -1052,7 +1055,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     );
     const removedRows: Rfc64PublicCatalogNativeRemovedRowEvidenceV1[] = [];
     const activatedRows: Rfc64PublicCatalogNativeActivatedRowEvidenceV1[] = [];
-    const activatedPublicQuadsDigests: string[] = [];
+    const activatedPrecommitRows: Rfc64PublicCatalogNativePrecommitRowPlanV1[] = [];
     let completion!: ReturnType<typeof verifyRfc64PublicCatalogInventoryCompletenessV1>;
     let activatedTripleCount = 0;
     let semanticMutationAttempted = false;
@@ -1093,9 +1096,14 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         activatedRows.push(Object.freeze({
           ...activation.evidence,
           swmGraph: activation.swmGraph,
+          publicQuadsDigest: activation.publicQuadsDigest,
           authorship: prepared.authorship,
         }));
-        activatedPublicQuadsDigests.push(activation.publicQuadsDigest);
+        activatedPrecommitRows.push(Object.freeze({
+          authorship: prepared.authorshipCapability,
+          sealBinding: prepared.sealBindingCapability,
+          publicQuadsDigest: activation.publicQuadsDigest,
+        }));
       }
       completion = verifyRfc64PublicCatalogInventoryCompletenessV1({
         catalogScope: trustedCatalogScope,
@@ -1138,11 +1146,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         policyDigest: announcement.policyDigest,
         catalogHeadDigest: head.objectDigest as Digest32V1,
         inventoryDigest: completion.inventoryDigest,
-        rows: Object.freeze(preparedRows.map((prepared, index) => Object.freeze({
-          authorship: prepared.authorshipCapability,
-          sealBinding: prepared.sealBindingCapability,
-          publicQuadsDigest: activatedPublicQuadsDigests[index]!,
-        }))),
+        rows: Object.freeze(activatedPrecommitRows),
       }),
       signal,
       'catalog applied-head precommit rejected the exact activated inventory',
@@ -2379,34 +2383,14 @@ async function assertExactAuthorSealPostRead(
       graph: binding.placement.metaGraph,
     };
   }).sort(compareQuads);
-  const normalizedActual = actual.map(normalizeAuthorSealPostReadQuadV1);
-  const normalizedExpected = expected.map(normalizeAuthorSealPostReadQuadV1);
+  const normalizedActual = actual.map(canonicalizeAuthorSealStoreRoundTripRowV1);
+  const normalizedExpected = expected.map(canonicalizeAuthorSealStoreRoundTripRowV1);
   if (quadsToNQuads(normalizedActual) !== quadsToNQuads(normalizedExpected)) {
     fail(
       'catalog-native-receiver-activation',
       'author-seal post-read differs from verified seal',
     );
   }
-}
-
-function normalizeAuthorSealPostReadQuadV1(
-  quad: Readonly<{ subject: string; predicate: string; object: string; graph: string }>,
-): Readonly<{ subject: string; predicate: string; object: string; graph: string }> {
-  let object = quad.object;
-  if (
-    quad.predicate === ASSERTION_SEAL_PREDICATES.KA_UAL
-    && !object.startsWith('<')
-  ) {
-    object = `<${object}>`;
-  } else if (quad.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_FINALIZED_AT) {
-    const match = /^"([^"]+)"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/.exec(object);
-    const instant = match === null ? Number.NaN : Date.parse(match[1]!);
-    if (Number.isFinite(instant)) {
-      object = `${JSON.stringify(new Date(instant).toISOString())}`
-        + '^^<http://www.w3.org/2001/XMLSchema#dateTime>';
-    }
-  }
-  return Object.freeze({ ...quad, object });
 }
 
 function compareQuads(

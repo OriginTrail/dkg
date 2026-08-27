@@ -622,6 +622,33 @@ export function renderCanonicalAuthorSealStoreRowV1(
 }
 
 /**
+ * Canonicalize the two RDF renderings that supported triple-store adapters
+ * may normalize on read: named-node UALs can be returned as bare IRIs and
+ * xsd:dateTime literals can be returned as an equivalent UTC lexical form.
+ * All other terms remain byte-exact, so this is not a general RDF-equivalence
+ * escape hatch.
+ */
+export function canonicalizeAuthorSealStoreRoundTripRowV1(
+  row: CanonicalGraphScopedAuthorSealRowV1,
+): CanonicalGraphScopedAuthorSealRowV1 {
+  let object = row.object;
+  if (
+    row.predicate === ASSERTION_SEAL_PREDICATES.KA_UAL
+    && !object.startsWith('<')
+    && isSafeIri(object)
+  ) {
+    object = `<${object}>`;
+  } else if (row.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_FINALIZED_AT) {
+    const match = /^"([^"]+)"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/.exec(object);
+    const instant = match === null ? Number.NaN : Date.parse(match[1]!);
+    if (Number.isFinite(instant)) {
+      object = `${JSON.stringify(new Date(instant).toISOString())}^^${XSD_DATE_TIME}`;
+    }
+  }
+  return Object.freeze({ ...row, object });
+}
+
+/**
  * Strict order-independent inverse over one fixed subject and graph. Every
  * predicate is cardinality-checked before the typed payload is materialized.
  * The store adapter must enforce RFC-64's 64 KiB query-response cap before it

@@ -22,7 +22,9 @@ import {
   contextGraphAssertionUri,
   contextGraphMetaUri,
   contextGraphLayerUri,
+  createGraphKnowledgeAssetScope,
   encodeCanonicalCgSharedPublicRootProjectionV1,
+  knowledgeAssetLayerGraphUri,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
   type AssertionSeal,
@@ -36,11 +38,19 @@ import {
   type UnsignedContextGraphPolicyEnvelopeV1,
   type UnsignedMemberRosterEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  OxigraphStore,
+  readSwmMaterializationWitness,
+  writeSwmMaterializationWitness,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10,
+  generateGraphKnowledgeAssetMetadata,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
+  workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -56,6 +66,7 @@ import {
   snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from '../src/dkg-agent-rfc64-catalog.js';
 import {
+  resolveRfc64PeerSwmRecoveryPlanV1,
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
 } from '../src/dkg-agent-rfc64-catalog-bootstrap.js';
 import {
@@ -112,6 +123,20 @@ const PROJECTION = new TextEncoder().encode(
   '<https://example.org/alice> <https://schema.org/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
   + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n',
 );
+const PROJECTION_QUADS: readonly Quad[] = Object.freeze([
+  Object.freeze({
+    subject: 'https://example.org/alice',
+    predicate: 'https://schema.org/age',
+    object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    graph: '',
+  }),
+  Object.freeze({
+    subject: 'https://example.org/alice',
+    predicate: 'https://schema.org/name',
+    object: '"Alice"',
+    graph: '',
+  }),
+]);
 const NATIVE_DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: '20430',
@@ -217,6 +242,7 @@ interface NativeAgentStartOptionsV1 {
   readonly activation?: Rfc64PublicCatalogActivationInputV1;
   readonly persistentStorePath?: string;
   readonly networkIdentityChainId?: NetworkIdV1;
+  readonly beforeStart?: (agent: DKGAgent) => void | Promise<void>;
 }
 
 async function startNativeAgentWithOptions(
@@ -233,6 +259,7 @@ async function startNativeAgentWithOptions(
     catalogActivation,
     activation,
     persistentStorePath,
+    beforeStart,
     networkIdentityChainId = activation === undefined && catalogActivation === undefined
       ? undefined
       : deployment.networkId,
@@ -284,9 +311,88 @@ async function startNativeAgentWithOptions(
     }),
   });
   agents.push(agent);
+  await beforeStart?.(agent);
   await agent.start();
   return agent;
 }
+
+async function seedPreexistingFinalizedTwinV1(
+  agent: DKGAgent,
+  seal: CanonicalGraphScopedAuthorSealV1,
+): Promise<Readonly<{ swmGraph: string; vmGraph: string; publicQuadsDigest: string }>> {
+  const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+  const swmGraph = knowledgeAssetLayerGraphUri(
+    CONTEXT_GRAPH_ID,
+    MemoryLayer.SharedWorkingMemory,
+    scope,
+  );
+  const vmGraph = knowledgeAssetLayerGraphUri(
+    CONTEXT_GRAPH_ID,
+    MemoryLayer.VerifiableMemory,
+    scope,
+  );
+  const vmMetadata = generateGraphKnowledgeAssetMetadata({
+    contextGraphId: CONTEXT_GRAPH_ID,
+    ual: seal.kaUal,
+    merkleRoot: ethers.getBytes(seal.assertionMerkleRoot),
+    publisherPeerId: 'rfc64-finalized-catalog-v1',
+    accessPolicy: 'ownerOnly',
+    allowedPeers: [],
+    timestamp: new Date(seal.assertionFinalizedAt),
+    assertionVersion: seal.assertionVersion,
+    authorAddress: seal.authorAddress,
+    publicTripleCount: Number(seal.publicTripleCount),
+    privateTripleCount: Number(seal.privateTripleCount),
+    assertionGraph: vmGraph,
+  }, {
+    status: 'confirmed',
+    confirmation: {
+      kind: 'finalized-materialization',
+      provenance: {
+        batchId: BigInt(seal.reservedKaId),
+        materializedVersion: { blockNumber: 124, txIndex: 0 },
+      },
+    },
+  });
+  await agent.store.insert([
+    ...PROJECTION_QUADS.map((quad) => ({ ...quad, graph: vmGraph })),
+    ...vmMetadata,
+    ...PROJECTION_QUADS.map((quad) => ({ ...quad, graph: swmGraph })),
+  ]);
+
+  const graphManager = new GraphManager(agent.store);
+  const shareOperationId = 'preexisting-finalized-twin-v1';
+  await storeKnowledgeAssetOperationPublicQuads({
+    store: agent.store,
+    graphManager,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    shareOperationId,
+    kaUal: seal.kaUal,
+    assertionVersion: seal.assertionVersion,
+    quads: PROJECTION_QUADS,
+    privateTripleCount: Number(seal.privateTripleCount),
+    publisherPeerId: 'preexisting-finalized-provider',
+    accessPolicy: 'ownerOnly',
+    agentAddress: seal.authorAddress,
+    timestamp: new Date(seal.assertionFinalizedAt),
+  });
+  await storeKnowledgeAssetWorkspaceHead({
+    store: agent.store,
+    graphManager,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    kaUal: seal.kaUal,
+    assertionVersion: seal.assertionVersion,
+    shareOperationId,
+  });
+  const publicQuadsDigest = workspacePublicQuadsDigest(PROJECTION_QUADS);
+  expect(await writeSwmMaterializationWitness(
+    agent.store,
+    swmGraph,
+    publicQuadsDigest,
+  )).toBe(true);
+  return Object.freeze({ swmGraph, vmGraph, publicQuadsDigest });
+}
+
 function seededSubscriptionStore(contextGraphId: string): ContextGraphSubscriptionStore {
   const records = new Map<string, ContextGraphSubscriptionRecord>([[contextGraphId, {
     id: contextGraphId,
@@ -1031,6 +1137,160 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     )).toEqual([]);
   });
 
+  it('builds one explicit mixed-lane recovery plan for a shared provider', () => {
+    const providerPeerId = '12D3KooWSharedPublicPrivateProvider';
+    const publicPolicy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const privatePolicy = {
+      ...privateCatalogPolicy(),
+      contextGraphId: (
+        '0x2222222222222222222222222222222222222222/mixed-private'
+      ) as ContextGraphIdV1,
+    };
+    const privatePolicyEnvelope = {
+      issuer: AUTHOR,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+      payload: privatePolicy,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedContextGraphPolicyEnvelopeV1;
+
+    expect(resolveRfc64PeerSwmRecoveryPlanV1({
+      acceptedPolicies: [
+        {
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(publicPolicy),
+          targets: [],
+          completeSwmProviders: [providerPeerId],
+        },
+        {
+          policyEnvelope: privatePolicyEnvelope,
+          targets: [],
+          completeSwmProviders: [providerPeerId],
+        },
+      ],
+    }, providerPeerId)).toEqual({
+      providerPeerId,
+      targets: [
+        { contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' },
+        { contextGraphId: privatePolicy.contextGraphId, lane: 'ordinary-private' },
+      ].sort((left, right) => left.contextGraphId.localeCompare(right.contextGraphId)),
+    });
+  });
+
+  it('admits a shared provider once without public/private queue arbitration', () => {
+    const providerPeerId = '12D3KooWSharedPlanAdmission';
+    const privateContextGraphId =
+      '0x2222222222222222222222222222222222222222/mixed-private-admission';
+    const request = vi.fn(() => true);
+    const queueSyncFromPeerOnConnect = vi.fn(() => true);
+    const scheduler = {
+      config: { syncContextGraphs: [CONTEXT_GRAPH_ID] },
+      selectedSwmBootstrapAdmission: { request },
+      queueSyncFromPeerOnConnect,
+    } as unknown as DKGAgent;
+    const handleError = vi.fn();
+    const recoveryPlan = {
+      providerPeerId,
+      targets: [
+        { contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' as const },
+        { contextGraphId: privateContextGraphId, lane: 'ordinary-private' as const },
+      ],
+    };
+
+    expect(DKGAgent.prototype.queueRfc64SwmRecoveryPlanFromPeerOnConnect.call(
+      scheduler,
+      recoveryPlan,
+      handleError,
+      0,
+    )).toBe(true);
+    expect(request).toHaveBeenCalledOnce();
+    expect(request).toHaveBeenCalledWith(providerPeerId, [CONTEXT_GRAPH_ID]);
+    expect(queueSyncFromPeerOnConnect).toHaveBeenCalledOnce();
+    expect(queueSyncFromPeerOnConnect).toHaveBeenCalledWith(
+      providerPeerId,
+      handleError,
+      0,
+      { rfc64RecoveryPlan: recoveryPlan },
+    );
+  });
+
+  it('retains the private lane when the shared provider public scope is already terminal', () => {
+    const providerPeerId = '12D3KooWSharedPlanPrivateOnly';
+    const privateContextGraphId =
+      '0x2222222222222222222222222222222222222222/mixed-private-terminal';
+    const queueSyncFromPeerOnConnect = vi.fn(() => true);
+    const scheduler = {
+      config: { syncContextGraphs: [CONTEXT_GRAPH_ID] },
+      selectedSwmBootstrapAdmission: { request: vi.fn(() => false) },
+      queueSyncFromPeerOnConnect,
+    } as unknown as DKGAgent;
+    const handleError = vi.fn();
+
+    expect(DKGAgent.prototype.queueRfc64SwmRecoveryPlanFromPeerOnConnect.call(
+      scheduler,
+      {
+        providerPeerId,
+        targets: [
+          { contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' },
+          { contextGraphId: privateContextGraphId, lane: 'ordinary-private' },
+        ],
+      },
+      handleError,
+      0,
+    )).toBe(true);
+    expect(queueSyncFromPeerOnConnect).toHaveBeenCalledWith(
+      providerPeerId,
+      handleError,
+      0,
+      {
+        rfc64RecoveryPlan: {
+          providerPeerId,
+          targets: [{ contextGraphId: privateContextGraphId, lane: 'ordinary-private' }],
+        },
+      },
+    );
+  });
+
+  it('admits an explicit private RFC-64 plan when broad on-connect sync is disabled', async () => {
+    const providerPeerId = '12D3KooWPrivatePlanKillSwitch';
+    const runPlan = vi.fn(async () => {});
+    const scheduler = {
+      config: {
+        syncOnConnectEnabled: false,
+        syncReconcilerTiming: { stalenessThresholdMs: 60_000 },
+      },
+      selectedSwmBootstrapAdmission: { isRetryRequired: () => false },
+      networkAdmissionCoordinator: { isAcceptedPeer: () => true },
+      syncOnConnectDisconnectBoundary: () => 0,
+      lastSuccessfulSyncAt: new Map(),
+      catchupOnConnectAt: new Map(),
+      syncReconcilerBackoff: new Map(),
+      runRfc64SwmRecoveryPlanFromPeerOnConnect: runPlan,
+    } as unknown as DKGAgent;
+    const recoveryPlan = {
+      providerPeerId,
+      targets: [{
+        contextGraphId: privateCatalogPolicy().contextGraphId,
+        lane: 'ordinary-private' as const,
+      }],
+    };
+
+    expect(DKGAgent.prototype.queueSyncFromPeerOnConnect.call(
+      scheduler,
+      providerPeerId,
+      vi.fn(),
+      0,
+      { rfc64RecoveryPlan: recoveryPlan },
+    )).toBe(true);
+    await vi.waitFor(() => expect(runPlan).toHaveBeenCalledWith(
+      recoveryPlan,
+      expect.any(Function),
+    ));
+  });
+
   it('dials and schedules every graph-complete SWM provider during bootstrap', async () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -1061,7 +1321,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     agents.push(receiver);
     const connect = vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
-    const queue = vi.spyOn(receiver, 'queueSelectedSwmFromPeerOnConnect').mockReturnValue(true);
+    const queue = vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
+      .mockReturnValue(true);
 
     await receiver.start();
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
@@ -1070,7 +1331,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       timeoutMs: 10_000,
     });
     expect(queue).toHaveBeenCalledWith(
-      '12D3KooWCompleteSwmProvider',
+      expect.objectContaining({
+        providerPeerId: '12D3KooWCompleteSwmProvider',
+        targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
+      }),
       expect.any(Function),
       0,
     );
@@ -1132,15 +1396,31 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     agents.push(receiver);
     const connect = vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
-    const queueOrdinary = vi.spyOn(receiver, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
-    const queueSelected = vi.spyOn(receiver, 'queueSelectedSwmFromPeerOnConnect').mockReturnValue(true);
+    const queue = vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
+      .mockReturnValue(true);
 
     await receiver.start();
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 
     expect(connect).toHaveBeenCalledWith(providerPeerId, { timeoutMs: 10_000 });
-    expect(queueOrdinary).toHaveBeenCalledWith(providerPeerId, expect.any(Function), 0);
-    expect(queueSelected).not.toHaveBeenCalled();
+    expect(queue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerPeerId,
+        targets: [{ contextGraphId: policy.contextGraphId, lane: 'ordinary-private' }],
+      }),
+      expect.any(Function),
+      0,
+    );
+    await expect(receiver.planSharedMemorySyncContextGraphs(
+      providerPeerId,
+      [policy.contextGraphId],
+      createOperationContext('sync'),
+      { requireCompleteProviderMatch: true },
+    )).resolves.toEqual({
+      publicContextGraphIds: [],
+      privateRecoverFromCurator: [policy.contextGraphId],
+      eligibleContextGraphIds: [policy.contextGraphId],
+    });
   });
 
   it('does not reseed a plane-proven SWM provider on periodic bootstrap refresh', async () => {
@@ -2770,7 +3050,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).toBeNull();
   }, 60_000);
 
-  it('reports the real private finalized missing-placement path as known-incomplete', async () => {
+  it('awaits production private retirement and reports a real finalized missing-placement path', async () => {
     const providerAgentAddress = `0x${'91'.repeat(20)}` as EvmAddressV1;
     const coldAgentAddress = `0x${'92'.repeat(20)}` as EvmAddressV1;
     const authorizedColdAgentAddress = `0x${'93'.repeat(20)}` as EvmAddressV1;
@@ -2936,6 +3216,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })?.currentCatalogHeadDigest).toBe(genesis.headObjectDigest);
 
     providerRpc = createFinalizedVmLoopbackRpcV1(providerFixture);
+    const finalizedSeal = await authorSeal(41n);
     const successor = await author.publishAuthorCatalogExactSetSuccessorV1({
       previousHead: {
         objectDigest: genesis.headObjectDigest,
@@ -2946,7 +3227,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       assets: [{
         assertionCoordinate: 'private-incomplete-41' as never,
         projectionBytes: PROJECTION,
-        seal: await authorSeal(41n),
+        seal: finalizedSeal,
       }],
       deployment: NATIVE_DEPLOYMENT,
       issuedAt: SUCCESSOR_ISSUED_AT,
@@ -2977,6 +3258,16 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       publishPolicy: 0,
       nameHash,
     });
+    let releaseRetirement!: () => void;
+    const retirementGate = new Promise<void>((resolve) => {
+      releaseRetirement = resolve;
+    });
+    let signalRetirementStarted!: () => void;
+    const retirementStarted = new Promise<void>((resolve) => {
+      signalRetirementStarted = resolve;
+    });
+    let retirementClearCalls = 0;
+    let preexistingTwin!: Awaited<ReturnType<typeof seedPreexistingFinalizedTwinV1>>;
     const authorizedCold = await startNativeAgentWithOptions({
       name: 'private-authorized-cold',
       finalizedRuntime: {
@@ -3004,9 +3295,63 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           retryIntervalMs: 0,
         },
       },
+      beforeStart: async (agent) => {
+        preexistingTwin = await seedPreexistingFinalizedTwinV1(agent, finalizedSeal);
+        const clearPublishedKnowledgeAssetSwm =
+          agent.publisher.clearPublishedKnowledgeAssetSwm.bind(agent.publisher);
+        vi.spyOn(agent.publisher, 'clearPublishedKnowledgeAssetSwm')
+          .mockImplementation(async (...args) => {
+            retirementClearCalls += 1;
+            // Catalog activation invalidates any previous memo. Recreate it at
+            // the production retirement boundary so this assertion proves the
+            // coordinator's post-clear invalidation, not activation's replace.
+            expect(await writeSwmMaterializationWitness(
+              agent.store,
+              preexistingTwin.swmGraph,
+              preexistingTwin.publicQuadsDigest,
+            )).toBe(true);
+            signalRetirementStarted();
+            await retirementGate;
+            await clearPublishedKnowledgeAssetSwm(...args);
+          });
+      },
     });
     providerPeerAddresses.set(authorizedCold.peerId, authorizedColdAgentAddress);
-    await authorizedCold.whenRfc64PublicCatalogBootstrapIdleV1();
+    const bootstrapIdle = authorizedCold.whenRfc64PublicCatalogBootstrapIdleV1();
+    let bootstrapIdleSettled = false;
+    void bootstrapIdle.then(
+      () => { bootstrapIdleSettled = true; },
+      () => { bootstrapIdleSettled = true; },
+    );
+    await retirementStarted;
+    try {
+      expect(bootstrapIdleSettled).toBe(false);
+      expect(authorizedCold.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+        authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest).toBe(successor.headObjectDigest);
+      expect(await authorizedCold.store.countQuads(preexistingTwin.vmGraph))
+        .toBe(PROJECTION_QUADS.length);
+      expect(await authorizedCold.store.countQuads(preexistingTwin.swmGraph))
+        .toBe(PROJECTION_QUADS.length);
+      expect(await readSwmMaterializationWitness(
+        authorizedCold.store,
+        preexistingTwin.swmGraph,
+        preexistingTwin.publicQuadsDigest,
+      )).toBe(true);
+    } finally {
+      releaseRetirement();
+    }
+    await bootstrapIdle;
+    expect(retirementClearCalls).toBe(1);
+    expect(await authorizedCold.store.countQuads(preexistingTwin.vmGraph))
+      .toBe(PROJECTION_QUADS.length);
+    expect(await authorizedCold.store.countQuads(preexistingTwin.swmGraph)).toBe(0);
+    expect(await readSwmMaterializationWitness(
+      authorizedCold.store,
+      preexistingTwin.swmGraph,
+      preexistingTwin.publicQuadsDigest,
+    )).toBe(false);
     expect(authorizedCold.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0])
       .toMatchObject({ outcome: 'applied', providerPeerId: provider.peerId });
 

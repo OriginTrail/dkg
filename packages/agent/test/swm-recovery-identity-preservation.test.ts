@@ -50,6 +50,28 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
   const localShare = swmFx.share({ version: 1, operationId: 'op-local', marker: 'identity', ual: UAL3 });
   const curatorEquivalent = swmFx.share({ version: 1, operationId: 'storage-ack-x', marker: 'identity', ual: UAL3 });
   const curatorChanged = swmFx.share({ version: 1, operationId: 'storage-ack-y', marker: 'changed', ual: UAL3 });
+  const UAL4 = 'did:dkg:hardhat:31337/0xcccccccccccccccccccccccccccccccccccccccc/4';
+  const privateRoot = new Uint8Array(32).fill(0xab);
+  const localPrivateOnly = swmFx.share({
+    version: 1,
+    operationId: 'private-local',
+    marker: 'private-only',
+    ual: UAL4,
+    payloadCount: 0,
+    privateTripleCount: 1,
+    privateMerkleRoot: privateRoot,
+    accessPolicy: 'ownerOnly',
+  });
+  const curatorPrivateOnly = swmFx.share({
+    version: 1,
+    operationId: 'private-curator',
+    marker: 'private-only',
+    ual: UAL4,
+    payloadCount: 0,
+    privateTripleCount: 1,
+    privateMerkleRoot: privateRoot,
+    accessPolicy: 'ownerOnly',
+  });
 
   function makeIdentityBaseDeps(store: OxigraphStore, curatorMeta: Quad[]) {
     return {
@@ -78,7 +100,13 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
   /** Pre-seeded with every fixture payload so any served ref is fetchable. */
   function identitySnapshotStore() {
     const snapshots = new Map<string, Quad[]>();
-    for (const share of [localShare, curatorEquivalent, curatorChanged]) {
+    for (const share of [
+      localShare,
+      curatorEquivalent,
+      curatorChanged,
+      localPrivateOnly,
+      curatorPrivateOnly,
+    ]) {
       snapshots.set(share.digest, share.payload.map((quad) => ({ ...quad })));
     }
     return {
@@ -145,6 +173,39 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     // The reported count is what actually reached the store: the payload
     // minus the ONE withheld curator head-id row.
     expect(result.insertedMetaQuads).toBe(curatorEquivalent.meta.length - 1);
+  });
+
+  it('preserves a healthy private-only asset with the canonical empty public projection', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedLocal(store, localPrivateOnly);
+
+    const descriptor = parseGraphScopedSwmRecoveryDescriptors({
+      contextGraphId: CG,
+      metaQuads: curatorPrivateOnly.meta,
+    })[0]!;
+    const materializer = identityDeps(store, curatorPrivateOnly.meta).snapshotMaterializer;
+    expect(await materializer.readStoredHead(descriptor)).toEqual({
+      version: '1',
+      needsRepair: false,
+      shareOperationId: 'private-local',
+    });
+    expect(await materializer.selectRepairIdentity(CG, descriptor)).not.toBeNull();
+    expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+
+    const result = await recoverContextGraphSwm(
+      identityDeps(store, [...curatorPrivateOnly.meta]),
+    );
+
+    expect(result.completed).toBe(true);
+    const head = await store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${WS_META}> { `
+      + `<${localPrivateOnly.headSubject}> <${DKG}shareOperationId> ?op } }`,
+    );
+    expect(head.type === 'bindings' ? head.bindings.map((row) => String(row['op'])) : [])
+      .toEqual(['"private-local"']);
+    expect(await opSubjectExists(store, localPrivateOnly.operationSubject)).toBe(true);
+    expect(await opSubjectExists(store, curatorPrivateOnly.operationSubject)).toBe(true);
   });
 
   it('a graph-backed REWRITE is meta-replaced, never preserved (rewrite marker)', async () => {

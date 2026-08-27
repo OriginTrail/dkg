@@ -1,8 +1,5 @@
 import {
-  MemoryLayer,
   assertCanonicalEvmAddress,
-  contextGraphLayerUri,
-  parseDeterministicKnowledgeAssetUal,
   type AuthorCatalogScopeV1,
   type ContextGraphIdV1,
 } from '@origintrail-official/dkg-core';
@@ -36,26 +33,8 @@ export interface Rfc64FinalizedVmAgentPrecommitOptionsV1 {
   readonly getKnowledgeAssetStorageAddress: () => Promise<string>;
   readonly getKnowledgeAssetsLifecycleAddress: () => Promise<string>;
   readonly store: TripleStore;
-  /**
-   * Post-applied-head retirement boundary for catalog projections that were
-   * promoted into finalized VM. It deliberately runs from transaction.commit,
-   * never during precommit, so a rejected catalog head can still restore its
-   * exact SWM predecessor.
-   */
-  readonly retireFinalizedSwm?: (
-    retirement: Readonly<Rfc64FinalizedVmSwmRetirementV1>,
-  ) => Promise<void>;
   /** Test or embedding seam; production uses the durable store materializer. */
   readonly materialize?: FinalizedVmMaterializerV1;
-}
-
-export interface Rfc64FinalizedVmSwmRetirementV1 {
-  readonly contextGraphId: ContextGraphIdV1;
-  readonly subGraphName?: string;
-  readonly kaUal: string;
-  readonly agentAddress: string;
-  readonly kaNumber: bigint;
-  readonly swmGraph: string;
 }
 
 /**
@@ -142,7 +121,7 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
     // Runtime materialization owns rollback for failures in its own execution.
     // Only a failure after a successful runtime reaches this layer's rollback,
     // so each failed precommit has exactly one transaction cleanup owner.
-    const runtimeResult = await runtime({
+    await runtime({
       catalogLane: Object.freeze({
         contextGraphId: plan.catalogScope.contextGraphId,
         subGraphName: plan.catalogScope.subGraphName,
@@ -175,33 +154,10 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
       }
       throw cause;
     }
-    const retirementPlan = runtimeResult.receipts.map((receipt) => {
-      const identity = parseDeterministicKnowledgeAssetUal(receipt.ual);
-      const subGraphName = plan.catalogScope.subGraphName ?? undefined;
-      return Object.freeze({
-        contextGraphId: plan.catalogScope.contextGraphId,
-        ...(subGraphName === undefined ? {} : { subGraphName }),
-        kaUal: identity.ual,
-        agentAddress: identity.agentAddress,
-        kaNumber: BigInt(identity.kaNumber),
-        swmGraph: contextGraphLayerUri(
-          plan.catalogScope.contextGraphId,
-          MemoryLayer.SharedWorkingMemory,
-          identity.agentAddress,
-          identity.kaNumber,
-          subGraphName,
-        ),
-      }) satisfies Readonly<Rfc64FinalizedVmSwmRetirementV1>;
-    });
-    if (transaction === null && options.retireFinalizedSwm === undefined) return;
+    if (transaction === null) return;
     return Object.freeze({
-      commit: async () => {
-        await transaction?.commit();
-        for (const retirement of retirementPlan) {
-          await options.retireFinalizedSwm?.(retirement);
-        }
-      },
-      rollback: (cause?: unknown) => transaction?.rollback(cause) ?? Promise.resolve(),
+      commit: () => transaction.commit(),
+      rollback: (cause?: unknown) => transaction.rollback(cause),
     }) satisfies Rfc64PublicCatalogNativePrecommitTransactionV1;
   });
 }

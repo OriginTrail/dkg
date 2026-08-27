@@ -116,7 +116,7 @@ async function liveRpcEndpoint(assertionRoot?: Digest32V1): Promise<string> {
 
 
 describe('RFC-64 finalized VM agent precommit', () => {
-  it('retires a finalized catalog SWM projection only after the applied-head commit', async () => {
+  it('leaves finalized SWM retirement to the catalog applied-head coordinator', async () => {
     const graphlessProjection: Quad[] = [{
       subject: 'urn:rfc64:post-commit-swm-retirement',
       predicate: 'urn:rfc64:value',
@@ -146,14 +146,10 @@ describe('RFC-64 finalized VM agent precommit', () => {
       1,
     );
     await store.insert(graphlessProjection.map((quad) => ({ ...quad, graph: swmGraph })));
-    const retireFinalizedSwm = vi.fn(async (retirement: { swmGraph: string }) => {
-      await store.dropGraph(retirement.swmGraph);
-    });
     const handler = createRfc64FinalizedVmAgentPrecommitV1({
       ...options,
       acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
       rpcEndpoints: [await liveRpcEndpoint(assertionRoot)],
-      retireFinalizedSwm,
     });
 
     const transaction = await handler(Object.freeze({
@@ -163,20 +159,10 @@ describe('RFC-64 finalized VM agent precommit', () => {
 
     await expect(store.hasGraph(swmGraph)).resolves.toBe(true);
     await expect(store.hasGraph(vmGraph)).resolves.toBe(true);
-    expect(retireFinalizedSwm).not.toHaveBeenCalled();
-
     await transaction?.commit();
 
-    await expect(store.hasGraph(swmGraph)).resolves.toBe(false);
+    await expect(store.hasGraph(swmGraph)).resolves.toBe(true);
     await expect(store.hasGraph(vmGraph)).resolves.toBe(true);
-    expect(retireFinalizedSwm).toHaveBeenCalledOnce();
-    expect(retireFinalizedSwm).toHaveBeenCalledWith(expect.objectContaining({
-      contextGraphId: RFC64_VM_CONTEXT_GRAPH_NAME,
-      kaUal: rfc64VmUal(1n),
-      agentAddress: RFC64_VM_AUTHOR,
-      kaNumber: 1n,
-      swmGraph,
-    }));
   });
 
   it('applies the root-only restriction to private finalized recovery', async () => {

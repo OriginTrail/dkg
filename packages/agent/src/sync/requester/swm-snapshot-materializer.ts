@@ -241,7 +241,6 @@ export interface SharedMemorySnapshotMaterializer {
    * caller-supplied closure) keeps skip and preserve as one capability over
    * one store and lock map.
    */
-  hasGraphAssetMarker(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean>;
   /**
    * Canonical graph-asset meta replacement (delete head + kaUal-owned linked
    * operation subjects) over THIS materializer's store — the one cleanup
@@ -433,7 +432,67 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     };
   };
 
-  const selectRepairIdentity: SharedMemorySnapshotMaterializer['selectRepairIdentity'] = async (contextGraphId, descriptor) => {
+  let selectRepairIdentity: SharedMemorySnapshotMaterializer['selectRepairIdentity'];
+
+  /**
+   * An empty named graph is indistinguishable from an absent named graph.
+   * Private-only assets therefore also need a healthy, exact control-plane
+   * commitment before the canonical empty projection can prove materialized.
+   */
+  const hasHealthyEmptyProjectionControlPlane = async (
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<boolean> => {
+    const head = await readStoredHead(descriptor);
+    if (head.needsRepair || head.version === null || head.shareOperationId === null) return false;
+    try {
+      if (BigInt(head.version) !== BigInt(descriptor.assertionVersion)) return false;
+    } catch {
+      return false;
+    }
+    if (head.shareOperationId !== descriptor.shareOperationId) {
+      const contextGraphId = literalValue(descriptor.metadataQuads.find((quad) => (
+        quad.subject === descriptor.operationSubject
+        && quad.predicate === `${DKG}contextGraphId`
+      ))?.object);
+      return contextGraphId !== undefined
+        && await selectRepairIdentity(contextGraphId, descriptor) !== null;
+    }
+    const operationResult = await deps.store.query(
+      `SELECT ?op ?p ?o WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+      + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?id . `
+      + `?op <${DKG}shareOperationId> ?id ; <${DKG}kaUal> <${assertSafeIri(descriptor.kaUal)}> ; ?p ?o } }`,
+      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.checkEmptyControlPlane' },
+    );
+    if (operationResult.type !== 'bindings') return false;
+    const rowsBySubject = new Map<string, Quad[]>();
+    for (const row of operationResult.bindings) {
+      const subject = row['op'] ?? '';
+      // The head itself also carries shareOperationId + kaUal. It proves the
+      // pointer, but it is not the WorkspaceOperation whose commitment must
+      // be decoded.
+      if (!subject || subject === descriptor.headSubject) continue;
+      const rows = rowsBySubject.get(subject) ?? [];
+      rows.push({
+        subject,
+        predicate: row['p'] ?? '',
+        object: row['o'] ?? '',
+        graph: descriptor.metaGraph,
+      });
+      rowsBySubject.set(subject, rows);
+    }
+    if (rowsBySubject.size !== 1) return false;
+    const storedRows = [...rowsBySubject.values()][0]!;
+    const descriptorKey = operationIdentityKey(
+      descriptor.metadataQuads.filter((quad) => quad.subject === descriptor.operationSubject),
+    );
+    if (descriptorKey === null || !operationIdentityMatches(storedRows, descriptorKey)) return false;
+    if (!storedWinnerIsDecodable(storedRows, descriptor, head.shareOperationId)) return false;
+    if (!storedWinnerHasResponderType(storedRows)) return false;
+    if (!storedWinnerHasUsableAccessEnvelope(storedRows)) return false;
+    return snapshotLocatorIsServeable(storedRows, descriptor);
+  };
+
+  selectRepairIdentity = async (contextGraphId, descriptor) => {
     const shareIds = await deps.store.query(
       `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
       + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?op } }`,
@@ -550,7 +609,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
 
     isGraphAssetMaterialized: async (descriptor) => {
       const expected = descriptor.publicQuadsCount;
-      if (!Number.isSafeInteger(expected) || expected <= 0) return false;
+      if (!Number.isSafeInteger(expected) || expected < 0) return false;
       // 1) Count gate: exact-IRI scope, so bounded — and cheap enough to run
       // every round. Strictly equal: a short graph is a partial write and must
       // be replaced, not treated as already materialized.
@@ -561,6 +620,9 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       if (countResult.type !== 'bindings' || countResult.bindings.length === 0) return false;
       const present = Number.parseInt(literalValue(countResult.bindings[0]?.['n']) ?? '0', 10);
       if (!Number.isFinite(present) || present !== expected) return false;
+      if (expected === 0 && !(await hasHealthyEmptyProjectionControlPlane(descriptor))) {
+        return false;
+      }
       // 1b) Witness fast path (#2079): a bound-subject ASK recording that THIS
       // node already read this graph back and matched this exact digest. It is
       // a memo of the measurement in step 2 — never an independent claim — so
@@ -595,8 +657,15 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o } }`,
         { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.readGraph' },
       );
-      if (contentResult.type !== 'quads') return false;
-      const stored = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
+      // Oxigraph represents an empty CONSTRUCT as empty bindings while the
+      // persistent worker returns an empty quad set. They are the same
+      // canonical empty projection; no non-empty bindings shape is accepted.
+      const stored = contentResult.type === 'quads'
+        ? contentResult.quads.map((quad) => ({ ...quad, graph: '' }))
+        : contentResult.type === 'bindings' && contentResult.bindings.length === 0
+          ? []
+          : null;
+      if (stored === null) return false;
       const matches = workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
       if (matches && witnessUsable) {
         // Written HERE — from the branch that just computed the digest over
@@ -698,10 +767,6 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           );
         }
       }
-    },
-
-    hasGraphAssetMarker: async (descriptor) => {
-      return materializer.isGraphAssetMaterialized(descriptor);
     },
 
     preserveStoredIdentityForSkippedAsset: async (contextGraphId, descriptor) => {
