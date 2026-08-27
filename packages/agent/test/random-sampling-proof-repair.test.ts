@@ -6,13 +6,37 @@ import {
   tripleContentV10,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import { generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import {
+  computeFlatKCRootV10,
+  generateGraphKnowledgeAssetMetadata,
+} from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import { runRandomSamplingExactRepair } from '../src/sync/recovery/random-sampling-exact-repair.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
+import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
+
+function processDurableBatchWithRealVerifier(
+  dataQuads: Quad[],
+  metaQuads: Quad[],
+  _ctx: OperationContext,
+  acceptUnverified: boolean,
+  mode: DurableBatchVerificationMode,
+) {
+  const {
+    verifiedDataIndexes,
+    verifiedMetaIndexes,
+    ...summary
+  } = processDurableBatchForWire(dataQuads, metaQuads, acceptUnverified, mode);
+  return Promise.resolve({
+    ...summary,
+    verifiedData: verifiedDataIndexes.map((index) => dataQuads[index]!),
+    verifiedMeta: verifiedMetaIndexes.map((index) => metaQuads[index]!),
+  });
+}
 
 describe('Random Sampling proof-time exact repair', () => {
   it('rotates through the bounded provider window until an exact asset is found', async () => {
@@ -103,7 +127,7 @@ describe('Random Sampling proof-time exact repair', () => {
       .toBeInstanceOf(AbortSignal);
   });
 
-  it('hands real authenticated historical bytes and private roots to Random Sampling without a durable write', async () => {
+  it('authenticates historical bytes cryptographically and rejects a tampered payload', async () => {
     const localContextGraphId = 'proof-only-history';
     const storageAddress = '0x1111111111111111111111111111111111111111';
     const kaId = (BigInt(storageAddress) << 96n) | 1n;
@@ -119,8 +143,8 @@ describe('Random Sampling proof-time exact repair', () => {
       object: '"proof-only"',
       graph: assertionGraph,
     };
-    const expectedRoot = new Uint8Array(32).fill(0x11);
     const privateRoot = new Uint8Array(32).fill(0x33);
+    const expectedRoot = computeFlatKCRootV10([historicalQuad], [privateRoot]);
     const metadata = generateGraphKnowledgeAssetMetadata({
       ual: assetUal,
       contextGraphId: localContextGraphId,
@@ -134,91 +158,85 @@ describe('Random Sampling proof-time exact repair', () => {
       privateMerkleRoot: privateRoot,
       assertionGraph,
     }, { status: 'tentative' });
-    const page = (phase: 'data' | 'meta'): SyncPageResult => {
-      const quads = phase === 'data' ? [historicalQuad] : metadata;
-      return {
-        quads,
-        bytesReceived: 100,
-        resumedFromOffset: 0,
-        nextOffset: quads.length,
-        checkpointKey: `proof-only:${phase}`,
-        completed: true,
-        timedOut: false,
+    const makeAgent = (fetchedQuad: Quad) => {
+      const insertSyncedQuadsAndInvalidateListCache = vi.fn(async () => {
+        throw new Error('proof-only historical asset reached durable insertion');
+      });
+      const submitProof = vi.fn();
+      const page = (phase: 'data' | 'meta'): SyncPageResult => {
+        const quads = phase === 'data' ? [fetchedQuad] : metadata;
+        return {
+          quads,
+          bytesReceived: 100,
+          resumedFromOffset: 0,
+          nextOffset: quads.length,
+          checkpointKey: `proof-only:${phase}`,
+          completed: true,
+          timedOut: false,
+        };
       };
+      const agentLike: any = {
+        started: true,
+        config: {},
+        peerId: 'self',
+        chain: {
+          chainId: 'otp:2043',
+          getDKGKnowledgeAssetsAddress: vi.fn(async () => storageAddress),
+          getKAContextGraphId: vi.fn(async () => 14n),
+          submitProof,
+        },
+        node: { stopSignal: undefined },
+        log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        resolveLocalCgIdByOnChainId: vi.fn(() => localContextGraphId),
+        vmReconcileObservedCandidatePeerIds: vi.fn(() => ['peer-history']),
+        selectCatchupPeerWindow: vi.fn((peers: Array<{ toString(): string }>) => peers),
+        ensurePeerAdmittedForRecovery: vi.fn(async () => true),
+        ensurePeerConnected: vi.fn(async () => undefined),
+        waitForSyncProtocol: vi.fn(async () => true),
+        fetchSyncPages: vi.fn(async (
+          _ctx: OperationContext,
+          _peerId: string,
+          _contextGraphId: string,
+          _includeSharedMemory: boolean,
+          phase: 'data' | 'meta',
+        ) => page(phase)),
+        processDurableBatchInWorker: vi.fn(processDurableBatchWithRealVerifier),
+        insertSyncedQuadsAndInvalidateListCache,
+        subscribedContextGraphs: new Map([[localContextGraphId, { subscribed: true }]]),
+        contextGraphBindingState: new ContextGraphBindingState(),
+        graphScopedStoreClosed: false,
+        graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
+        syncCheckpoints: {
+          delete: vi.fn(),
+          set: vi.fn(),
+          setManifestBoundOffset: vi.fn(),
+        },
+        requireLocalCgMatchesOnChainSlot: vi.fn(async () => true),
+      };
+      agentLike.runLegacyDurableSyncDetailed = async (
+        ctx: OperationContext,
+        peerId: string,
+        contextGraphIds: string[],
+        _onPhase: unknown,
+        _onAccessDenied: unknown,
+        _sinceBatchIdFor: unknown,
+        options: unknown,
+      ) => LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(
+        agentLike,
+        ctx,
+        peerId,
+        contextGraphIds[0]!,
+        1,
+        options as never,
+      );
+      agentLike.syncExactKnowledgeAssetsFromPeerDetailed =
+        LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed;
+      return { agentLike, insertSyncedQuadsAndInvalidateListCache, submitProof };
     };
-    const insertSyncedQuadsAndInvalidateListCache = vi.fn(async () => {
-      throw new Error('proof-only historical asset reached durable insertion');
-    });
-    const agentLike: any = {
-      started: true,
-      config: {},
-      peerId: 'self',
-      chain: {
-        chainId: 'otp:2043',
-        getDKGKnowledgeAssetsAddress: vi.fn(async () => storageAddress),
-        getKAContextGraphId: vi.fn(async () => 14n),
-      },
-      node: { stopSignal: undefined },
-      log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
-      resolveLocalCgIdByOnChainId: vi.fn(() => localContextGraphId),
-      vmReconcileObservedCandidatePeerIds: vi.fn(() => ['peer-history']),
-      selectCatchupPeerWindow: vi.fn((peers: Array<{ toString(): string }>) => peers),
-      ensurePeerAdmittedForRecovery: vi.fn(async () => true),
-      ensurePeerConnected: vi.fn(async () => undefined),
-      waitForSyncProtocol: vi.fn(async () => true),
-      fetchSyncPages: vi.fn(async (
-        _ctx: OperationContext,
-        _peerId: string,
-        _contextGraphId: string,
-        _includeSharedMemory: boolean,
-        phase: 'data' | 'meta',
-      ) => page(phase)),
-      processDurableBatchInWorker: vi.fn(async () => ({
-        verifiedData: [historicalQuad],
-        verifiedMeta: metadata,
-        verifiedGraphScopedDataGraphs: [assertionGraph],
-        consumedUnpersistedMetaTriples: 0,
-        totalFetchedDataQuads: 1,
-        totalFetchedMetaQuads: metadata.length,
-        rejectedKcs: 0,
-        emptyResponses: 0,
-        metaOnlyResponses: 0,
-        verifiedPrivateOnlyResponses: 0,
-        dataRejectedMissingMeta: 0,
-      })),
-      insertSyncedQuadsAndInvalidateListCache,
-      subscribedContextGraphs: new Map([[localContextGraphId, { subscribed: true }]]),
-      contextGraphBindingState: new ContextGraphBindingState(),
-      graphScopedStoreClosed: false,
-      graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
-      syncCheckpoints: {
-        delete: vi.fn(),
-        set: vi.fn(),
-        setManifestBoundOffset: vi.fn(),
-      },
-      requireLocalCgMatchesOnChainSlot: vi.fn(async () => true),
-    };
-    agentLike.runLegacyDurableSyncDetailed = async (
-      ctx: OperationContext,
-      peerId: string,
-      contextGraphIds: string[],
-      _onPhase: unknown,
-      _onAccessDenied: unknown,
-      _sinceBatchIdFor: unknown,
-      options: unknown,
-    ) => LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(
-      agentLike,
-      ctx,
-      peerId,
-      contextGraphIds[0]!,
-      1,
-      options as never,
-    );
-    agentLike.syncExactKnowledgeAssetsFromPeerDetailed =
-      LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed;
 
+    const clean = makeAgent(historicalQuad);
     const repaired = await LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset.call(
-      agentLike,
+      clean.agentLike,
       { kaId, cgId: 14n, expectedRoot, expectedLeafCount: 1n },
     );
 
@@ -230,8 +248,17 @@ describe('Random Sampling proof-time exact repair', () => {
       ),
     ]);
     expect(repaired.privateRoots).toEqual([privateRoot]);
-    expect(insertSyncedQuadsAndInvalidateListCache).not.toHaveBeenCalled();
-    expect(agentLike.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(clean.insertSyncedQuadsAndInvalidateListCache).not.toHaveBeenCalled();
+    expect(clean.agentLike.graphScopedStorePhysicalRuns.size).toBe(0);
+
+    const tampered = makeAgent({ ...historicalQuad, object: '"tampered"' });
+    await expect(LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset.call(
+      tampered.agentLike,
+      { kaId, cgId: 14n, expectedRoot, expectedLeafCount: 1n },
+    )).rejects.toThrow('did not recover');
+    expect(tampered.agentLike.chain.getKAContextGraphId).not.toHaveBeenCalled();
+    expect(tampered.submitProof).not.toHaveBeenCalled();
+    expect(tampered.insertSyncedQuadsAndInvalidateListCache).not.toHaveBeenCalled();
   });
 
   it('fails closed when no local on-chain CG binding exists', async () => {
@@ -288,6 +315,75 @@ describe('Random Sampling proof-time exact repair', () => {
 
     await expect(repair).rejects.toThrow();
     expect(setupSignal?.aborted).toBe(true);
+  });
+
+  it('bounds a hanging storage-address lookup with the repair deadline', async () => {
+    let addressSignal: AbortSignal | undefined;
+    const repair = runRandomSamplingExactRepair({
+      chainId: 'base:8453',
+      maxPeers: 1,
+      timeoutMs: 10,
+      resolveStorageAddress: (signal) => {
+        addressSignal = signal;
+        return new Promise<string>(() => undefined);
+      },
+      resolveLocalContextGraphId: () => 'food-safety',
+      observedCandidatePeerIds: () => ['unreachable'],
+      selectPeerWindow: (peers) => peers,
+      ensurePeerAdmitted: async () => true,
+      ensurePeerConnected: async () => undefined,
+      waitForSyncProtocol: async () => true,
+      fetchExactKnowledgeAsset: async () => ({
+        disposition: 'clean-absent',
+        insertedTriples: 0,
+      }),
+      logInfo: vi.fn(),
+    }, {
+      kaId: 7n,
+      cgId: 1n,
+      expectedRoot: new Uint8Array(32),
+      expectedLeafCount: 1n,
+    });
+
+    await expect(repair).rejects.toThrow();
+    expect(addressSignal?.aborted).toBe(true);
+  });
+
+  it('aborts a hanging storage-address lookup promptly when the node stops', async () => {
+    const stop = new AbortController();
+    let addressStarted!: () => void;
+    const started = new Promise<void>((resolve) => { addressStarted = resolve; });
+    const repair = runRandomSamplingExactRepair({
+      chainId: 'base:8453',
+      maxPeers: 1,
+      stopSignal: stop.signal,
+      timeoutMs: 60_000,
+      resolveStorageAddress: () => {
+        addressStarted();
+        return new Promise<string>(() => undefined);
+      },
+      resolveLocalContextGraphId: () => 'food-safety',
+      observedCandidatePeerIds: () => ['unreachable'],
+      selectPeerWindow: (peers) => peers,
+      ensurePeerAdmitted: async () => true,
+      ensurePeerConnected: async () => undefined,
+      waitForSyncProtocol: async () => true,
+      fetchExactKnowledgeAsset: async () => ({
+        disposition: 'clean-absent',
+        insertedTriples: 0,
+      }),
+      logInfo: vi.fn(),
+    }, {
+      kaId: 7n,
+      cgId: 1n,
+      expectedRoot: new Uint8Array(32),
+      expectedLeafCount: 1n,
+    });
+
+    await started;
+    const reason = new Error('node stopped');
+    stop.abort(reason);
+    await expect(repair).rejects.toThrow('node stopped');
   });
 
   it('wires the lifecycle repair callback through the production prover binding', async () => {

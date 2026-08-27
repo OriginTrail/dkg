@@ -398,6 +398,10 @@ export interface SyncPageFetchOptions {
    */
   readonly returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   readonly requesterScope?: SyncCheckpointScope;
+  /** Override used by proof-only callers that own a private in-memory store. */
+  readonly checkpointStore?: SyncCheckpointStore;
+  /** Proof-only requester state is invocation-local and must not survive this call. */
+  readonly ephemeralRequesterState?: boolean;
   readonly maxAcceptedQuads?: number;
   readonly maxAcceptedHeapBytesEstimate?: number;
   /**
@@ -488,6 +492,8 @@ interface FetchSyncPagesParams {
   returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   /** Isolates an internal requester whose retained prefix is not shareable. */
   requesterScope?: SyncCheckpointScope;
+  /** Delete both offset and responder-session state on every terminal path. */
+  ephemeralRequesterState?: boolean;
   /** Optional cumulative ceilings for proof-sensitive narrow fetches. */
   maxAcceptedBytes?: number;
   maxAcceptedQuads?: number;
@@ -559,7 +565,30 @@ function shouldReducePageSize(error: unknown): boolean {
   );
 }
 
+function checkpointKeyForFetch(params: FetchSyncPagesParams): string {
+  return getSyncCheckpointKey(
+    params.remotePeerId,
+    params.contextGraphId,
+    params.includeSharedMemory,
+    params.phase,
+    params.snapshotRef,
+    params.sinceBatchId,
+    params.recovery,
+    params.assetUals ? exactAssetFilterKey(params.assetUals) : undefined,
+    params.requesterScope,
+  );
+}
+
 export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<SyncPageResult> {
+  if (params.ephemeralRequesterState !== true) return fetchSyncPagesWithState(params);
+  try {
+    return await fetchSyncPagesWithState(params);
+  } finally {
+    deleteSyncPageCheckpoint(params.checkpointStore, checkpointKeyForFetch(params));
+  }
+}
+
+async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<SyncPageResult> {
   const {
     ctx,
     remotePeerId,
@@ -608,18 +637,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   // terminal outcome. Every started phase is guaranteed a finish() below.
   throwIfAborted(signal);
   const phaseTelemetry = createRequesterPhaseTelemetry({ includeSharedMemory, phase });
-  const assetKey = assetUals ? exactAssetFilterKey(assetUals) : undefined;
-  const checkpointKey = getSyncCheckpointKey(
-    remotePeerId,
-    contextGraphId,
-    includeSharedMemory,
-    phase,
-    snapshotRef,
-    sinceBatchId,
-    recovery,
-    assetKey,
-    requesterScope,
-  );
+  const checkpointKey = checkpointKeyForFetch(params);
   if (forceFreshSession) {
     checkpointStore.delete(checkpointKey);
     unfinishedSyncResponderSessions.delete(checkpointKey);

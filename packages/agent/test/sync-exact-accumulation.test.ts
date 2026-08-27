@@ -52,6 +52,53 @@ function fetchParams(overrides: Partial<FetchParams> = {}): FetchParams {
 }
 
 describe('exact sync accumulation limits', () => {
+  it.each(['success', 'failure', 'abort'] as const)(
+    'leaves no proof-only checkpoint or responder session after %s',
+    async (terminal) => {
+      const checkpointStore = new MemorySyncCheckpointStore();
+      const requesterScope = `challenge-exact:cleanup-${terminal}` as const;
+      const checkpointKey = getSyncCheckpointKey(
+        'legacy-peer',
+        'large-legacy-cg',
+        false,
+        'data',
+        undefined,
+        undefined,
+        undefined,
+        exactAssetFilterKey([EXACT_UAL]),
+        requesterScope,
+      );
+      const controller = new AbortController();
+      if (terminal === 'abort') controller.abort(new Error('proof attempt stopped'));
+      const fetch = fetchSyncPages(fetchParams({
+        checkpointStore,
+        requesterScope,
+        ephemeralRequesterState: true,
+        forceFreshSession: true,
+        signal: controller.signal,
+        send: terminal === 'failure'
+          ? async () => { throw new Error('proof transport failed'); }
+          : async () => new Uint8Array(),
+      }));
+
+      if (terminal === 'success') await expect(fetch).resolves.toBeDefined();
+      else await expect(fetch).rejects.toThrow();
+      expect(checkpointStore.get(checkpointKey)).toBeUndefined();
+
+      // A store-only offset makes any leaked compatibility-cache token visible
+      // to the next ordinary call with the same key.
+      checkpointStore.set(checkpointKey, 7);
+      const retry = await fetchSyncPages(fetchParams({
+        checkpointStore,
+        requesterScope,
+        forceFreshSession: false,
+        send: async () => new Uint8Array(),
+      }));
+      expect(retry.responderSessionStartedFresh).toBe(true);
+      deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+    },
+  );
+
   it.each([
     'peer-closed-stream',
     'The stream has been reset',

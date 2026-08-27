@@ -24,6 +24,25 @@ export interface GraphScopedPhysicalOperationFenceOptions<T, Subscription> {
   operation(control: GraphScopedPhysicalOperationControl<Subscription>): Promise<T>;
 }
 
+export interface GraphScopedPhysicalOperationFenceHost<Subscription> {
+  isClosed(): boolean;
+  captureSubscription(contextGraphId: string): Subscription;
+  captureBindingGeneration(contextGraphId: string): number;
+  isBindingGenerationCurrent(contextGraphId: string, generation: number): boolean;
+  assertLifecycleCurrent(): void;
+  asAbortError(reason: unknown): Error;
+  track(run: Promise<unknown>): void;
+  untrack(run: Promise<unknown>): void;
+}
+
+export interface BoundGraphScopedPhysicalOperationOptions<T, Subscription> {
+  readonly contextGraphId: string;
+  readonly signal?: AbortSignal;
+  closedError(): Error;
+  bindingChangedError(): Error;
+  operation(control: GraphScopedPhysicalOperationControl<Subscription>): Promise<T>;
+}
+
 /**
  * Own the lifecycle boundary shared by graph-scoped authentication and
  * materialization. The operation callback contains only feature-specific work;
@@ -58,4 +77,24 @@ export function runGraphScopedPhysicalOperation<T, Subscription>(
   }));
   options.track(physicalRun);
   return physicalRun.finally(() => options.untrack(physicalRun));
+}
+
+/** Capture lifecycle-stable wiring once; individual operations supply only ownership-specific work. */
+export function createGraphScopedPhysicalOperationFence<Subscription>(
+  host: GraphScopedPhysicalOperationFenceHost<Subscription>,
+): <T>(options: BoundGraphScopedPhysicalOperationOptions<T, Subscription>) => Promise<T> {
+  return <T>(options: BoundGraphScopedPhysicalOperationOptions<T, Subscription>) => (
+    runGraphScopedPhysicalOperation({
+      ...options,
+      isClosed: host.isClosed,
+      captureSubscription: () => host.captureSubscription(options.contextGraphId),
+      captureBindingGeneration: () => host.captureBindingGeneration(options.contextGraphId),
+      isBindingGenerationCurrent: (generation) =>
+        host.isBindingGenerationCurrent(options.contextGraphId, generation),
+      assertLifecycleCurrent: host.assertLifecycleCurrent,
+      asAbortError: host.asAbortError,
+      track: host.track,
+      untrack: host.untrack,
+    })
+  );
 }

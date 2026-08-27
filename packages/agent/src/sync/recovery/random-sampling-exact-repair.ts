@@ -21,7 +21,7 @@ export interface RandomSamplingExactRepairDependencies {
   readonly stopSignal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly createTimeoutSignal?: (timeoutMs: number) => AbortSignal;
-  resolveStorageAddress(): Promise<string>;
+  resolveStorageAddress(signal: AbortSignal): Promise<string>;
   resolveLocalContextGraphId(onChainContextGraphId: bigint): string | undefined;
   observedCandidatePeerIds(localContextGraphId: string): string[];
   selectPeerWindow(
@@ -52,6 +52,17 @@ function abortReason(signal: AbortSignal): Error {
   return error;
 }
 
+function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortReason(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    operation.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
+}
+
 /**
  * Bounded proof-time recovery coordinator. The challenge commitment is applied
  * to the exact descriptor before the peer payload can become ephemeral proof input.
@@ -60,12 +71,20 @@ export async function runRandomSamplingExactRepair(
   deps: RandomSamplingExactRepairDependencies,
   input: RandomSamplingExactRepairInput,
 ): Promise<RandomSamplingRepairMaterial> {
+  const timeoutSignal = (deps.createTimeoutSignal ?? AbortSignal.timeout)(
+    deps.timeoutMs ?? 90_000,
+  );
+  const signal = deps.stopSignal
+    ? AbortSignal.any([deps.stopSignal, timeoutSignal])
+    : timeoutSignal;
+  if (signal.aborted) throw abortReason(signal);
+
   const localContextGraphId = deps.resolveLocalContextGraphId(input.cgId);
   if (!localContextGraphId) {
     throw new Error(`Random Sampling repair cannot resolve local CG ${input.cgId}`);
   }
 
-  const storageAddress = await deps.resolveStorageAddress();
+  const storageAddress = await raceWithAbort(deps.resolveStorageAddress(signal), signal);
   const assetUal = buildReconciledKnowledgeAssetUal(
     deps.chainId,
     storageAddress,
@@ -84,12 +103,6 @@ export async function runRandomSamplingExactRepair(
     maxPeers: deps.maxPeers,
     peerRotationKey: `rs-proof:${localContextGraphId}`,
   });
-  const timeoutSignal = (deps.createTimeoutSignal ?? AbortSignal.timeout)(
-    deps.timeoutMs ?? 90_000,
-  );
-  const signal = deps.stopSignal
-    ? AbortSignal.any([deps.stopSignal, timeoutSignal])
-    : timeoutSignal;
   const attempted: string[] = [];
 
   for (const peerId of peerWindow) {

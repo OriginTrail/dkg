@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   parseDeterministicKnowledgeAssetUal,
   SYSTEM_CONTEXT_GRAPHS,
@@ -183,6 +184,8 @@ export interface DurableSyncFetchRequest {
   readonly shouldStopAfterPage?: (progress: SyncPageProgress) => boolean;
   readonly returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   readonly requesterScope?: SyncCheckpointScope;
+  /** Proof bytes own an invocation-local page/session store with terminal cleanup. */
+  readonly ephemeralRequesterState?: boolean;
   readonly fetchContext: DurableSyncFetchContext;
 }
 
@@ -415,6 +418,7 @@ interface InternalDurableSyncContext extends Omit<
     request: DurableSyncChallengePinnedAuthenticationRequest,
   ) => Promise<ChallengePinnedGraphScopedAsset>;
   proofOnlyChallengeFetch?: boolean;
+  proofRequesterScope?: `challenge-exact:${string}`;
 }
 
 interface InternalDetailedDurableSyncResult extends DetailedDurableSyncResult {
@@ -599,6 +603,7 @@ export async function runChallengeExactAssetFetch(
     deleteCheckpoint: () => undefined,
     setCheckpoint: () => undefined,
     proofOnlyChallengeFetch: true,
+    proofRequesterScope: `challenge-exact:${randomUUID()}`,
   });
   return {
     result: detailed.result,
@@ -630,6 +635,7 @@ async function runDurableSyncWithBudget(
     storeGraphScopedAsset,
     authenticateChallengePinnedAsset,
     proofOnlyChallengeFetch = false,
+    proofRequesterScope,
     onVerifiedFullSnapshot,
     deleteCheckpoint,
     setCheckpoint,
@@ -812,7 +818,9 @@ async function runDurableSyncWithBudget(
               .map((commitment) => [commitment.assetUal, commitment]),
       );
       const exactRequesterScope: SyncCheckpointScope | undefined =
-        exactFetchPolicy?.requesterScope;
+        isProofOnlyChallengeFetch
+          ? proofRequesterScope ?? exactFetchPolicy.requesterScope
+          : exactFetchPolicy?.requesterScope;
       const rootlessVerifiedFullSnapshot = sinceBatchId === undefined
         && !isSystemContextGraph;
       if (exactAssetUals !== undefined) {
@@ -865,6 +873,7 @@ async function runDurableSyncWithBudget(
           : {}),
         requesterScope: exactRequesterScope
           ?? (phase === 'meta' ? durableMetaContinuation?.requesterScope : undefined),
+        ephemeralRequesterState: isProofOnlyChallengeFetch || undefined,
         fetchContext: fetchContext(phase === 'meta' ? metaFetchDeadline : deadline),
       });
       const rawMetaResult: SyncPageResult = skipAgentsMeta
