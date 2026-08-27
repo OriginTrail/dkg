@@ -104,6 +104,8 @@ export {
   resolveWorkspaceAgentRecipients,
   resolveWorkspaceAgentRecipientKeys,
   projectWorkspaceAgentRecipientFanout,
+  requireEncryptedWorkspaceAgentRecipientResolution,
+  type EncryptedWorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientFanoutSnapshot,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipient,

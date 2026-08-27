@@ -15,8 +15,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   projectWorkspaceAgentRecipientFanout,
+  requireEncryptedWorkspaceAgentRecipientResolution,
   resolveWorkspaceAgentRecipients,
-  type WorkspaceAgentRecipientResolution,
+  type EncryptedWorkspaceAgentRecipientResolution,
 } from '../src/index.js';
 
 const CONTEXT_GRAPH_ID = 'workspace-agent-recipient-resolution';
@@ -186,7 +187,7 @@ describe('projectWorkspaceAgentRecipientFanout', () => {
         {},
         { peerId: PEER_B },
       ],
-    } as unknown as WorkspaceAgentRecipientResolution;
+    } as unknown as EncryptedWorkspaceAgentRecipientResolution;
 
     expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
       source: 'agent-roster',
@@ -195,11 +196,19 @@ describe('projectWorkspaceAgentRecipientFanout', () => {
     });
   });
 
-  it('returns null for a plaintext recipient resolution', () => {
-    expect(projectWorkspaceAgentRecipientFanout({
-      requiresEncryption: false,
+  it('narrows encrypted resolutions once and rejects an empty recipient set', () => {
+    const nonEmpty = {
+      requiresEncryption: true,
+      recipients: [{ agentAddress: '0xaaa', peerId: PEER_A }],
+    };
+    expect(requireEncryptedWorkspaceAgentRecipientResolution(
+      nonEmpty,
+      CONTEXT_GRAPH_ID,
+    )).toBe(nonEmpty);
+    expect(() => requireEncryptedWorkspaceAgentRecipientResolution({
+      requiresEncryption: true,
       recipients: [],
-    })).toBeNull();
+    }, CONTEXT_GRAPH_ID)).toThrow(/has no valid DKG agent recipients/);
   });
 
   it('marks a mixed authorized roster incomplete while retaining known peers', () => {
@@ -209,7 +218,7 @@ describe('projectWorkspaceAgentRecipientFanout', () => {
         { agentAddress: '0xaaa', peerId: PEER_A },
         { agentAddress: '0xbbb' },
       ],
-    } as unknown as WorkspaceAgentRecipientResolution;
+    } as unknown as EncryptedWorkspaceAgentRecipientResolution;
 
     expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
       source: 'agent-roster',
@@ -225,7 +234,7 @@ describe('projectWorkspaceAgentRecipientFanout', () => {
         { agentAddress: '0xaaa', peerId: SELF_PEER },
         { agentAddress: '0xbbb', peerId: PEER_B },
       ],
-    } as unknown as WorkspaceAgentRecipientResolution;
+    } as unknown as EncryptedWorkspaceAgentRecipientResolution;
 
     expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
       source: 'agent-roster',
@@ -241,7 +250,7 @@ describe('projectWorkspaceAgentRecipientFanout', () => {
         { agentAddress: '0xaaa', peerId: PEER_A },
         { agentAddress: '0xbbb', peerId: 'not-a-peer-id' },
       ],
-    } as unknown as WorkspaceAgentRecipientResolution;
+    } as unknown as EncryptedWorkspaceAgentRecipientResolution;
 
     expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
       source: 'agent-roster',

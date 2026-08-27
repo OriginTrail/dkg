@@ -654,6 +654,7 @@ describe('Working Memory Assertion Lifecycle', () => {
       complete: true,
       },
     });
+    expect(result.gossipMessage).toBe(result.gossipPayload?.message);
   });
 
   it('rejects generated private-CG catalog floor stripping without private CG proof', async () => {

@@ -832,9 +832,30 @@ function bytesEqual(left: Uint8Array | undefined, right: Uint8Array | undefined)
 }
 
 export class PublishMethods extends DKGAgentBase {
-  async publishWorkspaceGossip(this: DKGAgent,
+  publishWorkspaceGossip(this: DKGAgent,
     contextGraphId: string,
     payload: EncodedWorkspaceGossipPayload,
+    ctx: OperationContext,
+    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    shareOperationId?: string,
+  ): Promise<void>;
+
+  /**
+   * @deprecated Pass EncodedWorkspaceGossipPayload so encrypted bytes retain
+   * their encryption-time fan-out snapshot. Raw bytes preserve the historical
+   * enumerator-based planning behavior during migration.
+   */
+  publishWorkspaceGossip(this: DKGAgent,
+    contextGraphId: string,
+    message: Uint8Array,
+    ctx: OperationContext,
+    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    shareOperationId?: string,
+  ): Promise<void>;
+
+  async publishWorkspaceGossip(this: DKGAgent,
+    contextGraphId: string,
+    payloadOrMessage: EncodedWorkspaceGossipPayload | Uint8Array,
     ctx: OperationContext,
     resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
     /**
@@ -854,6 +875,9 @@ export class PublishMethods extends DKGAgentBase {
      */
     shareOperationId?: string,
   ): Promise<void> {
+    const payload: EncodedWorkspaceGossipPayload = payloadOrMessage instanceof Uint8Array
+      ? { mode: 'plaintext', message: payloadOrMessage }
+      : payloadOrMessage;
     if (
       !payload
       || (payload.mode !== 'plaintext' && payload.mode !== 'agent-encrypted')
@@ -1086,6 +1110,7 @@ export class PublishMethods extends DKGAgentBase {
         preAckedFromSubstrate: [],
         payload: wireMessage,
         enumerationSource: plan.enumerationSource,
+        ...(!plan.useGossip ? { quorumThreshold: 1 } : {}),
       });
     }
 

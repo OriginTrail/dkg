@@ -12,10 +12,26 @@ import {
   generateWorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { DKGAgent, FANOUT_RESPONSE_RETRYABLE } from '../src/index.js';
+import {
+  DKGAgent,
+  FANOUT_RESPONSE_REJECTED,
+  FANOUT_RESPONSE_RETRYABLE,
+} from '../src/index.js';
 import type { ReliableSendResult } from '../src/p2p/messenger.js';
 
 const SELF_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const PRIVATE_RETRY_ROSTER = [
+  '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw',
+  '12D3KooWCV9mkCJkKkyNLvvPNRTsvpGMstN5E4C5jtXUK61S3xan',
+  '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb',
+  '12D3KooWFHUALUrdSfrVHSxtCRCJC9xvxS7nYfM6T1sbYVak9HTu',
+  '12D3KooWFq5KMnSMyYr8Z8t8a6Vh1Y6N6KkF5UZjLpCqUkBJsAaa',
+  '12D3KooWGiQrwo1jXJsHaQK4kFYx3xVDp5tWHPEnpUUEUbygP4WL',
+  '12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ',
+  '12D3KooWLb1bH9NfMSjJDmsZxufmw5UFD8wajVKnvD5HfL3VbqGq',
+  '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh',
+  '12D3KooWRdP3mMN9KkQCWKFjFxhgpXp8Q2y8zQZkgRYfGQ4bQh3a',
+] as const;
 
 class CapturingGossip {
   publishes: Array<{ topic: string; bytes: number }> = [];
@@ -251,25 +267,27 @@ describe('DKGAgent private SWM agent-roster fan-out', () => {
     expect(gossip.publishes).toEqual([]);
   });
 
-  it('retries a transient rejection with the exact encrypted wire payload and no gossip', async () => {
+  it('keeps a substrate-only retry alive after nine of ten peers deliver', async () => {
     const agent = await createAgent('PrivateSnapshotRetryable');
     const gossip = new CapturingGossip();
     (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
-    const receiverPeerId = '12D3KooWRdP3mMN9KkQCWKFjFxhgpXp8Q2y8zQZkgRYfGQ4bQh3a';
+    const retryPeerId = PRIVATE_RETRY_ROSTER[PRIVATE_RETRY_ROSTER.length - 1];
     (agent as unknown as { isPeerDialable: (peerId: string) => Promise<boolean> })
       .isPeerDialable = async (_peerId: string) => true;
 
-    const sentPayloads: Uint8Array[] = [];
-    let attempts = 0;
+    const sentPayloads = new Map<string, Uint8Array[]>();
     (agent as unknown as { messenger: object }).messenger = {
-      sendReliable: async (_peerId: string, _protocolId: string, payload: Uint8Array) => {
-        sentPayloads.push(payload.slice());
-        attempts += 1;
+      sendReliable: async (peerId: string, _protocolId: string, payload: Uint8Array) => {
+        const attempts = sentPayloads.get(peerId) ?? [];
+        attempts.push(payload.slice());
+        sentPayloads.set(peerId, attempts);
         return {
           delivered: true,
-          response: attempts === 1 ? FANOUT_RESPONSE_RETRYABLE : new Uint8Array(),
+          response: peerId === retryPeerId && attempts.length === 1
+            ? FANOUT_RESPONSE_RETRYABLE
+            : new Uint8Array(),
           attempts: 1,
-          messageId: `private-retry-${attempts}`,
+          messageId: `private-retry-${peerId}-${attempts.length}`,
         };
       },
     };
@@ -280,25 +298,120 @@ describe('DKGAgent private SWM agent-roster fan-out', () => {
       {
         mode: 'agent-encrypted',
         message: new Uint8Array(2_048).fill(0x4d),
-        fanoutSnapshot: { source: 'agent-roster', members: [receiverPeerId], complete: true },
+        fanoutSnapshot: {
+          source: 'agent-roster',
+          members: PRIVATE_RETRY_ROSTER,
+          complete: true,
+        },
       },
       createOperationContext('share', shareOperationId),
       null,
       shareOperationId,
     );
     await agent.awaitInFlightSubstrateFanOuts();
-    expect(sentPayloads).toHaveLength(1);
+    expect([...sentPayloads.values()].flat()).toHaveLength(PRIVATE_RETRY_ROSTER.length);
+    expect(agent.getSwmAckQuorumStats()).toMatchObject({ tracked: 1, completed: 0, pending: 1 });
 
     (agent as unknown as {
       getOrCreateSwmAckQuorum: () => { tick: (nowMs?: number) => void };
     }).getOrCreateSwmAckQuorum().tick(Date.now() + 30_001);
-    for (let i = 0; i < 20 && sentPayloads.length < 2; i += 1) {
+    for (let i = 0; i < 20 && sentPayloads.get(retryPeerId)?.length !== 2; i += 1) {
       await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
     }
 
-    expect(sentPayloads).toHaveLength(2);
-    expect(sentPayloads[1]).toEqual(sentPayloads[0]);
+    expect(sentPayloads.get(retryPeerId)).toHaveLength(2);
+    expect(sentPayloads.get(retryPeerId)?.[1]).toEqual(sentPayloads.get(retryPeerId)?.[0]);
+    for (const peerId of PRIVATE_RETRY_ROSTER.slice(0, -1)) {
+      expect(sentPayloads.get(peerId)).toHaveLength(1);
+    }
     expect(agent.getSwmAckQuorumStats()).toMatchObject({ tracked: 1, completed: 1, pending: 0 });
+    expect(gossip.publishes).toEqual([]);
+  });
+
+  it('drops a terminal substrate-only rejection and never retries it', async () => {
+    const agent = await createAgent('PrivateSnapshotTerminal');
+    const gossip = new CapturingGossip();
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+    const deliveredPeerId = PRIVATE_RETRY_ROSTER[0];
+    const rejectedPeerId = PRIVATE_RETRY_ROSTER[1];
+    const calls: string[] = [];
+    (agent as unknown as { messenger: object }).messenger = {
+      sendReliable: async (peerId: string) => {
+        calls.push(peerId);
+        return {
+          delivered: true,
+          response: peerId === rejectedPeerId ? FANOUT_RESPONSE_REJECTED : new Uint8Array(),
+          attempts: 1,
+          messageId: `private-terminal-${peerId}`,
+        };
+      },
+    };
+
+    const shareOperationId = 'private-substrate-only-terminal';
+    await agent.publishWorkspaceGossip(
+      'cg-private-terminal-snapshot',
+      {
+        mode: 'agent-encrypted',
+        message: new Uint8Array(512).fill(0x5e),
+        fanoutSnapshot: {
+          source: 'agent-roster',
+          members: [deliveredPeerId, rejectedPeerId],
+          complete: true,
+        },
+      },
+      createOperationContext('share', shareOperationId),
+      null,
+      shareOperationId,
+    );
+    await agent.awaitInFlightSubstrateFanOuts();
+    expect(calls.sort()).toEqual([deliveredPeerId, rejectedPeerId].sort());
+    expect(agent.getSwmAckQuorumStats()).toMatchObject({ tracked: 1, completed: 1, pending: 0 });
+
+    (agent as unknown as {
+      getOrCreateSwmAckQuorum: () => { tick: (nowMs?: number) => void };
+    }).getOrCreateSwmAckQuorum().tick(Date.now() + 30_001);
+    await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+    expect(calls.sort()).toEqual([deliveredPeerId, rejectedPeerId].sort());
+    expect(gossip.publishes).toEqual([]);
+  });
+
+  it('keeps the deprecated raw-byte call on enumerator-based fan-out', async () => {
+    const agent = await createAgent('LegacyRawWorkspaceGossip');
+    const gossip = new CapturingGossip();
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+    const receiverPeerId = PRIVATE_RETRY_ROSTER[0];
+    const { calls, install } = stubMessengerSendReliable(new Map([
+      [receiverPeerId, {
+        delivered: true,
+        response: new Uint8Array(),
+        attempts: 1,
+        messageId: 'legacy-raw-delivered',
+      }],
+    ]));
+    install(agent);
+    const internals = agent as unknown as {
+      getOrCreateCGMemberEnumerator(): { enumerate: (cgId: string) => Promise<unknown> };
+    };
+    internals.getOrCreateCGMemberEnumerator().enumerate = async () => ({
+      source: 'agent-roster',
+      members: [receiverPeerId],
+      complete: true,
+    });
+
+    const rawMessage = new Uint8Array(256).fill(0x2a);
+    await agent.publishWorkspaceGossip(
+      'cg-legacy-raw-workspace-gossip',
+      rawMessage,
+      createOperationContext('share'),
+      null,
+    );
+    await agent.awaitInFlightSubstrateFanOuts();
+
+    expect(calls).toEqual([{
+      peerId: receiverPeerId,
+      protocolId: '/dkg/10.0.1/swm-update',
+      bytes: rawMessage.byteLength,
+    }]);
     expect(gossip.publishes).toEqual([]);
   });
 

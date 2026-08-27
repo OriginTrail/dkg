@@ -28,8 +28,40 @@ export interface WorkspaceAgentRecipient extends WorkspaceRecipientEncryptionKey
 }
 
 export interface WorkspaceAgentRecipientResolution {
-  requiresEncryption: boolean;
-  recipients: WorkspaceAgentRecipient[];
+  readonly requiresEncryption: boolean;
+  readonly recipients: readonly WorkspaceAgentRecipient[];
+}
+
+/**
+ * Recipient resolution after the encrypted-workspace boundary has proved that
+ * encryption is required and at least one verified recipient is available.
+ */
+export interface EncryptedWorkspaceAgentRecipientResolution
+  extends WorkspaceAgentRecipientResolution {
+  readonly requiresEncryption: true;
+  readonly recipients: readonly [
+    WorkspaceAgentRecipient,
+    ...WorkspaceAgentRecipient[],
+  ];
+}
+
+function isEncryptedWorkspaceAgentRecipientResolution(
+  resolution: WorkspaceAgentRecipientResolution,
+): resolution is EncryptedWorkspaceAgentRecipientResolution {
+  return resolution.requiresEncryption && resolution.recipients.length > 0;
+}
+
+export function requireEncryptedWorkspaceAgentRecipientResolution(
+  resolution: WorkspaceAgentRecipientResolution,
+  contextGraphId: string,
+): EncryptedWorkspaceAgentRecipientResolution {
+  if (!resolution.requiresEncryption) {
+    throw new TypeError(`Context graph "${contextGraphId}" does not require encrypted SWM gossip`);
+  }
+  if (!isEncryptedWorkspaceAgentRecipientResolution(resolution)) {
+    throw new Error(`Context graph "${contextGraphId}" requires encrypted SWM gossip but has no valid DKG agent recipients`);
+  }
+  return resolution;
 }
 
 export interface WorkspaceAgentRecipientFanoutSnapshot {
@@ -50,11 +82,9 @@ export interface WorkspaceAgentRecipientFanoutSnapshot {
  * while retaining whether the projection covers every authorized agent.
  */
 export function projectWorkspaceAgentRecipientFanout(
-  resolution: WorkspaceAgentRecipientResolution,
+  resolution: EncryptedWorkspaceAgentRecipientResolution,
   selfPeerId?: string,
-): WorkspaceAgentRecipientFanoutSnapshot | null {
-  if (!resolution.requiresEncryption) return null;
-
+): WorkspaceAgentRecipientFanoutSnapshot {
   const peers = new Set<string>();
   const agentsWithPeer = new Set<string>();
   const authorizedAgents = new Set<string>();

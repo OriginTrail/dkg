@@ -6,6 +6,7 @@ import {
   TypedEventBus,
   generateEd25519Keypair,
   decodeWorkspacePublishRequest,
+  decodeEncryptedWorkspacePayload,
   encodeGossipEnvelope,
   encodeEncryptedWorkspacePayload,
   encryptWorkspacePayload,
@@ -319,6 +320,35 @@ describe('Workspace: share', () => {
       members: [SNAPSHOT_PEER_B],
       complete: true,
       },
+    });
+  });
+
+  it('uses the validated non-empty recipient snapshot in built-in encryption', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    const recipient = recipientKeyFor(senderAgentAddress);
+    publisher.setWorkspaceAgentRecipientResolver(async () => ({
+      requiresEncryption: true,
+      recipients: [{
+        ...recipient,
+        agentAddress: senderAgentAddress,
+        peerId: SNAPSHOT_PEER_A,
+      }],
+    }));
+
+    const result = await publisher.share(
+      'snapshot-built-in-encryption',
+      [q('urn:test:snapshot-built-in', 'http://schema.org/name', '"built-in"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+
+    expect(result.gossipPayload.mode).toBe('agent-encrypted');
+    if (result.gossipPayload.mode !== 'agent-encrypted') throw new Error('expected encryption');
+    const envelope = decodeEncryptedWorkspacePayload(result.gossipPayload.message);
+    expect(envelope.recipients).toHaveLength(1);
+    expect(result.gossipPayload.fanoutSnapshot).toEqual({
+      source: 'agent-roster',
+      members: [SNAPSHOT_PEER_A],
+      complete: true,
     });
   });
 

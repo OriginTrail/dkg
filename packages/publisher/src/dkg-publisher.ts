@@ -78,8 +78,9 @@ import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js
 import { ethers } from 'ethers';
 import {
   projectWorkspaceAgentRecipientFanout,
+  requireEncryptedWorkspaceAgentRecipientResolution,
+  type EncryptedWorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientFanoutSnapshot,
-  type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolver,
 } from './workspace-agent-recipients.js';
 import {
@@ -162,6 +163,8 @@ type AssertionPromoteOptions = {
 type AssertionPromoteResult = {
   promotedCount: number;
   gossipPayload?: EncodedWorkspaceGossipPayload;
+  /** @deprecated Use gossipPayload.message. */
+  gossipMessage?: Uint8Array;
   promotedAllRoots: boolean;
   shareOperationId?: string;
 };
@@ -511,7 +514,7 @@ export interface WorkspaceSenderKeyEncryptInput {
   subGraphName?: string;
   publisherPeerId: string;
   /** The exact validated recipients used for both encryption and transport. */
-  resolution: WorkspaceAgentRecipientResolution;
+  resolution: EncryptedWorkspaceAgentRecipientResolution;
 }
 
 export type WorkspaceSenderKeyEncryptor = (
@@ -2002,17 +2005,18 @@ export class DKGPublisher implements Publisher {
     if (!resolution.requiresEncryption) {
       return { mode: 'plaintext', message: plaintext };
     }
-    if (resolution.recipients.length === 0) {
-      throw new Error(`Context graph "${contextGraphId}" requires encrypted SWM gossip but has no valid DKG agent recipients`);
-    }
+    const encryptedResolution = requireEncryptedWorkspaceAgentRecipientResolution(
+      resolution,
+      contextGraphId,
+    );
     if (!options.senderAgentAddress) {
       throw new Error(`Context graph "${contextGraphId}" requires a DKG agent sender identity for encrypted SWM gossip`);
     }
 
     const gossipFanoutSnapshot = projectWorkspaceAgentRecipientFanout(
-      resolution,
+      encryptedResolution,
       options.publisherPeerId,
-    ) ?? { source: 'agent-roster' as const, members: [], complete: false };
+    );
 
     if (this.workspaceSenderKeyEncryptor) {
       return {
@@ -2026,7 +2030,7 @@ export class DKGPublisher implements Publisher {
           timestampMs: options.timestampMs,
           subGraphName: options.subGraphName,
           publisherPeerId: options.publisherPeerId,
-          resolution,
+          resolution: encryptedResolution,
         }),
         fanoutSnapshot: gossipFanoutSnapshot,
       };
@@ -2043,7 +2047,7 @@ export class DKGPublisher implements Publisher {
         timestampMs: options.timestampMs,
         subGraphName: options.subGraphName,
         plaintext,
-        recipients: resolution.recipients,
+        recipients: encryptedResolution.recipients,
       })),
       fanoutSnapshot: gossipFanoutSnapshot,
     };
@@ -8930,6 +8934,7 @@ export class DKGPublisher implements Publisher {
         ? 0
         : swmQuads.length + normalizedPrivateQuads.length,
       gossipPayload,
+      gossipMessage: gossipPayload?.message,
       promotedAllRoots,
       shareOperationId: operationId,
     };
