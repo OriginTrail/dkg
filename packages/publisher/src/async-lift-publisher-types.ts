@@ -123,21 +123,27 @@ export interface AsyncLiftPublisher {
    */
   readonly reconciliationScheduling?: {
     /**
-     * EXCLUSIVE attachment of the demand listener — deliberately not pub/sub. Reconciliation
-     * demand has exactly one owner (the scheduling runner driving this publisher), so attaching
-     * TAKES OVER: a later attachment supersedes the earlier one, which is the safe handover
-     * when a new runner incarnation starts while its predecessor is still stopping. The
-     * returned detach releases only the caller's OWN attachment (a stale detach from a
-     * superseded owner is a no-op), so the handover cannot be torn down by the incarnation it
-     * replaced.
+     * EXCLUSIVE, ATOMIC attachment of the scheduling listeners — deliberately not pub/sub.
+     * Scheduling has exactly one owner (the runner driving this publisher), so attaching TAKES
+     * OVER both callbacks together: a later attachment supersedes the earlier one wholesale —
+     * the safe handover when a new runner incarnation starts while its predecessor is still
+     * stopping — and ownership can never be split between incarnations. The returned detach
+     * releases only the caller's OWN attachment (a stale detach from a superseded owner is a
+     * no-op).
      *
-     * The poke itself carries no payload and establishes nothing about the queue; it fires
-     * when a tx-bearing job stops being executor-owned (a detached receipt execution settles,
-     * or `processNext` hands back a live broadcast after an ambiguous send) — i.e. only once
-     * the work is actually visible to a {@link reconcileTransactions} pass — and merely
-     * invites the owner to run that pass sooner than its idle cadence would.
+     * Both pokes are scheduling-only and establish nothing — the invited operation re-checks
+     * its own guards. `onReconciliationDemand` fires when a tx-bearing job stops being
+     * executor-owned (a detached receipt settles, or `processNext` hands back a live broadcast
+     * after an ambiguous send) — only once the work is visible to a
+     * {@link reconcileTransactions} pass. `onWalletRelease` fires with the wallet id the
+     * moment that wallet's lock is DELETED (job finalized, proven ineffective and reset, or
+     * swept as stale) — exactly when the wallet becomes claimable — so wallet turnover is
+     * bounded by chain time rather than by the claim poll.
      */
-    attachDemandListener(listener: () => void): () => void;
+    attachScheduler(scheduler: {
+      onReconciliationDemand(): void;
+      onWalletRelease(walletId: string): void;
+    }): () => void;
     /**
      * Run one reconcile pass and report BOTH what it settled and whether actionable live work
      * remains — one operation, one atomic answer, computed during the pass's own walk rather
@@ -155,16 +161,6 @@ export interface AsyncLiftPublisher {
      * {@link AsyncLiftPublisher.recover}, the wire-stable numeric surface over the same pass.
      */
     recover(): Promise<{ reconciled: number; pendingWork: boolean }>;
-    /**
-     * EXCLUSIVE attachment of the wallet-release listener — same ownership/handover contract as
-     * {@link attachDemandListener}: one owner, takeover-on-attach, identity-guarded detach.
-     * Poked with the wallet id the moment that wallet's lock is DELETED (job finalized, proven
-     * ineffective and reset, or swept as stale), i.e. exactly when the wallet becomes claimable.
-     * Scheduling-only: the poke authorizes nothing — the owner's next claim attempt re-checks
-     * every claim guard — it only lets that attempt run now instead of on the next poll, so
-     * wallet turnover is bounded by chain time rather than by `pollIntervalMs`.
-     */
-    attachWalletReleaseListener(listener: (walletId: string) => void): () => void;
   };
   getStats(): Promise<Record<LiftJobState, number>>;
   pause(): Promise<void>;

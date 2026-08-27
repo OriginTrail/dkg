@@ -147,11 +147,14 @@ describe('async-lift reconciliation demand channel', () => {
       },
     });
     const outlookAtPoke: Promise<boolean>[] = [];
-    publisher.reconciliationScheduling.attachDemandListener(() => {
-      // Ground truth at poke time: an invited pass must already be able to act — it reports
-      // remaining work (or settles something) only if the announced job is visible to it.
-      outlookAtPoke.push(publisher.reconciliationScheduling.reconcile()
-        .then((outcome) => outcome.pendingWork || outcome.reconciled > 0));
+    publisher.reconciliationScheduling.attachScheduler({
+      onWalletRelease: () => {},
+      onReconciliationDemand: () => {
+        // Ground truth at poke time: an invited pass must already be able to act — it reports
+        // remaining work (or settles something) only if the announced job is visible to it.
+        outlookAtPoke.push(publisher.reconciliationScheduling.reconcile()
+          .then((outcome) => outcome.pendingWork || outcome.reconciled > 0));
+      },
     });
     await stageShareSnapshot();
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -189,11 +192,14 @@ describe('async-lift reconciliation demand channel', () => {
     // catch) reads false here, spends the one-shot demand on a pass that skips the job, and
     // parks it for the idle sweep.
     const outlookAtPoke: Promise<boolean>[] = [];
-    publisher.reconciliationScheduling.attachDemandListener(() => {
-      // Ground truth at poke time: an invited pass must already be able to act — it reports
-      // remaining work (or settles something) only if the announced job is visible to it.
-      outlookAtPoke.push(publisher.reconciliationScheduling.reconcile()
-        .then((outcome) => outcome.pendingWork || outcome.reconciled > 0));
+    publisher.reconciliationScheduling.attachScheduler({
+      onWalletRelease: () => {},
+      onReconciliationDemand: () => {
+        // Ground truth at poke time: an invited pass must already be able to act — it reports
+        // remaining work (or settles something) only if the announced job is visible to it.
+        outlookAtPoke.push(publisher.reconciliationScheduling.reconcile()
+          .then((outcome) => outcome.pendingWork || outcome.reconciled > 0));
+      },
     });
     await stageShareSnapshot();
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -216,11 +222,17 @@ describe('async-lift reconciliation demand channel', () => {
       },
     });
     const pokes: string[] = [];
-    const detachSuperseded = publisher.reconciliationScheduling.attachDemandListener(() => pokes.push('superseded'));
-    publisher.reconciliationScheduling.attachDemandListener(() => pokes.push('current'));
-    // A new runner incarnation took over the attachment; the superseded owner's detach firing
-    // late (e.g. from a delayed stop()) must not silence the takeover — that is the handover
-    // contract of the exclusive attachment.
+    const detachSuperseded = publisher.reconciliationScheduling.attachScheduler({
+      onReconciliationDemand: () => pokes.push('superseded:demand'),
+      onWalletRelease: (walletId) => pokes.push(`superseded:release:${walletId}`),
+    });
+    publisher.reconciliationScheduling.attachScheduler({
+      onReconciliationDemand: () => pokes.push('current'),
+      onWalletRelease: () => {},
+    });
+    // A new runner incarnation took over the attachment — BOTH callbacks together, so scheduler
+    // ownership can never be split — and the superseded owner's detach firing late (e.g. from a
+    // delayed stop()) must not silence the takeover.
     detachSuperseded();
     await stageShareSnapshot();
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -241,8 +253,11 @@ describe('async-lift reconciliation demand channel', () => {
         },
       },
     });
-    publisher.reconciliationScheduling.attachDemandListener(() => {
-      throw new Error('scheduler exploded');
+    publisher.reconciliationScheduling.attachScheduler({
+      onWalletRelease: () => {},
+      onReconciliationDemand: () => {
+        throw new Error('scheduler exploded');
+      },
     });
     await stageShareSnapshot();
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -329,11 +344,14 @@ describe('async-lift reconciliation demand channel', () => {
       },
     });
     const outlookAtPoke: Promise<boolean>[] = [];
-    publisher.reconciliationScheduling.attachDemandListener(() => {
-      // Ground truth at poke time: an invited pass must already be able to act — it reports
-      // remaining work (or settles something) only if the announced job is visible to it.
-      outlookAtPoke.push(publisher.reconciliationScheduling.reconcile()
-        .then((outcome) => outcome.pendingWork || outcome.reconciled > 0));
+    publisher.reconciliationScheduling.attachScheduler({
+      onWalletRelease: () => {},
+      onReconciliationDemand: () => {
+        // Ground truth at poke time: an invited pass must already be able to act — it reports
+        // remaining work (or settles something) only if the announced job is visible to it.
+        outlookAtPoke.push(publisher.reconciliationScheduling.reconcile()
+          .then((outcome) => outcome.pendingWork || outcome.reconciled > 0));
+      },
     });
     await stageShareSnapshot();
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -399,14 +417,16 @@ describe('async-lift reconciliation demand channel', () => {
       },
     });
     const pokes: string[] = [];
-    // Exclusive attachment with the same handover contract as the demand listener: a stale
-    // detach from a superseded owner must not silence the takeover.
-    const detachSuperseded = publisher.reconciliationScheduling.attachWalletReleaseListener(
-      (walletId) => pokes.push(`superseded:${walletId}`),
-    );
-    publisher.reconciliationScheduling.attachWalletReleaseListener(
-      (walletId) => pokes.push(walletId),
-    );
+    // Atomic takeover: the second attachScheduler supersedes BOTH callbacks of the first, and
+    // the superseded owner's late detach is a no-op — ownership transfers wholesale, never split.
+    const detachSuperseded = publisher.reconciliationScheduling.attachScheduler({
+      onReconciliationDemand: () => pokes.push('superseded:demand'),
+      onWalletRelease: (walletId) => pokes.push(`superseded:${walletId}`),
+    });
+    publisher.reconciliationScheduling.attachScheduler({
+      onReconciliationDemand: () => {},
+      onWalletRelease: (walletId) => pokes.push(walletId),
+    });
     detachSuperseded();
     await stageShareSnapshot();
 
@@ -424,10 +444,52 @@ describe('async-lift reconciliation demand channel', () => {
     expect(pokes).toEqual(['wallet-a']);
   });
 
+  it('completes a real wallet release even when the scheduler wallet listener throws', async () => {
+    // The release choke point guarantees listener failures cannot escape into lock state; this
+    // row proves it through an actual finalize-release: reconciliation resolves, the job is
+    // finalized, and the wallet lock is gone despite the exploding listener.
+    const txA = `0x${'aa'.repeat(32)}` as `0x${string}`;
+    const publisher = createPublisher({
+      chainProofResolver: async () => ({ status: 'recovered', recovery: { txHash: txA } } as never),
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: txA },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
+      knowledgeAssetVmPublishHandler: {
+        execute: async () => { throw new Error('executor must not run in this test'); },
+        finalizeRecovered: async () => {},
+      },
+    });
+    publisher.reconciliationScheduling.attachScheduler({
+      onReconciliationDemand: () => {},
+      onWalletRelease: () => { throw new Error('scheduler exploded'); },
+    });
+    await stageShareSnapshot();
+    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-a');
+    await publisher.update(jobA, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobA, 'broadcast', {
+      broadcast: { txHash: txA, walletId: 'wallet-a', operationKind: 'create' },
+    });
+
+    expect(await publisher.reconciliationScheduling.reconcile()).toEqual({ reconciled: 1, pendingWork: false });
+    expect((await publisher.getStatus(jobA))?.status).toBe('finalized');
+    const lock = await store.query(`SELECT ?job WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-a')}> <${CONTROL_LOCKED_JOB}> ?job .
+      }
+    }`);
+    expect(lock.type).toBe('bindings');
+    if (lock.type === 'bindings') expect(lock.bindings).toEqual([]);
+  });
+
   it('pokes the wallet-release listener when the stale-lock sweep frees a wallet', async () => {
     const publisher = createPublisher();
     const pokes: string[] = [];
-    publisher.reconciliationScheduling.attachWalletReleaseListener((walletId) => pokes.push(walletId));
+    publisher.reconciliationScheduling.attachScheduler({
+      onReconciliationDemand: () => {},
+      onWalletRelease: (walletId) => pokes.push(walletId),
+    });
     await stageShareSnapshot();
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     await publisher.claimNext('wallet-1');
@@ -571,11 +633,14 @@ describe('async-lift reconciliation demand channel', () => {
       },
     });
     const outlookAtPoke: Promise<boolean>[] = [];
-    publisher.reconciliationScheduling.attachDemandListener(() => {
-      // Ground truth at poke time: an invited pass must already be able to act — it reports
-      // remaining work (or settles something) only if the announced job is visible to it.
-      outlookAtPoke.push(publisher.reconciliationScheduling.reconcile()
-        .then((outcome) => outcome.pendingWork || outcome.reconciled > 0));
+    publisher.reconciliationScheduling.attachScheduler({
+      onWalletRelease: () => {},
+      onReconciliationDemand: () => {
+        // Ground truth at poke time: an invited pass must already be able to act — it reports
+        // remaining work (or settles something) only if the announced job is visible to it.
+        outlookAtPoke.push(publisher.reconciliationScheduling.reconcile()
+          .then((outcome) => outcome.pendingWork || outcome.reconciled > 0));
+      },
     });
     await stageShareSnapshot();
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());

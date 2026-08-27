@@ -27,6 +27,7 @@ export default defineConfig({
       'test/async-lift-chain-proof-dispatch-2270.test.ts',
       'test/async-lift-reconcile-demand.test.ts',
       'test/async-lift-runner.test.ts',
+      'test/async-lift-runner-wallet-wake.test.ts',
       'test/pre-broadcast-signal-await.test.ts',
       'test/async-lift-admission-clear-2270.test.ts',
       'test/lift-job-failure.test.ts',

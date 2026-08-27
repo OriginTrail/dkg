@@ -471,9 +471,8 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachWalletReleaseListener: () => () => {},
-        attachDemandListener: (listener: () => void) => {
-          demand = listener;
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
           return () => { demand = undefined; };
         },
         reconcile: async () => {
@@ -506,9 +505,8 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachWalletReleaseListener: () => () => {},
-        attachDemandListener: (listener: () => void) => {
-          demand = listener;
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
           return () => {};
         },
         reconcile: async () => {
@@ -546,8 +544,7 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachWalletReleaseListener: () => () => {},
-        attachDemandListener: () => () => {},
+        attachScheduler: () => () => {},
         reconcile: async () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: pending };
@@ -583,9 +580,8 @@ describe('AsyncLiftRunner', () => {
     const errors: unknown[] = [];
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachWalletReleaseListener: () => () => {},
-        attachDemandListener: (listener: () => void) => {
-          demand = listener;
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
           return () => {};
         },
         reconcile: async () => {
@@ -623,9 +619,8 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachWalletReleaseListener: () => () => {},
-        attachDemandListener: (listener: () => void) => {
-          demand = listener;
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
           return () => { demand = undefined; };
         },
         reconcile: async () => {
@@ -661,9 +656,8 @@ describe('AsyncLiftRunner', () => {
     const errors: unknown[] = [];
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachWalletReleaseListener: () => () => {},
-        attachDemandListener: (listener: () => void) => {
-          demand = listener;
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
           return () => {};
         },
         reconcile: async () => {
@@ -698,8 +692,7 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachWalletReleaseListener: () => () => {},
-        attachDemandListener: () => () => {},
+        attachScheduler: () => () => {},
         reconcile: async () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: true };
@@ -744,8 +737,7 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachWalletReleaseListener: () => () => {},
-        attachDemandListener: () => () => {},
+        attachScheduler: () => () => {},
         reconcile: async () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: true };
@@ -787,8 +779,7 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachWalletReleaseListener: () => () => {},
-        attachDemandListener: () => () => {},
+        attachScheduler: () => () => {},
         reconcile: async () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: true };
@@ -826,8 +817,7 @@ describe('AsyncLiftRunner', () => {
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachWalletReleaseListener: () => () => {},
-        attachDemandListener: () => () => {},
+        attachScheduler: () => () => {},
         reconcile: async () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: false };
@@ -861,176 +851,16 @@ describe('AsyncLiftRunner', () => {
     })).toThrow(/1 through 2147483647 ms/);
   });
 
-  it('claims immediately on a wallet-release poke instead of idling out the poll', async () => {
-    vi.useFakeTimers();
-    let release!: (walletId: string) => void;
-    let claimable = false;
-    const processCalls: string[] = [];
-    const publisher = createPublisher({
-      processNext: async (walletId: string) => {
-        processCalls.push(walletId);
-        if (claimable) {
-          claimable = false;
-          return { jobId: 'job-1' } as LiftJob;
-        }
-        return null;
-      },
-      reconciliationScheduling: {
-        attachDemandListener: () => () => {},
-        attachWalletReleaseListener: (listener: (walletId: string) => void) => {
-          release = listener;
-          return () => {};
-        },
-        reconcile: async () => ({ reconciled: 0, pendingWork: false }),
-        recover: async () => ({ reconciled: 0, pendingWork: false }),
-      },
-    } as any);
-    const runner = new AsyncLiftRunner({
-      publisher,
-      walletIds: ['wallet-1'],
-      // Poll parked ten minutes out: any claim attempt after the first can only come from the poke.
-      pollIntervalMs: 600_000,
-      recoveryIntervalMs: 600_000,
-      errorBackoffMs: 1,
-    });
-    try {
-      await runner.start();
-      await vi.advanceTimersByTimeAsync(5);
-      const before = processCalls.length;
-      expect(before).toBeGreaterThanOrEqual(1);
-      claimable = true;
-      release('wallet-1');
-      await vi.advanceTimersByTimeAsync(5);
-      expect(processCalls.length).toBeGreaterThan(before);
-    } finally {
-      const stopping = runner.stop();
-      await stopping;
-      vi.useRealTimers();
-    }
-  });
-
-  it('latches a release poke that lands during processNext and skips the next idle wait', async () => {
-    vi.useFakeTimers();
-    let release!: (walletId: string) => void;
-    let processCalls = 0;
-    const publisher = createPublisher({
-      processNext: async () => {
-        processCalls += 1;
-        if (processCalls === 1) {
-          // The release lands while the loop is still INSIDE processNext: no sleeper is parked
-          // yet, so the poke must latch and skip the upcoming idle wait entirely.
-          release('wallet-1');
-        }
-        return null;
-      },
-      reconciliationScheduling: {
-        attachDemandListener: () => () => {},
-        attachWalletReleaseListener: (listener: (walletId: string) => void) => {
-          release = listener;
-          return () => {};
-        },
-        reconcile: async () => ({ reconciled: 0, pendingWork: false }),
-        recover: async () => ({ reconciled: 0, pendingWork: false }),
-      },
-    } as any);
-    const runner = new AsyncLiftRunner({
-      publisher,
-      walletIds: ['wallet-1'],
-      pollIntervalMs: 600_000,
-      recoveryIntervalMs: 600_000,
-      errorBackoffMs: 1,
-    });
-    try {
-      await runner.start();
-      await vi.advanceTimersByTimeAsync(5);
-      // Call 2 happened without any timer elapsing; call 3 requires the (parked) poll.
-      expect(processCalls).toBe(2);
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(processCalls).toBe(2);
-    } finally {
-      const stopping = runner.stop();
-      await stopping;
-      vi.useRealTimers();
-    }
-  });
-
-  it('ignores a release poke for a wallet this runner does not drive', async () => {
-    vi.useFakeTimers();
-    let release!: (walletId: string) => void;
-    let processCalls = 0;
-    const publisher = createPublisher({
-      processNext: async () => {
-        processCalls += 1;
-        return null;
-      },
-      reconciliationScheduling: {
-        attachDemandListener: () => () => {},
-        attachWalletReleaseListener: (listener: (walletId: string) => void) => {
-          release = listener;
-          return () => {};
-        },
-        reconcile: async () => ({ reconciled: 0, pendingWork: false }),
-        recover: async () => ({ reconciled: 0, pendingWork: false }),
-      },
-    } as any);
-    const runner = new AsyncLiftRunner({
-      publisher,
-      walletIds: ['wallet-1'],
-      pollIntervalMs: 600_000,
-      recoveryIntervalMs: 600_000,
-      errorBackoffMs: 1,
-    });
-    try {
-      await runner.start();
-      await vi.advanceTimersByTimeAsync(5);
-      const before = processCalls;
-      release('some-other-wallet');
-      await vi.advanceTimersByTimeAsync(10);
-      expect(processCalls).toBe(before);
-    } finally {
-      const stopping = runner.stop();
-      await stopping;
-      vi.useRealTimers();
-    }
-  });
-
-  it('stops promptly while wallet loops are parked in the idle wait', async () => {
-    vi.useFakeTimers();
-    const publisher = createPublisher({
-      processNext: async () => null,
-      reconciliationScheduling: {
-        attachDemandListener: () => () => {},
-        attachWalletReleaseListener: () => () => {},
-        reconcile: async () => ({ reconciled: 0, pendingWork: false }),
-        recover: async () => ({ reconciled: 0, pendingWork: false }),
-      },
-    } as any);
-    const runner = new AsyncLiftRunner({
-      publisher,
-      walletIds: ['wallet-1', 'wallet-2'],
-      pollIntervalMs: 600_000,
-      recoveryIntervalMs: 600_000,
-      errorBackoffMs: 1,
-    });
-    await runner.start();
-    await vi.advanceTimersByTimeAsync(5);
-    // Both loops are parked in a 600s idle wait. stop() must resolve them itself: under fake
-    // timers, waiting out the poll would hang this test forever.
-    await runner.stop();
-    vi.useRealTimers();
-  });
-
   it('runs a demanded pass immediately after a successful pass, unfloored by errorBackoffMs', async () => {
     vi.useFakeTimers();
     let demand!: () => void;
     let reconciliationCalls = 0;
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachDemandListener: (listener: () => void) => {
-          demand = listener;
+        attachScheduler: (scheduler: { onReconciliationDemand(): void; onWalletRelease(walletId: string): void }) => {
+          demand = () => scheduler.onReconciliationDemand();
           return () => {};
         },
-        attachWalletReleaseListener: () => () => {},
         reconcile: async () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: false };

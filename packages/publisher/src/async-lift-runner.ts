@@ -53,8 +53,7 @@ export class AsyncLiftRunner {
   private reconciliationDemanded = false;
   /** Whether unresolved tx work remains, from the last pass outcome (boot-seeded); selects active vs idle cadence. */
   private pendingReconciliation = false;
-  private unsubscribeReconciliationDemand?: () => void;
-  private unsubscribeWalletRelease?: () => void;
+  private unsubscribeScheduler?: () => void;
   /** Wallet wake latch: a release poke landing while its loop is mid-processNext skips the next sleep. */
   private readonly walletWakePending = new Set<string>();
   /** At most one parked idle sleeper per wallet, resolvable by a release poke (or by stop()). */
@@ -110,16 +109,18 @@ export class AsyncLiftRunner {
     }
 
     this.started = true;
-    // A tx-bearing job leaves executor ownership (detached receipt settles, ambiguous broadcast)
-    // between passes; the poke pulls the next pass forward instead of waiting out the cadence.
-    // No in-process work can settle before this point — executors only run once the wallet
-    // loops below start — so attaching after startup recovery loses nothing.
-    this.unsubscribeReconciliationDemand = this.config.publisher.reconciliationScheduling
-      ?.attachDemandListener(() => this.demandTransactionReconciliation());
-    // A released wallet is claimable NOW; the poke lets its loop claim immediately instead of
-    // idling out the poll — turnover becomes chain-time-bound, not pollIntervalMs-bound.
-    this.unsubscribeWalletRelease = this.config.publisher.reconciliationScheduling
-      ?.attachWalletReleaseListener((walletId) => this.wakeWallet(walletId));
+    // ONE atomic scheduler attachment: reconciliation demand (a tx-bearing job left executor
+    // ownership — pull the next pass forward) and wallet release (the wallet is claimable NOW —
+    // let its loop claim instead of idling out the poll) take over together, so scheduling
+    // ownership can never be split between runner incarnations. Attaching after startup
+    // recovery loses nothing: no in-process work can settle before the wallet loops start.
+    // Optional-chained on the METHOD too: a capability object built against the pre-scheduler
+    // contract degrades to cadence-and-poll scheduling instead of failing start().
+    this.unsubscribeScheduler = this.config.publisher.reconciliationScheduling
+      ?.attachScheduler?.({
+        onReconciliationDemand: () => this.demandTransactionReconciliation(),
+        onWalletRelease: (walletId) => this.wakeWallet(walletId),
+      });
     this.scheduleTransactionReconciliation();
     this.running = Promise.all(
       this.config.walletIds.map((walletId) => this.walletLoop(walletId)),
@@ -132,13 +133,11 @@ export class AsyncLiftRunner {
       clearTimeout(this.recoveryTimer);
       this.recoveryTimer = undefined;
     }
-    // Dispose the demand subscription so the publisher does not keep (or invoke) a callback
+    // Dispose the scheduler subscription so the publisher does not keep (or invoke) callbacks
     // into a stopped runner — the drain below settles detached executions, which would
     // otherwise poke this corpse on every settle.
-    this.unsubscribeReconciliationDemand?.();
-    this.unsubscribeReconciliationDemand = undefined;
-    this.unsubscribeWalletRelease?.();
-    this.unsubscribeWalletRelease = undefined;
+    this.unsubscribeScheduler?.();
+    this.unsubscribeScheduler = undefined;
     // Wake every parked wallet loop so shutdown does not wait out a poll interval.
     for (const wake of this.walletSleepers.values()) wake();
     this.walletSleepers.clear();
@@ -189,17 +188,40 @@ export class AsyncLiftRunner {
     // Latch consumed on entry: a poke that landed during processNext means claimable work may
     // already exist, so skip the sleep entirely.
     if (this.walletWakePending.delete(walletId)) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
     let wake!: () => void;
-    const woken = new Promise<void>((resolve) => { wake = resolve; });
+    const done = new Promise<void>((resolve) => {
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        // A wake (or stop) must not abandon the losing poll delay: an uncancelled timer would
+        // accumulate per turnover and keep an otherwise-stopped process alive for the full
+        // interval.
+        if (timer !== undefined) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+        resolve();
+      };
+      wake = finish;
+      if (this.config.sleep) {
+        // Injected timing seam (tests): the custom sleep cannot be cancelled, only outraced.
+        void this.config.sleep(this.pollIntervalMs).then(finish);
+      } else {
+        timer = setTimeout(finish, this.pollIntervalMs);
+      }
+    });
     this.walletSleepers.set(walletId, wake);
     // Re-check AFTER registering: a poke in the gap between the entry check and the
     // registration would otherwise be latched against a sleeper that never sees it.
     if (this.walletWakePending.delete(walletId)) {
       this.walletSleepers.delete(walletId);
+      wake();
       return;
     }
     try {
-      await Promise.race([this.sleep(this.pollIntervalMs), woken]);
+      await done;
     } finally {
       if (this.walletSleepers.get(walletId) === wake) {
         this.walletSleepers.delete(walletId);
