@@ -105,6 +105,8 @@ describe('startProverLoop', () => {
 
     settleTick({ kind: 'period-closed' });
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    await expect(loop.stop()).resolves.toBeUndefined();
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it('catches tick rejections and keeps the loop alive', async () => {

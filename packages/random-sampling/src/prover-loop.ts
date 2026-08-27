@@ -84,6 +84,7 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
   let stopping = false;
   let inflight = false;
   let inflightRun: Promise<void> | null = null;
+  let shutdownPromise: Promise<void> | null = null;
   let stopPromise: Promise<void> | null = null;
   let totalTicks = 0;
   let lastTickAt: string | null = null;
@@ -155,30 +156,34 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
     },
     stop() {
       if (stopPromise) return stopPromise;
-      stopping = true;
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
-      opts.prover.cancel?.(new DOMException(
-        'Random Sampling prover loop stopped',
-        'AbortError',
-      ));
-      const running = inflightRun;
-      const shutdown = (async () => {
-        // Never release builder / WAL resources underneath a tick. If a custom
-        // dependency ignores cancellation and settles after the stop bound, this
-        // continuation performs the close then, while stop() has already rejected
-        // so the rest of node shutdown is not held hostage indefinitely.
-        if (running) await running;
-        await opts.prover.close();
-      })();
-      void shutdown.catch((err) => {
-        opts.log?.error('rs.loop.shutdown-late-failure', {
-          err: err instanceof Error ? err.message : String(err),
+      if (!shutdownPromise) {
+        stopping = true;
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+        }
+        opts.prover.cancel?.(new DOMException(
+          'Random Sampling prover loop stopped',
+          'AbortError',
+        ));
+        const running = inflightRun;
+        shutdownPromise = (async () => {
+          // Never release builder / WAL resources underneath a tick. If a custom
+          // dependency ignores cancellation and settles after the stop bound, this
+          // continuation performs the close then, while stop() has already rejected
+          // so the owner can quarantine dependency teardown and retry stop().
+          if (running) await running;
+          await opts.prover.close();
+        })();
+        void shutdownPromise.catch((err) => {
+          opts.log?.error('rs.loop.shutdown-late-failure', {
+            err: err instanceof Error ? err.message : String(err),
+          });
         });
-      });
-      stopPromise = new Promise<void>((resolve, reject) => {
+      }
+      const shutdown = shutdownPromise;
+      let boundedStop!: Promise<void>;
+      const boundedWait = new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
           reject(new ProverLoopShutdownTimeoutError(shutdownTimeoutMs));
         }, shutdownTimeoutMs);
@@ -196,7 +201,14 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
           },
         );
       });
-      return stopPromise;
+      // A timeout reports a bounded failure without cancelling the physical
+      // shutdown. Clear only this waiter so a later owner retry can observe the
+      // same shutdown's eventual success; the tick and close remain single-run.
+      boundedStop = boundedWait.finally(() => {
+        if (stopPromise === boundedStop) stopPromise = null;
+      });
+      stopPromise = boundedStop;
+      return boundedStop;
     },
     getStatus(): ProverLoopStatus {
       return {

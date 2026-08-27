@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { ProverLoopShutdownTimeoutError } from '@origintrail-official/dkg-random-sampling';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
@@ -25,6 +26,50 @@ function syntheticShutdownAgent(): any {
 }
 
 describe('DKGAgent outbox shutdown lifecycle', () => {
+  it('retains a timed-out Random Sampling prover and blocks dependency teardown until retry', async () => {
+    const timeout = new ProverLoopShutdownTimeoutError(5_000);
+    const stopProver = vi.fn()
+      .mockRejectedValueOnce(timeout)
+      .mockResolvedValueOnce(undefined);
+    const handle = {
+      enabled: true,
+      start: vi.fn(),
+      stop: stopProver,
+      getStatus: vi.fn(),
+    };
+    const stopNode = vi.fn(async () => {});
+    const closeStore = vi.fn(async () => {});
+    const agent = syntheticShutdownAgent();
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearRandomSamplingBindRetry: vi.fn(),
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      randomSamplingHandle: handle,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    await expect(agent.stop()).rejects.toBe(timeout);
+    expect(agent.randomSamplingHandle).toBe(handle);
+    expect(stopNode).not.toHaveBeenCalled();
+    expect(closeStore).not.toHaveBeenCalled();
+
+    await expect(agent.stop()).resolves.toBeUndefined();
+    expect(stopProver).toHaveBeenCalledTimes(2);
+    expect(agent.randomSamplingHandle).toBeNull();
+    expect(stopNode).toHaveBeenCalledOnce();
+    expect(closeStore).toHaveBeenCalledOnce();
+  });
+
   it('drains an in-flight selected-SWM owner after network stop and before store close', async () => {
     const events: string[] = [];
     const transfers = new SelectedSwmMetaTransferCoordinator();
