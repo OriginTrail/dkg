@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
+import { assertRfc64PrivateRuntimeProvenanceV1 } from './runtime-provenance.mjs';
+
 const SCHEMA = 'dkg-rfc64-private-release-gate-v1';
 
 /**
@@ -14,11 +16,11 @@ const SCHEMA = 'dkg-rfc64-private-release-gate-v1';
 export async function runRfc64PrivateGateArtifactLifecycleV1({
   artifactPath,
   execute,
-  sourceRevision = null,
+  resolveSourceRevision,
   now = () => new Date(),
 }) {
   const startedAt = now().toISOString();
-  const canonicalSourceRevision = canonicalSourceRevisionV1(sourceRevision);
+  let canonicalSourceRevision = null;
   await writeGateArtifactAtomicV1(artifactPath, {
     schema: SCHEMA,
     status: 'INCOMPLETE',
@@ -28,7 +30,14 @@ export async function runRfc64PrivateGateArtifactLifecycleV1({
   });
 
   try {
-    const artifact = await execute();
+    if (typeof resolveSourceRevision !== 'function') {
+      throw new TypeError('RFC-64 private gate requires one source revision resolver');
+    }
+    canonicalSourceRevision = canonicalSourceRevisionV1(await resolveSourceRevision());
+    if (canonicalSourceRevision === null) {
+      throw new TypeError('RFC-64 private gate source revision is malformed');
+    }
+    const artifact = await execute({ sourceRevision: canonicalSourceRevision });
     const completed = {
       ...artifact,
       startedAt,
@@ -62,7 +71,7 @@ export async function runRfc64PrivateGateArtifactLifecycleV1({
   }
 }
 
-/** A committed PASS must name one exact source revision and bounded run. */
+/** A committed PASS must name one exact source revision, runtime build, and bounded run. */
 export function assertRfc64PrivateGatePassProvenanceV1(artifact) {
   if (artifact === null || typeof artifact !== 'object') {
     throw new TypeError('RFC-64 private gate PASS artifact must be an object');
@@ -80,6 +89,24 @@ export function assertRfc64PrivateGatePassProvenanceV1(artifact) {
     || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(artifact.sourceRevision)
   ) {
     throw new TypeError('RFC-64 private gate PASS requires an exact source revision');
+  }
+  if (
+    typeof artifact.runtimeManifestDigest !== 'string'
+    || !/^0x[0-9a-f]{64}$/u.test(artifact.runtimeManifestDigest)
+  ) {
+    throw new TypeError('RFC-64 private gate PASS requires an exact runtime manifest digest');
+  }
+  let provenance;
+  try {
+    provenance = assertRfc64PrivateRuntimeProvenanceV1(artifact.runtimeProvenance);
+  } catch {
+    throw new TypeError('RFC-64 private gate PASS runtime provenance is incomplete');
+  }
+  if (
+    provenance.sourceBuild.sourceCommit !== artifact.sourceRevision
+    || provenance.sourceBuild.manifestDigest !== artifact.runtimeManifestDigest
+  ) {
+    throw new TypeError('RFC-64 private gate PASS runtime provenance is not source-bound');
   }
   return artifact;
 }

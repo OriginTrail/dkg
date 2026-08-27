@@ -1061,6 +1061,46 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     }
   });
 
+  it('settles a single-provider synchronization closed when shutdown wins the discovery race', async () => {
+    const reconcileHead = vi.fn(async () => 'applied' as const);
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      receiver: { retryBackoffMs: 0 },
+      native: nativeOptions(() => ({
+        isHeadApplied: async () => false,
+        reconcileHead,
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const current = announcement(policy.policyDigest);
+    const discovery = deferred<Readonly<{
+      announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+      head: never;
+    }>>();
+    vi.spyOn(service, 'discoverCurrentCatalogHead').mockReturnValue(discovery.promise);
+
+    const synchronization = service.synchronizeCurrentCatalogHead({
+      remotePeerId: 'peer-a',
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+      },
+    });
+    await Promise.resolve();
+    await service.close();
+    discovery.resolve(Object.freeze({ announcement: current, head: {} as never }));
+
+    const failure = await synchronization.then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(Rfc64CatalogReconciliationTerminalErrorV1);
+    expect(failure).toMatchObject({ outcome: 'closed', terminalReason: null });
+    expect(reconcileHead).not.toHaveBeenCalled();
+  });
+
   it('selects the highest exact head, retains all matching providers, and fails over', async () => {
     const router = new RecordingRouter();
     const reconciledPeers: string[] = [];
@@ -1133,6 +1173,123 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
         era: '0',
       },
     })).rejects.toThrow(/conflicting heads/u);
+    await service.close();
+  });
+
+  it('enforces the 1-8 provider bound and caps discovery concurrency at four', async () => {
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      receiver: { retryBackoffMs: 0 },
+      native: nativeOptions(() => ({
+        isHeadApplied: async () => false,
+        reconcileHead: async () => 'applied',
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const current = announcement(policy.policyDigest);
+    const scope = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0' as const,
+    };
+    const discovery = vi.spyOn(service, 'discoverCurrentCatalogHead').mockResolvedValue(
+      Object.freeze({ announcement: current, head: {} as never }),
+    );
+
+    await expect(service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: ['peer-only'],
+      scope,
+    })).resolves.toMatchObject({ providerPeerIds: ['peer-only'] });
+    await expect(service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: [],
+      scope,
+    })).rejects.toThrow(/1-8 distinct providers/u);
+    await expect(service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: Array.from({ length: 9 }, (_, index) => `peer-${index}`),
+      scope,
+    })).rejects.toThrow(/1-8 distinct providers/u);
+
+    const providers = Array.from({ length: 8 }, (_, index) => `peer-${index}`);
+    const gates = providers.map(() => deferred<void>());
+    let active = 0;
+    let peak = 0;
+    const started: string[] = [];
+    discovery.mockImplementation(async ({ remotePeerId }) => {
+      const index = providers.indexOf(remotePeerId);
+      started.push(remotePeerId);
+      active += 1;
+      peak = Math.max(peak, active);
+      try {
+        await gates[index]!.promise;
+        return Object.freeze({ announcement: current, head: {} as never });
+      } finally {
+        active -= 1;
+      }
+    });
+
+    const synchronized = service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: providers,
+      scope,
+    });
+    await vi.waitFor(() => expect(started).toHaveLength(4));
+    expect(peak).toBe(4);
+    for (const gate of gates.slice(0, 4)) gate.resolve(undefined);
+    await vi.waitFor(() => expect(started).toHaveLength(8));
+    expect(peak).toBe(4);
+    for (const gate of gates.slice(4)) gate.resolve(undefined);
+    await expect(synchronized).resolves.toMatchObject({ providerPeerIds: providers });
+    await service.close();
+  });
+
+  it('continues discovery through a reachable provider and aggregates only total failure', async () => {
+    const reconciledPeers: string[] = [];
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      receiver: { retryBackoffMs: 0 },
+      native: nativeOptions(() => ({
+        isHeadApplied: async () => false,
+        reconcileHead: async (peerId) => {
+          reconciledPeers.push(peerId);
+          return 'applied';
+        },
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const current = announcement(policy.policyDigest);
+    const scope = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0' as const,
+    };
+    const discovery = vi.spyOn(service, 'discoverCurrentCatalogHead').mockImplementation(
+      async ({ remotePeerId }) => {
+        if (remotePeerId === 'peer-offline') throw new Error('provider is offline');
+        return Object.freeze({ announcement: current, head: {} as never });
+      },
+    );
+
+    await expect(service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: ['peer-offline', 'peer-live'],
+      scope,
+    })).resolves.toMatchObject({
+      providerPeerIds: ['peer-live'],
+      appliedProviderPeerId: 'peer-live',
+    });
+    expect(reconciledPeers).toEqual(['peer-live']);
+
+    discovery.mockRejectedValue(new Error('all providers are offline'));
+    await expect(service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: ['peer-a', 'peer-b'],
+      scope,
+    })).rejects.toBeInstanceOf(AggregateError);
     await service.close();
   });
 

@@ -45,7 +45,10 @@ import {
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { DKGAgent } from '../src/dkg-agent.js';
+import {
+  DKGAgent,
+  Rfc64CatalogReconciliationTerminalErrorV1,
+} from '../src/index.js';
 import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
@@ -66,12 +69,6 @@ import {
   type Rfc64CatalogActivationInputV1,
   type Rfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
-import {
-  Rfc64PublicCatalogNativeReceiverErrorV1,
-} from '../src/rfc64/public-catalog-native-receiver-v1.js';
-import {
-  classifyRfc64CatalogReconciliationTerminalReasonV1,
-} from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 import type {
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
@@ -2403,6 +2400,102 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   }, 60_000);
 
+  it('preserves a single-provider discovery error without aggregation', async () => {
+    class ProviderDiscoveryError extends Error {}
+    const discoveryFailure = new ProviderDiscoveryError('provider discovery failed');
+    const synchronizeCurrentCatalogHead = vi.fn().mockRejectedValue(discoveryFailure);
+    const agentLike = {
+      rfc64PublicCatalogServiceV1: { synchronizeCurrentCatalogHead },
+    };
+
+    await expect(DKGAgent.prototype.synchronizeRfc64PublicCatalogFromProviderV1.call(
+      agentLike as never,
+      {
+        remotePeerId: 'provider-peer',
+        scope: {
+          networkId: NETWORK_ID,
+          contextGraphId: CONTEXT_GRAPH_ID,
+          subGraphName: null,
+          authorAddress: AUTHOR,
+          catalogEra: '0',
+        },
+      },
+    )).rejects.toBe(discoveryFailure);
+  });
+
+  it('rejects every stale durable postcondition without a registered receiver failure', async () => {
+    const selectedHeadDigest = `0x${'a1'.repeat(32)}` as Digest32V1;
+    const selectedVersion = '3';
+    const synchronized = {
+      announcement: {
+        authorAddress: AUTHOR,
+        catalogHeadObjectDigest: selectedHeadDigest,
+        catalogVersion: selectedVersion,
+        signatureVariantDigest: `0x${'a2'.repeat(32)}`,
+      },
+      head: {
+        envelope: {
+          payload: {
+            networkId: NETWORK_ID,
+            contextGraphId: CONTEXT_GRAPH_ID,
+            governanceChainId: null,
+            governanceContractAddress: null,
+            ownershipTransitionDigest: null,
+            subGraphName: null,
+            authorAddress: AUTHOR,
+            era: '0',
+            bucketCount: '1',
+            catalogIssuerDelegationDigest: `0x${'a3'.repeat(32)}`,
+            version: selectedVersion,
+            previousHeadDigest: null,
+            totalRows: '0',
+            directoryHeight: '0',
+            directoryRootDigest: `0x${'a4'.repeat(32)}`,
+            issuedAt: FIXED_HEAD_ISSUED_AT,
+          },
+        },
+      },
+    };
+    const staleAppliedSnapshots = [
+      null,
+      {
+        currentCatalogHeadDigest: `0x${'a5'.repeat(32)}`,
+        catalogVersion: selectedVersion,
+      },
+      {
+        currentCatalogHeadDigest: selectedHeadDigest,
+        catalogVersion: '2',
+      },
+    ];
+
+    for (const applied of staleAppliedSnapshots) {
+      const agentLike = {
+        rfc64PublicCatalogServiceV1: {
+          synchronizeCurrentCatalogHead: vi.fn().mockResolvedValue(synchronized),
+        },
+        rfc64PersistenceV1: {
+          inventory: { readAppliedCatalogHeadV1: vi.fn(() => applied) },
+        },
+      };
+
+      await expect(DKGAgent.prototype.synchronizeRfc64PublicCatalogFromProviderV1.call(
+        agentLike as never,
+        {
+          remotePeerId: 'provider-peer',
+          scope: {
+            networkId: NETWORK_ID,
+            contextGraphId: CONTEXT_GRAPH_ID,
+            subGraphName: null,
+            authorAddress: AUTHOR,
+            catalogEra: '0',
+          },
+        },
+      )).rejects.toThrow(/durable applied postcondition/u);
+      expect(agentLike.rfc64PublicCatalogServiceV1.synchronizeCurrentCatalogHead)
+        .toHaveBeenCalledOnce();
+    }
+  });
+
   it('cold-starts after publication from a provider current-head snapshot', async () => {
     const [author, provider] = await Promise.all([
       startNativeAgent('cold-author'),
@@ -2572,19 +2665,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           catalogEra: '0',
         },
       }).catch((error: unknown) => error);
+    expect(synchronizationFailure).toBeInstanceOf(
+      Rfc64CatalogReconciliationTerminalErrorV1,
+    );
     expect(synchronizationFailure).toMatchObject({
-      name: 'Rfc64CatalogReconciliationTerminalErrorV1',
-      message: 'RFC-64 current-head synchronization ended with failed',
-      cause: expect.any(Rfc64PublicCatalogNativeReceiverErrorV1),
+      outcome: 'failed',
+      terminalReason: null,
     });
-    const activationFailure = (synchronizationFailure as Error).cause;
-    expect(activationFailure).toMatchObject({
-      name: 'Rfc64PublicCatalogNativeReceiverErrorV1',
-      code: 'catalog-native-receiver-activation',
-    });
-    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(
-      activationFailure,
-    )).toBeNull();
     expect(replaceGraphAndSubject).toHaveBeenCalled();
     expect(cold.readRfc64PublicCatalogReconciliationFailureV1(
       successor.headObjectDigest,

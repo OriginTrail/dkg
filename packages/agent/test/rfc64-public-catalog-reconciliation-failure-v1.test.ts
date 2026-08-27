@@ -97,6 +97,7 @@ describe('RFC-64 public catalog terminal failure registry v1', () => {
     });
   });
 
+
   it('translates only the exact typed private VM incomplete failure', () => {
     const incomplete = new FinalizedVmCompositionErrorV1(
       'finalized-vm-composition-incomplete',

@@ -177,8 +177,8 @@ import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
   migrateLegacyContextGraphReadiness,
+  reconcileConfiguredContextGraphMetadata,
   registerProjectSyncedReadinessPersistence,
-  resetContextGraphReadinessForMissingMetadata,
   writeContextGraphReadiness,
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
@@ -1103,55 +1103,34 @@ export async function bootstrapConfiguredContextGraphs(input: {
       continue;
     }
 
-    const existing = input.agent.getSubscribedContextGraphs().get(contextGraphId);
     input.agent.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
 
-    let hasAuthoritativeMetadata = false;
-    let locallyCurated = false;
-    if (existing?.metaSynced === true) {
-      try {
-        locallyCurated = await input.agent.isCuratorOf(contextGraphId);
-      } catch (err) {
-        input.log(
-          `Context graph "${contextGraphId}" ownership check failed: ${err instanceof Error ? err.message : String(err)} — treating it as remote`,
-        );
-      }
+    const reconciliation = await reconcileConfiguredContextGraphMetadata({
+      agent: input.agent,
+      store: input.readinessStore ?? {},
+      contextGraphId,
+    });
+    if (reconciliation.diagnostic?.kind === 'public-metadata-repair-failed') {
+      input.log(
+        `Context graph "${contextGraphId}" public metadata repair failed: ${reconciliation.diagnostic.detail} — continuing fail-closed`,
+      );
+    } else if (reconciliation.diagnostic?.kind === 'public-metadata-projection-completed') {
+      input.log(
+        `Completed chain-attested public metadata for configured context graph: ${contextGraphId}`,
+      );
+    } else if (reconciliation.diagnostic?.kind === 'public-chain-proof-unavailable') {
+      const { reason, detail } = reconciliation.diagnostic;
+      input.log(
+        `Context graph "${contextGraphId}" public chain proof is unavailable (${reason}${detail ? `: ${detail}` : ''}) — continuing fail-closed`,
+      );
+    }
+    if (reconciliation.outcome === 'pending' && reconciliation.reason === 'conflicting-policy') {
+      input.log(
+        `Context graph "${contextGraphId}" has public on-chain policy but conflicting root metadata — leaving it pending`,
+      );
     }
 
-    if (existing?.metaSynced === true) {
-      try {
-        // Explicit local ownership is the only safe exception to rejecting an
-        // unregistered placeholder. createContextGraph() stamps ownership;
-        // the legacy configured-graph shadow created by
-        // ensureContextGraphLocal() deliberately has no creator/curator.
-        hasAuthoritativeMetadata = await input.agent.hasConfirmedMetaState(
-          contextGraphId,
-          { rejectUnregisteredPlaceholder: !locallyCurated },
-        );
-      } catch (err) {
-        input.log(
-          `Context graph "${contextGraphId}" metadata check failed: ${err instanceof Error ? err.message : String(err)} — treating metadata as pending`,
-        );
-      }
-    }
-
-    if (!hasAuthoritativeMetadata) {
-      // Legacy ensureContextGraphLocal() shadows contain an `unregistered`
-      // marker and stale metaSynced=true. The explicit remote proof above
-      // rejects that marker without depending on mutable subscription state;
-      // only now do we persist the fail-closed bootstrap classification.
-      const reset = await resetContextGraphReadinessForMissingMetadata({
-        agent: input.agent,
-        store: input.readinessStore ?? {},
-        contextGraphId,
-      });
-      // PROJECT_SYNCED persistence shares the same readiness lock and may
-      // have proved this graph while bootstrap was working from `existing`.
-      // Its live metadata revalidation wins over the stale snapshot.
-      if (!reset) hasAuthoritativeMetadata = true;
-    }
-
-    if (hasAuthoritativeMetadata) {
+    if (reconciliation.outcome === 'authoritative') {
       input.log(`Subscribed to configured context graph: ${contextGraphId} (metadata already confirmed)`);
       continue;
     }

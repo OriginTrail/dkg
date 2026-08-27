@@ -301,6 +301,45 @@ describe('RFC-64 finalized VM agent precommit', () => {
     });
   });
 
+  it('rolls back exactly once when runtime materialization fails', async () => {
+    const graphlessProjection: Quad[] = [{
+      subject: 'urn:rfc64:precommit-materialization-failure',
+      predicate: 'urn:rfc64:value',
+      object: '"new"',
+      graph: '',
+    }];
+    const assertionRoot = ethers.hexlify(computeFlatKCRootV10(
+      graphlessProjection,
+      [],
+    )).toLowerCase() as Digest32V1;
+    const placement = await createRfc64FinalizedVmPlacementFixture({
+      assertionRoot,
+      publicTripleCount: graphlessProjection.length,
+    });
+    const failure = new Error('injected finalized VM materialization failure');
+    const rollback = vi.fn(async () => {});
+    const materialize = Object.assign(
+      vi.fn(async () => { throw failure; }),
+      { commit: vi.fn(async () => {}), rollback },
+    );
+    const handler = createRfc64FinalizedVmAgentPrecommitV1({
+      ...baseOptions(),
+      acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
+      rpcEndpoints: [await liveRpcEndpoint(assertionRoot)],
+      materialize,
+    });
+
+    await expect(handler(Object.freeze({
+      ...plan(),
+      rows: Object.freeze([placement]),
+    }), new AbortController().signal)).rejects.toThrow(
+      /materializer failed at finalized ordinal/u,
+    );
+    expect(materialize).toHaveBeenCalledOnce();
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(rollback).toHaveBeenCalledWith(expect.any(Error));
+  });
+
   it('canonicalizes chain-service scalar responses at the precommit boundary', async () => {
     const noncanonicalContextGraphId = createRfc64FinalizedVmAgentPrecommitV1({
       ...baseOptions(),
