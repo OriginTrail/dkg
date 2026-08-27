@@ -297,6 +297,21 @@ describe('RFC-64 recovery plan lifecycle adapter', () => {
         .rejects.toThrow('not authorized by current configuration');
     }
     expect(harness.selectedSync).toHaveBeenCalledOnce();
+    expect(harness.selectedSync).toHaveBeenCalledWith(
+      PROVIDER,
+      [PUBLIC, PRIVATE],
+      {
+        stopOnBackoffWorthyFailure: true,
+        source: 'on-connect',
+        sharedMemorySyncPlan: {
+          publicContextGraphIds: [PUBLIC],
+          privateRecoverFromCurator: [PRIVATE],
+          eligibleContextGraphIds: [PUBLIC, PRIVATE],
+        },
+        priority: 2_000,
+        selectedSwmPriority: true,
+      },
+    );
   });
 
   it('runs private recovery when a generic non-SWM queue marker was recorded first', async () => {

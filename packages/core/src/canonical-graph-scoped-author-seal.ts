@@ -47,6 +47,7 @@ import {
   isPlainRecord,
   snapshotExactDataRecord,
 } from './sync-wire-objects.js';
+import { canonicalizeXsdDateTimeValue } from './xsd-date-time.js';
 
 declare const HEX_32_V1_BRAND: unique symbol;
 declare const POSITIVE_DECIMAL_U64_V1_BRAND: unique symbol;
@@ -642,59 +643,20 @@ export function canonicalizeAuthorSealStoreRoundTripRowV1(
     const match = /^"([^"]+)"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/.exec(object);
     const canonicalInstant = match === null
       ? null
-      : canonicalMillisecondDateTimeInstant(match[1]!);
+      : canonicalizeXsdDateTimeValue(match[1]!, {
+        timezone: 'required',
+        timezoneOffsets: 'any',
+        year: 'four-digit',
+        fractionalSeconds: 'reject-nonzero-submillisecond',
+        fractionalOutput: 'milliseconds',
+        hour24: 'reject',
+        yearOutput: 'ecmascript-iso',
+      });
     if (canonicalInstant !== null) {
       object = `${JSON.stringify(canonicalInstant)}^^${XSD_DATE_TIME}`;
     }
   }
   return Object.freeze({ ...row, object });
-}
-
-/**
- * Return one UTC lexical form only when the source denotes an exact
- * millisecond instant with an explicit timezone. `Date.parse` alone is not a
- * suitable equality test here: it silently truncates nonzero sub-millisecond
- * digits and gives timezone-less strings process-local semantics.
- */
-function canonicalMillisecondDateTimeInstant(value: string): string | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))$/.exec(value);
-  if (match === null) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  const second = Number(match[6]);
-  const fraction = match[7] ?? '';
-  const timezone = match[8]!;
-  const offsetHour = timezone === 'Z' ? 0 : Number(match[10]);
-  const offsetMinute = timezone === 'Z' ? 0 : Number(match[11]);
-  if (
-    month < 1 || month > 12
-    || day < 1 || day > daysInUtcMonth(year, month)
-    || hour > 23
-    || minute > 59
-    || second > 59
-    || offsetHour > 14
-    || offsetMinute > 59
-    || (offsetHour === 14 && offsetMinute !== 0)
-  ) return null;
-  const millisecondDigits = fraction.padEnd(3, '0').slice(0, 3);
-  if (fraction.slice(3).replace(/0/g, '').length > 0) return null;
-  const local = new Date(0);
-  local.setUTCFullYear(year, month - 1, day);
-  local.setUTCHours(hour, minute, second, Number(millisecondDigits));
-  const offsetSign = timezone === 'Z' || match[9] === '+' ? 1 : -1;
-  const offsetMs = offsetSign * ((offsetHour * 60) + offsetMinute) * 60_000;
-  const instant = local.getTime() - offsetMs;
-  return Number.isFinite(instant) ? new Date(instant).toISOString() : null;
-}
-
-function daysInUtcMonth(year: number, month: number): number {
-  if (month === 2) {
-    return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
-  }
-  return [4, 6, 9, 11].includes(month) ? 30 : 31;
 }
 
 /**
