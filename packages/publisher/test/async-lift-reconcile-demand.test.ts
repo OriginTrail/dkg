@@ -30,19 +30,6 @@ import {
   stageKnowledgeAssetShareSnapshot,
 } from './_helpers/ka-vm-publish.js';
 
-async function waitFor(assertion: () => void, timeout = 5000): Promise<void> {
-  const start = Date.now();
-  while (true) {
-    try {
-      assertion();
-      return;
-    } catch (e) {
-      if (Date.now() - start > timeout) throw e;
-      await new Promise((r) => setTimeout(r, 10));
-    }
-  }
-}
-
 describe('async-lift reconciliation demand channel', () => {
   let now = 1_000;
   let ids = 0;
