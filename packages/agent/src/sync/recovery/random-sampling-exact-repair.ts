@@ -10,6 +10,8 @@ export interface RandomSamplingExactRepairInput {
   readonly expectedLeafCount: bigint;
   /** Lifetime of the owning prover handle. */
   readonly signal?: AbortSignal;
+  /** Physical dependency work that prover close must drain after logical abort. */
+  readonly registerPhysicalOperation?: (operation: Promise<unknown>) => void;
 }
 
 export type RandomSamplingExactRepairResult =
@@ -59,14 +61,31 @@ function abortReason(signal: AbortSignal): Error {
   return error;
 }
 
-function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+function raceWithAbort<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+  registerPhysicalOperation?: (operation: Promise<unknown>) => void,
+): Promise<T> {
+  registerPhysicalOperation?.(operation);
   if (signal.aborted) return Promise.reject(abortReason(signal));
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(abortReason(signal));
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(abortReason(signal));
+    };
     signal.addEventListener('abort', onAbort, { once: true });
-    operation.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
+    operation.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
   });
 }
 
@@ -96,7 +115,11 @@ export async function runRandomSamplingExactRepair(
     throw new Error(`Random Sampling repair cannot resolve local CG ${input.cgId}`);
   }
 
-  const storageAddress = await raceWithAbort(deps.resolveStorageAddress(signal), signal);
+  const storageAddress = await raceWithAbort(
+    deps.resolveStorageAddress(signal),
+    signal,
+    input.registerPhysicalOperation,
+  );
   const assetUal = buildReconciledKnowledgeAssetUal(
     deps.chainId,
     storageAddress,
@@ -110,6 +133,7 @@ export async function runRandomSamplingExactRepair(
   const candidatePeerIds = await raceWithAbort(
     deps.resolveCandidatePeerIds(localContextGraphId, signal),
     signal,
+    input.registerPhysicalOperation,
   );
   if (candidatePeerIds.length === 0) {
     throw new Error(`Random Sampling repair found no providers for ${localContextGraphId}`);
@@ -125,7 +149,11 @@ export async function runRandomSamplingExactRepair(
       maxPeers,
       peerRotationKey: `rs-proof:${localContextGraphId}`,
     }),
-    preparePeer: (peerId) => raceWithAbort(deps.preparePeer(peerId, signal), signal),
+    preparePeer: (peerId) => raceWithAbort(
+      deps.preparePeer(peerId, signal),
+      signal,
+      input.registerPhysicalOperation,
+    ),
     attemptPeer: async (peerId) => {
       let result: RandomSamplingExactRepairResult;
       try {
@@ -134,7 +162,7 @@ export async function runRandomSamplingExactRepair(
           localContextGraphId,
           expectedCommitment,
           signal,
-        ), signal);
+        ), signal, input.registerPhysicalOperation);
       } catch (error) {
         if (signal.aborted) throw abortReason(signal);
         return { kind: 'continue', error };

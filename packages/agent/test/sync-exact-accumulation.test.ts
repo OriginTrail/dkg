@@ -241,6 +241,61 @@ describe('exact sync accumulation limits', () => {
     });
   });
 
+  it('rejects an accepted metadata prefix when the caller aborts during the next transport', async () => {
+    const requesterScope = 'selected-swm-meta:accepted-prefix-caller-abort' as const;
+    const checkpointStore = new MemorySyncCheckpointStore();
+    const checkpointKey = getSyncCheckpointKey(
+      'legacy-peer',
+      'large-legacy-cg',
+      true,
+      'meta',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      requesterScope,
+    );
+    const controller = new AbortController();
+    let sends = 0;
+
+    const fetch = fetchSyncPages(fetchParams({
+      checkpointStore,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      returnAcceptedPrefixOnRetryableTransportFailure: true,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      signal: controller.signal,
+      parseAndFilter: async () => ({
+        quads: [{
+          subject: 'urn:selected:accepted-before-abort',
+          predicate: 'urn:p',
+          object: '"o"',
+          graph: 'urn:meta',
+        }],
+        totalQuads: 1,
+      }),
+      send: async () => {
+        sends += 1;
+        if (sends === 1) return encoder.encode('valid-page');
+        controller.abort(new Error('caller cancelled after accepted prefix'));
+        throw toSyncTransportFailureError(
+          new Error('operation timed out after caller abort'),
+        );
+      },
+    }));
+
+    await expect(fetch).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'caller cancelled after accepted prefix',
+    });
+    expect(sends).toBe(2);
+    expect(controller.signal.aborted).toBe(true);
+    expect(checkpointStore.get(checkpointKey)).toBeUndefined();
+  });
+
   it('does not infer selected metadata retention policy from checkpoint scope', async () => {
     let sends = 0;
     await expect(fetchSyncPages(fetchParams({

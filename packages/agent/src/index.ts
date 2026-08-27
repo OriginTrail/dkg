@@ -308,6 +308,9 @@ export {
 } from './imported-artifact.js';
 export {
   bindRandomSampling,
+  RandomSamplingShutdownTimeoutError,
+  RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_ERROR_CODE,
+  stopRandomSamplingHandleWithin,
   type RandomSamplingBindOptions,
   type RandomSamplingDisabledReason,
   type RandomSamplingHandle,

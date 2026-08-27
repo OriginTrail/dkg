@@ -39,6 +39,7 @@ import {
   InMemoryProverWal,
   RandomSamplingProver,
   startProverLoop,
+  type RandomSamplingRepairMaterial,
 } from '../src/index.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -1056,6 +1057,7 @@ describe('RandomSamplingProver — short-circuits', () => {
       expectedRoot: root,
       expectedLeafCount: BigInt(leafCount),
       signal: expect.any(AbortSignal),
+      registerPhysicalOperation: expect.any(Function),
     });
     expect(outcome).toMatchObject({
       kind: 'submitted',
@@ -1122,6 +1124,68 @@ describe('RandomSamplingProver — short-circuits', () => {
     await loop.stop();
 
     expect(repairSignal?.aborted).toBe(true);
+    expect(onTick).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'error',
+      error: expect.objectContaining({ name: 'AbortError' }),
+    }));
+    expect(build).not.toHaveBeenCalled();
+    expect(submitProof).not.toHaveBeenCalled();
+    expect(closeBuilder).toHaveBeenCalledOnce();
+  });
+
+  it('keeps close pending until an abort-ignoring repair physically settles', async () => {
+    const fixture = { cgId: 11n, kaId: 999n };
+    const submitProof = vi.fn(async () => ({
+      hash: '0xshould-not-submit', blockNumber: 1001, success: true,
+    }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: new Uint8Array(32),
+      expectedLeafCount: 1,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    let repairStarted!: () => void;
+    const started = new Promise<void>((resolve) => { repairStarted = resolve; });
+    let settleRepair!: (material: RandomSamplingRepairMaterial) => void;
+    let repairSignal: AbortSignal | undefined;
+    const repairMissingKnowledgeAsset = vi.fn((input: { signal: AbortSignal }) => {
+      repairSignal = input.signal;
+      repairStarted();
+      return new Promise<RandomSamplingRepairMaterial>((resolve) => {
+        settleRepair = resolve;
+      });
+    });
+    const build = vi.fn();
+    const closeBuilder = vi.fn(async () => undefined);
+    const onTick = vi.fn();
+    const prover = new RandomSamplingProver({
+      chain,
+      store,
+      identityId: IDENTITY_ID,
+      repairMissingKnowledgeAsset,
+      builder: { build, close: closeBuilder },
+    });
+    const loop = startProverLoop({ prover, intervalMs: 60_000, onTick });
+    loop.start();
+    await started;
+
+    const stopping = loop.stop();
+    await vi.waitFor(() => expect(repairSignal?.aborted).toBe(true));
+    await expect(Promise.race([
+      stopping.then(() => 'stopped'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 20)),
+    ])).resolves.toBe('pending');
+    expect(closeBuilder).not.toHaveBeenCalled();
+
+    settleRepair({ contents: [], privateRoots: [] });
+    await expect(stopping).resolves.toBeUndefined();
     expect(onTick).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'error',
       error: expect.objectContaining({ name: 'AbortError' }),

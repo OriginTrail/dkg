@@ -99,6 +99,8 @@ export interface RandomSamplingProverDeps {
     expectedLeafCount: bigint;
     /** Lifetime of the owning prover handle; aborted before handle shutdown drains the tick. */
     signal: AbortSignal;
+    /** Register dependency work that may outlive prompt logical cancellation. */
+    registerPhysicalOperation(operation: Promise<unknown>): void;
   }) => Promise<RandomSamplingRepairMaterial>;
 }
 
@@ -169,6 +171,7 @@ export class RandomSamplingProver {
   private readonly repairMissingKnowledgeAsset?: RandomSamplingProverDeps['repairMissingKnowledgeAsset'];
   private readonly lifecycleController = new AbortController();
   private inflight: Promise<TickOutcome> | null = null;
+  private readonly physicalRepairOperations = new Set<Promise<unknown>>();
 
   /**
    * Proof material pinned for the active proof period. The prover already pins
@@ -220,11 +223,22 @@ export class RandomSamplingProver {
     }
   }
 
-  /** Release builder + WAL handles after any handle-owned tick has settled. */
+  private registerPhysicalRepairOperation(operation: Promise<unknown>): void {
+    this.physicalRepairOperations.add(operation);
+    void operation.then(
+      () => this.physicalRepairOperations.delete(operation),
+      () => this.physicalRepairOperations.delete(operation),
+    );
+  }
+
+  /** Release builder + WAL handles after all logical and physical work settles. */
   async close(): Promise<void> {
     this.cancel();
     const running = this.inflight;
     if (running) await running.catch(() => undefined);
+    while (this.physicalRepairOperations.size > 0) {
+      await Promise.allSettled(this.physicalRepairOperations);
+    }
     await this.builder.close();
     await this.wal.close();
   }
@@ -373,13 +387,18 @@ export class RandomSamplingProver {
     try {
       const signal = this.lifecycleController.signal;
       if (signal.aborted) throw lifecycleAbortReason(signal);
-      const repaired = await raceWithLifecycleAbort(this.repairMissingKnowledgeAsset({
+      const repairOperation = this.repairMissingKnowledgeAsset({
         kaId: input.kaId,
         cgId: input.cgId,
         expectedRoot: input.expectedRoot,
         expectedLeafCount: input.expectedLeafCount,
         signal,
-      }), signal);
+        registerPhysicalOperation: (operation) => {
+          this.registerPhysicalRepairOperation(operation);
+        },
+      });
+      this.registerPhysicalRepairOperation(repairOperation);
+      const repaired = await raceWithLifecycleAbort(repairOperation, signal);
       if (signal.aborted) throw lifecycleAbortReason(signal);
       this.log.info('rs.tick.kc-repaired', {
         kaId: input.kaId.toString(),

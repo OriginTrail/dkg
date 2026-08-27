@@ -82,7 +82,7 @@ describe('startProverLoop', () => {
     await loop.stop();
   });
 
-  it('bounds a non-cancellable tick without closing resources underneath it', async () => {
+  it('exposes one stable physical shutdown without closing underneath a live tick', async () => {
     let settleTick!: (outcome: TickOutcome) => void;
     const tick = vi.fn(() => new Promise<TickOutcome>((resolve) => {
       settleTick = resolve;
@@ -92,20 +92,21 @@ describe('startProverLoop', () => {
     const loop = startProverLoop({
       prover,
       intervalMs: 60_000,
-      shutdownTimeoutMs: 20,
     });
     loop.start();
     await vi.waitFor(() => expect(tick).toHaveBeenCalledOnce());
 
-    await expect(loop.stop()).rejects.toMatchObject({
-      name: 'ProverLoopShutdownTimeoutError',
-      timeoutMs: 20,
-    });
+    const stopping = loop.stop();
+    expect(loop.stop()).toBe(stopping);
+    let stopped = false;
+    void stopping.then(() => { stopped = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(stopped).toBe(false);
     expect(close).not.toHaveBeenCalled();
 
     settleTick({ kind: 'period-closed' });
-    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
-    await expect(loop.stop()).resolves.toBeUndefined();
+    await expect(stopping).resolves.toBeUndefined();
+    expect(loop.stop()).toBe(stopping);
     expect(close).toHaveBeenCalledOnce();
   });
 

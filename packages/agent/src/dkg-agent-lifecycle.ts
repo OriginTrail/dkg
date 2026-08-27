@@ -196,7 +196,13 @@ import {
   type DurableBatchVerificationMode,
 } from './sync-verify-worker.js';
 import { classifyDurableMetaGraph } from './sync/durable-integrity.js';
-import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
+import {
+  bindRandomSampling,
+  RandomSamplingShutdownTimeoutError,
+  stopRandomSamplingHandleWithin,
+  type RandomSamplingHandle,
+  type RandomSamplingStatus,
+} from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import { createSingleUseSyncSender } from './p2p/sync-transport.js';
@@ -4322,7 +4328,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.repairRandomSamplingKnowledgeAsset(input),
       });
       if (this.randomSamplingHandle && this.randomSamplingHandle !== handle) {
-        try { await this.randomSamplingHandle.stop(); } catch { /* swallow bind replacement cleanup */ }
+        try {
+          await stopRandomSamplingHandleWithin(
+            this.randomSamplingHandle,
+            DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
+          );
+        } catch (error) {
+          if (error instanceof RandomSamplingShutdownTimeoutError) {
+            // The replacement has not started, so retire its fresh resources
+            // and keep the old handle quarantined until its physical close can
+            // be observed by a later lifecycle retry.
+            try { await handle.stop(); } catch { /* best-effort unused-handle cleanup */ }
+            throw error;
+          }
+          this.log.warn(
+            ctx,
+            `Previous V10 Random Sampling prover close failed during replacement: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
       this.randomSamplingHandle = handle;
       if (handle.enabled) {

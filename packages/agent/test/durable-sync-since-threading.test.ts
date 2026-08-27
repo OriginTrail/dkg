@@ -261,10 +261,10 @@ describe('exact-asset rolling-upgrade filter', () => {
     const mismatch = makeContext({
       pageQuads: { data, meta },
     });
-    await runChallengeExactAssetFetch(challengeContext(
+    await expect(runChallengeExactAssetFetch(challengeContext(
       mismatch.context,
       selection('2'),
-    ));
+    ))).rejects.toMatchObject({ code: 'SYNC_EXACT_DESCRIPTOR_MISMATCH' });
     expect(mismatch.calls.map((call) => call.phase)).toEqual(['meta']);
     expect(mismatch.processCalls).toHaveLength(0);
     expect(mismatch.insertedBatches).toHaveLength(0);

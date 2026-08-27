@@ -1119,6 +1119,19 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
         );
       }
     }
+    if (
+      returnAcceptedPrefixOnRetryableTransportFailure === true
+      && signal?.aborted === true
+    ) {
+      // Cancellation is authoritative even when the transport reports a
+      // separately retryable failure while unwinding. The selected owner must
+      // receive an AbortError and discard both halves of its private prefix,
+      // never mistake the accepted rows for a successful partial transfer.
+      deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+      phaseTelemetry.finish('error', allQuads.length);
+      throw asAbortError(signal.reason);
+    }
+
     // A durable data prefix that already crossed the wire is still useful when
     // a later page loses its stream. Return it through the same bounded,
     // incomplete-result contract as a deadline so the caller can verify whole

@@ -89,7 +89,6 @@ import {
   LegacyKnowledgeAssetReadOnlyError,
   isAllocatableKaAuthorV1,
 } from '@origintrail-official/dkg-core';
-import { ProverLoopShutdownTimeoutError } from '@origintrail-official/dkg-random-sampling';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -150,7 +149,13 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
-import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
+import {
+  bindRandomSampling,
+  RandomSamplingShutdownTimeoutError,
+  stopRandomSamplingHandleWithin,
+  type RandomSamplingHandle,
+  type RandomSamplingStatus,
+} from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
@@ -2017,9 +2022,12 @@ export class DKGAgent extends DKGAgentBase {
     if (this.randomSamplingHandle) {
       const handle = this.randomSamplingHandle;
       try {
-        await handle.stop();
+        await stopRandomSamplingHandleWithin(
+          handle,
+          DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
+        );
       } catch (error) {
-        if (error instanceof ProverLoopShutdownTimeoutError) {
+        if (error instanceof RandomSamplingShutdownTimeoutError) {
           // The loop still owns a live tick and will close its builder/WAL only
           // after that tick retires. Preserve the handle and quarantine the
           // network/store boundary so a later stop() retry can observe the same

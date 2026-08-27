@@ -557,20 +557,23 @@ describe('Random Sampling proof-time exact repair', () => {
     expect(addressSignal?.aborted).toBe(true);
   });
 
-  it('aborts a hanging repair promptly when the owning prover stops', async () => {
+  it('reports owner abort promptly while tracking the ignored dependency until it settles', async () => {
     const owner = new AbortController();
     let addressStarted!: () => void;
     const started = new Promise<void>((resolve) => { addressStarted = resolve; });
+    let settleAddress!: (address: string) => void;
+    const physicalOperations = new Set<Promise<unknown>>();
+    const resolveCandidatePeerIds = vi.fn(async () => ['unreachable']);
     const repair = runRandomSamplingExactRepair({
       chainId: 'base:8453',
       maxPeers: 1,
       timeoutMs: 60_000,
       resolveStorageAddress: () => {
         addressStarted();
-        return new Promise<string>(() => undefined);
+        return new Promise<string>((resolve) => { settleAddress = resolve; });
       },
       resolveLocalContextGraphId: () => 'food-safety',
-      resolveCandidatePeerIds: async () => ['unreachable'],
+      resolveCandidatePeerIds,
       selectPeerWindow: (peers) => peers,
       preparePeer: async () => true,
       fetchExactKnowledgeAsset: async () => ({
@@ -584,12 +587,23 @@ describe('Random Sampling proof-time exact repair', () => {
       expectedRoot: new Uint8Array(32),
       expectedLeafCount: 1n,
       signal: owner.signal,
+      registerPhysicalOperation: (operation) => {
+        physicalOperations.add(operation);
+        void operation.then(
+          () => physicalOperations.delete(operation),
+          () => physicalOperations.delete(operation),
+        );
+      },
     });
 
     await started;
     const reason = new Error('prover stopped');
     owner.abort(reason);
     await expect(repair).rejects.toThrow('prover stopped');
+    expect(physicalOperations.size).toBe(1);
+    settleAddress('0x00000000000000000000000000000000000000aa');
+    await vi.waitFor(() => expect(physicalOperations.size).toBe(0));
+    expect(resolveCandidatePeerIds).not.toHaveBeenCalled();
   });
 
   it('wires the lifecycle repair callback through the production prover binding', async () => {
@@ -660,6 +674,7 @@ describe('Random Sampling proof-time exact repair', () => {
       expectedRoot,
       expectedLeafCount: 1n,
       signal: expect.any(AbortSignal),
+      registerPhysicalOperation: expect.any(Function),
     });
     await agentLike.randomSamplingHandle!.stop();
   });

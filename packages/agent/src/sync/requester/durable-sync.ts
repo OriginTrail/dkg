@@ -1476,6 +1476,16 @@ async function runDurableSyncWithBudget(
       markDurableTerminalBoundary(accumulator, false);
       endPhase();
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
+      if (
+        proofOnlyChallengeFetch
+        && (pidErr as { code?: unknown }).code === 'SYNC_EXACT_DESCRIPTOR_MISMATCH'
+      ) {
+        // A proof-only caller must distinguish an authenticated clean miss from
+        // a responder descriptor that contradicts the pinned challenge. Do not
+        // collapse this integrity failure into the ordinary best-effort sync
+        // diagnostics returned by the multi-CG durable fanout.
+        throw pidErr;
+      }
       if (isSyncPermanentRejection(pidErr)) {
         // Missed-seam alarm (OT-RFC-56): the oversize guard should have
         // filtered this BEFORE the store insert. Reaching here means an
