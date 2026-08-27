@@ -1720,6 +1720,11 @@ export class TripleStoreAsyncLiftPublisher
     // reached before the deadline. Held-failed jobs are deliberately NOT counted — the
     // failed-job dispatcher paces itself with per-job due times.
     let remainingLive = 0;
+    // Jobs the live lane settled THIS pass. A settle can be a transition INTO the held-failed
+    // state (inconclusive timeout, proven revert), and the dispatcher below must see those in
+    // the same pass — with only the shared start-of-pass snapshot they would wait out the idle
+    // sweep holding their wallets, which per-lane inventories never made them do.
+    const settledLive: string[] = [];
     const deadline = new AbortController();
     const deadlineTimer = setTimeout(
       () => deadline.abort(),
@@ -1739,6 +1744,7 @@ export class TripleStoreAsyncLiftPublisher
           if (this.activeProcessJobIds.has(current.jobId)) return;
           if (await this.jobHandlerFor(current.request).recoverInterrupted(current, { signal: deadline.signal })) {
             reconciled += 1;
+            settledLive.push(current.jobId);
           } else {
             remainingLive += 1;
           }
@@ -1749,7 +1755,19 @@ export class TripleStoreAsyncLiftPublisher
       deadline.abort();
     }
 
-    reconciled += await this.dispatchFailedJobsOnChainProof(inventory);
+    // The dispatcher's view: the shared snapshot with this pass's own settlements made current
+    // (a point read per settled job — zero on the common pass — not a second inventory).
+    let dispatcherInventory: readonly LiftJob[] = inventory;
+    if (settledLive.length > 0) {
+      const refreshed = new Map<string, LiftJob | null>();
+      for (const jobId of settledLive) {
+        refreshed.set(jobId, await this.getStatus(jobId));
+      }
+      dispatcherInventory = inventory
+        .map((job) => (refreshed.has(job.jobId) ? refreshed.get(job.jobId) ?? null : job))
+        .filter((job): job is LiftJob => job !== null);
+    }
+    reconciled += await this.dispatchFailedJobsOnChainProof(dispatcherInventory);
     return { reconciled, pendingWork: remainingLive > 0 };
   }
 

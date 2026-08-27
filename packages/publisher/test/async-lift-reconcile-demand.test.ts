@@ -25,10 +25,13 @@ import {
 } from '../src/async-lift-control-plane.js';
 import {
   KA_VM_EXECUTOR_TX_HASH,
+  KA_VM_KA_UAL,
   KA_VM_VALIDATION,
   kaVmPublishRequest,
   stageKnowledgeAssetShareSnapshot,
 } from './_helpers/ka-vm-publish.js';
+import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 
 describe('async-lift reconciliation demand channel', () => {
   let now = 1_000;
@@ -343,6 +346,52 @@ describe('async-lift reconciliation demand channel', () => {
     expect(outcome).toEqual({ reconciled: 1, pendingWork: true });
     expect((await publisher.getStatus(jobA))?.status).toBe('finalized');
     expect((await publisher.getStatus(jobB))?.status).toBe('broadcast');
+  });
+
+  it('hands a job the pass itself just failed to the same pass dispatcher, not the idle sweep', async () => {
+    // A live job can transition INTO the held-failed state during the pass (here: the raw
+    // lane's inconclusive-recovery timeout). The failed-job dispatcher runs in the same pass
+    // and must see that transition — through the shared snapshot it would keep the wallet
+    // parked until the idle sweep, which the per-lane inventories it replaced never did.
+    const resolverAsks: string[] = [];
+    const publisher = createPublisher({
+      recoveryLookupTimeoutMs: 1_000,
+      chainProofResolver: async (lookup) => {
+        resolverAsks.push((lookup as { txHash?: string }).txHash ?? 'unknown');
+        return { status: 'pending' };
+      },
+      knowledgeAssetVmPublishRecoveryResolver: async () => null,
+    });
+    await stageShareSnapshot();
+    const jobId = await seedLegacyRawLiftTestJob(store, {
+      swmId: 'swm-1',
+      namespace: 'default',
+      contextGraphId: 'music-social',
+      shareOperationId: 'share-op-1',
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: KA_VM_KA_UAL,
+      assertionVersion: '1',
+      publicTripleCount: 2,
+      privateTripleCount: 0,
+      scope: 'full',
+      transitionType: 'CREATE',
+      authority: { type: 'owner', proofRef: 'proof:owner:1' },
+    }, { now: () => ++now, idGenerator: () => `raw-job-${++ids}` });
+    await publisher.claimNext('wallet-raw');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-raw', operationKind: 'create' },
+    });
+    // Sail past the inconclusive-recovery window so the live lane fails the job THIS pass.
+    now += 5_000;
+
+    const outcome = await publisher.reconciliationScheduling.reconcile();
+    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    expect(outcome).toEqual({ reconciled: 1, pendingWork: false });
+    // Two chain reads in ONE pass: the live lane's probe that timed the job out, then the
+    // dispatcher's proof-first turn for the freshly held job.
+    expect(resolverAsks).toEqual([KA_VM_EXECUTOR_TX_HASH, KA_VM_EXECUTOR_TX_HASH]);
   });
 
   it('runs exactly one queue inventory per reconcile pass across all three lanes', async () => {
