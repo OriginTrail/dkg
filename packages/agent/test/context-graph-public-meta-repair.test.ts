@@ -6,8 +6,12 @@ import {
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { buildAuthoritativePublicMetaAskQuery } from '../src/context-graph-public-meta-proof.js';
-import { repairCreatorPublicMetaProjections } from '../src/context-graph-public-meta-repair.js';
+import { buildAuthoritativePublicMetaAskQuery } from
+  '../src/context-graph-public-meta-proof.js';
+import {
+  repairChainAttestedPublicMetaProjection,
+  repairCreatorPublicMetaProjections,
+} from '../src/context-graph-public-meta-repair.js';
 
 const CREATOR_PEER = '12D3KooWCreatorPublicMetaRepair111111111111111111111111';
 const FOREIGN_PEER = '12D3KooWForeignPublicMetaRepair111111111111111111111111';
@@ -37,7 +41,10 @@ function publicOntologyDefinition(contextGraphId: string, creatorPeerId: string)
   ];
 }
 
-async function hasPublicProof(store: OxigraphStore, contextGraphId: string): Promise<boolean> {
+async function hasPublicProof(
+  store: OxigraphStore,
+  contextGraphId: string,
+): Promise<boolean> {
   const result = await store.query(buildAuthoritativePublicMetaAskQuery(contextGraphId));
   expect(result.type).toBe('boolean');
   return result.type === 'boolean' && result.value;
@@ -159,6 +166,121 @@ describe('creator-owned public metadata projection repair', () => {
       expect(repaired.candidates).toBe(0);
       expect(repaired.insertedTriples).toBe(0);
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+describe('chain-attested public metadata projection repair', () => {
+  it('backfills creatorless legacy metadata after exact active-public chain proof', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = '0x1234567890123456789012345678901234567890/legacy-public';
+    let proofResolutions = 0;
+    const resolveActivePublicBinding = async () => {
+      proofResolutions += 1;
+      return { state: 'public' } as const;
+    };
+    try {
+      const first = await repairChainAttestedPublicMetaProjection(
+        store,
+        contextGraphId,
+        resolveActivePublicBinding,
+      );
+      const second = await repairChainAttestedPublicMetaProjection(
+        store,
+        contextGraphId,
+        resolveActivePublicBinding,
+      );
+
+      expect(first).toEqual({
+        outcome: 'projection-complete',
+      });
+      expect(second).toEqual({
+        outcome: 'already-complete',
+      });
+      expect(await hasPublicProof(store, contextGraphId)).toBe(true);
+      expect(proofResolutions).toBe(1);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('does not materialize metadata without current-chain proof', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'unattested-public-looking-graph';
+    try {
+      const repaired = await repairChainAttestedPublicMetaProjection(
+        store,
+        contextGraphId,
+        async () => ({ state: 'not-public', reason: 'unregistered' }),
+      );
+
+      expect(repaired).toEqual({
+        outcome: 'not-chain-attested',
+        chainProof: { state: 'not-public', reason: 'unregistered' },
+      });
+      expect(await hasPublicProof(store, contextGraphId)).toBe(false);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('never overwrites conflicting private root policy', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'chain-public-root-private-conflict';
+    try {
+      await store.insert([{
+        subject: contextGraphDataGraphUri(contextGraphId),
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: contextGraphMetaGraphUri(contextGraphId),
+      }]);
+
+      const repaired = await repairChainAttestedPublicMetaProjection(
+        store,
+        contextGraphId,
+        async () => ({ state: 'public' }),
+      );
+
+      expect(repaired).toEqual({
+        outcome: 'conflicting-policy',
+      });
+      expect(await hasPublicProof(store, contextGraphId)).toBe(false);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('does not insert stale public facts when private policy arrives during chain proof', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'chain-public-concurrent-private-conflict';
+    try {
+      const repaired = await repairChainAttestedPublicMetaProjection(
+        store,
+        contextGraphId,
+        async () => {
+          await store.insert([{
+            subject: contextGraphDataGraphUri(contextGraphId),
+            predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+            object: '"private"',
+            graph: contextGraphMetaGraphUri(contextGraphId),
+          }]);
+          return { state: 'public' } as const;
+        },
+      );
+
+      expect(repaired).toEqual({
+        outcome: 'conflicting-policy',
+      });
+      expect(await hasPublicProof(store, contextGraphId)).toBe(false);
+      const typeResult = await store.query(`ASK WHERE {
+        GRAPH <${contextGraphMetaGraphUri(contextGraphId)}> {
+          <${contextGraphDataGraphUri(contextGraphId)}> <${DKG_ONTOLOGY.RDF_TYPE}>
+            <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+        }
+      }`);
+      expect(typeResult).toEqual({ type: 'boolean', value: false });
     } finally {
       await store.close();
     }

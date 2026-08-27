@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
+import { DKGAgent } from '../src/dkg-agent.js';
 import {
   ContextGraphAssetFetchConflictError,
   ContextGraphAssetFetchValidationError,
@@ -101,6 +102,35 @@ function createFetchHost(options: {
 }
 
 describe('exact Context Graph asset fetch', () => {
+  it('accepts an equal numeric durable binding without a committed name hash', async () => {
+    const { host } = createFetchHost();
+    const numericContextGraphId = ON_CHAIN_ID;
+    const subscription = host.subscribedContextGraphs.get(CONTEXT_GRAPH)!;
+    host.subscribedContextGraphs = new Map([[numericContextGraphId, subscription]]);
+    const getContextGraphNameHash = vi.fn(async () => null);
+    Object.assign(host.chain, { getContextGraphNameHash });
+    Object.assign(host, {
+      requireLocalCgMatchesOnChainSlot:
+        DKGAgent.prototype.requireLocalCgMatchesOnChainSlot,
+      localCgMatchesOnChainSlot: DKGAgent.prototype.localCgMatchesOnChainSlot,
+      isWireIdKeyedSubscription: DKGAgent.prototype.isWireIdKeyedSubscription,
+      raceChainPolicyRead: DKGAgent.prototype.raceChainPolicyRead,
+      log: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    await expect(SwmHostModeMethods.prototype.fetchContextGraphAssets.call(
+      host as never,
+      numericContextGraphId,
+      [UALS[0]],
+      { peerIds: [PEER] },
+    )).resolves.toMatchObject({
+      contextGraphId: numericContextGraphId,
+      onChainId: numericContextGraphId,
+      status: 'complete',
+    });
+    expect(getContextGraphNameHash).not.toHaveBeenCalled();
+  });
+
   it('fetches up to ten named assets without using the background reconciler', async () => {
     const { host, exactFetch, inspect, flush, subscription } = createFetchHost({ present: [UALS[0]] });
     const scalarRoot = vi.fn(async () => new Uint8Array(32).fill(0xff));
