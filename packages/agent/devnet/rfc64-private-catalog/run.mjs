@@ -8,12 +8,17 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
-import { PROJECTION_DIGEST, roleAgentAddress } from './fixture.mjs';
+import {
+  ASSET_NUMBERS,
+  PROJECTION_EVIDENCE,
+  roleAgentAddress,
+} from './fixture.mjs';
 import {
   runRfc64PrivateGateArtifactLifecycleV1,
   sanitizeGateFailureV1,
 } from './gate-artifact.mjs';
 import { isExpectedPrivateCatalogDenialResultV1 } from './denial-evidence.mjs';
+import { hasExactPrivateCatalogMemoryContents } from './memory-evidence.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENT_ROOT = join(HERE, '..', '..');
@@ -21,6 +26,10 @@ const AGENT_PROCESS = join(HERE, 'agent-process.mjs');
 const ARTIFACT = join(HERE, 'artifacts', 'latest.json');
 const ROLES = Object.freeze(['owner', 'provider2', 'receiver', 'outsider']);
 const RUN_TIMEOUT_MS = 90_000;
+export const EXPECTED_MEMORY_CONTENTS = Object.freeze({
+  assetNumbers: ASSET_NUMBERS,
+  projection: PROJECTION_EVIDENCE,
+});
 
 let requestSequence = 0;
 let lifecycleSequence = 0;
@@ -385,15 +394,8 @@ async function dial(from, to) {
   }, 'dialed', 30_000);
 }
 
-export function hasExactMemoryContents(state) {
-  return state.graphCounts.length === 2
-    && state.graphCounts.every(({ swm, swmDigest, vm, vmDigest }) => (
-      swm === 2
-      && vm === 2
-      && swmDigest === PROJECTION_DIGEST
-      && vmDigest === PROJECTION_DIGEST
-    ));
-}
+export const hasExactMemoryContents = (state) =>
+  hasExactPrivateCatalogMemoryContents(state, EXPECTED_MEMORY_CONTENTS);
 
 function safeRole(ready) {
   return {

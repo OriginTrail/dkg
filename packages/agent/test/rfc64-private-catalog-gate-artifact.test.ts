@@ -6,6 +6,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  MemoryLayer,
+  contextGraphLayerUri,
+} from '@origintrail-official/dkg-core';
 
 import {
   Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1,
@@ -23,10 +28,34 @@ import {
   AgentChild,
   hasExactMemoryContents,
 } from '../devnet/rfc64-private-catalog/run.mjs';
-import { PROJECTION_DIGEST } from '../devnet/rfc64-private-catalog/fixture.mjs';
+import {
+  ASSET_NUMBERS,
+  CONTEXT_GRAPH_ID,
+  PROJECTION_EVIDENCE,
+  PROJECTION_NQUADS,
+  PROJECTION_QUADS,
+  roleAgentAddress,
+} from '../devnet/rfc64-private-catalog/fixture.mjs';
+import {
+  bindGraphlessProjectionToGraph,
+  hasExactPrivateCatalogMemoryContents,
+  readExactGraphMemoryEvidence,
+  readPrivateCatalogGraphCountEvidence,
+} from '../devnet/rfc64-private-catalog/memory-evidence.mjs';
 
 const temporaryRoots: string[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
+// Independent oracle: these bytes and this digest are intentionally NOT
+// produced by memory-evidence.mjs. If canonicalization drops or rewrites any
+// term, the fixture/helper assertions below fail together against this pin.
+const EXPECTED_PROJECTION_NQUADS =
+  '<https://example.org/alice> <https://schema.org/age> ' +
+  '"42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n' +
+  '<https://example.org/alice> <https://schema.org/name> "Alice" .';
+const EXPECTED_PROJECTION_EVIDENCE = Object.freeze({
+  count: 2,
+  digest: 'babf6f5fe8b4028a569792682dc3775c7410a853adfeb4e55ecea14d5ba0445f',
+});
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => (
@@ -133,20 +162,132 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
 });
 
 describe('RFC-64 private release gate process and denial evidence', () => {
-  it('rejects same-size SWM or VM semantic corruption', () => {
-    const exactGraphCounts = [41, 42].map((kaNumber) => ({
-      kaNumber,
-      swm: 2,
-      swmDigest: PROJECTION_DIGEST,
-      vm: 2,
-      vmDigest: PROJECTION_DIGEST,
-    }));
-    expect(hasExactMemoryContents({ graphCounts: exactGraphCounts })).toBe(true);
-    expect(hasExactMemoryContents({
-      graphCounts: exactGraphCounts.map((entry, index) => index === 0
-        ? { ...entry, vmDigest: '0'.repeat(64) }
-        : entry),
-    })).toBe(false);
+  it('feeds process-built SWM/VM evidence through the executable gate predicate', async () => {
+    const store = new OxigraphStore();
+    const authorAddress = roleAgentAddress('owner');
+    try {
+      const graphs = ASSET_NUMBERS.flatMap((kaNumber) => (
+        [MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiableMemory].flatMap((layer) => {
+          const graph = contextGraphLayerUri(
+            CONTEXT_GRAPH_ID,
+            layer,
+            authorAddress,
+            kaNumber,
+          );
+          return bindGraphlessProjectionToGraph(PROJECTION_QUADS, graph);
+        })
+      ));
+      await store.insert(graphs);
+
+      const graphCounts = await readPrivateCatalogGraphCountEvidence(store, {
+        assetNumbers: ASSET_NUMBERS,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorAddress,
+      });
+      expect(hasExactMemoryContents({ graphCounts })).toBe(true);
+      expect(hasExactMemoryContents({
+        graphCounts: graphCounts.map((entry, index) => index === 0
+          ? { ...entry, swmDigest: entry.vmDigest, vmDigest: '0'.repeat(64) }
+          : entry),
+      })).toBe(false);
+      expect(hasExactMemoryContents({
+        graphCounts: graphCounts.map((entry, index) => index === 1
+          ? { ...entry, kaNumber: 43 }
+          : entry),
+      })).toBe(false);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('hashes real graph contents and rejects same-size semantic corruption', async () => {
+    const graph = 'urn:rfc64:private-gate:test-memory';
+    const store = new OxigraphStore();
+    const projection = (name: string) => bindGraphlessProjectionToGraph(
+      PROJECTION_QUADS.map((quad) => quad.predicate === 'https://schema.org/name'
+        ? { ...quad, object: `"${name}"` }
+        : quad),
+      graph,
+    );
+    try {
+      // Reverse fixture order: canonicalization, not insertion order, defines
+      // the digest used by the process gate.
+      const original = projection('Alice').reverse();
+      await store.insert(original);
+      const exact = await readExactGraphMemoryEvidence(store, graph);
+      expect(PROJECTION_NQUADS).toBe(EXPECTED_PROJECTION_NQUADS);
+      expect(PROJECTION_EVIDENCE).toEqual(EXPECTED_PROJECTION_EVIDENCE);
+      expect(exact).toEqual(EXPECTED_PROJECTION_EVIDENCE);
+
+      const exactGraphCounts = ASSET_NUMBERS.map((kaNumber) => ({
+        kaNumber,
+        swm: exact.count,
+        swmDigest: exact.digest,
+        vm: exact.count,
+        vmDigest: exact.digest,
+      }));
+      const expected = {
+        assetNumbers: ASSET_NUMBERS,
+        projection: PROJECTION_EVIDENCE,
+      };
+      expect(hasExactPrivateCatalogMemoryContents(
+        { graphCounts: exactGraphCounts },
+        expected,
+      )).toBe(true);
+      // Identity substitution, multiplicity, and omission are independent
+      // failures even when every surviving projection digest is authentic.
+      expect(hasExactPrivateCatalogMemoryContents({
+        graphCounts: exactGraphCounts.map((entry, index) => index === 1
+          ? { ...entry, kaNumber: 43 }
+          : entry),
+      }, expected)).toBe(false);
+      expect(hasExactPrivateCatalogMemoryContents({
+        graphCounts: exactGraphCounts.map((entry) => ({ ...entry, kaNumber: 41 })),
+      }, expected)).toBe(false);
+      expect(hasExactPrivateCatalogMemoryContents({
+        graphCounts: exactGraphCounts.slice(0, 1),
+      }, expected)).toBe(false);
+
+      const semanticCorruptions = [
+        ['omitted age statement', PROJECTION_QUADS.slice(1)],
+        ['omitted name statement', PROJECTION_QUADS.slice(0, 1)],
+        ['changed subject', PROJECTION_QUADS.map((quad, index) => index === 0
+          ? { ...quad, subject: 'https://example.org/bob' }
+          : quad)],
+        ['changed predicate', PROJECTION_QUADS.map((quad, index) => index === 0
+          ? { ...quad, predicate: 'https://schema.org/birthDate' }
+          : quad)],
+        ['changed object', PROJECTION_QUADS.map((quad, index) => index === 0
+          ? { ...quad, object: '"43"^^<http://www.w3.org/2001/XMLSchema#integer>' }
+          : quad)],
+      ] as const;
+      for (const [label, quads] of semanticCorruptions) {
+        await store.delete(original);
+        const corruptedProjection = bindGraphlessProjectionToGraph(quads, graph);
+        await store.insert(corruptedProjection);
+        const evidence = await readExactGraphMemoryEvidence(store, graph);
+        expect(evidence, label).not.toEqual(EXPECTED_PROJECTION_EVIDENCE);
+        await store.delete(corruptedProjection);
+        await store.insert(original);
+      }
+
+      await store.delete(original);
+      await store.insert(projection('Mallory'));
+      const corrupted = await readExactGraphMemoryEvidence(store, graph);
+      expect(corrupted.count).toBe(PROJECTION_EVIDENCE.count);
+      expect(corrupted.digest).not.toBe(PROJECTION_EVIDENCE.digest);
+      expect(hasExactPrivateCatalogMemoryContents({
+        graphCounts: exactGraphCounts.map((entry, index) => index === 0
+          ? {
+              ...entry,
+              vm: corrupted.count,
+              vmDigest: corrupted.digest,
+            }
+          : entry),
+      }, expected)).toBe(false);
+    } finally {
+      await store.close();
+    }
   });
 
   it('reaps a child that ignores the stop command and SIGTERM', async () => {
