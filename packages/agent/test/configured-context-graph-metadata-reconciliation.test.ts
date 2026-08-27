@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
+import {
+  DKG_ONTOLOGY,
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+} from '@origintrail-official/dkg-core';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { buildAuthoritativePublicMetaAskQuery } from
   '../src/context-graph-public-meta-proof.js';
+import type { ConfirmContextGraphMetadataInput } from
+  '../src/context-graph-meta-confirmation.js';
 import { reconcileConfiguredContextGraphMetadataV1 } from
   '../src/configured-context-graph-metadata-reconciliation.js';
 
@@ -29,6 +36,128 @@ async function hasPublicProof(
 }
 
 describe('configured Context Graph metadata reconciliation', () => {
+  it('reuses one active-public proof for placeholder repair and confirmation', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'single-proof';
+    const resolveActivePublicChainProof = vi.fn(async () => ({ state: 'public' } as const));
+    const confirmMetadata = vi.fn(async (
+      _id: string,
+      input: ConfirmContextGraphMetadataInput,
+    ) => (
+      input.activePublicChainProof?.state === 'public'
+      && hasPublicProof(store, contextGraphId)
+    ));
+    try {
+      await store.insert([{
+        subject: contextGraphDataGraphUri(contextGraphId),
+        predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
+        object: '"unregistered"',
+        graph: contextGraphMetaGraphUri(contextGraphId),
+      }]);
+
+      const result = await reconcileConfiguredContextGraphMetadataV1({
+        store,
+        resolveActivePublicChainProof,
+        isLocallyCurated: async () => false,
+        confirmMetadata,
+      }, contextGraphId);
+
+      expect(result).toEqual({
+        outcome: 'authoritative',
+        diagnostic: { kind: 'public-metadata-projection-completed' },
+      });
+      expect(resolveActivePublicChainProof).toHaveBeenCalledTimes(1);
+      expect(confirmMetadata).toHaveBeenCalledWith(contextGraphId, {
+        rejectUnregisteredPlaceholder: true,
+        activePublicChainProof: { state: 'public' },
+      });
+      expect(await hasPublicProof(store, contextGraphId)).toBe(true);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('keeps negative and positive chain evidence typed through confirmation', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'typed-chain-evidence';
+    const resolveActivePublicChainProof = vi.fn()
+      .mockResolvedValueOnce({ state: 'not-public', reason: 'private' })
+      .mockResolvedValueOnce({ state: 'public' });
+    const confirmMetadata = vi.fn(async (
+      _id: string,
+      input: ConfirmContextGraphMetadataInput,
+    ) => (
+      input.activePublicChainProof?.state === 'public'
+      && hasPublicProof(store, contextGraphId)
+    ));
+    try {
+      const dependencies = {
+        store,
+        resolveActivePublicChainProof,
+        isLocallyCurated: async () => false,
+        confirmMetadata,
+      };
+
+      await expect(reconcileConfiguredContextGraphMetadataV1(
+        dependencies,
+        contextGraphId,
+      )).resolves.toEqual({
+        outcome: 'pending',
+        reason: 'missing-metadata',
+      });
+      expect(await hasPublicProof(store, contextGraphId)).toBe(false);
+
+      await expect(reconcileConfiguredContextGraphMetadataV1(
+        dependencies,
+        contextGraphId,
+      )).resolves.toEqual({
+        outcome: 'authoritative',
+        diagnostic: { kind: 'public-metadata-projection-completed' },
+      });
+      expect(await hasPublicProof(store, contextGraphId)).toBe(true);
+      expect(resolveActivePublicChainProof).toHaveBeenCalledTimes(2);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('preserves a resolver rejection as an unknown RPC chain proof', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'rpc-failure';
+    const confirmMetadata = vi.fn(async () => false);
+    try {
+      const result = await reconcileConfiguredContextGraphMetadataV1({
+        store,
+        resolveActivePublicChainProof: async () => {
+          throw new Error('temporary RPC outage');
+        },
+        isLocallyCurated: async () => false,
+        confirmMetadata,
+      }, contextGraphId);
+
+      expect(result).toEqual({
+        outcome: 'pending',
+        reason: 'missing-metadata',
+        diagnostic: {
+          kind: 'public-chain-proof-unavailable',
+          reason: 'rpc-failure',
+          detail: 'temporary RPC outage',
+        },
+      });
+      expect(confirmMetadata).toHaveBeenCalledWith(contextGraphId, {
+        rejectUnregisteredPlaceholder: true,
+        activePublicChainProof: {
+          state: 'unknown',
+          reason: 'rpc-failure',
+          detail: 'temporary RPC outage',
+        },
+      });
+      expect(await hasPublicProof(store, contextGraphId)).toBe(false);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('fails closed when a repair is query-visible but its durability flush rejects', async () => {
     const baseStore = new OxigraphStore();
     const contextGraphId = 'public-meta-flush-failure';
