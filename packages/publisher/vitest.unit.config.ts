@@ -25,6 +25,8 @@ export default defineConfig({
       'test/async-lift-auto-retry-2270.test.ts',
       'test/async-lift-retry-disposition-2270.test.ts',
       'test/async-lift-chain-proof-dispatch-2270.test.ts',
+      'test/async-lift-reconcile-demand.test.ts',
+      'test/async-lift-runner.test.ts',
       'test/pre-broadcast-signal-await.test.ts',
       'test/async-lift-admission-clear-2270.test.ts',
       'test/lift-job-failure.test.ts',

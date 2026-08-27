@@ -470,6 +470,15 @@ export class TripleStoreAsyncLiftPublisher
   private readonly activeProcessJobIds = new Set<string>();
   /** Receipt tasks that continue after the RPC-acceptance fast return. */
   private readonly detachedExecutions = new Map<string, Promise<void>>();
+  /** Poked when a tx-bearing job stops being executor-owned; see setReconciliationDemandListener. */
+  private reconciliationDemandListener?: () => void;
+  /**
+   * Rotates the live-lane iteration start across passes. The pass deadline may truncate the walk,
+   * and `list()` order is stable, so without rotation the same head jobs would be re-asked every
+   * pass while the tail starved behind a slow resolver. In-memory for the same reason as
+   * `chainProofNextDueAt`: a restart resetting the rotation is safe, skipping is a pure no-op.
+   */
+  private reconcilePassOffset = 0;
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   private readonly detachReceiptReconciliation: boolean;
   /** 3825614002 — this instance's ROLE, resolved once from its wiring. */
@@ -810,11 +819,22 @@ export class TripleStoreAsyncLiftPublisher
     if (!claimed) {
       return null;
     }
+    let processed: LiftJob | undefined;
     try {
-      return await this.jobHandlerFor(claimed.request).process(claimed, walletId);
+      processed = await this.jobHandlerFor(claimed.request).process(claimed, walletId);
     } finally {
       this.activeProcessJobIds.delete(claimed.jobId);
+      // Invariant: the demand poke fires only at the OWNERSHIP BOUNDARY — after the marker
+      // above is deleted — so an invited pass can always act on the announced job. An ESCAPED
+      // processing fault pokes unconditionally: a durable broadcast may already exist, reading
+      // the job state back would use the store that just failed, and the poke is scheduling-only
+      // (the pass re-reads canonical state before acting) — an unneeded invite costs one empty
+      // pass, a missed one parks the wallet until the idle sweep.
+      if (processed === undefined || this.isReconciliationActionable(processed)) {
+        this.notifyReconciliationDemand();
+      }
     }
+    return processed;
   }
 
   private async processRawLift(claimed: LiftJob, walletId: string): Promise<LiftJob> {
@@ -1017,7 +1037,9 @@ export class TripleStoreAsyncLiftPublisher
         // Ambiguous post-write-ahead failure — leave the job in 'broadcast' so recovery's
         // interrupted-broadcast path reconciles it on chain, never resend. Receipt timeout is
         // UNKNOWN, not failed. The tx-bearing job retains the wallet until
-        // chain proof finalizes, proves a revert, or proves create absence.
+        // chain proof finalizes, proves a revert, or proves create absence. The reconciliation
+        // demand poke for this job fires at the processNext ownership boundary, not here —
+        // this frame still holds the job's activeProcessJobIds marker.
         return await this.getRequiredJob(claimed.jobId);
       }
       // #1867 — either the tx never left ('not-reached' / 'rolled-back-pre-send'), or a
@@ -1107,6 +1129,10 @@ export class TripleStoreAsyncLiftPublisher
       if (this.detachedExecutions.get(jobId) === tracked) {
         this.detachedExecutions.delete(jobId);
       }
+      // The job just stopped being executor-owned (line-of-ownership: reconciliation skips jobs
+      // in this map). Whatever the execution's outcome, only chain proof can settle the record
+      // now, so invite the reconcile pass instead of leaving the job to the idle sweep.
+      this.notifyReconciliationDemand();
     });
     this.detachedExecutions.set(jobId, tracked);
   }
@@ -1114,6 +1140,72 @@ export class TripleStoreAsyncLiftPublisher
   async drainDetachedExecutions(): Promise<void> {
     while (this.detachedExecutions.size > 0) {
       await Promise.all([...this.detachedExecutions.values()]);
+    }
+  }
+
+  readonly reconciliationScheduling = {
+    // Exclusive attachment: reconciliation demand has exactly one owner (the scheduling
+    // runner); attaching takes over. See the interface doc for the ownership/handover contract.
+    attachDemandListener: (listener: () => void): (() => void) => {
+      this.reconciliationDemandListener = listener;
+      return () => {
+        // Detaches only THIS attachment — a stale detach from a superseded owner is a no-op.
+        if (this.reconciliationDemandListener === listener) {
+          this.reconciliationDemandListener = undefined;
+        }
+      };
+    },
+    // The scheduling caller's per-tick operation: one pass, one atomic answer.
+    reconcile: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.runReconciliationPass(),
+    // Startup recovery with the outcome kept: the caller seeds its cadence from the pass it
+    // already ran instead of paying a second boot-time inventory.
+    recover: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.runRecovery(),
+  };
+
+  /**
+   * The ONE definition of "reconciliation can act on this job now": live tx-bearing state, no
+   * executor ownership marker, and a lane that can actually move the record as THIS publisher
+   * is wired. Shared by the outlook, the reconcile pass pre-filter, and the ownership-boundary
+   * demand poke, so the three cannot drift. The deeper per-job re-checks under the transition
+   * lock remain authoritative; this is the coherent pre-answer.
+   */
+  private isReconciliationActionable(job: LiftJob): boolean {
+    return (
+      (job.status === 'broadcast' || job.status === 'included')
+      && !this.detachedExecutions.has(job.jobId)
+      && !this.activeProcessJobIds.has(job.jobId)
+      && this.canReconciliationProgress(job)
+    );
+  }
+
+  /**
+   * Whether any configured lane can ever TRANSITION this live record. A named-KA job with
+   * neither the chain-proof resolver nor the named recovery resolver has no path that changes
+   * it — it is deliberately held for safety — so advertising it as active work would pin the
+   * scheduling caller to the active cadence (a full inventory per tick) forever, in exactly the
+   * degraded configuration where recovery is unavailable. Such records stay eligible for the
+   * idle crash-recovery sweep and become actionable the moment a resolver is configured again.
+   * The raw lane always has a transition available (evidence-free reset, or the inconclusive
+   * timeout into the held-failed state), so its jobs always count.
+   */
+  private canReconciliationProgress(job: LiftJob): boolean {
+    if (isKnowledgeAssetVmPublishJobRequest(job.request)) {
+      return this.chainProofResolver !== undefined
+        || this.knowledgeAssetVmPublishRecoveryResolver !== undefined;
+    }
+    return true;
+  }
+
+  /**
+   * A scheduling poke, not a state transition: it must never throw into a job's own control flow,
+   * and it establishes nothing — the reconcile pass re-reads the queue and remains the only judge
+   * of what is actionable.
+   */
+  private notifyReconciliationDemand(): void {
+    try {
+      this.reconciliationDemandListener?.();
+    } catch {
+      // The listener belongs to the caller's scheduler; its failure must not touch job state.
     }
   }
 
@@ -1605,32 +1697,76 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async recover(): Promise<number> {
+    return (await this.runRecovery()).reconciled;
+  }
+
+  private async runRecovery(): Promise<{ reconciled: number; pendingWork: boolean }> {
     await this.ensureGraph();
     await this.sweepStaleWalletLocks();
-    return await this.reconcileTransactions();
+    return await this.runReconciliationPass();
   }
 
   async reconcileTransactions(): Promise<number> {
-    await this.ensureGraph();
-    let reconciled = await this.recoverInterruptedPreBroadcastJobs();
-    const txBearing = (await this.list()).filter(
-      (job) => job.status === 'broadcast' || job.status === 'included',
-    );
+    return (await this.runReconciliationPass()).reconciled;
+  }
 
+  /**
+   * The ONE canonical pass: reports both what it settled and whether actionable live work
+   * remains, computed DURING the walk (per-job, from the under-lock re-reads the pass already
+   * pays for) — never by a second queue inventory afterwards. The scheduling caller consumes
+   * this outcome atomically, so no separate outlook read exists to fail after a successful
+   * pass and strand a served demand on the idle cadence. `reconcileTransactions`/`recover`
+   * remain the wire-stable numeric surface over the same pass.
+   */
+  private async runReconciliationPass(): Promise<{ reconciled: number; pendingWork: boolean }> {
+    await this.ensureGraph();
+    // ONE queue inventory per pass, partitioned in memory across the three lanes — per-lane
+    // full reads at an active cadence move the bottleneck into store/control-plane work. Each
+    // lane re-reads its candidates under the transition lock before acting, so the shared
+    // snapshot only selects candidates and staleness cannot change a disposition.
+    const inventory = await this.list();
+    let reconciled = await this.recoverInterruptedPreBroadcastJobs(inventory);
+    // Same actionability rule the scheduling outlook answers with: executor-owned jobs are
+    // skipped up front rather than each burning a transition-lock turn to be skipped deeper in.
+    const txBearing = inventory.filter((job) => this.isReconciliationActionable(job));
+    // The pass deadline below may truncate this walk, and `list()` order is stable — without
+    // rotation a head job behind a slow resolver would be re-asked every pass while the tail
+    // starved. Rotating the start bounds every job's wait to at most `txBearing.length` passes.
+    // (The failed-job lane needs no rotation: its per-job due times already rotate the batch.)
+    const offset = txBearing.length > 0 ? this.reconcilePassOffset++ % txBearing.length : 0;
+    const rotatedTxBearing = txBearing.slice(offset).concat(txBearing.slice(0, offset));
+
+    // Live jobs this pass could not settle: still awaiting proof after their turn, or not
+    // reached before the deadline. Held-failed jobs are deliberately NOT counted — the
+    // failed-job dispatcher paces itself with per-job due times.
+    let remainingLive = 0;
+    // Jobs the live lane settled THIS pass. A settle can be a transition INTO the held-failed
+    // state (inconclusive timeout, proven revert), and the dispatcher below must see those in
+    // the same pass — with only the shared start-of-pass snapshot they would wait out the idle
+    // sweep holding their wallets, which per-lane inventories never made them do.
+    const settledLive: string[] = [];
     const deadline = new AbortController();
     const deadlineTimer = setTimeout(
       () => deadline.abort(),
       Math.max(0, this.chainProofDispatchTimeBudgetMs),
     );
     try {
-      for (const snapshot of txBearing) {
-        if (deadline.signal.aborted) break;
+      for (let i = 0; i < rotatedTxBearing.length; i += 1) {
+        if (deadline.signal.aborted) {
+          remainingLive += rotatedTxBearing.length - i;
+          break;
+        }
+        const snapshot = rotatedTxBearing[i];
         await this.withJobTransitionLock(snapshot.jobId, async () => {
           const current = await this.getStatus(snapshot.jobId);
+          // Settled or re-owned since the pre-filter: no longer this pass's remaining work.
           if (!current || (current.status !== 'broadcast' && current.status !== 'included')) return;
           if (this.activeProcessJobIds.has(current.jobId)) return;
           if (await this.jobHandlerFor(current.request).recoverInterrupted(current, { signal: deadline.signal })) {
             reconciled += 1;
+            settledLive.push(current.jobId);
+          } else {
+            remainingLive += 1;
           }
         });
       }
@@ -1639,8 +1775,20 @@ export class TripleStoreAsyncLiftPublisher
       deadline.abort();
     }
 
-    reconciled += await this.dispatchFailedJobsOnChainProof();
-    return reconciled;
+    // The dispatcher's view: the shared snapshot with this pass's own settlements made current
+    // (a point read per settled job — zero on the common pass — not a second inventory).
+    let dispatcherInventory: readonly LiftJob[] = inventory;
+    if (settledLive.length > 0) {
+      const refreshed = new Map<string, LiftJob | null>();
+      for (const jobId of settledLive) {
+        refreshed.set(jobId, await this.getStatus(jobId));
+      }
+      dispatcherInventory = inventory
+        .map((job) => (refreshed.has(job.jobId) ? refreshed.get(job.jobId) ?? null : job))
+        .filter((job): job is LiftJob => job !== null);
+    }
+    reconciled += await this.dispatchFailedJobsOnChainProof(dispatcherInventory);
+    return { reconciled, pendingWork: remainingLive > 0 };
   }
 
   private async resolveChainProofWithinSignal(
@@ -1665,8 +1813,10 @@ export class TripleStoreAsyncLiftPublisher
     }
   }
 
-  private async recoverInterruptedPreBroadcastJobs(): Promise<number> {
-    const interrupted = (await this.list()).filter(
+  private async recoverInterruptedPreBroadcastJobs(inventory: readonly LiftJob[]): Promise<number> {
+    // Candidates come from the pass's shared inventory snapshot; each is re-read under its
+    // transition lock below before anything acts on it.
+    const interrupted = inventory.filter(
       (job) => job.status === 'claimed' || job.status === 'validated',
     );
     let recovered = 0;
@@ -1731,7 +1881,7 @@ export class TripleStoreAsyncLiftPublisher
     return this.heldJobSettlement(job, walletId, liftJobOperationKindMarker(job));
   }
 
-  private async dispatchFailedJobsOnChainProof(): Promise<number> {
+  private async dispatchFailedJobsOnChainProof(inventory: readonly LiftJob[]): Promise<number> {
     // The dispatcher RE-QUEUES work (a proven-absent job goes back to 'accepted') and spends a
     // chain read per held job per tick. `pause()` means this node is not driving publishes, so it
     // must not do either. The interrupted half above deliberately keeps running while paused: it
@@ -1746,7 +1896,10 @@ export class TripleStoreAsyncLiftPublisher
     // bounds apply, and none of them changes a job's DISPOSITION: a job that is not asked is left
     // exactly as held, so no bound can authorize a resend.
     const startedAt = this.now();
-    const heldJobs = (await this.list({ status: 'failed' }))
+    // Candidates from the pass's shared inventory snapshot (one read per pass); dispositions
+    // still act only on state re-read in each job's own turn.
+    const heldJobs = inventory
+      .filter((job) => job.status === 'failed')
       .filter(isFailedJob)
       .filter((job) => this.jobHandlerFor(job.request).canRetryFailedRecovery(job));
 

@@ -857,8 +857,19 @@ export interface DkgConfig {
     enabled?: boolean;
     pollIntervalMs?: number;
     errorBackoffMs?: number;
-    /** How often to check submitted transactions for chain confirmation. Default 60000ms. */
+    /**
+     * The IDLE sweep: how often to check submitted transactions for chain confirmation when the
+     * queue reports no transaction awaiting proof (crash recovery, missed wake-ups).
+     * Default 60000ms.
+     */
     recoveryIntervalMs?: number;
+    /**
+     * The ACTIVE reconcile cadence: how often to re-check while at least one submitted
+     * transaction is still awaiting chain proof. The publisher additionally wakes reconciliation
+     * immediately when a receipt task settles, so this bounds only the re-check loop for
+     * transactions whose proof was not yet available. Default 5000ms.
+     */
+    activeRecoveryIntervalMs?: number;
     /**
      * Retry budget per job — ONE counter shared by the publisher's automatic
      * retries and manual reaccepts, snapshot at admission. Default 10.

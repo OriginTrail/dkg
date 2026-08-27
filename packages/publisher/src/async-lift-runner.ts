@@ -7,6 +7,17 @@ export interface AsyncLiftRunnerConfig {
   readonly pollIntervalMs?: number;
   readonly errorBackoffMs?: number;
   readonly recoveryIntervalMs?: number;
+  /**
+   * Reconciliation cadence while the publisher reports transaction-bearing jobs awaiting chain
+   * proof. `recoveryIntervalMs` stays the idle sweep for work no wake-up can announce (crash
+   * recovery, jobs stranded by a listener that never fired). Only consulted when the publisher
+   * implements the `reconciliationScheduling` capability.
+   *
+   * When omitted, the effective active cadence is `min(recoveryIntervalMs, 5000)`: never slower
+   * than the 5s default, and never slower than an explicitly configured `recoveryIntervalMs` —
+   * a consumer that already checks pending transactions faster than 5s keeps that rate.
+   */
+  readonly activeRecoveryIntervalMs?: number;
   /** Start recovery, but do not claim accepted jobs until an operator restarts unpaused. */
   readonly startPaused?: boolean;
   readonly sleep?: (ms: number) => Promise<void>;
@@ -18,6 +29,7 @@ export class AsyncLiftRunner {
   private readonly pollIntervalMs: number;
   private readonly errorBackoffMs: number;
   private readonly recoveryIntervalMs: number;
+  private readonly activeRecoveryIntervalMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly onError?: (error: unknown) => void | Promise<void>;
   private started = false;
@@ -27,12 +39,28 @@ export class AsyncLiftRunner {
   private lastRecoveryAttemptAt = 0;
   private recoveryInFlight?: Promise<void>;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Demand latch: set by a poke, consumed at pass start, restored if that pass FAILS — so a
+   * transient error cannot spend the only wake-up. A mid-pass poke sets it after the consume
+   * and therefore survives a successful pass that may already be past its job; repeated pokes
+   * coalesce naturally. Only one pass runs at a time, so a boolean is the whole state.
+   */
+  private reconciliationDemanded = false;
+  /** Whether unresolved tx work remains, from the last pass outcome (boot-seeded); selects active vs idle cadence. */
+  private pendingReconciliation = false;
+  private unsubscribeReconciliationDemand?: () => void;
 
   constructor(private readonly config: AsyncLiftRunnerConfig) {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.errorBackoffMs = config.errorBackoffMs ?? 1000;
     this.recoveryIntervalMs = config.recoveryIntervalMs ?? 60_000;
     assertNodeTimerDelayMs(this.recoveryIntervalMs, 'AsyncLiftRunner recoveryIntervalMs');
+    // The active cadence must never be SLOWER than an explicitly configured recoveryIntervalMs:
+    // that setting was a consumer's pending-transaction check rate before the active/idle split
+    // existed, and the new default must not override a faster explicit choice.
+    this.activeRecoveryIntervalMs = config.activeRecoveryIntervalMs
+      ?? Math.min(config.recoveryIntervalMs ?? 5_000, 5_000);
+    assertNodeTimerDelayMs(this.activeRecoveryIntervalMs, 'AsyncLiftRunner activeRecoveryIntervalMs');
     this.sleep = config.sleep ?? defaultSleep;
     this.onError = config.onError;
   }
@@ -50,7 +78,15 @@ export class AsyncLiftRunner {
       if (this.config.startPaused === true) {
         await this.config.publisher.pause();
       }
-      await this.config.publisher.recover();
+      // Startup recovery IS the first pass: with the scheduling capability its outcome seeds
+      // the cadence choice directly — one inventory, no second boot-time outlook read. Without
+      // the capability the legacy numeric recover() runs and the idle cadence is the seed.
+      const scheduling = this.config.publisher.reconciliationScheduling;
+      if (scheduling) {
+        this.pendingReconciliation = (await scheduling.recover()).pendingWork;
+      } else {
+        await this.config.publisher.recover();
+      }
       this.lastRecoveryAt = Date.now();
       if (!this.config.hasIncludedRecoveryResolver) {
         const includedJobs = await this.config.publisher.list({ status: 'included' });
@@ -64,6 +100,12 @@ export class AsyncLiftRunner {
     }
 
     this.started = true;
+    // A tx-bearing job leaves executor ownership (detached receipt settles, ambiguous broadcast)
+    // between passes; the poke pulls the next pass forward instead of waiting out the cadence.
+    // No in-process work can settle before this point — executors only run once the wallet
+    // loops below start — so attaching after startup recovery loses nothing.
+    this.unsubscribeReconciliationDemand = this.config.publisher.reconciliationScheduling
+      ?.attachDemandListener(() => this.demandTransactionReconciliation());
     this.scheduleTransactionReconciliation();
     this.running = Promise.all(
       this.config.walletIds.map((walletId) => this.walletLoop(walletId)),
@@ -76,6 +118,11 @@ export class AsyncLiftRunner {
       clearTimeout(this.recoveryTimer);
       this.recoveryTimer = undefined;
     }
+    // Dispose the demand subscription so the publisher does not keep (or invoke) a callback
+    // into a stopped runner — the drain below settles detached executions, which would
+    // otherwise poke this corpse on every settle.
+    this.unsubscribeReconciliationDemand?.();
+    this.unsubscribeReconciliationDemand = undefined;
     await this.running;
     await this.recoveryInFlight;
     await this.config.publisher.drainDetachedExecutions?.();
@@ -101,11 +148,29 @@ export class AsyncLiftRunner {
     }
   }
 
+  /**
+   * The publisher's poke that reconciliation gained actionable work. Coalesced: during an
+   * in-flight pass it only marks the flag, and the pass's own rescheduling turns any number of
+   * pokes into one follow-up pass. `errorBackoffMs` since the last attempt stays the floor, so a
+   * reconciliation that keeps throwing cannot be poked into a hot loop.
+   */
+  private demandTransactionReconciliation(): void {
+    if (this.stopped || !this.started) return;
+    this.reconciliationDemanded = true;
+    if (this.recoveryInFlight) return;
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = undefined;
+    }
+    this.scheduleTransactionReconciliation();
+  }
+
   private scheduleTransactionReconciliation(): void {
     if (this.stopped || this.recoveryTimer || this.recoveryInFlight) return;
     const now = Date.now();
+    const cadenceMs = this.pendingReconciliation ? this.activeRecoveryIntervalMs : this.recoveryIntervalMs;
     const nextAt = Math.max(
-      this.lastRecoveryAt + this.recoveryIntervalMs,
+      this.reconciliationDemanded ? now : this.lastRecoveryAt + cadenceMs,
       this.lastRecoveryAttemptAt + this.errorBackoffMs,
     );
     this.recoveryTimer = setTimeout(() => {
@@ -116,12 +181,27 @@ export class AsyncLiftRunner {
 
   private startTransactionReconciliation(): void {
     if (this.stopped || this.recoveryInFlight) return;
+    // Consume the latch; a failed pass restores what it consumed (errorBackoffMs floor paces
+    // the retry), and a mid-pass poke re-sets the latch independently of this capture.
+    const demandConsumed = this.reconciliationDemanded;
+    this.reconciliationDemanded = false;
     this.lastRecoveryAttemptAt = Date.now();
-    const recovery = (this.config.publisher.reconcileTransactions?.() ?? this.config.publisher.recover())
-      .then(() => {
+    const scheduling = this.config.publisher.reconciliationScheduling;
+    // The outlook arrives IN the pass result: serving the demand and learning whether work
+    // remains are one atomic step, so no separate post-pass queue read exists to fail after a
+    // successful pass and park an unresolved transaction on the idle cadence. A publisher
+    // without the capability has no outlook to report; its passes keep the seeded cadence.
+    const pass: Promise<{ reconciled: number; pendingWork: boolean }> = scheduling
+      ? scheduling.reconcile()
+      : (this.config.publisher.reconcileTransactions?.() ?? this.config.publisher.recover())
+        .then((reconciled) => ({ reconciled, pendingWork: this.pendingReconciliation }));
+    const recovery = pass
+      .then((outcome) => {
         this.lastRecoveryAt = Date.now();
+        this.pendingReconciliation = outcome.pendingWork;
       })
       .catch(async (error) => {
+        this.reconciliationDemanded = this.reconciliationDemanded || demandConsumed;
         try {
           await this.onError?.(error);
         } catch {
