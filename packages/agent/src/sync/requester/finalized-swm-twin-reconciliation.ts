@@ -43,6 +43,20 @@ export interface FinalizedSwmTwinRetirement {
   readonly kaNumber: bigint;
 }
 
+export interface FinalizedSwmTwinCatalogProjectionEvidence {
+  readonly contextGraphId: string;
+  readonly subGraphName?: string;
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  /** Digest of the exact verified catalog projection activated into SWM. */
+  readonly publicQuadsDigest: string;
+  readonly publicQuadsCount: number;
+  readonly privateTripleCount: number;
+  readonly privateMerkleRoot?: string;
+  /** Author-signed assertion root carried by the verified catalog seal. */
+  readonly expectedMerkleRoot: string;
+}
+
 /**
  * Retire the mutable SWM twin of an authenticated VM asset, but only when the
  * receiver can prove locally that it is the exact finalized content.
@@ -99,6 +113,28 @@ export async function reconcileFinalizedSwmTwinFromDescriptor(params: {
   });
 }
 
+/**
+ * Catalog activation can be the final SWM arrival even when a confirmed VM
+ * copy already exists locally. Unlike ordinary SWM recovery, that path does
+ * not create a WorkspaceOperation descriptor, so it supplies the equivalent
+ * process-local proof directly: exact verified projection digest/count plus
+ * the author-signed private and aggregate commitments from the catalog seal.
+ */
+export async function reconcileFinalizedSwmTwinFromCatalogProjection(params: {
+  readonly store: TripleStore;
+  readonly writeLocks: Map<string, Promise<void>>;
+  readonly evidence: Readonly<FinalizedSwmTwinCatalogProjectionEvidence>;
+  readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
+}): Promise<FinalizedSwmTwinReconciliationOutcome> {
+  const evidence = evidenceFromCatalogProjection(params.evidence);
+  return reconcileFinalizedSwmTwinEvidence({
+    store: params.store,
+    writeLocks: params.writeLocks,
+    evidence,
+    retire: params.retire,
+  });
+}
+
 interface CommonFinalizedSwmTwinEvidence extends FinalizedSwmTwinRetirement {
   readonly assertionVersion: bigint;
   readonly vmGraph: string;
@@ -122,9 +158,16 @@ interface SwmArrivalFinalizedSwmTwinEvidence extends CommonFinalizedSwmTwinEvide
   readonly arrival: 'swm';
 }
 
+interface CatalogArrivalFinalizedSwmTwinEvidence extends CommonFinalizedSwmTwinEvidence {
+  /** Exact catalog projection plus author seal supplied the SWM evidence. */
+  readonly arrival: 'catalog';
+  readonly expectedMerkleRoot: string;
+}
+
 type FinalizedSwmTwinEvidence =
   | VmArrivalFinalizedSwmTwinEvidence
-  | SwmArrivalFinalizedSwmTwinEvidence;
+  | SwmArrivalFinalizedSwmTwinEvidence
+  | CatalogArrivalFinalizedSwmTwinEvidence;
 
 async function reconcileFinalizedSwmTwinEvidence(params: {
   readonly store: TripleStore;
@@ -309,6 +352,48 @@ function evidenceFromSwmDescriptor(
     ...(descriptor.privateMerkleRoot === undefined
       ? {}
       : { privateMerkleRoot: normalizeHex32(descriptor.privateMerkleRoot) }),
+    agentAddress: scope.agentAddress,
+    kaNumber: BigInt(scope.kaNumber),
+  };
+}
+
+function evidenceFromCatalogProjection(
+  input: Readonly<FinalizedSwmTwinCatalogProjectionEvidence>,
+): CatalogArrivalFinalizedSwmTwinEvidence {
+  const scope = createGraphKnowledgeAssetScope(input.kaUal, input.assertionVersion);
+  const swmGraph = knowledgeAssetLayerGraphUri(
+    input.contextGraphId,
+    MemoryLayer.SharedWorkingMemory,
+    scope,
+    input.subGraphName,
+  );
+  const vmGraph = knowledgeAssetLayerGraphUri(
+    input.contextGraphId,
+    MemoryLayer.VerifiableMemory,
+    scope,
+    input.subGraphName,
+  );
+  return {
+    arrival: 'catalog',
+    contextGraphId: input.contextGraphId,
+    ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
+    kaUal: scope.ual,
+    assertionVersion: BigInt(input.assertionVersion),
+    vmGraph,
+    vmMetaGraph: `did:dkg:context-graph:${input.contextGraphId}/_meta`,
+    swmGraph,
+    swmMetaGraph: contextGraphSharedMemoryMetaUri(
+      input.contextGraphId,
+      input.subGraphName,
+    ),
+    headSubject: `${scope.ual}#dkg-swm-head`,
+    expectedVmDigest: input.publicQuadsDigest.trim().toLowerCase(),
+    expectedPublicQuadsCount: input.publicQuadsCount,
+    privateTripleCount: input.privateTripleCount,
+    ...(input.privateMerkleRoot === undefined
+      ? {}
+      : { privateMerkleRoot: normalizeHex32(input.privateMerkleRoot) }),
+    expectedMerkleRoot: normalizeHex32(input.expectedMerkleRoot),
     agentAddress: scope.agentAddress,
     kaNumber: BigInt(scope.kaNumber),
   };

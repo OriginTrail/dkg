@@ -264,6 +264,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       contextGraphIds: readonly string[];
       selected: boolean;
     }> = [];
+    const plannedScopes: Array<readonly string[]> = [];
     const mixedPlan = {
       publicContextGraphIds: [publicCg],
       privateRecoverFromCurator: [privateCg],
@@ -274,9 +275,12 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       config: {
         syncOnConnect: true,
         syncSharedMemoryOnConnect: true,
-        syncContextGraphs: [publicCg, privateCg],
-        rfc64PublicCatalogBootstrap: {
-          acceptedPublicPolicies: [{ completeSwmProviders: [PEER] }],
+        syncContextGraphs: [publicCg],
+        rfc64CatalogBootstrap: {
+          acceptedPolicies: [publicCg, privateCg].map((contextGraphId) => ({
+            policyEnvelope: { payload: { contextGraphId } },
+            completeSwmProviders: [PEER],
+          })),
         },
       },
       networkAdmissionCoordinator: { isAcceptedPeer: () => true },
@@ -289,9 +293,12 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       syncReconcilerBackoff: new Map<string, unknown>(),
       selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      planSharedMemorySyncContextGraphs: async () => mixedPlan,
+      planSharedMemorySyncContextGraphs: async (_peerId, contextGraphIds = []) => {
+        plannedScopes.push([...contextGraphIds]);
+        return mixedPlan;
+      },
       resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId: string) => (
-        contextGraphId === publicCg ? [PEER] : []
+        contextGraphId === publicCg || contextGraphId === privateCg ? [PEER] : []
       ),
       syncFromPeerDetailed: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
@@ -329,6 +336,10 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       { contextGraphIds: [publicCg], selected: true },
       { contextGraphIds: [privateCg], selected: false },
     ]);
+    expect(plannedScopes.length).toBeGreaterThan(0);
+    expect(plannedScopes.every((scope) => (
+      scope.includes(publicCg) && scope.includes(privateCg)
+    ))).toBe(true);
   });
 
   it('does not stamp a max-pass incomplete selected provider fresh', async () => {
@@ -341,7 +352,10 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         syncSharedMemoryOnConnect: true,
         syncContextGraphs: [publicCg],
         rfc64PublicCatalogBootstrap: {
-          acceptedPublicPolicies: [{ completeSwmProviders: [PEER] }],
+          acceptedPublicPolicies: [{
+            policyEnvelope: { payload: { contextGraphId: publicCg } },
+            completeSwmProviders: [PEER],
+          }],
         },
       },
       networkAdmissionCoordinator: { isAcceptedPeer: () => true },

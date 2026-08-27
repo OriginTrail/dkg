@@ -116,6 +116,69 @@ async function liveRpcEndpoint(assertionRoot?: Digest32V1): Promise<string> {
 
 
 describe('RFC-64 finalized VM agent precommit', () => {
+  it('retires a finalized catalog SWM projection only after the applied-head commit', async () => {
+    const graphlessProjection: Quad[] = [{
+      subject: 'urn:rfc64:post-commit-swm-retirement',
+      predicate: 'urn:rfc64:value',
+      object: '"finalized"',
+      graph: '',
+    }];
+    const assertionRoot = ethers.hexlify(computeFlatKCRootV10(
+      graphlessProjection,
+      [],
+    )).toLowerCase() as Digest32V1;
+    const placement = await createRfc64FinalizedVmPlacementFixture({
+      assertionRoot,
+      publicTripleCount: graphlessProjection.length,
+    });
+    const options = baseOptions();
+    const { store } = options;
+    const swmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.SharedWorkingMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    const vmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.VerifiableMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    await store.insert(graphlessProjection.map((quad) => ({ ...quad, graph: swmGraph })));
+    const retireFinalizedSwm = vi.fn(async (retirement: { swmGraph: string }) => {
+      await store.dropGraph(retirement.swmGraph);
+    });
+    const handler = createRfc64FinalizedVmAgentPrecommitV1({
+      ...options,
+      acceptedPolicySnapshotForCatalogScope: () => privateFinalizedSnapshot(),
+      rpcEndpoints: [await liveRpcEndpoint(assertionRoot)],
+      retireFinalizedSwm,
+    });
+
+    const transaction = await handler(Object.freeze({
+      ...plan(),
+      rows: Object.freeze([placement]),
+    }), new AbortController().signal);
+
+    await expect(store.hasGraph(swmGraph)).resolves.toBe(true);
+    await expect(store.hasGraph(vmGraph)).resolves.toBe(true);
+    expect(retireFinalizedSwm).not.toHaveBeenCalled();
+
+    await transaction?.commit();
+
+    await expect(store.hasGraph(swmGraph)).resolves.toBe(false);
+    await expect(store.hasGraph(vmGraph)).resolves.toBe(true);
+    expect(retireFinalizedSwm).toHaveBeenCalledOnce();
+    expect(retireFinalizedSwm).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: RFC64_VM_CONTEXT_GRAPH_NAME,
+      kaUal: rfc64VmUal(1n),
+      agentAddress: RFC64_VM_AUTHOR,
+      kaNumber: 1n,
+      swmGraph,
+    }));
+  });
+
   it('applies the root-only restriction to private finalized recovery', async () => {
     const getOnChainContextGraphId = vi.fn(async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID);
     const getEvmChainId = vi.fn(async () => BigInt(RFC64_VM_CHAIN_ID));

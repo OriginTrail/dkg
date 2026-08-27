@@ -72,6 +72,38 @@ describe('private SWM curator recovery planning', () => {
     expect(plan.eligibleContextGraphIds).toEqual([]);
   });
 
+  it('recovers a selected private CG from its exact complete provider without registry discovery', async () => {
+    const curator = ethers.Wallet.createRandom().address.toLowerCase();
+    const member = ethers.Wallet.createRandom().address.toLowerCase();
+    const completeProvider = '12D3KooWPrivateCompleteProvider';
+    const contextGraphId = `${curator}/selected-private-cold`;
+    const agent = await createAgent('CompletePrivateSwmColdStartPlan');
+
+    installPlanningStubs(agent, {
+      localAgent: member,
+      curator,
+      curatorPeers: [],
+      isPrivate: true,
+    });
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [completeProvider];
+    internals.refreshMetaFromCurator = async () => {
+      throw new Error('pinned private recovery must not wait for registry discovery');
+    };
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      completeProvider,
+      [contextGraphId],
+      createOperationContext('sync'),
+      { requireCompleteProviderMatch: true },
+    )).resolves.toEqual({
+      publicContextGraphIds: [],
+      privateRecoverFromCurator: [contextGraphId],
+      eligibleContextGraphIds: [contextGraphId],
+    });
+  });
+
   it('limits automatic public SWM sweeps to an RFC-64 graph-complete provider', async () => {
     const contextGraphId = `${ethers.Wallet.createRandom().address}/selected-public`;
     const completeProvider = '12D3KooWCompleteSwmProvider';

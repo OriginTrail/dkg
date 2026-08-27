@@ -417,6 +417,38 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
   }, 30_000);
 
+  it('replays a cold-bootstrapped current exact head without staging its predecessor', async () => {
+    const fixture = await setupLiveReceiver();
+
+    await expect(fixture.synchronizeAny(
+      fixture.multiAssetAnnouncement,
+    )).resolves.toMatchObject({
+      catalogHeadDigest: fixture.multiAssetSuccessor.head.objectDigest,
+      inventoryRowCount: 2,
+      appliedHeadStatus: 'applied',
+    });
+    await expect(fixture.receiverPersistence.controlObjects.getVerifiedObjectByDigest({
+      objectDigest: fixture.multiAssetSuccessor.head.payload.previousHeadDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    })).resolves.toBeNull();
+
+    await expect(fixture.synchronizeAny(
+      fixture.multiAssetAnnouncement,
+    )).resolves.toMatchObject({
+      catalogHeadDigest: fixture.multiAssetSuccessor.head.objectDigest,
+      inventoryRowCount: 2,
+      appliedHeadStatus: 'existing',
+    });
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toMatchObject({
+      currentCatalogHeadDigest: fixture.multiAssetSuccessor.head.objectDigest,
+      inventoryRowCount: '2',
+    });
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
+  }, 30_000);
+
   it('checkpoints verified bundles and resumes the exact head after receiver restart', async () => {
     const fixture = await setupLiveReceiver();
     await fixture.bootstrap();

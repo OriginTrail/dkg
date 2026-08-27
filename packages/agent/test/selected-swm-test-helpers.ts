@@ -259,8 +259,17 @@ export interface SelectedProviderSelectionAgent {
     syncOnConnect: boolean;
     syncSharedMemoryOnConnect: boolean;
     syncContextGraphs: string[];
-    rfc64PublicCatalogBootstrap: {
-      acceptedPublicPolicies: Array<{ completeSwmProviders: string[] }>;
+    rfc64PublicCatalogBootstrap?: {
+      acceptedPublicPolicies: Array<{
+        policyEnvelope: { payload: { contextGraphId: string } };
+        completeSwmProviders: string[];
+      }>;
+    };
+    rfc64CatalogBootstrap?: {
+      acceptedPolicies: Array<{
+        policyEnvelope: { payload: { contextGraphId: string } };
+        completeSwmProviders: string[];
+      }>;
     };
   };
   networkAdmissionCoordinator: { isAcceptedPeer: (peerId: string) => boolean };
@@ -273,7 +282,10 @@ export interface SelectedProviderSelectionAgent {
   syncReconcilerBackoff: Map<string, unknown>;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   getPeerProtocols: () => Promise<string[]>;
-  planSharedMemorySyncContextGraphs: () => Promise<{
+  planSharedMemorySyncContextGraphs: (
+    peerId?: string,
+    contextGraphIds?: readonly string[],
+  ) => Promise<{
     publicContextGraphIds: string[];
     privateRecoverFromCurator: string[];
     eligibleContextGraphIds: string[];

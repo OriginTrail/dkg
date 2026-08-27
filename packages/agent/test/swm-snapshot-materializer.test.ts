@@ -133,6 +133,9 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       await store.insert([...v1.meta]);
       const { materializer } = materializerFor(store);
       expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(false);
+      // Private recovery used to ask only for the durable head marker here,
+      // skip the missing assertion graph, and still count it as recovered.
+      expect(await materializer.hasGraphAssetMarker(descriptorFor(v1))).toBe(false);
     });
 
     it('is false for a short (partially written) graph', async () => {
@@ -147,6 +150,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       await store.insert(inGraph(v1.payload, v1.assertionGraph));
       const { materializer } = materializerFor(store);
       expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+      expect(await materializer.hasGraphAssetMarker(descriptorFor(v1))).toBe(true);
     });
 
     it('is false when an EQUAL-COUNT graph holds a different version\'s content', async () => {

@@ -16,6 +16,7 @@ import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-officia
 import { ethers } from 'ethers';
 import {
   reconcileFinalizedSwmTwin,
+  reconcileFinalizedSwmTwinFromCatalogProjection,
   reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
@@ -219,6 +220,25 @@ function descriptorFor(input: ReturnType<typeof fixture>) {
   } as const;
 }
 
+function catalogEvidenceFor(input: ReturnType<typeof fixture>) {
+  const expectedMerkleRoot = ethers.hexlify(computeFlatKCRootV10(
+    input.payload.map((quad) => ({ ...quad, graph: '' })),
+    input.privateMerkleRoot === undefined ? [] : [ethers.getBytes(input.privateMerkleRoot)],
+  ));
+  return {
+    contextGraphId: CG,
+    kaUal: UAL,
+    assertionVersion: input.asset.assertionVersion.toString(),
+    publicQuadsDigest: workspacePublicQuadsDigest(input.payload),
+    publicQuadsCount: input.payload.length,
+    privateTripleCount: input.privateTripleCount,
+    ...(input.privateMerkleRoot === undefined
+      ? {}
+      : { privateMerkleRoot: input.privateMerkleRoot }),
+    expectedMerkleRoot,
+  } as const;
+}
+
 describe('durable VM / SWM tier reconciliation', () => {
   it.each([undefined, 'code'])('retires an exact finalized twin for subgraph %s', async (subGraphName) => {
     const store = new OxigraphStore();
@@ -264,6 +284,55 @@ describe('durable VM / SWM tier reconciliation', () => {
 
     expect(retire).toHaveBeenCalledTimes(1);
     expect(await store.countQuads(input.swmGraph)).toBe(0);
+  });
+
+  it('retires an exact catalog-staged SWM twin without a WorkspaceOperation head', async () => {
+    const store = new OxigraphStore();
+    const input = fixture();
+    await seedTwin(store, input);
+    await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+    await store.deleteByPattern({
+      graph: input.swmMetaGraph,
+      subject: `urn:dkg:share:${CG}:${OPERATION_ID}`,
+    });
+    const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+      await store.dropGraph(candidate.swmGraph);
+    });
+
+    await expect(reconcileFinalizedSwmTwinFromCatalogProjection({
+      store,
+      writeLocks: new Map(),
+      evidence: catalogEvidenceFor(input),
+      retire,
+    })).resolves.toBe('retired');
+
+    expect(retire).toHaveBeenCalledTimes(1);
+    expect(await store.countQuads(input.swmGraph)).toBe(0);
+  });
+
+  it('preserves a catalog-staged SWM twin when the author-signed root differs', async () => {
+    const store = new OxigraphStore();
+    const input = fixture();
+    await seedTwin(store, input);
+    await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+    await store.deleteByPattern({
+      graph: input.swmMetaGraph,
+      subject: `urn:dkg:share:${CG}:${OPERATION_ID}`,
+    });
+    const retire = vi.fn(async () => {});
+
+    await expect(reconcileFinalizedSwmTwinFromCatalogProjection({
+      store,
+      writeLocks: new Map(),
+      evidence: {
+        ...catalogEvidenceFor(input),
+        expectedMerkleRoot: `0x${'ff'.repeat(32)}`,
+      },
+      retire,
+    })).resolves.toBe('vm-metadata-mismatch');
+
+    expect(retire).not.toHaveBeenCalled();
+    expect(await store.countQuads(input.swmGraph)).toBe(input.payload.length);
   });
 
   it.each(['vm-arrival', 'swm-arrival'] as const)(

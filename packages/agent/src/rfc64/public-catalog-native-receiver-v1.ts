@@ -74,6 +74,7 @@ import {
   type TripleStore,
   invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
+import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
 import { parseNQuads } from '../dkg-agent-utils.js';
@@ -168,6 +169,8 @@ export interface Rfc64PublicCatalogNativeReceiverResourceStatsV1 {
 export interface Rfc64PublicCatalogNativePrecommitRowPlanV1 {
   readonly authorship: VerifiedAuthorCatalogRowAuthorshipV1;
   readonly sealBinding: VerifiedCatalogSealBindingV1;
+  /** Exact graph-neutral digest of the verified projection activated into SWM. */
+  readonly publicQuadsDigest?: string;
 }
 
 /** Generic same-process barrier plan executed after semantic post-read and before head CAS. */
@@ -190,7 +193,12 @@ export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
 
 /** Side effects that become durable only when the catalog head CAS succeeds. */
 export interface Rfc64PublicCatalogNativePrecommitTransactionV1 {
-  commit(): void;
+  /**
+   * Finalize side effects only after the exact applied head is known durable.
+   * Implementations may need an awaited post-commit cleanup (for example,
+   * retiring the SWM staging twin of an already-finalized VM asset).
+   */
+  commit(): void | Promise<void>;
   rollback(cause?: unknown): Promise<void>;
 }
 
@@ -681,7 +689,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       await this.rollbackAppliedHeadPrecommitV1(precommitTransaction, cause);
       throw cause;
     }
-    precommitTransaction?.commit();
+    await precommitTransaction?.commit();
     return Object.freeze({
       inventoryDigest,
       catalogHeadDigest: head.objectDigest as Digest32V1,
@@ -982,12 +990,21 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     // only rows owned by that applied closure may be removed.
     const predecessorRows = historyDisposition === 'cold-bootstrap'
       ? Object.freeze([]) as readonly Readonly<AuthorCatalogRowV1>[]
-      : await loadExactAppliedPredecessorRows(
-        this.options.controlObjects,
-        head,
-        trustedCatalogScope,
-        this.#verifyIssuerSignature,
-      );
+      : historyDisposition === 'replay'
+        // A fresh receiver may initialize directly from a bounded current
+        // exact set and therefore has no obligation to stage version N-1.
+        // On exact-head replay, the already-authenticated target closure is
+        // itself the durable applied closure whose rows own any repair/removal
+        // decision. Requiring target.previousHeadDigest here made the first
+        // retry after a successful cold bootstrap fail despite exact durable
+        // target state.
+        ? Object.freeze(bucket.payload.rows.map((row) => Object.freeze({ ...row })))
+        : await loadExactAppliedPredecessorRows(
+          this.options.controlObjects,
+          head,
+          trustedCatalogScope,
+          this.#verifyIssuerSignature,
+        );
     if (historyDisposition === 'cold-bootstrap') {
       await assertColdBootstrapHasNoOmittedSemanticStateV1(
         this.options.store,
@@ -1035,6 +1052,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     );
     const removedRows: Rfc64PublicCatalogNativeRemovedRowEvidenceV1[] = [];
     const activatedRows: Rfc64PublicCatalogNativeActivatedRowEvidenceV1[] = [];
+    const activatedPublicQuadsDigests: string[] = [];
     let completion!: ReturnType<typeof verifyRfc64PublicCatalogInventoryCompletenessV1>;
     let activatedTripleCount = 0;
     let semanticMutationAttempted = false;
@@ -1077,6 +1095,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           swmGraph: activation.swmGraph,
           authorship: prepared.authorship,
         }));
+        activatedPublicQuadsDigests.push(activation.publicQuadsDigest);
       }
       completion = verifyRfc64PublicCatalogInventoryCompletenessV1({
         catalogScope: trustedCatalogScope,
@@ -1119,9 +1138,10 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         policyDigest: announcement.policyDigest,
         catalogHeadDigest: head.objectDigest as Digest32V1,
         inventoryDigest: completion.inventoryDigest,
-        rows: Object.freeze(preparedRows.map((prepared) => Object.freeze({
+        rows: Object.freeze(preparedRows.map((prepared, index) => Object.freeze({
           authorship: prepared.authorshipCapability,
           sealBinding: prepared.sealBindingCapability,
+          publicQuadsDigest: activatedPublicQuadsDigests[index]!,
         }))),
       }),
       signal,
@@ -1136,12 +1156,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     let headCommitDisposition: 'predecessor' | 'target' | 'indeterminate' =
       historyDisposition === 'replay' ? 'target' : 'predecessor';
     let precommitFinalized = false;
-    const finalizeTargetTransition = (): void => {
+    const finalizeTargetTransition = async (): Promise<void> => {
       if (precommitFinalized) return;
       // Set the fence before invoking operator code. A throwing commit hook
       // cannot make a known-durable target safe to roll back to its predecessor.
       precommitFinalized = true;
-      precommitTransaction?.commit();
+      await precommitTransaction?.commit();
     };
     const rollbackRejectedTransition = async (cause: unknown): Promise<void> => {
       const rollbackFailures: unknown[] = [];
@@ -1229,7 +1249,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       // Once the exact target head is known durable, SWM and VM are the target
       // generation. Finalize that recovery unit before a diagnostic post-read:
       // a later read fault must never restore VM behind the committed head.
-      finalizeTargetTransition();
+      await finalizeTargetTransition();
       const durablePostRead = this.options.inventory.readAppliedCatalogHeadV1(
         catalogScopeDigest,
         head.payload.authorAddress,
@@ -1250,7 +1270,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       } else {
         // A confirmed or possibly committed CAS fences predecessor rollback.
         // Keep both semantic journals on the target for exact durable repair.
-        finalizeTargetTransition();
+        await finalizeTargetTransition();
       }
       throw cause;
     }
@@ -2229,6 +2249,7 @@ async function activateExactPublicProjection(
   sealBinding: VerifiedCatalogSealBindingSnapshotV1,
 ): Promise<{
   readonly swmGraph: string;
+  readonly publicQuadsDigest: string;
   readonly evidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
 }> {
   let projectionText: string;
@@ -2312,6 +2333,7 @@ async function activateExactPublicProjection(
   await assertExactAuthorSealPostRead(store, sealBinding);
   return {
     swmGraph,
+    publicQuadsDigest: workspacePublicQuadsDigest(graphQuads),
     evidence: Object.freeze({
       kaId: row.kaId,
       catalogRowDigest: sealBinding.catalogRowDigest,
@@ -2357,9 +2379,34 @@ async function assertExactAuthorSealPostRead(
       graph: binding.placement.metaGraph,
     };
   }).sort(compareQuads);
-  if (quadsToNQuads(actual) !== quadsToNQuads(expected)) {
-    fail('catalog-native-receiver-activation', 'author-seal post-read differs from verified seal');
+  const normalizedActual = actual.map(normalizeAuthorSealPostReadQuadV1);
+  const normalizedExpected = expected.map(normalizeAuthorSealPostReadQuadV1);
+  if (quadsToNQuads(normalizedActual) !== quadsToNQuads(normalizedExpected)) {
+    fail(
+      'catalog-native-receiver-activation',
+      'author-seal post-read differs from verified seal',
+    );
   }
+}
+
+function normalizeAuthorSealPostReadQuadV1(
+  quad: Readonly<{ subject: string; predicate: string; object: string; graph: string }>,
+): Readonly<{ subject: string; predicate: string; object: string; graph: string }> {
+  let object = quad.object;
+  if (
+    quad.predicate === ASSERTION_SEAL_PREDICATES.KA_UAL
+    && !object.startsWith('<')
+  ) {
+    object = `<${object}>`;
+  } else if (quad.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_FINALIZED_AT) {
+    const match = /^"([^"]+)"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/.exec(object);
+    const instant = match === null ? Number.NaN : Date.parse(match[1]!);
+    if (Number.isFinite(instant)) {
+      object = `${JSON.stringify(new Date(instant).toISOString())}`
+        + '^^<http://www.w3.org/2001/XMLSchema#dateTime>';
+    }
+  }
+  return Object.freeze({ ...quad, object });
 }
 
 function compareQuads(

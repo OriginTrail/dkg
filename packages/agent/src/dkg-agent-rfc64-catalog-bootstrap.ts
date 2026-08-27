@@ -150,10 +150,7 @@ export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
 ): readonly string[] {
   if (config === undefined) return Object.freeze([]);
   return Object.freeze(acceptedPoliciesV1(config)
-    .filter(({ policyEnvelope, completeSwmProviders = [] }) => (
-      policyEnvelope.payload.accessPolicy === 0
-      && completeSwmProviders.length > 0
-    ))
+    .filter(({ completeSwmProviders = [] }) => completeSwmProviders.length > 0)
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
 
@@ -165,9 +162,8 @@ export function resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
 ): readonly string[] {
   if (config === undefined) return Object.freeze([]);
   return Object.freeze(acceptedPoliciesV1(config)
-    .filter(({ policyEnvelope, completeSwmProviders = [] }) => (
-      policyEnvelope.payload.accessPolicy === 0
-      && completeSwmProviders.includes(providerPeerId)
+    .filter(({ completeSwmProviders = [] }) => (
+      completeSwmProviders.includes(providerPeerId)
     ))
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
@@ -188,9 +184,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     const policy = acceptedPoliciesV1(config).find(
       ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
     );
-    return policy?.policyEnvelope.payload.accessPolicy === 0
-      ? policy.completeSwmProviders ?? Object.freeze([])
-      : Object.freeze([]);
+    return policy?.completeSwmProviders ?? Object.freeze([]);
   }
 
   /** Accept pinned policies and start the first bounded provider pass. */
@@ -350,6 +344,13 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           ),
         ),
       );
+      const privateCompleteSwmProviders = new Set(
+        state.config.acceptedPolicies.flatMap(
+          ({ policyEnvelope, completeSwmProviders: providers = [] }) => (
+            policyEnvelope.payload.accessPolicy === 1 ? providers : []
+          ),
+        ),
+      );
       await mapWithConcurrency(
         completeSwmProviders,
         MAX_CONCURRENT_TARGETS_V1,
@@ -363,7 +364,22 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
             // the lifecycle scheduler to seed or resume the selected lane; it
             // owns the seed/incomplete/complete state transition and becomes a
             // no-op after exact plane proof.
-            if (publicCompleteSwmProviders.has(providerPeerId)) {
+            // Private SWM replacement deliberately stays on the ordinary lane;
+            // it must not inherit public selected-snapshot semantics. Queue that
+            // broad lane first when the provider connection already existed, so
+            // its per-peer cooldown cannot be consumed by the public-only retry.
+            const queuedPrivateRecovery = privateCompleteSwmProviders.has(providerPeerId)
+              && this.queueSyncFromPeerOnConnect(
+                providerPeerId,
+                (_peerId, error) => {
+                  this.log.warn(
+                    state.ctx,
+                    `RFC-64 private complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
+                  );
+                },
+                0,
+              );
+            if (publicCompleteSwmProviders.has(providerPeerId) && !queuedPrivateRecovery) {
               this.queueSelectedSwmFromPeerOnConnect(
                 providerPeerId,
                 (_peerId, error) => {
@@ -406,14 +422,11 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     target: MutableTargetStatusV1,
     signal: AbortSignal,
   ): Promise<void> {
-    target.outcome = 'pending';
-    target.completionReason = null;
-    target.attempts = 0;
-    target.providerPeerId = null;
-    target.appliedHeadDigest = null;
-    target.catalogVersion = null;
-    target.inventoryRowCount = null;
-    target.lastError = null;
+    // `state.running` exposes that a refresh is in progress. Keep the target's
+    // last completed snapshot intact until this attempt itself completes so a
+    // healthy, durably applied catalog does not transiently regress to pending
+    // (and lose its head/row evidence) on every periodic revalidation pass.
+    // New targets already start as pending in the state initializer below.
     let lastError: string | null = null;
     let terminalError: unknown | null = null;
     try {

@@ -1076,6 +1076,73 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     );
   });
 
+  it('schedules a pre-connected private complete provider on the ordinary SWM lane', async () => {
+    const policy = privateCatalogPolicy();
+    const policyEnvelope = {
+      issuer: AUTHOR,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+      payload: policy,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedContextGraphPolicyEnvelopeV1;
+    const rosterEnvelope = {
+      issuer: AUTHOR,
+      objectType: MEMBER_ROSTER_OBJECT_TYPE_V1,
+      payload: privateCatalogRoster(
+        policy,
+        computeContextGraphPolicyObjectDigestV1(policyEnvelope),
+      ),
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedMemberRosterEnvelopeV1;
+    const providerPeerId = '12D3KooWPrivateCompleteProvider';
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-private-complete-provider-bootstrap-'));
+    tempDirs.push(dataDir);
+    const receiver = await DKGAgent.create({
+      name: 'private-complete-provider-bootstrap-receiver',
+      dataDir,
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      store: new OxigraphStore(),
+      syncOnConnectEnabled: true,
+      syncReconcilerEnabled: false,
+      syncContextGraphs: [],
+      agentProfileHeartbeatMs: 0,
+      networkIdentity: {
+        networkId: await computeNetworkId(),
+        chainId: NATIVE_DEPLOYMENT.networkId,
+      },
+      rfc64CatalogActivation: {
+        enabled: true,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        accessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          peerAgentBindings: [{ peerId: providerPeerId, agentAddress: AUTHOR }],
+        },
+        bootstrap: {
+          acceptedPolicies: [{
+            policyEnvelope,
+            rosterEnvelope,
+            targets: [],
+            completeSwmProviders: [providerPeerId],
+          }],
+        },
+      },
+    });
+    agents.push(receiver);
+    const connect = vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
+    const queueOrdinary = vi.spyOn(receiver, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+    const queueSelected = vi.spyOn(receiver, 'queueSelectedSwmFromPeerOnConnect').mockReturnValue(true);
+
+    await receiver.start();
+    await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
+
+    expect(connect).toHaveBeenCalledWith(providerPeerId, { timeoutMs: 10_000 });
+    expect(queueOrdinary).toHaveBeenCalledWith(providerPeerId, expect.any(Function), 0);
+    expect(queueSelected).not.toHaveBeenCalled();
+  });
+
   it('does not reseed a plane-proven SWM provider on periodic bootstrap refresh', async () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -1941,7 +2008,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })?.currentCatalogHeadDigest).toBe(published?.currentCatalogHeadDigest);
   }, 60_000);
 
-  it('clears applied metadata when a later bootstrap refresh misses', async () => {
+  it('retains the last completed target while refreshing, then clears it on a miss', async () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -1949,6 +2016,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     const appliedHeadDigest = `0x${'a1'.repeat(32)}` as Digest32V1;
     const providerPeerId = '12D3KooStatusProvider';
+    let resolveSecond!: (value: null) => void;
+    const secondAttempt = new Promise<null>((resolve) => {
+      resolveSecond = resolve;
+    });
     const synchronize = vi.spyOn(
       DKGAgent.prototype,
       'synchronizeRfc64CatalogFromProvidersV1',
@@ -1963,7 +2034,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       appliedProviderPeerId: providerPeerId,
       providerAttempts: 1,
       signatureVariantDigest: `0x${'c3'.repeat(32)}` as Digest32V1,
-    }).mockResolvedValue(null);
+    }).mockReturnValueOnce(secondAttempt);
     const bootstrap: Rfc64PublicCatalogBootstrapConfigV1 = {
       acceptedPublicPolicies: [{
         policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
@@ -1983,6 +2054,19 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         inventoryRowCount: '3',
       });
     }, { timeout: 10_000, interval: 50 });
+    await vi.waitFor(() => {
+      expect(synchronize).toHaveBeenCalledTimes(2);
+      expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()).toMatchObject({
+        running: true,
+        targets: [expect.objectContaining({
+          outcome: 'applied',
+          appliedHeadDigest,
+          catalogVersion: '2',
+          inventoryRowCount: '3',
+        })],
+      });
+    }, { timeout: 10_000, interval: 50 });
+    resolveSecond(null);
     await vi.waitFor(() => {
       expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
         outcome: 'not-found',

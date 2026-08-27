@@ -233,12 +233,13 @@ export interface SharedMemorySnapshotMaterializer {
     | { outcome: 'replace' }
   >;
   /**
-   * The private curator-recovery lane's skip predicate: a marker-only ASK on
-   * the head's assertionGraph row. Deliberately DIGEST-BLIND — upgrading it
-   * to the count+digest witness `isGraphAssetMaterialized` uses is the
-   * recorded F2 follow-up, out of scope for the identity fix. Living here
-   * (rather than as a caller-supplied closure) is what makes skip and
-   * preserve ONE capability over ONE store and lock map.
+   * The private curator-recovery lane's skip predicate. A head marker alone
+   * cannot prove materialization: the assertion graph can be cleared while
+   * its durable metadata survives. Reuse the same exact count+digest guard as
+   * ordinary catch-up so a marker-only, partial, or equal-count stale graph is
+   * repaired rather than reported as recovered. Living here (rather than as a
+   * caller-supplied closure) keeps skip and preserve as one capability over
+   * one store and lock map.
    */
   hasGraphAssetMarker(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean>;
   /**
@@ -700,17 +701,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     },
 
     hasGraphAssetMarker: async (descriptor) => {
-      const result = await deps.store.query(
-        `ASK { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { ` +
-          `<${assertSafeIri(descriptor.headSubject)}> ` +
-          `<${DKG}assertionGraph> ` +
-          `<${assertSafeIri(descriptor.assertionGraph)}> . } }`,
-        {
-          priority: 'background',
-          source: 'agent.swmRecovery.hasGraphAssetMarker',
-        },
-      );
-      return result.type === 'boolean' && result.value;
+      return materializer.isGraphAssetMaterialized(descriptor);
     },
 
     preserveStoredIdentityForSkippedAsset: async (contextGraphId, descriptor) => {

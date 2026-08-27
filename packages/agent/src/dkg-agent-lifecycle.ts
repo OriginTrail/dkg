@@ -4471,6 +4471,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const acceptedPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
       ?? [];
+    // Private RFC-64 selections stay out of `syncContextGraphs`: that list is
+    // also the automatic durable/VM scope, and private VM recovery belongs to
+    // catalog activation. They still need an explicit SWM-only planning scope
+    // so the ordinary private curator-replacement lane can run.
+    const sharedMemoryRecoveryContextGraphIds = [...new Set([
+      ...(this.config.syncContextGraphs ?? []),
+      ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
+        this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+      ),
+    ])];
     const remotePeerIsCompleteSwmProvider = acceptedPolicies.some(
         ({ completeSwmProviders = [] }) => completeSwmProviders.includes(remotePeer),
       );
@@ -4479,7 +4489,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (!plan) {
         plan = this.planSharedMemorySyncContextGraphs(
           peerId,
-          this.config.syncContextGraphs ?? [],
+          sharedMemoryRecoveryContextGraphIds,
           createOperationContext('sync'),
         );
         sharedMemorySyncPlans.set(peerId, plan);
@@ -4493,7 +4503,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (!plan) {
         plan = this.planSharedMemorySyncContextGraphs(
           peerId,
-          this.config.syncContextGraphs ?? [],
+          sharedMemoryRecoveryContextGraphIds,
           createOperationContext('sync'),
           { requireCompleteProviderMatch: true },
         );
@@ -4756,6 +4766,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           eligibleContextGraphIds.push(contextGraphId);
           continue;
         }
+        // RFC-64 private catalog activation pins one or more graph-complete SWM
+        // providers for the exact target. That explicit operator authorization is
+        // stronger than best-effort AGENTS discovery, which can legitimately be
+        // empty during a receiver's cold bootstrap. Preserve the curator invariant
+        // below, then recover directly from the connecting pinned provider instead
+        // of waiting indefinitely for its wallet -> peer registry row to arrive.
+        const completeProviderSelected = completeSwmProviders.includes(remotePeerId);
         // The curator (curator-leader) is the authoritative SWM replica; it never
         // reverse-syncs a CG it owns. Decide curatorship AND resolve the curator's
         // peer by the STRUCTURAL curator — the wallet-scoped id prefix `0x<addr>` —
@@ -4771,6 +4788,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const structuralAgent = structuralCuratorDid.slice('did:dkg:agent:'.length).toLowerCase();
           if ([...this.localAgents.keys()].some((addr) => addr.toLowerCase() === structuralAgent)) {
             this.log.debug(ctx, `SWM sync: skipping "${contextGraphId}" — local node is the curator (never reverse-syncs a CG it owns)`);
+            continue;
+          }
+          if (completeProviderSelected) {
+            this.log.info(ctx, `SWM recovery ENQUEUED for private CG "${contextGraphId.slice(0, 28)}" from RFC-64 complete provider ${remotePeerId.slice(0, 12)}`);
+            privateRecoverFromCurator.push(contextGraphId);
+            eligibleContextGraphIds.push(contextGraphId);
             continue;
           }
           // Resolve the structural curator's peer via the agent registry. On a
@@ -4796,6 +4819,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // triple-based curator resolution.
         if (await this.isCuratorOf(contextGraphId)) {
           this.log.debug(ctx, `SWM sync: skipping "${contextGraphId}" — local node is the curator (never reverse-syncs a CG it owns)`);
+          continue;
+        }
+        if (completeProviderSelected) {
+          this.log.info(ctx, `SWM recovery ENQUEUED for private CG "${contextGraphId.slice(0, 28)}" from RFC-64 complete provider ${remotePeerId.slice(0, 12)}`);
+          privateRecoverFromCurator.push(contextGraphId);
+          eligibleContextGraphIds.push(contextGraphId);
           continue;
         }
         let curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
