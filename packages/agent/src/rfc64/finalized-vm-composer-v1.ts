@@ -33,8 +33,8 @@ const COMPOSITION_KEYS = [
   'finalizedContextGraph',
   'inventory',
   'placements',
-  'requireCompleteAuthorSet',
 ] as const;
+const LEGACY_COMPOSITION_KEYS = ['requireCompleteAuthorSet'] as const;
 const CATALOG_LANE_KEYS = ['contextGraphId', 'subGraphName'] as const;
 const PLACEMENT_KEYS = ['authorship', 'sealBinding'] as const;
 
@@ -58,8 +58,12 @@ export interface ComposeFinalizedVmSetRequestV1 {
   readonly finalizedContextGraph: FinalizedContextGraphReadV1;
   readonly inventory: FinalizedVmChainInventoryV1;
   readonly placements: readonly FinalizedVmPlacementEvidenceV1[];
-  /** Private Release 2 requires every finalized row in this author lane. */
-  readonly requireCompleteAuthorSet: boolean;
+  /**
+   * @deprecated Completeness is derived from finalized access policy. Retained
+   * only so pre-10.0.15 callers remain source/runtime compatible; `false`
+   * cannot weaken private author-set completeness.
+   */
+  readonly requireCompleteAuthorSet?: boolean;
 }
 
 interface ResolvedFinalizedVmPlacementV1 {
@@ -116,14 +120,9 @@ export function composeFinalizedVmSetV1(
     COMPOSITION_KEYS,
     'finalized VM composition request',
     'finalized-vm-composition-input',
+    LEGACY_COMPOSITION_KEYS,
   );
   const catalogLane = snapshotCatalogLane(request.catalogLane);
-  if (typeof request.requireCompleteAuthorSet !== 'boolean') {
-    fail(
-      'finalized-vm-composition-input',
-      'requireCompleteAuthorSet must be boolean',
-    );
-  }
   let assertedAtKav10Address: EvmAddressV1;
   let catalogAuthorAddress: EvmAddressV1;
   let inventory: Readonly<FinalizedVmChainInventoryV1>;
@@ -234,8 +233,10 @@ export function composeFinalizedVmSetV1(
   for (const candidate of inventory.rows) {
     const placement = placementsByKaId.get(candidate.kaId);
     if (placement === undefined) {
+      // Completeness is a property of the finalized policy, never a caller
+      // option that could weaken a private author lane's closure requirement.
       if (
-        request.requireCompleteAuthorSet
+        finalizedContextGraph.accessPolicy === 1
         && candidate.authorAddress === catalogAuthorAddress
       ) {
         fail(
@@ -414,6 +415,7 @@ function snapshotRecord<Code extends FinalizedVmCompositionErrorCodeV1>(
   expectedKeys: readonly string[],
   label: string,
   code: Code,
+  optionalKeys: readonly string[] = [],
 ): Record<string, unknown> {
   try {
     if (input === null || typeof input !== 'object' || Array.isArray(input)) {
@@ -422,15 +424,17 @@ function snapshotRecord<Code extends FinalizedVmCompositionErrorCodeV1>(
     const prototype = Object.getPrototypeOf(input);
     if (prototype !== Object.prototype && prototype !== null) throw new Error('not plain');
     const actualKeys = Reflect.ownKeys(input);
-    const expected = new Set(expectedKeys);
+    const accepted = new Set([...expectedKeys, ...optionalKeys]);
     if (
-      actualKeys.length !== expectedKeys.length
-      || actualKeys.some((key) => typeof key !== 'string' || !expected.has(key))
+      actualKeys.length < expectedKeys.length
+      || actualKeys.length > accepted.size
+      || expectedKeys.some((key) => !actualKeys.includes(key))
+      || actualKeys.some((key) => typeof key !== 'string' || !accepted.has(key))
     ) {
       throw new Error('unknown or missing fields');
     }
     const snapshot = Object.create(null) as Record<string, unknown>;
-    for (const key of expectedKeys) {
+    for (const key of actualKeys as string[]) {
       const descriptor = Object.getOwnPropertyDescriptor(input, key);
       if (
         descriptor === undefined

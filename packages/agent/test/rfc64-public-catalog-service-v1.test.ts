@@ -44,6 +44,7 @@ import {
   Rfc64CatalogProviderFailureAggregateV1,
   classifyRfc64CatalogReconciliationTerminalReasonV1,
 } from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
+import { Rfc64CatalogReconciliationTerminalErrorV1 } from '../src/index.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
@@ -1195,7 +1196,11 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
           era: '0',
         },
       }).then(() => null, (error: unknown) => error);
-      expect(rejection).toBeInstanceOf(Error);
+      expect(rejection).toBeInstanceOf(Rfc64CatalogReconciliationTerminalErrorV1);
+      expect(rejection).toMatchObject({
+        outcome: 'failed',
+        terminalReason: scenario.terminalReason,
+      });
       const aggregate = (rejection as Error & { readonly cause: unknown }).cause;
       expect(aggregate).toBeInstanceOf(Rfc64CatalogProviderFailureAggregateV1);
       expect(aggregate).toMatchObject({

@@ -21,7 +21,6 @@ import {
   type EvmAddressV1,
   type KaIdV1,
   type NetworkIdV1,
-  type MemberRosterV1,
   type SubGraphNameV1,
 } from '@origintrail-official/dkg-core';
 import {
@@ -34,7 +33,10 @@ import {
   type StrictCurrentFinalizedEvmSnapshotSessionV1,
 } from '@origintrail-official/dkg-chain';
 
-import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
+import {
+  assertAcceptedRfc64CatalogPolicyRosterV1,
+  type AcceptedRfc64CatalogAccessSnapshotV1,
+} from './catalog-access-policy-v1.js';
 import {
   Rfc64FinalizedPolicyVerifierErrorV1,
   resolveAndVerifyRfc64FinalizedPolicyInSnapshotV1,
@@ -200,7 +202,6 @@ export function createFinalizedVmRuntimeV1(
           finalizedContextGraph,
           inventory,
           placements: request.placements,
-          requireCompleteAuthorSet: request.acceptedPolicy.accessPolicy === 1,
         });
         return Object.freeze({
           finalizedContextGraph,
@@ -303,7 +304,11 @@ function snapshotRequest(input: FinalizedVmRuntimeRequestV1): RuntimeRequestSnap
       : parseCanonicalMemberRosterPayloadV1(
         canonicalizeMemberRosterPayloadV1(input.acceptedPolicy.roster),
       );
-    assertAcceptedRosterV1(roster, policy, input.acceptedPolicy.policyDigest);
+    assertAcceptedRfc64CatalogPolicyRosterV1(
+      policy,
+      input.acceptedPolicy.policyDigest,
+      roster,
+    );
     assertCanonicalEvmAddress(input.catalogAuthorAddress, 'catalogAuthorAddress');
     assertCanonicalDecimalU256(
       input.onChainContextGraphId,
@@ -382,30 +387,6 @@ async function resolveFinalizedPolicyForVmRuntime(
       fail('finalized-vm-runtime-request', 'finalized policy request is invalid', cause);
     }
     throw cause;
-  }
-}
-
-function assertAcceptedRosterV1(
-  roster: Readonly<MemberRosterV1> | null,
-  policy: Readonly<ContextGraphPolicyV1>,
-  policyDigest: Digest32V1,
-): void {
-  if (policy.accessPolicy === 0) {
-    if (roster !== null) throw new TypeError('public finalized VM policy forbids a member roster');
-    return;
-  }
-  if (
-    roster === null
-    || roster.networkId !== policy.networkId
-    || roster.contextGraphId !== policy.contextGraphId
-    || roster.ownershipTransitionDigest !== policy.ownershipTransitionDigest
-    || roster.era !== policy.era
-    || roster.policyDigest !== policyDigest
-    || roster.administrativeDelegationDigest !== policy.administrativeDelegationDigest
-  ) {
-    throw new TypeError(
-      'private finalized VM policy requires the exact current policy-bound roster',
-    );
   }
 }
 

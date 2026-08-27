@@ -2,12 +2,54 @@
 
 import type { Digest32V1 } from '@origintrail-official/dkg-core';
 
+import { Rfc64CatalogSynchronizationErrorV1 } from './catalog-synchronization-error-v1.js';
 import { FinalizedVmCompositionErrorV1 } from './finalized-vm-composer-v1.js';
 import { Rfc64PublicCatalogNativeReceiverErrorV1 } from './public-catalog-native-receiver-v1.js';
+import {
+  isRfc64CatalogReconciliationFailureOutcomeV1,
+  type Rfc64CatalogReconciliationFailureCompletionV1,
+  type Rfc64CatalogReconciliationFailureOutcomeV1,
+  type Rfc64CatalogReconciliationTerminalReasonV1,
+} from './public-catalog-reconciliation-outcome-v1.js';
 
-/** User-visible terminal meanings emitted once at the receiver boundary. */
-export type Rfc64CatalogReconciliationTerminalReasonV1 =
-  | 'no-authorized-provider';
+export type {
+  Rfc64CatalogReconciliationFailureCompletionV1,
+  Rfc64CatalogReconciliationFailureOutcomeV1,
+  Rfc64CatalogReconciliationTerminalReasonV1,
+} from './public-catalog-reconciliation-outcome-v1.js';
+
+/** Exact, public semantic failure returned by one scheduled reconciliation task. */
+export class Rfc64CatalogReconciliationTerminalErrorV1
+  extends Rfc64CatalogSynchronizationErrorV1 {
+  readonly outcome: Rfc64CatalogReconciliationFailureOutcomeV1;
+
+  constructor(completion: Rfc64CatalogReconciliationFailureCompletionV1) {
+    if (!isRfc64CatalogReconciliationFailureOutcomeV1(completion?.outcome)) {
+      throw new TypeError('RFC-64 reconciliation terminal error requires a non-success outcome');
+    }
+    const cause = completion.error;
+    super(
+      classifyRfc64CatalogReconciliationTerminalReasonV1(cause),
+      readStringErrorCodeV1(cause),
+      cause === null ? {} : { cause },
+    );
+    this.name = 'Rfc64CatalogReconciliationTerminalErrorV1';
+    this.message = `RFC-64 current-head synchronization ended with ${completion.outcome}`;
+    this.outcome = completion.outcome;
+  }
+}
+
+function readStringErrorCodeV1(error: unknown): string | null {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    return null;
+  }
+  try {
+    const code = (error as { readonly code?: unknown }).code;
+    return typeof code === 'string' ? code : null;
+  } catch {
+    return null;
+  }
+}
 
 /** One bounded provider's terminal reconciliation result. */
 export interface Rfc64CatalogProviderTerminalFailureV1 {
@@ -54,17 +96,6 @@ export interface Rfc64PublicCatalogReconciliationFailureV1 {
   readonly causeCode?: string;
 }
 
-/** Result of the most recently started scheduler attempt for one exact head. */
-export interface Rfc64CatalogReconciliationAttemptFailureV1 {
-  readonly catalogHeadDigest: Digest32V1;
-  readonly terminalReason: Rfc64CatalogReconciliationTerminalReasonV1 | null;
-  readonly errorName: string;
-  readonly errorCode: string | null;
-}
-
-/** Monotonic process-local identity for one execution-time reconciliation attempt. */
-export type Rfc64CatalogReconciliationAttemptTokenV1 = number;
-
 /** Hard process-memory bound for distinct terminal receiver failures. */
 export const RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1 = 128;
 
@@ -77,31 +108,11 @@ const STABLE_ERROR_TOKEN_V1 = /^[A-Za-z][A-Za-z0-9._:-]*$/;
  */
 export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
   readonly #failures = new Map<Digest32V1, Rfc64PublicCatalogReconciliationFailureV1>();
-  readonly #currentAttemptFailures = new Map<
-    Digest32V1,
-    Rfc64CatalogReconciliationAttemptFailureV1
-  >();
-  readonly #currentAttemptTokens = new Map<
-    Digest32V1,
-    Rfc64CatalogReconciliationAttemptTokenV1
-  >();
-  #attemptSequence = 0;
-
-  /** Start a new semantic attempt without changing immutable diagnostic history. */
-  beginAttempt(catalogHeadDigest: Digest32V1): Rfc64CatalogReconciliationAttemptTokenV1 {
-    const token = ++this.#attemptSequence;
-    evictOldestWhenFullV1(this.#currentAttemptTokens);
-    this.#currentAttemptTokens.set(catalogHeadDigest, token);
-    this.#currentAttemptFailures.delete(catalogHeadDigest);
-    return token;
-  }
 
   /** Scheduler-terminal callback sink. The first failure for one head wins. */
   record(
     catalogHeadDigest: Digest32V1,
     error: unknown,
-    terminalReason: Rfc64CatalogReconciliationTerminalReasonV1 | null = null,
-    attemptToken?: Rfc64CatalogReconciliationAttemptTokenV1,
   ): void {
     const errorName = stableErrorNameV1(error);
     const errorCode = stableErrorCodeV1(error);
@@ -115,39 +126,6 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
         ...(causeCode === null ? {} : { causeCode }),
       }));
     }
-    const currentAttemptToken = this.#currentAttemptTokens.get(catalogHeadDigest);
-    if (
-      (currentAttemptToken !== undefined && currentAttemptToken !== attemptToken)
-      || (currentAttemptToken === undefined && attemptToken !== undefined)
-    ) {
-      return;
-    }
-    evictOldestWhenFullV1(this.#currentAttemptFailures);
-    this.#currentAttemptFailures.set(catalogHeadDigest, Object.freeze({
-      catalogHeadDigest,
-      terminalReason,
-      errorName,
-      errorCode,
-    }));
-  }
-
-  /** Clear only the exact current attempt; stale successes cannot erase a newer failure. */
-  completeAttempt(
-    catalogHeadDigest: Digest32V1,
-    attemptToken: Rfc64CatalogReconciliationAttemptTokenV1,
-  ): void {
-    if (this.#currentAttemptTokens.get(catalogHeadDigest) !== attemptToken) return;
-    this.#currentAttemptFailures.delete(catalogHeadDigest);
-    this.#currentAttemptTokens.delete(catalogHeadDigest);
-  }
-
-  /** Release only the exact terminal attempt token; retain its failure result. */
-  endAttempt(
-    catalogHeadDigest: Digest32V1,
-    attemptToken: Rfc64CatalogReconciliationAttemptTokenV1,
-  ): void {
-    if (this.#currentAttemptTokens.get(catalogHeadDigest) !== attemptToken) return;
-    this.#currentAttemptTokens.delete(catalogHeadDigest);
   }
 
   read(catalogHeadDigest: Digest32V1): Rfc64PublicCatalogReconciliationFailureV1 | null {
@@ -155,16 +133,8 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
     return failure === undefined ? null : failure;
   }
 
-  readCurrentAttempt(
-    catalogHeadDigest: Digest32V1,
-  ): Rfc64CatalogReconciliationAttemptFailureV1 | null {
-    return this.#currentAttemptFailures.get(catalogHeadDigest) ?? null;
-  }
-
   clear(): void {
     this.#failures.clear();
-    this.#currentAttemptFailures.clear();
-    this.#currentAttemptTokens.clear();
   }
 
   /** Internal test/diagnostic bound assertion; never exposed on DKGAgent. */
@@ -172,15 +142,6 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
     return this.#failures.size;
   }
 
-  /** Internal test/diagnostic bound assertion; never exposed on DKGAgent. */
-  get currentAttemptFailureSize(): number {
-    return this.#currentAttemptFailures.size;
-  }
-
-  /** Internal test/diagnostic bound assertion; never exposed on DKGAgent. */
-  get currentAttemptTokenSize(): number {
-    return this.#currentAttemptTokens.size;
-  }
 }
 
 function stableErrorNameV1(error: unknown): string {
@@ -194,16 +155,7 @@ function stableErrorNameV1(error: unknown): string {
 }
 
 function stableErrorCodeV1(error: unknown): string | null {
-  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
-    return null;
-  }
-  let candidate: unknown;
-  try {
-    candidate = (error as { readonly code?: unknown }).code;
-  } catch {
-    return null;
-  }
-  return stableErrorTokenV1(candidate);
+  return stableErrorTokenV1(readStringErrorCodeV1(error));
 }
 
 function stableImmediateCauseCodeV1(error: unknown): string | null {

@@ -2573,7 +2573,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         },
       }).catch((error: unknown) => error);
     expect(synchronizationFailure).toMatchObject({
-      name: 'Error',
+      name: 'Rfc64CatalogReconciliationTerminalErrorV1',
       message: 'RFC-64 current-head synchronization ended with failed',
       cause: expect.any(Rfc64PublicCatalogNativeReceiverErrorV1),
     });

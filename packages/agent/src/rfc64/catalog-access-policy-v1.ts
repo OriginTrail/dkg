@@ -69,6 +69,53 @@ export interface AcceptedRfc64CatalogAccessSnapshotV1 {
   readonly roster: Readonly<MemberRosterV1> | null;
 }
 
+/** Canonical policy/roster invariant shared by every accepted-snapshot consumer. */
+export function assertAcceptedRfc64CatalogPolicyRosterV1(
+  policy: Readonly<ContextGraphPolicyV1>,
+  policyDigest: Digest32V1,
+  roster: Readonly<MemberRosterV1> | null,
+): void {
+  if (policy.accessPolicy === 0) {
+    if (roster !== null) {
+      throw new Error('public RFC-64 policy forbids an exhaustive member roster');
+    }
+    return;
+  }
+  if (
+    roster === null
+    || roster.networkId !== policy.networkId
+    || roster.contextGraphId !== policy.contextGraphId
+    || roster.ownershipTransitionDigest !== policy.ownershipTransitionDigest
+    || roster.era !== policy.era
+    || roster.policyDigest !== policyDigest
+    || roster.administrativeDelegationDigest !== policy.administrativeDelegationDigest
+  ) {
+    throw new Error(
+      'private RFC-64 member roster is not bound to the exact accepted policy; '
+      + 'private recovery requires the exact current policy-bound roster',
+    );
+  }
+}
+
+/** Require one author to belong to an already-validated private access snapshot. */
+export function assertAcceptedRfc64CatalogAuthorMembershipV1(
+  policy: Readonly<ContextGraphPolicyV1>,
+  roster: Readonly<MemberRosterV1> | null,
+  requiredMemberAddress: EvmAddressV1,
+): void {
+  if (
+    policy.accessPolicy === 1
+    && (
+      roster === null
+      || !roster.members.some((member) => member.agentAddress === requiredMemberAddress)
+    )
+  ) {
+    throw new Error(
+      'private RFC-64 policy requires the exact current policy-bound roster and author membership',
+    );
+  }
+}
+
 export interface Rfc64CatalogAccessPolicyRegistryOptionsV1 {
   readonly localAgentAddress: EvmAddressV1;
   /** Exact authenticated libp2p-peer to agent-wallet binding. */
@@ -156,7 +203,7 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
         throw new Error('invite-only RFC-64 catalog policy requires a current member roster');
       }
       roster = snapshotRoster(rosterInput);
-      assertRosterMatchesPolicy(roster, policy, policyDigest);
+      assertAcceptedRfc64CatalogPolicyRosterV1(policy, policyDigest, roster);
       members = new Map(roster.members.map((entry) => [entry.agentAddress, entry]));
     }
 
@@ -340,23 +387,6 @@ function snapshotOperation(input: unknown): Rfc64CatalogAccessOperationV1 {
       return input;
     default:
       throw new TypeError('operation must be a supported RFC-64 catalog access operation');
-  }
-}
-
-function assertRosterMatchesPolicy(
-  roster: Readonly<MemberRosterV1>,
-  policy: Readonly<ContextGraphPolicyV1>,
-  policyDigest: Digest32V1,
-): void {
-  if (
-    roster.networkId !== policy.networkId
-    || roster.contextGraphId !== policy.contextGraphId
-    || roster.ownershipTransitionDigest !== policy.ownershipTransitionDigest
-    || roster.era !== policy.era
-    || roster.policyDigest !== policyDigest
-    || roster.administrativeDelegationDigest !== policy.administrativeDelegationDigest
-  ) {
-    throw new Error('RFC-64 member roster is not bound to the exact accepted policy');
   }
 }
 
