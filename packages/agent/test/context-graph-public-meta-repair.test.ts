@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
@@ -428,6 +429,68 @@ describe('chain-attested public metadata projection repair', () => {
       expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
       expect(getContextGraphAccessPolicy).toHaveBeenCalledWith(42n);
       expect(await hasPublicProof(store, contextGraphId)).toBe(true);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('revalidates an unregistered placeholder after repair and rejects a reused slot', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'legacy-public/reused-slot';
+    const committedHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
+    const reusedSlotHash = ethers.keccak256(ethers.toUtf8Bytes('unrelated/reused-slot'));
+    const getContextGraphNameHash = vi.fn()
+      .mockResolvedValueOnce(committedHash)
+      .mockResolvedValueOnce(reusedSlotHash);
+    const agentLike: any = {
+      store,
+      chain: {
+        getContextGraphNameHash,
+        getContextGraphAccessPolicy: vi.fn(async () => 0 as const),
+        isContextGraphActiveOnChain: vi.fn(async () => true),
+      },
+      getContextGraphOnChainId: vi.fn(async () => '42'),
+      contextGraphExists: vi.fn(async () => true),
+      subscribedContextGraphs: new Map(),
+      wireIdToLocalCgId: new Map(),
+      onChainAccessPolicyCache: new Map(),
+      localApprovedAgentByCG: new Map(),
+      log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      peerId: CREATOR_PEER,
+      isCuratorOf: vi.fn(async () => false),
+      isPrivateContextGraph: vi.fn(async () => false),
+    };
+    agentLike.isContextGraphPublicOnChain = DKGAgent.prototype.isContextGraphPublicOnChain;
+    agentLike.resolveOnChainAccessPolicyState = DKGAgent.prototype.resolveOnChainAccessPolicyState;
+    agentLike.localCgMatchesOnChainSlot = DKGAgent.prototype.localCgMatchesOnChainSlot;
+    agentLike.isWireIdKeyedSubscription = DKGAgent.prototype.isWireIdKeyedSubscription;
+    agentLike.readLiveOnChainAccessPolicy = DKGAgent.prototype.readLiveOnChainAccessPolicy;
+    agentLike.raceChainPolicyRead = DKGAgent.prototype.raceChainPolicyRead;
+    try {
+      await store.insert([{
+        subject: contextGraphDataGraphUri(contextGraphId),
+        predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
+        object: '"unregistered"',
+        graph: contextGraphMetaGraphUri(contextGraphId),
+      }]);
+
+      const repaired = await LifecycleSyncMethods.prototype
+        .reconcileConfiguredContextGraphMetadata.call(agentLike, contextGraphId);
+      expect(repaired.outcome).toBe('authoritative');
+      expect(await hasPublicProof(store, contextGraphId)).toBe(true);
+
+      const afterSlotReuse = await LifecycleSyncMethods.prototype
+        .reconcileConfiguredContextGraphMetadata.call(agentLike, contextGraphId);
+      expect(afterSlotReuse).toEqual({
+        outcome: 'pending',
+        reason: 'missing-metadata',
+        repair: {
+          outcome: 'already-complete',
+          chainProof: { state: 'not-requested' },
+        },
+      });
+      expect(getContextGraphNameHash).toHaveBeenCalledTimes(2);
+      expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledTimes(1);
     } finally {
       await store.close();
     }

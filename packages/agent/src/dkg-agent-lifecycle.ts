@@ -164,15 +164,15 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-import { buildAuthoritativePrivateMetaAskQuery } from './context-graph-private-meta-proof.js';
 import {
   repairCreatorPublicMetaProjections,
+  type ActivePublicContextGraphChainProof,
 } from './context-graph-public-meta-repair.js';
 import {
-  confirmConfiguredContextGraphMetadataV1,
   reconcileConfiguredContextGraphMetadataV1,
   type ConfiguredContextGraphMetadataReconciliationResult,
 } from './configured-context-graph-metadata-reconciliation.js';
+import { confirmContextGraphMetadataV1 } from './context-graph-meta-confirmation.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -9657,31 +9657,35 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<ConfiguredContextGraphMetadataReconciliationResult> {
+    const resolveActivePublicChainProof = async (
+      normalizedContextGraphId: string,
+    ): Promise<ActivePublicContextGraphChainProof> => {
+      const state = await this.resolveOnChainAccessPolicyState(
+        normalizedContextGraphId,
+        createOperationContext('init'),
+        { slotBindingMode: 'chain-attested-repair' },
+      );
+      return state === 0
+        ? { state: 'public' }
+        : state === 1
+          ? { state: 'not-public', reason: 'private' }
+          : state === 'unregistered'
+            ? { state: 'not-public', reason: 'unregistered' }
+            : { state: 'unknown', reason: 'unprovable' };
+    };
     return reconcileConfiguredContextGraphMetadataV1({
       store: this.store,
-      resolveActivePublicChainProof: async (normalizedContextGraphId) => {
-        const state = await this.resolveOnChainAccessPolicyState(
-          normalizedContextGraphId,
-          createOperationContext('init'),
-          { slotBindingMode: 'chain-attested-repair' },
-        );
-        return state === 0
-          ? { state: 'public' }
-          : state === 1
-            ? { state: 'not-public', reason: 'private' }
-            : state === 'unregistered'
-              ? { state: 'not-public', reason: 'unregistered' }
-              : { state: 'unknown', reason: 'unprovable' };
-      },
+      resolveActivePublicChainProof,
       isLocallyCurated: (normalizedContextGraphId) =>
         this.isCuratorOf(normalizedContextGraphId),
       confirmMetadata: (normalizedContextGraphId, input) =>
-        confirmConfiguredContextGraphMetadataV1({
+        confirmContextGraphMetadataV1({
           chain: this.chain,
           isContextGraphPublicOnChain: (id) => this.isContextGraphPublicOnChain(
             id,
             createOperationContext('sync'),
           ),
+          resolveActivePublicChainProof,
           isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
           localApprovedAgentByContextGraph: this.localApprovedAgentByCG,
           peerId: this.peerId,
@@ -9697,12 +9701,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       rejectUnregisteredPlaceholder?: boolean;
     },
   ): Promise<boolean> {
-    return confirmConfiguredContextGraphMetadataV1({
+    return confirmContextGraphMetadataV1({
       chain: this.chain,
       isContextGraphPublicOnChain: (id) => this.isContextGraphPublicOnChain(
         id,
         createOperationContext('sync'),
       ),
+      resolveActivePublicChainProof: async (id) => {
+        const state = await this.resolveOnChainAccessPolicyState(
+          id,
+          createOperationContext('sync'),
+          { slotBindingMode: 'chain-attested-repair' },
+        );
+        return state === 0
+          ? { state: 'public' }
+          : state === 1
+            ? { state: 'not-public', reason: 'private' }
+            : state === 'unregistered'
+              ? { state: 'not-public', reason: 'unregistered' }
+              : { state: 'unknown', reason: 'unprovable' };
+      },
       isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
       localApprovedAgentByContextGraph: this.localApprovedAgentByCG,
       peerId: this.peerId,

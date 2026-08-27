@@ -201,7 +201,7 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
       '5',
       undefined,
       { bindingMode: 'chain-attested-repair' },
-    )).resolves.toBe(false);
+    )).rejects.toBe(transportError);
     await expect(retryableStrictBinding.call(agentLike, cgId, '5'))
       .rejects.toBe(transportError);
   });

@@ -346,14 +346,20 @@ describe('private CG membership bootstrap recovery', () => {
       onChainId: '7',
       pendingMeta: true,
     });
-    const publicOnChainProof = vi.fn(async () => true);
-    (agent as any).isContextGraphPublicOnChain = publicOnChainProof;
+    const strictPublicOnChainProof = vi.fn(async () => 0 as const);
+    const legacyPublicOnChainProof = vi.fn(async () => true);
+    (agent as any).resolveOnChainAccessPolicyState = strictPublicOnChainProof;
+    (agent as any).isContextGraphPublicOnChain = legacyPublicOnChainProof;
 
     expect(await (agent as any).hasConfirmedMetaState(
       contextGraphId,
       { rejectUnregisteredPlaceholder: true },
     )).toBe(true);
-    expect(publicOnChainProof).toHaveBeenCalledWith(contextGraphId, expect.any(Object));
+    expect(strictPublicOnChainProof).toHaveBeenCalledWith(
+      contextGraphId,
+      expect.any(Object),
+      { slotBindingMode: 'chain-attested-repair' },
+    );
   });
 
   it('keeps requester decisions local, preserves queued generations, and drops stale decisions', async () => {
