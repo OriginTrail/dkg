@@ -149,13 +149,12 @@ export interface AsyncLiftPublisher {
      */
     reconcile(): Promise<{ reconciled: number; pendingWork: boolean }>;
     /**
-     * Whether any transaction-bearing job currently awaits chain-proof reconciliation — live
-     * `broadcast`/`included` state with no executor (in-process or detached) still owning it,
-     * the same actionability rule the reconcile pass itself applies. A read-only probe for the
-     * caller's boot-time cadence seed and for diagnostics; the scheduling loop itself consumes
-     * {@link reconcile}'s outcome instead of pairing this query with the pass.
+     * Startup recovery with the same outcome shape: stale-wallet-lock sweep plus one reconcile
+     * pass, so a starting caller seeds its cadence from the pass it already ran instead of
+     * paying a second boot-time inventory. Identical recovery semantics to
+     * {@link AsyncLiftPublisher.recover}, the wire-stable numeric surface over the same pass.
      */
-    hasPendingWork(): Promise<boolean>;
+    recover(): Promise<{ reconciled: number; pendingWork: boolean }>;
   };
   getStats(): Promise<Record<LiftJobState, number>>;
   pause(): Promise<void>;

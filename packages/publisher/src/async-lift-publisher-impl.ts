@@ -1156,12 +1156,10 @@ export class TripleStoreAsyncLiftPublisher
       };
     },
     // The scheduling caller's per-tick operation: one pass, one atomic answer.
-    // `hasPendingWork` below is the boot-time seed and diagnostic probe only.
     reconcile: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.runReconciliationPass(),
-    hasPendingWork: async (): Promise<boolean> => {
-      await this.ensureGraph();
-      return (await this.list()).some((job) => this.isReconciliationActionable(job));
-    },
+    // Startup recovery with the outcome kept: the caller seeds its cadence from the pass it
+    // already ran instead of paying a second boot-time inventory.
+    recover: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.runRecovery(),
   };
 
   /**
@@ -1679,9 +1677,13 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async recover(): Promise<number> {
+    return (await this.runRecovery()).reconciled;
+  }
+
+  private async runRecovery(): Promise<{ reconciled: number; pendingWork: boolean }> {
     await this.ensureGraph();
     await this.sweepStaleWalletLocks();
-    return (await this.runReconciliationPass()).reconciled;
+    return await this.runReconciliationPass();
   }
 
   async reconcileTransactions(): Promise<number> {

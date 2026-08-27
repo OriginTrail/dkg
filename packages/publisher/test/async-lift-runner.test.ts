@@ -479,7 +479,7 @@ describe('AsyncLiftRunner', () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: false };
         },
-        hasPendingWork: async () => false,
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
       },
     } as any);
     const runner = new AsyncLiftRunner({
@@ -514,7 +514,7 @@ describe('AsyncLiftRunner', () => {
           if (reconciliationCalls === 1) await firstPassGate;
           return { reconciled: 0, pendingWork: false };
         },
-        hasPendingWork: async () => false,
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
       },
     } as any);
     const runner = new AsyncLiftRunner({
@@ -549,7 +549,7 @@ describe('AsyncLiftRunner', () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: pending };
         },
-        hasPendingWork: async () => pending,
+        recover: async () => ({ reconciled: 0, pendingWork: pending }),
       },
     } as any);
     const runner = new AsyncLiftRunner({
@@ -588,7 +588,7 @@ describe('AsyncLiftRunner', () => {
           reconciliationCalls += 1;
           throw new Error('reconciliation keeps failing');
         },
-        hasPendingWork: async () => false,
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
       },
     } as any);
     const runner = new AsyncLiftRunner({
@@ -627,7 +627,7 @@ describe('AsyncLiftRunner', () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: false };
         },
-        hasPendingWork: async () => false,
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
       },
     } as any);
     const runner = new AsyncLiftRunner({
@@ -665,7 +665,7 @@ describe('AsyncLiftRunner', () => {
           if (reconciliationCalls === 1) throw new Error('transient reconcile failure');
           return { reconciled: 0, pendingWork: false };
         },
-        hasPendingWork: async () => false,
+        recover: async () => ({ reconciled: 0, pendingWork: false }),
       },
     } as any);
     const runner = new AsyncLiftRunner({
@@ -697,7 +697,7 @@ describe('AsyncLiftRunner', () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: true };
         },
-        hasPendingWork: async () => true,
+        recover: async () => ({ reconciled: 0, pendingWork: true }),
       },
     } as any);
     const runner = new AsyncLiftRunner({
@@ -742,7 +742,7 @@ describe('AsyncLiftRunner', () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: true };
         },
-        hasPendingWork: async () => true,
+        recover: async () => ({ reconciled: 0, pendingWork: true }),
       },
     } as any);
     const runner = new AsyncLiftRunner({
@@ -769,22 +769,63 @@ describe('AsyncLiftRunner', () => {
     }
   });
 
-  it('continues startup and scheduling when the boot-time pending probe rejects', async () => {
-    let demand!: () => void;
+
+  it('holds an explicitly configured active cadence exactly, not merely a fast one', async () => {
+    // The knob must CONTROL the delay: a runner that ignored it for any hard-coded fast
+    // cadence would pass every loose "reconciles quickly" assertion while hammering the
+    // store and chain at a rate the operator never chose.
+    vi.useFakeTimers();
+    const blockedSleeps: Array<() => void> = [];
     let reconciliationCalls = 0;
-    const errors: unknown[] = [];
     const publisher = createPublisher({
       reconciliationScheduling: {
-        attachDemandListener: (listener: () => void) => {
-          demand = listener;
-          return () => {};
+        attachDemandListener: () => () => {},
+        reconcile: async () => {
+          reconciliationCalls += 1;
+          return { reconciled: 0, pendingWork: true };
         },
+        recover: async () => ({ reconciled: 0, pendingWork: true }),
+      },
+    } as any);
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      recoveryIntervalMs: 600_000,
+      activeRecoveryIntervalMs: 1_234,
+      errorBackoffMs: 1,
+      sleep: () => new Promise<void>((resolve) => { blockedSleeps.push(resolve); }),
+    });
+    try {
+      await runner.start();
+      expect(reconciliationCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_233);
+      expect(reconciliationCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(reconciliationCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1_235);
+      expect(reconciliationCalls).toBe(2);
+    } finally {
+      const stopping = runner.stop();
+      blockedSleeps.forEach((resolve) => resolve());
+      await stopping;
+      vi.useRealTimers();
+    }
+  });
+
+  it('can retry start after the capability recovery pass fails once', async () => {
+    let recoverCalls = 0;
+    let reconciliationCalls = 0;
+    const publisher = createPublisher({
+      reconciliationScheduling: {
+        attachDemandListener: () => () => {},
         reconcile: async () => {
           reconciliationCalls += 1;
           return { reconciled: 0, pendingWork: false };
         },
-        hasPendingWork: async () => {
-          throw new Error('store read failed during boot probe');
+        recover: async () => {
+          recoverCalls += 1;
+          if (recoverCalls === 1) throw new Error('startup recovery failed');
+          return { reconciled: 0, pendingWork: false };
         },
       },
     } as any);
@@ -793,17 +834,13 @@ describe('AsyncLiftRunner', () => {
       walletIds: ['wallet-1'],
       pollIntervalMs: 1,
       recoveryIntervalMs: 600_000,
-      onError: (error) => { errors.push(error); },
     });
 
-    // Fail-open: the rejecting probe must neither abort startup...
-    await runner.start();
-    expect(errors).toHaveLength(1);
-    expect(reconciliationCalls).toBe(0);
-    // ...nor stop the scheduling loop that follows it.
-    demand();
-    await waitFor(() => expect(reconciliationCalls).toBeGreaterThanOrEqual(1));
+    await expect(runner.start()).rejects.toThrow('startup recovery failed');
+    await expect(runner.start()).resolves.toBeUndefined();
+    expect(recoverCalls).toBe(2);
     await runner.stop();
+    expect(reconciliationCalls).toBe(0);
   });
 
   it('rejects an active recovery interval above the Node.js timer limit', () => {
