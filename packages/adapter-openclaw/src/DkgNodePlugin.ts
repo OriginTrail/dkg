@@ -3031,9 +3031,16 @@ export class DkgNodePlugin {
       const catalogName = optionalString(args.catalog_name) ?? USER_QUERY_CATALOG_NAME;
       const catalogDescription = optionalString(args.catalog_description) ?? USER_QUERY_CATALOG_DESCRIPTION;
       const resultColumn = optionalString(args.result_column)?.replace(/^\?/, '');
-      const requestedView = optionalString(args.execution_view);
-      if (requestedView && !GET_VIEWS.includes(requestedView as GetView)) {
-        return this.error('"execution_view" must be working-memory, shared-working-memory, or verifiable-memory.');
+      let requestedView: GetView | undefined;
+      if (args.execution_view !== undefined) {
+        if (typeof args.execution_view !== 'string') {
+          return this.error('"execution_view" must be working-memory, shared-working-memory, or verifiable-memory.');
+        }
+        const normalizedView = args.execution_view.trim();
+        if (!GET_VIEWS.includes(normalizedView as GetView)) {
+          return this.error('"execution_view" must be working-memory, shared-working-memory, or verifiable-memory.');
+        }
+        requestedView = normalizedView as GetView;
       }
       const rank = Date.now();
       const { savedQuery, quads } = buildQueryCatalogSaveWrite({
@@ -3049,7 +3056,7 @@ export class DkgNodePlugin {
         rank,
         catalogRank: 50,
         parameters: args.parameters,
-        view: requestedView as GetView | undefined,
+        view: requestedView,
       });
       const write = await this.client.writeQueryCatalog(contextGraphId, quads);
       return this.json({

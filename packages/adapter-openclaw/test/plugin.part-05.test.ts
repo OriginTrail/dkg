@@ -246,6 +246,27 @@ describe("DkgNodePlugin", () => {
     }
   });
 
+  it.each([
+    { value: 'working-memory' },
+    null,
+    '',
+    'unsupported-memory',
+  ])('rejects malformed execution_view values before writing: %j', async (executionView) => {
+    const writeQueryCatalog = vi.fn();
+    const plugin = new DkgNodePlugin();
+    (plugin as any).client = { writeQueryCatalog };
+
+    const result = await (plugin as any).handleQueryCatalogSave({
+      context_graph_id: 'cg-1',
+      name: 'Orders',
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      execution_view: executionView,
+    });
+
+    expect(result.details?.error).toMatch(/"execution_view" must be working-memory/);
+    expect(writeQueryCatalog).not.toHaveBeenCalled();
+  });
+
 
   it('bootstraps resolver state even when slot is owned by another plugin (R10.2)', async () => {
     // Pre-fix: when memory slot was owned by a different plugin, the
