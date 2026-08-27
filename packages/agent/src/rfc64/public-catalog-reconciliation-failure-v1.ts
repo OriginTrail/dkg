@@ -109,11 +109,8 @@ const STABLE_ERROR_TOKEN_V1 = /^[A-Za-z][A-Za-z0-9._:-]*$/;
 export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
   readonly #failures = new Map<Digest32V1, Rfc64PublicCatalogReconciliationFailureV1>();
 
-  /** Scheduler-terminal callback sink. The first failure for one head wins. */
-  record(
-    catalogHeadDigest: Digest32V1,
-    error: unknown,
-  ): void {
+  /** Diagnostic-history sink. The first failure for one head wins. */
+  record(catalogHeadDigest: Digest32V1, error: unknown): void {
     const errorName = stableErrorNameV1(error);
     const errorCode = stableErrorCodeV1(error);
     const causeCode = stableImmediateCauseCodeV1(error);
@@ -141,7 +138,6 @@ export class Rfc64PublicCatalogReconciliationFailureRegistryV1 {
   get size(): number {
     return this.#failures.size;
   }
-
 }
 
 function stableErrorNameV1(error: unknown): string {

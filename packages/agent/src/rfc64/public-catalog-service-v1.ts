@@ -662,10 +662,10 @@ export class Rfc64PublicCatalogServiceV1 {
 
   /**
    * Discover one provider's current public-root head, enqueue that exact
-   * authenticated head through the ordinary receiver, and wait for all
-   * scheduled reconciliation work to drain. A caller must still inspect the
-   * durable applied-head record: receiver failures are reported through its
-   * bounded diagnostic channel rather than thrown from the scheduler.
+   * authenticated head through the ordinary receiver, and await this request's
+   * terminal completion. Observer callbacks remain diagnostic-only; semantic
+   * failure is returned directly by the receiver and translated to the public
+   * terminal error here.
    *
    * Once discovery has completed, reconciliation is deliberately durable work
    * owned by the receiver lifecycle. Aborting the caller's signal after that
@@ -688,8 +688,13 @@ export class Rfc64PublicCatalogServiceV1 {
     });
     if (discovered === null) return null;
     if (signal?.aborted) throw signal.reason;
-    this.#receiver.schedule(discovered.announcement, remotePeerId);
-    await this.#receiver.whenIdle();
+    const completion = await this.#receiver.scheduleManyAndWait([{
+      announcement: discovered.announcement,
+      remotePeerId,
+    }]);
+    if (!isRfc64PublicCatalogReceiverSuccessCompletionV1(completion)) {
+      throw new Rfc64CatalogReconciliationTerminalErrorV1(completion);
+    }
     return discovered;
   }
 

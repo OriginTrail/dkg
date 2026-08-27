@@ -14,7 +14,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --experimental-strip-types --test test/completeness.test.ts",
+    "test": "node --experimental-strip-types --test test/completeness.test.ts test/runtime-provenance.test.ts",
     "generate": "node --experimental-strip-types src/cli/generate.ts",
     "verify": "node --experimental-strip-types src/cli/verify.ts",
     "live:generate": "node --import tsx run.ts",

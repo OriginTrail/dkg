@@ -35,6 +35,66 @@ test('runtime manifests are deterministic and bind exact loaded bytes', () => {
   );
 });
 
+test('Gate 2 compatibility codec preserves the pre-extraction wire contract', () => {
+  const build = buildGate2RuntimeManifestFromEntriesV1(SOURCE_COMMIT, FILES);
+  const loaded = buildGate2ExecutedRuntimeManifestV1(SOURCE_COMMIT, FILES);
+  const provenance = buildGate2RuntimeProvenanceV1(build, [
+    { id: 'author', loaded },
+    { id: 'receiverBeforeCrash', loaded },
+    { id: 'receiverAfterRestart', loaded },
+  ]);
+
+  assert.equal(build.schemaVersion, 'dkg-rfc64-gate2-runtime-manifest-v1');
+  assert.equal(
+    build.manifestDigest,
+    '0x8cbd9ec990acd49abb799776d45f30bfe678f78b2d766b2323d31d65c14c85fd',
+  );
+  assert.deepEqual(build.build, {
+    buildArgs: [
+      '-r',
+      '--filter',
+      '@origintrail-official/dkg-agent...',
+      '--filter',
+      '!@origintrail-official/dkg-evm-module',
+      'run',
+      'build',
+    ],
+    cleanArgs: [
+      '-r',
+      '--filter',
+      '@origintrail-official/dkg-agent...',
+      '--filter',
+      '!@origintrail-official/dkg-evm-module',
+      'run',
+      'clean',
+    ],
+    command: 'pnpm',
+  });
+  assert.deepEqual(build.packageClosure, [
+    { name: '@origintrail-official/dkg-agent', path: 'packages/agent/dist' },
+    { name: '@origintrail-official/dkg-chain', path: 'packages/chain/dist' },
+    { name: '@origintrail-official/dkg-core', path: 'packages/core/dist' },
+    { name: '@origintrail-official/dkg-publisher', path: 'packages/publisher/dist' },
+    { name: '@origintrail-official/dkg-query', path: 'packages/query/dist' },
+    {
+      name: '@origintrail-official/dkg-random-sampling',
+      path: 'packages/random-sampling/dist',
+    },
+    { name: '@origintrail-official/dkg-rdf-utils', path: 'packages/rdf-utils/dist' },
+    { name: '@origintrail-official/dkg-storage', path: 'packages/storage/dist' },
+  ]);
+  assert.equal(loaded.schemaVersion, 'dkg-rfc64-gate2-executed-runtime-manifest-v1');
+  assert.equal(
+    loaded.manifestDigest,
+    '0xaf09bd484855cdb7a86581f64d7356b204f093babfef1ae86371e61dc854b453',
+  );
+  assert.equal(provenance.schemaVersion, 'dkg-rfc64-gate2-runtime-provenance-v1');
+  assert.equal(
+    provenance.provenanceDigest,
+    '0x0f8f2b7becf479a832938ef3b3dd77065c10fb8eeb12be2dee97d30db5da43ed',
+  );
+});
+
 test('runtime provenance rejects missing entrypoints and process substitution', () => {
   const build = buildGate2RuntimeManifestFromEntriesV1(SOURCE_COMMIT, FILES);
   const incomplete = buildGate2ExecutedRuntimeManifestV1(SOURCE_COMMIT, FILES.slice(1));

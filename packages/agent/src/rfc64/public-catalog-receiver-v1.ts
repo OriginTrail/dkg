@@ -362,7 +362,14 @@ export class Rfc64PublicCatalogReceiverV1 {
     const exactProviderKeys = new Set(inputs.map(({ announcement, remotePeerId }) => (
       providerContextKey(remotePeerId, announcement)
     )));
-    return new Promise((resolve) => this.#scheduleMany(inputs, resolve, exactProviderKeys));
+    if (exactProviderKeys.size !== inputs.length) {
+      throw new TypeError('RFC-64 receiver completion providers must be distinct');
+    }
+    // Explicit synchronization owns an immutable request-scoped provider set.
+    // Ambient hints keep their configurable per-head cap and coalescing; an
+    // awaited failover request must retain every provider already validated by
+    // the service, even when maxProvidersPerHead is lower.
+    return new Promise((resolve) => this.#scheduleIsolatedCompletion(inputs, resolve));
   }
 
   #scheduleMany(
@@ -370,36 +377,13 @@ export class Rfc64PublicCatalogReceiverV1 {
       announcement: Rfc64PublicCatalogHeadAnnouncementV1;
       remotePeerId: string;
     }>[],
-    completion?: (result: Rfc64PublicCatalogReceiverCompletionV1) => void,
-    exactCompletionProviderKeys?: ReadonlySet<string>,
   ): void {
-    if (this.#closed) {
-      completion?.(createRfc64PublicCatalogReceiverCompletionV1({
-        outcome: 'closed',
-        providerAttempts: 0,
-      }));
-      return;
-    }
-    if (completion !== undefined && exactCompletionProviderKeys !== undefined) {
-      const existing = this.#pendingByKey.get(headKey(inputs[0]!.announcement));
-      if (
-        existing !== undefined
-        && [...existing.providers.keys()].some((key) => !exactCompletionProviderKeys.has(key))
-      ) {
-        this.#scheduleIsolatedCompletion(inputs, completion);
-        return;
-      }
-    }
-    let completionAttached = false;
+    if (this.#closed) return;
     for (const { announcement, remotePeerId } of inputs) {
       this.#scheduled += 1;
       const key = headKey(announcement);
       const existing = this.#pendingByKey.get(key);
       if (existing !== undefined) {
-        if (!completionAttached && completion !== undefined) {
-          (existing.completionWaiters ??= []).push(completion);
-          completionAttached = true;
-        }
         this.#dedupedInFlight += 1;
         const providerKey = providerContextKey(remotePeerId, announcement);
         const provider = existing.providers.get(providerKey);
@@ -423,13 +407,6 @@ export class Rfc64PublicCatalogReceiverV1 {
       this.#safeNotify(() => this.#onAttemptStart?.(announcement));
       if (this.#queue.length >= this.#maxQueue) {
         this.#droppedQueueFull += 1;
-        if (!completionAttached && completion !== undefined) {
-          completion(createRfc64PublicCatalogReceiverCompletionV1({
-            outcome: 'dropped',
-            providerAttempts: 0,
-          }));
-          completionAttached = true;
-        }
         continue;
       }
       const providerKey = providerContextKey(remotePeerId, announcement);
@@ -443,11 +420,7 @@ export class Rfc64PublicCatalogReceiverV1 {
           announcement,
           hintRevision: 1n,
         }]]),
-        ...(completion === undefined || completionAttached
-          ? {}
-          : { completionWaiters: [completion] }),
       };
-      if (completion !== undefined) completionAttached = true;
       this.#pendingByKey.set(key, task);
       this.#queue.push(task);
     }
@@ -469,6 +442,17 @@ export class Rfc64PublicCatalogReceiverV1 {
     }>[],
     completion: (result: Rfc64PublicCatalogReceiverCompletionV1) => void,
   ): void {
+    // An awaited request can arrive after discovery has completed but after
+    // service shutdown closed the receiver. A closed receiver never pumps its
+    // queue, so resolve at the scheduling boundary instead of enqueuing a
+    // completion that can never settle.
+    if (this.#closed) {
+      completion(createRfc64PublicCatalogReceiverCompletionV1({
+        outcome: 'closed',
+        providerAttempts: 0,
+      }));
+      return;
+    }
     this.#scheduled += inputs.length;
     const first = inputs[0]!;
     this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));
@@ -484,10 +468,6 @@ export class Rfc64PublicCatalogReceiverV1 {
     for (const { announcement, remotePeerId } of inputs) {
       const key = providerContextKey(remotePeerId, announcement);
       if (providers.has(key)) continue;
-      if (providers.size >= this.#maxProvidersPerHead) {
-        this.#droppedProviders += 1;
-        continue;
-      }
       providers.set(key, {
         key,
         peerId: remotePeerId,

@@ -16,4 +16,3 @@ if (readCleanRepositoryHead(repoRoot) !== sourceCommit) {
 const manifest = buildGate2RuntimeManifestV1(repoRoot, sourceCommit);
 installGate2RuntimeLaunchReceiptV1({ manifest, sourceCommit });
 await import('./run.ts');
-

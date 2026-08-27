@@ -136,7 +136,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       peers.push(peerId);
       if (peerId === 'peerA') throw new Error('provider lost during transfer');
       return 'applied';
-    }), { maxAttempts: 2, retryBackoffMs: 0 });
+    }), { maxAttempts: 2, maxProvidersPerHead: 1, retryBackoffMs: 0 });
 
     const completion = await receiver.scheduleManyAndWait([
       { announcement: announcement(), remotePeerId: 'peerA' },
@@ -176,7 +176,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
         return 'applied';
       },
       async () => applied,
-    ), { retryBackoffMs: 0 });
+    ), { maxProvidersPerHead: 1, retryBackoffMs: 0 });
 
     receiver.schedule(announcement(), 'peerC');
     await ambientStarted.promise;
@@ -826,6 +826,27 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     reconcileGate.resolve('applied');
     await closing;
     receiver.schedule(headWith(`0x${'cc'.repeat(32)}`), 'peerA');
+    expect(receiver.stats().scheduled).toBe(1);
+
+    const postClose = await Promise.race([
+      receiver.scheduleManyAndWait([{
+        announcement: headWith(`0x${'dd'.repeat(32)}`),
+        remotePeerId: 'peerB',
+      }]),
+      new Promise<never>((_resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('post-close awaited scheduling did not settle')),
+          100,
+        );
+        timer.unref?.();
+      }),
+    ]);
+    expect(postClose).toEqual({
+      outcome: 'closed',
+      appliedProviderPeerId: null,
+      providerAttempts: 0,
+      error: null,
+    });
     expect(receiver.stats().scheduled).toBe(1);
   });
 });
