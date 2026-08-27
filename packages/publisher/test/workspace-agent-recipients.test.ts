@@ -14,7 +14,6 @@ import {
   workspaceAgentEncryptionKeyId,
 } from '@origintrail-official/dkg-core';
 import {
-  projectWorkspaceAgentRecipientPeers,
   projectWorkspaceAgentRecipientFanout,
   resolveWorkspaceAgentRecipients,
   type WorkspaceAgentRecipientResolution,
@@ -175,7 +174,7 @@ async function insertAgentEncryptionKeyRevocation(
   await store.insert(quads);
 }
 
-describe('projectWorkspaceAgentRecipientPeers', () => {
+describe('projectWorkspaceAgentRecipientFanout', () => {
   it('projects the validated snapshot once, trimming, deduping, and excluding self', () => {
     const resolution = {
       requiresEncryption: true,
@@ -189,11 +188,15 @@ describe('projectWorkspaceAgentRecipientPeers', () => {
       ],
     } as unknown as WorkspaceAgentRecipientResolution;
 
-    expect(projectWorkspaceAgentRecipientPeers(resolution, SELF_PEER)).toEqual([PEER_A, PEER_B]);
+    expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
+      source: 'agent-roster',
+      members: [PEER_A, PEER_B],
+      complete: false,
+    });
   });
 
   it('returns null for a plaintext recipient resolution', () => {
-    expect(projectWorkspaceAgentRecipientPeers({
+    expect(projectWorkspaceAgentRecipientFanout({
       requiresEncryption: false,
       recipients: [],
     })).toBeNull();
@@ -209,7 +212,8 @@ describe('projectWorkspaceAgentRecipientPeers', () => {
     } as unknown as WorkspaceAgentRecipientResolution;
 
     expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
-      peerIds: [PEER_A],
+      source: 'agent-roster',
+      members: [PEER_A],
       complete: false,
     });
   });
@@ -224,7 +228,8 @@ describe('projectWorkspaceAgentRecipientPeers', () => {
     } as unknown as WorkspaceAgentRecipientResolution;
 
     expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
-      peerIds: [PEER_B],
+      source: 'agent-roster',
+      members: [PEER_B],
       complete: true,
     });
   });
@@ -239,7 +244,8 @@ describe('projectWorkspaceAgentRecipientPeers', () => {
     } as unknown as WorkspaceAgentRecipientResolution;
 
     expect(projectWorkspaceAgentRecipientFanout(resolution, SELF_PEER)).toEqual({
-      peerIds: [PEER_A],
+      source: 'agent-roster',
+      members: [PEER_A],
       complete: false,
     });
   });

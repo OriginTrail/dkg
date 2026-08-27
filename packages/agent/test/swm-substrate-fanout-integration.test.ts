@@ -421,17 +421,82 @@ describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {
     expect(gossip.publishes).toEqual([]);
   });
 
+  it('retries a substrate-only transient rejection with the exact encrypted wire payload', async () => {
+    const agent = await createAgent('PrivateSnapshotRetryable');
+    const gossip = new CapturingGossip();
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+    const receiverPeerId = '12D3KooWRdP3mMN9KkQCWKFjFxhgpXp8Q2y8zQZkgRYfGQ4bQh3a';
+    (agent as unknown as { isPeerDialable: (peerId: string) => Promise<boolean> }).isPeerDialable = async () => true;
+
+    const sentPayloads: Uint8Array[] = [];
+    let attempts = 0;
+    (agent as unknown as { messenger: object }).messenger = {
+      sendReliable: async (_peerId: string, _protocolId: string, payload: Uint8Array) => {
+        sentPayloads.push(payload.slice());
+        attempts += 1;
+        return {
+          delivered: true,
+          response: attempts === 1 ? FANOUT_RESPONSE_RETRYABLE : new Uint8Array(),
+          attempts: 1,
+          messageId: `private-retry-${attempts}`,
+        };
+      },
+    };
+
+    const encryptedBody = new Uint8Array(2_048).fill(0x4d);
+    const shareOperationId = 'private-substrate-only-retry';
+    await agent.publishWorkspaceGossip(
+      'cg-private-retryable-snapshot',
+      {
+        mode: 'agent-encrypted',
+        message: encryptedBody,
+        fanoutSnapshot: { source: 'agent-roster', members: [receiverPeerId], complete: true },
+      },
+      createOperationContext('share', shareOperationId),
+      null,
+      shareOperationId,
+    );
+    await agent.awaitInFlightSubstrateFanOuts();
+
+    expect(sentPayloads).toHaveLength(1);
+    expect(agent.getSwmAckQuorumStats()).toMatchObject({ tracked: 1, completed: 0, pending: 1 });
+
+    const quorum = (agent as unknown as {
+      getOrCreateSwmAckQuorum: () => { tick: (nowMs?: number) => void };
+    }).getOrCreateSwmAckQuorum();
+    quorum.tick(Date.now() + 30_001);
+    for (let i = 0; i < 20 && sentPayloads.length < 2; i += 1) {
+      await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+    }
+
+    expect(sentPayloads).toHaveLength(2);
+    expect(sentPayloads[1]).toEqual(sentPayloads[0]);
+    expect(agent.getSwmAckQuorumStats()).toMatchObject({ tracked: 1, completed: 1, pending: 0 });
+    expect(gossip.publishes).toEqual([]);
+  });
+
   it('rejects encrypted bytes that arrive without their associated fan-out snapshot', async () => {
     const agent = await createAgent('PrivateSnapshotRequired');
     const gossip = new CapturingGossip();
     (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+    const { calls, install } = stubMessengerSendReliable(() => ({
+      delivered: true,
+      response: new Uint8Array(),
+      attempts: 1,
+      messageId: 'must-not-send',
+    }));
+    install(agent);
 
     await expect((agent.publishWorkspaceGossip as any)(
       'cg-private-missing-operation-snapshot',
-      new Uint8Array(128).fill(0x7c),
+      {
+        mode: 'agent-encrypted',
+        message: new Uint8Array(128).fill(0x7c),
+      },
       createOperationContext('share'),
       null,
     )).rejects.toThrow(/requires a complete encoded payload/);
+    expect(calls).toEqual([]);
     expect(gossip.publishes).toEqual([]);
   });
 

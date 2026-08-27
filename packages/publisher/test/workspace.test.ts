@@ -255,6 +255,7 @@ describe('Workspace: share', () => {
     expect(result.shareOperationId).toMatch(/^swm-\d+-[a-z0-9]+$/);
     expect(result.gossipPayload.message).toBeInstanceOf(Uint8Array);
     expect(result.gossipPayload.message.length).toBeGreaterThan(0);
+    expect(result.message).toBe(result.gossipPayload.message);
 
     const workspaceResult = await store.query(
       `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,

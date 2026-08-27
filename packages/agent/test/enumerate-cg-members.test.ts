@@ -22,32 +22,6 @@ function makeDeps(overrides: Partial<CGMemberEnumeratorDeps>): CGMemberEnumerato
   };
 }
 
-describe('createCGMemberEnumerator: legacy dependency compatibility', () => {
-  const legacyDeps = (isPrivate: boolean) => ({
-    getContextGraphAllowedPeers: async () => null,
-    isPrivateContextGraph: async () => isPrivate,
-    getTopicSubscribers: () => ['peerA'],
-    topicForCG: (cgId: string) => `topic/${cgId}`,
-    getSelfPeerId: () => SELF,
-  });
-
-  it('accepts the pre-agent-roster dependency object for a public CG', async () => {
-    const enumerator = createCGMemberEnumerator(legacyDeps(false));
-    await expect(enumerator.enumerate('cg-public-legacy')).resolves.toEqual({
-      source: 'topic-subscribers',
-      members: ['peerA'],
-    });
-  });
-
-  it('fails closed without throwing for a private CG using the legacy object', async () => {
-    const enumerator = createCGMemberEnumerator(legacyDeps(true));
-    await expect(enumerator.enumerate('cg-private-legacy')).resolves.toEqual({
-      source: 'none',
-      members: [],
-    });
-  });
-});
-
 describe('createCGMemberEnumerator: curated CG (allowlist source)', () => {
   it('returns allowlist members and excludes self', async () => {
     const enumerator = createCGMemberEnumerator(makeDeps({
@@ -353,7 +327,11 @@ describe('createCGMemberEnumerator: private CG WITHOUT peer allowlist (agent-gat
     const enumerator = createCGMemberEnumerator(makeDeps({
       getContextGraphAllowedPeers: async () => null,
       isPrivateContextGraph: async () => true,
-      getContextGraphAllowedAgentPeers: async () => ['peerA', SELF, 'peerA', 'peerB'],
+      getContextGraphAllowedAgentPeers: async () => ({
+        source: 'agent-roster',
+        members: ['peerA', SELF, 'peerA', 'peerB'],
+        complete: true,
+      }),
       getTopicSubscribers: () => {
         subscribersCalled += 1;
         return ['nonMemberWhoHappensToSubscribe'];
@@ -371,7 +349,7 @@ describe('createCGMemberEnumerator: private CG WITHOUT peer allowlist (agent-gat
     const enumerator = createCGMemberEnumerator(makeDeps({
       getContextGraphAllowedPeers: async () => null,
       isPrivateContextGraph: async () => true,
-      getContextGraphAllowedAgentPeers: async () => [],
+      getContextGraphAllowedAgentPeers: async () => null,
       getTopicSubscribers: () => {
         subscribersCalled += 1;
         return ['nonMemberWhoHappensToSubscribe'];
@@ -448,7 +426,7 @@ describe('createCGMemberEnumerator: TTL cache', () => {
       isPrivateContextGraph: async () => true,
       getContextGraphAllowedAgentPeers: async () => {
         rosterCalls += 1;
-        return agentPeers;
+        return { source: 'agent-roster', members: agentPeers, complete: true };
       },
     }));
 

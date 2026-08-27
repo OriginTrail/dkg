@@ -219,7 +219,9 @@ export function chooseFanOutTier(input: ChooseFanOutTierInput): FanOutPlan {
   // (`allowlist`) CGs the enumerator never populates this field
   // (we deliberately track offline allowlistees), so the
   // fallback to `members` preserves curated semantics.
-  const substrateTarget = enumeration.substrateEligibleMembers ?? enumeration.members;
+  const substrateTarget = enumeration.source === 'topic-subscribers'
+    ? (enumeration.substrateEligibleMembers ?? enumeration.members)
+    : enumeration.members;
 
   switch (enumeration.source) {
     case 'allowlist': {

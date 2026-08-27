@@ -32,16 +32,17 @@ export interface WorkspaceAgentRecipientResolution {
   recipients: WorkspaceAgentRecipient[];
 }
 
-export interface WorkspaceAgentRecipientPeerProjection {
+export interface WorkspaceAgentRecipientFanoutSnapshot {
+  readonly source: 'agent-roster';
   /** Remote transport peers from the validated encryption recipient snapshot. */
-  peerIds: string[];
+  readonly members: readonly string[];
   /**
    * True only when every authorized agent has at least one advertised peer
    * (including this node). An incomplete projection must keep GossipSub as a
    * compatibility fallback; the reliable leg alone cannot reach the agents
    * whose profile has no usable peer id.
    */
-  complete: boolean;
+  readonly complete: boolean;
 }
 
 /** Parse and normalize a libp2p peer ID, rejecting arbitrary profile text. */
@@ -62,7 +63,7 @@ export function canonicalWorkspacePeerId(value: string | undefined): string | nu
 export function projectWorkspaceAgentRecipientFanout(
   resolution: WorkspaceAgentRecipientResolution,
   selfPeerId?: string,
-): WorkspaceAgentRecipientPeerProjection | null {
+): WorkspaceAgentRecipientFanoutSnapshot | null {
   if (!resolution.requiresEncryption) return null;
 
   const peers = new Set<string>();
@@ -80,22 +81,10 @@ export function projectWorkspaceAgentRecipientFanout(
   }
 
   return {
-    peerIds: [...peers],
+    source: 'agent-roster',
+    members: [...peers],
     complete: authorizedAgents.size > 0 && agentsWithPeer.size === authorizedAgents.size,
   };
-}
-
-/**
- * Project the already validated Sender Key recipient snapshot to its reliable
- * transport peer roster. Keeping this as a pure stage lets encryption and SWM
- * fan-out consume the same membership/key resolution without rerunning the
- * cryptographic resolver.
- */
-export function projectWorkspaceAgentRecipientPeers(
-  resolution: WorkspaceAgentRecipientResolution,
-  selfPeerId?: string,
-): string[] | null {
-  return projectWorkspaceAgentRecipientFanout(resolution, selfPeerId)?.peerIds ?? null;
 }
 
 export interface WorkspaceAgentRecipientResolverInput {

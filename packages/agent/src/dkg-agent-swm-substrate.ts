@@ -119,6 +119,7 @@ import {
   type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
+  type WorkspaceAgentRecipientFanoutSnapshot,
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
@@ -147,7 +148,7 @@ import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatu
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
-  createAgentAwareCGMemberEnumerator,
+  createCGMemberEnumerator,
   type CGMemberEnumerator,
 } from './swm/enumerate-cg-members.js';
 import {
@@ -1158,7 +1159,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
 
   getOrCreateCGMemberEnumerator(this: DKGAgent): CGMemberEnumerator {
     if (!this.cgMemberEnumerator) {
-      this.cgMemberEnumerator = createAgentAwareCGMemberEnumerator({
+      this.cgMemberEnumerator = createCGMemberEnumerator({
         getContextGraphAllowedPeers: (cgId) => this.getContextGraphAllowedPeers(cgId),
         getContextGraphAllowedAgentPeers: (cgId) => this.resolvePrivateSwmAgentPeerRoster(cgId),
         isPrivateContextGraph: (cgId) => this.isPrivateContextGraph(cgId),
@@ -1216,15 +1217,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * SWM body from falling back to GossipSub-only delivery merely because the
    * CG has no legacy peer-ID allowlist.
    */
-  async resolvePrivateSwmAgentPeerRoster(this: DKGAgent, contextGraphId: string): Promise<{
-    members: string[];
-    complete: boolean;
-  } | null> {
+  async resolvePrivateSwmAgentPeerRoster(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<WorkspaceAgentRecipientFanoutSnapshot | null> {
     const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId });
-    const projection = projectWorkspaceAgentRecipientFanout(resolution, this.peerId);
-    return projection
-      ? { members: projection.peerIds, complete: projection.complete }
-      : null;
+    return projectWorkspaceAgentRecipientFanout(resolution, this.peerId);
   }
 
   /**

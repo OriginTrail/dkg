@@ -53,6 +53,8 @@
  * `invalidate(cgId)`.
  */
 
+import type { WorkspaceAgentRecipientFanoutSnapshot } from '@origintrail-official/dkg-publisher';
+
 export type CGMemberSource = 'allowlist' | 'agent-roster' | 'topic-subscribers' | 'none';
 
 interface CGMemberEnumerationBase {
@@ -69,7 +71,7 @@ interface CGMemberEnumerationBase {
    * the {@link CGMemberEnumeratorDeps.isPeerDialable} jsdoc for
    * why the two sets diverge.
    */
-  members: string[];
+  readonly members: readonly string[];
   /**
    * Subset of {@link members} that {@link CGMemberEnumeratorDeps.isPeerDialable}
    * accepts — i.e. the peers the substrate fan-out is allowed to
@@ -94,7 +96,7 @@ interface CGMemberEnumerationBase {
    * `onDeadlineExpired` — a metric blip, not a wire-load
    * regression.
    */
-  substrateEligibleMembers?: string[];
+  readonly substrateEligibleMembers?: readonly string[];
 }
 
 /**
@@ -108,14 +110,9 @@ export type CGMemberEnumeration =
     source: 'allowlist';
     isPrivate: boolean;
   })
-  | (CGMemberEnumerationBase & { source: 'agent-roster'; complete: boolean })
+  | WorkspaceAgentRecipientFanoutSnapshot
   | (CGMemberEnumerationBase & { source: 'topic-subscribers' })
-  | (CGMemberEnumerationBase & { source: 'none'; members: [] });
-
-export interface CGAgentPeerRoster {
-  members: string[];
-  complete: boolean;
-}
+  | (CGMemberEnumerationBase & { source: 'none'; members: readonly [] });
 
 export interface CGMemberEnumeratorDeps {
   /**
@@ -141,7 +138,7 @@ export interface CGMemberEnumeratorDeps {
    */
   getContextGraphAllowedAgentPeers?: (
     cgId: string,
-  ) => Promise<CGAgentPeerRoster | string[] | null>;
+  ) => Promise<WorkspaceAgentRecipientFanoutSnapshot | null>;
   /**
    * Returns true for any private CG — peer-allowlisted, agent-gated,
    * or both. Same predicate the responder consults to gate sync /
@@ -263,17 +260,6 @@ export interface CGMemberEnumeratorDeps {
   cacheTtlMs?: number;
 }
 
-/**
- * Strict dependency shape used by the DKG agent's production wiring. The
- * long-standing `createCGMemberEnumerator` export remains source-compatible
- * for external callers; production cannot accidentally omit agent resolution.
- */
-export interface AgentAwareCGMemberEnumeratorDeps extends CGMemberEnumeratorDeps {
-  getContextGraphAllowedAgentPeers: (
-    cgId: string,
-  ) => Promise<CGAgentPeerRoster | string[] | null>;
-}
-
 const DEFAULT_CACHE_TTL_MS = 60_000;
 
 export interface CGMemberEnumerator {
@@ -292,22 +278,6 @@ export interface CGMemberEnumerator {
 }
 
 export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMemberEnumerator {
-  return createCGMemberEnumeratorInternal({
-    ...deps,
-    getContextGraphAllowedAgentPeers:
-      deps.getContextGraphAllowedAgentPeers ?? (async () => null),
-  });
-}
-
-export function createAgentAwareCGMemberEnumerator(
-  deps: AgentAwareCGMemberEnumeratorDeps,
-): CGMemberEnumerator {
-  return createCGMemberEnumeratorInternal(deps);
-}
-
-function createCGMemberEnumeratorInternal(
-  deps: AgentAwareCGMemberEnumeratorDeps,
-): CGMemberEnumerator {
   const now = deps.now ?? (() => Date.now());
   const ttl = deps.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const cache = new Map<string, {
@@ -383,17 +353,11 @@ function createCGMemberEnumeratorInternal(
     // sync / SWM-share auth. Private CGs use the authorized DKG-agent
     // roster and never fall through to arbitrary topic subscribers.
     if (await deps.isPrivateContextGraph(cgId)) {
-      const resolvedRoster = await deps.getContextGraphAllowedAgentPeers(cgId);
-      const agentPeers = Array.isArray(resolvedRoster)
-        ? resolvedRoster
-        : resolvedRoster?.members;
-      if (agentPeers && (agentPeers.length > 0 || !Array.isArray(resolvedRoster))) {
+      const resolvedRoster = await (deps.getContextGraphAllowedAgentPeers?.(cgId) ?? null);
+      if (resolvedRoster) {
         return {
-          source: 'agent-roster',
-          members: dedupAndExcludeSelf(agentPeers, deps.getSelfPeerId()),
-          // Legacy callbacks returned only a string[]. Preserve their old
-          // authoritative semantics; production returns the explicit shape.
-          complete: Array.isArray(resolvedRoster) ? true : (resolvedRoster?.complete ?? false),
+          ...resolvedRoster,
+          members: dedupAndExcludeSelf(resolvedRoster.members, deps.getSelfPeerId()),
         };
       }
       return { source: 'none', members: [] };

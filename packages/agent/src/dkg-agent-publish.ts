@@ -945,11 +945,7 @@ export class PublishMethods extends DKGAgentBase {
     let plan: FanOutPlan;
     try {
       const enumeration = payload.mode === 'agent-encrypted'
-        ? {
-          source: 'agent-roster' as const,
-          members: payload.fanoutSnapshot.members,
-          complete: payload.fanoutSnapshot.complete,
-        }
+        ? payload.fanoutSnapshot
         : await this.getOrCreateCGMemberEnumerator().enumerate(contextGraphId);
       plan = chooseFanOutTier({
         enumeration,
@@ -1027,14 +1023,10 @@ export class PublishMethods extends DKGAgentBase {
     // arithmetic is identical regardless of which transport
     // delivered first.
     //
-    // Three preconditions for tracking:
+    // Two preconditions for tracking:
     //   1. Caller supplied a shareOperationId (`share()` does;
     //      legacy callers don't).
-    //   2. The plan ran a gossip leg — SwmShareAck only covers
-    //      gossip-applied receivers. A hypothetical future
-    //      no-gossip / substrate-only plan would already cover
-    //      quorum via PR-C's substrate counters.
-    //   3. We have at least one ack-roundtrip-eligible peer
+    //   2. We have at least one ack-roundtrip-eligible peer
     //      (`plan.substrateMembers.length > 0`). PR-K change:
     //      pre-PR-K keyed off `plan.enumeratedMembers.length` to
     //      keep the gossip-only-too-many-subscribers branch
@@ -1076,8 +1068,13 @@ export class PublishMethods extends DKGAgentBase {
     // — the same class of bug the codex-RED note in
     // `enumerate-cg-members.ts` (`members` must not shrink
     // `expectedMembers`) was added to prevent.
+    // Substrate-only plans need the tracker too: delivered sends complete via
+    // the bookkeeper below, while retryable/queued/in-flight sends remain
+    // pending and are resent by the bounded watchdog using the exact wire
+    // payload. Without this, an encrypted private share that received the
+    // retryable sentinel had no second delivery attempt because no gossip ACK
+    // could ever arrive.
     const ackQuorumActive = !!shareOperationId
-      && plan.useGossip
       && plan.substrateMembers.length > 0;
     let trackedQuorum: SwmAckQuorum | null = null;
     if (ackQuorumActive && shareOperationId) {
@@ -1119,12 +1116,15 @@ export class PublishMethods extends DKGAgentBase {
             substrate: this.messenger,
             bookkeeper: {
               recordOutcome: (cgId, record) => {
-                if (
-                  trackedQuorum
-                  && shareOperationId
-                  && record.outcome === 'delivered'
-                ) {
-                  trackedQuorum.onAck(shareOperationId, record.peerId);
+                if (trackedQuorum && shareOperationId) {
+                  if (record.outcome === 'delivered') {
+                    trackedQuorum.onAck(shareOperationId, record.peerId);
+                  } else if (
+                    !plan.useGossip
+                    && (record.outcome === 'rejected' || record.outcome === 'failed')
+                  ) {
+                    trackedQuorum.dropPeer(shareOperationId, record.peerId);
+                  }
                 }
                 // #1227 regression fix: only feed TERMINAL initial-fanout
                 // outcomes (delivered→good, failed/rejected→failed/

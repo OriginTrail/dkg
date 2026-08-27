@@ -78,6 +78,7 @@ import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js
 import { ethers } from 'ethers';
 import {
   projectWorkspaceAgentRecipientFanout,
+  type WorkspaceAgentRecipientFanoutSnapshot,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolver,
 } from './workspace-agent-recipients.js';
@@ -707,14 +708,13 @@ export type WriteToWorkspaceOptions = ShareOptions;
 
 export interface ShareResult {
   shareOperationId: string;
+  /** @deprecated Use gossipPayload.message. */
+  message: Uint8Array;
   gossipPayload: EncodedWorkspaceGossipPayload;
 }
 
-export interface WorkspaceGossipFanoutSnapshot {
-  source: 'agent-roster';
-  members: string[];
-  complete: boolean;
-}
+/** @deprecated Use WorkspaceAgentRecipientFanoutSnapshot. */
+export type WorkspaceGossipFanoutSnapshot = WorkspaceAgentRecipientFanoutSnapshot;
 
 /**
  * Network-ready workspace bytes and their encryption-time transport snapshot.
@@ -731,7 +731,7 @@ export type EncodedWorkspaceGossipPayload =
   | {
       mode: 'agent-encrypted';
       message: Uint8Array;
-      fanoutSnapshot: WorkspaceGossipFanoutSnapshot;
+      fanoutSnapshot: WorkspaceAgentRecipientFanoutSnapshot;
     };
 
 /** @deprecated Use ShareResult */
@@ -1978,7 +1978,7 @@ export class DKGPublisher implements Publisher {
     }
 
     this.log.info(ctx, `Shared memory write complete: ${shareOperationId}`);
-    return { shareOperationId, gossipPayload };
+    return { shareOperationId, message: gossipPayload.message, gossipPayload };
   }
 
   private async encodeWorkspaceGossipPayload(
@@ -2009,12 +2009,10 @@ export class DKGPublisher implements Publisher {
       throw new Error(`Context graph "${contextGraphId}" requires a DKG agent sender identity for encrypted SWM gossip`);
     }
 
-    const projected = projectWorkspaceAgentRecipientFanout(resolution, options.publisherPeerId);
-    const gossipFanoutSnapshot: WorkspaceGossipFanoutSnapshot = {
-      source: 'agent-roster',
-      members: projected?.peerIds ?? [],
-      complete: projected?.complete ?? false,
-    };
+    const gossipFanoutSnapshot = projectWorkspaceAgentRecipientFanout(
+      resolution,
+      options.publisherPeerId,
+    ) ?? { source: 'agent-roster' as const, members: [], complete: false };
 
     if (this.workspaceSenderKeyEncryptor) {
       return {
