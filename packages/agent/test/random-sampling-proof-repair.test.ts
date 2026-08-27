@@ -127,6 +127,68 @@ describe('Random Sampling proof-time exact repair', () => {
       .toBeInstanceOf(AbortSignal);
   });
 
+  it('continues to a later provider after an ordinary peer failure', async () => {
+    const stopController = new AbortController();
+    const attemptedPeers: string[] = [];
+    const observedSignals: AbortSignal[] = [];
+    const logInfo = vi.fn();
+    const proofMaterial = {
+      contents: ['urn:historical urn:value "recovered"'],
+      privateRoots: [],
+    };
+
+    const repaired = await runRandomSamplingExactRepair({
+      chainId: 'base:8453',
+      maxPeers: 2,
+      stopSignal: stopController.signal,
+      timeoutMs: 30_000,
+      resolveStorageAddress: async (signal) => {
+        observedSignals.push(signal);
+        return '0x0000000000000000000000000000000000001234';
+      },
+      resolveLocalContextGraphId: () => 'food-safety',
+      observedCandidatePeerIds: () => ['peer-0001', 'peer-0002'],
+      selectPeerWindow: (peerIds) => peerIds,
+      ensurePeerAdmitted: async (_peerId, signal) => {
+        observedSignals.push(signal);
+        return true;
+      },
+      ensurePeerConnected: async (peerId, signal) => {
+        attemptedPeers.push(peerId);
+        observedSignals.push(signal);
+        if (peerId === 'peer-0001') throw new Error('connection reset');
+      },
+      waitForSyncProtocol: async (_peerId, signal) => {
+        observedSignals.push(signal);
+        return true;
+      },
+      fetchExactKnowledgeAsset: async (_peerId, _cgId, _ual, _commitment, signal) => {
+        observedSignals.push(signal);
+        return {
+          disposition: 'found',
+          insertedTriples: 0,
+          proofMaterial,
+        };
+      },
+      logInfo,
+    }, {
+      kaId: 7n,
+      cgId: 1n,
+      expectedRoot: new Uint8Array(32).fill(0x11),
+      expectedLeafCount: 1n,
+    });
+
+    expect(repaired).toEqual(proofMaterial);
+    expect(attemptedPeers).toEqual(['peer-0001', 'peer-0002']);
+    expect(logInfo).toHaveBeenCalledWith(expect.stringContaining(
+      'eer-0001 failed: connection reset',
+    ));
+    expect(stopController.signal.aborted).toBe(false);
+    expect(observedSignals.length).toBeGreaterThan(0);
+    expect(observedSignals.every((signal) => signal === observedSignals[0])).toBe(true);
+    expect(observedSignals[0]?.aborted).toBe(false);
+  });
+
   it('authenticates historical bytes cryptographically and rejects a tampered payload', async () => {
     const localContextGraphId = 'proof-only-history';
     const storageAddress = '0x1111111111111111111111111111111111111111';
