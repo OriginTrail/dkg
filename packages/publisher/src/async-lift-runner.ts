@@ -35,15 +35,19 @@ export class AsyncLiftRunner {
   private lastRecoveryAttemptAt = 0;
   private recoveryInFlight?: Promise<void>;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
-  /** An unserved demand poke exists; the next pass is due now, not next cadence. */
-  private reconciliationDemanded = false;
   /**
-   * Bumped per poke. A pass records the generation it started under and clears the demand flag
-   * only when it SUCCEEDS with that generation still current — so a pass that throws leaves the
-   * demand standing (retried on the errorBackoffMs floor), and a poke that lands mid-pass
-   * survives the pass that may already be past its job.
+   * r2-2 (🟡 3872744751) — ONE invariant, two monotonic cursors: demand is pending exactly while
+   * `servedDemandGeneration < demandedGeneration`. A poke advances `demanded`; only a pass that
+   * SUCCEEDS advances `served`, and only to the generation it captured at start — so a failed
+   * pass leaves the demand standing (retried on the errorBackoffMs floor) and a poke landing
+   * mid-pass stays ahead of the pass that may already be past its job. No separate boolean can
+   * drift out of sync, because the pending state is derived, never stored.
    */
-  private demandGeneration = 0;
+  private demandedGeneration = 0;
+  private servedDemandGeneration = 0;
+  private get reconciliationDemanded(): boolean {
+    return this.servedDemandGeneration < this.demandedGeneration;
+  }
   /** Last answer from the publisher's `reconciliationScheduling.hasPendingWork`; selects active vs idle cadence. */
   private pendingReconciliation = false;
   private unsubscribeReconciliationDemand?: () => void;
@@ -89,7 +93,7 @@ export class AsyncLiftRunner {
     // A tx-bearing job leaves executor ownership (detached receipt settles, ambiguous broadcast)
     // between passes; the poke pulls the next pass forward instead of waiting out the cadence.
     this.unsubscribeReconciliationDemand = this.config.publisher.reconciliationScheduling
-      ?.subscribeDemand(() => this.demandTransactionReconciliation());
+      ?.attachDemandListener(() => this.demandTransactionReconciliation());
     // Startup recovery may have left unresolved tx-bearing jobs behind (chain proof still
     // pending); seed the cadence choice from the queue rather than assuming idle.
     await this.refreshPendingReconciliation();
@@ -143,8 +147,7 @@ export class AsyncLiftRunner {
    */
   private demandTransactionReconciliation(): void {
     if (this.stopped || !this.started) return;
-    this.reconciliationDemanded = true;
-    this.demandGeneration += 1;
+    this.demandedGeneration += 1;
     if (this.recoveryInFlight) return;
     if (this.recoveryTimer) {
       clearTimeout(this.recoveryTimer);
@@ -179,19 +182,17 @@ export class AsyncLiftRunner {
 
   private startTransactionReconciliation(): void {
     if (this.stopped || this.recoveryInFlight) return;
-    // r2 (🔴 3872361404) — the demand is consumed only by a pass that SUCCEEDS. Consuming it at
-    // pass start let one transient reconcile error spend the only wake-up and park the job for
-    // the idle interval; now a failed demanded pass stays due and retries on the errorBackoffMs
-    // floor. The generation check keeps the mid-pass-poke semantics: a poke that lands while
-    // this pass runs re-arms the demand, because the pass may already be past that job.
-    const generationAtStart = this.demandGeneration;
+    // r2 (🔴 3872361404) — the demand is served only by a pass that SUCCEEDS: `served` advances
+    // to the generation captured here, never past it. Consuming demand at pass start let one
+    // transient reconcile error spend the only wake-up and park the job for the idle interval;
+    // a failed pass now leaves `served` behind `demanded`, so the demand stays due on the
+    // errorBackoffMs floor, and a poke landing mid-pass keeps `demanded` ahead of this capture.
+    const generationAtStart = this.demandedGeneration;
     this.lastRecoveryAttemptAt = Date.now();
     const recovery = (this.config.publisher.reconcileTransactions?.() ?? this.config.publisher.recover())
       .then(async () => {
         this.lastRecoveryAt = Date.now();
-        if (this.demandGeneration === generationAtStart) {
-          this.reconciliationDemanded = false;
-        }
+        this.servedDemandGeneration = Math.max(this.servedDemandGeneration, generationAtStart);
         await this.refreshPendingReconciliation();
       })
       .catch(async (error) => {

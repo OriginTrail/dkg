@@ -123,16 +123,21 @@ export interface AsyncLiftPublisher {
    */
   readonly reconciliationScheduling?: {
     /**
-     * Register the single listener poked when transaction reconciliation gains actionable
-     * work — a tx-bearing job stops being executor-owned (a detached receipt execution
-     * settles, or `processNext` hands back a live broadcast after an ambiguous send). The poke
-     * carries no payload and establishes nothing about the queue; it only invites the caller
-     * to run {@link reconcileTransactions} sooner than its idle cadence would, and it fires
-     * only once the work is actually visible to that pass. A later subscription replaces the
-     * earlier listener. Returns the unsubscribe for THIS listener; calling it after a
-     * replacement is a no-op.
+     * EXCLUSIVE attachment of the demand listener — deliberately not pub/sub. Reconciliation
+     * demand has exactly one owner (the scheduling runner driving this publisher), so attaching
+     * TAKES OVER: a later attachment supersedes the earlier one, which is the safe handover
+     * when a new runner incarnation starts while its predecessor is still stopping. The
+     * returned detach releases only the caller's OWN attachment (a stale detach from a
+     * superseded owner is a no-op), so the handover cannot be torn down by the incarnation it
+     * replaced.
+     *
+     * The poke itself carries no payload and establishes nothing about the queue; it fires
+     * when a tx-bearing job stops being executor-owned (a detached receipt execution settles,
+     * or `processNext` hands back a live broadcast after an ambiguous send) — i.e. only once
+     * the work is actually visible to a {@link reconcileTransactions} pass — and merely
+     * invites the owner to run that pass sooner than its idle cadence would.
      */
-    subscribeDemand(listener: () => void): () => void;
+    attachDemandListener(listener: () => void): () => void;
     /**
      * Whether any transaction-bearing job currently awaits chain-proof reconciliation — live
      * `broadcast`/`included` state with no executor (in-process or detached) still owning it,

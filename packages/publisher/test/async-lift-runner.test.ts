@@ -475,7 +475,7 @@ describe('AsyncLiftRunner', () => {
         return 0;
       },
       reconciliationScheduling: {
-        subscribeDemand: (listener: () => void) => {
+        attachDemandListener: (listener: () => void) => {
           demand = listener;
           return () => { demand = undefined; };
         },
@@ -510,7 +510,7 @@ describe('AsyncLiftRunner', () => {
         return 0;
       },
       reconciliationScheduling: {
-        subscribeDemand: (listener: () => void) => {
+        attachDemandListener: (listener: () => void) => {
           demand = listener;
           return () => {};
         },
@@ -548,7 +548,7 @@ describe('AsyncLiftRunner', () => {
         return 0;
       },
       reconciliationScheduling: {
-        subscribeDemand: () => () => {},
+        attachDemandListener: () => () => {},
         hasPendingWork: async () => pending,
       },
     } as any);
@@ -584,7 +584,7 @@ describe('AsyncLiftRunner', () => {
         throw new Error('reconciliation keeps failing');
       },
       reconciliationScheduling: {
-        subscribeDemand: (listener: () => void) => {
+        attachDemandListener: (listener: () => void) => {
           demand = listener;
           return () => {};
         },
@@ -623,7 +623,7 @@ describe('AsyncLiftRunner', () => {
         return 0;
       },
       reconciliationScheduling: {
-        subscribeDemand: (listener: () => void) => {
+        attachDemandListener: (listener: () => void) => {
           demand = listener;
           return () => { demand = undefined; };
         },
@@ -661,7 +661,7 @@ describe('AsyncLiftRunner', () => {
         return 0;
       },
       reconciliationScheduling: {
-        subscribeDemand: (listener: () => void) => {
+        attachDemandListener: (listener: () => void) => {
           demand = listener;
           return () => {};
         },

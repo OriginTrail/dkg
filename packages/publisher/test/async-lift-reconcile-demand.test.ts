@@ -108,7 +108,7 @@ describe('async-lift reconciliation demand channel', () => {
       },
     });
     const outlookAtPoke: Promise<boolean>[] = [];
-    publisher.reconciliationScheduling.subscribeDemand(() => {
+    publisher.reconciliationScheduling.attachDemandListener(() => {
       outlookAtPoke.push(publisher.reconciliationScheduling.hasPendingWork());
     });
     await stageShareSnapshot();
@@ -145,7 +145,7 @@ describe('async-lift reconciliation demand channel', () => {
     // catch) reads false here, spends the one-shot demand on a pass that skips the job, and
     // parks it for the idle sweep.
     const outlookAtPoke: Promise<boolean>[] = [];
-    publisher.reconciliationScheduling.subscribeDemand(() => {
+    publisher.reconciliationScheduling.attachDemandListener(() => {
       outlookAtPoke.push(publisher.reconciliationScheduling.hasPendingWork());
     });
     await stageShareSnapshot();
@@ -158,7 +158,7 @@ describe('async-lift reconciliation demand channel', () => {
     expect(await publisher.reconciliationScheduling.hasPendingWork()).toBe(true);
   });
 
-  it('a stale unsubscribe from a replaced listener does not tear down the current subscription', async () => {
+  it('a stale detach from a superseded owner does not tear down the current attachment', async () => {
     const publisher = createPublisher({
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
@@ -168,11 +168,12 @@ describe('async-lift reconciliation demand channel', () => {
       },
     });
     const pokes: string[] = [];
-    const disposeReplaced = publisher.reconciliationScheduling.subscribeDemand(() => pokes.push('replaced'));
-    publisher.reconciliationScheduling.subscribeDemand(() => pokes.push('current'));
-    // A restarted runner replaced the subscription; the old incarnation's disposer firing late
-    // (e.g. from a delayed stop()) must not silence the new one.
-    disposeReplaced();
+    const detachSuperseded = publisher.reconciliationScheduling.attachDemandListener(() => pokes.push('superseded'));
+    publisher.reconciliationScheduling.attachDemandListener(() => pokes.push('current'));
+    // A new runner incarnation took over the attachment; the superseded owner's detach firing
+    // late (e.g. from a delayed stop()) must not silence the takeover — that is the handover
+    // contract of the exclusive attachment.
+    detachSuperseded();
     await stageShareSnapshot();
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
 
@@ -190,7 +191,7 @@ describe('async-lift reconciliation demand channel', () => {
         },
       },
     });
-    publisher.reconciliationScheduling.subscribeDemand(() => {
+    publisher.reconciliationScheduling.attachDemandListener(() => {
       throw new Error('scheduler exploded');
     });
     await stageShareSnapshot();
@@ -236,6 +237,55 @@ describe('async-lift reconciliation demand channel', () => {
     expect(asked.length).toBe(3);
     expect(new Set(asked).size).toBe(3);
     expect(new Set(asked)).toEqual(new Set(txHashes));
+  });
+
+  it('suppresses pending work and reconciliation while processNext still owns a live broadcast', async () => {
+    let releaseExecutor!: () => void;
+    const executorGate = new Promise<void>((resolve) => { releaseExecutor = resolve; });
+    let broadcastPersisted!: () => void;
+    const broadcastReady = new Promise<void>((resolve) => { broadcastPersisted = resolve; });
+    const resolverAsks: string[] = [];
+    const publisher = createPublisher({
+      chainProofResolver: async (lookup) => {
+        resolverAsks.push((lookup as { txHash?: string }).txHash ?? 'unknown');
+        return { status: 'pending' };
+      },
+      knowledgeAssetVmPublishRecoveryResolver: async () => null,
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          broadcastPersisted();
+          await executorGate;
+          throw new Error('socket hang up mid-send');
+        },
+      },
+    });
+    const outlookAtPoke: Promise<boolean>[] = [];
+    publisher.reconciliationScheduling.attachDemandListener(() => {
+      outlookAtPoke.push(publisher.reconciliationScheduling.hasPendingWork());
+    });
+    await stageShareSnapshot();
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+    const processing = publisher.processNext('wallet-1');
+    await broadcastReady;
+    // r2-3 (🟡 3872744759) — the third conjunct of the actionability rule: the job is durably
+    // 'broadcast' but processNext still owns it, so it is not pending, no demand has fired, and
+    // a reconcile pass running NOW must not spend a chain read on it.
+    expect(await publisher.reconciliationScheduling.hasPendingWork()).toBe(false);
+    expect(await publisher.reconcileTransactions()).toBe(0);
+    expect(resolverAsks).toHaveLength(0);
+    expect(outlookAtPoke).toHaveLength(0);
+
+    releaseExecutor();
+    const processed = await processing;
+    expect(processed?.status).toBe('broadcast');
+    // Ownership released at the boundary: the poke fired with the work already visible, and a
+    // pass now reaches the chain-proof resolver for this job.
+    expect(outlookAtPoke).toHaveLength(1);
+    await expect(outlookAtPoke[0]).resolves.toBe(true);
+    await publisher.reconcileTransactions();
+    expect(resolverAsks).toEqual([KA_VM_EXECUTOR_TX_HASH]);
   });
 
   it('finalizes a detached publish through the demand channel alone, one send, with the idle sweep parked', async () => {

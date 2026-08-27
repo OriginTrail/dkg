@@ -1146,11 +1146,15 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   readonly reconciliationScheduling = {
-    subscribeDemand: (listener: () => void): (() => void) => {
+    // r2-1 (🟡 3872744747) — an EXCLUSIVE attachment, named as one: reconciliation demand has
+    // exactly one owner (the scheduling runner), so attaching takes over from the previous
+    // owner rather than joining a subscriber set nothing in production would ever have two of.
+    // See the interface doc for the ownership/handover contract.
+    attachDemandListener: (listener: () => void): (() => void) => {
       this.reconciliationDemandListener = listener;
       return () => {
-        // Unsubscribes only THIS listener: a replacement subscription must not be torn down by
-        // a stale disposer from the runner incarnation it replaced.
+        // Detaches only THIS attachment: a superseding owner must not be torn down by a stale
+        // detach from the runner incarnation it replaced — that is the safe handover.
         if (this.reconciliationDemandListener === listener) {
           this.reconciliationDemandListener = undefined;
         }
