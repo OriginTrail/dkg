@@ -30,7 +30,7 @@ export class Rfc64CatalogReconciliationTerminalErrorV1
     const cause = completion.error;
     super(
       classifyRfc64CatalogReconciliationTerminalReasonV1(cause),
-      readSynchronizationErrorCodeV1(cause),
+      readStringErrorCodeV1(cause),
       cause === null ? {} : { cause },
     );
     this.name = 'Rfc64CatalogReconciliationTerminalErrorV1';
@@ -39,7 +39,7 @@ export class Rfc64CatalogReconciliationTerminalErrorV1
   }
 }
 
-function readSynchronizationErrorCodeV1(error: unknown): string | null {
+function readStringErrorCodeV1(error: unknown): string | null {
   if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
     return null;
   }
@@ -155,16 +155,7 @@ function stableErrorNameV1(error: unknown): string {
 }
 
 function stableErrorCodeV1(error: unknown): string | null {
-  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
-    return null;
-  }
-  let candidate: unknown;
-  try {
-    candidate = (error as { readonly code?: unknown }).code;
-  } catch {
-    return null;
-  }
-  return stableErrorTokenV1(candidate);
+  return stableErrorTokenV1(readStringErrorCodeV1(error));
 }
 
 function stableImmediateCauseCodeV1(error: unknown): string | null {
