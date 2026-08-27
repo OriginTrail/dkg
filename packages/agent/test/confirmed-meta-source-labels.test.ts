@@ -13,7 +13,10 @@ describe('confirmed context-graph metadata source labels', () => {
       store,
       localApprovedAgentByCG: new Map(),
       subscribedContextGraphs: new Map(),
-      isContextGraphPublicOnChain: vi.fn(async () => false),
+      resolveActivePublicContextGraphChainProof: vi.fn(async () => ({
+        state: 'not-public',
+        reason: 'unregistered',
+      } as const)),
       isPrivateContextGraph: vi.fn(async () => false),
     };
 
