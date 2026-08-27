@@ -191,8 +191,8 @@ export class AsyncLiftRunner {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
     let wake!: () => void;
-    const done = new Promise<void>((resolve) => {
-      const finish = () => {
+    const done = new Promise<void>((resolve, reject) => {
+      const settle = (error?: unknown) => {
         if (settled) return;
         settled = true;
         // A wake (or stop) must not abandon the losing poll delay: an uncancelled timer would
@@ -202,14 +202,22 @@ export class AsyncLiftRunner {
           clearTimeout(timer);
           timer = undefined;
         }
-        resolve();
+        if (error === undefined) resolve();
+        else reject(error);
       };
-      wake = finish;
+      wake = () => settle();
       if (this.config.sleep) {
-        // Injected timing seam (tests): the custom sleep cannot be cancelled, only outraced.
-        void this.config.sleep(this.pollIntervalMs).then(finish);
+        // Injected timing seam (tests): the custom sleep cannot be cancelled, only outraced —
+        // but its rejection must settle the wait exceptionally so walletLoop's error path
+        // (onError + backoff) still owns delay failures, exactly as the pre-wake awaited sleep
+        // did (r4 3875113214). A rejection that loses the race to a wake is observed here and
+        // deliberately dropped: the wait already ended.
+        this.config.sleep(this.pollIntervalMs).then(
+          () => settle(),
+          (error) => settle(error ?? new Error('injected sleep rejected')),
+        );
       } else {
-        timer = setTimeout(finish, this.pollIntervalMs);
+        timer = setTimeout(() => settle(), this.pollIntervalMs);
       }
     });
     this.walletSleepers.set(walletId, wake);

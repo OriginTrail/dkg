@@ -169,6 +169,51 @@ describe('AsyncLiftRunner wallet-release wake', () => {
     vi.useRealTimers();
   });
 
+  it('routes a rejected injected sleep through the error path and keeps the wallet polling', async () => {
+    // r4 (🔴 3875113214) — the interruptible wait must not detach the injected sleep's rejection:
+    // unhandled, it left the wait pending forever and the wallet parked until an unrelated wake.
+    // A rejection has to settle the wait exceptionally so walletLoop's existing onError+backoff
+    // path owns delay failures, exactly as the pre-wake awaited sleep did.
+    let sleepCalls = 0;
+    const errors: unknown[] = [];
+    const processCalls: string[] = [];
+    const { publisher } = createWalletWakeFixture();
+    const runner = new AsyncLiftRunner({
+      publisher: {
+        ...(publisher as unknown as Record<string, unknown>),
+        processNext: async (walletId: string) => {
+          processCalls.push(walletId);
+          return null;
+        },
+      } as unknown as AsyncLiftPublisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 600_000,
+      errorBackoffMs: 1,
+      onError: async (error) => { errors.push(error); },
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) throw new Error('timer failed');
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      },
+    });
+    await runner.start();
+    try {
+      const deadline = Date.now() + 5_000;
+      while (errors.length < 1 || processCalls.length < 2) {
+        if (Date.now() > deadline) {
+          throw new Error(
+            `wallet loop did not recover from the rejected sleep (errors: ${errors.length}, processNext calls: ${processCalls.length})`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    } finally {
+      await runner.stop();
+    }
+    expect(errors.some((error) => String(error).includes('timer failed'))).toBe(true);
+  });
+
   it('stops promptly while wallet loops are parked in the idle wait', async () => {
     vi.useFakeTimers();
     const { runner } = createWalletWakeFixture({ walletIds: ['wallet-1', 'wallet-2'] });
