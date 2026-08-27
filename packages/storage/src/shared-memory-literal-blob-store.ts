@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import type {
   ConstructResult,
   Quad,
-  SubjectReplacement,
   QueryOptions,
   UpdateOptions,
   QueryResult,
@@ -151,26 +150,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
       quads.map((quad) => this.externalizeInsertQuad(quad)),
     );
     await this.inner.replaceSubject(graphUri, subject, externalized, options);
-  }
-
-  async replaceSubjects(
-    graphUri: string,
-    replacements: SubjectReplacement[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    if (typeof this.inner.replaceSubjects !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError(
-        'replaceSubjects',
-        'SharedMemoryLiteralBlobStore',
-      );
-    }
-    const externalized = await Promise.all(replacements.map(async (replacement) => ({
-      subject: replacement.subject,
-      quads: await Promise.all(
-        replacement.quads.map((quad) => this.externalizeInsertQuad(quad)),
-      ),
-    })));
-    await this.inner.replaceSubjects(graphUri, externalized, options);
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {

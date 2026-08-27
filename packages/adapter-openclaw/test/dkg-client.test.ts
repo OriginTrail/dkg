@@ -175,7 +175,7 @@ describe('DkgDaemonClient', () => {
     expect(body.contextGraphId).toBe('agent-context');
   });
 
-  it('writeQueryCatalog requests subject-scoped upsert semantics', async () => {
+  it('writeQueryCatalog sends catalog quads to the dedicated endpoint', async () => {
     fetchResponses.push(new Response(JSON.stringify({ ok: true }), { status: 200 }));
     const quads = [{ subject: 'urn:q', predicate: 'urn:p', object: '"value"', graph: '' }];
 
@@ -184,7 +184,6 @@ describe('DkgDaemonClient', () => {
     expect(fetchCalls[0]?.[0]).toBe('http://localhost:9200/api/profile/query-catalog/write');
     expect(JSON.parse(fetchCalls[0]?.[1]?.body as string)).toEqual({
       contextGraphId: 'agent-context',
-      mode: 'upsert',
       quads,
     });
   });

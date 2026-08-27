@@ -2,7 +2,6 @@ import { performance } from 'node:perf_hooks';
 import type {
   TripleStore,
   Quad as DKGQuad,
-  SubjectReplacement,
   QueryOptions,
   UpdateOptions,
   StorePressureSnapshot,
@@ -22,7 +21,6 @@ import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import {
   assertQuadLiteralsMutf8Safe,
-  classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
 } from '@origintrail-official/dkg-core';
@@ -31,7 +29,6 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
-  buildAtomicSubjectsReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { quadToNQuad } from '../bounded-rdf.js';
@@ -458,36 +455,15 @@ export class BlazegraphStore implements TripleStore {
     );
   }
 
-  async replaceSubjects(
-    graphUri: string,
-    replacements: SubjectReplacement[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    const quads = replacements.flatMap((replacement) => replacement.quads);
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'BlazegraphStore.replaceSubjects',
-    });
-    await this.sparqlUpdate(
-      buildAtomicSubjectsReplaceUpdate(graphUri, replacements),
-      { ...options, source: options?.source ?? 'blazegraph.replaceSubjects' },
-      'replaceSubjects',
-    );
-  }
-
   // -------------------------------------------------------------------
   // Queries
   // -------------------------------------------------------------------
 
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     const trimmed = sparql.trim();
-    // PREFIX / BASE prologues precede the query form. Classify through the
-    // shared scanner so graph-producing queries still negotiate N-Quads
-    // instead of being sent with the SELECT/ASK JSON Accept header.
-    const operation = classifySparqlOperation(trimmed);
-    const isAsk = operation.kind === 'read' && operation.form === 'ASK';
-    const isConstruct = operation.kind === 'read'
-      && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
+    const upper = trimmed.toUpperCase();
+    const isAsk = upper.startsWith('ASK');
+    const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
     return this.runStoreWork(isConstruct ? 'construct' : 'query', options, async (deadline) => {
 
       if (isConstruct) {

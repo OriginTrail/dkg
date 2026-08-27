@@ -24,7 +24,6 @@
 import type {
   TripleStore,
   Quad as DKGQuad,
-  SubjectReplacement,
   QueryOptions,
   UpdateOptions,
   QueryResult,
@@ -50,7 +49,6 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
-  buildAtomicSubjectsReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
@@ -816,27 +814,6 @@ export class SparqlHttpStore implements TripleStore {
     if (lifecycle) this.invalidateListGraphsCache();
   }
 
-  async replaceSubjects(
-    graphUri: string,
-    replacements: SubjectReplacement[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    if (!this.atomicUpdates) {
-      throw new UnsupportedTripleStoreCapabilityError('replaceSubjects', 'SparqlHttpStore');
-    }
-    const quads = replacements.flatMap((replacement) => replacement.quads);
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'SparqlHttpStore.replaceSubjects',
-    });
-    await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [graphUri] },
-      update: buildAtomicSubjectsReplaceUpdate(graphUri, replacements),
-      options: { ...options, source: options?.source ?? 'sparql-http.replaceSubjects' },
-      operation: 'replaceSubjects',
-    });
-  }
-
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
     return this.runStoreWork('query', options, async (lifecycleSignal) => {
       const effectiveOptions: SparqlHttpQueryOptions = {
@@ -846,16 +823,9 @@ export class SparqlHttpStore implements TripleStore {
       const startedAt = this.now();
       throwIfAborted(lifecycleSignal);
       const trimmed = sparql.trim();
-      // SPARQL queries commonly begin with PREFIX / BASE declarations. A raw
-      // startsWith check misclassified those CONSTRUCT / DESCRIBE queries as
-      // SELECT and advertised application/sparql-results+json, which causes
-      // standards-compliant endpoints such as Oxigraph to reject the request
-      // with HTTP 406. Use the shared, prologue-aware classifier that already
-      // guards update-vs-query dispatch in this adapter.
-      const operation = classifySparqlOperation(trimmed);
-      const isAsk = operation.kind === 'read' && operation.form === 'ASK';
-      const isConstruct = operation.kind === 'read'
-        && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
+      const upper = trimmed.toUpperCase();
+      const isAsk = upper.startsWith('ASK');
+      const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
 
       try {
         if (isConstruct) {

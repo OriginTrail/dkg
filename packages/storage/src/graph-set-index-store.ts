@@ -2,7 +2,6 @@ import { performance } from 'node:perf_hooks';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import type {
   Quad,
-  SubjectReplacement,
   QueryOptions,
   QueryResult,
   StorePressureSnapshot,
@@ -17,7 +16,6 @@ import {
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
   isReplaceSubjectCapabilityRefusal,
-  isReplaceSubjectsCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 
@@ -39,7 +37,6 @@ export type GraphSetMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
-  | 'replaceSubjects'
   | 'query'
   | 'update';
 
@@ -50,7 +47,6 @@ type TouchedGraphMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
-  | 'replaceSubjects'
   | 'update';
 type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
 type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
@@ -463,30 +459,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     }
     this.bumpMutation();
     await this.maintainTouchedGraphs([graphUri], 'replaceSubject', options);
-  }
-
-  async replaceSubjects(
-    graphUri: string,
-    replacements: SubjectReplacement[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    if (typeof this.inner.replaceSubjects !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('replaceSubjects', 'GraphSetIndexStore');
-    }
-    if (!this.enabled) {
-      await this.inner.replaceSubjects(graphUri, replacements, options);
-      return;
-    }
-    try {
-      await this.inner.replaceSubjects(graphUri, replacements, options);
-    } catch (error) {
-      if (!isReplaceSubjectsCapabilityRefusal(error)) {
-        this.scheduleFullRefresh('replaceSubjects');
-      }
-      throw error;
-    }
-    this.bumpMutation();
-    await this.maintainTouchedGraphs([graphUri], 'replaceSubjects', options);
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {

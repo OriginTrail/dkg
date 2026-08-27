@@ -64,7 +64,7 @@ function queryCatalogReadContext(agent: Record<string, unknown>): {
 
 function queryCatalogWriteContext(
   store: TripleStore,
-  payload: { contextGraphId: string; mode?: string; quads: Quad[] },
+  payload: { contextGraphId: string; quads: Quad[] },
 ): {
   context: RequestContext;
   response: ReturnType<typeof fakeResponse>;
@@ -365,58 +365,7 @@ describe('/api/profile/query-catalog/read', () => {
 });
 
 describe('/api/profile/query-catalog/write', () => {
-  it('fails closed without an atomic batch capability and preserves the existing subject', async () => {
-    const store = await createTripleStore({ backend: 'oxigraph' });
-    const contextGraphId = 'kamstrup-testnet';
-    const graph = `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
-    const query = `urn:dkg:profile:${contextGraphId}:query:configuration-trace`;
-    const sparql = 'http://dkg.io/ontology/profile/sparqlQuery';
-    await store.insert([{
-      subject: query,
-      predicate: sparql,
-      object: '"SELECT \\"old\\" WHERE {}"',
-      graph,
-    }]);
-
-    const insert = vi.fn(store.insert.bind(store));
-    const deleteByPattern = vi.fn(store.deleteByPattern.bind(store));
-    const unsupportedStore = new Proxy(store, {
-      get(target, property, receiver) {
-        if (property === 'replaceSubjects') return undefined;
-        if (property === 'insert') return insert;
-        if (property === 'deleteByPattern') return deleteByPattern;
-        const value = Reflect.get(target, property, receiver);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    }) as TripleStore;
-
-    try {
-      const write = queryCatalogWriteContext(unsupportedStore, {
-        contextGraphId,
-        mode: 'upsert',
-        quads: [{
-          subject: query,
-          predicate: sparql,
-          object: '"SELECT \\"new\\" WHERE {}"',
-          graph: '',
-        }],
-      });
-      await handleMemoryRoutes(write.context);
-
-      expect(write.response.statusCode).toBe(501);
-      expect(JSON.parse(write.response.body)).toMatchObject({
-        code: 'QUERY_CATALOG_ATOMIC_UPSERT_UNSUPPORTED',
-      });
-      expect(insert).not.toHaveBeenCalled();
-      expect(deleteByPattern).not.toHaveBeenCalled();
-      expect(await ask(store, graph, query, sparql, 'SELECT "old" WHERE {}')).toBe(true);
-      expect(await ask(store, graph, query, sparql, 'SELECT "new" WHERE {}')).toBe(false);
-    } finally {
-      await store.close();
-    }
-  });
-
-  it('upserts incoming catalog/query subjects and preserves unrelated saved queries', async () => {
+  it('appends repeated subject values without deleting existing catalog data', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const contextGraphId = 'kamstrup-testnet';
     const graph = `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
@@ -429,7 +378,6 @@ describe('/api/profile/query-catalog/write', () => {
     try {
       const first = queryCatalogWriteContext(store, {
         contextGraphId,
-        mode: 'upsert',
         quads: [
           { subject: catalog, predicate: label, object: '"Old catalog"', graph: '' },
           { subject: query, predicate: sparql, object: '"SELECT \\"old\\" WHERE {}"', graph: '' },
@@ -439,14 +387,11 @@ describe('/api/profile/query-catalog/write', () => {
       await handleMemoryRoutes(first.context);
       expect(first.response.statusCode).toBe(200);
       expect(JSON.parse(first.response.body)).toMatchObject({
-        mode: 'upsert',
-        subjectsUpserted: 3,
         triplesWritten: 3,
       });
 
       const second = queryCatalogWriteContext(store, {
         contextGraphId,
-        mode: 'upsert',
         quads: [
           { subject: catalog, predicate: label, object: '"Current catalog"', graph: '' },
           { subject: query, predicate: sparql, object: '"SELECT \\"current\\" WHERE {}"', graph: '' },
@@ -455,14 +400,12 @@ describe('/api/profile/query-catalog/write', () => {
       await handleMemoryRoutes(second.context);
       expect(second.response.statusCode).toBe(200);
       expect(JSON.parse(second.response.body)).toMatchObject({
-        mode: 'upsert',
-        subjectsUpserted: 2,
         triplesWritten: 2,
       });
 
-      expect(await ask(store, graph, catalog, label, 'Old catalog')).toBe(false);
+      expect(await ask(store, graph, catalog, label, 'Old catalog')).toBe(true);
       expect(await ask(store, graph, catalog, label, 'Current catalog')).toBe(true);
-      expect(await ask(store, graph, query, sparql, 'SELECT "old" WHERE {}')).toBe(false);
+      expect(await ask(store, graph, query, sparql, 'SELECT "old" WHERE {}')).toBe(true);
       expect(await ask(store, graph, query, sparql, 'SELECT "current" WHERE {}')).toBe(true);
       expect(await ask(store, graph, unrelated, sparql, 'SELECT "keep" WHERE {}')).toBe(true);
     } finally {
@@ -470,7 +413,7 @@ describe('/api/profile/query-catalog/write', () => {
     }
   });
 
-  it('keeps concurrent multi-subject saves transactionally coherent', async () => {
+  it('keeps both concurrent append-only saves', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const contextGraphId = 'kamstrup-testnet';
     const graph = `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
@@ -480,7 +423,6 @@ describe('/api/profile/query-catalog/write', () => {
     const sparql = 'http://dkg.io/ontology/profile/sparqlQuery';
     const payload = (version: 'A' | 'B') => queryCatalogWriteContext(store, {
       contextGraphId,
-      mode: 'upsert',
       quads: [
         { subject: catalog, predicate: label, object: `"Catalog ${version}"`, graph: '' },
         { subject: query, predicate: sparql, object: `"SELECT \\"${version}\\" WHERE {}"`, graph: '' },
@@ -499,42 +441,10 @@ describe('/api/profile/query-catalog/write', () => {
       expect(saveB.response.statusCode).toBe(200);
       const hasA = await ask(store, graph, catalog, label, 'Catalog A');
       const hasB = await ask(store, graph, catalog, label, 'Catalog B');
-      expect([hasA, hasB].filter(Boolean)).toHaveLength(1);
-      expect(await ask(
-        store,
-        graph,
-        query,
-        sparql,
-        hasA ? 'SELECT "A" WHERE {}' : 'SELECT "B" WHERE {}',
-      )).toBe(true);
-      expect(await ask(
-        store,
-        graph,
-        query,
-        sparql,
-        hasA ? 'SELECT "B" WHERE {}' : 'SELECT "A" WHERE {}',
-      )).toBe(false);
-    } finally {
-      await store.close();
-    }
-  });
-
-  it('rejects an upsert subject outside the selected context graph profile namespace', async () => {
-    const store = await createTripleStore({ backend: 'oxigraph' });
-    try {
-      const write = queryCatalogWriteContext(store, {
-        contextGraphId: 'kamstrup-testnet',
-        mode: 'upsert',
-        quads: [{
-          subject: 'urn:dkg:profile:other-context:query:trace',
-          predicate: 'http://dkg.io/ontology/profile/sparqlQuery',
-          object: '"SELECT * WHERE {}"',
-          graph: '',
-        }],
-      });
-      await handleMemoryRoutes(write.context);
-      expect(write.response.statusCode).toBe(400);
-      expect(JSON.parse(write.response.body).error).toContain('must belong to context graph');
+      expect(hasA).toBe(true);
+      expect(hasB).toBe(true);
+      expect(await ask(store, graph, query, sparql, 'SELECT "A" WHERE {}')).toBe(true);
+      expect(await ask(store, graph, query, sparql, 'SELECT "B" WHERE {}')).toBe(true);
     } finally {
       await store.close();
     }

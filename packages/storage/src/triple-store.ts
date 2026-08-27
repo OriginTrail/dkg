@@ -26,11 +26,6 @@ export interface Quad {
   graph: string;
 }
 
-export interface SubjectReplacement {
-  subject: string;
-  quads: Quad[];
-}
-
 export interface SelectResult {
   type: 'bindings';
   bindings: Array<Record<string, string>>;
@@ -174,17 +169,6 @@ export interface TripleStore {
     graphUri: string,
     subject: string,
     quads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void>;
-  /**
-   * Atomically replace every row for several subjects in one shared named
-   * graph. The complete batch MUST have one commit boundary: on failure none
-   * of the subjects may be changed. Optional because generic SPARQL endpoints
-   * do not necessarily provide a transactional update boundary.
-   */
-  replaceSubjects?(
-    graphUri: string,
-    replacements: SubjectReplacement[],
     options?: QueryOptions,
   ): Promise<void>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
@@ -370,34 +354,6 @@ export async function tryReplaceSubjectAtomically(
     if (
       error instanceof UnsupportedTripleStoreCapabilityError &&
       error.capability === 'replaceSubject'
-    ) {
-      return false;
-    }
-    throw error;
-  }
-}
-
-/**
- * Attempt one atomic multi-subject replacement inside a shared named graph.
- * Returns false only for a clean preflight capability refusal. Execution
- * errors propagate because the caller cannot safely retry an indeterminate
- * remote mutation as a compatibility fallback.
- */
-export async function tryReplaceSubjectsAtomically(
-  store: TripleStore,
-  graphUri: string,
-  replacements: SubjectReplacement[],
-  options: QueryOptions = {},
-): Promise<boolean> {
-  const replaceSubjects = store.replaceSubjects;
-  if (typeof replaceSubjects !== 'function') return false;
-  try {
-    await replaceSubjects.call(store, graphUri, replacements, options);
-    return true;
-  } catch (error) {
-    if (
-      error instanceof UnsupportedTripleStoreCapabilityError &&
-      error.capability === 'replaceSubjects'
     ) {
       return false;
     }

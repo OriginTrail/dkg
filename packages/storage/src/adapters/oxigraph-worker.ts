@@ -2,10 +2,9 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { TripleStore, Quad, SubjectReplacement, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
+import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker, type GraphWriteScope } from '../graph-write-gen.js';
-import { StoreResponseTooLargeError } from '../http-response-limit.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -689,29 +688,8 @@ export class OxigraphWorkerStore implements TripleStore {
     await this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>
       this.call('replaceSubject', graphUri, subject, quads));
   }
-  async replaceSubjects(graphUri: string, replacements: SubjectReplacement[]): Promise<void> {
-    await this.runTrackedWrite(
-      { kind: 'graphs', graphs: [graphUri] },
-      () => this.call('replaceSubjects', graphUri, replacements),
-    );
-  }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
-    const result = await this.callWithTimeout<QueryResult>(
-      this.operationTimeoutMs,
-      options?.signal,
-      'query',
-      sparql,
-    );
-    if (options?.maxResponseBytes !== undefined) {
-      if (!Number.isSafeInteger(options.maxResponseBytes) || options.maxResponseBytes < 0) {
-        throw new RangeError('maxResponseBytes must be a non-negative safe integer');
-      }
-      const actualBytes = Buffer.byteLength(JSON.stringify(result));
-      if (actualBytes > options.maxResponseBytes) {
-        throw new StoreResponseTooLargeError(options.maxResponseBytes, actualBytes);
-      }
-    }
-    return result;
+    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
   }
   async hasGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<boolean> {
     return this.callWithTimeout<boolean>(this.operationTimeoutMs, options?.signal, 'hasGraph', graphUri);

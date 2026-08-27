@@ -78,11 +78,6 @@ function listenerBoiLegacyQueryCatalogView(
     ? 'working-memory'
     : undefined;
 }
-import {
-  QUERY_CATALOG_ATOMIC_UPSERT_UNSUPPORTED,
-  writeQueryCatalog,
-  type QueryCatalogWriteMode,
-} from '../query-catalog-store.js';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
   DashboardDB,
@@ -558,13 +553,6 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
 
-    const mode = parsed.mode ?? 'insert';
-    if (mode !== 'insert' && mode !== 'upsert') {
-      return jsonResponse(res, 400, {
-        error: 'Invalid "mode" (must be "insert" or "upsert")',
-      });
-    }
-
     const contextGraphId = parsed.contextGraphId;
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
@@ -617,25 +605,16 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
 
       const literalSize = validateWritableQuadLiteralSizes("quads", normalized);
       if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
-      const { subjectsUpserted } = await writeQueryCatalog(
-        agent.store,
-        graph,
-        resolvedContextGraphId,
-        normalized,
-        mode,
-      );
+      await agent.store.insert(normalized, {
+        source: 'daemon.profile.queryCatalog.insert',
+      });
       return jsonResponse(res, 200, {
         ok: true,
         contextGraphId: resolvedContextGraphId,
         graph,
-        mode: mode as QueryCatalogWriteMode,
-        ...(mode === 'upsert' ? { subjectsUpserted } : {}),
         triplesWritten: normalized.length,
       });
     } catch (err: any) {
-      if (err?.code === QUERY_CATALOG_ATOMIC_UPSERT_UNSUPPORTED) {
-        return jsonResponse(res, 501, { error: err.message, code: err.code });
-      }
       return jsonResponse(res, 400, {
         error: err?.message ?? "Invalid query catalog write",
       });

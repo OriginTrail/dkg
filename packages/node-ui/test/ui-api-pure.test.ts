@@ -356,7 +356,7 @@ describe('UI API tests', () => {
       expect(JSON.parse(call?.body ?? '{}')).toEqual({ contextGraphId: 'cg-listenerboi' });
     });
 
-    it('writeProfileQueryCatalog requests subject-scoped upsert semantics', async () => {
+    it('writeProfileQueryCatalog sends catalog quads to the dedicated endpoint', async () => {
       const quads = [{ subject: 'urn:q', predicate: 'urn:p', object: '"value"', graph: '' }];
       await writeProfileQueryCatalog('cg-listenerboi', quads);
       const call = requestLog.find(
@@ -364,7 +364,6 @@ describe('UI API tests', () => {
       );
       expect(JSON.parse(call?.body ?? '{}')).toEqual({
         contextGraphId: 'cg-listenerboi',
-        mode: 'upsert',
         quads,
       });
     });

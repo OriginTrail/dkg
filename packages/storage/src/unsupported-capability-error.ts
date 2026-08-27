@@ -6,7 +6,6 @@ export type TripleStoreCapability =
   | 'update'
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
-  | 'replaceSubjects'
   | 'replaceSubject';
 
 /**
@@ -54,12 +53,5 @@ export function isReplaceSubjectCapabilityRefusal(error: unknown): boolean {
   return (
     error instanceof UnsupportedTripleStoreCapabilityError &&
     error.capability === 'replaceSubject'
-  );
-}
-
-export function isReplaceSubjectsCapabilityRefusal(error: unknown): boolean {
-  return (
-    error instanceof UnsupportedTripleStoreCapabilityError &&
-    error.capability === 'replaceSubjects'
   );
 }

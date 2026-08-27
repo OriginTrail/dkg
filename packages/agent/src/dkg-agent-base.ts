@@ -542,17 +542,6 @@ export function createListContextGraphsCacheInvalidatingStore(
             () => markProjectionDirty?.(undefined, graphUri),
           )
       : undefined,
-    // Saved-query catalog upserts replace the catalog and query subjects as one
-    // commit. Preserve the multi-subject capability through the production
-    // agent wrapper just as we do for single-subject publisher records.
-    replaceSubjects: innerStore.replaceSubjects
-      ? (graphUri, replacements, options) =>
-          invalidateAfterMutation(
-            () => innerStore.replaceSubjects!(graphUri, replacements, options),
-            () => true,
-            () => markProjectionDirty?.(undefined, graphUri),
-          )
-      : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },

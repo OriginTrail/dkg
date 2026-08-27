@@ -242,20 +242,6 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(String(init?.body)).toMatch(/^CONSTRUCT /);
   });
 
-  it('uses an N-Quads Accept header for a BASE/PREFIX-prefixed CONSTRUCT query', async () => {
-    setFetch(async () => new Response(
-      '<http://ex.org/s> <http://schema.org/name> "Alice" .\n',
-      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
-    ));
-    const s = new BlazegraphStore(baseUrl);
-    const result = await s.query(
-      'BASE <http://ex.org/>\nPREFIX schema: <http://schema.org/>\nCONSTRUCT { <s> schema:name ?name } WHERE { <s> schema:name ?name }',
-    );
-    expect(result.type).toBe('quads');
-    const headers = fetchCalls[0][1]?.headers as Record<string, string>;
-    expect(headers.Accept).toBe('text/x-nquads, application/n-quads');
-  });
-
   it('sends a server-side query deadline on SELECT and CONSTRUCT, wider than the client deadline', async () => {
     // Without a server-side bound, a client abort leaves the query executing
     // on Blazegraph indefinitely (observed on mainnet: 10-32+ min past a 30s

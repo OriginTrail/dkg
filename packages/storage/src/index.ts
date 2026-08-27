@@ -1,6 +1,5 @@
 export {
   type Quad,
-  type SubjectReplacement,
   type TripleStore,
   type TripleStoreDecorator,
   type QueryResult,
@@ -22,7 +21,6 @@ export {
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
   tryReplaceSubjectAtomically,
-  tryReplaceSubjectsAtomically,
   isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,
@@ -33,7 +31,6 @@ export {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
-  buildAtomicSubjectsReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
@@ -43,7 +40,6 @@ export {
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
   isReplaceSubjectCapabilityRefusal,
-  isReplaceSubjectsCapabilityRefusal,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 export {

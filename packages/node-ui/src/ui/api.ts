@@ -735,7 +735,6 @@ export const writeProfileQueryCatalog = (
 ) =>
   post<any>('/api/profile/query-catalog/write', {
     contextGraphId,
-    mode: 'upsert',
     quads,
   });
 
