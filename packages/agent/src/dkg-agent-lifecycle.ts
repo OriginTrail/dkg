@@ -4222,6 +4222,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.lastSuccessfulSyncAt.delete(remotePeer);
     this.lastSyncProgressAt.delete(remotePeer);
     this.selectedSwmBootstrapAdmission.clear(remotePeer);
+    this.rfc64SwmRecoveryQueuedAt.delete(remotePeer);
     this.syncReconcilerBackoff.delete(remotePeer);
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
@@ -4258,8 +4259,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       isPeerAccepted: (peerId) => this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
       isStarted: () => this.started,
       disconnectBoundary: (peerId, now) => this.syncOnConnectDisconnectBoundary(peerId, now),
-      lastQueuedAt: (peerId) => this.catchupOnConnectAt.get(peerId) ?? 0,
-      recordQueuedAt: (peerId, now) => this.catchupOnConnectAt.set(peerId, now),
+      lastQueuedAt: (peerId) => this.rfc64SwmRecoveryQueuedAt.get(peerId) ?? 0,
+      recordQueuedAt: (peerId, now) => this.rfc64SwmRecoveryQueuedAt.set(peerId, now),
       backoffRetryAt: (peerId) => this.syncReconcilerBackoff.get(peerId)?.nextRetryAt ?? null,
       schedule: (run, delayMs) => { setTimeout(run, delayMs); },
       getProbe: (peerId) => this.getSyncReconcilerProbe(peerId),
@@ -5121,6 +5122,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const [peerId, ts] of this.catchupOnConnectAt) {
       if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
         this.catchupOnConnectAt.delete(peerId);
+      }
+    }
+    for (const [peerId, ts] of this.rfc64SwmRecoveryQueuedAt) {
+      if (!connected.has(peerId) && now - ts >= syncTiming.stalenessThresholdMs) {
+        this.rfc64SwmRecoveryQueuedAt.delete(peerId);
       }
     }
     for (const [peerId, ts] of this.lastSyncDisconnectedAt) {

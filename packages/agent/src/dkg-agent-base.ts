@@ -1576,6 +1576,12 @@ export class DKGAgentBase {
    */
   protected readonly catchupOnConnectAt = new Map<string, number>();
   /**
+   * Dedicated RFC-64 provider-plan queue timestamps. These must not share the
+   * generic on-connect ledger: a generic run may intentionally omit SWM and
+   * therefore cannot coalesce an explicit graph-complete recovery plan.
+   */
+  protected readonly rfc64SwmRecoveryQueuedAt = new Map<string, number>();
+  /**
    * Per-peer timestamp of the last time all live connections to that peer
    * were gone. Used to avoid suppressing reconnect catch-up with a
    * `lastSuccessfulSyncAt` value from before an offline gap.

@@ -666,15 +666,10 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o } }`,
         { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.readGraph' },
       );
-      // Oxigraph represents an empty CONSTRUCT as empty bindings while the
-      // persistent worker returns an empty quad set. They are the same
-      // canonical empty projection; no non-empty bindings shape is accepted.
-      const stored = contentResult.type === 'quads'
-        ? contentResult.quads.map((quad) => ({ ...quad, graph: '' }))
-        : contentResult.type === 'bindings' && contentResult.bindings.length === 0
-          ? []
-          : null;
-      if (stored === null) return false;
+      // TripleStore adapters guarantee a quad result for CONSTRUCT queries.
+      // Fail closed if an adapter violates that contract.
+      if (contentResult.type !== 'quads') return false;
+      const stored = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
       const matches = workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
       if (matches && witnessUsable) {
         // Written HERE — from the branch that just computed the digest over

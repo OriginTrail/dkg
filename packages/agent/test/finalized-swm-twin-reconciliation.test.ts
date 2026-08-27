@@ -39,6 +39,7 @@ function fixture(
   swmMetaGraph: string;
   headSubject: string;
   payload: Quad[];
+  subGraphName?: string;
   privateTripleCount: number;
   privateMerkleRoot?: string;
 }> {
@@ -96,6 +97,7 @@ function fixture(
       : `did:dkg:context-graph:${CG}/_shared_memory_meta`,
     headSubject: `${UAL}#dkg-swm-head`,
     payload,
+    ...(subGraphName === undefined ? {} : { subGraphName }),
     privateTripleCount,
     ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
   };
@@ -211,6 +213,7 @@ function descriptorFor(input: ReturnType<typeof fixture>) {
     publicQuadsDigest: workspacePublicQuadsDigest(input.payload),
     publicQuadsCount: input.payload.length,
     privateTripleCount: input.privateTripleCount,
+    ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
     ...(input.privateMerkleRoot === undefined
       ? {}
       : { privateMerkleRoot: input.privateMerkleRoot }),
@@ -232,6 +235,7 @@ function catalogEvidenceFor(input: ReturnType<typeof fixture>) {
     publicQuadsDigest: workspacePublicQuadsDigest(input.payload),
     publicQuadsCount: input.payload.length,
     privateTripleCount: input.privateTripleCount,
+    ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
     ...(input.privateMerkleRoot === undefined
       ? {}
       : { privateMerkleRoot: input.privateMerkleRoot }),
@@ -286,29 +290,44 @@ describe('durable VM / SWM tier reconciliation', () => {
     expect(await store.countQuads(input.swmGraph)).toBe(0);
   });
 
-  it('retires an exact catalog-staged SWM twin without a WorkspaceOperation head', async () => {
-    const store = new OxigraphStore();
-    const input = fixture();
-    await seedTwin(store, input);
-    await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
-    await store.deleteByPattern({
-      graph: input.swmMetaGraph,
-      subject: `urn:dkg:share:${CG}:${OPERATION_ID}`,
-    });
-    const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
-      await store.dropGraph(candidate.swmGraph);
-    });
+  it.each([undefined, 'code'])(
+    'retires an exact catalog-staged SWM twin without a WorkspaceOperation head for subgraph %s',
+    async (subGraphName) => {
+      const store = new OxigraphStore();
+      const input = fixture(subGraphName);
+      await seedTwin(store, input);
+      const root = fixture();
+      if (subGraphName !== undefined) {
+        expect(input.swmGraph).not.toBe(root.swmGraph);
+        await store.insert(root.payload.map((quad) => ({ ...quad, graph: root.swmGraph })));
+      }
+      await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+      await store.deleteByPattern({
+        graph: input.swmMetaGraph,
+        subject: `urn:dkg:share:${CG}:${OPERATION_ID}`,
+      });
+      const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+        await store.dropGraph(candidate.swmGraph);
+      });
 
-    await expect(reconcileFinalizedSwmTwinFromCatalogProjection({
-      store,
-      writeLocks: new Map(),
-      evidence: catalogEvidenceFor(input),
-      retire,
-    })).resolves.toBe('retired');
+      await expect(reconcileFinalizedSwmTwinFromCatalogProjection({
+        store,
+        writeLocks: new Map(),
+        evidence: catalogEvidenceFor(input),
+        retire,
+      })).resolves.toBe('retired');
 
-    expect(retire).toHaveBeenCalledTimes(1);
-    expect(await store.countQuads(input.swmGraph)).toBe(0);
-  });
+      expect(retire).toHaveBeenCalledWith(expect.objectContaining({
+        contextGraphId: CG,
+        swmGraph: input.swmGraph,
+        ...(subGraphName === undefined ? {} : { subGraphName }),
+      }));
+      expect(await store.countQuads(input.swmGraph)).toBe(0);
+      if (subGraphName !== undefined) {
+        expect(await store.countQuads(root.swmGraph)).toBe(root.payload.length);
+      }
+    },
+  );
 
   it('preserves a catalog-staged SWM twin when the author-signed root differs', async () => {
     const store = new OxigraphStore();

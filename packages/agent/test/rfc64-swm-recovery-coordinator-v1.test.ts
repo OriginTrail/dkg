@@ -147,6 +147,51 @@ describe('RFC-64 SWM recovery coordinator', () => {
     expect(deps.syncAuthorizedPlan).not.toHaveBeenCalled();
   });
 
+  it('suppresses a plan inside the dedicated RFC-64 queue cooldown', () => {
+    const deps = dependencies({ lastQueuedAt: () => 99_999 });
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
+
+    expect(coordinator.queue({
+      providerPeerId: PROVIDER,
+      targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
+    }, vi.fn(), 0)).toBe(false);
+    expect(deps.recordQueuedAt).not.toHaveBeenCalled();
+    expect(deps.schedule).not.toHaveBeenCalled();
+  });
+
+  it('suppresses queueing during active reconciler backoff', () => {
+    const deps = dependencies({ backoffRetryAt: () => 100_001 });
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
+
+    expect(coordinator.queue({
+      providerPeerId: PROVIDER,
+      targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
+    }, vi.fn(), 0)).toBe(false);
+    expect(deps.recordQueuedAt).not.toHaveBeenCalled();
+    expect(deps.schedule).not.toHaveBeenCalled();
+  });
+
+  it('rechecks backoff when a delayed queued plan begins', async () => {
+    let retryAt: number | null = null;
+    let scheduled: (() => void) | undefined;
+    const deps = dependencies({
+      backoffRetryAt: () => retryAt,
+      schedule: (run) => { scheduled = run; },
+    });
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(deps);
+
+    expect(coordinator.queue({
+      providerPeerId: PROVIDER,
+      targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
+    }, vi.fn(), 0)).toBe(true);
+    retryAt = 100_001;
+    scheduled!();
+    await Promise.resolve();
+    expect(deps.getProbe).not.toHaveBeenCalled();
+    expect(deps.accountAttempt).not.toHaveBeenCalled();
+    expect(deps.syncAuthorizedPlan).not.toHaveBeenCalled();
+  });
+
   it('executes the real mixed-plan runner with one typed authorized request', async () => {
     const syncAuthorizedPlan = vi.fn(async () => completeSelectedResult());
     const deps = dependencies({ syncAuthorizedPlan });
