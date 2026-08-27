@@ -10,32 +10,56 @@ import {
   type ChainAttestedPublicMetaRepairResult,
 } from './context-graph-public-meta-repair.js';
 
-export type PublicMetaRepairDiagnostic =
+type PublicMetaRepairDiagnostic =
   | ChainAttestedPublicMetaRepairResult
   | { readonly outcome: 'repair-failed'; readonly detail: string };
 
-type ConflictingPublicMetaRepairDiagnostic = Extract<
-  PublicMetaRepairDiagnostic,
-  { readonly outcome: 'conflicting-policy' }
->;
-
-type NonConflictingPublicMetaRepairDiagnostic = Exclude<
-  PublicMetaRepairDiagnostic,
-  { readonly outcome: 'conflicting-policy' }
->;
+export type ConfiguredContextGraphMetadataReconciliationDiagnostic =
+  | { readonly kind: 'public-metadata-projection-completed' }
+  | { readonly kind: 'public-metadata-repair-failed'; readonly detail: string }
+  | {
+      readonly kind: 'public-chain-proof-unavailable';
+      readonly reason: 'unprovable' | 'rpc-failure';
+      readonly detail?: string;
+    };
 
 export type ConfiguredContextGraphMetadataReconciliationResult =
-  | { readonly outcome: 'authoritative'; readonly repair: NonConflictingPublicMetaRepairDiagnostic }
+  | {
+      readonly outcome: 'authoritative';
+      readonly diagnostic?: ConfiguredContextGraphMetadataReconciliationDiagnostic;
+    }
   | {
       readonly outcome: 'pending';
       readonly reason: 'conflicting-policy';
-      readonly repair: ConflictingPublicMetaRepairDiagnostic;
+      readonly diagnostic?: never;
     }
   | {
       readonly outcome: 'pending';
       readonly reason: 'missing-metadata';
-      readonly repair: NonConflictingPublicMetaRepairDiagnostic;
+      readonly diagnostic?: ConfiguredContextGraphMetadataReconciliationDiagnostic;
     };
+
+function reconciliationDiagnostic(
+  repair: PublicMetaRepairDiagnostic,
+): ConfiguredContextGraphMetadataReconciliationDiagnostic | undefined {
+  if (repair.outcome === 'projection-complete') {
+    return { kind: 'public-metadata-projection-completed' };
+  }
+  if (repair.outcome === 'repair-failed') {
+    return { kind: 'public-metadata-repair-failed', detail: repair.detail };
+  }
+  if (
+    repair.outcome === 'not-chain-attested'
+    && repair.chainProof.state === 'unknown'
+  ) {
+    return {
+      kind: 'public-chain-proof-unavailable',
+      reason: repair.chainProof.reason,
+      ...(repair.chainProof.detail === undefined ? {} : { detail: repair.chainProof.detail }),
+    };
+  }
+  return undefined;
+}
 
 export interface ConfiguredContextGraphMetadataReconciliationDependencies {
   readonly store: TripleStore;
@@ -59,7 +83,10 @@ export async function reconcileConfiguredContextGraphMetadataV1(
     return {
       outcome: 'pending',
       reason: 'missing-metadata',
-      repair: { outcome: 'repair-failed', detail: 'Context graph id is empty' },
+      diagnostic: {
+        kind: 'public-metadata-repair-failed',
+        detail: 'Context graph id is empty',
+      },
     };
   }
 
@@ -93,7 +120,7 @@ export async function reconcileConfiguredContextGraphMetadataV1(
   }
 
   if (repair.outcome === 'conflicting-policy') {
-    return { outcome: 'pending', reason: 'conflicting-policy', repair };
+    return { outcome: 'pending', reason: 'conflicting-policy' };
   }
 
   const locallyCurated = await dependencies.isLocallyCurated(contextGraphId)
@@ -102,7 +129,15 @@ export async function reconcileConfiguredContextGraphMetadataV1(
     rejectUnregisteredPlaceholder: !locallyCurated,
     ...(activePublicChainProof === undefined ? {} : { activePublicChainProof }),
   }).catch(() => false);
+  const diagnostic = reconciliationDiagnostic(repair);
   return hasConfirmedMeta
-    ? { outcome: 'authoritative', repair }
-    : { outcome: 'pending', reason: 'missing-metadata', repair };
+    ? {
+        outcome: 'authoritative',
+        ...(diagnostic === undefined ? {} : { diagnostic }),
+      }
+    : {
+        outcome: 'pending',
+        reason: 'missing-metadata',
+        ...(diagnostic === undefined ? {} : { diagnostic }),
+      };
 }

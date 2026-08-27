@@ -54,13 +54,9 @@ function createAgent(
   );
   const reconcileConfiguredContextGraphMetadata = vi.fn(
     async (contextGraphId: string): Promise<ConfiguredContextGraphMetadataReconciliationResult> => {
-      const repair = {
-        outcome: 'not-chain-attested' as const,
-        chainProof: { state: 'not-public' as const, reason: 'unregistered' as const },
-      };
       return confirmedMeta[contextGraphId] ?? Boolean(creators[contextGraphId])
-        ? { outcome: 'authoritative', repair }
-        : { outcome: 'pending', reason: 'missing-metadata', repair };
+        ? { outcome: 'authoritative' }
+        : { outcome: 'pending', reason: 'missing-metadata' };
     },
   );
 
@@ -236,10 +232,7 @@ describe('configured context graph daemon bootstrap', () => {
     );
     fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
       outcome: 'authoritative',
-      repair: {
-        outcome: 'projection-complete',
-        chainProof: { state: 'public' },
-      },
+      diagnostic: { kind: 'public-metadata-projection-completed' },
     });
     const log = vi.fn();
 
@@ -278,10 +271,6 @@ describe('configured context graph daemon bootstrap', () => {
     fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
       outcome: 'pending',
       reason: 'conflicting-policy',
-      repair: {
-        outcome: 'conflicting-policy',
-        chainProof: { state: 'public' },
-      },
     });
 
     await bootstrapConfiguredContextGraphs({
@@ -319,17 +308,10 @@ describe('configured context graph daemon bootstrap', () => {
       .mockResolvedValueOnce({
         outcome: 'pending',
         reason: 'conflicting-policy',
-        repair: {
-          outcome: 'conflicting-policy',
-          chainProof: { state: 'public' },
-        },
       })
       .mockResolvedValueOnce({
         outcome: 'authoritative',
-        repair: {
-          outcome: 'projection-complete',
-          chainProof: { state: 'public' },
-        },
+        diagnostic: { kind: 'public-metadata-projection-completed' },
       });
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -373,9 +355,9 @@ describe('configured context graph daemon bootstrap', () => {
       return {
         outcome: 'pending' as const,
         reason: 'missing-metadata' as const,
-        repair: {
-          outcome: 'not-chain-attested' as const,
-          chainProof: { state: 'unknown' as const, reason: 'unprovable' as const },
+        diagnostic: {
+          kind: 'public-chain-proof-unavailable' as const,
+          reason: 'unprovable' as const,
         },
       };
     });
@@ -444,13 +426,10 @@ describe('configured context graph daemon bootstrap', () => {
     fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
       outcome: 'pending',
       reason: 'missing-metadata',
-      repair: {
-        outcome: 'not-chain-attested',
-        chainProof: {
-          state: 'unknown',
-          reason: 'rpc-failure',
-          detail: 'temporary RPC outage',
-        },
+      diagnostic: {
+        kind: 'public-chain-proof-unavailable',
+        reason: 'rpc-failure',
+        detail: 'temporary RPC outage',
       },
     });
 
@@ -500,7 +479,10 @@ describe('configured context graph daemon bootstrap', () => {
     fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
       outcome: 'pending',
       reason: 'missing-metadata',
-      repair: { outcome: 'repair-failed', detail: 'simulated chain RPC failure' },
+      diagnostic: {
+        kind: 'public-metadata-repair-failed',
+        detail: 'simulated chain RPC failure',
+      },
     });
     const log = vi.fn();
 
@@ -627,10 +609,6 @@ describe('configured context graph daemon bootstrap', () => {
     vi.mocked(fixture.agent.hasConfirmedMetaState).mockResolvedValue(true);
     fixture.reconcileConfiguredContextGraphMetadata.mockResolvedValue({
       outcome: 'authoritative',
-      repair: {
-        outcome: 'already-complete',
-        chainProof: { state: 'not-requested' },
-      },
     });
     const readinessStore = {
       getContextGraphReadinessProvenance: () => readiness,

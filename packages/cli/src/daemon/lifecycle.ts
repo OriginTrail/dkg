@@ -1097,19 +1097,16 @@ export async function bootstrapConfiguredContextGraphs(input: {
       store: input.readinessStore ?? {},
       contextGraphId,
     });
-    if (reconciliation.repair.outcome === 'repair-failed') {
+    if (reconciliation.diagnostic?.kind === 'public-metadata-repair-failed') {
       input.log(
-        `Context graph "${contextGraphId}" public metadata repair failed: ${reconciliation.repair.detail} — continuing fail-closed`,
+        `Context graph "${contextGraphId}" public metadata repair failed: ${reconciliation.diagnostic.detail} — continuing fail-closed`,
       );
-    } else if (reconciliation.repair.outcome === 'projection-complete') {
+    } else if (reconciliation.diagnostic?.kind === 'public-metadata-projection-completed') {
       input.log(
         `Completed chain-attested public metadata for configured context graph: ${contextGraphId}`,
       );
-    } else if (
-      reconciliation.repair.outcome === 'not-chain-attested'
-      && reconciliation.repair.chainProof.state === 'unknown'
-    ) {
-      const { reason, detail } = reconciliation.repair.chainProof;
+    } else if (reconciliation.diagnostic?.kind === 'public-chain-proof-unavailable') {
+      const { reason, detail } = reconciliation.diagnostic;
       input.log(
         `Context graph "${contextGraphId}" public chain proof is unavailable (${reason}${detail ? `: ${detail}` : ''}) — continuing fail-closed`,
       );

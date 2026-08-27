@@ -744,7 +744,10 @@ export async function reconcileConfiguredContextGraphMetadata(input: {
     return {
       outcome: 'pending',
       reason: 'missing-metadata',
-      repair: { outcome: 'repair-failed', detail: 'Context graph id is empty' },
+      diagnostic: {
+        kind: 'public-metadata-repair-failed',
+        detail: 'Context graph id is empty',
+      },
     };
   }
 

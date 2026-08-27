@@ -204,10 +204,7 @@ describe('chain-attested public metadata projection repair', () => {
 
       expect(reconciliation).toEqual({
         outcome: 'authoritative',
-        repair: {
-          outcome: 'projection-complete',
-          chainProof: { state: 'public' },
-        },
+        diagnostic: { kind: 'public-metadata-projection-completed' },
       });
       expect(resolveOnChainAccessPolicyState).toHaveBeenCalledTimes(1);
       expect(isContextGraphPublicOnChain).not.toHaveBeenCalled();
@@ -240,10 +237,6 @@ describe('chain-attested public metadata projection repair', () => {
       expect(first).toEqual({
         outcome: 'pending',
         reason: 'missing-metadata',
-        repair: {
-          outcome: 'not-chain-attested',
-          chainProof: { state: 'not-public', reason: 'private' },
-        },
       });
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
       expect(agentLike.isContextGraphPublicOnChain).not.toHaveBeenCalled();
@@ -252,10 +245,7 @@ describe('chain-attested public metadata projection repair', () => {
         .reconcileConfiguredContextGraphMetadata.call(agentLike as never, contextGraphId);
       expect(second).toEqual({
         outcome: 'authoritative',
-        repair: {
-          outcome: 'projection-complete',
-          chainProof: { state: 'public' },
-        },
+        diagnostic: { kind: 'public-metadata-projection-completed' },
       });
       expect(await hasPublicProof(store, contextGraphId)).toBe(true);
       expect(resolveOnChainAccessPolicyState.mock.calls.map(([id]) => id)).toEqual([
@@ -294,13 +284,10 @@ describe('chain-attested public metadata projection repair', () => {
       expect(reconciliation).toEqual({
         outcome: 'pending',
         reason: 'missing-metadata',
-        repair: {
-          outcome: 'not-chain-attested',
-          chainProof: {
-            state: 'unknown',
-            reason: 'rpc-failure',
-            detail: 'temporary RPC outage',
-          },
+        diagnostic: {
+          kind: 'public-chain-proof-unavailable',
+          reason: 'rpc-failure',
+          detail: 'temporary RPC outage',
         },
       });
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
@@ -351,13 +338,10 @@ describe('chain-attested public metadata projection repair', () => {
       expect(reconciliation).toEqual({
         outcome: 'pending',
         reason: 'missing-metadata',
-        repair: {
-          outcome: 'not-chain-attested',
-          chainProof: {
-            state: 'unknown',
-            reason: 'rpc-failure',
-            detail: 'RPC endpoints exhausted',
-          },
+        diagnostic: {
+          kind: 'public-chain-proof-unavailable',
+          reason: 'rpc-failure',
+          detail: 'RPC endpoints exhausted',
         },
       });
       expect(getContextGraphNameHash).toHaveBeenCalledWith(42n);
@@ -408,9 +392,9 @@ describe('chain-attested public metadata projection repair', () => {
       expect(reconciliation).toEqual({
         outcome: 'pending',
         reason: 'missing-metadata',
-        repair: {
-          outcome: 'not-chain-attested',
-          chainProof: { state: 'unknown', reason: 'unprovable' },
+        diagnostic: {
+          kind: 'public-chain-proof-unavailable',
+          reason: 'unprovable',
         },
       });
       expect(getContextGraphNameHash).toHaveBeenCalledWith(42n);
@@ -421,10 +405,7 @@ describe('chain-attested public metadata projection repair', () => {
         .reconcileConfiguredContextGraphMetadata.call(agentLike, contextGraphId);
       expect(rawSlotReconciliation).toEqual({
         outcome: 'authoritative',
-        repair: {
-          outcome: 'projection-complete',
-          chainProof: { state: 'public' },
-        },
+        diagnostic: { kind: 'public-metadata-projection-completed' },
       });
       expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
       expect(getContextGraphAccessPolicy).toHaveBeenCalledWith(42n);
@@ -484,10 +465,6 @@ describe('chain-attested public metadata projection repair', () => {
       expect(afterSlotReuse).toEqual({
         outcome: 'pending',
         reason: 'missing-metadata',
-        repair: {
-          outcome: 'already-complete',
-          chainProof: { state: 'not-requested' },
-        },
       });
       expect(getContextGraphNameHash).toHaveBeenCalledTimes(2);
       expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledTimes(1);

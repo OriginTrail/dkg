@@ -1,51 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
-  ActivePublicContextGraphChainProof,
-  ChainAttestedPublicMetaRepairResult,
+  ConfiguredContextGraphMetadataReconciliationDiagnostic,
   ConfiguredContextGraphMetadataReconciliationResult,
 } from '@origintrail-official/dkg-agent';
 
-const privateProof: ActivePublicContextGraphChainProof = {
-  state: 'not-public',
-  reason: 'private',
+const unavailable: ConfiguredContextGraphMetadataReconciliationDiagnostic = {
+  kind: 'public-chain-proof-unavailable',
+  reason: 'rpc-failure',
+  detail: 'temporary outage',
 };
 const pending: ConfiguredContextGraphMetadataReconciliationResult = {
   outcome: 'pending',
   reason: 'missing-metadata',
-  repair: {
-    outcome: 'not-chain-attested',
-    chainProof: privateProof,
-  },
+  diagnostic: unavailable,
+};
+const authoritative: ConfiguredContextGraphMetadataReconciliationResult = {
+  outcome: 'authoritative',
+  diagnostic: { kind: 'public-metadata-projection-completed' },
 };
 void pending;
+void authoritative;
 
-// @ts-expect-error Conflicting repair diagnostics can never be authoritative.
-const impossibleAuthoritativeConflict: ConfiguredContextGraphMetadataReconciliationResult = {
-  outcome: 'authoritative',
-  repair: { outcome: 'conflicting-policy', chainProof: { state: 'public' } },
-};
-void impossibleAuthoritativeConflict;
-
-// @ts-expect-error A conflicting-policy reason requires the matching repair diagnostic.
-const impossibleConflictReason: ConfiguredContextGraphMetadataReconciliationResult = {
+const impossibleConflictDiagnostic: ConfiguredContextGraphMetadataReconciliationResult = {
   outcome: 'pending',
   reason: 'conflicting-policy',
-  repair: { outcome: 'already-complete', chainProof: { state: 'not-requested' } },
+  // @ts-expect-error Conflicts are completely represented by the stable pending reason.
+  diagnostic: { kind: 'public-metadata-projection-completed' },
 };
-void impossibleConflictReason;
+void impossibleConflictDiagnostic;
 
-// @ts-expect-error A conflicting repair cannot be reported as missing metadata.
-const impossibleMissingMetadataConflict: ConfiguredContextGraphMetadataReconciliationResult = {
-  outcome: 'pending',
-  reason: 'missing-metadata',
-  repair: { outcome: 'conflicting-policy', chainProof: { state: 'public' } },
+const impossibleInternalRepairState: ConfiguredContextGraphMetadataReconciliationResult = {
+  outcome: 'authoritative',
+  // @ts-expect-error Projection-repair workflow states are not public diagnostics.
+  diagnostic: { kind: 'projection-complete' },
 };
-void impossibleMissingMetadataConflict;
-
-// @ts-expect-error A completed projection necessarily carries positive public chain proof.
-const impossibleProjection: ChainAttestedPublicMetaRepairResult = {
-  outcome: 'projection-complete',
-  chainProof: privateProof,
-};
-void impossibleProjection;
+void impossibleInternalRepairState;
