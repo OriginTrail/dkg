@@ -27,7 +27,7 @@ import {
 import {
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
   resolveRfc64SelectedRecoveryContextGraphIdsV1,
-} from '../src/dkg-agent-rfc64-catalog-bootstrap.js';
+} from '../src/rfc64/swm-recovery-plan-v1.js';
 import { DKGAgent, mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
 
 const NETWORK = 'otp:20430' as NetworkIdV1;

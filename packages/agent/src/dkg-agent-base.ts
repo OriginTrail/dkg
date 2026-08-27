@@ -27,10 +27,8 @@ import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
-import {
-  createDkgAgentRfc64SwmRecoveryCoordinatorV1,
-  type DkgAgentRfc64SwmRecoveryRuntimeV1,
-} from './rfc64/dkg-agent-swm-recovery-coordinator-v1.js';
+import type { Rfc64SwmRecoveryCoordinatorV1 } from
+  './rfc64/swm-recovery-coordinator-v1.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -1584,8 +1582,7 @@ export class DKGAgentBase {
    * the generic on-connect ledger: a generic run may intentionally omit SWM
    * and cannot coalesce an explicit graph-complete recovery plan.
    */
-  protected readonly rfc64SwmRecoveryCoordinatorV1:
-    ReturnType<typeof createDkgAgentRfc64SwmRecoveryCoordinatorV1>;
+  protected rfc64SwmRecoveryCoordinatorV1!: Rfc64SwmRecoveryCoordinatorV1;
   /**
    * Per-peer timestamp of the last time all live connections to that peer
    * were gone. Used to avoid suppressing reconnect catch-up with a
@@ -1746,9 +1743,6 @@ export class DKGAgentBase {
       getConnections: () => [],
       deletePeerFromPeerStore: async () => {},
     });
-    this.rfc64SwmRecoveryCoordinatorV1 = createDkgAgentRfc64SwmRecoveryCoordinatorV1(
-      () => this as unknown as DkgAgentRfc64SwmRecoveryRuntimeV1,
-    );
     this.publisher.setWorkspaceAgentRecipientResolver((input) => (this as unknown as DKGAgent).resolveWorkspaceRecipientsGated(input));
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
     this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;

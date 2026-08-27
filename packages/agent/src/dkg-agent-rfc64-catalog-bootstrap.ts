@@ -22,6 +22,8 @@ import type {
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { Rfc64CatalogSynchronizationErrorV1 } from
   './rfc64/catalog-synchronization-error-v1.js';
+import { resolveRfc64PeerSwmRecoveryPlanV1 } from
+  './rfc64/swm-recovery-plan-v1.js';
 
 const MAX_STATUS_ERROR_BYTES_V1 = 1024;
 const MAX_CONCURRENT_TARGETS_V1 = 4;
@@ -138,91 +140,6 @@ interface BootstrapStateV1 {
 }
 
 const STATES = new WeakMap<DKGAgent, BootstrapStateV1>();
-
-/**
- * Normalize catalog authority into the scheduler's feature-neutral reserved
- * recovery scope. Policies without a graph-complete SWM provider confer no
- * reservation.
- */
-export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
-  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
-    | undefined,
-): readonly string[] {
-  if (config === undefined) return Object.freeze([]);
-  return Object.freeze(acceptedPoliciesV1(config)
-    .filter(({ completeSwmProviders = [] }) => completeSwmProviders.length > 0)
-    .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
-}
-
-export type Rfc64SwmRecoveryLaneV1 = 'ordinary-private' | 'selected-public';
-
-export interface Rfc64SwmRecoveryTargetV1 {
-  readonly contextGraphId: string;
-  readonly lane: Rfc64SwmRecoveryLaneV1;
-}
-
-export interface Rfc64PeerSwmRecoveryPlanV1 {
-  readonly providerPeerId: string;
-  readonly targets: readonly Readonly<Rfc64SwmRecoveryTargetV1>[];
-}
-
-/**
- * Snapshot one provider's complete RFC-64 recovery authority at the config
- * boundary. Downstream schedulers consume the lane labels directly instead
- * of re-inferring private/public policy from an empty local store.
- */
-export function resolveRfc64PeerSwmRecoveryPlanV1(
-  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
-    | undefined,
-  providerPeerId: string,
-): Readonly<Rfc64PeerSwmRecoveryPlanV1> {
-  const byContextGraph = new Map<string, Rfc64SwmRecoveryLaneV1>();
-  if (config !== undefined) {
-    for (const { policyEnvelope, completeSwmProviders = [] } of acceptedPoliciesV1(config)) {
-      if (!completeSwmProviders.includes(providerPeerId)) continue;
-      byContextGraph.set(
-        policyEnvelope.payload.contextGraphId,
-        policyEnvelope.payload.accessPolicy === 1 ? 'ordinary-private' : 'selected-public',
-      );
-    }
-  }
-  return Object.freeze({
-    providerPeerId,
-    targets: Object.freeze([...byContextGraph]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([contextGraphId, lane]) => Object.freeze({ contextGraphId, lane }))),
-  });
-}
-
-/** Accepted RFC-64 lane for a graph, independent of local store contents. */
-export function resolveRfc64SwmRecoveryLaneV1(
-  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
-    | undefined,
-  contextGraphId: string,
-): Rfc64SwmRecoveryLaneV1 | undefined {
-  if (config === undefined) return undefined;
-  const policy = acceptedPoliciesV1(config).find(
-    ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
-  );
-  if (policy === undefined) return undefined;
-  return policy.policyEnvelope.payload.accessPolicy === 1
-    ? 'ordinary-private'
-    : 'selected-public';
-}
-
-/** Selected recovery scopes for which one peer is explicitly graph-complete. */
-export function resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
-  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
-    | undefined,
-  providerPeerId: string,
-): readonly string[] {
-  if (config === undefined) return Object.freeze([]);
-  return Object.freeze(acceptedPoliciesV1(config)
-    .filter(({ completeSwmProviders = [] }) => (
-      completeSwmProviders.includes(providerPeerId)
-    ))
-    .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
-}
 
 export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   /**

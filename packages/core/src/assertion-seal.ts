@@ -28,7 +28,7 @@ import {
   parseDeterministicKnowledgeAssetUal,
 } from './ka-content-scope.js';
 import { parseContextGraphAssertionUri } from './constants.js';
-import { canonicalizeXsdDateTimeValue } from './xsd-date-time.js';
+import { canonicalizeAssertionSealXsdDateTimeValue } from './xsd-date-time.js';
 
 const ONT = 'http://dkg.io/ontology/';
 
@@ -724,15 +724,7 @@ function dateTimeLiteralToValue(literal: string): string {
  * AssertionSeal consumer sees exact millisecond bytes.
  */
 function canonicalizeAssertionSealDateTimeValue(value: string): string {
-  const canonical = canonicalizeXsdDateTimeValue(value, {
-    timezone: 'required',
-    timezoneOffsets: 'z-or-positive-zero',
-    year: 'four-digit',
-    fractionalSeconds: 'at-most-milliseconds',
-    fractionalOutput: 'milliseconds',
-    hour24: 'reject',
-    yearOutput: 'ecmascript-iso',
-  });
+  const canonical = canonicalizeAssertionSealXsdDateTimeValue(value);
   if (canonical === null) {
     throw new Error(`Invalid assertion seal xsd:dateTime value: ${value}`);
   }

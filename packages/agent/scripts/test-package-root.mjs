@@ -188,7 +188,6 @@ const blockedRfc64Modules = [
   'control-envelope-signer-v1.js',
   'control-object-store-v1-internal.js',
   'control-object-store-v1.js',
-  'dkg-agent-swm-recovery-coordinator-v1.js',
   'durable-file-store-v1.js',
   'inventory-v1/exact-record.js',
   'inventory-v1/swm-author-inventory-auth-v1.js',
@@ -226,6 +225,7 @@ const blockedRfc64Modules = [
   'recoverable-author-attestation-v1.js',
   'secure-filesystem-policy-v1.js',
   'swm-recovery-coordinator-v1.js',
+  'swm-recovery-plan-v1.js',
   'swm-inventory-shadow-runtime-v1.js',
 ];
 const packageExports = packageManifest.exports;

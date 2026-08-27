@@ -43,7 +43,7 @@ import {
   XSD_STRING_DATATYPE,
 } from '@origintrail-official/dkg-rdf-utils';
 import {
-  canonicalizeXsdDateTimeValue,
+  canonicalizeTermXsdDateTimeValue,
   civilFromDays,
   daysFromCivil,
   formatXsdYear as fmtYear,
@@ -388,17 +388,7 @@ const YEAR = '-?\\d{4,}';
 // Neptune). This is the value-space form the publisher's input AND every
 // backend's read-back converge to.
 function canonDateTime(lex: string): string {
-  const canonical = canonicalizeXsdDateTimeValue(lex, {
-    timezone: 'optional-assume-utc',
-    timezoneOffsets: 'any',
-    year: 'extended',
-    fractionalSeconds: 'truncate-to-milliseconds',
-    fractionalOutput: 'trim',
-    hour24: 'oxigraph-rollover',
-    yearOutput: 'xsd',
-    normalizedValueAllowed: ({ year, month, day, hour, minute, second }) =>
-      temporalInRange(year, month, day, hour, minute, second),
-  });
+  const canonical = canonicalizeTermXsdDateTimeValue(lex);
   if (canonical === null) throw new Error('invalid xsd:dateTime');
   return canonical;
 }

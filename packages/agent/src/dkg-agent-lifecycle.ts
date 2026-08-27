@@ -638,14 +638,9 @@ import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './star
 import {
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
   resolveRfc64SelectedRecoveryContextGraphIdsV1,
-  resolveRfc64PeerSwmRecoveryPlanV1,
   resolveRfc64SwmRecoveryLaneV1,
   type Rfc64PeerSwmRecoveryPlanV1,
-} from './dkg-agent-rfc64-catalog-bootstrap.js';
-import {
-  canonicalizeRfc64SwmRecoveryTargetsV1,
-  type Rfc64AuthorizedSwmRecoveryPlanV1,
-} from './rfc64/swm-recovery-coordinator-v1.js';
+} from './rfc64/swm-recovery-plan-v1.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -1257,18 +1252,6 @@ type SharedMemorySyncContextGraphPlan = {
   privateRecoverFromCurator: string[];
   eligibleContextGraphIds: string[];
 };
-
-function sameRfc64SwmRecoveryTargetsV1(
-  left: Rfc64AuthorizedSwmRecoveryPlanV1['targets'],
-  right: Rfc64AuthorizedSwmRecoveryPlanV1['targets'],
-): boolean {
-  return left.length === right.length && left.every((target, index) => {
-    const expected = right[index];
-    return expected !== undefined
-      && target.contextGraphId === expected.contextGraphId
-      && target.lane === expected.lane;
-  });
-}
 
 function enforceRfc64CompleteProviderAuthority(
   plan: SharedMemorySyncContextGraphPlan,
@@ -4249,18 +4232,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
   }
 
-  /**
-   * Admit one config-bound RFC-64 provider plan. Mixed providers deliberately
-   * share this single queue/cooldown boundary while retaining distinct
-   * execution lanes per Context Graph.
-   */
-  authorizeRfc64SwmRecoveryPlanV1(
-    this: DKGAgent,
-    recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
-  ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
-    return this.rfc64SwmRecoveryCoordinatorV1.authorize(recoveryPlan);
-  }
-
+  /** Production trigger shared with the RFC-64 bootstrap mixin. */
   queueRfc64SwmRecoveryPlanFromPeerOnConnect(
     this: DKGAgent,
     recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
@@ -4362,25 +4334,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
     }, delayMs);
     return true;
-  }
-
-  async runRfc64SwmRecoveryPlanFromPeerOnConnect(
-    this: DKGAgent,
-    recoveryPlan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
-    handleSyncError: (remotePeer: string, err: unknown) => void,
-  ): Promise<void> {
-    await this.rfc64SwmRecoveryCoordinatorV1.run(recoveryPlan, handleSyncError);
-  }
-
-  async tryRfc64SwmRecoveryPlanFromPeer(
-    this: DKGAgent,
-    recoveryPlan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
-    onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
-  ): Promise<SyncOnConnectOutcome | 'not-started'> {
-    return this.rfc64SwmRecoveryCoordinatorV1.execute(
-      recoveryPlan,
-      onSyncAccounting,
-    );
   }
 
   async runSyncFromPeerOnConnect(
@@ -6853,79 +6806,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       options,
     );
     return execution.shared;
-  }
-
-  /**
-   * Execute one coordinator-admitted RFC-64 plan only after re-resolving its
-   * exact provider and lanes from current configuration. The structural input
-   * is never itself an authority token; ordinary sync still applies its own
-   * complete-provider enforcement after this dedicated boundary.
-   */
-  async syncRfc64AuthorizedSwmRecoveryPlanV1(
-    this: DKGAgent,
-    authorized: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
-  ): Promise<SelectedSharedMemorySyncResult> {
-    if (
-      !this.started
-      || !this.networkAdmissionCoordinator.isAcceptedPeer(authorized.providerPeerId)
-    ) {
-      throw new Error('RFC-64 SWM recovery provider is not admitted');
-    }
-    const configured = resolveRfc64PeerSwmRecoveryPlanV1(
-      this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
-      authorized.providerPeerId,
-    );
-    const selectedPublic = new Set(this.config.syncContextGraphs ?? []);
-    const configuredPublicTargets = configured.targets.filter(
-      ({ contextGraphId, lane }) => lane === 'selected-public'
-        && selectedPublic.has(contextGraphId),
-    );
-    const configuredPublicIds = configuredPublicTargets.map(
-      ({ contextGraphId }) => contextGraphId,
-    );
-    const admission = this.selectedSwmBootstrapAdmission.snapshot(
-      authorized.providerPeerId,
-    );
-    const admittedPublicTargets = admission?.phase === 'retry-required'
-      && sameStringArray(admission.contextGraphIds, configuredPublicIds)
-      ? configuredPublicTargets
-      : [];
-    const expectedTargets = canonicalizeRfc64SwmRecoveryTargetsV1([
-      ...configured.targets.filter(({ lane }) => lane === 'ordinary-private'),
-      ...admittedPublicTargets,
-    ]);
-    const suppliedTargets = canonicalizeRfc64SwmRecoveryTargetsV1(authorized.targets);
-    if (
-      authorized.kind !== 'rfc64-authorized-swm-recovery-v1'
-      || expectedTargets === null
-      || suppliedTargets === null
-      || !sameRfc64SwmRecoveryTargetsV1(suppliedTargets, expectedTargets)
-    ) {
-      throw new Error('RFC-64 SWM recovery plan is not authorized by current configuration');
-    }
-
-    const publicContextGraphIds = suppliedTargets
-      .filter(({ lane }) => lane === 'selected-public')
-      .map(({ contextGraphId }) => contextGraphId);
-    const privateRecoverFromCurator = suppliedTargets
-      .filter(({ lane }) => lane === 'ordinary-private')
-      .map(({ contextGraphId }) => contextGraphId);
-    const eligibleContextGraphIds = suppliedTargets.map(({ contextGraphId }) => contextGraphId);
-    return this.syncSelectedSharedMemoryFromPeerDetailed(
-      authorized.providerPeerId,
-      eligibleContextGraphIds,
-      {
-        stopOnBackoffWorthyFailure: true,
-        source: 'on-connect',
-        sharedMemorySyncPlan: {
-          publicContextGraphIds,
-          privateRecoverFromCurator,
-          eligibleContextGraphIds,
-        },
-        priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
-        selectedSwmPriority: true,
-      },
-    );
   }
 
   async syncSelectedSharedMemoryFromPeerDetailed(this: DKGAgent,

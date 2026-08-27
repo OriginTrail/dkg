@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-export interface XsdDateTimeCanonicalizationOptions {
+interface XsdDateTimeCanonicalizationPolicy {
   /** Require a lexical timezone, or treat an absent timezone as UTC. */
   readonly timezone: 'required' | 'optional-assume-utc';
   /** Assertion seals intentionally accept only Z and the positive zero offset. */
@@ -18,15 +18,56 @@ export interface XsdDateTimeCanonicalizationOptions {
   readonly hour24: 'oxigraph-rollover' | 'reject';
   /** Extended XSD years and ECMAScript ISO instants use different spellings. */
   readonly yearOutput: 'xsd' | 'ecmascript-iso';
-  /** Optional caller-specific value-space bound, applied after UTC rollover. */
-  readonly normalizedValueAllowed?: (value: Readonly<{
-    year: string;
-    month: number;
-    day: number;
-    hour: number;
-    minute: number;
-    second: number;
-  }>) => boolean;
+}
+
+type XsdDateTimeCanonicalizationMode =
+  | 'term'
+  | 'assertion-seal'
+  | 'author-seal-store';
+
+const CANONICALIZATION_POLICIES = {
+  term: {
+    timezone: 'optional-assume-utc',
+    timezoneOffsets: 'any',
+    year: 'extended',
+    fractionalSeconds: 'truncate-to-milliseconds',
+    fractionalOutput: 'trim',
+    hour24: 'oxigraph-rollover',
+    yearOutput: 'xsd',
+  },
+  'assertion-seal': {
+    timezone: 'required',
+    timezoneOffsets: 'z-or-positive-zero',
+    year: 'four-digit',
+    fractionalSeconds: 'at-most-milliseconds',
+    fractionalOutput: 'milliseconds',
+    hour24: 'reject',
+    yearOutput: 'ecmascript-iso',
+  },
+  'author-seal-store': {
+    timezone: 'required',
+    timezoneOffsets: 'any',
+    year: 'four-digit',
+    fractionalSeconds: 'reject-nonzero-submillisecond',
+    fractionalOutput: 'milliseconds',
+    hour24: 'reject',
+    yearOutput: 'ecmascript-iso',
+  },
+} as const satisfies Record<XsdDateTimeCanonicalizationMode, XsdDateTimeCanonicalizationPolicy>;
+
+/** Backend-independent value form used by consensus term canonicalization. */
+export function canonicalizeTermXsdDateTimeValue(value: string): string | null {
+  return canonicalizeXsdDateTimeValue(value, 'term');
+}
+
+/** Exact bounded UTC form accepted by assertion-seal decoding. */
+export function canonicalizeAssertionSealXsdDateTimeValue(value: string): string | null {
+  return canonicalizeXsdDateTimeValue(value, 'assertion-seal');
+}
+
+/** Exact-millisecond instant form accepted after author-seal store read-back. */
+export function canonicalizeAuthorSealStoreXsdDateTimeValue(value: string): string | null {
+  return canonicalizeXsdDateTimeValue(value, 'author-seal-store');
 }
 
 /**
@@ -34,10 +75,11 @@ export interface XsdDateTimeCanonicalizationOptions {
  * Returns null rather than throwing so policy wrappers can preserve their own
  * fail-closed/verbatim error contracts.
  */
-export function canonicalizeXsdDateTimeValue(
+function canonicalizeXsdDateTimeValue(
   value: string,
-  options: Readonly<XsdDateTimeCanonicalizationOptions>,
+  mode: XsdDateTimeCanonicalizationMode,
 ): string | null {
+  const options = CANONICALIZATION_POLICIES[mode];
   const match = /^(-?\d{4,})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))?$/.exec(value);
   if (match === null) return null;
   const [
@@ -116,7 +158,7 @@ export function canonicalizeXsdDateTimeValue(
     minute: normalizedMinute,
     second,
   };
-  if (options.normalizedValueAllowed?.(normalizedValue) === false) return null;
+  if (mode === 'term' && !isOxigraphDateTimeValueInRange(normalizedValue)) return null;
 
   const outputYear = options.yearOutput === 'ecmascript-iso'
     ? formatEcmascriptIsoYear(normalized.y)
@@ -129,6 +171,27 @@ export function canonicalizeXsdDateTimeValue(
     + `T${padXsdDateTimeComponent(normalizedHour)}`
     + `:${padXsdDateTimeComponent(normalizedMinute)}`
     + `:${secondText}${outputFraction}Z`;
+}
+
+// Oxigraph stores temporal seconds as an i128 Decimal scaled by 1e18.
+// Keep this term-only value-space bound inside the named term policy so seal
+// callers cannot accidentally select or omit it.
+function isOxigraphDateTimeValueInRange(value: Readonly<{
+  year: string;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+}>): boolean {
+  const seconds =
+    (daysFromCivil(BigInt(value.year), BigInt(value.month), BigInt(value.day)) + 719162n)
+      * 86400n
+    + BigInt(value.hour) * 3600n
+    + BigInt(value.minute) * 60n
+    + BigInt(value.second);
+  const scaled = seconds * (10n ** 18n);
+  return scaled >= -(1n << 127n) && scaled <= (1n << 127n) - 1n;
 }
 
 /** Proleptic-Gregorian day count relative to 1970-01-01. */

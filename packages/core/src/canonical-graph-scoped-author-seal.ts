@@ -47,7 +47,7 @@ import {
   isPlainRecord,
   snapshotExactDataRecord,
 } from './sync-wire-objects.js';
-import { canonicalizeXsdDateTimeValue } from './xsd-date-time.js';
+import { canonicalizeAuthorSealStoreXsdDateTimeValue } from './xsd-date-time.js';
 
 declare const HEX_32_V1_BRAND: unique symbol;
 declare const POSITIVE_DECIMAL_U64_V1_BRAND: unique symbol;
@@ -643,15 +643,7 @@ export function canonicalizeAuthorSealStoreRoundTripRowV1(
     const match = /^"([^"]+)"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/.exec(object);
     const canonicalInstant = match === null
       ? null
-      : canonicalizeXsdDateTimeValue(match[1]!, {
-        timezone: 'required',
-        timezoneOffsets: 'any',
-        year: 'four-digit',
-        fractionalSeconds: 'reject-nonzero-submillisecond',
-        fractionalOutput: 'milliseconds',
-        hour24: 'reject',
-        yearOutput: 'ecmascript-iso',
-      });
+      : canonicalizeAuthorSealStoreXsdDateTimeValue(match[1]!);
     if (canonicalInstant !== null) {
       object = `${JSON.stringify(canonicalInstant)}^^${XSD_DATE_TIME}`;
     }

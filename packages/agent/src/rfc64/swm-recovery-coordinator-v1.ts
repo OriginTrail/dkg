@@ -3,11 +3,6 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../dkg-agent-constants.js';
-import type {
-  Rfc64PeerSwmRecoveryPlanV1,
-  Rfc64SwmRecoveryTargetV1,
-} from
-  '../dkg-agent-rfc64-catalog-bootstrap.js';
 import type { SyncReconcilerProbe } from '../dkg-agent-types.js';
 import {
   runSelectedSharedMemoryRetry,
@@ -15,18 +10,25 @@ import {
   type SyncOnConnectPeerOutcome,
 } from '../sync/on-connect/sync-on-connect.js';
 import type { SelectedSharedMemorySyncResult } from '../sync/shared-memory-freshness.js';
+import {
+  canonicalizeRfc64SwmRecoveryTargetsV1,
+  sameRfc64SwmRecoveryTargetsV1,
+  type Rfc64AuthorizedSwmRecoveryPlanV1,
+  type Rfc64PeerSwmRecoveryPlanV1,
+} from './swm-recovery-plan-v1.js';
 
-export interface Rfc64AuthorizedSwmRecoveryPlanV1 {
-  readonly kind: 'rfc64-authorized-swm-recovery-v1';
-  readonly providerPeerId: string;
-  /** The single canonical authority model; execution derives all lane views. */
-  readonly targets: readonly Readonly<Rfc64SwmRecoveryTargetV1>[];
-}
+export type { Rfc64AuthorizedSwmRecoveryPlanV1 } from './swm-recovery-plan-v1.js';
 
 export interface Rfc64SwmRecoveryAdmissionPortV1 {
   readonly selectedPublicContextGraphIds: () => readonly string[];
   readonly requestSelectedPublicAdmission:
     (providerPeerId: string, contextGraphIds: readonly string[]) => boolean;
+  readonly selectedPublicAdmissionSnapshot: (providerPeerId: string) => Readonly<{
+    contextGraphIds: readonly string[];
+    phase: 'retry-required' | 'terminal';
+  }> | null;
+  readonly configuredRecoveryPlan:
+    (providerPeerId: string) => Readonly<Rfc64PeerSwmRecoveryPlanV1>;
   readonly isPeerAccepted: (providerPeerId: string) => boolean;
   readonly isStarted: () => boolean;
   readonly disconnectBoundary: (providerPeerId: string, now: number) => number;
@@ -48,8 +50,8 @@ export interface Rfc64SwmRecoverySchedulingPortV1 {
 export interface Rfc64SwmRecoveryExecutionPortV1 {
   readonly syncingPeers: () => Set<string>;
   readonly getPeerProtocols: (providerPeerId: string) => Promise<string[]>;
-  readonly syncAuthorizedPlan: (
-    plan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
+  readonly syncRecoveryRequest: (
+    request: Readonly<Rfc64SwmRecoveryExecutionRequestV1>,
   ) => Promise<SelectedSharedMemorySyncResult>;
   readonly logInfo: (ctx: OperationContext, message: string) => void;
   readonly onPeerSkippedNoSync: (providerPeerId: string) => void;
@@ -58,6 +60,13 @@ export interface Rfc64SwmRecoveryExecutionPortV1 {
     outcome: SyncOnConnectPeerOutcome | undefined,
     onSyncAccounting: ((outcome: SyncOnConnectPeerOutcome) => void) | undefined,
   ) => void;
+}
+
+export interface Rfc64SwmRecoveryExecutionRequestV1 {
+  readonly providerPeerId: string;
+  readonly eligibleContextGraphIds: readonly string[];
+  readonly publicContextGraphIds: readonly string[];
+  readonly privateRecoverFromCurator: readonly string[];
 }
 
 export interface Rfc64SwmRecoveryCoordinatorDependenciesV1 {
@@ -183,7 +192,7 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       getPeerProtocols: this.deps.execution.getPeerProtocols,
       selectedSharedMemoryLane: {
         getContextGraphIds: () => authorized.targets.map(({ contextGraphId }) => contextGraphId),
-        syncFromPeer: () => this.deps.execution.syncAuthorizedPlan(authorized),
+        syncFromPeer: () => this.syncAuthorizedPlan(authorized),
       },
       logInfo: this.deps.execution.logInfo,
       onPeerSkippedNoSync: (peerId) => this.deps.execution.onPeerSkippedNoSync(peerId),
@@ -192,19 +201,66 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       },
     });
   }
+
+  private async syncAuthorizedPlan(
+    authorized: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
+  ): Promise<SelectedSharedMemorySyncResult> {
+    if (
+      !this.deps.admission.isStarted()
+      || !this.deps.admission.isPeerAccepted(authorized.providerPeerId)
+    ) {
+      throw new Error('RFC-64 SWM recovery provider is not admitted');
+    }
+    const configured = this.deps.admission.configuredRecoveryPlan(
+      authorized.providerPeerId,
+    );
+    const selectedPublic = new Set(
+      this.deps.admission.selectedPublicContextGraphIds(),
+    );
+    const configuredPublicTargets = configured.targets.filter(
+      ({ contextGraphId, lane }) => lane === 'selected-public'
+        && selectedPublic.has(contextGraphId),
+    );
+    const configuredPublicIds = configuredPublicTargets.map(
+      ({ contextGraphId }) => contextGraphId,
+    );
+    const admission = this.deps.admission.selectedPublicAdmissionSnapshot(
+      authorized.providerPeerId,
+    );
+    const admittedPublicTargets = admission?.phase === 'retry-required'
+      && sameStringArray(admission.contextGraphIds, configuredPublicIds)
+      ? configuredPublicTargets
+      : [];
+    const expectedTargets = canonicalizeRfc64SwmRecoveryTargetsV1([
+      ...configured.targets.filter(({ lane }) => lane === 'ordinary-private'),
+      ...admittedPublicTargets,
+    ]);
+    const suppliedTargets = canonicalizeRfc64SwmRecoveryTargetsV1(authorized.targets);
+    if (
+      authorized.kind !== 'rfc64-authorized-swm-recovery-v1'
+      || expectedTargets === null
+      || suppliedTargets === null
+      || !sameRfc64SwmRecoveryTargetsV1(suppliedTargets, expectedTargets)
+    ) {
+      throw new Error('RFC-64 SWM recovery plan is not authorized by current configuration');
+    }
+
+    return this.deps.execution.syncRecoveryRequest(Object.freeze({
+      providerPeerId: authorized.providerPeerId,
+      eligibleContextGraphIds: Object.freeze(
+        suppliedTargets.map(({ contextGraphId }) => contextGraphId),
+      ),
+      publicContextGraphIds: Object.freeze(suppliedTargets
+        .filter(({ lane }) => lane === 'selected-public')
+        .map(({ contextGraphId }) => contextGraphId)),
+      privateRecoverFromCurator: Object.freeze(suppliedTargets
+        .filter(({ lane }) => lane === 'ordinary-private')
+        .map(({ contextGraphId }) => contextGraphId)),
+    }));
+  }
 }
 
-/** Reject contradictory lanes and produce one stable target per Context Graph. */
-export function canonicalizeRfc64SwmRecoveryTargetsV1(
-  targets: readonly Readonly<Rfc64SwmRecoveryTargetV1>[],
-): readonly Readonly<Rfc64SwmRecoveryTargetV1>[] | null {
-  const lanes = new Map<string, Rfc64SwmRecoveryTargetV1['lane']>();
-  for (const { contextGraphId, lane } of targets) {
-    const current = lanes.get(contextGraphId);
-    if (current !== undefined && current !== lane) return null;
-    lanes.set(contextGraphId, lane);
-  }
-  return Object.freeze([...lanes]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([contextGraphId, lane]) => Object.freeze({ contextGraphId, lane })));
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length
+    && left.every((value, index) => value === right[index]);
 }

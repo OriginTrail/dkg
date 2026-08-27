@@ -79,8 +79,8 @@
     "./dist/rfc64/public-catalog-transport-v1.js": null,
     "./dist/rfc64/recoverable-author-attestation-v1.js": null,
     "./dist/rfc64/secure-filesystem-policy-v1.js": null,
-    "./dist/rfc64/dkg-agent-swm-recovery-coordinator-v1.js": null,
     "./dist/rfc64/swm-recovery-coordinator-v1.js": null,
+    "./dist/rfc64/swm-recovery-plan-v1.js": null,
     "./dist/rfc64/*": null,
     "./dist/*": "./dist/*"
   },
