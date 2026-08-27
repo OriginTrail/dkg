@@ -149,6 +149,8 @@ describe('buildAtomicSubjectReplaceUpdate', () => {
       quad(SUBJECT_A, 'urn:dkg:profile:sparql', '"old-a"'),
       quad(subjectB, 'urn:dkg:profile:sparql', '"old-b"'),
     ]);
+    const embedded = (store as unknown as { store: { update: (sparql: string) => void } }).store;
+    const spy = vi.spyOn(embedded, 'update');
 
     await store.replaceSubjects!(GRAPH, [
       {
@@ -160,6 +162,17 @@ describe('buildAtomicSubjectReplaceUpdate', () => {
         quads: [quad(subjectB, 'urn:dkg:profile:sparql', '"new-b"')],
       },
     ]);
+
+    // The batch guarantee is the transaction boundary, not merely the final
+    // state: both subjects must be carried by one backend update. A sequential
+    // loop over replaceSubject would produce two calls and fail this assertion.
+    const mutations = spy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((sparql) => sparql.includes('DELETE') || sparql.includes('INSERT'));
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]).toContain(`VALUES ?targetSubject { <${SUBJECT_A}> <${subjectB}> }`);
+    expect(mutations[0]).toContain(`<${SUBJECT_A}> <urn:dkg:profile:sparql> "new-a"`);
+    expect(mutations[0]).toContain(`<${subjectB}> <urn:dkg:profile:sparql> "new-b"`);
 
     const rows = await store.query(
       `SELECT ?s ?o WHERE { GRAPH <${GRAPH}> { ?s <urn:dkg:profile:sparql> ?o } } ORDER BY ?s`,

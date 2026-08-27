@@ -35,27 +35,43 @@ function normalizeDaemonQueryResult(result: unknown, sparql: string): SparqlResu
   const raw = result && typeof result === 'object' && !Array.isArray(result)
     ? result as Record<string, unknown>
     : {};
+  const compatibilityBindings = Array.isArray(raw.bindings)
+    ? raw.bindings as SparqlBinding[]
+    : undefined;
   if (raw.type === 'boolean' && typeof raw.value === 'boolean') {
-    return { type: 'boolean', value: raw.value };
+    return {
+      type: 'boolean',
+      value: raw.value,
+      ...(compatibilityBindings ? { bindings: compatibilityBindings } : {}),
+    };
   }
   if (raw.type === 'quads' && Array.isArray(raw.quads)) {
-    return { type: 'quads', quads: raw.quads as SparqlQuad[] };
+    return {
+      type: 'quads',
+      quads: raw.quads as SparqlQuad[],
+      ...(compatibilityBindings ? { bindings: compatibilityBindings } : {}),
+    };
   }
   if (raw.type === 'bindings' && Array.isArray(raw.bindings)) {
     return { type: 'bindings', bindings: raw.bindings as SparqlBinding[] };
   }
 
   const operation = classifySparqlOperation(sparql);
-  const bindings = Array.isArray(raw.bindings) ? raw.bindings as SparqlBinding[] : [];
+  const bindings = compatibilityBindings ?? [];
   if (operation.kind === 'read' && operation.form === 'ASK') {
     const resultValue = bindings[0]?.result;
     const flattened = typeof resultValue === 'string' ? resultValue : resultValue?.value;
-    return { type: 'boolean', value: String(flattened).toLowerCase() === 'true' };
+    return {
+      type: 'boolean',
+      value: String(flattened).toLowerCase() === 'true',
+      bindings,
+    };
   }
   if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
     return {
       type: 'quads',
       quads: Array.isArray(raw.quads) ? raw.quads as SparqlQuad[] : [],
+      bindings,
     };
   }
   return { type: 'bindings', bindings };
