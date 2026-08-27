@@ -348,6 +348,44 @@ describe('async-lift reconciliation demand channel', () => {
     expect((await publisher.getStatus(jobB))?.status).toBe('broadcast');
   });
 
+  it('capability startup recovery performs the real crash-recovery effects, not just the outcome shape', async () => {
+    // The runner's capability path replaced `publisher.recover()` as the production startup
+    // entry point. This row drives the REAL publisher through a REAL runner start: a crashed
+    // process left a claimed job behind an expired wallet lease, and startup must requeue the
+    // job and release the lock before wallet processing begins — a `recover()` that merely
+    // returned the outcome shape would leave the post-crash wallet locked forever.
+    const publisher = createPublisher();
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    expect((await publisher.getStatus(jobId))?.status).toBe('claimed');
+    // The "crash": nothing progresses the claim, and its 5-minute lease expires.
+    now += 6 * 60_000;
+
+    const runner = new AsyncLiftRunner({
+      publisher,
+      walletIds: ['wallet-1'],
+      pollIntervalMs: 600_000,
+      recoveryIntervalMs: 600_000,
+      // Paused start: recovery must still run in maintenance mode, before any claiming.
+      startPaused: true,
+      hasIncludedRecoveryResolver: true,
+    });
+    await runner.start();
+    try {
+      expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
+      const lock = await store.query(`SELECT ?job WHERE {
+        GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+          <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?job .
+        }
+      }`);
+      expect(lock.type).toBe('bindings');
+      if (lock.type === 'bindings') expect(lock.bindings).toEqual([]);
+    } finally {
+      await runner.stop();
+    }
+  });
+
   it('hands a job the pass itself just failed to the same pass dispatcher, not the idle sweep', async () => {
     // A live job can transition INTO the held-failed state during the pass (here: the raw
     // lane's inconclusive-recovery timeout). The failed-job dispatcher runs in the same pass
