@@ -333,7 +333,10 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
   }
 
   async function computeMembers(cgId: string): Promise<CGMemberEnumeration> {
-    const allowed = await deps.getContextGraphAllowedPeers(cgId);
+    const [allowed, isPrivate] = await Promise.all([
+      deps.getContextGraphAllowedPeers(cgId),
+      deps.isPrivateContextGraph(cgId),
+    ]);
 
     if (allowed !== null) {
       // Curated CG with explicit peer allowlist: roster is
@@ -343,7 +346,7 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
       // kicked).
       return {
         source: 'allowlist',
-        isPrivate: await deps.isPrivateContextGraph(cgId),
+        isPrivate,
         members: dedupAndExcludeSelf(allowed, deps.getSelfPeerId()),
       };
     }
@@ -352,7 +355,7 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
     // from public via the same predicate the responder consults for
     // sync / SWM-share auth. Private CGs use the authorized DKG-agent
     // roster and never fall through to arbitrary topic subscribers.
-    if (await deps.isPrivateContextGraph(cgId)) {
+    if (isPrivate) {
       const resolvedRoster = await (deps.getContextGraphAllowedAgentPeers?.(cgId) ?? null);
       if (resolvedRoster) {
         return {

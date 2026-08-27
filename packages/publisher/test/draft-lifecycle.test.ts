@@ -15,6 +15,7 @@ import {
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   decodeWorkspacePublishRequest,
+  generateWorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
@@ -626,11 +627,15 @@ describe('Working Memory Assertion Lifecycle', () => {
 
     let advertisedPeer = PROMOTE_RECIPIENT_PEER;
     let resolverCalls = 0;
+    const recipient = generateWorkspaceRecipientEncryptionKey(
+      `did:dkg:agent:${AGENT}`,
+      `did:dkg:agent:${AGENT}#promotion-snapshot-x25519`,
+    );
     publisher.setWorkspaceAgentRecipientResolver(async () => {
       resolverCalls += 1;
       return {
         requiresEncryption: true,
-        recipients: [{ agentAddress: AGENT, peerId: advertisedPeer }] as any,
+        recipients: [{ ...recipient, agentAddress: AGENT, peerId: advertisedPeer }],
       };
     });
     publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
@@ -646,12 +651,14 @@ describe('Working Memory Assertion Lifecycle', () => {
 
     expect(resolverCalls).toBe(1);
     expect(result.gossipPayload).toEqual({
-      mode: 'agent-encrypted',
       message: expect.any(Uint8Array),
-      fanoutSnapshot: {
-      source: 'agent-roster',
-      members: [PROMOTE_RECIPIENT_PEER],
-      complete: true,
+      fanout: {
+        kind: 'captured',
+        snapshot: {
+          source: 'agent-roster',
+          members: [PROMOTE_RECIPIENT_PEER],
+          complete: true,
+        },
       },
     });
     expect(result.gossipMessage).toBe(result.gossipPayload?.message);

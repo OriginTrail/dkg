@@ -103,7 +103,6 @@ import {
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
   projectWorkspaceAgentRecipientFanout,
-  requireEncryptedWorkspaceAgentRecipientResolution,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
   canonicalPublishPayload,
   resolveLiftWorkspaceSlice,
@@ -1225,7 +1224,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId });
     if (!resolution.requiresEncryption) return null;
     return projectWorkspaceAgentRecipientFanout(
-      requireEncryptedWorkspaceAgentRecipientResolution(resolution, contextGraphId),
+      resolution,
       this.peerId,
     );
   }

@@ -257,8 +257,8 @@ describe('Assertion promote gossip (2 nodes)', () => {
     const publishCall = publishWorkspaceGossip.mock.calls[0];
     expect(publishCall?.[0]).toBe(CG_ID);
     expect(publishCall?.[1]).toEqual({
-      mode: 'plaintext',
       message: expect.any(Uint8Array),
+      fanout: { kind: 'resolve-current' },
     });
     expect(publishCall?.[4]).toBe(promoted.shareOperationId);
 

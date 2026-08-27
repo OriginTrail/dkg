@@ -172,6 +172,8 @@ import {
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
+  createResolveCurrentWorkspaceGossipPayload,
+  parseEncodedWorkspaceGossipPayload,
   type EncodedWorkspaceGossipPayload,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
@@ -831,6 +833,16 @@ function bytesEqual(left: Uint8Array | undefined, right: Uint8Array | undefined)
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 
+/** Normalize the deprecated raw-byte call and validate the typed publish seam. */
+function normalizeWorkspaceGossipPublishInput(
+  input: EncodedWorkspaceGossipPayload | Uint8Array,
+): EncodedWorkspaceGossipPayload {
+  if (input instanceof Uint8Array) {
+    return createResolveCurrentWorkspaceGossipPayload(input);
+  }
+  return parseEncodedWorkspaceGossipPayload(input);
+}
+
 export class PublishMethods extends DKGAgentBase {
   publishWorkspaceGossip(this: DKGAgent,
     contextGraphId: string,
@@ -841,8 +853,8 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<void>;
 
   /**
-   * @deprecated Pass EncodedWorkspaceGossipPayload so encrypted bytes retain
-   * their encryption-time fan-out snapshot. Raw bytes preserve the historical
+   * @deprecated Pass EncodedWorkspaceGossipPayload so encoded bytes retain
+   * their captured fan-out snapshot. Raw bytes preserve the historical
    * enumerator-based planning behavior during migration.
    */
   publishWorkspaceGossip(this: DKGAgent,
@@ -875,26 +887,7 @@ export class PublishMethods extends DKGAgentBase {
      */
     shareOperationId?: string,
   ): Promise<void> {
-    const payload: EncodedWorkspaceGossipPayload = payloadOrMessage instanceof Uint8Array
-      ? { mode: 'plaintext', message: payloadOrMessage }
-      : payloadOrMessage;
-    if (
-      !payload
-      || (payload.mode !== 'plaintext' && payload.mode !== 'agent-encrypted')
-      || !(payload.message instanceof Uint8Array)
-      || (
-        payload.mode === 'agent-encrypted'
-        && (
-          payload.fanoutSnapshot?.source !== 'agent-roster'
-          || !Array.isArray(payload.fanoutSnapshot.members)
-          || typeof payload.fanoutSnapshot.complete !== 'boolean'
-        )
-      )
-    ) {
-      throw new TypeError(
-        'publishWorkspaceGossip requires a complete encoded payload; encrypted bytes must carry their encryption-time fan-out snapshot',
-      );
-    }
+    const payload = normalizeWorkspaceGossipPublishInput(payloadOrMessage);
     const message = payload.message;
     // OT-RFC-38 / LU-6 Phase B — derive the wire-form id ONCE at the
     // publish-side boundary and use it consistently across the topic,
@@ -944,9 +937,9 @@ export class PublishMethods extends DKGAgentBase {
     // (PR-A) absorbs the resulting double-delivery cleanly and
     // PR-A's `swm.redundantApplies` gauge makes it observable.
     //
-    // The normal encrypted-share path receives the exact transport projection
-    // produced while wrapping the payload. Direct or legacy callers fall back
-    // to the enumerator. Private agent rosters are never held in its TTL cache.
+    // Canonical private shares carry the exact transport projection captured
+    // while wrapping their bytes. Public and deprecated raw calls resolve the
+    // current enumerator. Private agent rosters are never held in its TTL cache.
     //
     // Errors are intentionally NOT re-thrown — share() in the
     // caller already committed locally; transport failures here
@@ -968,8 +961,8 @@ export class PublishMethods extends DKGAgentBase {
     // next share to the same cgId pays the planning retry.
     let plan: FanOutPlan;
     try {
-      const enumeration = payload.mode === 'agent-encrypted'
-        ? payload.fanoutSnapshot
+      const enumeration = payload.fanout.kind === 'captured'
+        ? payload.fanout.snapshot
         : await this.getOrCreateCGMemberEnumerator().enumerate(contextGraphId);
       plan = chooseFanOutTier({
         enumeration,
@@ -3976,12 +3969,6 @@ export class PublishMethods extends DKGAgentBase {
       throw new Error(
         `${logPrefix}: curated CG ${contextGraphId}: access-policy says curated but recipient resolver ` +
         `returned no agent recipients. Refusing to publish to avoid plaintext leak.`,
-      );
-    }
-    if (resolution.recipients.length === 0) {
-      throw new Error(
-        `${logPrefix}: curated CG ${contextGraphId}: no DKG agent recipients available — ` +
-        `add at least one allowed agent before publishing.`,
       );
     }
     const recipientSet = new Set(resolution.recipients.map((r) => r.agentAddress.toLowerCase()));

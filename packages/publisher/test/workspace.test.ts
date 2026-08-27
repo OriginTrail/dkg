@@ -281,9 +281,10 @@ describe('Workspace: share', () => {
     publisher.setWorkspaceAgentRecipientResolver(async ({ contextGraphId }) => ({
       requiresEncryption: true,
       recipients: [{
+        ...recipientKeyFor(senderAgentAddress),
         agentAddress: senderAgentAddress,
         peerId: contextGraphId === 'snapshot-a' ? SNAPSHOT_PEER_A : SNAPSHOT_PEER_B,
-      }] as any,
+      }],
     }));
     publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
       expect(input.resolution.recipients[0]?.peerId).toBe(
@@ -304,22 +305,76 @@ describe('Workspace: share', () => {
     ]);
 
     expect(first.gossipPayload).toEqual({
-      mode: 'agent-encrypted',
       message: expect.any(Uint8Array),
-      fanoutSnapshot: {
-      source: 'agent-roster',
-      members: [SNAPSHOT_PEER_A],
-      complete: true,
+      fanout: {
+        kind: 'captured',
+        snapshot: {
+          source: 'agent-roster',
+          members: [SNAPSHOT_PEER_A],
+          complete: true,
+        },
       },
     });
     expect(second.gossipPayload).toEqual({
-      mode: 'agent-encrypted',
       message: expect.any(Uint8Array),
-      fanoutSnapshot: {
-      source: 'agent-roster',
-      members: [SNAPSHOT_PEER_B],
-      complete: true,
+      fanout: {
+        kind: 'captured',
+        snapshot: {
+          source: 'agent-roster',
+          members: [SNAPSHOT_PEER_B],
+          complete: true,
+        },
       },
+    });
+  });
+
+  it('owns resolver recipient records and key bytes before encryption and fan-out', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    const resolverKey = recipientKeyFor(senderAgentAddress);
+    const resolverPublicKeyBytes = resolverKey.publicKeyBytes;
+    if (!resolverPublicKeyBytes) throw new Error('expected recipient public key');
+    const originalPublicKeyBytes = Uint8Array.from(resolverPublicKeyBytes);
+    const resolverRecipient = {
+      ...resolverKey,
+      agentAddress: senderAgentAddress,
+      peerId: SNAPSHOT_PEER_A,
+    };
+
+    publisher.setWorkspaceAgentRecipientResolver(async () => ({
+      requiresEncryption: true,
+      recipients: [resolverRecipient],
+    }));
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
+      resolverRecipient.peerId = SNAPSHOT_PEER_B;
+      resolverPublicKeyBytes.fill(0);
+
+      const capturedRecipient = input.resolution.recipients[0];
+      expect(capturedRecipient).not.toBe(resolverRecipient);
+      expect(capturedRecipient.peerId).toBe(SNAPSHOT_PEER_A);
+      expect(capturedRecipient.publicKeyBytes).not.toBe(resolverPublicKeyBytes);
+      expect(capturedRecipient.publicKeyBytes).toEqual(originalPublicKeyBytes);
+      expect(Object.isFrozen(input.resolution)).toBe(true);
+      expect(Object.isFrozen(input.resolution.recipients)).toBe(true);
+      expect(Object.isFrozen(capturedRecipient)).toBe(true);
+      expect(() => {
+        (capturedRecipient as { peerId?: string }).peerId = SNAPSHOT_PEER_B;
+      }).toThrow();
+      return input.plaintext;
+    });
+
+    const result = await publisher.share(
+      'snapshot-owned-recipient',
+      [q('urn:test:snapshot-owned-recipient', 'http://schema.org/name', '"owned"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+
+    expect(result.gossipPayload.fanout.kind).toBe('captured');
+    expect(result.gossipPayload.fanout.kind === 'captured'
+      ? result.gossipPayload.fanout.snapshot
+      : null).toEqual({
+      source: 'agent-roster',
+      members: [SNAPSHOT_PEER_A],
+      complete: true,
     });
   });
 
@@ -341,11 +396,11 @@ describe('Workspace: share', () => {
       { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
     );
 
-    expect(result.gossipPayload.mode).toBe('agent-encrypted');
-    if (result.gossipPayload.mode !== 'agent-encrypted') throw new Error('expected encryption');
+    expect(result.gossipPayload.fanout.kind).toBe('captured');
+    if (result.gossipPayload.fanout.kind !== 'captured') throw new Error('expected captured fan-out');
     const envelope = decodeEncryptedWorkspacePayload(result.gossipPayload.message);
     expect(envelope.recipients).toHaveLength(1);
-    expect(result.gossipPayload.fanoutSnapshot).toEqual({
+    expect(result.gossipPayload.fanout.snapshot).toEqual({
       source: 'agent-roster',
       members: [SNAPSHOT_PEER_A],
       complete: true,
@@ -357,9 +412,10 @@ describe('Workspace: share', () => {
     publisher.setWorkspaceAgentRecipientResolver(async ({ contextGraphId }) => ({
       requiresEncryption: true,
       recipients: [{
+        ...recipientKeyFor(senderAgentAddress),
         agentAddress: senderAgentAddress,
         peerId: contextGraphId === 'snapshot-fail' ? SNAPSHOT_PEER_B : SNAPSHOT_PEER_C,
-      }] as any,
+      }],
     }));
     publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
       if (input.contextGraphId === 'snapshot-fail') throw new Error('encryption failed');
@@ -378,30 +434,29 @@ describe('Workspace: share', () => {
       { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
     );
     expect(recovered.gossipPayload).toEqual({
-      mode: 'agent-encrypted',
       message: expect.any(Uint8Array),
-      fanoutSnapshot: {
-      source: 'agent-roster',
-      members: [SNAPSHOT_PEER_C],
-      complete: true,
+      fanout: {
+        kind: 'captured',
+        snapshot: {
+          source: 'agent-roster',
+          members: [SNAPSHOT_PEER_C],
+          complete: true,
+        },
       },
     });
   });
 
   it('keeps gossip enabled when an unchanged encryption member advertises a malformed peer ID', async () => {
     const senderAgentAddress = ethers.Wallet.createRandom().address;
-    const recipientId = `did:dkg:agent:${senderAgentAddress}`;
+    const recipient = recipientKeyFor(senderAgentAddress);
     let advertisedPeerId = SNAPSHOT_PEER_A;
     publisher.setWorkspaceAgentRecipientResolver(async () => ({
       requiresEncryption: true,
       recipients: [{
+        ...recipient,
         agentAddress: senderAgentAddress,
-        recipientId,
-        encryptionKeyId: `${recipientId}#stable-key`,
-        encryptionPublicKey: new Uint8Array(32).fill(7),
-        encryptionKeyAlgorithm: 'X25519',
         peerId: advertisedPeerId,
-      }] as any,
+      }],
     }));
     publisher.setWorkspaceSenderKeyEncryptor(async (input) => input.plaintext);
 
@@ -417,22 +472,57 @@ describe('Workspace: share', () => {
       { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
     );
 
-    expect(first.gossipPayload.mode).toBe('agent-encrypted');
-    expect(first.gossipPayload.mode === 'agent-encrypted'
-      ? first.gossipPayload.fanoutSnapshot
+    expect(first.gossipPayload.fanout.kind).toBe('captured');
+    expect(first.gossipPayload.fanout.kind === 'captured'
+      ? first.gossipPayload.fanout.snapshot
       : null).toEqual({
       source: 'agent-roster',
       members: [SNAPSHOT_PEER_A],
       complete: true,
     });
-    expect(second.gossipPayload.mode).toBe('agent-encrypted');
-    expect(second.gossipPayload.mode === 'agent-encrypted'
-      ? second.gossipPayload.fanoutSnapshot
+    expect(second.gossipPayload.fanout.kind).toBe('captured');
+    expect(second.gossipPayload.fanout.kind === 'captured'
+      ? second.gossipPayload.fanout.snapshot
       : null).toEqual({
       source: 'agent-roster',
       members: [],
       complete: false,
     });
+  });
+
+  it.each([
+    [
+      'an empty encrypted roster',
+      { requiresEncryption: true, recipients: [] },
+      /has no valid DKG agent recipients/,
+    ],
+    [
+      'recipients on the plaintext arm',
+      {
+        requiresEncryption: false,
+        recipients: [{
+          ...recipientKeyFor('0x0000000000000000000000000000000000000001'),
+          agentAddress: '0x0000000000000000000000000000000000000001',
+        }],
+      },
+      /returned recipients while encryption is disabled/,
+    ],
+    [
+      'a malformed encrypted recipient',
+      { requiresEncryption: true, recipients: [{ agentAddress: ethers.Wallet.createRandom().address }] },
+      /returned an invalid DKG agent recipient/,
+    ],
+  ])('rejects custom resolver output with %s', async (_label, invalidResolution, expected) => {
+    publisher.setWorkspaceAgentRecipientResolver(async () => invalidResolution as any);
+
+    await expect(publisher.share(
+      'snapshot-invalid-resolver',
+      [q('urn:test:snapshot-invalid-resolver', 'http://schema.org/name', '"invalid"')],
+      {
+        publisherPeerId: SNAPSHOT_SELF_PEER,
+        senderAgentAddress: ethers.Wallet.createRandom().address,
+      },
+    )).rejects.toThrow(expected);
   });
 
   // ── Strict curator-ack gate (OT-RFC-49 curator-leader) ──

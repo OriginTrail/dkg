@@ -77,12 +77,16 @@ import {
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { ethers } from 'ethers';
 import {
+  parseWorkspaceAgentRecipientResolution,
   projectWorkspaceAgentRecipientFanout,
-  requireEncryptedWorkspaceAgentRecipientResolution,
-  type EncryptedWorkspaceAgentRecipientResolution,
-  type WorkspaceAgentRecipientFanoutSnapshot,
+  type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolver,
 } from './workspace-agent-recipients.js';
+import {
+  createCapturedWorkspaceGossipPayload,
+  createResolveCurrentWorkspaceGossipPayload,
+  type EncodedWorkspaceGossipPayload,
+} from './workspace-gossip-payload.js';
 import {
   PublisherWalletRequiredError,
   StaleWriteError,
@@ -514,7 +518,7 @@ export interface WorkspaceSenderKeyEncryptInput {
   subGraphName?: string;
   publisherPeerId: string;
   /** The exact validated recipients used for both encryption and transport. */
-  resolution: EncryptedWorkspaceAgentRecipientResolution;
+  resolution: Extract<WorkspaceAgentRecipientResolution, { readonly requiresEncryption: true }>;
 }
 
 export type WorkspaceSenderKeyEncryptor = (
@@ -715,24 +719,6 @@ export interface ShareResult {
   message: Uint8Array;
   gossipPayload: EncodedWorkspaceGossipPayload;
 }
-
-/**
- * Network-ready workspace bytes and their encryption-time transport snapshot.
- *
- * The discriminated encrypted arm makes it impossible for a caller to forward
- * Sender Key ciphertext through the typed publish boundary without carrying
- * the exact recipient projection used to create those bytes.
- */
-export type EncodedWorkspaceGossipPayload =
-  | {
-      mode: 'plaintext';
-      message: Uint8Array;
-    }
-  | {
-      mode: 'agent-encrypted';
-      message: Uint8Array;
-      fanoutSnapshot: WorkspaceAgentRecipientFanoutSnapshot;
-    };
 
 /** @deprecated Use ShareResult */
 export type WriteToWorkspaceResult = ShareResult;
@@ -1223,7 +1209,7 @@ export class DKGPublisher implements Publisher {
     this.sharedMemoryOwnedEntities = config.sharedMemoryOwnedEntities ?? new Map();
     this.knownBatchContextGraphs = config.knownBatchContextGraphs ?? new Map();
     this.writeLocks = writeLocksForStore(this.store, config.writeLocks);
-    this.workspaceAgentRecipientResolver = config.workspaceAgentRecipientResolver;
+    this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
     this.publisherPlanner = new PublisherPlanner({
@@ -1240,7 +1226,12 @@ export class DKGPublisher implements Publisher {
   }
 
   setWorkspaceAgentRecipientResolver(resolver: WorkspaceAgentRecipientResolver | undefined): void {
-    this.workspaceAgentRecipientResolver = resolver;
+    this.workspaceAgentRecipientResolver = resolver
+      ? async (input) => parseWorkspaceAgentRecipientResolution(
+        await resolver(input),
+        input.contextGraphId,
+      )
+      : undefined;
   }
 
   setWorkspaceSenderKeyEncryptor(encryptor: WorkspaceSenderKeyEncryptor | undefined): void {
@@ -1995,30 +1986,25 @@ export class DKGPublisher implements Publisher {
     },
   ): Promise<EncodedWorkspaceGossipPayload> {
     if (options.localOnly || !this.workspaceAgentRecipientResolver) {
-      return { mode: 'plaintext', message: plaintext };
+      return createResolveCurrentWorkspaceGossipPayload(plaintext);
     }
 
     const resolution = await this.workspaceAgentRecipientResolver({ contextGraphId });
     if (!resolution.requiresEncryption) {
-      return { mode: 'plaintext', message: plaintext };
+      return createResolveCurrentWorkspaceGossipPayload(plaintext);
     }
-    const encryptedResolution = requireEncryptedWorkspaceAgentRecipientResolution(
-      resolution,
-      contextGraphId,
-    );
     if (!options.senderAgentAddress) {
       throw new Error(`Context graph "${contextGraphId}" requires a DKG agent sender identity for encrypted SWM gossip`);
     }
 
     const gossipFanoutSnapshot = projectWorkspaceAgentRecipientFanout(
-      encryptedResolution,
+      resolution,
       options.publisherPeerId,
     );
 
     if (this.workspaceSenderKeyEncryptor) {
-      return {
-        mode: 'agent-encrypted',
-        message: await this.workspaceSenderKeyEncryptor({
+      return createCapturedWorkspaceGossipPayload(
+        await this.workspaceSenderKeyEncryptor({
           contextGraphId,
           plaintext,
           senderAgentAddress: options.senderAgentAddress,
@@ -2027,16 +2013,15 @@ export class DKGPublisher implements Publisher {
           timestampMs: options.timestampMs,
           subGraphName: options.subGraphName,
           publisherPeerId: options.publisherPeerId,
-          resolution: encryptedResolution,
+          resolution,
         }),
-        fanoutSnapshot: gossipFanoutSnapshot,
-      };
+        gossipFanoutSnapshot,
+      );
     }
 
     const senderIdentity = `did:dkg:agent:${ethers.getAddress(options.senderAgentAddress)}`;
-    return {
-      mode: 'agent-encrypted',
-      message: encodeEncryptedWorkspacePayload(await encryptWorkspacePayload({
+    return createCapturedWorkspaceGossipPayload(
+      encodeEncryptedWorkspacePayload(await encryptWorkspacePayload({
         contextGraphId,
         senderIdentity,
         operationId: options.operationId,
@@ -2044,10 +2029,10 @@ export class DKGPublisher implements Publisher {
         timestampMs: options.timestampMs,
         subGraphName: options.subGraphName,
         plaintext,
-        recipients: encryptedResolution.recipients,
+        recipients: resolution.recipients,
       })),
-      fanoutSnapshot: gossipFanoutSnapshot,
-    };
+      gossipFanoutSnapshot,
+    );
   }
 
   /**

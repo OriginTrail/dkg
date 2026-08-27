@@ -19,6 +19,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import type { EncodedWorkspaceGossipPayload } from '@origintrail-official/dkg-publisher';
 import {
   PROTOCOL_SWM_UPDATE,
   PROTOCOL_SWM_SHARE_ACK,
@@ -411,7 +412,7 @@ describe('DKGAgent SwmAckQuorum integration (rc.9 PR-D)', () => {
     const internals = agent as unknown as {
       publishWorkspaceGossip: (
         cgId: string,
-        payload: { mode: 'plaintext'; message: Uint8Array },
+        payload: EncodedWorkspaceGossipPayload,
         ctx: unknown,
         signer: unknown,
       ) => Promise<void>;
@@ -419,7 +420,7 @@ describe('DKGAgent SwmAckQuorum integration (rc.9 PR-D)', () => {
     const dummyMessage = new TextEncoder().encode('not-a-real-wire-message');
     await internals.publishWorkspaceGossip(
       'cg-legacy-caller',
-      { mode: 'plaintext', message: dummyMessage },
+      { message: dummyMessage, fanout: { kind: 'resolve-current' } },
       { operationId: 'test' },
       null,
     );

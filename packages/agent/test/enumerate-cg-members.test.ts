@@ -452,6 +452,33 @@ describe('createCGMemberEnumerator: TTL cache', () => {
     expect(rosterCalls).toBe(3);
   });
 
+  it('does not cache none while a private agent roster becomes available within the TTL', async () => {
+    let roster: Awaited<ReturnType<NonNullable<CGMemberEnumeratorDeps['getContextGraphAllowedAgentPeers']>>> = null;
+    let rosterCalls = 0;
+    const enumerator = createCGMemberEnumerator(makeDeps({
+      cacheTtlMs: 60_000,
+      isPrivateContextGraph: async () => true,
+      getContextGraphAllowedAgentPeers: async () => {
+        rosterCalls += 1;
+        return roster;
+      },
+    }));
+
+    expect(await enumerator.enumerate('cg-agent-roster-appears')).toEqual({
+      source: 'none',
+      members: [],
+    });
+
+    roster = { source: 'agent-roster', members: ['peerNew'], complete: true };
+
+    expect(await enumerator.enumerate('cg-agent-roster-appears')).toEqual({
+      source: 'agent-roster',
+      members: ['peerNew'],
+      complete: true,
+    });
+    expect(rosterCalls).toBe(2);
+  });
+
   it('recomputes after TTL elapses', async () => {
     let allowedCalls = 0;
     let nowMs = 1_000_000;

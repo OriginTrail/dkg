@@ -257,8 +257,15 @@ describe('DKGAgent SWM gossip signing', () => {
       resolverCalls += 1;
       const resolution = await originalResolver(input);
       // Mutate the live profile after the publisher captured its recipient
-      // resolution. Encryption and transport must both keep using that first
-      // immutable operation snapshot instead of consulting the store again.
+      // resolution. Removing the live encryption key makes a second crypto
+      // resolution observably incompatible, while changing the peer makes a
+      // second transport resolution observably different. Encryption and
+      // transport must both keep using the first immutable operation snapshot.
+      await agent.store.deleteByPattern({
+        subject: recipientId,
+        predicate: DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
+        graph: 'did:dkg:system/agents',
+      });
       await agent.store.deleteByPattern({
         subject: recipientId,
         predicate: DKG_ONTOLOGY.DKG_PEER_ID,

@@ -1246,13 +1246,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     }
 
     const resolution = input.resolution;
-    if (!resolution.requiresEncryption) {
-      return input.plaintext;
-    }
-    if (resolution.recipients.length === 0) {
-      throw new Error(`Context graph "${input.contextGraphId}" requires Sender Key SWM but has no DKG agent recipients`);
-    }
-
     const senderAddress = ethers.getAddress(sender.agentAddress);
     const recipientSet = new Set(resolution.recipients.map((recipient) => recipient.agentAddress.toLowerCase()));
     if (!recipientSet.has(senderAddress.toLowerCase())) {

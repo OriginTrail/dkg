@@ -22,46 +22,108 @@ const DKG_ENCRYPTION_KEY_ALGORITHM = `${DKG}encryptionKeyAlgorithm`;
 const DKG_ENCRYPTION_KEY_PROOF = `${DKG}encryptionKeyProof`;
 const DKG_PEER_ID = `${DKG}peerId`;
 
-export interface WorkspaceAgentRecipient extends WorkspaceRecipientEncryptionKey {
-  agentAddress: string;
-  peerId?: string;
+export interface WorkspaceAgentRecipient {
+  readonly purpose: WorkspaceRecipientEncryptionKey['purpose'];
+  readonly recipientId: string;
+  readonly recipientKeyId: string;
+  readonly encryptionKeyAlgorithm: WorkspaceRecipientEncryptionKey['encryptionKeyAlgorithm'];
+  readonly publicKeyBytes?: Uint8Array;
+  readonly privateKeyBytes?: Uint8Array;
+  readonly agentAddress: string;
+  readonly peerId?: string;
 }
 
-export interface WorkspaceAgentRecipientResolution {
-  readonly requiresEncryption: boolean;
-  readonly recipients: readonly WorkspaceAgentRecipient[];
+export type WorkspaceAgentRecipientResolution =
+  | {
+    readonly requiresEncryption: false;
+    readonly recipients: readonly [];
+  }
+  | {
+    readonly requiresEncryption: true;
+    readonly recipients: readonly [
+      WorkspaceAgentRecipient,
+      ...WorkspaceAgentRecipient[],
+    ];
+  };
+
+function isWorkspaceAgentRecipient(value: unknown): value is WorkspaceAgentRecipient {
+  if (typeof value !== 'object' || value === null) return false;
+  const recipient = value as Record<string, unknown>;
+  return recipient['purpose'] === WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE
+    && typeof recipient['recipientId'] === 'string'
+    && typeof recipient['recipientKeyId'] === 'string'
+    && recipient['encryptionKeyAlgorithm'] === WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519
+    && (recipient['publicKeyBytes'] === undefined || recipient['publicKeyBytes'] instanceof Uint8Array)
+    && (recipient['privateKeyBytes'] === undefined || recipient['privateKeyBytes'] instanceof Uint8Array)
+    && typeof recipient['agentAddress'] === 'string'
+    && (recipient['peerId'] === undefined || typeof recipient['peerId'] === 'string');
+}
+
+function ownWorkspaceAgentRecipient(
+  recipient: WorkspaceAgentRecipient,
+): WorkspaceAgentRecipient {
+  return Object.freeze({
+    purpose: recipient.purpose,
+    recipientId: recipient.recipientId,
+    recipientKeyId: recipient.recipientKeyId,
+    encryptionKeyAlgorithm: recipient.encryptionKeyAlgorithm,
+    publicKeyBytes: recipient.publicKeyBytes === undefined
+      ? undefined
+      : Uint8Array.from(recipient.publicKeyBytes),
+    privateKeyBytes: recipient.privateKeyBytes === undefined
+      ? undefined
+      : Uint8Array.from(recipient.privateKeyBytes),
+    agentAddress: recipient.agentAddress,
+    peerId: recipient.peerId,
+  });
 }
 
 /**
- * Recipient resolution after the encrypted-workspace boundary has proved that
- * encryption is required and at least one verified recipient is available.
+ * Validate resolver output at the publisher injection boundary. Runtime callers
+ * can bypass the TypeScript contract, so normalize the two valid arms here and
+ * keep the rest of the encrypted path impossible to enter with an empty roster.
+ * This intentionally remains an internal module export rather than a second
+ * public refinement API.
  */
-export interface EncryptedWorkspaceAgentRecipientResolution
-  extends WorkspaceAgentRecipientResolution {
-  readonly requiresEncryption: true;
-  readonly recipients: readonly [
-    WorkspaceAgentRecipient,
-    ...WorkspaceAgentRecipient[],
-  ];
-}
-
-function isEncryptedWorkspaceAgentRecipientResolution(
-  resolution: WorkspaceAgentRecipientResolution,
-): resolution is EncryptedWorkspaceAgentRecipientResolution {
-  return resolution.requiresEncryption && resolution.recipients.length > 0;
-}
-
-export function requireEncryptedWorkspaceAgentRecipientResolution(
-  resolution: WorkspaceAgentRecipientResolution,
+export function parseWorkspaceAgentRecipientResolution(
+  value: unknown,
   contextGraphId: string,
-): EncryptedWorkspaceAgentRecipientResolution {
-  if (!resolution.requiresEncryption) {
-    throw new TypeError(`Context graph "${contextGraphId}" does not require encrypted SWM gossip`);
+): WorkspaceAgentRecipientResolution {
+  if (typeof value !== 'object' || value === null) {
+    throw new TypeError(`Context graph "${contextGraphId}" recipient resolver returned an invalid result`);
   }
-  if (!isEncryptedWorkspaceAgentRecipientResolution(resolution)) {
+  const resolution = value as Record<string, unknown>;
+  if (typeof resolution['requiresEncryption'] !== 'boolean' || !Array.isArray(resolution['recipients'])) {
+    throw new TypeError(`Context graph "${contextGraphId}" recipient resolver returned an invalid result`);
+  }
+  const recipients = resolution['recipients'];
+  if (!resolution['requiresEncryption']) {
+    if (recipients.length !== 0) {
+      throw new TypeError(
+        `Context graph "${contextGraphId}" recipient resolver returned recipients while encryption is disabled`,
+      );
+    }
+    const noRecipients: [] = [];
+    return Object.freeze({
+      requiresEncryption: false,
+      recipients: Object.freeze(noRecipients),
+    });
+  }
+  if (recipients.length === 0) {
     throw new Error(`Context graph "${contextGraphId}" requires encrypted SWM gossip but has no valid DKG agent recipients`);
   }
-  return resolution;
+  if (!recipients.every(isWorkspaceAgentRecipient)) {
+    throw new TypeError(`Context graph "${contextGraphId}" recipient resolver returned an invalid DKG agent recipient`);
+  }
+  const [firstRecipient, ...remainingRecipients] = recipients.map(ownWorkspaceAgentRecipient);
+  const ownedRecipients: [WorkspaceAgentRecipient, ...WorkspaceAgentRecipient[]] = [
+    firstRecipient,
+    ...remainingRecipients,
+  ];
+  return Object.freeze({
+    requiresEncryption: true,
+    recipients: Object.freeze(ownedRecipients),
+  });
 }
 
 export interface WorkspaceAgentRecipientFanoutSnapshot {
@@ -82,7 +144,7 @@ export interface WorkspaceAgentRecipientFanoutSnapshot {
  * while retaining whether the projection covers every authorized agent.
  */
 export function projectWorkspaceAgentRecipientFanout(
-  resolution: EncryptedWorkspaceAgentRecipientResolution,
+  resolution: Extract<WorkspaceAgentRecipientResolution, { readonly requiresEncryption: true }>,
   selfPeerId?: string,
 ): WorkspaceAgentRecipientFanoutSnapshot {
   const peers = new Set<string>();
@@ -121,7 +183,10 @@ export async function resolveWorkspaceAgentRecipients(
   const access = await getWorkspaceAccessMetadata(store, input.contextGraphId);
   const requiresEncryption = access.hasPrivateAccessPolicy || access.agentAddresses.length > 0;
   if (!requiresEncryption) {
-    return { requiresEncryption: false, recipients: [] };
+    return parseWorkspaceAgentRecipientResolution(
+      { requiresEncryption: false, recipients: [] },
+      input.contextGraphId,
+    );
   }
 
   if (access.agentAddresses.length === 0) {
@@ -136,7 +201,17 @@ export async function resolveWorkspaceAgentRecipients(
     const agentRecipients = await resolveWorkspaceAgentRecipientKeys(store, agentAddress);
     recipients.push(...agentRecipients);
   }
-  return { requiresEncryption: true, recipients };
+  const [firstRecipient, ...remainingRecipients] = recipients;
+  if (!firstRecipient) {
+    throw new Error(`Context graph "${input.contextGraphId}" requires encrypted SWM gossip but has no valid DKG agent recipients`);
+  }
+  return parseWorkspaceAgentRecipientResolution(
+    {
+      requiresEncryption: true,
+      recipients: [firstRecipient, ...remainingRecipients],
+    },
+    input.contextGraphId,
+  );
 }
 
 async function getWorkspaceAccessMetadata(

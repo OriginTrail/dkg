@@ -93,18 +93,21 @@ export {
   type DKGPublisherConfig,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,
-  type EncodedWorkspaceGossipPayload,
   type ShareOptions,
   type ShareResult,
   type ShareConditionalOptions,
   type CASCondition,
 } from './dkg-publisher.js';
 export {
+  createCapturedWorkspaceGossipPayload,
+  createResolveCurrentWorkspaceGossipPayload,
+  parseEncodedWorkspaceGossipPayload,
+  type EncodedWorkspaceGossipPayload,
+} from './workspace-gossip-payload.js';
+export {
   resolveWorkspaceAgentRecipients,
   resolveWorkspaceAgentRecipientKeys,
   projectWorkspaceAgentRecipientFanout,
-  requireEncryptedWorkspaceAgentRecipientResolution,
-  type EncryptedWorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientFanoutSnapshot,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipient,

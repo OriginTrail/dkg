@@ -167,7 +167,7 @@ describe('DKGAgent private SWM agent-roster fan-out', () => {
     const encryptedBody = new Uint8Array(180_000).fill(0xa5);
     await agent.publishWorkspaceGossip(
       'cg-private-agent-roster',
-      { mode: 'plaintext', message: encryptedBody },
+      { message: encryptedBody, fanout: { kind: 'resolve-current' } },
       createOperationContext('share'),
       null,
     );
@@ -250,9 +250,11 @@ describe('DKGAgent private SWM agent-roster fan-out', () => {
     await agent.publishWorkspaceGossip(
       'cg-private-operation-snapshot',
       {
-        mode: 'agent-encrypted',
         message: encryptedBody,
-        fanoutSnapshot: { source: 'agent-roster', members: [receiverPeerId], complete: true },
+        fanout: {
+          kind: 'captured',
+          snapshot: { source: 'agent-roster', members: [receiverPeerId], complete: true },
+        },
       },
       createOperationContext('share'),
       null,
@@ -296,12 +298,14 @@ describe('DKGAgent private SWM agent-roster fan-out', () => {
     await agent.publishWorkspaceGossip(
       'cg-private-retryable-snapshot',
       {
-        mode: 'agent-encrypted',
         message: new Uint8Array(2_048).fill(0x4d),
-        fanoutSnapshot: {
-          source: 'agent-roster',
-          members: PRIVATE_RETRY_ROSTER,
-          complete: true,
+        fanout: {
+          kind: 'captured',
+          snapshot: {
+            source: 'agent-roster',
+            members: PRIVATE_RETRY_ROSTER,
+            complete: true,
+          },
         },
       },
       createOperationContext('share', shareOperationId),
@@ -351,12 +355,14 @@ describe('DKGAgent private SWM agent-roster fan-out', () => {
     await agent.publishWorkspaceGossip(
       'cg-private-terminal-snapshot',
       {
-        mode: 'agent-encrypted',
         message: new Uint8Array(512).fill(0x5e),
-        fanoutSnapshot: {
-          source: 'agent-roster',
-          members: [deliveredPeerId, rejectedPeerId],
-          complete: true,
+        fanout: {
+          kind: 'captured',
+          snapshot: {
+            source: 'agent-roster',
+            members: [deliveredPeerId, rejectedPeerId],
+            complete: true,
+          },
         },
       },
       createOperationContext('share', shareOperationId),
@@ -415,7 +421,7 @@ describe('DKGAgent private SWM agent-roster fan-out', () => {
     expect(gossip.publishes).toEqual([]);
   });
 
-  it('rejects encrypted payloads missing their fan-out snapshot before transport', async () => {
+  it('rejects captured fan-out provenance missing its snapshot before transport', async () => {
     const agent = await createAgent('PrivateSnapshotRequired');
     const gossip = new CapturingGossip();
     (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
@@ -429,10 +435,38 @@ describe('DKGAgent private SWM agent-roster fan-out', () => {
 
     await expect((agent.publishWorkspaceGossip as any)(
       'cg-private-missing-operation-snapshot',
-      { mode: 'agent-encrypted', message: new Uint8Array(128).fill(0x7c) },
+      { message: new Uint8Array(128).fill(0x7c), fanout: { kind: 'captured' } },
       createOperationContext('share'),
       null,
-    )).rejects.toThrow(/requires a complete encoded payload/);
+    )).rejects.toThrow(/requires a complete captured fan-out snapshot/);
+    expect(calls).toEqual([]);
+    expect(gossip.publishes).toEqual([]);
+  });
+
+  it('rejects malformed complete captured peers before transport can disable gossip', async () => {
+    const agent = await createAgent('PrivateSnapshotPeerValidation');
+    const gossip = new CapturingGossip();
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+    const { calls, install } = stubMessengerSendReliable(() => ({
+      delivered: true,
+      response: new Uint8Array(),
+      attempts: 1,
+      messageId: 'must-not-send-invalid-peer',
+    }));
+    install(agent);
+
+    await expect((agent.publishWorkspaceGossip as any)(
+      'cg-private-invalid-operation-snapshot',
+      {
+        message: new Uint8Array(128).fill(0x7d),
+        fanout: {
+          kind: 'captured',
+          snapshot: { source: 'agent-roster', members: ['not-a-peer-id'], complete: true },
+        },
+      },
+      createOperationContext('share'),
+      null,
+    )).rejects.toThrow(/invalid peer ID/);
     expect(calls).toEqual([]);
     expect(gossip.publishes).toEqual([]);
   });
@@ -456,9 +490,11 @@ describe('DKGAgent private SWM agent-roster fan-out', () => {
     await agent.publishWorkspaceGossip(
       'cg-private-mixed-operation-snapshot',
       {
-        mode: 'agent-encrypted',
         message: encryptedBody,
-        fanoutSnapshot: { source: 'agent-roster', members: [knownPeerId], complete: false },
+        fanout: {
+          kind: 'captured',
+          snapshot: { source: 'agent-roster', members: [knownPeerId], complete: false },
+        },
       },
       createOperationContext('share'),
       null,
