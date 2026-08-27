@@ -11,7 +11,7 @@
  * idle sweep effectively disabled (10-minute interval): finalization can then only happen
  * through the demand channel, which is exactly the property the fix must hold.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   AsyncLiftRunner,
@@ -240,6 +240,75 @@ describe('async-lift reconciliation demand channel', () => {
     expect(asked.length).toBe(3);
     expect(new Set(asked).size).toBe(3);
     expect(new Set(asked)).toEqual(new Set(txHashes));
+  });
+
+  it('demands reconciliation when an escaped fault interrupts processNext after a durable broadcast', async () => {
+    // r3 (🟡 3873024814, branarakic) — the write-ahead has durably recorded 'broadcast', then a
+    // secondary store read fails (observed production shape: transient store-scheduler
+    // saturation). processNext must still poke on its way out: ownership is released, only
+    // reconciliation can settle the job, and without the poke it waits out the idle sweep.
+    let failNextQuery = false;
+    const saturatedStore = new Proxy(store, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop === 'query' && typeof value === 'function') {
+          return async (...args: unknown[]) => {
+            if (failNextQuery) {
+              failNextQuery = false;
+              throw new Error('store scheduler saturated');
+            }
+            return (value as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        }
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as typeof store;
+    const publisher = new TripleStoreAsyncLiftPublisher(saturatedStore, {
+      now: () => ++now,
+      idGenerator: () => `job-${++ids}`,
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          // Arm the failure for the next store read — the ambiguous path's own job re-read —
+          // so the fault escapes process() AFTER the durable broadcast exists.
+          failNextQuery = true;
+          throw new Error('socket hang up mid-send');
+        },
+      },
+    });
+    const outlookAtPoke: Promise<boolean>[] = [];
+    publisher.reconciliationScheduling.attachDemandListener(() => {
+      outlookAtPoke.push(publisher.reconciliationScheduling.hasPendingWork());
+    });
+    await stageShareSnapshot();
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+    await expect(publisher.processNext('wallet-1')).rejects.toThrow('store scheduler saturated');
+    expect(outlookAtPoke).toHaveLength(1);
+    // The poke fired after ownership release, with the durable broadcast visible to the pass.
+    await expect(outlookAtPoke[0]).resolves.toBe(true);
+  });
+
+  it('runs exactly one queue inventory per reconcile pass across all three lanes', async () => {
+    // r3-1 follow-up (branarakic 3873026014) — the lanes share one list() snapshot; per-tick
+    // inventory cost must not scale with the number of lanes.
+    const publisher = createPublisher({
+      chainProofResolver: async () => ({ status: 'pending' }),
+      knowledgeAssetVmPublishRecoveryResolver: async () => null,
+    });
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-1', operationKind: 'create' },
+    });
+
+    const listSpy = vi.spyOn(publisher, 'list');
+    const outcome = await publisher.reconciliationScheduling.reconcile();
+    expect(outcome).toEqual({ reconciled: 0, pendingWork: true });
+    expect(listSpy).toHaveBeenCalledTimes(1);
+    listSpy.mockRestore();
   });
 
   it('suppresses pending work and reconciliation while processNext still owns a live broadcast', async () => {
