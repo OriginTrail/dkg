@@ -6,13 +6,12 @@ import type { ConfirmContextGraphMetadataInput } from
   './context-graph-meta-confirmation.js';
 import {
   repairChainAttestedPublicMetaProjection,
-  type ActivePublicContextGraphChainProof,
   type ChainAttestedPublicMetaRepairResult,
 } from './context-graph-public-meta-repair.js';
+import type { ActivePublicContextGraphChainProof } from
+  './active-public-context-graph-chain-proof.js';
 
-type PublicMetaRepairDiagnostic =
-  | ChainAttestedPublicMetaRepairResult
-  | { readonly outcome: 'repair-failed'; readonly detail: string };
+type PublicMetaRepairDiagnostic = ChainAttestedPublicMetaRepairResult;
 
 export type ConfiguredContextGraphMetadataReconciliationDiagnostic =
   | { readonly kind: 'public-metadata-projection-completed' }
@@ -115,12 +114,25 @@ export async function reconcileConfiguredContextGraphMetadataV1(
   } catch (error) {
     repair = {
       outcome: 'repair-failed',
+      failureStage: 'pre-mutation',
+      chainProof: { state: 'not-requested' },
       detail: error instanceof Error ? error.message : String(error),
     };
   }
 
   if (repair.outcome === 'conflicting-policy') {
     return { outcome: 'pending', reason: 'conflicting-policy' };
+  }
+
+  if (
+    repair.outcome === 'repair-failed'
+    && repair.failureStage === 'mutation-or-durability'
+  ) {
+    return {
+      outcome: 'pending',
+      reason: 'missing-metadata',
+      diagnostic: reconciliationDiagnostic(repair),
+    };
   }
 
   const locallyCurated = await dependencies.isLocallyCurated(contextGraphId)

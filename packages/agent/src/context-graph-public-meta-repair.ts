@@ -16,6 +16,8 @@ import {
   buildAuthoritativePublicMetaRepairUpdate,
   inspectAuthoritativePublicMetaDefinition,
 } from './context-graph-public-meta-proof.js';
+import type { ActivePublicContextGraphChainProof } from
+  './active-public-context-graph-chain-proof.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 
@@ -26,11 +28,6 @@ export interface PublicMetaRepairResult {
   conflictingGraphs: string[];
 }
 
-export type ActivePublicContextGraphChainProof =
-  | { state: 'public' }
-  | { state: 'not-public'; reason: 'private' | 'unregistered' }
-  | { state: 'unknown'; reason: 'unprovable' | 'rpc-failure'; detail?: string };
-
 export type ChainAttestedPublicMetaRepairResult =
   | { outcome: 'already-complete'; chainProof: { state: 'not-requested' } }
   | {
@@ -38,7 +35,17 @@ export type ChainAttestedPublicMetaRepairResult =
       chainProof: Exclude<ActivePublicContextGraphChainProof, { state: 'public' }>;
     }
   | { outcome: 'conflicting-policy'; chainProof: { state: 'public' } }
-  | { outcome: 'projection-complete'; chainProof: { state: 'public' } };
+  | { outcome: 'projection-complete'; chainProof: { state: 'public' } }
+  | {
+      outcome: 'repair-failed';
+      failureStage: 'pre-mutation' | 'mutation-or-durability';
+      chainProof: { state: 'not-requested' } | { state: 'public' };
+      detail: string;
+    };
+
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 async function inspectPublicMetaProjection(
   store: TripleStore,
@@ -158,33 +165,82 @@ export async function repairChainAttestedPublicMetaProjection(
 ): Promise<ChainAttestedPublicMetaRepairResult> {
   // Canonical metadata needs no repair and therefore no chain RPC. This keeps
   // normal restarts cheap once a legacy graph has been healed.
-  const inspection = await inspectPublicMetaProjection(store, contextGraphId);
+  let inspection: Awaited<ReturnType<typeof inspectPublicMetaProjection>>;
+  try {
+    inspection = await inspectPublicMetaProjection(store, contextGraphId);
+  } catch (error) {
+    return {
+      outcome: 'repair-failed',
+      failureStage: 'pre-mutation',
+      chainProof: { state: 'not-requested' },
+      detail: errorDetail(error),
+    };
+  }
   if (!inspection.conflictingPolicy && inspection.missing.length === 0) {
     return { outcome: 'already-complete', chainProof: { state: 'not-requested' } };
   }
 
-  const chainProof = await resolveActivePublicBinding();
+  let chainProof: ActivePublicContextGraphChainProof;
+  try {
+    chainProof = await resolveActivePublicBinding();
+  } catch (error) {
+    return {
+      outcome: 'repair-failed',
+      failureStage: 'pre-mutation',
+      chainProof: { state: 'not-requested' },
+      detail: errorDetail(error),
+    };
+  }
   if (chainProof.state !== 'public') {
     return { outcome: 'not-chain-attested', chainProof };
   }
 
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-  const updated = await tryUpdateWithTouchedGraphs(
-    store,
-    buildAuthoritativePublicMetaRepairUpdate(contextGraphId),
-    [metaGraph],
-    { source: 'agent.chainAttestedPublicMetaRepair' },
-  );
+  let updated: boolean;
+  try {
+    updated = await tryUpdateWithTouchedGraphs(
+      store,
+      buildAuthoritativePublicMetaRepairUpdate(contextGraphId),
+      [metaGraph],
+      { source: 'agent.chainAttestedPublicMetaRepair' },
+    );
+  } catch (error) {
+    return {
+      outcome: 'repair-failed',
+      failureStage: 'mutation-or-durability',
+      chainProof,
+      detail: errorDetail(error),
+    };
+  }
   if (!updated) {
-    throw new Error('Triple store does not support atomic public metadata repair');
+    return {
+      outcome: 'repair-failed',
+      failureStage: 'pre-mutation',
+      chainProof,
+      detail: 'Triple store does not support atomic public metadata repair',
+    };
   }
-  await store.flush?.();
-  const finalInspection = await inspectPublicMetaProjection(store, contextGraphId);
-  if (finalInspection.conflictingPolicy) {
-    return { outcome: 'conflicting-policy', chainProof };
-  }
-  if (finalInspection.missing.length > 0) {
-    throw new Error('Atomic public metadata repair completed without the canonical proof');
+  try {
+    await store.flush?.();
+    const finalInspection = await inspectPublicMetaProjection(store, contextGraphId);
+    if (finalInspection.conflictingPolicy) {
+      return { outcome: 'conflicting-policy', chainProof };
+    }
+    if (finalInspection.missing.length > 0) {
+      return {
+        outcome: 'repair-failed',
+        failureStage: 'mutation-or-durability',
+        chainProof,
+        detail: 'Atomic public metadata repair completed without the canonical proof',
+      };
+    }
+  } catch (error) {
+    return {
+      outcome: 'repair-failed',
+      failureStage: 'mutation-or-durability',
+      chainProof,
+      detail: errorDetail(error),
+    };
   }
   return { outcome: 'projection-complete', chainProof };
 }

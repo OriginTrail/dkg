@@ -15,7 +15,7 @@ import { buildAuthoritativePrivateMetaAskQuery } from
 import { buildAuthoritativePublicMetaAskQuery } from
   './context-graph-public-meta-proof.js';
 import type { ActivePublicContextGraphChainProof } from
-  './context-graph-public-meta-repair.js';
+  './active-public-context-graph-chain-proof.js';
 
 export interface ConfirmContextGraphMetadataInput {
   readonly rejectUnregisteredPlaceholder?: boolean;
@@ -25,7 +25,6 @@ export interface ConfirmContextGraphMetadataInput {
 
 export interface ContextGraphMetadataConfirmationDependencies {
   readonly chain: ChainAdapter;
-  readonly isContextGraphPublicOnChain: (contextGraphId: string) => Promise<boolean>;
   readonly resolveActivePublicChainProof: (
     contextGraphId: string,
   ) => Promise<ActivePublicContextGraphChainProof>;
@@ -119,7 +118,8 @@ export async function confirmContextGraphMetadataV1(
   }
 
   if (hasActivePublicOnChainProof === undefined) {
-    hasActivePublicOnChainProof = await dependencies.isContextGraphPublicOnChain(contextGraphId)
+    hasActivePublicOnChainProof = await dependencies.resolveActivePublicChainProof(contextGraphId)
+      .then((proof) => proof.state === 'public')
       .catch(() => false);
   }
   if (hasActivePublicOnChainProof) return true;

@@ -132,6 +132,8 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import type { ActivePublicChainProofSlotBindingMode } from
+  './active-public-context-graph-chain-proof.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -429,10 +431,7 @@ export type ContextGraphSlotBindingMode =
   | 'chain-attested-repair'
   | 'retryable-durable';
 
-type PublicPolicySlotBindingMode = Exclude<
-  ContextGraphSlotBindingMode,
-  'retryable-durable'
->;
+type PublicPolicySlotBindingMode = ActivePublicChainProofSlotBindingMode;
 
 function mapContextGraphSlotBindingOutcome(
   outcome: ContextGraphSlotBindingOutcome,

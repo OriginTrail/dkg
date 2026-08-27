@@ -166,8 +166,10 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import {
   repairCreatorPublicMetaProjections,
-  type ActivePublicContextGraphChainProof,
 } from './context-graph-public-meta-repair.js';
+import {
+  resolveActivePublicContextGraphChainProof,
+} from './active-public-context-graph-chain-proof.js';
 import {
   reconcileConfiguredContextGraphMetadataV1,
   type ConfiguredContextGraphMetadataReconciliationResult,
@@ -9657,35 +9659,35 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<ConfiguredContextGraphMetadataReconciliationResult> {
-    const resolveActivePublicChainProof = async (
+    const resolveActivePublicChainProof = (
       normalizedContextGraphId: string,
-    ): Promise<ActivePublicContextGraphChainProof> => {
-      const state = await this.resolveOnChainAccessPolicyState(
+      operationContext: OperationContext,
+    ) =>
+      resolveActivePublicContextGraphChainProof(
+        (id, resolverOperationContext, options) => this.resolveOnChainAccessPolicyState(
+          id,
+          resolverOperationContext,
+          options,
+        ),
         normalizedContextGraphId,
-        createOperationContext('init'),
-        { slotBindingMode: 'chain-attested-repair' },
+        operationContext,
+        'chain-attested-repair',
       );
-      return state === 0
-        ? { state: 'public' }
-        : state === 1
-          ? { state: 'not-public', reason: 'private' }
-          : state === 'unregistered'
-            ? { state: 'not-public', reason: 'unregistered' }
-            : { state: 'unknown', reason: 'unprovable' };
-    };
     return reconcileConfiguredContextGraphMetadataV1({
       store: this.store,
-      resolveActivePublicChainProof,
+      resolveActivePublicChainProof: (id) => resolveActivePublicChainProof(
+        id,
+        createOperationContext('init'),
+      ),
       isLocallyCurated: (normalizedContextGraphId) =>
         this.isCuratorOf(normalizedContextGraphId),
       confirmMetadata: (normalizedContextGraphId, input) =>
         confirmContextGraphMetadataV1({
           chain: this.chain,
-          isContextGraphPublicOnChain: (id) => this.isContextGraphPublicOnChain(
+          resolveActivePublicChainProof: (id) => resolveActivePublicChainProof(
             id,
             createOperationContext('sync'),
           ),
-          resolveActivePublicChainProof,
           isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
           localApprovedAgentByContextGraph: this.localApprovedAgentByCG,
           peerId: this.peerId,
@@ -9703,23 +9705,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<boolean> {
     return confirmContextGraphMetadataV1({
       chain: this.chain,
-      isContextGraphPublicOnChain: (id) => this.isContextGraphPublicOnChain(
-        id,
-        createOperationContext('sync'),
-      ),
       resolveActivePublicChainProof: async (id) => {
-        const state = await this.resolveOnChainAccessPolicyState(
+        return resolveActivePublicContextGraphChainProof(
+          (contextGraphId, operationContext, options) =>
+            this.resolveOnChainAccessPolicyState(
+              contextGraphId,
+              operationContext,
+              options,
+            ),
           id,
           createOperationContext('sync'),
-          { slotBindingMode: 'chain-attested-repair' },
+          'chain-attested-repair',
         );
-        return state === 0
-          ? { state: 'public' }
-          : state === 1
-            ? { state: 'not-public', reason: 'private' }
-            : state === 'unregistered'
-              ? { state: 'not-public', reason: 'unregistered' }
-              : { state: 'unknown', reason: 'unprovable' };
       },
       isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
       localApprovedAgentByContextGraph: this.localApprovedAgentByCG,
