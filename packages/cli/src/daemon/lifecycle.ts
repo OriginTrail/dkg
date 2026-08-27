@@ -26,7 +26,6 @@ import {
 } from "./metrics-queries.js";
 import { createMetricsPresence } from "./metrics-presence.js";
 import {
-  appendFile,
   chmod,
   copyFile,
   mkdir,
@@ -150,14 +149,28 @@ import {
   validateNetworkConfigReadiness,
 } from '../config.js';
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
-import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
+import {
+  resolveOtlpLogEndpoint,
+  type ActiveLogExporterMode,
+} from '../telemetry-config.js';
 import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
-import { createDaemonLogSink } from './log-sink.js';
-import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
+import {
+  exitAfterFatalLogDrain,
+  startDaemonLogController,
+  type DaemonLogExporterStartResult,
+} from './log-lifecycle.js';
+import { startDaemonLogFileWriter } from './daemon-log-file-writer.js';
+import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
+import {
+  createTelemetrySettings,
+  createTelemetryRuntime,
+} from './telemetry-runtime.js';
+import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
+import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
@@ -292,7 +305,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -1167,28 +1179,47 @@ export async function runDaemonInner(
   // upgrades/restarts and can already be multi-gigabyte at this point.
   const startupLogRotation = await rotateDaemonLogIfNeeded(logFile).catch(() => null);
 
-  // Tee all stdout/stderr (including structured Logger output) into the log file
+  // One file-level writer owns every daemon.log append after startup rotation.
+  // Its separate diagnostic file remains visible when the detached worker's
+  // original stderr is ignored and cannot recurse through the daemon.log tee.
   const origStdoutWrite = process.stdout.write.bind(process.stdout);
   const origStderrWrite = process.stderr.write.bind(process.stderr);
+  const logWriterDiagnosticFile = join(dkgDir(), 'daemon-log-writer-errors.log');
+  const daemonLogFileWriter = startDaemonLogFileWriter({
+    logFile,
+    rotate: () => rotateDaemonLogIfNeeded(logFile),
+    onDiagnostic: async (message) => {
+      const line = `[${new Date().toISOString()}] ${message}\n`;
+      await appendBoundedDaemonLogDiagnostic(logWriterDiagnosticFile, line)
+        .catch(() => {});
+      if (foreground) origStderrWrite(`[daemon-log-writer] ${message}\n`);
+    },
+  });
+
+  // Tee all stdout/stderr (including structured Logger output) through the
+  // same serialized and bounded file lifecycle.
   process.stdout.write = ((chunk: any, ...args: any[]) => {
-    appendFile(
-      logFile,
+    daemonLogFileWriter.push(
       typeof chunk === "string" ? chunk : chunk.toString(),
-    ).catch(() => {});
+    );
     return origStdoutWrite(chunk, ...args);
   }) as typeof process.stdout.write;
   process.stderr.write = ((chunk: any, ...args: any[]) => {
-    appendFile(
-      logFile,
+    daemonLogFileWriter.push(
       typeof chunk === "string" ? chunk : chunk.toString(),
-    ).catch(() => {});
+    );
     return origStderrWrite(chunk, ...args);
   }) as typeof process.stderr.write;
+
+  const detachDaemonLogTee = (): void => {
+    process.stdout.write = origStdoutWrite as typeof process.stdout.write;
+    process.stderr.write = origStderrWrite as typeof process.stderr.write;
+  };
 
   function log(msg: string) {
     const line = `[${new Date().toISOString()}] ${msg}`;
     if (foreground) origStdoutWrite(line + "\n");
-    appendFile(logFile, line + "\n").catch(() => {});
+    daemonLogFileWriter.push(line + "\n");
   }
   const backpressureMonitor = new BackpressureMonitor({
     emit: (level, message) => log(`[${level}] ${message}`),
@@ -1218,7 +1249,16 @@ export async function runDaemonInner(
     log(`[fatal] Uncaught exception: ${err?.stack ?? msg}`);
     removePid()
       .catch(() => {})
-      .finally(() => process.exit(1));
+      .finally(() => {
+        void exitAfterFatalLogDrain({
+          detach: detachDaemonLogTee,
+          shutdown: () => daemonLogFileWriter.shutdown(),
+          exit: (code) => process.exit(code),
+          reportTimeout: (message) => {
+            origStderrWrite(`[daemon-log-writer] ${message}\n`);
+          },
+        });
+      });
   });
 
   process.on("unhandledRejection", (reason) => {
@@ -1260,7 +1300,7 @@ export async function runDaemonInner(
  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝              ╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚═╝ ╚═════╝
 `;
   origStdoutWrite(banner + "\n");
-  appendFile(logFile, banner + "\n").catch(() => {});
+  daemonLogFileWriter.push(banner + "\n");
 
   const nodeVersion = getNodeVersion();
   const nodeCommit = getCurrentCommitShort(); // cached once at startup — avoids execSync in hot path
@@ -2591,22 +2631,20 @@ export async function runDaemonInner(
   chatDb = dashDb;
   log("Dashboard DB initialized at " + join(dkgDir(), "node-ui.db"));
 
-  // Redactor for the copy of each record that LEAVES the node. The local
-  // dashboard DB keeps full-fidelity records (it's the operator's own machine);
-  // redaction only protects data crossing the trust boundary to a collector.
+  // Redactor for the copy of each record that LEAVES the node. The local path
+  // writes every level to daemon.log, served by the dashboard's /api/node-log.
   const redactForRemote = createLogRedactor(config.telemetry?.logs?.redact);
 
-  // Local DB gets the FULL record; remote shippers get a single REDACTED copy.
-  // `remoteShippers` is evaluated per record so runtime enable/disable of the
-  // syslog/OTLP workers is reflected without re-wiring. Logic lives in
-  // createDaemonLogSink so this trust boundary is unit-tested (log-sink.test.ts).
-  Logger.setSink(
-    createDaemonLogSink({
-      insertLog: (rec) => dashDb.insertLog(rec),
-      redact: redactForRemote,
-      remoteShippers: () => [logPusher, otlpExporter],
-    }),
-  );
+  // Avoid duplicating routine logs into SQLite on the event loop. Low-volume
+  // warning/error records remain available to operation and dashboard views;
+  // the controller owns sink attachment plus the one active remote exporter.
+  const daemonLogController = startDaemonLogController({
+    writeLocalDebug: (record) => {
+      daemonLogFileWriter.pushDebug(record);
+    },
+    insertDiagnosticLog: (record) => dashDb.insertLog(record),
+    redact: redactForRemote,
+  });
 
   // Extract the plain value from an RDF typed literal like "6"^^<xsd:integer>
   const metricsSource: MetricsSource = {
@@ -2803,11 +2841,45 @@ export async function runDaemonInner(
     ? "testnet"
     : "mainnet";
   const syslogEndpoint = TELEMETRY_ENDPOINTS[networkKey]?.syslog;
-  let logPusher: LogPushWorker | null = null;
-  let otlpExporter: OtlpLogWorker | null = null;
+  function startLogExporter(
+    mode: ActiveLogExporterMode,
+  ): DaemonLogExporterStartResult {
+    if (mode === 'otlp') {
+      const endpoint = resolveOtlpLogEndpoint(config.telemetry, process.env);
+      if (!endpoint) {
+        return {
+          ok: false,
+          error: `OTLP log export is not configured for ${networkKey} (set config.telemetry.logs.endpoint or OTEL_EXPORTER_OTLP_ENDPOINT)`,
+        };
+      }
+      const minLevel = config.telemetry?.logs?.level ?? "info";
+      const result = daemonLogController.startExporter(mode, () => {
+        const worker = new OtlpLogWorker({
+          endpoint,
+          token: config.telemetry?.logs?.token,
+          network: networkKey,
+          peerId: agent.peerId,
+          nodeName: config.name,
+          version: nodeVersion,
+          commit: nodeCommit,
+          role: config.nodeRole ?? "edge",
+          chainId: config.chain?.chainId,
+          minLevel,
+          bufferMaxEntries: config.telemetry?.logs?.bufferMaxEntries,
+          onError: (m) => log(`Telemetry(OTLP): ${m}`),
+        });
+        worker.start();
+        return {
+          shipper: worker,
+          shutdown: () => worker.shutdown(),
+        };
+      });
+      if (result.ok && result.started) {
+        log(`Telemetry: OTLP log export enabled → ${endpoint} (level ≥ ${minLevel})`);
+      }
+      return result;
+    }
 
-  function startLogPusher(): { ok: boolean; error?: string } {
-    if (logPusher) return { ok: true };
     if (!syslogEndpoint || !syslogEndpoint.port) {
       return {
         ok: false,
@@ -2815,184 +2887,100 @@ export async function runDaemonInner(
       };
     }
     const autoUpdateEnabled = config.autoUpdate?.enabled ?? false;
-    logPusher = new LogPushWorker({
-      host: syslogEndpoint.host,
-      port: syslogEndpoint.port,
-      peerId: agent.peerId,
-      network: networkKey,
-      nodeName: config.name,
-      version: nodeVersion,
-      commit: nodeCommit,
-      role: config.nodeRole ?? "edge",
-      autoUpdate: autoUpdateEnabled,
-      versionStatus: () => {
-        if (!autoUpdateEnabled) return "disabled";
-        if (daemonState.isUpdating) return "updating";
-        if (daemonState.lastUpdateCheck.checkedAt === 0) return "unknown";
-        return daemonState.lastUpdateCheck.upToDate ? "latest" : "behind";
-      },
-    });
-    logPusher.start();
-    log(
-      `Telemetry: log streaming enabled → ${syslogEndpoint.host}:${syslogEndpoint.port}`,
-    );
-    return { ok: true };
-  }
-
-  function stopLogPusher(): void {
-    if (!logPusher) return;
-    logPusher.stop();
-    logPusher = null;
-    log("Telemetry: log streaming disabled");
-  }
-
-  function startOtlpExporter(): { ok: boolean; error?: string } {
-    if (otlpExporter) return { ok: true };
-    // Resolve env-first, matching the traces/metrics precedence (resolveOtelSignals):
-    // the standard OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, then OTEL_EXPORTER_OTLP_ENDPOINT
-    // + /v1/logs, then config. NO hardcoded per-network fallback — logs must never
-    // ship to a placeholder/TBD URL the operator never set.
-    const envBase = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.replace(/\/$/, "");
-    const endpoint =
-      process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ||
-      (envBase ? `${envBase}/v1/logs` : undefined) ||
-      config.telemetry?.logs?.endpoint;
-    if (!endpoint) {
-      return {
-        ok: false,
-        error: `OTLP log export is not configured for ${networkKey} (set config.telemetry.logs.endpoint or OTEL_EXPORTER_OTLP_ENDPOINT)`,
-      };
-    }
-    const minLevel = config.telemetry?.logs?.level ?? "info";
-    otlpExporter = new OtlpLogWorker({
-      endpoint,
-      token: config.telemetry?.logs?.token,
-      network: networkKey,
-      peerId: agent.peerId,
-      nodeName: config.name,
-      version: nodeVersion,
-      commit: nodeCommit,
-      role: config.nodeRole ?? "edge",
-      chainId: config.chain?.chainId,
-      minLevel,
-      bufferMaxEntries: config.telemetry?.logs?.bufferMaxEntries,
-      onError: (m) => log(`Telemetry(OTLP): ${m}`),
-    });
-    otlpExporter.start();
-    log(`Telemetry: OTLP log export enabled → ${endpoint} (level ≥ ${minLevel})`);
-    return { ok: true };
-  }
-
-  async function stopOtlpExporter(): Promise<void> {
-    if (!otlpExporter) return;
-    // Await the final flush so disable/shutdown can't return while logs are
-    // still in flight or stranded in the buffer.
-    await otlpExporter.shutdown();
-    otlpExporter = null;
-    log("Telemetry: OTLP log export disabled");
-  }
-
-  // OTel traces + metrics SDK (independent of the log-exporter path below).
-  // Endpoints resolve env-first (standard OTEL_EXPORTER_OTLP_* names) then
-  // config; a signal registers ONLY when its endpoint resolves — never a
-  // guessed prod default. Idempotent (initTelemetry no-ops once configured), so
-  // it is safe to call both at boot AND from the runtime enable toggle.
-  async function startOtelSdk(): Promise<void> {
-    const { tracesEndpoint, metricsEndpoint, tracesOn, metricsOn } = resolveOtelSignals(
-      config.telemetry,
-    );
-    if (!tracesOn && !metricsOn) return;
-    try {
-      await initTelemetry({
-        enabled: true,
-        resource: {
-          serviceName: "dkg-node",
-          serviceVersion: nodeVersion,
-          serviceInstanceId: config.name,
-          network: networkKey,
-          peerId: agent.peerId,
-          nodeName: config.name,
-          nodeRole: config.nodeRole ?? "edge",
-          commit: nodeCommit,
-          chainId: config.chain?.chainId,
+    const result = daemonLogController.startExporter(mode, () => {
+      const worker = new LogPushWorker({
+        host: syslogEndpoint.host,
+        port: syslogEndpoint.port,
+        peerId: agent.peerId,
+        network: networkKey,
+        nodeName: config.name,
+        version: nodeVersion,
+        commit: nodeCommit,
+        role: config.nodeRole ?? "edge",
+        autoUpdate: autoUpdateEnabled,
+        versionStatus: () => {
+          if (!autoUpdateEnabled) return "disabled";
+          if (daemonState.isUpdating) return "updating";
+          if (daemonState.lastUpdateCheck.checkedAt === 0) return "unknown";
+          return daemonState.lastUpdateCheck.upToDate ? "latest" : "behind";
         },
-        traces: tracesOn
-          ? {
-              endpoint: tracesEndpoint,
-              token: config.telemetry?.traces?.token,
-              sampleRatio: config.telemetry?.traces?.sampleRatio,
-            }
-          : undefined,
-        metrics: metricsOn
-          ? {
-              endpoint: metricsEndpoint,
-              token: config.telemetry?.metrics?.token,
-              exportIntervalMs: config.telemetry?.metrics?.exportIntervalMs,
-            }
-          : undefined,
       });
+      worker.start();
+      return {
+        shipper: worker,
+        shutdown: async () => worker.stop(),
+      };
+    });
+    if (result.ok && result.started) {
       log(
-        `Telemetry: OTel SDK registered (traces=${tracesOn ? tracesEndpoint : "off"}, metrics=${metricsOn ? metricsEndpoint : "off"})`,
-      );
-    } catch (err) {
-      // Telemetry must never block startup.
-      log(`Telemetry: OTel init failed (non-fatal): ${String(err)}`);
-    }
-  }
-
-  // Start ALL telemetry signals under the master gate: OTel traces/metrics
-  // (SDK) AND the configured log exporter. Used at boot and from the runtime
-  // enable toggle so both behave identically (the bug fixed here: enabling from
-  // a boot-disabled state previously started only logs, never traces/metrics).
-  // The log-exporter result is returned separately — a failed log shipper must
-  // NOT tear down or disable the independent traces/metrics signals.
-  // Await the SDK init first (it is dynamically imported) so traces/metrics are
-  // fully registered before the log exporter result is returned — that ordering
-  // lets the runtime-enable path roll the SDK back if the log exporter fails.
-  async function startTelemetry(): Promise<{ ok: boolean; error?: string }> {
-    await startOtelSdk();
-    // Dispatch to the configured log exporter. 'syslog' is the default when
-    // unset (preserves prior behaviour); 'otlp' is the recommended path; 'none'
-    // keeps logs local-only even while telemetry is enabled. An UNKNOWN/typo'd
-    // value fails closed to 'none' (never silently syslog → off-node).
-    if (isUnknownLogExporter(config.telemetry)) {
-      log(
-        `Telemetry: unknown logs.exporter "${config.telemetry?.logs?.exporter}" — ` +
-          `keeping logs local-only (no off-node forwarding). Use 'otlp', 'syslog', or 'none'.`,
+        `Telemetry: log streaming enabled → ${syslogEndpoint.host}:${syslogEndpoint.port}`,
       );
     }
-    const mode = resolveLogExporterMode(config.telemetry);
-    if (mode === "none") return { ok: true };
-    if (mode === "otlp") return startOtlpExporter();
-    return startLogPusher();
+    return result;
   }
 
-  // Stop ALL telemetry signals: log exporters AND the OTel SDK (flush + shut
-  // down + clear the API globals). Async so a runtime disable actually stops
-  // traces/metrics — not just logs — and callers can await an orderly teardown.
-  async function stopTelemetry(): Promise<void> {
-    stopLogPusher();
-    await stopOtlpExporter();
-    await shutdownTelemetry().catch(() => {});
+  async function stopLogExporter(): Promise<void> {
+    const mode = await daemonLogController.stopExporter();
+    if (!mode) return;
+    log(mode === 'otlp'
+      ? "Telemetry: OTLP log export disabled"
+      : "Telemetry: log streaming disabled");
   }
 
-  if (config.telemetry?.enabled) {
-    const r = await startTelemetry();
-    if (!r.ok) {
-      // Log forwarding failed to start (e.g. mainnet syslog port 0). Disable
-      // ONLY the log signal — leave the master gate and any registered
-      // traces/metrics intact; they are independent signals. (Boot path:
-      // best-effort per signal; the runtime toggle below rolls back instead.)
-      log(`Telemetry: log exporter not started — ${r.error} (traces/metrics unaffected)`);
-    }
+  // OTel traces/metrics and the selected log exporter share one production
+  // adapter. Boot, runtime settings changes, and shutdown all traverse it.
+  const telemetrySignals = createDaemonTelemetryLifecycle({
+    config,
+    resource: {
+      serviceName: "dkg-node",
+      serviceVersion: nodeVersion,
+      serviceInstanceId: config.name,
+      network: networkKey,
+      peerId: agent.peerId,
+      nodeName: config.name,
+      nodeRole: config.nodeRole ?? "edge",
+      commit: nodeCommit,
+      chainId: config.chain?.chainId,
+    },
+    initOtel: initTelemetry,
+    shutdownOtel: shutdownTelemetry,
+    startLogExporter,
+    stopLogExporter,
+    log,
+  });
+
+  const telemetryRuntime = createTelemetryRuntime({
+    config,
+    persist: saveConfig,
+    signals: telemetrySignals,
+    onBootStartFailure: (error) => {
+      // Boot remains best-effort per signal: a failed log shipper must not
+      // disable independently registered traces/metrics or rewrite config.
+      log(`Telemetry: log exporter not started — ${error} (traces/metrics unaffected)`);
+    },
+  });
+
+  // Daemon shutdown additionally detaches the Logger sink. Runtime telemetry
+  // disable keeps the sink attached so warn/error diagnostics still persist.
+  async function stopDaemonLogging(): Promise<void> {
+    // Detach synchronously, then flush the shared file lifecycle through a
+    // serialized barrier. The tee remains active for later teardown messages;
+    // final shutdown detaches it and closes the writer after all producers stop.
+    daemonLogController.detachSink();
+    await Promise.all([
+      telemetryRuntime.shutdown(),
+      daemonLogFileWriter.flush(),
+    ]);
   }
+
+  await telemetryRuntime.startConfiguredBestEffort();
   backpressureMonitor.start();
 
   const PRUNE_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
   const pruneRuntimeState = async (): Promise<void> => {
     try {
       dashDb.prune();
-      const rotation = await rotateDaemonLogIfNeeded(logFile);
+      const rotation = await daemonLogFileWriter.rotate();
       if (rotation.rotated) {
         log(
           `Rotated daemon.log (was ${(rotation.previousBytes / 1024 / 1024).toFixed(1)} MB)`,
@@ -3007,9 +2995,9 @@ export async function runDaemonInner(
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
 
-  // A time window cannot bound a same-day log storm. The focused maintenance
-  // helper owns bounded catch-up batches, compaction retries, and timer cleanup;
-  // daemon lifecycle only starts and stops it.
+  // A time window cannot bound a same-day compatibility-log storm. This
+  // independent maintenance helper enforces only the published count cap;
+  // it never guesses whether an ambiguous historical row came from the daemon.
   const logVolumePruner = startDashboardLogVolumePruner({
     dashDb,
     log,
@@ -3318,29 +3306,7 @@ export async function runDaemonInner(
     },
   };
 
-  const telemetrySettings = {
-    getTelemetryEnabled: () => config.telemetry?.enabled ?? false,
-    setTelemetryEnabled: async (
-      enabled: boolean,
-    ): Promise<{ ok: boolean; error?: string }> => {
-      if (enabled) {
-        const r = await startTelemetry();
-        if (!r.ok) {
-          // The OTel SDK may have started before the log exporter failed. Roll
-          // it back so we never leave traces/metrics exporting while we report
-          // failure and persist nothing — the API/UI state stays consistent
-          // (telemetry remains off) with what is actually running.
-          await stopTelemetry();
-          return r;
-        }
-      } else {
-        await stopTelemetry();
-      }
-      config.telemetry = { ...config.telemetry, enabled };
-      await saveConfig(config);
-      return { ok: true };
-    },
-  };
+  const telemetrySettings = createTelemetrySettings(telemetryRuntime);
 
   // Resolve the static UI directory (built by @origintrail-official/dkg-node-ui)
   //
@@ -3863,8 +3829,8 @@ export async function runDaemonInner(
                 );
             },
             stopAgent: () => agent.stop(),
-            // Stops log exporters AND flushes + shuts down the OTel SDK.
-            stopTelemetry,
+            // Detaches the sink, stops its exporter, and shuts down the OTel SDK.
+            stopTelemetry: stopDaemonLogging,
             log,
           }),
           log,
@@ -3893,6 +3859,9 @@ export async function runDaemonInner(
       }
     })().catch((err: any) => {
       log(`Shutdown cleanup error: ${err?.message ?? String(err)}`);
+    }).finally(async () => {
+      detachDaemonLogTee();
+      await daemonLogFileWriter.shutdown();
     });
     const { forced } = await raceShutdownWithTimeout(
       cleanup,

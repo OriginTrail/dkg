@@ -88,9 +88,8 @@ import {
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
-import {
-  classifyRfc64CatalogReconciliationTerminalReasonV1,
-  type Rfc64PublicCatalogReconciliationFailureV1,
+import type {
+  Rfc64PublicCatalogReconciliationFailureV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import {
   Rfc64PublicCatalogSuccessorProducerV1,
@@ -177,6 +176,10 @@ export type {
 
 export {
   RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+  Rfc64CatalogReconciliationTerminalErrorV1,
+  type Rfc64CatalogReconciliationFailureCompletionV1,
+  type Rfc64CatalogReconciliationFailureOutcomeV1,
+  type Rfc64CatalogReconciliationTerminalReasonV1,
   type Rfc64PublicCatalogReconciliationFailureV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 
@@ -302,29 +305,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       receiver: {
-        onReconciliationAttemptStart: (announcement) => (
-          this.rfc64PublicCatalogReconciliationFailuresV1.beginAttempt(
-            announcement.catalogHeadObjectDigest,
-          )
-        ),
-        onReconciliationAttemptSuccess: (announcement, attemptToken) => {
-          this.rfc64PublicCatalogReconciliationFailuresV1.completeAttempt(
-            announcement.catalogHeadObjectDigest,
-            attemptToken,
-          );
-        },
-        onReconciliationAttemptEnd: (announcement, attemptToken) => {
-          this.rfc64PublicCatalogReconciliationFailuresV1.endAttempt(
-            announcement.catalogHeadObjectDigest,
-            attemptToken,
-          );
-        },
-        onError: (announcement, error, attemptToken) => {
+        onError: (announcement, error) => {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
             announcement.catalogHeadObjectDigest,
             error,
-            classifyRfc64CatalogReconciliationTerminalReasonV1(error),
-            attemptToken ?? undefined,
           );
         },
       },

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
+import { findTripleStoreCapability } from './triple-store.js';
 import type {
   Quad,
   SubjectReplacement,
@@ -8,6 +9,7 @@ import type {
   TripleStore,
   UpdateOptions,
   StorePressureSnapshot,
+  TripleStoreDecorator,
 } from './triple-store.js';
 import {
   UnsupportedTripleStoreCapabilityError,
@@ -199,12 +201,13 @@ export interface ChangelogStoreOptions {
  * Write-path append-only change log. See the class-level docstring for the
  * crash-consistency and single-writer arguments.
  */
-export class ChangelogStore implements TripleStore, ChangelogReader {
+export class ChangelogStore implements TripleStoreDecorator, ChangelogReader {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }
 
   private readonly inner: TripleStore;
+  readonly innerStore: TripleStore;
   private readonly enabled: boolean;
   private readonly reserved: ReadonlySet<string>;
   private readonly onAppend?: (record: ChangeRecord) => void;
@@ -229,6 +232,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   constructor(inner: TripleStore, options: ChangelogStoreOptions = {}) {
     this.inner = inner;
+    this.innerStore = inner;
     this.enabled = options.enabled !== false;
     const reserved = new Set<string>([CHANGELOG_GRAPH]);
     for (const g of options.reservedGraphs ?? []) reserved.add(g);
@@ -966,24 +970,17 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * no `instanceof`/cast/decorator-order assumption at the call site.
  */
 export function asChangelogReader(store: unknown): ChangelogReader | null {
-  // Follow `.innerStore` so a wrapper AROUND the ChangelogStore still resolves.
-  // The daemon's store is `createListContextGraphsCacheInvalidatingStore(...)`
-  // (dkg-agent-base.ts), a hand-rolled forwarder that exposes `.innerStore` but
-  // does NOT forward the changelog API — so a direct check misses it even when
-  // the changelog is enabled. The depth bound guards a pathological/cyclic chain.
-  let s = store as (Partial<ChangelogReader> & { innerStore?: unknown }) | null | undefined;
-  for (let depth = 0; s && depth < 8; depth++) {
-    if (s instanceof ChangelogStore) return s;
-    if (
-      typeof s.changelogHead === 'function' &&
-      typeof s.readChanges === 'function' &&
-      typeof s.headSeq === 'function' &&
-      typeof s.clearReconcileFlag === 'function' &&
-      typeof s.needsReconcile === 'boolean'
-    ) {
-      return s as ChangelogReader;
-    }
-    s = s.innerStore as typeof s;
-  }
-  return null;
+  return findTripleStoreCapability(
+    store,
+    (candidate): candidate is ChangelogReader => {
+      if (candidate instanceof ChangelogStore) return true;
+      if (typeof candidate !== 'object' || candidate === null) return false;
+      const reader = candidate as Partial<ChangelogReader>;
+      return typeof reader.changelogHead === 'function'
+        && typeof reader.readChanges === 'function'
+        && typeof reader.headSeq === 'function'
+        && typeof reader.clearReconcileFlag === 'function'
+        && typeof reader.needsReconcile === 'boolean';
+    },
+  );
 }

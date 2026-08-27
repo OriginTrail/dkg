@@ -160,6 +160,29 @@ export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
 export {
+  Rfc64CatalogReconciliationTerminalErrorV1,
+  type Rfc64CatalogReconciliationFailureCompletionV1,
+  type Rfc64CatalogReconciliationFailureOutcomeV1,
+  type Rfc64CatalogReconciliationTerminalReasonV1,
+} from './rfc64/public-catalog-reconciliation-failure-v1.js';
+export {
+  Rfc64CatalogSynchronizationErrorV1,
+} from './rfc64/catalog-synchronization-error-v1.js';
+export {
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_OUTCOMES_V1,
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1,
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_SUCCESS_OUTCOMES_V1,
+  isRfc64CatalogReconciliationFailureOutcomeV1,
+  isRfc64CatalogReconciliationSuccessOutcomeV1,
+  isRfc64PublicCatalogReceiverFailureCompletionV1,
+  isRfc64PublicCatalogReceiverSuccessCompletionV1,
+  type Rfc64CatalogReconciliationSuccessOutcomeV1,
+  type Rfc64PublicCatalogReceiverCompletionOutcomeV1,
+  type Rfc64PublicCatalogReceiverCompletionV1,
+  type Rfc64PublicCatalogReceiverFailureCompletionV1,
+  type Rfc64PublicCatalogReceiverSuccessCompletionV1,
+} from './rfc64/public-catalog-reconciliation-outcome-v1.js';
+export {
   DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY,
   SYNC_ADMISSION_SOURCES,
   contextGraphPriority,

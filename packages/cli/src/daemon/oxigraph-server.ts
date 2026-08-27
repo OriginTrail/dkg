@@ -36,6 +36,11 @@
  * `spawn`/`fetch` are injectable so unit tests exercise ready-polling,
  * crash-restart, and shutdown without launching a real binary.
  */
+import {
+  formatWalBytes,
+  measureRetainedWalBytes,
+  resolveWalAwareReadyTimeoutMs,
+} from './oxigraph-wal.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { findListenOwnerPid } from './oxigraph-listen-port.js';
 import {
@@ -88,6 +93,15 @@ export interface StartOxigraphServerOptions {
   readyIntervalMs?: number;
   /** Grace period between SIGTERM and SIGKILL on stop. */
   stopGraceMs?: number;
+  /**
+   * Base of the automatic WAL-aware readiness deadline (GH#1400). Production
+   * default is DEFAULT_READY_TIMEOUT_MS; exposed as a test seam. Deliberately
+   * NOT read from `store.options` — operators configure `readyTimeoutMs`,
+   * which overrides the automatic sizing entirely.
+   */
+  autoReadyBaseTimeoutMs?: number;
+  /** Progress-log cadence while a retained WAL is opening. Test seam. */
+  progressLogIntervalMs?: number;
   /** Base delay for restart backoff after an unexpected crash. */
   restartBackoffBaseMs?: number;
   /** Cap for restart backoff. */
@@ -130,6 +144,10 @@ export interface OxigraphRecoveryState {
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const DEFAULT_READY_INTERVAL_MS = 500;
+// GH#1400 — a LEAK GUARD, not a flush window. Measured: oxigraph 0.5.8
+// installs no SIGTERM handler, so the child dies by default disposition and
+// the WAL is byte-identical across the signal. Raising this cannot buy a
+// RocksDB flush; it would only delay teardown.
 const DEFAULT_STOP_GRACE_MS = 5_000;
 const DEFAULT_RESTART_BASE_MS = 1_000;
 const DEFAULT_RESTART_MAX_MS = 30_000;
@@ -177,8 +195,31 @@ export async function startOxigraphServer(
   const base = `http://${host}:${port}`;
   const queryEndpoint = `${base}/query`;
   const updateEndpoint = `${base}/update`;
-  const readyTimeoutMs = opts.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+  // GH#1400 — `readyTimeoutMs` keeps its documented meaning: an explicit
+  // maximum, used verbatim and never extended. When it is absent the daemon
+  // sizes the deadline from the write-ahead log pending replay.
+  const explicitReadyTimeoutMs = opts.readyTimeoutMs;
+  const autoReadyBaseMs = opts.autoReadyBaseTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+  const nextReadyTimeout = (): { timeoutMs: number; walBytes: number } => {
+    const walBytes = measureRetainedWalBytes(opts.location);
+    if (explicitReadyTimeoutMs !== undefined) {
+      const auto = resolveWalAwareReadyTimeoutMs({ baseMs: autoReadyBaseMs, walBytes });
+      if (auto > explicitReadyTimeoutMs) {
+        log(
+          `[oxigraph] configured readyTimeoutMs=${explicitReadyTimeoutMs}ms is below the ~${auto}ms ` +
+            `estimated to replay ${formatWalBytes(walBytes)} of retained write-ahead log; ` +
+            `remove the setting to let the daemon size the deadline automatically.`,
+        );
+      }
+      return { timeoutMs: explicitReadyTimeoutMs, walBytes };
+    }
+    return {
+      timeoutMs: resolveWalAwareReadyTimeoutMs({ baseMs: autoReadyBaseMs, walBytes }),
+      walBytes,
+    };
+  };
   const readyIntervalMs = opts.readyIntervalMs ?? DEFAULT_READY_INTERVAL_MS;
+  const progressLogIntervalMs = normalizePositiveInteger(opts.progressLogIntervalMs) ?? 10_000;
   const stopGraceMs = opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const restartBase = opts.restartBackoffBaseMs ?? DEFAULT_RESTART_BASE_MS;
   const restartMax = opts.restartBackoffMaxMs ?? DEFAULT_RESTART_MAX_MS;
@@ -355,10 +396,37 @@ export async function startOxigraphServer(
     const reason = lifecycle.phase === 'recovering'
       ? lifecycle.reason
       : 'supervised recovery';
+    // GH#1400 — size THIS attempt, not the one at boot. The WAL grows during
+    // the session, so a mid-life respawn (onClientTimeout, a crashed child)
+    // faces a larger replay than the daemon ever measured at startup. Reusing
+    // the boot value re-arms the exact ratchet: kill a healthy replaying
+    // child, leave the WAL, retry, kill it again. Measured before the spawn,
+    // same as boot, so the child cannot delete segments underneath the scan.
+    const reviveReady = nextReadyTimeout();
     const candidate = spawnChild();
     lifecycle = { phase: 'recovering', child: candidate, reason, generation };
-    const reviveDeadline = Date.now() + readyTimeoutMs;
+    if (reviveReady.walBytes > 0) {
+      log(
+        `[oxigraph] restart: ${formatWalBytes(reviveReady.walBytes)} of retained write-ahead log ` +
+          `to replay; allowing up to ${Math.round(reviveReady.timeoutMs / 1000)}s.`,
+      );
+    }
+    const reviveDeadline = Date.now() + reviveReady.timeoutMs;
+    let reviveProgressLog = Date.now();
     while (Date.now() < reviveDeadline) {
+      // Same reasoning as the boot loop: RocksDB emits no progress records
+      // during replay, so without this a multi-minute restart is silent.
+      if (
+        reviveReady.walBytes > 0
+        && Date.now() - reviveProgressLog >= progressLogIntervalMs
+      ) {
+        reviveProgressLog = Date.now();
+        log(
+          `[oxigraph] restart still opening: ` +
+            `${Math.round((Date.now() - (reviveDeadline - reviveReady.timeoutMs)) / 1000)}s elapsed ` +
+            `of ${Math.round(reviveReady.timeoutMs / 1000)}s allowed.`,
+        );
+      }
       if (
         lifecycle.phase !== 'recovering'
         || lifecycle.child !== candidate
@@ -497,7 +565,13 @@ export async function startOxigraphServer(
     generation: lifecycle.generation,
   });
 
+  const exitGuard = (): void => { killSync(); };
+
   const stop = async (): Promise<void> => {
+    // Single release point for the process-exit reaper installed before the
+    // spawn (GH#1400) — every stop path, successful or not, comes through
+    // here, so no caller has to remember a handoff.
+    process.removeListener('exit', exitGuard);
     if (lifecycle.phase === 'stopping') return;
     const candidate = lifecycle.child;
     lifecycle = {
@@ -536,6 +610,15 @@ export async function startOxigraphServer(
   );
   const launchSummary = launchStrategy.logSummary();
   if (launchSummary) log(launchSummary);
+  // GH#1400 — measure BEFORE the spawn, so the child cannot delete segments
+  // underneath the scan.
+  const bootReady = nextReadyTimeout();
+  if (bootReady.walBytes > 0) {
+    log(
+      `[oxigraph] ${formatWalBytes(bootReady.walBytes)} of retained write-ahead log to replay; ` +
+        `allowing up to ${Math.round(bootReady.timeoutMs / 1000)}s for the database to open.`,
+    );
+  }
   const initialChild = spawnChild();
   lifecycle = {
     phase: 'starting',
@@ -543,10 +626,41 @@ export async function startOxigraphServer(
     generation: lifecycle.generation,
   };
 
-  const deadline = Date.now() + readyTimeoutMs;
+  // GH#1400 — the caller (daemon/lifecycle.ts) does not register its
+  // `process.once('exit', killSync)` until AFTER this function resolves, so
+  // for the whole readiness window nothing would reap the child if the worker
+  // exits. That window used to be <=30s; sizing it to the WAL makes it
+  // minutes, which turns a rare orphan into a likely one — and an orphaned
+  // server holding the port and the RocksDB LOCK presents as the very bug
+  // being fixed.
+  //
+  // ONE owner, for the handle's whole lifetime: installed before the spawn and
+  // removed by `stop()`. No handoff protocol with the caller — an exception
+  // anywhere in readiness would otherwise skip a release and strand both the
+  // child and a process-global listener. `killSync` is idempotent, so the
+  // caller's own reaper remains harmless.
+  process.on('exit', exitGuard);
+
+  const deadline = Date.now() + bootReady.timeoutMs;
+  const readyTimeoutMs = bootReady.timeoutMs;
   let attempt = 0;
   let childDied = false;
+  let lastProgressLog = Date.now();
   while (Date.now() < deadline) {
+    // GH#1400 — RocksDB writes no progress records during replay, so this
+    // daemon-side line is the only thing distinguishing "recovering" from
+    // "hung" for an operator watching a multi-minute boot.
+    if (
+      bootReady.walBytes > 0
+      && Date.now() - lastProgressLog >= progressLogIntervalMs
+    ) {
+      lastProgressLog = Date.now();
+      log(
+        `[oxigraph] still opening: ${Math.round((Date.now() - (deadline - readyTimeoutMs)) / 1000)}s ` +
+          `elapsed of ${Math.round(readyTimeoutMs / 1000)}s allowed ` +
+          `(${formatWalBytes(bootReady.walBytes)} of write-ahead log).`,
+      );
+    }
     attempt += 1;
     // Our spawned child exited during startup — almost always a bind
     // failure. Stop probing and fail fast; do NOT adopt whatever may be
@@ -589,6 +703,7 @@ export async function startOxigraphServer(
   }
 
   // Never became ready — stop the child so we don't leak it, then throw.
+  // `stop()` removes the exit guard.
   await stop();
   const stderrHint = lastStderr.trim()
     ? ` Last server output:\n${lastStderr.trim()}`
@@ -597,7 +712,15 @@ export async function startOxigraphServer(
     childDied
       ? `Oxigraph server exited during startup on ${bind} ` +
         `(binary: ${opts.binaryPath}, location: ${opts.location}). ` +
-        `The port may already be in use by another process.${stderrHint}`
+        `The port may already be in use by another process.` +
+        (bootReady.walBytes > 0
+          // Every managed stop is a crash-stop to RocksDB, so some retained
+          // WAL is the NORM on a production node — the OOM hypothesis is
+          // additional context, never a replacement for the bind-failure one.
+          ? ` It was also replaying ${formatWalBytes(bootReady.walBytes)} of retained ` +
+            `write-ahead log, so an out-of-memory kill during recovery is possible too.`
+          : ``) +
+        `${stderrHint}`
       : `Oxigraph server did not become ready on ${bind} within ${readyTimeoutMs}ms ` +
         `(binary: ${opts.binaryPath}, location: ${opts.location}).${stderrHint}`,
   );

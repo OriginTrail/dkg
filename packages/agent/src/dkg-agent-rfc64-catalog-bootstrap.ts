@@ -12,7 +12,6 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
-import { Rfc64CatalogSynchronizationErrorV1 } from './dkg-agent-rfc64-catalog-sync.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type {
   Rfc64CatalogBootstrapConfigV1,
@@ -21,9 +20,8 @@ import type {
   Rfc64PublicCatalogBootstrapScopeV1,
 } from './dkg-agent-types.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
-import {
-  classifyRfc64CatalogReconciliationTerminalReasonV1,
-} from './rfc64/public-catalog-reconciliation-failure-v1.js';
+import { Rfc64CatalogSynchronizationErrorV1 } from
+  './rfc64/catalog-synchronization-error-v1.js';
 
 const MAX_STATUS_ERROR_BYTES_V1 = 1024;
 const MAX_CONCURRENT_TARGETS_V1 = 4;
@@ -81,23 +79,25 @@ export function classifyRfc64CatalogBootstrapFailureV1(
 }
 
 function hasNoAuthorizedProviderTerminalReasonV1(error: unknown): boolean {
-  let current: unknown = error;
-  const seen = new Set<unknown>();
-  for (let depth = 0; current !== null && depth < 8 && !seen.has(current); depth += 1) {
-    seen.add(current);
+  let current = error;
+  const visited = new Set<object>();
+  for (let depth = 0; depth < 8; depth += 1) {
     if (
       current instanceof Rfc64CatalogSynchronizationErrorV1
       && current.terminalReason === 'no-authorized-provider'
     ) {
       return true;
     }
-    if (classifyRfc64CatalogReconciliationTerminalReasonV1(current)
-      === 'no-authorized-provider') {
-      return true;
+    if (
+      (typeof current !== 'object' && typeof current !== 'function')
+      || current === null
+      || visited.has(current)
+    ) {
+      return false;
     }
-    if (typeof current !== 'object') return false;
+    visited.add(current);
     try {
-      current = (current as { readonly cause?: unknown }).cause ?? null;
+      current = (current as { readonly cause?: unknown }).cause;
     } catch {
       return false;
     }

@@ -9,6 +9,10 @@ import {
   computeContextGraphPolicyObjectDigestV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
+import {
+  canonicalGraphlessProjectionNQuads,
+  computeGraphlessMemoryEvidence,
+} from './memory-evidence.mjs';
 
 const ROLE_KEYS = Object.freeze({
   owner: `0x${'64'.repeat(32)}`,
@@ -30,10 +34,22 @@ export const FINALIZED_POLICY_BLOCK_HASH = `0x${'76'.repeat(32)}`;
 export const ASSERTION_ROOT =
   '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f';
 export const ASSET_NUMBERS = Object.freeze([41, 42]);
-export const PROJECTION = new TextEncoder().encode(
-  '<https://example.org/alice> <https://schema.org/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
-  + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n',
-);
+export const PROJECTION_QUADS = Object.freeze([
+  Object.freeze({
+    subject: 'https://example.org/alice',
+    predicate: 'https://schema.org/age',
+    object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+  }),
+  Object.freeze({
+    subject: 'https://example.org/alice',
+    predicate: 'https://schema.org/name',
+    object: '"Alice"',
+  }),
+]);
+export const PROJECTION_NQUADS = canonicalGraphlessProjectionNQuads(PROJECTION_QUADS);
+export const PROJECTION = new TextEncoder().encode(`${PROJECTION_NQUADS}\n`);
+export const PROJECTION_EVIDENCE = computeGraphlessMemoryEvidence(PROJECTION_QUADS);
+export const PROJECTION_DIGEST = PROJECTION_EVIDENCE.digest;
 export const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: CHAIN_ID,

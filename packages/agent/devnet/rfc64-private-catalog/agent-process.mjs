@@ -6,10 +6,8 @@ import { createInterface } from 'node:readline';
 
 import { multiaddr } from '@multiformats/multiaddr';
 import {
-  MemoryLayer,
   computeAuthorCatalogScopeDigestV1,
   computeNetworkId,
-  contextGraphLayerUri,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -31,6 +29,7 @@ import {
   roleAgentAddress,
 } from './fixture.mjs';
 import { classifyExpectedPrivateCatalogDenialV1 } from './denial-evidence.mjs';
+import { readPrivateCatalogGraphCountEvidence } from './memory-evidence.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
@@ -290,26 +289,11 @@ async function inspect(expectedHeadDigest) {
     catalogScopeDigest: scopeDigest,
     authorAddress,
   });
-  const graphCounts = [];
-  for (const kaNumber of ASSET_NUMBERS) {
-    const swmGraph = contextGraphLayerUri(
-      CONTEXT_GRAPH_ID,
-      MemoryLayer.SharedWorkingMemory,
-      authorAddress,
-      kaNumber,
-    );
-    const vmGraph = contextGraphLayerUri(
-      CONTEXT_GRAPH_ID,
-      MemoryLayer.VerifiableMemory,
-      authorAddress,
-      kaNumber,
-    );
-    graphCounts.push({
-      kaNumber,
-      swm: await exactGraphCount(swmGraph),
-      vm: await exactGraphCount(vmGraph),
-    });
-  }
+  const graphCounts = await readPrivateCatalogGraphCountEvidence(agent.store, {
+    assetNumbers: ASSET_NUMBERS,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    authorAddress,
+  });
   const outsiderResult = ROLE === 'outsider'
     ? null
     : await agent.query(
@@ -363,15 +347,6 @@ async function proveDenied(command, requestId) {
       ...denial,
     });
   }
-}
-
-async function exactGraphCount(graph) {
-  const result = await agent.store.query(
-    `SELECT (COUNT(*) AS ?count) WHERE { GRAPH <${graph}> { ?s ?p ?o } }`,
-  );
-  const value = result?.bindings?.[0]?.count ?? '0';
-  const match = String(value).match(/-?[0-9]+/u);
-  return match === null ? 0 : Number(match[0]);
 }
 
 function seededSubscriptionStore(contextGraphId) {

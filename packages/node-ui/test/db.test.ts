@@ -379,34 +379,189 @@ describe('DashboardDB — retention', () => {
       logVolumePruneBatchRows: 2,
     });
     try {
+      const insert = volumeDb.db.prepare(
+        `INSERT INTO logs (ts, level, module, message) VALUES (?, ?, 'sync', ?)`,
+      );
       for (let i = 0; i < 7; i += 1) {
-        volumeDb.insertLog({
-          ts: 1_000 + i,
-          level: i % 2 === 0 ? 'debug' : 'info',
-          module: 'sync',
-          message: `routine-${i}`,
-        });
+        insert.run(1_000 + i, i % 2 === 0 ? 'debug' : 'info', `routine-${i}`);
       }
-      volumeDb.insertLog({ ts: 2_000, level: 'warn', module: 'sync', message: 'keep-warn' });
-      volumeDb.insertLog({ ts: 2_001, level: 'error', module: 'sync', message: 'keep-error' });
+      insert.run(2_000, 'warn', 'keep-warn');
+      insert.run(2_001, 'error', 'keep-error');
 
       expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
-      // The second batch exactly reaches the cap. The API conservatively asks
-      // for one final probe, avoiding a second large count on every batch.
       expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
       expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 0, status: 'done' });
 
       const rows = volumeDb.db.prepare(
         `SELECT level, message FROM logs ORDER BY id ASC`,
       ).all() as Array<{ level: string; message: string }>;
-      expect(rows.filter((row) => row.level === 'debug' || row.level === 'info'))
-        .toEqual([
-          { level: 'debug', message: 'routine-4' },
-          { level: 'info', message: 'routine-5' },
-          { level: 'debug', message: 'routine-6' },
-        ]);
+      expect(rows.filter((row) => row.level === 'debug' || row.level === 'info')).toEqual([
+        { level: 'debug', message: 'routine-4' },
+        { level: 'info', message: 'routine-5' },
+        { level: 'debug', message: 'routine-6' },
+      ]);
       expect(rows).toContainEqual({ level: 'warn', message: 'keep-warn' });
       expect(rows).toContainEqual({ level: 'error', message: 'keep-error' });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves ambiguous pre-upgrade compatibility rows below the public cap', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-legacy-compat-'));
+    const dbPath = join(volumeDir, 'node-ui.db');
+    let volumeDb = new DashboardDB({ dataDir: volumeDir, retentionDays: 365 });
+    try {
+      volumeDb.close();
+      const preUpgrade = new Database(dbPath);
+      preUpgrade.prepare(
+        `INSERT INTO logs (ts, level, module, message) VALUES (?, 'info', 'third-party', ?)`,
+      ).run(Date.now(), 'public-compatibility-record');
+      preUpgrade.close();
+
+      volumeDb = new DashboardDB({
+        dataDir: volumeDir,
+        retentionDays: 365,
+        routineLogRowCap: 10,
+        logVolumePruneBatchRows: 2,
+      });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 0, status: 'done' });
+      expect(volumeDb.db.prepare(
+        `SELECT module, message FROM logs`,
+      ).all()).toEqual([
+        { module: 'third-party', message: 'public-compatibility-record' },
+      ]);
+    } finally {
+      if (volumeDb.db.open) volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('bounds routine compatibility writes through the published row cap', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-compat-cap-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 2,
+      // Deprecated option remains a source/runtime-compatible alias.
+      logVolumePruneBatchRows: 10,
+    });
+    try {
+      const rawInsert = volumeDb.db.prepare(
+        `INSERT INTO logs (ts, level, module, message) VALUES (?, 'info', 'legacy-caller', ?)`,
+      );
+      rawInsert.run(Date.now(), 'preexisting-0');
+      rawInsert.run(Date.now() + 1, 'preexisting-1');
+      rawInsert.run(Date.now() + 2, 'preexisting-2');
+      expect(volumeDb.pruneLogVolumeBatch()).toMatchObject({ deleted: 1, status: 'done' });
+      for (let i = 0; i < 6; i += 1) {
+        volumeDb.insertLog({
+          ts: Date.now() + i,
+          level: 'info',
+          module: 'compatibility',
+          message: `routine-${i}`,
+        });
+      }
+      volumeDb.insertLog({
+        ts: Date.now() + 10,
+        level: 'warn',
+        module: 'compatibility',
+        message: 'keep-warning',
+      });
+
+      const rows = volumeDb.db.prepare(
+        `SELECT level, message FROM logs ORDER BY id ASC`,
+      ).all() as Array<{ level: string; message: string }>;
+      expect(rows.filter((row) => row.level === 'info')).toEqual([
+        { level: 'info', message: 'routine-4' },
+        { level: 'info', message: 'routine-5' },
+      ]);
+      expect(rows).toContainEqual({ level: 'warn', message: 'keep-warning' });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps pace when the compatibility cleanup batch is smaller than the old guard cadence', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-small-compat-batch-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 100,
+      logVolumePruneBatchRows: 1,
+    });
+    try {
+      // Compile-time compatibility guard: published callers may still pass a
+      // string-typed value even when its runtime value is canonical.
+      const configuredLevel: string = 'info';
+      volumeDb.insertLog({
+        ts: Date.now(),
+        level: configuredLevel,
+        module: 'legacy-caller',
+        message: 'configured-level',
+      });
+      for (let i = 0; i < 500; i += 1) {
+        volumeDb.insertLog({
+          ts: Date.now() + i + 1,
+          level: 'info',
+          module: 'legacy-caller',
+          message: `routine-${i}`,
+        });
+      }
+      volumeDb.insertLog({
+        ts: Date.now() + 1_000,
+        level: 'warn',
+        module: 'legacy-caller',
+        message: 'keep-warning',
+      });
+
+      const counts = volumeDb.db.prepare(`
+        SELECT
+          SUM(CASE WHEN level NOT IN ('warn', 'error') THEN 1 ELSE 0 END) AS routine,
+          SUM(CASE WHEN level = 'warn' THEN 1 ELSE 0 END) AS warnings
+        FROM logs
+      `).get() as { routine: number; warnings: number };
+      expect(counts).toEqual({ routine: 100, warnings: 1 });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a committed insert as successful when inline retention fails', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-retention-failure-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 0,
+      logVolumePruneBatchRows: 1,
+    });
+    try {
+      volumeDb.db.exec(`
+        CREATE TRIGGER fail_inline_log_retention
+        BEFORE DELETE ON logs
+        BEGIN
+          SELECT RAISE(ABORT, 'forced retention failure');
+        END
+      `);
+
+      expect(() => volumeDb.insertLog({
+        ts: Date.now(),
+        level: 'info',
+        module: 'compatibility',
+        message: 'committed-before-maintenance',
+      })).not.toThrow();
+      expect(volumeDb.db.prepare(
+        `SELECT level, message FROM logs`,
+      ).all()).toEqual([
+        { level: 'info', message: 'committed-before-maintenance' },
+      ]);
+
+      volumeDb.db.exec('DROP TRIGGER fail_inline_log_retention');
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 1, status: 'more' });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 0, status: 'done' });
     } finally {
       volumeDb.close();
       rmSync(volumeDir, { recursive: true, force: true });
@@ -424,15 +579,13 @@ describe('DashboardDB — retention', () => {
     });
     try {
       const payload = 'x'.repeat(256 * 1024);
+      const insert = volumeDb.db.prepare(
+        `INSERT INTO logs (ts, level, module, message) VALUES (?, ?, 'sync', ?)`,
+      );
       for (let i = 0; i < 30; i += 1) {
-        volumeDb.insertLog({
-          ts: 1_000 + i,
-          level: 'debug',
-          module: 'sync',
-          message: `${i}:${payload}`,
-        });
+        insert.run(1_000 + i, 'debug', `${i}:${payload}`);
       }
-      volumeDb.insertLog({ ts: 2_000, level: 'warn', module: 'sync', message: 'keep-warn' });
+      insert.run(2_000, 'warn', 'keep-warn');
       volumeDb.db.pragma('wal_checkpoint(TRUNCATE)');
       const beforeBytes = statSync(dbPath).size;
 

@@ -223,6 +223,32 @@ export interface TripleStore {
 }
 
 /**
+ * Public boundary implemented by every TripleStore decorator. Capability
+ * discovery may traverse only this accessor; decorator-private fields are not
+ * part of the contract.
+ */
+export interface TripleStoreDecorator extends TripleStore {
+  readonly innerStore: TripleStore;
+}
+
+/** Resolve one optional capability through the documented decorator chain. */
+export function findTripleStoreCapability<T>(
+  store: unknown,
+  isCapability: (candidate: unknown) => candidate is T,
+): T | null {
+  let candidate = store;
+  const seen = new Set<unknown>();
+  for (let depth = 0; candidate && depth < 16; depth += 1) {
+    if (isCapability(candidate)) return candidate;
+    if (typeof candidate !== 'object' || seen.has(candidate)) return null;
+    seen.add(candidate);
+    if (!('innerStore' in candidate)) return null;
+    candidate = (candidate as { innerStore?: unknown }).innerStore;
+  }
+  return null;
+}
+
+/**
  * Run a server-side update whose affected named graphs are known by the caller.
  * Returns `false` when the store does not support `update()` directly, or when
  * a decorator reports that its wrapped store lacks the capability. Genuine

@@ -12,6 +12,7 @@ import {
 } from '../src/p2p/network-admission-coordinator.js';
 import {
   createNetworkAdmissionProtocolCheck,
+  createNetworkAdmissionRouterPolicy,
   translateNetworkAdmissionErrorAtProtocolBoundary,
 } from '../src/p2p/network-admission-protocol-adapter.js';
 import { NetworkAdmissionService, type NetworkAdmissionOptions } from '../src/p2p/network-admission.js';
@@ -58,6 +59,24 @@ describe('protocol admission error boundary', () => {
     expect(ensureAdmitted.mock.calls[0][0]).toBe(REMOTE_PEER_ID);
     expect(ensureAdmitted.mock.calls[0][1]).toMatchObject({ operationName: 'connect' });
     expect(ensureAdmitted.mock.calls[0][2]).toBe(options);
+  });
+
+  it('builds BOTH router hooks from one coordinator via createNetworkAdmissionRouterPolicy', async () => {
+    // The wiring test asserts zero ensureAdmitted calls for a cached-rejected
+    // peer, so it cannot catch a factory whose full-admission half was
+    // disconnected (e.g. replaced with `async () => true`). This pins each
+    // half's delegation to the SAME coordinator.
+    const ensureAdmitted = vi.fn().mockResolvedValue(true);
+    const isRejectedPeer = vi.fn().mockReturnValue(false);
+    const policy = createNetworkAdmissionRouterPolicy({ ensureAdmitted, isRejectedPeer });
+
+    await expect(policy.isPeerAccepted(REMOTE_PEER_ID, '/p', 'inbound')).resolves.toBe(true);
+    expect(ensureAdmitted).toHaveBeenCalledTimes(1);
+    expect(ensureAdmitted.mock.calls[0][0]).toBe(REMOTE_PEER_ID);
+
+    expect(policy.isPeerKnownRejected(REMOTE_PEER_ID, '/p')).toBe(false);
+    expect(isRejectedPeer).toHaveBeenCalledTimes(1);
+    expect(isRejectedPeer).toHaveBeenCalledWith(REMOTE_PEER_ID);
   });
 });
 

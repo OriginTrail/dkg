@@ -2,6 +2,7 @@ export {
   type Quad,
   type SubjectReplacement,
   type TripleStore,
+  type TripleStoreDecorator,
   type QueryResult,
   type QueryOptions,
   type StoreWorkPriority,
@@ -15,6 +16,7 @@ export {
   type UpdateOptions,
   type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
+  findTripleStoreCapability,
   createTripleStore,
   tryUpdateWithTouchedGraphs,
   tryReplaceGraphAtomically,
@@ -95,7 +97,12 @@ export {
 export {
   GraphWriteGenTracker,
   asGraphWriteGenSource,
+  asGraphWriteRevisionSource,
   type GraphWriteGenSource,
+  type GraphWriteLifecycle,
+  type GraphWriteRevision,
+  type GraphWriteRevisionSource,
+  type GraphWriteScope,
 } from './graph-write-gen.js';
 export {
   ExactGraphReadError,
@@ -126,6 +133,10 @@ export {
   type SparqlHttpStoreOptions,
   type SparqlHttpQueryOptions,
   type SparqlHttpSlowQueryEvent,
+  SparqlHttpResponseError,
+  isSparqlHttpResponseError,
+  SPARQL_HTTP_RESPONSE_ERROR_CODE,
+  type SparqlHttpResponseErrorLike,
 } from './adapters/sparql-http.js';
 export {
   ContextGraphManager,

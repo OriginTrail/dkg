@@ -11,6 +11,7 @@ import type {
   SelectResult,
   StorePressureSnapshot,
   TripleStore,
+  TripleStoreDecorator,
 } from './triple-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
@@ -32,7 +33,7 @@ export interface SharedMemoryLiteralBlobStoreOptions {
   thresholdBytes: number;
 }
 
-export class SharedMemoryLiteralBlobStore implements TripleStore {
+export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }

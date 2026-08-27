@@ -264,7 +264,27 @@ describe('RFC-64 finalized VM placement composition', () => {
         ...request.finalizedContextGraph,
         accessPolicy: 1,
       },
+    })).toThrow(/known-incomplete: no-authorized-provider/u);
+  });
+
+  it('accepts the legacy completeness option without allowing it to weaken private policy', async () => {
+    const placement = await createPlacement(KA_1, ROOT_1);
+    const publicRequest = {
+      ...requestFor([placement]),
+      requireCompleteAuthorSet: false,
+    } satisfies ComposeFinalizedVmSetRequestV1;
+
+    expect(composeFinalizedVmSetV1(publicRequest).rows).toHaveLength(1);
+    expect(composeFinalizedVmSetV1({
+      ...publicRequest,
       requireCompleteAuthorSet: true,
+    }).rows).toHaveLength(1);
+    expect(() => composeFinalizedVmSetV1({
+      ...publicRequest,
+      finalizedContextGraph: {
+        ...publicRequest.finalizedContextGraph,
+        accessPolicy: 1,
+      },
     })).toThrow(/known-incomplete: no-authorized-provider/u);
   });
 });
@@ -295,7 +315,6 @@ function requestFor(
     },
     inventory: inventory(),
     placements: [...placements],
-    requireCompleteAuthorSet: false,
   };
 }
 

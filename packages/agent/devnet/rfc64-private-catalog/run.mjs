@@ -8,12 +8,17 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
-import { roleAgentAddress } from './fixture.mjs';
+import {
+  ASSET_NUMBERS,
+  PROJECTION_EVIDENCE,
+  roleAgentAddress,
+} from './fixture.mjs';
 import {
   runRfc64PrivateGateArtifactLifecycleV1,
   sanitizeGateFailureV1,
 } from './gate-artifact.mjs';
 import { isExpectedPrivateCatalogDenialResultV1 } from './denial-evidence.mjs';
+import { hasExactPrivateCatalogMemoryContents } from './memory-evidence.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENT_ROOT = join(HERE, '..', '..');
@@ -21,6 +26,10 @@ const AGENT_PROCESS = join(HERE, 'agent-process.mjs');
 const ARTIFACT = join(HERE, 'artifacts', 'latest.json');
 const ROLES = Object.freeze(['owner', 'provider2', 'receiver', 'outsider']);
 const RUN_TIMEOUT_MS = 90_000;
+export const EXPECTED_MEMORY_CONTENTS = Object.freeze({
+  assetNumbers: ASSET_NUMBERS,
+  projection: PROJECTION_EVIDENCE,
+});
 
 let requestSequence = 0;
 let lifecycleSequence = 0;
@@ -225,7 +234,7 @@ async function main() {
     }, 'inspection');
     if (
       provider2StateAfterOwnerExit.exactExpectedHead !== true
-      || !exactMemoryCounts(provider2StateAfterOwnerExit)
+      || !hasExactMemoryContents(provider2StateAfterOwnerExit)
     ) {
       throw new Error('provider2: exact head, SWM, or VM changed after owner exit');
     }
@@ -287,7 +296,7 @@ async function main() {
         provider2Bootstrap.appliedHeadDigest === published.headObjectDigest
         && provider2State.exactExpectedHead === true
         && provider2State.inventoryRowCount === '2',
-      provider2HasExactSwmAndVm: exactMemoryCounts(provider2State),
+      provider2HasExactSwmAndVm: hasExactMemoryContents(provider2State),
       receiverUsedProvider2AfterOwnerStopped:
         receiverBootstrap.appliedHeadDigest === published.headObjectDigest
         && receiverBootstrap.providerPeerId === peerIds.provider2,
@@ -296,7 +305,7 @@ async function main() {
         && ownerListenerClosed
         && provider2ListenerDialable
         && owner.exitSequence < receiver.spawnSequence,
-      receiverHasExactSwmAndVm: exactMemoryCounts(receiverState),
+      receiverHasExactSwmAndVm: hasExactMemoryContents(receiverState),
       finalizedChainPathExecuted:
         provider2State.rpcCalls > 0 && receiverState.rpcCalls > 0,
       outsiderDeniedBeforeApplication:
@@ -309,7 +318,7 @@ async function main() {
         restartedReceiver.ready.peerId === peerIds.receiver
         && restartState.exactExpectedHead === true
         && restartState.inventoryRowCount === '2',
-      restartPreservedExactSwmAndVm: exactMemoryCounts(restartState),
+      restartPreservedExactSwmAndVm: hasExactMemoryContents(restartState),
     });
     const status = Object.values(checks).every(Boolean) ? 'PASS' : 'FAIL';
     artifact = {
@@ -385,10 +394,8 @@ async function dial(from, to) {
   }, 'dialed', 30_000);
 }
 
-function exactMemoryCounts(state) {
-  return state.graphCounts.length === 2
-    && state.graphCounts.every(({ swm, vm }) => swm === 2 && vm === 2);
-}
+export const hasExactMemoryContents = (state) =>
+  hasExactPrivateCatalogMemoryContents(state, EXPECTED_MEMORY_CONTENTS);
 
 function safeRole(ready) {
   return {

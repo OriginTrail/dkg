@@ -46,7 +46,7 @@ export class OxigraphStore implements TripleStore {
   // #1609: per-graph write generations, bumped on every local mutation (the
   // same choke points the sparql-http adapter pairs with its listGraphs-cache
   // invalidation). Feeds the chain-reconcile negative memo via
-  // `asGraphWriteGenSource` / `getWriteGen`.
+  // `asGraphWriteGenSource` / `getWriteRevision`.
   private readonly writeGen = new GraphWriteGenTracker();
 
   /**
@@ -236,7 +236,10 @@ export class OxigraphStore implements TripleStore {
     const nquads = `${quadsToNQuads(quads)}\n`;
     this.store.load(nquads, { format: 'application/n-quads' });
     this.scheduleFlush();
-    this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
+    this.writeGen.recordWrite({
+      kind: 'graphs',
+      graphs: [...new Set(quads.map((q) => q.graph || ''))],
+    });
   }
 
   async delete(quads: DKGQuad[]): Promise<void> {
@@ -245,7 +248,10 @@ export class OxigraphStore implements TripleStore {
       if (oxQuad) this.store.delete(oxQuad);
     }
     this.scheduleFlush();
-    this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
+    this.writeGen.recordWrite({
+      kind: 'graphs',
+      graphs: [...new Set(quads.map((q) => q.graph || ''))],
+    });
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>): Promise<number> {
@@ -259,8 +265,9 @@ export class OxigraphStore implements TripleStore {
       this.store.delete(q);
     }
     if (matches.length > 0) this.scheduleFlush();
-    if (pattern.graph) this.writeGen.recordGraphWrites([pattern.graph]);
-    else this.writeGen.recordUnscopedWrite();
+    this.writeGen.recordWrite(pattern.graph
+      ? { kind: 'graphs', graphs: [pattern.graph] }
+      : { kind: 'all' });
     return matches.length;
   }
 
@@ -322,10 +329,14 @@ export class OxigraphStore implements TripleStore {
     return this.writeGen.getWriteGen(graphPrefix);
   }
 
+  getWriteRevision(graphPrefix: string) {
+    return this.writeGen.getWriteRevision(graphPrefix);
+  }
+
   async dropGraph(graphUri: string): Promise<void> {
     this.store.update(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
     this.scheduleFlush();
-    this.writeGen.recordGraphWrites([graphUri]);
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
 
   async replaceGraph(graphUri: string, quads: DKGQuad[]): Promise<void> {
@@ -354,7 +365,7 @@ export class OxigraphStore implements TripleStore {
       throw error;
     }
     this.scheduleFlush();
-    this.writeGen.recordGraphWrites([graphUri]);
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
 
   async replaceGraphAndSubject(
@@ -387,7 +398,7 @@ export class OxigraphStore implements TripleStore {
       throw error;
     }
     this.scheduleFlush();
-    this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri, metaGraphUri] });
   }
 
   async replaceSubject(graphUri: string, subject: string, quads: DKGQuad[]): Promise<void> {
@@ -406,7 +417,7 @@ export class OxigraphStore implements TripleStore {
     // rolls the whole thing back.
     this.store.update(buildAtomicSubjectReplaceUpdate(graphUri, subject, quads));
     this.scheduleFlush();
-    this.writeGen.recordGraphWrites([graphUri]);
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
 
   async replaceSubjects(
@@ -455,7 +466,7 @@ export class OxigraphStore implements TripleStore {
     );
     const removed = before - this.store.size;
     if (removed > 0) this.scheduleFlush();
-    this.writeGen.recordGraphWrites([graphUri]);
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
     return removed;
   }
 
@@ -473,7 +484,7 @@ export class OxigraphStore implements TripleStore {
     this.scheduleFlush();
     // A raw UPDATE's write scope is not derivable at the call site
     // (`touchedGraphs` hints only membership changes) — unscoped bump.
-    this.writeGen.recordUnscopedWrite();
+    this.writeGen.recordWrite({ kind: 'all' });
   }
 
   async countQuads(graphUri?: string): Promise<number> {
