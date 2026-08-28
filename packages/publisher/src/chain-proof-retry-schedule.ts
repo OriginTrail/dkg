@@ -21,8 +21,11 @@
  * never admitted to: a foreign identity with an older token is refused outright, and a turn's
  * later deferral/settlement is identity-checked against the entry again at write time, making
  * a superseded echo a whole-value no-op (neither resets the successor's ladder nor is it
- * retained), and a deferral into a slot the owner already SETTLED cannot resurrect it — the
- * map is bounded at one entry per LIVE job, observable via `retainedEntryCount`.
+ * retained), and a deferral into a slot the owner already SETTLED cannot resurrect it. A stale
+ * pass's FIRST-CONTACT observation after a settlement is admitted (the schedule keeps no
+ * settlement history), but its residue is bounded: the dispatcher releases the slot at the
+ * locked re-read, and each pass's `prune` sweeps entries no newer snapshot can observe — the
+ * map stays bounded at one entry per LIVE job, observable via `retainedEntryCount`.
  *
  * BACKOFF — base 30s doubling per attempt, +0..25% jitter (anti-herd), capped at 10 minutes;
  * the `awaiting-confirmations` cadence caps the BASE at ceiling/(1+jitter) so two minutes is a
@@ -49,6 +52,14 @@ export interface ChainProofScheduleTurn {
 export interface ChainProofSchedulePass {
   /** Observe one inventoried (jobId, incarnation): a turn when due, `null` otherwise. */
   observe(jobId: string, identity: string): ChainProofScheduleTurn | null;
+  /**
+   * Sweep entries installed by OLDER passes for jobs this pass's snapshot cannot observe: a
+   * job absent from the newest snapshot's held population left the held state, so its entry is
+   * dead (a re-failed job is a NEW incarnation and reinstalls fresh). The token guard spares
+   * entries installed by this pass or a newer overlapping one, whose snapshots this pass's
+   * cannot outrank.
+   */
+  prune(observableJobIds: ReadonlySet<string>): void;
 }
 
 type ScheduleEntry =
@@ -84,6 +95,11 @@ export class ChainProofRetrySchedule {
           defer: (cadence: ChainProofRetryCadence) => this.deferTurn(jobId, identity, cadence, token),
           settled: () => this.settleTurn(jobId, identity),
         };
+      },
+      prune: (observableJobIds: ReadonlySet<string>) => {
+        for (const [jobId, entry] of this.entries) {
+          if (entry.observedToken < token && !observableJobIds.has(jobId)) this.entries.delete(jobId);
+        }
       },
     };
   }

@@ -472,6 +472,9 @@ export class TripleStoreAsyncLiftPublisher
     now: () => this.now(),
     rand: () => this.rand(),
   });
+
+  /** Serializes {@link takeReconciliationSnapshot} acquisitions; see its r6 ordering note. */
+  private reconciliationAcquisitionChain: Promise<void> = Promise.resolve();
   /**
    * r26 (🔴 3821028709) — jobs whose MUTATING recovery repair is currently running. A deadline
    * may stop the dispatcher waiting, but it must never let a second pass enter the same repair
@@ -2125,9 +2128,19 @@ export class TripleStoreAsyncLiftPublisher
     inventory: LiftJob[];
     chainProofPass: ChainProofSchedulePass;
   }> {
-    const inventory = await this.list();
-    const chainProofPass = this.chainProofRetrySchedule.beginPass(this.now());
-    return { inventory, chainProofPass };
+    // r6 (🔴 3883453447) — acquisition is SERIALIZED, not merely adjacent: two overlapping
+    // `list()` reads can resolve out of store-side capture order (the store runs on a worker
+    // pool), so adjacency alone orders tokens by query COMPLETION. Chaining acquisitions makes
+    // capture order equal completion order equal token order — a real linearization boundary,
+    // scoped to the seam so passes themselves still overlap everywhere else.
+    const acquisition = this.reconciliationAcquisitionChain.then(async () => {
+      const inventory = await this.list();
+      const chainProofPass = this.chainProofRetrySchedule.beginPass(this.now());
+      return { inventory, chainProofPass };
+    });
+    // The chain must survive a failed acquisition — carry only settlement, never the result.
+    this.reconciliationAcquisitionChain = acquisition.then(() => undefined, () => undefined);
+    return acquisition;
   }
 
   /**
@@ -2392,6 +2405,11 @@ export class TripleStoreAsyncLiftPublisher
       .map((job) => ({ job, lookup: this.chainProofLookupFor(job) }))
       .filter((candidate): candidate is { job: PersistedFailedJob; lookup: AsyncLiftChainProofLookup } => candidate.lookup !== null)
       .map(({ job, lookup }) => ({ job, lookup, identity: this.heldChainProofIncarnationKey(job, lookup) }));
+    // r6 (🔴 3883453613) — the sweep: an entry no newer snapshot can observe belongs to a job
+    // that left the held state (or lost its evidence), so it can never be settled or deferred
+    // again — without this it would be retained forever (e.g. installed by a stale pass after
+    // the owner settled, then never dispatched because the batch or deadline truncated the walk).
+    chainProofPass.prune(new Set(withEvidence.map(({ job }) => job.jobId)));
     const dueJobs = withEvidence
       .map((candidate) => ({ ...candidate, turn: chainProofPass.observe(candidate.job.jobId, candidate.identity) }))
       .filter((candidate): candidate is typeof candidate & { turn: ChainProofScheduleTurn } => candidate.turn !== null);
@@ -2489,15 +2507,30 @@ export class TripleStoreAsyncLiftPublisher
     // evidence. Anything else drops the verdict; the next tick asks about whatever now exists.
     return this.claimCoordinator.runClaimJobTransaction(job.jobId, async (transaction) => {
       // A verdict rejected at the identity boundary is discarded WHOLE — no disposition, no
-      // scheduling, not even the attempt count: its cadence metadata belongs to the same stale
-      // answer. r5 (3882010299) — the schedule mutation happens HERE, inside the same claim
+      // deferral cadence, not even the attempt count: its cadence metadata belongs to the same
+      // stale answer. r5 (3882010299) — the schedule mutation happens HERE, inside the same claim
       // transaction as the re-read, so verification and mutation are one ownership boundary: a
       // replace-and-re-fail serializes on this boundary, and a verdict that was current at the
       // re-read stays current through its own scheduling write.
-      if (transaction.kind === 'missing') return 0;
+      // r6 (🔴 3883453613) — in all three stale branches the locked re-read is the authority
+      // that THIS incarnation no longer exists as held work (record gone, moved on, or
+      // re-failed as a successor), so the turn releases its slot instead of leaving a retained
+      // entry for a job no future pass will observe. `settled()` is identity-guarded, so when a
+      // successor already owns the entry the release is a no-op — the verdict itself is still
+      // discarded WHOLE: no disposition, no deferral cadence, no attempt count.
+      if (transaction.kind === 'missing') {
+        turn.settled();
+        return 0;
+      }
       const { current, scope } = transaction;
-      if (!isFailedJob(current)) return 0;
-      if (!this.isSameHeldFailedJob(job, current, lookup)) return 0;
+      if (!isFailedJob(current)) {
+        turn.settled();
+        return 0;
+      }
+      if (!this.isSameHeldFailedJob(job, current, lookup)) {
+        turn.settled();
+        return 0;
+      }
       const settled = await this.applyChainProofDisposition(current, scope, lookup, resolution, deadline);
       if (settled > 0) {
         turn.settled();

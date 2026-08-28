@@ -440,4 +440,131 @@ describe('GH#2270 chain-proof cadence', () => {
       expect((await publisher.getStatus(jobId))?.status).toBe('failed');
     });
   });
+
+  describe('pass ordering and residue through the real reconciliation path (r6)', () => {
+    it("a pass stalled BEFORE dispatch cannot outrank a later pass's newer snapshot", async () => {
+      // r6 (🔴 3883453447 follow-up) — the publisher-level inversion regression: pass A
+      // snapshots the predecessor incarnation, stalls in an earlier reconciliation lane, the
+      // record is re-failed, pass B snapshots and defers the successor for its 30s base — and
+      // only THEN pass A reaches the dispatcher. Its token was issued at its SNAPSHOT, so its
+      // observation is refused: no resolver call, and the successor's backoff runs in full. A
+      // regression that issues the token at the dispatcher hands stale A the newer token,
+      // erases B's deferral, and re-asks before 30s — both assertions below go red.
+      let releaseStalled!: () => void;
+      const stalled = new Promise<void>((resolve) => { releaseStalled = resolve; });
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        chainProofResolver: async () => {
+          asks += 1;
+          return { status: 'pending-mempool' };
+        },
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      // Stall pass A between its snapshot and its chain-proof dispatch — the window the
+      // ordering claim is about — by parking the first recovery-lane call on its way through.
+      const impl = publisher as unknown as {
+        recoverInterruptedPreBroadcastJobs(inventory: unknown): Promise<number>;
+      };
+      const originalLane = impl.recoverInterruptedPreBroadcastJobs.bind(publisher);
+      let firstLaneCall = true;
+      impl.recoverInterruptedPreBroadcastJobs = async (inventory: unknown) => {
+        if (firstLaneCall) {
+          firstLaneCall = false;
+          await stalled;
+        }
+        return originalLane(inventory);
+      };
+
+      const passA = publisher.recover(); // snapshot taken (predecessor incarnation), then stalled
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const current = await publisher.getStatus(jobId);
+      const successor = {
+        ...current!,
+        timestamps: { ...current!.timestamps, failedAt: (current!.timestamps as { failedAt: number }).failedAt + 1 },
+      };
+      const { jobRef, jobQuads } = serializeJobRecord(successor as never, DEFAULT_CONTROL_GRAPH_URI);
+      await (h.store as unknown as {
+        replaceSubject(graph: string, subject: string, quads: unknown): Promise<void>;
+      }).replaceSubject(DEFAULT_CONTROL_GRAPH_URI, jobRef, jobQuads);
+
+      await publisher.recover(); // pass B: newer snapshot, successor asked and deferred 30s
+      expect(asks).toBe(1);
+
+      releaseStalled();
+      await passA; // stale A reaches the dispatcher LAST — refused by its older token
+      expect(asks).toBe(1);
+
+      h.advance(29_000);
+      await publisher.recover();
+      expect(asks).toBe(1); // the successor's earned backoff ran in full
+      h.advance(2_000);
+      await publisher.recover();
+      expect(asks).toBe(2);
+    });
+
+    it('inventory acquisition is a linearization boundary — concurrent passes cannot interleave it', async () => {
+      // r6 (🔴 3883453447) — overlapping list() reads may RESOLVE out of store-side capture
+      // order, so the seam serializes acquisitions: the second pass's read must not start
+      // until the first pass's snapshot (and its token) is complete, even when the first
+      // read is slow. Interleaved enters here mean tokens can order by completion again.
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        chainProofResolver: async () => ({ status: 'pending-mempool' }),
+      });
+      const events: string[] = [];
+      const originalList = publisher.list.bind(publisher);
+      let firstListCall = true;
+      (publisher as { list: typeof publisher.list }).list = async (filter) => {
+        events.push('enter');
+        if (firstListCall) {
+          firstListCall = false;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        const result = await originalList(filter);
+        events.push('exit');
+        return result;
+      };
+      await Promise.all([publisher.recover(), publisher.recover()]);
+      expect(events).toEqual(['enter', 'exit', 'enter', 'exit']);
+    });
+
+    it('a held job cleared while its verdict is in flight releases its schedule slot', async () => {
+      // r6 (🔴 3883453613) — the record is DELETED (operator clear) while the resolver is in
+      // flight; the locked re-read finds nothing. The turn must release its slot: without the
+      // stale-branch settlement the ready() entry survives a job no pass will ever observe
+      // again, and `retainedEntryCount` counts it forever.
+      let release!: () => void;
+      const parked = new Promise<void>((resolve) => { release = resolve; });
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        chainProofResolver: async () => {
+          asks += 1;
+          await parked;
+          return { status: 'pending-mempool' };
+        },
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      const firstPass = publisher.recover();
+      while (asks === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+
+      // The real operator exit, serialized on the same claim lock the disposition uses.
+      await publisher.clearTerminalJob(jobId, { pendingTransactionOverride: { requestedBy: 'operator' } });
+
+      release();
+      await firstPass;
+      const schedule = (publisher as unknown as {
+        chainProofRetrySchedule: { retainedEntryCount(): number };
+      }).chainProofRetrySchedule;
+      expect(schedule.retainedEntryCount()).toBe(0);
+      expect(await publisher.getStatus(jobId)).toBeNull();
+    });
+  });
 });

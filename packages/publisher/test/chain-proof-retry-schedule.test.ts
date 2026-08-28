@@ -193,6 +193,45 @@ describe('ChainProofRetrySchedule', () => {
     expect(h.schedule.retainedEntryCount()).toBe(0);
   });
 
+  it("a stale pass's first contact AFTER a settlement is admitted, but the next pass SWEEPS the residue", () => {
+    // PR #2380 r6 (🔴 3883453613) — the schedule keeps no settlement history, so an older pass
+    // observing a settled job's gone incarnation for the first time installs ready() again.
+    // Boundedness comes from the sweep: the newest snapshot no longer holds the job, so its
+    // prune collects the residue entry.
+    const h = harness();
+    const oldPass = h.schedule.beginPass(h.now());
+    const freshPass = h.schedule.beginPass(h.now());
+    const freshTurn = freshPass.observe('job', B);
+    expect(freshTurn).not.toBeNull();
+    freshTurn!.settled(); // the job is resolved; the map is empty
+    const lateTurn = oldPass.observe('job', A); // stale first contact: admitted (no history)
+    expect(lateTurn).not.toBeNull();
+    expect(h.schedule.retainedEntryCount()).toBe(1);
+    h.schedule.beginPass(h.now()).prune(new Set()); // newest snapshot holds no jobs
+    expect(h.schedule.retainedEntryCount()).toBe(0);
+  });
+
+  it('the sweep spares live jobs and entries from passes at least as new as the sweeper', () => {
+    // The two prune guards, each load-bearing: a job in the sweeper's snapshot keeps its earned
+    // ladder, and an entry installed by a NEWER overlapping pass (whose snapshot the sweeper's
+    // cannot outrank) is kept even though the sweeper's older snapshot does not know the job.
+    const h = harness();
+    h.turn('live', A); // deferred under an older pass, still held: must survive with its ladder
+    const sweeper = h.schedule.beginPass(h.now());
+    const newerPass = h.schedule.beginPass(h.now());
+    const newerTurn = newerPass.observe('fresh', B);
+    expect(newerTurn).not.toBeNull();
+    sweeper.prune(new Set(['live']));
+    expect(h.schedule.retainedEntryCount()).toBe(2);
+    newerTurn!.defer('default'); // the kept entry is still owned: the deferral lands
+    h.advance(29_999);
+    expect(h.due('live', A)).toBe(false); // the spared ladder is intact, not reinstalled
+    expect(h.due('fresh', B)).toBe(false);
+    h.advance(1);
+    expect(h.due('live', A)).toBe(true);
+    expect(h.due('fresh', B)).toBe(true);
+  });
+
   it('a repeat observation of the current owner REFRESHES recency — a stale pass cannot slip between', () => {
     const h = harness();
     h.turn('job', B); // B deferred under token t1
