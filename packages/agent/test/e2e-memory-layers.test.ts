@@ -2626,22 +2626,28 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
 describe('Query views', () => {
   it('includeSharedMemory merges SWM data into query results', async () => {
     const agent = await createAgent('ViewBot');
-    await agent.createContextGraph({ id: CG_ID, name: 'View E2E' });
+    // This file intentionally reuses CG_ID across many independent agents.
+    // Registration now treats an explicit local `unregistered` marker as a
+    // fresh graph instead of reverse-binding a historical name hash, so those
+    // independent tests legitimately leave multiple chain slots for CG_ID.
+    // Keep this query-view test isolated from that registration fixture noise.
+    const queryViewCgId = `${CG_ID}-query-views`;
+    await agent.createContextGraph({ id: queryViewCgId, name: 'View E2E' });
 
     // Put data in canonical graph via publish
-    await agent.publish(CG_ID, [
+    await agent.publish(queryViewCgId, [
       { subject: `${ENTITY_BASE}:canonical`, predicate: 'http://schema.org/name', object: '"Canonical"', graph: '' },
     ]);
 
     // Put data in SWM
-    await agent.share(CG_ID, [
+    await agent.share(queryViewCgId, [
       { subject: `${ENTITY_BASE}:shared`, predicate: 'http://schema.org/name', object: '"Shared"', graph: '' },
     ], { localOnly: true });
 
     // Default query (data graph only) — should see canonical
     const defaultResult = await agent.query(
       `SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }`,
-      CG_ID,
+      queryViewCgId,
     );
     const defaultSubjects = defaultResult.bindings.map((b: any) => b['s']);
     expect(defaultSubjects.some((s: string) => s.includes('canonical'))).toBe(true);
@@ -2649,7 +2655,7 @@ describe('Query views', () => {
     // includeSharedMemory — should see both
     const mergedResult = await agent.query(
       `SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }`,
-      { contextGraphId: CG_ID, includeSharedMemory: true },
+      { contextGraphId: queryViewCgId, includeSharedMemory: true },
     );
     const mergedSubjects = mergedResult.bindings.map((b: any) => b['s']);
     expect(mergedSubjects.some((s: string) => s.includes('canonical'))).toBe(true);

@@ -418,15 +418,6 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   ): Promise<string | null> {
     const registrationStatus = knownRegistrationStatus
       ?? await this.getContextGraphRegistrationStatus(contextGraphId);
-    const subscription = this.subscribedContextGraphs.get(contextGraphId);
-    const currentBinding = this.contextGraphBindingState.currentBindingFor(
-      contextGraphId,
-      subscription,
-    );
-    if (currentBinding?.bindingKind === 'authoritative') {
-      return currentBinding.onChainId;
-    }
-
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const receipt = await this.store.query(
@@ -468,6 +459,20 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         'without a durable receipt binding. Refusing to submit another transaction; recover or ' +
         'clear the original attempt after verifying its chain outcome.',
       );
+    }
+
+    // An exact receipt persisted by this registration attempt and the local
+    // registration state both outrank a subscription learned from chain
+    // discovery. Reused deployment labels can leave that subscription pointing
+    // at an older numeric slot. It remains authoritative for established or
+    // legacy graphs that do not carry an explicit local attempt state.
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    const currentBinding = this.contextGraphBindingState.currentBindingFor(
+      contextGraphId,
+      subscription,
+    );
+    if (currentBinding?.bindingKind === 'authoritative') {
+      return currentBinding.onChainId;
     }
     return this.getContextGraphOnChainId(contextGraphId);
   }

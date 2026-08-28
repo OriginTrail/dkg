@@ -21,6 +21,9 @@ type Stub = Record<string, any>;
 function makeStub(overrides: Stub = {}): Stub {
   return {
     getContextGraphOnChainId: async () => null,
+    resolveContextGraphRegistrationOnChainId: async function (contextGraphId: string) {
+      return this.getContextGraphOnChainId(contextGraphId);
+    },
     getStoredContextGraphRegistrationOptions: async () => ({}),
     registerContextGraph: async () => undefined,
     ...overrides,
