@@ -15,6 +15,11 @@ import type {
   SharedMemorySyncResult,
   SwmSnapshotCoverage,
 } from '../src/dkg-agent-types.js';
+import type {
+  SelectedSharedMemoryRequestedScope,
+  SelectedSharedMemorySyncResult,
+} from '../src/sync/shared-memory-freshness.js';
+import type { Rfc64SwmRecoveryTargetV1 } from '../src/rfc64/swm-recovery-plan-v1.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   type SelectedSwmMetaContinuation,
@@ -259,8 +264,17 @@ export interface SelectedProviderSelectionAgent {
     syncOnConnect: boolean;
     syncSharedMemoryOnConnect: boolean;
     syncContextGraphs: string[];
-    rfc64PublicCatalogBootstrap: {
-      acceptedPublicPolicies: Array<{ completeSwmProviders: string[] }>;
+    rfc64PublicCatalogBootstrap?: {
+      acceptedPublicPolicies: Array<{
+        policyEnvelope: { payload: { contextGraphId: string; accessPolicy?: 0 | 1 } };
+        completeSwmProviders: string[];
+      }>;
+    };
+    rfc64CatalogBootstrap?: {
+      acceptedPolicies: Array<{
+        policyEnvelope: { payload: { contextGraphId: string; accessPolicy?: 0 | 1 } };
+        completeSwmProviders: string[];
+      }>;
     };
   };
   networkAdmissionCoordinator: { isAcceptedPeer: (peerId: string) => boolean };
@@ -273,10 +287,11 @@ export interface SelectedProviderSelectionAgent {
   syncReconcilerBackoff: Map<string, unknown>;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   getPeerProtocols: () => Promise<string[]>;
-  planSharedMemorySyncContextGraphs: () => Promise<{
-    publicContextGraphIds: string[];
-    privateRecoverFromCurator: string[];
-    eligibleContextGraphIds: string[];
+  planSharedMemorySyncContextGraphs: (
+    peerId?: string,
+    contextGraphIds?: readonly string[],
+  ) => Promise<{
+    targets: readonly Rfc64SwmRecoveryTargetV1[];
   }>;
   resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId: string) => string[];
   syncFromPeerDetailed: () => Promise<number>;
@@ -289,12 +304,11 @@ export interface SelectedProviderSelectionAgent {
   syncSelectedSharedMemoryFromPeerDetailed: (
     peerId: string,
     contextGraphIds: readonly string[],
-    options: { selectedSwmPriority: true },
-  ) => Promise<{
-    kind: 'selected-shared-memory';
-    shared: SharedMemorySyncResult;
-    selectedScopeComplete: boolean;
-  }>;
+    options: {
+      selectedSwmPriority: true;
+      requestedScope: SelectedSharedMemoryRequestedScope;
+    },
+  ) => Promise<SelectedSharedMemorySyncResult>;
   log: { info: () => void; warn: () => void; debug: () => void };
   getSelectedSwmMetaTransfers: () => SelectedSwmMetaTransferCoordinator;
   closeSelectedSwmMetaTransfers: () => Promise<void>;
@@ -456,34 +470,77 @@ export interface SelectedSwmLifecycleHarness {
   readonly close: () => Promise<void>;
 }
 
-export type SelectedSyncSharedMemoryOptions = Parameters<
+type ProductionSelectedSyncSharedMemoryOptions = Parameters<
   typeof LifecycleSyncMethods.prototype.syncSelectedSharedMemoryFromPeerDetailed
 >[2];
 
-export type SyncSharedMemoryOptions = Parameters<
+type TestSelectedSharedMemoryRequestedScope = Pick<
+  SelectedSharedMemoryRequestedScope,
+  'kind'
+>;
+
+export type SelectedSyncSharedMemoryOptions = Omit<
+ProductionSelectedSyncSharedMemoryOptions,
+'requestedScope'
+> & {
+  requestedScope?: TestSelectedSharedMemoryRequestedScope;
+  recoveryTargets?: readonly Rfc64SwmRecoveryTargetV1[];
+};
+
+type ProductionSyncSharedMemoryOptions = Parameters<
   typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed
 >[2];
+
+export type SyncSharedMemoryOptions = NonNullable<ProductionSyncSharedMemoryOptions>;
+
+function testRecoveryTargets(
+  contextGraphIds: readonly string[],
+  targets: readonly Rfc64SwmRecoveryTargetV1[] | undefined,
+): readonly Rfc64SwmRecoveryTargetV1[] {
+  if (targets === undefined) {
+    return contextGraphIds.map((contextGraphId) => ({
+      contextGraphId,
+      lane: 'selected-public',
+    }));
+  }
+  return targets;
+}
 
 export const callSelectedSharedMemoryFromPeerDetailed = (
   agent: SelectedSwmLifecycleAgentFixture,
   contextGraphIds: string[],
   options: SelectedSyncSharedMemoryOptions,
-): Promise<{
-  kind: 'selected-shared-memory';
-  shared: SharedMemorySyncResult;
-  selectedScopeComplete: boolean;
-}> => {
+): Promise<SelectedSharedMemorySyncResult> => {
   const method = LifecycleSyncMethods.prototype.syncSelectedSharedMemoryFromPeerDetailed as unknown as (
     this: SelectedSwmLifecycleAgentFixture,
     remotePeerId: string,
     ids: string[],
-    syncOptions: SelectedSyncSharedMemoryOptions,
-  ) => Promise<{
-    kind: 'selected-shared-memory';
-    shared: SharedMemorySyncResult;
-    selectedScopeComplete: boolean;
-  }>;
-  return method.call(agent, PEER, contextGraphIds, options);
+    syncOptions: ProductionSelectedSyncSharedMemoryOptions,
+  ) => Promise<SelectedSharedMemorySyncResult>;
+  const { requestedScope, recoveryTargets, ...productionOptions } = options;
+  const targets = testRecoveryTargets(contextGraphIds, recoveryTargets);
+  const exactRequestedScope: SelectedSharedMemoryRequestedScope = requestedScope?.kind
+    === 'rfc64-recovery-plan'
+    ? {
+      kind: 'rfc64-recovery-plan',
+      plan: {
+        kind: 'rfc64-authorized-swm-recovery-v1',
+        providerPeerId: PEER,
+        targets,
+      },
+    }
+    : {
+      kind: 'selected-public',
+      targets: targets.filter(
+        (target): target is Rfc64SwmRecoveryTargetV1 & { lane: 'selected-public' } => (
+          target.lane === 'selected-public'
+        ),
+      ),
+    };
+  return method.call(agent, PEER, contextGraphIds, {
+    ...productionOptions,
+    requestedScope: exactRequestedScope,
+  });
 };
 
 export const callSelectedSharedMemorySummary = async (
@@ -503,7 +560,7 @@ export const callSyncSharedMemoryFromPeerDetailed = async (
     this: SelectedSwmLifecycleAgentFixture,
     remotePeerId: string,
     ids: string[],
-    syncOptions: SyncSharedMemoryOptions,
+    syncOptions: NonNullable<ProductionSyncSharedMemoryOptions>,
   ) => Promise<SharedMemorySyncResult>;
   return method.call(agent, PEER, contextGraphIds, options);
 };

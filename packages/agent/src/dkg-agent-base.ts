@@ -27,6 +27,11 @@ import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
+import type {
+  Rfc64AuthorizedSwmRecoveryPlanV1,
+  Rfc64SwmRecoveryCoordinatorV1,
+} from
+  './rfc64/swm-recovery-coordinator-v1.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -1577,6 +1582,22 @@ export class DKGAgentBase {
    * direct + relayed connections within a short window.
    */
   protected readonly catchupOnConnectAt = new Map<string, number>();
+  /**
+   * The canonical on-connect scheduler's pending state. A generic connection
+   * event can be upgraded in place when RFC-64 bootstrap supplies an exact
+   * mixed plan before its timer fires; no second queue or cooldown ledger is
+   * involved.
+   */
+  protected readonly queuedSyncOnConnectPeers = new Set<string>();
+  protected readonly pendingRfc64SwmRecoveries = new Map<
+    string,
+    Readonly<{
+      plan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
+      handleSyncError: (remotePeer: string, error: unknown) => void;
+    }>
+  >();
+  /** Typed RFC-64 admission and current-configuration validation boundary. */
+  protected rfc64SwmRecoveryCoordinatorV1!: Rfc64SwmRecoveryCoordinatorV1;
   /**
    * Per-peer timestamp of the last time all live connections to that peer
    * were gone. Used to avoid suppressing reconnect catch-up with a

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
@@ -169,7 +169,7 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).refreshMetaSyncedFlags = async () => undefined;
     (agent as any).discoverContextGraphsFromStore = async () => 0;
     (agent as any).planSharedMemorySyncContextGraphs = async () => ({
-      eligibleContextGraphIds: [],
+      targets: [],
     });
 
     expect(await (agent as any).trySyncFromPeer(PEER_A)).toBe('synced');
@@ -214,6 +214,84 @@ describe('sync-on-connect churn gates', () => {
 
     await flushTimers();
     expect(calls).toEqual([PEER_A]);
+  });
+
+  it('upgrades one queued connection owner with an exact mixed RFC-64 plan', async () => {
+    const agent = await createUnstartedAgent('Rfc64MixedPlanSingleQueueOwner');
+    allowAllNetworkAdmission(agent);
+    (agent as any).started = true;
+    (agent as any).getSyncReconcilerProbe = async () => ({
+      connected: true,
+      hasSyncProtocol: true,
+    });
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    const authorized = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [
+        { contextGraphId: 'private-cg', lane: 'ordinary-private' as const },
+        { contextGraphId: 'public-cg', lane: 'selected-public' as const },
+      ],
+    };
+    (agent as any).rfc64SwmRecoveryCoordinatorV1 = {
+      authorize: vi.fn(() => authorized),
+      revalidate: vi.fn(() => authorized),
+    };
+    const selectedSync = vi.fn(async (
+      _peerId: string,
+      _contextGraphIds: readonly string[],
+      options: { requestedScope: { kind: 'rfc64-recovery-plan'; plan: typeof authorized } },
+    ) => ({
+      kind: 'selected-shared-memory' as const,
+      requestedScope: options.requestedScope,
+      shared: emptyDetailedSync({ completedPhases: 2 }),
+      scopeComplete: true,
+      targetDiagnostics: {
+        selectedPublic: { completed: 1, total: 1 },
+        ordinaryPrivate: { completed: 1, total: 1 },
+      },
+    }));
+    (agent as any).syncSelectedSharedMemoryFromPeerDetailed = selectedSync;
+    const genericRun = vi.spyOn(agent as any, 'runSyncFromPeerOnConnect');
+    const selectedRun = vi.spyOn(agent as any, 'runSelectedSwmRetryFromPeerOnConnect');
+    const errors: unknown[] = [];
+    const handleSyncError = (_peerId: string, error: unknown) => { errors.push(error); };
+
+    // The connection event schedules the canonical owner first. Bootstrap then
+    // upgrades that pending run instead of creating a second timer/ledger.
+    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
+    expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+      {
+        providerPeerId: PEER_A,
+        targets: authorized.targets,
+      },
+      handleSyncError,
+      0,
+    )).toBe(true);
+    expect((agent as any).catchupOnConnectAt.size).toBe(1);
+    expect((agent as any).queuedSyncOnConnectPeers.size).toBe(1);
+    expect((agent as any).pendingRfc64SwmRecoveries.get(PEER_A).plan).toBe(authorized);
+
+    await vi.waitFor(() => expect(selectedSync).toHaveBeenCalledOnce());
+
+    expect(genericRun).not.toHaveBeenCalled();
+    expect(selectedRun).toHaveBeenCalledOnce();
+    expect(selectedSync).toHaveBeenCalledWith(
+      PEER_A,
+      ['private-cg', 'public-cg'],
+      expect.objectContaining({
+        selectedSwmPriority: true,
+        requestedScope: {
+          kind: 'rfc64-recovery-plan',
+          plan: authorized,
+        },
+      }),
+    );
+    expect(selectedSync.mock.calls[0]![2].requestedScope.plan).toBe(authorized);
+    expect((agent as any).queuedSyncOnConnectPeers.size).toBe(0);
+    expect((agent as any).pendingRfc64SwmRecoveries.size).toBe(0);
+    expect((agent as any).syncReconcilerBackoff.has(PEER_A)).toBe(false);
+    expect(errors).toEqual([]);
   });
 
   it('retries incomplete selected SWM past generic freshness without creating a loop', async () => {
@@ -303,17 +381,24 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-cg'];
     (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
     (agent as any).planSharedMemorySyncContextGraphs = async () => ({
-      publicContextGraphIds: ['selected-cg'],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: ['selected-cg'],
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
     });
-    const selectedSync = recorder(async () => ({
+    const selectedSync = recorder(async (
+      _peerId: string,
+      _contextGraphIds: readonly string[],
+      options: { requestedScope: any },
+    ) => ({
       kind: 'selected-shared-memory' as const,
+      requestedScope: options.requestedScope,
       shared: emptyDetailedSync({
         insertedTriples: 4,
         insertedDataTriples: 4,
       }),
-      selectedScopeComplete: true,
+      scopeComplete: true,
+      targetDiagnostics: {
+        selectedPublic: { completed: 1, total: 1 },
+        ordinaryPrivate: { completed: 0, total: 0 },
+      },
     }));
     const durableSync = recorder(async () => emptyDetailedSync({ completedPhases: 1 }));
     const ordinarySharedSync = recorder(async () => emptyDetailedSync({ completedPhases: 1 }));
@@ -520,8 +605,16 @@ describe('sync-on-connect churn gates', () => {
         getContextGraphIds: () => ['selected-cg'],
         syncFromPeer: async () => ({
           kind: 'selected-shared-memory',
+          requestedScope: {
+            kind: 'selected-public',
+            targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
+          },
           shared: emptyDetailedSync(),
-          selectedScopeComplete: false,
+          scopeComplete: false,
+          targetDiagnostics: {
+            selectedPublic: { completed: 0, total: 1 },
+            ordinaryPrivate: { completed: 0, total: 0 },
+          },
         }),
       },
       onPeerSynced: (_peerId, outcome) => {
@@ -555,20 +648,27 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
     (agent as any).resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [PEER_A];
     (agent as any).planSharedMemorySyncContextGraphs = async () => ({
-      publicContextGraphIds: ['selected-cg'],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: ['selected-cg'],
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
     });
     (agent as any).syncFromPeerDetailed = async () => emptyDetailedSync({ complete: true });
     (agent as any).refreshMetaSyncedFlags = async () => undefined;
     (agent as any).discoverContextGraphsFromStore = async () => 0;
-    (agent as any).syncSelectedSharedMemoryFromPeerDetailed = async () => ({
+    (agent as any).syncSelectedSharedMemoryFromPeerDetailed = async (
+      _peerId: string,
+      _contextGraphIds: readonly string[],
+      options: { requestedScope: any },
+    ) => ({
       kind: 'selected-shared-memory',
+      requestedScope: options.requestedScope,
       shared: emptyDetailedSync({
         insertedTriples: 4,
         insertedDataTriples: 4,
       }),
-      selectedScopeComplete: false,
+      scopeComplete: false,
+      targetDiagnostics: {
+        selectedPublic: { completed: 0, total: 1 },
+        ordinaryPrivate: { completed: 0, total: 0 },
+      },
     });
     (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
     (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-cg'];

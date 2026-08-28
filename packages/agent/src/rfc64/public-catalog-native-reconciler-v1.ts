@@ -138,7 +138,9 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
       // Preserve the already-qualified Gate-1 behavior. Refuse to bless a
       // multi-row snapshot without the exact staged head that commits its count.
       if (announcement.catalogVersion === '0') return '0' as CountV1;
-      return durableInventoryRowCount === '1' ? '1' as CountV1 : null;
+      return durableInventoryRowCount === '0' || durableInventoryRowCount === '1'
+        ? durableInventoryRowCount
+        : null;
     }
     const staged = await this.options.readStagedCatalogHead(announcement);
     if (staged === null) return null;
@@ -157,7 +159,6 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
         totalRows < 0n
         || totalRows > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
         || (announcement.catalogVersion === '0' && totalRows !== 0n)
-        || (announcement.catalogVersion !== '0' && totalRows < 1n)
       ) {
         throw new Error('staged head totalRows is outside the bounded lane');
       }

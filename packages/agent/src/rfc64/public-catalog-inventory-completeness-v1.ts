@@ -8,8 +8,8 @@
  * module is the join between those two facts: it rejects missing, duplicate,
  * extra, or mismatched rows before minting deterministic inventory evidence.
  *
- * Gate 2 deliberately stays inside one canonical v1 bucket (at most 1,024
- * rows). Directory-tree expansion is a later, orthogonal capacity slice.
+ * Gate 2 deliberately stays inside one canonical v1 bucket descriptor (zero
+ * to 1,024 rows). Directory-tree expansion is a later, orthogonal capacity slice.
  */
 
 import {
@@ -181,12 +181,12 @@ export function verifyRfc64PublicCatalogInventoryCompletenessV1(
     );
   }
   if (
-    expectedCount < 1n
+    expectedCount < 0n
     || expectedCount > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
   ) {
     fail(
       'catalog-inventory-completeness-count',
-      `bounded catalog completion supports 1..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} rows`,
+      `bounded catalog completion supports 0..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} rows`,
     );
   }
 

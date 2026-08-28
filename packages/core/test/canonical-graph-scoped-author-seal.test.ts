@@ -8,6 +8,7 @@ import {
   assertCanonicalGraphScopedAuthorSealV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
+  canonicalizeAuthorSealStoreRoundTripRowV1,
   classifyCanonicalGraphScopedAuthorSealRowsV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
@@ -120,6 +121,40 @@ describe('CanonicalGraphScopedAuthorSealV1 bytes and projection', () => {
       toStoreRows(rows),
       COORDINATE,
     ).payload).toEqual(privatePayload);
+  });
+
+  it('canonicalizes only backend-equivalent UAL and dateTime post-read forms', () => {
+    const rows = projectCanonicalGraphScopedAuthorSealRowsV1(PAYLOAD, COORDINATE);
+    const ual = rows.find((row) => row.predicate === ASSERTION_SEAL_PREDICATES.KA_UAL)!;
+    const finalizedAt = rows.find(
+      (row) => row.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_FINALIZED_AT,
+    )!;
+    expect(canonicalizeAuthorSealStoreRoundTripRowV1({
+      ...ual,
+      object: PAYLOAD.kaUal,
+    })).toEqual(ual);
+    expect(canonicalizeAuthorSealStoreRoundTripRowV1({
+      ...finalizedAt,
+      object: `"2026-07-19T13:34:56.789+01:00"^^<${XSD}dateTime>`,
+    })).toEqual(finalizedAt);
+    expect(canonicalizeAuthorSealStoreRoundTripRowV1({
+      ...finalizedAt,
+      object: `"2026-07-19T13:34:56.7890+01:00"^^<${XSD}dateTime>`,
+    })).toEqual(finalizedAt);
+    for (const nonEquivalent of [
+      `"2026-07-19T12:34:56.7899Z"^^<${XSD}dateTime>`,
+      `"2026-07-19T12:34:56.789"^^<${XSD}dateTime>`,
+      `"2026-02-30T12:34:56.789Z"^^<${XSD}dateTime>`,
+    ]) {
+      expect(canonicalizeAuthorSealStoreRoundTripRowV1({
+        ...finalizedAt,
+        object: nonEquivalent,
+      }).object).toBe(nonEquivalent);
+    }
+    expect(canonicalizeAuthorSealStoreRoundTripRowV1({
+      ...finalizedAt,
+      object: `"not-an-instant"^^<${XSD}dateTime>`,
+    }).object).toBe(`"not-an-instant"^^<${XSD}dateTime>`);
   });
 
   it('derives the prefix-free tagged subgraph subject and metadata graph', () => {

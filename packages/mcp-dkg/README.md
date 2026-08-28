@@ -138,7 +138,7 @@ autoShare: true
 
 `.dkg/` is gitignored repo-wide so this file stays local to each operator. The `tokenFile` path is resolved relative to the YAML; default of `~/.dkg/auth.token` matches what `dkg start` writes on first boot.
 
-## Tool surface (30 tools)
+## Tool surface (33 tools)
 
 All tools are available the moment `dkg mcp setup` registers the MCP with your client. They group into seven categories tracking how a session typically uses memory: check health, discover the graph, set it up, drive the knowledge-asset lifecycle (create → write → finalize → share → publish), recall from it, query it, and message other agents.
 
@@ -202,6 +202,19 @@ The canonical per-KA sealed publish is `dkg_knowledge_asset_publish` (step 5 of 
 |---|---|
 | `dkg_memory_search` | Trust-weighted free-text recall across WM/SWM/VM in the agent-context graph (and an optional project graph). Higher-trust layers (VM > SWM > WM) collapse lower-trust hits for the same entity URI. Each hit surfaces `contextGraphId`, `layer`, and `trustWeight`. Use this for "ask my memory anything" recall. |
 | `dkg_query` | Execute SPARQL SELECT / ASK / CONSTRUCT against a context graph. Known prefixes are auto-prepended. Scope with `view`: `"working-memory"` (default), `"shared-working-memory"`, or `"verifiable-memory"`. Set `includeSharedMemory: true` alongside `view: "working-memory"` to query WM ∪ SWM in one call. |
+
+### Query catalog
+
+These tools use the same versioned query-catalog contract as the DKG CLI and
+Node UI. Runtime parameters are rendered according to their declared RDF-term
+type; callers never interpolate raw strings into SPARQL.
+
+| Tool | What it does |
+|---|---|
+| `dkg_query_catalog_context_graphs` | Inspect accessible Context Graphs and return only graphs that actually contain saved catalog entries. Read-only. |
+| `dkg_query_catalog_list` | List saved queries with stable selectors, declared parameters, execution views, and sub-graph scopes. Read-only. |
+| `dkg_query_catalog_run` | Execute one saved query by selector, slug, or exact name. Parameter values are validated and safely rendered before the canonical `/api/query` call. Read-only. |
+| `dkg_query_catalog_save` | Save an immutable parameterized query revision through the guarded profile-catalog route. Exact retries are idempotent; changed definitions create new revisions. Mutates local DKG state and should only be called on an explicit user request. |
 
 ### Messaging (agent-to-agent)
 
@@ -290,8 +303,9 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 
 | File | Purpose |
 |---|---|
-| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 30 tools. |
+| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 33 tools. |
 | `src/tools.ts` | Read tools (`dkg_list_context_graphs`, `dkg_sub_graph_list`, `dkg_query`, `dkg_get_entity`, `dkg_get_entity_sources`, `dkg_list_activity`, `dkg_get_agent`). |
+| `src/tools/query-catalog.ts` | Versioned query-catalog list/run/save MCP facade shared with the CLI and Node UI contract. |
 | `src/tools/assertions.ts` | Knowledge-asset lifecycle (`dkg_knowledge_asset_*` × 13: create/write/finalize/share/publish/pull_from/discard/query/history/import_file + import_artifact_resolve/read_markdown + semantic_enrichment_write). |
 | `src/tools/health.ts` | `dkg_status`, `dkg_peer_info`, `dkg_wallet_balances`. |
 | `src/tools/memory-search.ts` | `dkg_memory_search` with WM/SWM/VM fan-out and trust-weighted ranking. |

@@ -22,6 +22,8 @@ import type {
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { Rfc64CatalogSynchronizationErrorV1 } from
   './rfc64/catalog-synchronization-error-v1.js';
+import { resolveRfc64PeerSwmRecoveryPlanV1 } from
+  './rfc64/swm-recovery-plan-v1.js';
 
 const MAX_STATUS_ERROR_BYTES_V1 = 1024;
 const MAX_CONCURRENT_TARGETS_V1 = 4;
@@ -139,39 +141,6 @@ interface BootstrapStateV1 {
 
 const STATES = new WeakMap<DKGAgent, BootstrapStateV1>();
 
-/**
- * Normalize catalog authority into the scheduler's feature-neutral reserved
- * recovery scope. Policies without a graph-complete SWM provider confer no
- * reservation.
- */
-export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
-  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
-    | undefined,
-): readonly string[] {
-  if (config === undefined) return Object.freeze([]);
-  return Object.freeze(acceptedPoliciesV1(config)
-    .filter(({ policyEnvelope, completeSwmProviders = [] }) => (
-      policyEnvelope.payload.accessPolicy === 0
-      && completeSwmProviders.length > 0
-    ))
-    .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
-}
-
-/** Selected recovery scopes for which one peer is explicitly graph-complete. */
-export function resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
-  config: Readonly<Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1>
-    | undefined,
-  providerPeerId: string,
-): readonly string[] {
-  if (config === undefined) return Object.freeze([]);
-  return Object.freeze(acceptedPoliciesV1(config)
-    .filter(({ policyEnvelope, completeSwmProviders = [] }) => (
-      policyEnvelope.payload.accessPolicy === 0
-      && completeSwmProviders.includes(providerPeerId)
-    ))
-    .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
-}
-
 export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   /**
    * Exact operator-pinned graph-complete SWM providers for one accepted policy.
@@ -188,9 +157,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     const policy = acceptedPoliciesV1(config).find(
       ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
     );
-    return policy?.policyEnvelope.payload.accessPolicy === 0
-      ? policy.completeSwmProviders ?? Object.freeze([])
-      : Object.freeze([]);
+    return policy?.completeSwmProviders ?? Object.freeze([]);
   }
 
   /** Accept pinned policies and start the first bounded provider pass. */
@@ -343,13 +310,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           ({ completeSwmProviders: providers = [] }) => providers,
         ),
       )];
-      const publicCompleteSwmProviders = new Set(
-        state.config.acceptedPolicies.flatMap(
-          ({ policyEnvelope, completeSwmProviders: providers = [] }) => (
-            policyEnvelope.payload.accessPolicy === 0 ? providers : []
-          ),
-        ),
-      );
       await mapWithConcurrency(
         completeSwmProviders,
         MAX_CONCURRENT_TARGETS_V1,
@@ -359,22 +319,19 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
             await this.connectToPeerId(providerPeerId, {
               timeoutMs: COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1,
             });
-            // A pre-existing connection has no new connection:open event. Ask
-            // the lifecycle scheduler to seed or resume the selected lane; it
-            // owns the seed/incomplete/complete state transition and becomes a
-            // no-op after exact plane proof.
-            if (publicCompleteSwmProviders.has(providerPeerId)) {
-              this.queueSelectedSwmFromPeerOnConnect(
-                providerPeerId,
-                (_peerId, error) => {
-                  this.log.warn(
-                    state.ctx,
-                    `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
-                  );
-                },
-                0,
-              );
-            }
+            // A pre-existing connection has no new connection:open event. One
+            // immutable provider plan owns admission for every selected graph,
+            // including mixed public/private providers.
+            this.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+              resolveRfc64PeerSwmRecoveryPlanV1(state.config, providerPeerId),
+              (_peerId, error) => {
+                this.log.warn(
+                  state.ctx,
+                  `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
+                );
+              },
+              0,
+            );
           } catch (error) {
             this.log.warn(
               state.ctx,
@@ -406,14 +363,11 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     target: MutableTargetStatusV1,
     signal: AbortSignal,
   ): Promise<void> {
-    target.outcome = 'pending';
-    target.completionReason = null;
-    target.attempts = 0;
-    target.providerPeerId = null;
-    target.appliedHeadDigest = null;
-    target.catalogVersion = null;
-    target.inventoryRowCount = null;
-    target.lastError = null;
+    // `state.running` exposes that a refresh is in progress. Keep the target's
+    // last completed snapshot intact until this attempt itself completes so a
+    // healthy, durably applied catalog does not transiently regress to pending
+    // (and lose its head/row evidence) on every periodic revalidation pass.
+    // New targets already start as pending in the state initializer below.
     let lastError: string | null = null;
     let terminalError: unknown | null = null;
     try {

@@ -39,6 +39,7 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     const lastCall = client.queryCalls.at(-1)!;
     expect(lastCall.view).toBe('working-memory');
     expect(lastCall.includeSharedMemory).toBe(true);
+    expect(lastCall.agentAddress).toBe('peer-test');
   });
 
   it('renders CONSTRUCT quads instead of dropping graph-shaped results', async () => {
@@ -207,6 +208,49 @@ describe('F1 schema-migration sweep — no public tool exposes legacy `layer` fi
     expect(result.isError).toBeFalsy();
     const lastCall = client.queryCalls.at(-1)!;
     expect(lastCall.view).toBe('verifiable-memory');
+  });
+
+  it('dkg_get_entity scopes both neighbourhood queries to the requested named subgraph', async () => {
+    const server = new FakeServer();
+    const client = new FakeClient();
+    registerReadTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+    const result = await server.call('dkg_get_entity', {
+      uri: 'urn:test:entity',
+      subGraphName: 'model-families',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(client.queryCalls).toHaveLength(4);
+    for (const call of client.queryCalls) {
+      expect(call.subGraphName).toBe('model-families');
+    }
+    expect(client.queryCalls.filter((call) => call.view === 'working-memory')).toHaveLength(2);
+    expect(client.queryCalls.filter((call) => call.graphSuffix === '_shared_memory')).toHaveLength(2);
+  });
+
+  it('dkg_get_entity forwards explicit working-memory view instead of falling into legacy data-graph routing', async () => {
+    const server = new FakeServer();
+    const client = new FakeClient();
+    registerReadTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+    await server.call('dkg_get_entity', {
+      uri: 'urn:test:entity',
+      view: 'working-memory',
+    });
+    for (const call of client.queryCalls) expect(call.view).toBe('working-memory');
+    for (const call of client.queryCalls) expect(call.agentAddress).toBe('peer-test');
+  });
+
+  it('dkg_get_entity implements working-memory plus SWM as two strict scoped reads', async () => {
+    const server = new FakeServer();
+    const client = new FakeClient();
+    registerReadTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+    await server.call('dkg_get_entity', {
+      uri: 'urn:test:entity',
+      view: 'working-memory',
+      includeSharedMemory: true,
+    });
+    expect(client.queryCalls).toHaveLength(4);
+    expect(client.queryCalls.filter((call) => call.view === 'working-memory')).toHaveLength(2);
+    expect(client.queryCalls.filter((call) => call.graphSuffix === '_shared_memory')).toHaveLength(2);
   });
 
   it('F27: dkg_get_entity silently drops legacy `layer: "union"`, falls back to V9-era default WM∪SWM scope', async () => {

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { compareRfc64ContextGraphIdsV1 } from '../rfc64/swm-recovery-plan-v1.js';
+
 export type SelectedSwmBootstrapPhase = 'retry-required' | 'terminal';
 
 export interface SelectedSwmBootstrapAdmissionSnapshot {
@@ -24,7 +26,9 @@ interface SelectedSwmBootstrapAdmissionState extends SelectedSwmBootstrapAdmissi
 }
 
 function canonicalScope(contextGraphIds: readonly string[]): readonly string[] {
-  return Object.freeze([...new Set(contextGraphIds)].sort());
+  return Object.freeze(
+    [...new Set(contextGraphIds)].sort(compareRfc64ContextGraphIdsV1),
+  );
 }
 
 function sameScope(left: readonly string[], right: readonly string[]): boolean {

@@ -1055,7 +1055,7 @@ describe('durable sync lifecycle chain binding', () => {
       publisher: { clearPublishedKnowledgeAssetSwm: vi.fn() },
       // Ordinary public CG: no RFC-64 complete-provider authority applies.
       // Required once #2271's execution-boundary source fence is in the base.
-      resolveRfc64CompleteSwmProviderPeerIdsV1: async () => [],
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     agentLike.retireFinalizedSwmTwinCandidate = (
@@ -1068,9 +1068,7 @@ describe('durable sync lifecycle chain binding', () => {
       [contextGraphId],
       {
         sharedMemorySyncPlan: {
-          eligibleContextGraphIds: [contextGraphId],
-          publicContextGraphIds: [contextGraphId],
-          privateRecoverFromCurator: [],
+          targets: [{ contextGraphId, lane: 'selected-public' }],
         },
       },
     );
@@ -1145,7 +1143,7 @@ describe('durable sync lifecycle chain binding', () => {
       ) => work(),
       publisher: { clearPublishedKnowledgeAssetSwm },
       // Ordinary public CG: no RFC-64 complete-provider authority applies.
-      resolveRfc64CompleteSwmProviderPeerIdsV1: async () => [],
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     agentLike.retireFinalizedSwmTwinCandidate = (
@@ -1158,9 +1156,7 @@ describe('durable sync lifecycle chain binding', () => {
       [contextGraphId],
       {
         sharedMemorySyncPlan: {
-          eligibleContextGraphIds: [contextGraphId],
-          publicContextGraphIds: [contextGraphId],
-          privateRecoverFromCurator: [],
+          targets: [{ contextGraphId, lane: 'selected-public' }],
         },
       },
     );

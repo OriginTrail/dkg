@@ -7,6 +7,7 @@ import { useMemoryEntities } from '../src/ui/hooks/useMemoryEntities.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const MENTIONS = 'http://schema.org/mentions';
+const PROFILE_QUERY_CATALOG = 'http://dkg.io/ontology/profile/QueryCatalog';
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -38,8 +39,8 @@ function uriBinding(subject: string, predicate: string, object: string, graph: s
   };
 }
 
-function Probe({ id }: { id: string }) {
-  const memory = useMemoryEntities(id);
+function Probe({ id, includeQueryCatalog = false }: { id: string; includeQueryCatalog?: boolean }) {
+  const memory = useMemoryEntities(id, { includeQueryCatalog });
   return React.createElement('div', {
     id: 'probe',
     'data-loading': String(memory.loading),
@@ -74,13 +75,19 @@ describe('useMemoryEntities canonical layer counts', () => {
       const { sparql = '', contextGraphId = 'cg' } =
         JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
       const isVm = sparql.includes('_verifiable_memory_meta');
+      const isCatalogQuery = sparql.includes(PROFILE_QUERY_CATALOG);
+      const isCatalogSwm = isCatalogQuery && sparql.includes('/meta/_shared_memory/');
       // PR #818 sweep 3 — WM SPARQL now contains `STRENDS(...,
       // "/_meta")` for the meta-exclusion filter, so the SWM
       // detection needs the discriminating clause that's still
       // SWM-exclusive: the `/_shared_memory` tail check.
       const isSwm = !isVm && sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
       const graphBase = `did:dkg:context-graph:${contextGraphId}`;
-      const bindings = isVm
+      const bindings = isCatalogQuery
+        ? isCatalogSwm
+          ? [typeBinding('urn:test:query-catalog', `${graphBase}/meta/_shared_memory/0xabc/0`)]
+          : []
+        : isVm
         ? [
             typeBinding('urn:test:verified', graphBase),
             typeBinding('urn:test:full-pipeline', graphBase),
@@ -157,5 +164,36 @@ describe('useMemoryEntities canonical layer counts', () => {
       .find(body => body.sparql?.includes('STRENDS(STR(?g), "/_shared_memory")'));
     expect(swmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta/_shared_memory"');
     expect(swmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
+  });
+
+  it('loads the query-catalog branch only after visibility is enabled', async () => {
+    await act(async () => {
+      root.render(React.createElement(Probe, { id: 'cg-catalog-toggle' }));
+    });
+    await flush();
+
+    let el = container.querySelector('#probe')!;
+    expect(el.getAttribute('data-current-layers')).not.toContain('urn:test:query-catalog');
+    expect(vi.mocked(fetch).mock.calls.some(([, init]) =>
+      String(init?.body ?? '').includes(PROFILE_QUERY_CATALOG))).toBe(false);
+
+    await act(async () => {
+      root.render(React.createElement(Probe, {
+        id: 'cg-catalog-toggle',
+        includeQueryCatalog: true,
+      }));
+    });
+    await flush();
+
+    el = container.querySelector('#probe')!;
+    expect(el.getAttribute('data-current-layers')).toContain('urn:test:query-catalog:shared');
+    const catalogRequests = vi.mocked(fetch).mock.calls
+      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
+      .filter(body => body.sparql?.includes(PROFILE_QUERY_CATALOG));
+    expect(catalogRequests).toHaveLength(2);
+    expect(catalogRequests.some(body => body.sparql?.includes('/meta/assertion/'))).toBe(true);
+    expect(catalogRequests.some(body => body.sparql?.includes('/meta/_working_memory/'))).toBe(true);
+    expect(catalogRequests.some(body => body.sparql?.includes('/meta/_shared_memory/'))).toBe(true);
+    expect(catalogRequests.every(body => !body.sparql?.includes('assertionGraph'))).toBe(true);
   });
 });

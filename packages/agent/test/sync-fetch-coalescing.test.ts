@@ -888,9 +888,7 @@ describe('DKGAgent sync fetch coalescing', () => {
       { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
     );
     const sharedMemorySyncPlan = {
-      eligibleContextGraphIds: ['coalesced-cg'],
-      publicContextGraphIds: ['coalesced-cg'],
-      privateRecoverFromCurator: [],
+      targets: [{ contextGraphId: 'coalesced-cg', lane: 'selected-public' }],
     };
     (agent as any).listSubGraphs = async () => [];
     stubLifecycleFetch(agent, async ({ phase }) => {
@@ -935,9 +933,7 @@ describe('DKGAgent sync fetch coalescing', () => {
     const completeProvider = '12D3KooWCompleteSwmProvider';
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
     const sharedMemorySyncPlan = {
-      eligibleContextGraphIds: [selectedContextGraphId],
-      publicContextGraphIds: [selectedContextGraphId],
-      privateRecoverFromCurator: [],
+      targets: [{ contextGraphId: selectedContextGraphId, lane: 'selected-public' }],
     };
     (agent as any).resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [completeProvider];
     stubLifecycleFetch(agent, async ({ phase }) => {
@@ -961,9 +957,7 @@ describe('DKGAgent sync fetch coalescing', () => {
     let fetchCalls = 0;
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
     const sharedMemorySyncPlan = {
-      eligibleContextGraphIds: ['coalesced-cg'],
-      publicContextGraphIds: ['coalesced-cg'],
-      privateRecoverFromCurator: [],
+      targets: [{ contextGraphId: 'coalesced-cg', lane: 'selected-public' }],
     };
     (agent as any).listSubGraphs = async () => [];
     stubLifecycleFetch(agent, async ({ phase }) => {
@@ -1005,26 +999,24 @@ describe('DKGAgent sync fetch coalescing', () => {
   it.each([
     {
       name: 'private-only',
-      eligibleContextGraphIds: ['private-cg'],
-      publicContextGraphIds: [] as string[],
-      privateRecoverFromCurator: ['private-cg'],
+      targets: [{ contextGraphId: 'private-cg', lane: 'ordinary-private' as const }],
       expectedAdmissionLanes: ['swm-recovery:'],
     },
     {
       name: 'mixed public/private',
-      eligibleContextGraphIds: ['public-cg', 'private-cg'],
-      publicContextGraphIds: ['public-cg'],
-      privateRecoverFromCurator: ['private-cg'],
+      targets: [
+        { contextGraphId: 'public-cg', lane: 'selected-public' as const },
+        { contextGraphId: 'private-cg', lane: 'ordinary-private' as const },
+      ],
       expectedAdmissionLanes: ['shared-memory:', 'swm-recovery:'],
       syncContextGraphPriorities: { 'private-cg': 100, 'public-cg': -10 },
     },
   ])('uses per-CG global admission for $name shared-memory aggregation', async ({
-    eligibleContextGraphIds,
-    publicContextGraphIds,
-    privateRecoverFromCurator,
+    targets,
     expectedAdmissionLanes,
     syncContextGraphPriorities,
   }) => {
+    const contextGraphIds = targets.map(({ contextGraphId }) => contextGraphId);
     const agent = await createAgentWithSend(
       async () => new Uint8Array(0),
       { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0, syncContextGraphPriorities },
@@ -1050,13 +1042,9 @@ describe('DKGAgent sync fetch coalescing', () => {
     try {
       await expect((agent as any).syncSharedMemoryFromPeerDetailed(
         PEER_A,
-        eligibleContextGraphIds,
+        contextGraphIds,
         {
-          sharedMemorySyncPlan: {
-            eligibleContextGraphIds,
-            publicContextGraphIds,
-            privateRecoverFromCurator,
-          },
+          sharedMemorySyncPlan: { targets },
         },
       )).resolves.toMatchObject({ failedPeers: 0 });
       const runningAdmissions = backpressureLogs.filter((message) => (

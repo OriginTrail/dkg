@@ -299,7 +299,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
                 metadataContinuationYields: 1,
                 resolvedMetadataContinuationYields: 1,
               },
-              selectedScopeComplete: true,
+              scopeComplete: true,
             };
           }
           case 'finalizeCatchup':
@@ -350,7 +350,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
             return {
               kind: 'selected-shared-memory',
               shared: sharedResult(),
-              selectedScopeComplete: true,
+              scopeComplete: true,
             };
           case 'syncDurable':
             calls.push('durable');
@@ -400,7 +400,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
                 completedPhases: 0,
                 deferredBackpressure: 1,
               },
-              selectedScopeComplete: false,
+              scopeComplete: false,
             };
           case 'syncDurable':
             durableCalls += 1;
@@ -447,7 +447,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
             return {
               kind: 'selected-shared-memory',
               shared: sharedResult(),
-              selectedScopeComplete: false,
+              scopeComplete: false,
             };
           case 'finalizeCatchup':
             return null;
@@ -491,7 +491,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
             return {
               kind: 'selected-shared-memory',
               shared: sharedResult(),
-              selectedScopeComplete: true,
+              scopeComplete: true,
             };
           case 'finalizeCatchup':
             return null;
@@ -537,7 +537,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
                 bytesReceived: 0,
                 emptyResponses: 1,
               },
-              selectedScopeComplete: true,
+              scopeComplete: true,
             };
           }
           case 'finalizeCatchup':

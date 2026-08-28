@@ -392,6 +392,7 @@ export {
   projectCanonicalGraphScopedAuthorSealRowsV1,
   projectCanonicalGraphScopedAuthorSealStoreRowsV1,
   renderCanonicalAuthorSealStoreRowV1,
+  canonicalizeAuthorSealStoreRoundTripRowV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
   classifyCanonicalGraphScopedAuthorSealRowsV1,
   type Hex32V1,

@@ -1233,7 +1233,14 @@ class WorkerCatchupRunner implements CatchupRunner {
           return agent.syncSelectedSharedMemoryFromPeerDetailed(
             peerId,
             [contextGraphId],
-            { ...admission, selectedSwmPriority: true },
+            {
+              ...admission,
+              selectedSwmPriority: true,
+              requestedScope: {
+                kind: 'selected-public',
+                targets: [{ contextGraphId, lane: 'selected-public' }],
+              },
+            },
           );
         }
         return agent.syncSharedMemoryFromPeerDetailed(

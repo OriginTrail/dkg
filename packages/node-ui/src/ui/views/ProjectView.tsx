@@ -123,7 +123,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const [showImport, setShowImport] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [activeLayer, setActiveLayer] = useState<LayerView>('overview');
+  const [showQueryCatalog, setShowQueryCatalog] = useState(false);
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
+  useEffect(() => {
+    setShowQueryCatalog(false);
+  }, [contextGraphId]);
   const [participantsState, setParticipantsState] = useState<ParticipantsState>({
     contextGraphId: null,
     list: [],
@@ -363,7 +367,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // contradiction Bug C set out to prevent). Mirrors the
   // DashboardView caller, which already opts in for the same
   // failed-vs-empty-distinct reason.
-  const rawMemory = useMemoryEntities(contextGraphId, { signalErrors: true });
+  const includeQueryCatalogInMemory = showQueryCatalog
+    && (activeLayer === 'wm' || activeLayer === 'swm');
+  const rawMemory = useMemoryEntities(contextGraphId, {
+    signalErrors: true,
+    includeQueryCatalog: includeQueryCatalogInMemory,
+  });
   // Canonical (de-duped, Root-inclusive) triple total — the SAME number the
   // Subgraph Explorer panel subtitle shows. Fed to the SubGraphBar "All" chip
   // tooltip so it stops reporting "0 triples" on Root-only graphs (the daemon
@@ -974,6 +983,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             activeTab={layerContentTabs[activeLayer]}
             onTabChange={tab => handleLayerTabChange(activeLayer, tab)}
             swmAttribution={swmAttributionsResult}
+            showQueryCatalog={showQueryCatalog}
+            onShowQueryCatalogChange={setShowQueryCatalog}
           />
         </>
       )}

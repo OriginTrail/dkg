@@ -6,8 +6,8 @@
  * stable synchronization invariant.
  *
  * The supported vertical slice is intentionally narrow: one successor head,
- * one bucket with 1..1,024 rows, the root context-graph lane, and complete
- * bundles for every signed row.
+ * zero or one bucket with 0..1,024 rows, the root context-graph lane, and
+ * complete bundles for every signed row.
  * Every network hop is RFC-64 catalog-native. Activation happens only after
  * signed head/path/bucket verification, transfer verification, canonical
  * projection verification, one atomic projection-plus-seal replace, exact
@@ -33,8 +33,10 @@ import {
   assertSignedAuthorCatalogHeadEnvelopeV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
+  canonicalizeAuthorSealStoreRoundTripRowV1,
   computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
+  contextGraphMetaUri,
   contextGraphWorkspaceGraphUri,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   deriveAuthorCatalogScopeFromHeadV1,
@@ -74,6 +76,7 @@ import {
   type TripleStore,
   invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
+import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
 import { parseNQuads } from '../dkg-agent-utils.js';
@@ -119,6 +122,18 @@ const MAX_TRANSITION_GRAPH_QUADS_V1 =
 // wider than the verified projection-byte ceiling while remaining finite.
 const MAX_TRANSITION_GRAPH_NQUADS_BYTES_V1 = 256 * 1024 * 1024;
 const MAX_TRANSITION_SEAL_SUBJECT_ROWS_V1 = 15;
+
+type Rfc64BoundedSuccessorTargetV1 =
+  | Readonly<{
+    kind: 'empty';
+    rows: readonly [];
+  }>
+  | Readonly<{
+    kind: 'bucket';
+    rows: readonly AuthorCatalogRowV1[];
+    bucket: SignedAuthorCatalogBucketEnvelopeV1;
+    fetchedBucket: FetchedRfc64PublicCatalogObjectV1;
+  }>;
 
 export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
   /** Fetch-only capability; lifecycle ownership remains with the catalog service. */
@@ -168,6 +183,8 @@ export interface Rfc64PublicCatalogNativeReceiverResourceStatsV1 {
 export interface Rfc64PublicCatalogNativePrecommitRowPlanV1 {
   readonly authorship: VerifiedAuthorCatalogRowAuthorshipV1;
   readonly sealBinding: VerifiedCatalogSealBindingV1;
+  /** Exact graph-neutral digest of the verified projection activated into SWM. */
+  readonly publicQuadsDigest: string;
 }
 
 /** Generic same-process barrier plan executed after semantic post-read and before head CAS. */
@@ -181,17 +198,44 @@ export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1 {
   readonly rows: readonly Readonly<Rfc64PublicCatalogNativePrecommitRowPlanV1>[];
 }
 
-export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
+/** Side effects that become durable only when the catalog head CAS succeeds. */
+export interface Rfc64PublicCatalogNativePrecommitTransactionV1 {
+  /** Finalize rollback-capable side effects after the exact head is durable. */
+  commit(): void | Promise<void>;
+  rollback(cause?: unknown): Promise<void>;
+}
+
+/** A rollback-capable primary precommit, before any post-head coordination. */
+export interface Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
   (
     plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
     signal: AbortSignal,
   ): Promise<void | Rfc64PublicCatalogNativePrecommitTransactionV1>;
 }
 
-/** Side effects that become durable only when the catalog head CAS succeeds. */
-export interface Rfc64PublicCatalogNativePrecommitTransactionV1 {
-  commit(): void;
-  rollback(cause?: unknown): Promise<void>;
+/**
+ * Explicit two-domain lifecycle returned by a precommit coordinator.
+ * `transaction` owns only rollback-capable work. `afterAppliedHead` runs after
+ * the head, transaction, and durable post-read are final; a failure is
+ * reported without predecessor rollback and an exact replay retries the hook.
+ */
+export interface Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 {
+  readonly kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1';
+  readonly transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null;
+  readonly afterAppliedHead: (() => void | Promise<void>) | null;
+}
+
+/** Backward-compatible root receiver result plus the explicit post-head lifecycle. */
+export type Rfc64PublicCatalogNativeBeforeAppliedHeadCommitResultV1 =
+  | void
+  | Rfc64PublicCatalogNativePrecommitTransactionV1
+  | Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
+
+export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
+  (
+    plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
+    signal: AbortSignal,
+  ): Promise<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitResultV1>;
 }
 
 export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
@@ -223,6 +267,8 @@ export interface Rfc64PublicCatalogNativeRemovedRowEvidenceV1 {
 export interface Rfc64PublicCatalogNativeActivatedRowEvidenceV1
   extends Rfc64PublicCatalogInventoryEvidenceRowV1 {
   readonly swmGraph: string;
+  /** Exact graph-neutral digest of the activated public projection. */
+  readonly publicQuadsDigest: string;
   /** Exact signed delegation/head/path/bucket/row authorization closure. */
   readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
 }
@@ -342,9 +388,13 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     signal: AbortSignal | undefined,
     failureMessage: string,
     rollback?: (cause: unknown) => Promise<void>,
-  ): Promise<Rfc64PublicCatalogNativePrecommitTransactionV1 | null> {
+  ): Promise<Readonly<{
+    transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null;
+    afterAppliedHead: (() => void | Promise<void>) | null;
+  }>> {
     const precommitSignal = signal ?? new AbortController().signal;
     let transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null = null;
+    let afterAppliedHead: (() => void | Promise<void>) | null = null;
     try {
       throwIfAborted(precommitSignal);
       const returned = await this.options.beforeAppliedHeadCommit?.(
@@ -352,18 +402,17 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         precommitSignal,
       );
       if (returned !== undefined) {
-        if (
-          returned === null
-          || typeof returned !== 'object'
-          || typeof returned.commit !== 'function'
-          || typeof returned.rollback !== 'function'
-        ) {
-          throw new TypeError('catalog applied-head precommit returned an invalid transaction');
+        if (isPrecommitTransactionV1(returned)) {
+          transaction = returned;
+        } else if (isAppliedHeadLifecycleV1(returned)) {
+          transaction = returned.transaction;
+          afterAppliedHead = returned.afterAppliedHead;
+        } else {
+          throw new TypeError('catalog applied-head precommit returned an invalid lifecycle');
         }
-        transaction = returned;
       }
       throwIfAborted(precommitSignal);
-      return transaction;
+      return Object.freeze({ transaction, afterAppliedHead });
     } catch (cause) {
       const rollbackFailures: unknown[] = [];
       try {
@@ -625,7 +674,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       fail('catalog-native-receiver-catalog', 'verified genesis objects could not be staged', cause);
     }
 
-    const precommitTransaction = await this.runBeforeAppliedHeadCommitV1(
+    const precommitLifecycle = await this.runBeforeAppliedHeadCommitV1(
       Object.freeze({
         catalogScope: trustedCatalogScope,
         policyDigest: announcement.policyDigest,
@@ -678,10 +727,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         );
       }
     } catch (cause) {
-      await this.rollbackAppliedHeadPrecommitV1(precommitTransaction, cause);
+      await this.rollbackAppliedHeadPrecommitV1(precommitLifecycle.transaction, cause);
       throw cause;
     }
-    precommitTransaction?.commit();
+    await precommitLifecycle.transaction?.commit();
+    await precommitLifecycle.afterAppliedHead?.();
     return Object.freeze({
       inventoryDigest,
       catalogHeadDigest: head.objectDigest as Digest32V1,
@@ -764,55 +814,72 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     } catch (cause) {
       fail('catalog-native-receiver-catalog', 'successor directory path is invalid', cause);
     }
+    const isEmptyTarget = expectedRowCount === 0;
     if (
       descriptor.rowCount !== head.payload.totalRows
-      || descriptor.bucketDigest === ZERO_DIGEST32_V1
+      || (isEmptyTarget && (
+        descriptor.bucketDigest !== ZERO_DIGEST32_V1
+        || descriptor.byteLength !== '0'
+      ))
+      || (!isEmptyTarget && descriptor.bucketDigest === ZERO_DIGEST32_V1)
     ) {
       fail(
         'catalog-native-receiver-slice',
-        'bounded receiver requires one non-empty bucket containing the exact head row count',
+        'bounded receiver requires the canonical empty descriptor or one bucket containing the exact head row count',
       );
     }
 
-    const fetchedBucket = await this.fetchCatalogObjectWithCacheV1(
-      remotePeerId,
-      scope,
-      AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
-      descriptor.bucketDigest,
-      signal,
-    );
-    if (fetchedBucket === null) {
-      fail('catalog-native-receiver-not-found', 'successor catalog bucket was not found');
-    }
-    let bucket: SignedAuthorCatalogBucketEnvelopeV1;
-    try {
-      assertSignedAuthorCatalogBucketEnvelopeV1(fetchedBucket.envelope);
-      bucket = fetchedBucket.envelope;
-      assertAuthorCatalogBucketScopeBindingV1(
-        bucket.payload,
-        deriveAuthorCatalogScopeFromHeadV1(head.payload),
+    let target: Rfc64BoundedSuccessorTargetV1;
+    if (isEmptyTarget) {
+      target = Object.freeze({ kind: 'empty' as const, rows: Object.freeze([] as []) });
+    } else {
+      const fetchedBucket = await this.fetchCatalogObjectWithCacheV1(
+        remotePeerId,
+        scope,
+        AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
+        descriptor.bucketDigest,
+        signal,
       );
-      if (
-        bucket.issuer !== head.issuer
-        || bucket.objectDigest !== descriptor.bucketDigest
-        || bucket.payload.bucketId !== descriptor.bucketId
-        || bucket.payload.rows.length !== expectedRowCount
-        || bucket.payload.rows.length.toString() !== descriptor.rowCount
-        || canonicalizeAuthorCatalogBucketPayloadBytesV1(bucket.payload).byteLength.toString()
-          !== descriptor.byteLength
-      ) {
-        throw new Error('bucket differs from its verified directory descriptor');
+      if (fetchedBucket === null) {
+        fail('catalog-native-receiver-not-found', 'successor catalog bucket was not found');
       }
-    } catch (cause) {
-      fail('catalog-native-receiver-catalog', 'catalog bucket is not bound to its directory', cause);
+      let bucket: SignedAuthorCatalogBucketEnvelopeV1;
+      try {
+        assertSignedAuthorCatalogBucketEnvelopeV1(fetchedBucket.envelope);
+        bucket = fetchedBucket.envelope;
+        assertAuthorCatalogBucketScopeBindingV1(
+          bucket.payload,
+          deriveAuthorCatalogScopeFromHeadV1(head.payload),
+        );
+        if (
+          bucket.issuer !== head.issuer
+          || bucket.objectDigest !== descriptor.bucketDigest
+          || bucket.payload.bucketId !== descriptor.bucketId
+          || bucket.payload.rows.length !== expectedRowCount
+          || bucket.payload.rows.length.toString() !== descriptor.rowCount
+          || canonicalizeAuthorCatalogBucketPayloadBytesV1(bucket.payload).byteLength.toString()
+            !== descriptor.byteLength
+        ) {
+          throw new Error('bucket differs from its verified directory descriptor');
+        }
+      } catch (cause) {
+        fail('catalog-native-receiver-catalog', 'catalog bucket is not bound to its directory', cause);
+      }
+      await this.stageVerifiedControlObjectV1(
+        fetchedBucket,
+        'verified successor bucket could not be staged for restart-safe recovery',
+      );
+      target = Object.freeze({
+        kind: 'bucket' as const,
+        rows: bucket.payload.rows,
+        bucket,
+        fetchedBucket,
+      });
     }
-    await this.stageVerifiedControlObjectV1(
-      fetchedBucket,
-      'verified successor bucket could not be staged for restart-safe recovery',
-    );
+    const targetRows = target.rows;
     try {
       assertRfc64PublicCatalogExactSetBundleBytesV1(
-        bucket.payload.rows.map((row) => row.transfer.byteLength),
+        targetRows.map((row) => row.transfer.byteLength),
       );
     } catch (cause) {
       fail(
@@ -831,8 +898,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       readonly projectionBytes: Uint8Array;
       readonly expectedEvidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
     }> = [];
-    for (const row of bucket.payload.rows) {
+    for (const row of targetRows) {
       throwIfAborted(signal);
+      if (target.kind !== 'bucket') {
+        fail('catalog-native-receiver-catalog', 'non-empty catalog target lost its bucket proof');
+      }
       let authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
       let authorshipCapability: VerifiedAuthorCatalogRowAuthorshipV1;
       try {
@@ -845,8 +915,8 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           directoryPathEnvelopes: [directory],
           directoryPathSignatures: [fetchedDirectory.issuerSignature],
           directoryPathProof,
-          catalogBucket: bucket,
-          catalogBucketSignature: fetchedBucket.issuerSignature,
+          catalogBucket: target.bucket,
+          catalogBucketSignature: target.fetchedBucket.issuerSignature,
           targetKaId: row.kaId,
         });
         authorship = readVerifiedAuthorCatalogRowAuthorshipV1(authorshipCapability);
@@ -982,12 +1052,21 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     // only rows owned by that applied closure may be removed.
     const predecessorRows = historyDisposition === 'cold-bootstrap'
       ? Object.freeze([]) as readonly Readonly<AuthorCatalogRowV1>[]
-      : await loadExactAppliedPredecessorRows(
-        this.options.controlObjects,
-        head,
-        trustedCatalogScope,
-        this.#verifyIssuerSignature,
-      );
+      : historyDisposition === 'replay'
+        // A fresh receiver may initialize directly from a bounded current
+        // exact set and therefore has no obligation to stage version N-1.
+        // On exact-head replay, the already-authenticated target closure is
+        // itself the durable applied closure whose rows own any repair/removal
+        // decision. Requiring target.previousHeadDigest here made the first
+        // retry after a successful cold bootstrap fail despite exact durable
+        // target state.
+        ? Object.freeze(targetRows.map((row) => Object.freeze({ ...row })))
+        : await loadExactAppliedPredecessorRows(
+          this.options.controlObjects,
+          head,
+          trustedCatalogScope,
+          this.#verifyIssuerSignature,
+        );
     if (historyDisposition === 'cold-bootstrap') {
       await assertColdBootstrapHasNoOmittedSemanticStateV1(
         this.options.store,
@@ -1008,12 +1087,13 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       // Every exact bundle crossed its immutable durability barrier directly
       // after verification above. This preserves restart/failover progress
       // without making a staged-only head authoritative.
-      await this.options.controlObjects.stageVerifiedObjects([
+      const verifiedObjects = [
         fetchedDelegation,
         fetchedHead,
         fetchedDirectory,
-        fetchedBucket,
-      ]);
+      ];
+      if (target.kind === 'bucket') verifiedObjects.push(target.fetchedBucket);
+      await this.options.controlObjects.stageVerifiedObjects(verifiedObjects);
     } catch (cause) {
       fail(
         'catalog-native-receiver-catalog',
@@ -1035,6 +1115,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     );
     const removedRows: Rfc64PublicCatalogNativeRemovedRowEvidenceV1[] = [];
     const activatedRows: Rfc64PublicCatalogNativeActivatedRowEvidenceV1[] = [];
+    const activatedPrecommitRows: Rfc64PublicCatalogNativePrecommitRowPlanV1[] = [];
     let completion!: ReturnType<typeof verifyRfc64PublicCatalogInventoryCompletenessV1>;
     let activatedTripleCount = 0;
     let semanticMutationAttempted = false;
@@ -1075,7 +1156,13 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         activatedRows.push(Object.freeze({
           ...activation.evidence,
           swmGraph: activation.swmGraph,
+          publicQuadsDigest: activation.publicQuadsDigest,
           authorship: prepared.authorship,
+        }));
+        activatedPrecommitRows.push(Object.freeze({
+          authorship: prepared.authorshipCapability,
+          sealBinding: prepared.sealBindingCapability,
+          publicQuadsDigest: activation.publicQuadsDigest,
         }));
       }
       completion = verifyRfc64PublicCatalogInventoryCompletenessV1({
@@ -1113,16 +1200,13 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       );
     }
 
-    const precommitTransaction = await this.runBeforeAppliedHeadCommitV1(
+    const precommitLifecycle = await this.runBeforeAppliedHeadCommitV1(
       Object.freeze({
         catalogScope: trustedCatalogScope,
         policyDigest: announcement.policyDigest,
         catalogHeadDigest: head.objectDigest as Digest32V1,
         inventoryDigest: completion.inventoryDigest,
-        rows: Object.freeze(preparedRows.map((prepared) => Object.freeze({
-          authorship: prepared.authorshipCapability,
-          sealBinding: prepared.sealBindingCapability,
-        }))),
+        rows: Object.freeze(activatedPrecommitRows),
       }),
       signal,
       'catalog applied-head precommit rejected the exact activated inventory',
@@ -1136,17 +1220,17 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     let headCommitDisposition: 'predecessor' | 'target' | 'indeterminate' =
       historyDisposition === 'replay' ? 'target' : 'predecessor';
     let precommitFinalized = false;
-    const finalizeTargetTransition = (): void => {
+    const finalizeTargetTransition = async (): Promise<void> => {
       if (precommitFinalized) return;
       // Set the fence before invoking operator code. A throwing commit hook
       // cannot make a known-durable target safe to roll back to its predecessor.
       precommitFinalized = true;
-      precommitTransaction?.commit();
+      await precommitLifecycle.transaction?.commit();
     };
     const rollbackRejectedTransition = async (cause: unknown): Promise<void> => {
       const rollbackFailures: unknown[] = [];
       try {
-        await this.rollbackAppliedHeadPrecommitV1(precommitTransaction, cause);
+        await this.rollbackAppliedHeadPrecommitV1(precommitLifecycle.transaction, cause);
       } catch (rollbackCause) {
         rollbackFailures.push(rollbackCause);
       }
@@ -1229,7 +1313,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       // Once the exact target head is known durable, SWM and VM are the target
       // generation. Finalize that recovery unit before a diagnostic post-read:
       // a later read fault must never restore VM behind the committed head.
-      finalizeTargetTransition();
+      await finalizeTargetTransition();
       const durablePostRead = this.options.inventory.readAppliedCatalogHeadV1(
         catalogScopeDigest,
         head.payload.authorAddress,
@@ -1250,10 +1334,16 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       } else {
         // A confirmed or possibly committed CAS fences predecessor rollback.
         // Keep both semantic journals on the target for exact durable repair.
-        finalizeTargetTransition();
+        await finalizeTargetTransition();
       }
       throw cause;
     }
+
+    // This is intentionally outside the transaction/CAS catch. At this point
+    // the exact head and primary transaction are durable and the post-read has
+    // succeeded. A cleanup failure is retryable by replay, never by restoring
+    // the predecessor behind an already-committed head.
+    await precommitLifecycle.afterAppliedHead?.();
 
     if (activatedRows.length === 1) {
       const [only] = activatedRows;
@@ -1658,14 +1748,14 @@ function assertBoundedSuccessorHead(head: SignedAuthorCatalogHeadEnvelopeV1): nu
     || head.payload.bucketCount !== '1'
     || head.payload.directoryHeight !== '0'
     || !Number.isSafeInteger(totalRows)
-    || totalRows < 1
+    || totalRows < 0
     || totalRows > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
     || head.payload.version === '0'
     || head.payload.previousHeadDigest === null
   ) {
     fail(
       'catalog-native-receiver-slice',
-      `bounded receiver requires 1..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} root-lane rows in one non-genesis successor bucket`,
+      `bounded receiver requires 0..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} root-lane rows in one non-genesis successor`,
     );
   }
   return totalRows;
@@ -1963,10 +2053,7 @@ async function assertColdBootstrapHasNoOmittedSemanticStateV1(
     );
   }
 
-  const metaGraph = targets[0]?.sealMetaGraph;
-  if (metaGraph === undefined) {
-    fail('catalog-native-receiver-history', 'cold successor has no semantic target scope');
-  }
+  const metaGraph = contextGraphMetaUri(scope.contextGraphId);
   let sealSubjects;
   try {
     sealSubjects = await store.query(
@@ -2229,6 +2316,7 @@ async function activateExactPublicProjection(
   sealBinding: VerifiedCatalogSealBindingSnapshotV1,
 ): Promise<{
   readonly swmGraph: string;
+  readonly publicQuadsDigest: string;
   readonly evidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
 }> {
   let projectionText: string;
@@ -2312,6 +2400,7 @@ async function activateExactPublicProjection(
   await assertExactAuthorSealPostRead(store, sealBinding);
   return {
     swmGraph,
+    publicQuadsDigest: workspacePublicQuadsDigest(graphQuads),
     evidence: Object.freeze({
       kaId: row.kaId,
       catalogRowDigest: sealBinding.catalogRowDigest,
@@ -2357,8 +2446,13 @@ async function assertExactAuthorSealPostRead(
       graph: binding.placement.metaGraph,
     };
   }).sort(compareQuads);
-  if (quadsToNQuads(actual) !== quadsToNQuads(expected)) {
-    fail('catalog-native-receiver-activation', 'author-seal post-read differs from verified seal');
+  const normalizedActual = actual.map(canonicalizeAuthorSealStoreRoundTripRowV1);
+  const normalizedExpected = expected.map(canonicalizeAuthorSealStoreRoundTripRowV1);
+  if (quadsToNQuads(normalizedActual) !== quadsToNQuads(normalizedExpected)) {
+    fail(
+      'catalog-native-receiver-activation',
+      'author-seal post-read differs from verified seal',
+    );
   }
 }
 
@@ -2400,6 +2494,31 @@ export function assertRecoverableAuthorAttestationV1(
       cause,
     );
   }
+}
+
+function isPrecommitTransactionV1(
+  value: unknown,
+): value is Rfc64PublicCatalogNativePrecommitTransactionV1 {
+  return value !== null
+    && typeof value === 'object'
+    && typeof (value as Rfc64PublicCatalogNativePrecommitTransactionV1).commit === 'function'
+    && typeof (value as Rfc64PublicCatalogNativePrecommitTransactionV1).rollback === 'function';
+}
+
+function isAppliedHeadLifecycleV1(
+  value: unknown,
+): value is Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 {
+  if (
+    value === null
+    || typeof value !== 'object'
+    || (value as Rfc64PublicCatalogNativeAppliedHeadLifecycleV1).kind
+      !== 'rfc64-public-catalog-native-applied-head-lifecycle-v1'
+  ) {
+    return false;
+  }
+  const lifecycle = value as Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
+  return (lifecycle.transaction === null || isPrecommitTransactionV1(lifecycle.transaction))
+    && (lifecycle.afterAppliedHead === null || typeof lifecycle.afterAppliedHead === 'function');
 }
 
 function fail(

@@ -1,6 +1,9 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { invalidateSwmMaterializationWitness } from '@origintrail-official/dkg-storage';
-import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import {
+  withKeyedLocks,
+  type WorkspacePublicSnapshotStore,
+} from '@origintrail-official/dkg-publisher';
 import {
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
@@ -85,6 +88,12 @@ export interface RecoverContextGraphSwmDeps {
     registeredSubGraphNames?: readonly string[],
     excludedSubGraphNames?: readonly string[],
   ) => Promise<ProcessedSwmBatch>;
+  /**
+   * Agent-owned lock domain shared by every authoritative recovery caller.
+   * One complete provider transaction for a Context Graph must finish before
+   * another provider can fetch/apply a competing head for that same graph.
+   */
+  readonly writeLocks: Map<string, Promise<void>>;
   readonly store: SwmRecoveryStore;
   readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   /**
@@ -107,7 +116,7 @@ export interface RecoverContextGraphSwmDeps {
   /**
    * GH#2273 — skipping an already-materialized KA and deciding whether its
    * stored operation identity may be preserved are ONE capability, and the
-   * materializer OWNS both halves (`hasGraphAssetMarker` +
+   * materializer OWNS both halves (`isGraphAssetMaterialized` +
    * `preserveStoredIdentityForSkippedAsset`) over one store and one lock
    * map — a config that could skip but not decide, or pair a predicate from
    * one store with a materializer over another, is unrepresentable. Absent
@@ -248,6 +257,25 @@ async function fetchPhaseFully(
 export async function recoverContextGraphSwm(
   deps: RecoverContextGraphSwmDeps,
 ): Promise<RecoverContextGraphSwmResult> {
+  return withKeyedLocks(
+    deps.writeLocks,
+    [contextGraphSwmRecoveryWriteLockKey(deps.contextGraphId)],
+    () => recoverContextGraphSwmUnlocked(deps),
+  );
+}
+
+/**
+ * Recovery-level lock key. Per-KA materialization keeps using the canonical
+ * publisher lock, while this coarser key elects exactly one authoritative
+ * provider transaction for a Context Graph at a time.
+ */
+export function contextGraphSwmRecoveryWriteLockKey(contextGraphId: string): string {
+  return `${contextGraphId}\u0000swm-recovery`;
+}
+
+async function recoverContextGraphSwmUnlocked(
+  deps: RecoverContextGraphSwmDeps,
+): Promise<RecoverContextGraphSwmResult> {
   const wsGraph = contextGraphWorkspaceGraphUri(deps.contextGraphId);
   const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(deps.contextGraphId);
 
@@ -333,7 +361,7 @@ export async function recoverContextGraphSwm(
     for (const descriptor of snapshotDescriptorsByRef.get(snapshotRef) ?? []) {
       const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
       if (incrementallyReadyGraphs.has(graphKey)) continue;
-      if (await deps.snapshotMaterializer?.hasGraphAssetMarker(descriptor)) {
+      if (await deps.snapshotMaterializer?.isGraphAssetMaterialized(descriptor)) {
         incrementallyReadyGraphs.add(graphKey);
         continue;
       }

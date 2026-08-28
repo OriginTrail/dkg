@@ -23,8 +23,8 @@ import {
   resolveAndVerifyRfc64FinalizedPolicyInSnapshotV1,
 } from './finalized-policy-verifier-v1.js';
 import type {
-  Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
   Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1,
+  Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1,
 } from './public-catalog-native-receiver-v1.js';
 
 export interface Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1 {
@@ -162,7 +162,7 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
  */
 export function createRfc64FinalizedPolicyAgentPrecommitV1(
   options: Rfc64FinalizedPolicyAgentPrecommitOptionsV1,
-): Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
+): Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
   return Object.freeze(async (plan, signal): Promise<void> => {
     const resolved = await resolveRfc64FinalizedPolicyAgentPrecommitV1(
       options,

@@ -24,7 +24,12 @@ import {
   snapshotRfc64CatalogBootstrapConfigV1,
   snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from '../src/rfc64/catalog-authority-config-v1.js';
-import { mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
+import {
+  resolveRfc64PeerSwmRecoveryPlanV1,
+  resolveRfc64PrivateRecoveryContextGraphIdsV1,
+  resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
+} from '../src/rfc64/swm-recovery-plan-v1.js';
+import { DKGAgent, mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
 
 const NETWORK = 'otp:20430' as NetworkIdV1;
 const PRIVATE_CG = (
@@ -162,6 +167,81 @@ function publicBootstrapPolicy(index: number, targetCount = 0) {
 const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK);
 
 describe('RFC-64 private catalog activation', () => {
+  it('reserves the exact graph-complete provider for selected private SWM recovery', () => {
+    const bootstrap = snapshotRfc64CatalogBootstrapConfigV1(
+      privateActivation().bootstrap,
+    )!;
+    const resolverAgent = {
+      config: { rfc64CatalogBootstrap: bootstrap },
+    } as unknown as DKGAgent;
+
+    expect(resolveRfc64PrivateRecoveryContextGraphIdsV1(bootstrap))
+      .toEqual([PRIVATE_CG]);
+    expect(resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
+      bootstrap,
+      PROVIDER_PEER,
+    )).toEqual([PRIVATE_CG]);
+    expect(resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
+      bootstrap,
+      '12D3KooUnconfiguredPrivateProvider',
+    )).toEqual([]);
+    expect(DKGAgent.prototype.resolveRfc64CompleteSwmProviderPeerIdsV1.call(
+      resolverAgent,
+      PRIVATE_CG,
+    )).toEqual([PROVIDER_PEER]);
+  });
+
+  it('derives one mixed private/public recovery plan from snapshotted catalog config', () => {
+    const privatePolicy = privateActivation().bootstrap.acceptedPolicies[0]!;
+    const bootstrap = snapshotRfc64CatalogBootstrapConfigV1({
+      acceptedPolicies: [
+        privatePolicy,
+        {
+          policyEnvelope: policyEnvelope(policy(PUBLIC_CG, 0)),
+          targets: [],
+          completeSwmProviders: [PROVIDER_PEER],
+        },
+      ],
+      retryIntervalMs: 1_000,
+    })!;
+
+    expect(resolveRfc64PeerSwmRecoveryPlanV1(bootstrap, PROVIDER_PEER)).toEqual({
+      providerPeerId: PROVIDER_PEER,
+      targets: [
+        { contextGraphId: PRIVATE_CG, lane: 'ordinary-private' },
+        { contextGraphId: PUBLIC_CG, lane: 'selected-public' },
+      ],
+    });
+  });
+
+  it('elects one private replacement owner while retaining redundant public providers', () => {
+    const privatePolicy = privateActivation({
+      providers: [PROVIDER_PEER, PROVIDER_TWO_PEER],
+    }).bootstrap.acceptedPolicies[0]!;
+    const bootstrap = snapshotRfc64CatalogBootstrapConfigV1({
+      acceptedPolicies: [
+        privatePolicy,
+        {
+          policyEnvelope: policyEnvelope(policy(PUBLIC_CG, 0)),
+          targets: [],
+          completeSwmProviders: [PROVIDER_PEER, PROVIDER_TWO_PEER],
+        },
+      ],
+    })!;
+
+    expect(resolveRfc64PeerSwmRecoveryPlanV1(bootstrap, PROVIDER_PEER)).toEqual({
+      providerPeerId: PROVIDER_PEER,
+      targets: [
+        { contextGraphId: PRIVATE_CG, lane: 'ordinary-private' },
+        { contextGraphId: PUBLIC_CG, lane: 'selected-public' },
+      ],
+    });
+    expect(resolveRfc64PeerSwmRecoveryPlanV1(bootstrap, PROVIDER_TWO_PEER)).toEqual({
+      providerPeerId: PROVIDER_TWO_PEER,
+      targets: [{ contextGraphId: PUBLIC_CG, lane: 'selected-public' }],
+    });
+  });
+
   it('accepts one exact private policy, roster, provider, and local member', () => {
     const resolved = resolveRfc64CatalogActivationConfigV1(
       privateActivation(),

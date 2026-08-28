@@ -51,6 +51,9 @@ export interface ShareOptions {
    * place of another visible in the counters instead of cancelling out.
    */
   payloadCount?: number;
+  privateTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
 }
 
 export type SwmShare = ReturnType<ReturnType<typeof swmFixtures>['share']>;
@@ -87,13 +90,16 @@ export function swmFixtures(contextGraphId: string) {
         kaUal: opts.ual,
         assertionVersion: opts.version,
         publicTripleCount: payload.length,
-        privateTripleCount: 0,
+        privateTripleCount: opts.privateTripleCount ?? 0,
+        ...(opts.privateMerkleRoot === undefined
+          ? {}
+          : { privateMerkleRoot: opts.privateMerkleRoot }),
         publisherPeerId: 'peer-source',
         // Production share paths always stamp the effective policy row (see
         // the async-lift options default); a policy-less op is the
         // OLD-metadata interop shape, constructed per-row where a test needs
         // it — the preserve gate refuses winners without the explicit row.
-        accessPolicy: 'public',
+        accessPolicy: opts.accessPolicy ?? 'public',
         timestamp: new Date(0),
       }, metaGraph),
       { subject: operationSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${digest}"`, graph: metaGraph },
