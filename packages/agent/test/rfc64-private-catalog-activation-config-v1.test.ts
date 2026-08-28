@@ -214,6 +214,34 @@ describe('RFC-64 private catalog activation', () => {
     });
   });
 
+  it('elects one private replacement owner while retaining redundant public providers', () => {
+    const privatePolicy = privateActivation({
+      providers: [PROVIDER_PEER, PROVIDER_TWO_PEER],
+    }).bootstrap.acceptedPolicies[0]!;
+    const bootstrap = snapshotRfc64CatalogBootstrapConfigV1({
+      acceptedPolicies: [
+        privatePolicy,
+        {
+          policyEnvelope: policyEnvelope(policy(PUBLIC_CG, 0)),
+          targets: [],
+          completeSwmProviders: [PROVIDER_PEER, PROVIDER_TWO_PEER],
+        },
+      ],
+    })!;
+
+    expect(resolveRfc64PeerSwmRecoveryPlanV1(bootstrap, PROVIDER_PEER)).toEqual({
+      providerPeerId: PROVIDER_PEER,
+      targets: [
+        { contextGraphId: PRIVATE_CG, lane: 'ordinary-private' },
+        { contextGraphId: PUBLIC_CG, lane: 'selected-public' },
+      ],
+    });
+    expect(resolveRfc64PeerSwmRecoveryPlanV1(bootstrap, PROVIDER_TWO_PEER)).toEqual({
+      providerPeerId: PROVIDER_TWO_PEER,
+      targets: [{ contextGraphId: PUBLIC_CG, lane: 'selected-public' }],
+    });
+  });
+
   it('accepts one exact private policy, roster, provider, and local member', () => {
     const resolved = resolveRfc64CatalogActivationConfigV1(
       privateActivation(),

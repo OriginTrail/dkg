@@ -101,6 +101,45 @@ describe('private SWM curator recovery planning', () => {
     });
   });
 
+  it('prevents a later stale complete provider from replacing the elected private snapshot', async () => {
+    const curator = ethers.Wallet.createRandom().address.toLowerCase();
+    const member = ethers.Wallet.createRandom().address.toLowerCase();
+    const electedProvider = '12D3KooWPrivateRecoveryOwner';
+    const staleProvider = '12D3KooWPrivateRecoveryStale';
+    const contextGraphId = `${curator}/selected-private-single-owner`;
+    const agent = await createAgent('CompletePrivateSwmSingleOwnerPlan');
+
+    installPlanningStubs(agent, {
+      localAgent: member,
+      curator,
+      // Even if the stale provider is also discoverable as a curator, the
+      // pinned private replacement owner remains the only destructive writer.
+      curatorPeers: [staleProvider],
+      isPrivate: true,
+    });
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [
+      electedProvider,
+      staleProvider,
+    ];
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      electedProvider,
+      [contextGraphId],
+      createOperationContext('sync'),
+      { requireCompleteProviderMatch: true },
+    )).resolves.toEqual({
+      targets: [{ contextGraphId, lane: 'ordinary-private' }],
+    });
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      staleProvider,
+      [contextGraphId],
+      createOperationContext('sync'),
+      { requireCompleteProviderMatch: true },
+    )).resolves.toEqual({ targets: [] });
+  });
+
   it('limits automatic public SWM sweeps to an RFC-64 graph-complete provider', async () => {
     const contextGraphId = `${ethers.Wallet.createRandom().address}/selected-public`;
     const completeProvider = '12D3KooWCompleteSwmProvider';

@@ -88,6 +88,20 @@ describe('RFC-64 SWM recovery authorization', () => {
     expect(requestSelectedPublicAdmission).not.toHaveBeenCalled();
   });
 
+  it('rejects a private target not owned by the configured provider', () => {
+    const requestSelectedPublicAdmission = vi.fn(() => true);
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
+      requestSelectedPublicAdmission,
+      configuredRecoveryPlan: (providerPeerId) => ({ providerPeerId, targets: [] }),
+    }));
+
+    expect(coordinator.authorize({
+      providerPeerId: PROVIDER,
+      targets: [{ contextGraphId: PRIVATE, lane: 'ordinary-private' }],
+    })).toBeNull();
+    expect(requestSelectedPublicAdmission).not.toHaveBeenCalled();
+  });
+
   it('revalidates one authorized mixed plan against current configuration', () => {
     const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies());
     const authorized = coordinator.authorize(mixedPlan());

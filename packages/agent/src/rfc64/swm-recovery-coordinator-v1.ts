@@ -41,8 +41,17 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
     const selectedPublic = new Set(this.deps.admission.selectedPublicContextGraphIds());
     const canonicalTargets = canonicalizeRfc64SwmRecoveryTargetsV1(recoveryPlan.targets);
     if (canonicalTargets === null) return null;
-    const eligible = canonicalTargets.filter(({ contextGraphId, lane }) => (
-      lane === 'ordinary-private' || selectedPublic.has(contextGraphId)
+    const configuredTargets = canonicalizeRfc64SwmRecoveryTargetsV1(
+      this.deps.admission.configuredRecoveryPlan(recoveryPlan.providerPeerId).targets,
+    );
+    if (configuredTargets === null) return null;
+    const configuredTargetKeys = new Set(configuredTargets.map(recoveryTargetKey));
+    const eligible = canonicalTargets.filter((target) => (
+      configuredTargetKeys.has(recoveryTargetKey(target))
+      && (
+        target.lane === 'ordinary-private'
+        || selectedPublic.has(target.contextGraphId)
+      )
     ));
     if (eligible.length === 0) return null;
     const requestedPublic = eligible
@@ -118,4 +127,11 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
 function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length
     && left.every((value, index) => value === right[index]);
+}
+
+function recoveryTargetKey(target: Readonly<{
+  contextGraphId: string;
+  lane: 'ordinary-private' | 'selected-public';
+}>): string {
+  return `${target.lane}\n${target.contextGraphId}`;
 }

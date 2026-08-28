@@ -643,6 +643,7 @@ import type { DKGAgent } from './dkg-agent.js';
 
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import {
+  isRfc64PrivateRecoveryOwnerV1,
   resolveRfc64PrivateRecoveryContextGraphIdsV1,
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
   resolveRfc64SelectedRecoveryContextGraphIdsV1,
@@ -1339,20 +1340,22 @@ function enforceRfc64CompleteProviderAuthority(
   onRejected: (contextGraphId: string, remotePeerId: string) => void,
 ): SharedMemorySyncContextGraphPlan {
   if (remotePeerId === undefined) return plan;
-  const rejectedPublicContextGraphIds = new Set(
-    plan.targets.filter(({ lane }) => lane === 'selected-public').filter(({ contextGraphId }) => {
+  const rejectedContextGraphIds = new Set(
+    plan.targets.filter(({ contextGraphId, lane }) => {
       const completeSwmProviders = resolveCompleteProviders(contextGraphId);
-      return completeSwmProviders.length > 0
-        && !completeSwmProviders.includes(remotePeerId);
+      if (completeSwmProviders.length === 0) return false;
+      return lane === 'ordinary-private'
+        ? !isRfc64PrivateRecoveryOwnerV1(completeSwmProviders, remotePeerId)
+        : !completeSwmProviders.includes(remotePeerId);
     }).map(({ contextGraphId }) => contextGraphId),
   );
-  if (rejectedPublicContextGraphIds.size === 0) return plan;
-  for (const contextGraphId of rejectedPublicContextGraphIds) {
+  if (rejectedContextGraphIds.size === 0) return plan;
+  for (const contextGraphId of rejectedContextGraphIds) {
     onRejected(contextGraphId, remotePeerId);
   }
   return {
     targets: plan.targets.filter(
-      ({ contextGraphId }) => !rejectedPublicContextGraphIds.has(contextGraphId),
+      ({ contextGraphId }) => !rejectedContextGraphIds.has(contextGraphId),
     ),
   };
 }
@@ -4944,7 +4947,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           targets.push({ contextGraphId, lane: 'ordinary-private' });
           continue;
         }
-        const completeProviderSelected = completeSwmProviders.includes(remotePeerId);
+        const completeProviderSelected = isRfc64PrivateRecoveryOwnerV1(
+          completeSwmProviders,
+          remotePeerId,
+        );
+        if (completeSwmProviders.length > 0 && !completeProviderSelected) {
+          this.log.debug(
+            ctx,
+            `SWM recovery deferred for private CG "${contextGraphId.slice(0, 28)}": connecting peer is not the elected RFC-64 recovery owner`,
+          );
+          continue;
+        }
         const recoverySource = await planPrivateRecoverySource({
           contextGraphId,
           remotePeerId,

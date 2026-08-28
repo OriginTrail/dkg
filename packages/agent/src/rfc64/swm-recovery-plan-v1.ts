@@ -28,6 +28,18 @@ type Rfc64RecoveryConfigV1 = Readonly<
   Rfc64CatalogBootstrapConfigV1 | Rfc64PublicCatalogBootstrapConfigV1
 >;
 
+/**
+ * Private recovery replaces the whole local graph, so redundant complete
+ * providers cannot all be writers. The operator-pinned list order elects one
+ * stable owner; changing that order is the explicit failover boundary.
+ */
+export function isRfc64PrivateRecoveryOwnerV1(
+  completeSwmProviders: readonly string[],
+  providerPeerId: string,
+): boolean {
+  return completeSwmProviders[0] === providerPeerId;
+}
+
 /** Graphs reserved by an accepted policy with at least one complete provider. */
 export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
   config: Rfc64RecoveryConfigV1 | undefined,
@@ -60,10 +72,16 @@ export function resolveRfc64PeerSwmRecoveryPlanV1(
   if (config !== undefined) {
     for (const { policyEnvelope, completeSwmProviders = [] } of acceptedPoliciesV1(config)) {
       if (!completeSwmProviders.includes(providerPeerId)) continue;
-      byContextGraph.set(
-        policyEnvelope.payload.contextGraphId,
-        policyEnvelope.payload.accessPolicy === 1 ? 'ordinary-private' : 'selected-public',
-      );
+      const lane = policyEnvelope.payload.accessPolicy === 1
+        ? 'ordinary-private'
+        : 'selected-public';
+      if (
+        lane === 'ordinary-private'
+        && !isRfc64PrivateRecoveryOwnerV1(completeSwmProviders, providerPeerId)
+      ) {
+        continue;
+      }
+      byContextGraph.set(policyEnvelope.payload.contextGraphId, lane);
     }
   }
   return Object.freeze({
