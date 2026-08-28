@@ -56,6 +56,7 @@ import {
 } from '../atomic-graph-replace.js';
 import {
   buildRfc64AuthorCommitCasUpdateV1,
+  executeRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasInputV1,
   type Rfc64AuthorCommitCasResultV1,
 } from '../rfc64-author-commit-cas.js';
@@ -763,33 +764,28 @@ export class SparqlHttpStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.rfc64AuthorCommitCasV1',
     });
-    await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [...plan.touchedGraphs] },
-      update: plan.update,
-      options: { ...options, source: options?.source ?? 'sparql-http.rfc64AuthorCommitCasV1' },
-      operation: 'rfc64AuthorCommitCasV1',
-      cleanup: {
-        update: plan.cleanup,
-        options: { ...options, source: 'sparql-http.rfc64AuthorCommitCasV1.cleanup' },
+    return executeRfc64AuthorCommitCasV1({
+      executeUpdate: () => this.runRemoteGraphMutation({
+        // The transactional request always mutates private receipt/staging
+        // graphs, while semantic graphs change only when the receipt is true.
+        scope: { kind: 'graphs', graphs: [plan.receiptGraph] },
+        update: plan.update,
+        options: { ...options, source: options?.source ?? 'sparql-http.rfc64AuthorCommitCasV1' },
         operation: 'rfc64AuthorCommitCasV1',
-      },
-    });
-    try {
-      const receipt = await this.query(plan.receiptAsk, {
+      }),
+      readReceipt: () => this.query(plan.receiptAsk, {
         ...options,
         source: 'sparql-http.rfc64AuthorCommitCasV1.receipt',
-      });
-      if (receipt.type !== 'boolean') {
-        throw new Error('SPARQL HTTP RFC-64 author commit receipt query returned a non-boolean result');
-      }
-      return receipt.value ? 'committed' : 'conflict';
-    } finally {
-      await this.postCleanupUpdate(
+      }),
+      cleanup: () => this.postCleanupUpdate(
         plan.cleanup,
         { ...options, source: 'sparql-http.rfc64AuthorCommitCasV1.cleanup' },
         'rfc64AuthorCommitCasV1',
-      ).catch(() => undefined);
-    }
+      ),
+      onCommitted: () => {
+        this.writeGen.recordWrite({ kind: 'graphs', graphs: [...plan.touchedGraphs] });
+      },
+    });
   }
 
   /**

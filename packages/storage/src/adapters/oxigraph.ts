@@ -27,6 +27,7 @@ import {
 } from '../atomic-graph-replace.js';
 import {
   buildRfc64AuthorCommitCasUpdateV1,
+  executeRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasInputV1,
   type Rfc64AuthorCommitCasResultV1,
 } from '../rfc64-author-commit-cas.js';
@@ -436,7 +437,9 @@ export class OxigraphStore implements TripleStore {
 
   async rfc64AuthorCommitCasV1(
     input: Rfc64AuthorCommitCasInputV1,
+    options?: TripleStoreQueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1> {
+    throwIfAborted(options?.signal);
     const plan = buildRfc64AuthorCommitCasUpdateV1(input);
     const guarded = plan.semanticQuads.filter(
       (quad) => !(quad.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(quad.graph)),
@@ -447,32 +450,20 @@ export class OxigraphStore implements TripleStore {
         label: 'OxigraphStore.rfc64AuthorCommitCasV1',
       });
     }
-    try {
-      this.store.update(plan.update);
-    } catch (error) {
-      try {
-        this.store.update(plan.cleanup);
-      } catch {
-        // Preserve the semantic commit failure. Internal graphs stay hidden.
-      }
-      this.scheduleFlush();
-      throw error;
-    }
-    let committed: boolean;
-    try {
-      committed = this.store.query(plan.receiptAsk) === true;
-    } finally {
-      try {
-        this.store.update(plan.cleanup);
-      } catch {
-        // The semantic outcome is already known. Receipt cleanup is auxiliary.
-      }
-      this.scheduleFlush();
-    }
-    if (committed) {
-      this.writeGen.recordWrite({ kind: 'graphs', graphs: [...plan.touchedGraphs] });
-    }
-    return committed ? 'committed' : 'conflict';
+    return executeRfc64AuthorCommitCasV1({
+      executeUpdate: () => this.store.update(plan.update),
+      readReceipt: () => this.store.query(plan.receiptAsk),
+      cleanup: () => {
+        try {
+          this.store.update(plan.cleanup);
+        } finally {
+          this.scheduleFlush();
+        }
+      },
+      onCommitted: () => {
+        this.writeGen.recordWrite({ kind: 'graphs', graphs: [...plan.touchedGraphs] });
+      },
+    });
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {

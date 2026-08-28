@@ -38,11 +38,13 @@ export {
 } from './atomic-graph-replace.js';
 export {
   buildRfc64AuthorCommitCasUpdateV1,
+  executeRfc64AuthorCommitCasV1,
   normalizeRfc64AuthorCommitCasV1,
   RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
   RFC64_AUTHOR_COMMIT_MAX_STATE_GUARDS_V1,
   RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1,
   type Rfc64AuthorCommitCasInputV1,
+  type Rfc64AuthorCommitCasExecutionV1,
   type Rfc64AuthorCommitCasResultV1,
   type Rfc64AuthorCommitCasUpdateV1,
   type NormalizedRfc64AuthorCommitCasV1,

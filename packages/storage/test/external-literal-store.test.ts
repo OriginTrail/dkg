@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -7,10 +7,12 @@ import {
   EXTERNAL_LITERAL_REF_DATATYPE,
   OxigraphStore,
   SharedMemoryLiteralBlobStore,
+  UnsupportedTripleStoreCapabilityError,
   createTripleStore,
   type QueryOptions,
   type QueryResult,
   type Quad,
+  type Rfc64AuthorCommitCasInputV1,
   type TripleStore,
 } from '../src/index.js';
 
@@ -220,6 +222,88 @@ describe('SharedMemoryLiteralBlobStore', () => {
     ).rejects.toThrow(/external literal blob corrupt/);
   });
 
+  it('preserves an ordinary insert blob after an indeterminate post-commit failure', async () => {
+    const blobDir = await tempBlobDir();
+    const base = new OxigraphStore();
+    const inner = overrideStore(base, {
+      insert: async (quads, options) => {
+        await base.insert(quads, options);
+        throw new Error('insert response lost after commit');
+      },
+    });
+    const store = new SharedMemoryLiteralBlobStore(inner, { blobDir, thresholdBytes: 20 });
+    const largeLiteral = `"${'indeterminate-insert'.repeat(10)}"`;
+    const subject = 'http://ex.org/indeterminate-insert';
+
+    await expect(store.insert([quad(subject, largeLiteral, SWM_GRAPH)]))
+      .rejects.toThrow('insert response lost after commit');
+    expect(await readFile(blobPath(blobDir, sha256Term(largeLiteral)), 'utf8')).toBe(largeLiteral);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <${subject}> <http://schema.org/value> ?o } }`,
+    );
+    expect(result.type === 'bindings' ? result.bindings : []).toEqual([{ o: largeLiteral }]);
+  });
+
+  it('removes an atomic replacement blob after a proven pre-dispatch refusal', async () => {
+    const blobDir = await tempBlobDir();
+    const base = new OxigraphStore();
+    const inner = overrideStore(base, {
+      replaceGraph: async () => {
+        throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'refusing-test-store');
+      },
+    });
+    const store = new SharedMemoryLiteralBlobStore(inner, { blobDir, thresholdBytes: 20 });
+    const largeLiteral = `"${'refused-replacement'.repeat(10)}"`;
+
+    await expect(store.replaceGraph(SWM_GRAPH, [
+      quad('http://ex.org/refused-replacement', largeLiteral, SWM_GRAPH),
+    ])).rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
+    expect(await readdir(blobDir)).toEqual([]);
+  });
+
+  it('serializes cleanup with a new writer for the same content hash', async () => {
+    const blobDir = await tempBlobDir();
+    let removalStartedResolve!: () => void;
+    let allowRemovalResolve!: () => void;
+    const removalStarted = new Promise<void>((resolve) => { removalStartedResolve = resolve; });
+    const allowRemoval = new Promise<void>((resolve) => { allowRemovalResolve = resolve; });
+    class PausingBlobStore extends SharedMemoryLiteralBlobStore {
+      protected override async removeBlobFile(hash: string): Promise<void> {
+        removalStartedResolve();
+        await allowRemoval;
+        await super.removeBlobFile(hash);
+      }
+    }
+
+    const base = new OxigraphStore();
+    let attempt = 0;
+    const inner = overrideStore(base, {
+      rfc64AuthorCommitCasV1: async (input) => {
+        attempt += 1;
+        if (attempt === 1) return 'conflict';
+        await base.insert([...input.sharedProjectionQuads]);
+        return 'committed';
+      },
+    });
+    const store = new PausingBlobStore(inner, { blobDir, thresholdBytes: 20 });
+    const largeLiteral = `"${'cleanup-race'.repeat(30)}"`;
+    const subject = 'http://ex.org/cleanup-race';
+    const input = rfc64Input(subject, largeLiteral);
+
+    const losingWriter = store.rfc64AuthorCommitCasV1(input);
+    await removalStarted;
+    const winningWriter = store.rfc64AuthorCommitCasV1(input);
+    allowRemovalResolve();
+
+    await expect(Promise.all([losingWriter, winningWriter]))
+      .resolves.toEqual(['conflict', 'committed']);
+    expect(await readFile(blobPath(blobDir, sha256Term(largeLiteral)), 'utf8')).toBe(largeLiteral);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <${subject}> <http://schema.org/value> ?o } }`,
+    );
+    expect(result.type === 'bindings' ? result.bindings : []).toEqual([{ o: largeLiteral }]);
+  });
+
   it('can be enabled through createTripleStore configuration', async () => {
     const blobDir = await tempBlobDir();
     const store = await createTripleStore({
@@ -327,4 +411,44 @@ function externalRef(hash: string): string {
 
 function blobPath(blobDir: string, hash: string): string {
   return join(blobDir, hash);
+}
+
+function overrideStore(base: TripleStore, overrides: Partial<TripleStore>): TripleStore {
+  return new Proxy(base, {
+    get(target, prop) {
+      if (prop in overrides) return (overrides as Record<string | symbol, unknown>)[prop];
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as TripleStore;
+}
+
+function rfc64Input(subject: string, object: string): Rfc64AuthorCommitCasInputV1 {
+  const sealGraph = 'urn:test:blob-race:seal-graph';
+  const headGraph = 'urn:test:blob-race:head-graph';
+  const stateGraph = 'urn:test:blob-race:state-graph';
+  const transition = (role: string) => ({
+    graphUri: stateGraph,
+    subject: `urn:test:blob-race:${role}`,
+    predicate: 'http://schema.org/value',
+    expectedObject: null,
+    quads: [quad(`urn:test:blob-race:${role}`, `"${role}-next"`, stateGraph)],
+  });
+  return {
+    sharedProjectionGraph: SWM_GRAPH,
+    sharedProjectionQuads: [quad(subject, object, SWM_GRAPH)],
+    authorSealGraph: sealGraph,
+    authorSealSubject: 'urn:test:blob-race:seal',
+    authorSealQuads: [quad('urn:test:blob-race:seal', '"seal"', sealGraph)],
+    currentHeadGraph: headGraph,
+    currentHeadSubject: 'urn:test:blob-race:author',
+    currentHeadPredicate: 'http://schema.org/value',
+    expectedCurrentHeadObject: null,
+    nextCurrentHeadObject: 'urn:test:blob-race:head:new',
+    kaStateDigest: transition('ka-state'),
+    subgraphMutationGeneration: transition('subgraph-generation'),
+    contextGraphMutationGeneration: transition('context-graph-generation'),
+    appliedSet: transition('applied-set'),
+    sealInvalidations: [],
+  };
 }

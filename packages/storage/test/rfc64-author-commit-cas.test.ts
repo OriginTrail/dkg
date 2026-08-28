@@ -33,6 +33,7 @@ const KA_STATE = 'urn:test:rfc64:ka-state';
 const MUTATION = 'urn:test:rfc64:mutation:subgraph';
 const CG_MUTATION = 'urn:test:rfc64:mutation:context-graph';
 const APPLIED_SET = 'urn:test:rfc64:applied-set';
+const INVALIDATED_SEAL = 'urn:test:rfc64:seal:stale';
 const P_VALUE = 'urn:test:rfc64:value';
 const P_HEAD = 'urn:test:rfc64:current-head';
 const P_GENERATION = 'urn:test:rfc64:generation';
@@ -186,6 +187,25 @@ describe('RFC-64 certified author commit CAS v1', () => {
     )).toBe(false);
   });
 
+  it('honors Oxigraph pre-dispatch cancellation without changing any semantic target', async () => {
+    const store = new OxigraphStore();
+    await seedOldState(store);
+    const controller = new AbortController();
+    controller.abort(new Error('caller cancelled before CAS dispatch'));
+
+    await expect(store.rfc64AuthorCommitCasV1!(authorCommitInput(), {
+      signal: controller.signal,
+    })).rejects.toThrow('caller cancelled before CAS dispatch');
+
+    expect(await objectFor(store, PROJECTION_GRAPH, 'urn:test:rfc64:old', P_VALUE)).toBe('"old"');
+    expect(await objectFor(store, SEAL_GRAPH, SEAL, P_VALUE)).toBe('"old-seal"');
+    expect(await objectFor(store, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(OLD_HEAD);
+    expect(await objectFor(store, STATE_GRAPH, KA_STATE, P_VALUE)).toBe(OLD_HEAD);
+    expect(await objectFor(store, STATE_GRAPH, MUTATION, P_GENERATION)).toBe('"1"');
+    expect(await objectFor(store, STATE_GRAPH, CG_MUTATION, P_GENERATION)).toBe('"10"');
+    expect(await objectFor(store, STATE_GRAPH, APPLIED_SET, P_APPLIED)).toBe(OLD_HEAD);
+  });
+
   it('enforces exact-value and absent-value guard semantics', async () => {
     const multiValued = new OxigraphStore();
     await seedOldState(multiValued);
@@ -307,6 +327,90 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(await objectFor(store, STATE_GRAPH, MUTATION, P_GENERATION)).toBeUndefined();
     expect(await objectFor(store, STATE_GRAPH, APPLIED_SET, P_APPLIED)).toBeUndefined();
     expect(await store.countQuads(OTHER_GRAPH)).toBe(1);
+  });
+
+  it('applies seal invalidations only when every guard commits', async () => {
+    const committed = new OxigraphStore();
+    await seedOldState(committed);
+    await committed.insert([
+      quad(INVALIDATED_SEAL, P_VALUE, '"stale-seal"', SEAL_GRAPH),
+    ]);
+    const invalidation = {
+      graphUri: SEAL_GRAPH,
+      subject: INVALIDATED_SEAL,
+      quads: [],
+    } as const;
+
+    await expect(committed.rfc64AuthorCommitCasV1!(authorCommitInput({
+      sealInvalidations: [invalidation],
+    }))).resolves.toBe('committed');
+    expect(await objectFor(committed, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE)).toBeUndefined();
+
+    const conflicted = new OxigraphStore();
+    await seedOldState(conflicted);
+    await conflicted.insert([
+      quad(INVALIDATED_SEAL, P_VALUE, '"stale-seal"', SEAL_GRAPH),
+    ]);
+    const base = authorCommitInput();
+    await expect(conflicted.rfc64AuthorCommitCasV1!(authorCommitInput({
+      subgraphMutationGeneration: {
+        ...base.subgraphMutationGeneration,
+        expectedObject: '"stale"',
+      },
+      sealInvalidations: [invalidation],
+    }))).resolves.toBe('conflict');
+    expect(await objectFor(conflicted, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE)).toBe('"stale-seal"');
+  });
+
+  it('bumps affected write generations only for a committed CAS', async () => {
+    const store = new OxigraphStore();
+    await seedOldState(store);
+    const affectedPrefix = 'did:dkg:context-graph:rfc64/';
+    const unrelatedPrefix = 'did:dkg:context-graph:unrelated/';
+    const affectedBefore = store.getWriteGen(affectedPrefix);
+    const unrelatedBefore = store.getWriteGen(unrelatedPrefix);
+
+    await expect(store.rfc64AuthorCommitCasV1!(authorCommitInput())).resolves.toBe('committed');
+    const affectedAfterCommit = store.getWriteGen(affectedPrefix);
+    expect(affectedAfterCommit).toBeGreaterThan(affectedBefore);
+    expect(store.getWriteGen(unrelatedPrefix)).toBe(unrelatedBefore);
+
+    await expect(store.rfc64AuthorCommitCasV1!(authorCommitInput())).resolves.toBe('conflict');
+    expect(store.getWriteGen(affectedPrefix)).toBe(affectedAfterCommit);
+    expect(store.getWriteGen(unrelatedPrefix)).toBe(unrelatedBefore);
+  });
+
+  it('keeps remote semantic write generations stable on a clean conflict', async () => {
+    let receiptValue = true;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      if (String(init?.body ?? '').includes('ASK')) {
+        return new Response(JSON.stringify({ boolean: receiptValue }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        });
+      }
+      return new Response(null, { status: 200 });
+    });
+    const store = new SparqlHttpStore({
+      queryEndpoint: 'http://write-gen.test/query',
+      updateEndpoint: 'http://write-gen.test/update',
+      atomicUpdates: true,
+      readAfterWriteConsistency: true,
+    });
+    const affectedPrefix = 'did:dkg:context-graph:rfc64/';
+    const unrelatedPrefix = 'did:dkg:context-graph:unrelated/';
+    const affectedBefore = store.getWriteGen(affectedPrefix);
+    const unrelatedBefore = store.getWriteGen(unrelatedPrefix);
+
+    await expect(store.rfc64AuthorCommitCasV1(authorCommitInput())).resolves.toBe('committed');
+    const affectedAfterCommit = store.getWriteGen(affectedPrefix);
+    expect(affectedAfterCommit).toBeGreaterThan(affectedBefore);
+    expect(store.getWriteGen(unrelatedPrefix)).toBe(unrelatedBefore);
+
+    receiptValue = false;
+    await expect(store.rfc64AuthorCommitCasV1(authorCommitInput())).resolves.toBe('conflict');
+    expect(store.getWriteGen(affectedPrefix)).toBe(affectedAfterCommit);
+    expect(store.getWriteGen(unrelatedPrefix)).toBe(unrelatedBefore);
   });
 
   it('preserves the capability through literal, graph-index, and changelog decorators', async () => {

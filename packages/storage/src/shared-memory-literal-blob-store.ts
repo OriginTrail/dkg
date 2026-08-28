@@ -25,6 +25,7 @@ interface ActiveBlobUse {
   users: number;
   preserve: boolean;
   created: boolean;
+  /** Serialized create/remove lifecycle for this content hash. */
   ready: Promise<void>;
 }
 
@@ -453,15 +454,20 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         created: false,
         ready: Promise.resolve(),
       };
-      const state = active;
-      state.ready = this.writeBlobFile(hash, term).then((created) => {
-        state.created = created;
-      });
-      this.activeBlobUses.set(hash, state);
+      this.activeBlobUses.set(hash, active);
     }
     active.users += 1;
     scope.set(hash, active);
-    await active.ready;
+    const state = active;
+    // Chain creation behind any pending cleanup. If a prior losing writer is
+    // already removing this hash, the new user waits for that removal and then
+    // recreates/verifies the file before its store mutation can commit.
+    const ready = state.ready.then(async () => {
+      const created = await this.writeBlobFile(hash, term);
+      state.created ||= created;
+    });
+    state.ready = ready;
+    await ready;
   }
 
   private async releaseBlobUses(scope: BlobUseScope, preserve: boolean): Promise<void> {
@@ -470,12 +476,27 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
       state.preserve ||= preserve;
       state.users -= 1;
       if (state.users !== 0) continue;
-      this.activeBlobUses.delete(state.hash);
-      if (state.created && !state.preserve) {
-        cleanup.push(rm(this.blobPath(state.hash), { force: true }));
-      }
+      const lifecycle = state.ready.then(async () => {
+        // A new acquisition may have joined while this cleanup was queued.
+        if (state.users !== 0 || !state.created || state.preserve) return;
+        await this.removeBlobFile(state.hash);
+        state.created = false;
+      });
+      state.ready = lifecycle;
+      cleanup.push(lifecycle.finally(() => {
+        // Keep the coordination entry installed through deletion. A concurrent
+        // acquisition either prevents removal or chains recreation after it.
+        if (state.users === 0 && this.activeBlobUses.get(state.hash) === state) {
+          this.activeBlobUses.delete(state.hash);
+        }
+      }));
     }
     await Promise.all(cleanup);
+  }
+
+  /** Test seam for deterministic create/delete race coverage. */
+  protected async removeBlobFile(hash: string): Promise<void> {
+    await rm(this.blobPath(hash), { force: true });
   }
 
   private async writeBlobFile(hash: string, term: string): Promise<boolean> {
