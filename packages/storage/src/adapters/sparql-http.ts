@@ -38,7 +38,10 @@ import {
   formatSparqlJsonBindings,
   type AdapterSparqlJsonSelectResponse,
 } from './sparql-json-results.js';
-import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
+import {
+  externalStorePriorityScheduler,
+  type StorePriorityScheduler,
+} from '../store-priority-scheduler.js';
 import {
   GraphWriteGenTracker,
   type GraphWriteLifecycle,
@@ -67,6 +70,7 @@ import {
   StoreOperationTimeoutError,
 } from '../store-operation-timeout.js';
 import { readSparqlResponseText } from './sparql-response-policy.js';
+import type { StoreOperation } from '../store-operation-outcome.js';
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -225,6 +229,8 @@ export interface SparqlHttpStoreOptions {
   slowQuerySampleRate?: number;
   /** Optional sink for sampled slow-query events; defaults to a compact console warning. */
   onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
+  /** Optional scheduler injection for embedded callers and adapter-boundary tests. */
+  scheduler?: StorePriorityScheduler;
   /**
    * Monotonic clock for slow-query telemetry. Graph-list revalidation clocks
    * are owned by GraphSetIndexStore.
@@ -244,6 +250,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly onClientTimeout?: (operation: string) => void;
   private readonly getRecoveryState?: () => SparqlHttpRecoveryState;
   private readonly atomicUpdates: boolean;
+  private readonly scheduler: StorePriorityScheduler;
 
   private readonly now: () => number;
   private readonly slowQueryThresholdMs: number;
@@ -271,6 +278,7 @@ export class SparqlHttpStore implements TripleStore {
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
     this.atomicUpdates = options.atomicUpdates === true || this.managedOxigraph;
+    this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
       options.slowQueryThresholdMs,
@@ -291,7 +299,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   private runStoreWork<T>(
-    operation: string,
+    operation: StoreOperation,
     options: QueryOptions | undefined,
     work: (signal: AbortSignal | undefined) => Promise<T>,
   ): Promise<T> {
@@ -301,12 +309,15 @@ export class SparqlHttpStore implements TripleStore {
     }
     return this.workLifecycle.run(
       options?.signal,
-      (signal) => externalStorePriorityScheduler.run(
-        options?.priority,
-        options?.source ?? `sparql-http.${operation}`,
-        () => work(signal),
-        signal,
-      ),
+      (signal) => {
+        return this.scheduler.run(
+          options?.priority,
+          options?.source ?? `sparql-http.${operation}`,
+          () => work(signal),
+          signal,
+          { storeOperation: operation },
+        );
+      },
     );
   }
 
@@ -326,7 +337,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   private recoveryError(
-    operation: string,
+    operation: StoreOperation,
     outcome: 'not_started' | 'indeterminate',
     cause?: unknown,
   ): StoreOperationTimeoutError {
@@ -351,7 +362,7 @@ export class SparqlHttpStore implements TripleStore {
     );
   }
 
-  private notifyClientTimeout(operation: string): void {
+  private notifyClientTimeout(operation: StoreOperation): void {
     try {
       this.onClientTimeout?.(operation);
     } catch {
@@ -360,7 +371,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   getPressureSnapshot(): StorePressureSnapshot {
-    return externalStorePriorityScheduler.snapshot;
+    return this.scheduler.snapshot;
   }
 
   /** {@link GraphWriteGenSource} capability (#1609) — see graph-write-gen.ts. */
@@ -376,12 +387,13 @@ export class SparqlHttpStore implements TripleStore {
     sparql: string,
     accept: string,
     operation: 'query' | 'construct',
+    storeOperation: StoreOperation,
     options: SparqlHttpQueryOptions | undefined,
     consume: (response: Response) => Promise<T>,
   ): Promise<T> {
     const recoveryAtStart = this.readRecoveryState();
     if (recoveryAtStart?.recovering) {
-      throw this.recoveryError(operation, 'not_started');
+      throw this.recoveryError(storeOperation, 'not_started');
     }
     // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
     // request body with `application/sparql-query`, not URL-encoded form
@@ -420,12 +432,13 @@ export class SparqlHttpStore implements TripleStore {
         throw new StoreOperationTimeoutError({
           backend: this.managedOxigraph ? 'oxigraph-server' : 'sparql-http',
           operation,
+          storeOperation,
           timeoutMs: this.timeout,
           cause: error,
         });
       }
       if (this.recoveryInterrupted(recoveryAtStart)) {
-        throw this.recoveryError(operation, 'indeterminate', error);
+        throw this.recoveryError(storeOperation, 'indeterminate', error);
       }
       throw error;
     } finally {
@@ -437,7 +450,7 @@ export class SparqlHttpStore implements TripleStore {
   private async postCleanupUpdate(
     update: string,
     options?: QueryOptions,
-    operation = 'update',
+    operation: StoreOperation = 'update',
   ): Promise<void> {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
@@ -731,11 +744,11 @@ export class SparqlHttpStore implements TripleStore {
     scope: GraphWriteScope;
     update: string;
     options?: QueryOptions;
-    operation: string;
+    operation: StoreOperation;
     cleanup?: {
       update: string;
       options?: QueryOptions;
-      operation: string;
+      operation: StoreOperation;
     };
   }): Promise<void> {
     let lifecycle: GraphWriteLifecycle | undefined;
@@ -815,34 +828,44 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
-    return this.runStoreWork('query', options, async (lifecycleSignal) => {
+    return this.queryWithOperation(sparql, options);
+  }
+
+  private async queryWithOperation(
+    sparql: string,
+    options: SparqlHttpQueryOptions | undefined,
+    storeOperation?: StoreOperation,
+  ): Promise<QueryResult> {
+    const trimmed = sparql.trim();
+    const upper = trimmed.toUpperCase();
+    const isAsk = upper.startsWith('ASK');
+    const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+    const canonicalOperation = storeOperation ?? (isConstruct ? 'construct' : 'query');
+    return this.runStoreWork(canonicalOperation, options, async (lifecycleSignal) => {
       const effectiveOptions: SparqlHttpQueryOptions = {
         ...options,
         signal: lifecycleSignal,
       };
       const startedAt = this.now();
       throwIfAborted(lifecycleSignal);
-      const trimmed = sparql.trim();
-      const upper = trimmed.toUpperCase();
-      const isAsk = upper.startsWith('ASK');
-      const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
 
       try {
         if (isConstruct) {
-          return await this.queryConstruct(trimmed, effectiveOptions);
+          return await this.queryConstruct(trimmed, effectiveOptions, canonicalOperation);
         }
 
         return await this.postQuery(
           trimmed,
           'application/sparql-results+json',
           'query',
+          canonicalOperation,
           effectiveOptions,
           async (res) => {
             if (!res.ok) {
               const text = await readSparqlResponseText(res, {
                 maxResponseBytes: effectiveOptions.maxResponseBytes,
                 managedOxigraph: this.managedOxigraph,
-                operation: 'query',
+                operation: canonicalOperation,
                 tolerateReadFailure: true,
               });
               throw new SparqlHttpResponseError('query', res.status, text.slice(0, 300));
@@ -851,7 +874,7 @@ export class SparqlHttpStore implements TripleStore {
             const text = await readSparqlResponseText(res, {
               maxResponseBytes: effectiveOptions.maxResponseBytes,
               managedOxigraph: this.managedOxigraph,
-              operation: 'query',
+              operation: canonicalOperation,
             });
             const json = JSON.parse(text) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
 
@@ -876,18 +899,23 @@ export class SparqlHttpStore implements TripleStore {
     });
   }
 
-  private async queryConstruct(sparql: string, options?: SparqlHttpQueryOptions): Promise<ConstructResult> {
+  private async queryConstruct(
+    sparql: string,
+    options: SparqlHttpQueryOptions | undefined,
+    storeOperation: StoreOperation,
+  ): Promise<ConstructResult> {
     return this.postQuery(
       sparql,
       'application/n-quads, text/n-quads',
       'construct',
+      storeOperation,
       options,
       async (res) => {
         if (!res.ok) {
           const text = await readSparqlResponseText(res, {
             maxResponseBytes: options?.maxResponseBytes,
             managedOxigraph: this.managedOxigraph,
-            operation: 'construct',
+            operation: storeOperation,
             tolerateReadFailure: true,
           });
           throw new SparqlHttpResponseError('construct', res.status, text.slice(0, 300));
@@ -895,7 +923,7 @@ export class SparqlHttpStore implements TripleStore {
         const text = await readSparqlResponseText(res, {
           maxResponseBytes: options?.maxResponseBytes,
           managedOxigraph: this.managedOxigraph,
-          operation: 'construct',
+          operation: storeOperation,
         });
         const quads = parseNQuadsTextTolerant(text);
         return { type: 'quads', quads };
@@ -904,9 +932,10 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    const r = await this.query(
+    const r = await this.queryWithOperation(
       `ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`,
       { ...options, source: options?.source ?? 'sparql-http.hasGraph' },
+      'hasGraph',
     );
     return r.type === 'boolean' && r.value;
   }
@@ -951,9 +980,10 @@ export class SparqlHttpStore implements TripleStore {
     // Index-read enumeration shared with OxigraphStore — see the rationale on
     // NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY (O(#graphs) vs the legacy O(#quads)
     // scan; FILTER EXISTS preserves the non-empty-only contract).
-    const r = await this.query(
+    const r = await this.queryWithOperation(
       NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY,
       { ...options, source: options?.source ?? 'sparql-http.listGraphs' },
+      'listGraphs',
     );
     return r.type === 'bindings'
       ? r.bindings
@@ -992,10 +1022,14 @@ export class SparqlHttpStore implements TripleStore {
     const sparql = graphUri
       ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`
       : `SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`;
-    const r = await this.query(sparql, {
-      ...options,
-      source: options?.source ?? 'sparql-http.countQuads',
-    });
+    const r = await this.queryWithOperation(
+      sparql,
+      {
+        ...options,
+        source: options?.source ?? 'sparql-http.countQuads',
+      },
+      'countQuads',
+    );
     if (r.type === 'bindings' && r.bindings.length > 0) {
       const c = String(r.bindings[0].c ?? '');
       const stripped = c.replace(/^"|"$/g, '');

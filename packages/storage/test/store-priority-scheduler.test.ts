@@ -242,6 +242,71 @@ describe('StorePriorityScheduler', () => {
     });
   });
 
+  it('binds canonical operations at both scheduler-owned admission rejection sites', async () => {
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 1,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+      backgroundReservedSlots: 0,
+      queueLimits: 1,
+      queueWaitTimeoutMs: 10,
+    });
+    let release!: () => void;
+    const blocker = scheduler.run('normal', 'observability.blocker', async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+    });
+    const expires = scheduler.run(
+      'normal',
+      'observability.waiting',
+      async () => undefined,
+      undefined,
+      { storeOperation: 'replaceGraph' },
+    );
+
+    await expect(scheduler.run(
+      'normal',
+      'observability.rejected',
+      async () => undefined,
+      undefined,
+      { storeOperation: 'hasGraph' },
+    )).rejects.toMatchObject({
+      reason: 'queue_full',
+      operation: 'observability.rejected',
+      storeOperation: 'hasGraph',
+      outcome: 'not_started',
+    });
+
+    await expect(expires).rejects.toMatchObject({
+      reason: 'queue_wait_timeout',
+      operation: 'observability.waiting',
+      storeOperation: 'replaceGraph',
+      outcome: 'not_started',
+    });
+    release();
+    await blocker;
+  });
+
+  it('does not rewrite a busy error thrown by work after admission', async () => {
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0 });
+    const nested = new StoreSchedulerBusyError(
+      'queue_wait_timeout',
+      'normal',
+      'nested.hasGraph',
+      { storeOperation: 'hasGraph' },
+    );
+
+    const outcome = scheduler.run(
+      'normal',
+      'outer.replaceGraph',
+      async () => { throw nested; },
+      undefined,
+      { storeOperation: 'replaceGraph' },
+    );
+
+    await expect(outcome).rejects.toBe(nested);
+    expect(nested.storeOperation).toBe('hasGraph');
+  });
+
   it('preserves queue admission settings in the deprecated positional constructor', async () => {
     vi.useFakeTimers();
     let releaseNormal1: (() => void) | undefined;

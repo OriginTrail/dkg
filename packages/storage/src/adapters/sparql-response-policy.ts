@@ -1,5 +1,6 @@
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
+import type { StoreOperation } from '../store-operation-outcome.js';
 
 // Oxigraph 0.5.x appends this evaluator error to an already-started
 // SELECT/CONSTRUCT response when `serve --timeout-s` cancels the query.
@@ -8,7 +9,7 @@ const MANAGED_OXIGRAPH_CANCELLATION_SUFFIX = 'The SPARQL operation has been canc
 export interface SparqlResponseTextOptions {
   maxResponseBytes?: number;
   managedOxigraph?: boolean;
-  operation: string;
+  operation: StoreOperation;
   tolerateReadFailure?: boolean;
 }
 
