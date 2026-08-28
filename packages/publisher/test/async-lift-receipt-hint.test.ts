@@ -317,10 +317,13 @@ describe('async-lift receipt-hint lane', () => {
     });
 
     try {
-      // The pass must RETURN despite the hung resolver (vitest's own row timeout is the
-      // discriminator against a hang), report the hinted job as pending, and mutate nothing.
+      // The pass must return NEAR its configured budget (50ms here; the 1s ceiling is a 20x
+      // margin for CI wall-clock noise, still far below any accidental multi-second deadline -
+      // r9 3877850648), report the hinted job as pending, and mutate nothing.
+      const startedAt = Date.now();
       expect(await publisher.reconciliationScheduling.reconcile())
         .toEqual({ reconciled: 0, pendingWork: true });
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
       expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
       await expectWalletLock('wallet-1', 'held');
     } finally {
@@ -732,5 +735,52 @@ describe('async-lift receipt-hint lane', () => {
     expect(proofAsks).toBe(1);
     expect(recoveryAsks).toBe(1);
     expect(hints.has(jobId)).toBe(false);
+  });
+
+  it('does not release on a hint when the handler has no lifecycle finalizer', async () => {
+    // r9 (3877850638) - a handler may legally omit finalizeRecovered; the settle path then
+    // answers 'unsupported' and expects the wallet lock intact. Early release would strand an
+    // internally inconsistent held job, so hints are not even recorded for such a publisher:
+    // the job follows plain detached behavior with its lock held.
+    let hinted = false;
+    let releaseTail!: () => void;
+    const tailParked = new Promise<void>((resolve) => { releaseTail = resolve; });
+    const publisher = createPublisher({
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => (
+        { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
+      knowledgeAssetVmPublishHandler: {
+        // Deliberately NO finalizeRecovered - valid under the public type.
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            operationKind: 'create',
+          });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          hinted = true;
+          await tailParked;
+        },
+      } as never,
+    });
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.processNext('wallet-1');
+    await waitForCondition(() => hinted, 'the executor never fired the hint');
+
+    try {
+      await publisher.reconcileTransactions();
+      await publisher.reconcileTransactions();
+      // No early release, no included stamp: the wallet lock stays with the tx-bearing job.
+      expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+      await expectWalletLock('wallet-1', 'held');
+    } finally {
+      releaseTail();
+    }
   });
 });

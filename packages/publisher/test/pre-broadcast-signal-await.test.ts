@@ -45,6 +45,13 @@ const NONCE = 19;
 class SignalRecordingChain extends MockChainAdapter {
   sent = false;
   hookSettled = false;
+  /** r9 (3877850653) - order log for hook-vs-post-receipt-chain-op assertions. */
+  readonly order: string[] = [];
+
+  override async getLatestMerkleRootPublisher(kaId: bigint): Promise<string | null> {
+    this.order.push('post-receipt-chain-op');
+    return super.getLatestMerkleRootPublisher(kaId);
+  }
 
   constructor() {
     super('mock:31337', AUTHOR);
@@ -60,6 +67,7 @@ class SignalRecordingChain extends MockChainAdapter {
     await params.onBroadcastAccepted?.({ txHash: TX_HASH, nonce: NONCE });
     this.hookSettled = true;
     this.sent = true;
+    this.order.push('sent');
     return { success: true, hash: TX_HASH, blockNumber: 1 } as TxResult;
   }
 }
@@ -155,11 +163,18 @@ describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
       quads,
       precomputedUpdateAttestation,
       onPublishConfirmed: (confirmation) => {
+        chain.order.push('confirmed');
         confirmations.push({ txHash: confirmation.txHash, at: store.query(QUAD_QUERY) });
       },
     });
 
     expect(confirmations.map((c) => c.txHash)).toEqual([TX_HASH]);
+    // r9 (3877850653) - the hook precedes the update path's first post-receipt chain
+    // operation (the latest-publisher lookup), anchored on the send marker (the lookups also
+    // run pre-broadcast).
+    const afterSend = chain.order.slice(chain.order.indexOf('sent') + 1);
+    expect(afterSend[0]).toBe('confirmed');
+    expect(afterSend).toContain('post-receipt-chain-op');
     const before = await confirmations[0].at;
     expect(before.type).toBe('bindings');
     if (before.type === 'bindings') expect(before.bindings).toEqual([]);
@@ -275,6 +290,13 @@ describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
  */
 class PublishSignalRecordingChain extends MockChainAdapter {
   sent = false;
+  /** r9 (3877850653) - order log for hook-vs-post-receipt-chain-op assertions. */
+  readonly order: string[] = [];
+
+  override async getDKGKnowledgeAssetsAddress(): Promise<string> {
+    this.order.push('post-receipt-chain-op');
+    return super.getDKGKnowledgeAssetsAddress();
+  }
 
   constructor() {
     super('mock:31337', AUTHOR);
@@ -284,7 +306,11 @@ class PublishSignalRecordingChain extends MockChainAdapter {
     await params.onBroadcast?.({ txHash: TX_HASH, nonce: NONCE });
     await params.onBroadcastAccepted?.({ txHash: TX_HASH, nonce: NONCE });
     this.sent = true;
-    return super.createKnowledgeAssets(params);
+    // The marker lands AFTER the super call: the mock builds its result with its own internal
+    // address lookup, and the boundary under test is the RECEIPT RETURN, not the send.
+    const result = await super.createKnowledgeAssets(params);
+    this.order.push('sent');
+    return result;
   }
 }
 
@@ -366,10 +392,20 @@ describe('DKGPublisher.publish awaits the pre-broadcast signal [GH#2270]', () =>
 
     await publisher.publish({
       ...(await publishArgs()),
-      onPublishConfirmed: () => { atFire.push(store.query(QUAD_QUERY)); },
+      onPublishConfirmed: () => {
+        chain.order.push('confirmed');
+        atFire.push(store.query(QUAD_QUERY));
+      },
     });
 
     expect(atFire).toHaveLength(1);
+    // r9 (3877850653) - the hook also precedes the FIRST post-receipt chain operation
+    // (the knowledge-assets address lookup): a regression parking the hint behind a slow RPC
+    // cannot stay green on store-order alone. The lookups also run pre-broadcast, so the
+    // ordering is anchored on the send marker.
+    const afterSend = chain.order.slice(chain.order.indexOf('sent') + 1);
+    expect(afterSend[0]).toBe('confirmed');
+    expect(afterSend).toContain('post-receipt-chain-op');
     const before = await atFire[0];
     expect(before.type).toBe('bindings');
     if (before.type === 'bindings') expect(before.bindings).toEqual([]);

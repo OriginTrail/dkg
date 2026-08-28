@@ -1022,6 +1022,12 @@ export class TripleStoreAsyncLiftPublisher
           walletId,
           queuedLiftOperationKind(claimed),
         ) ?? true);
+      // r9 (3877850638) — early release additionally requires a lifecycle finalizer: without
+      // finalizeRecovered the settle path answers 'unsupported' and expects the wallet lock it
+      // would otherwise synchronize, so a hint-driven release would strand an internally
+      // inconsistent held job. Detachment itself is NOT gated on this (existing behavior).
+      const canReleaseOnReceiptHint = canDetachReceiptReconciliation
+        && this.knowledgeAssetVmPublishHandler?.finalizeRecovered !== undefined;
       const executionInput = {
         walletId,
         request,
@@ -1049,7 +1055,7 @@ export class TripleStoreAsyncLiftPublisher
           // reads while the executor finishes its local post-receipt tail. Never trusted as
           // evidence.
           onPublishConfirmed: (confirmation: { txHash: string }) => {
-            if (canDetachReceiptReconciliation) {
+            if (canReleaseOnReceiptHint) {
               this.recordExecutorProofHint(claimed.jobId, confirmation);
             }
             // Scheduling-only: an inherited listener failure — synchronous or an async
