@@ -1,10 +1,10 @@
 /**
- * PR #2373 r2 (3879930153) — the chain-proof retry schedule tested DIRECTLY: pure timing
- * behavior (ladder growth, both ceilings, ownership, recency, cleanup) no longer needs the
- * full publisher lifecycle to be provable. The dispatcher integration rows in
- * async-lift-chain-proof-cadence.test.ts keep proving the wiring. Every row models passes
- * explicitly: `beginPass()` issues the ordering token a real dispatch pass obtains at its
- * inventory snapshot (PR #2380 r3 — tokens, not millisecond timestamps, order ownership).
+ * The chain-proof retry schedule tested DIRECTLY through its pass/turn protocol: rows model
+ * dispatch passes exactly as the publisher runs them — `beginPass` at the inventory snapshot,
+ * `observe` admitting turns, and only turns mutating. Stale passes and stale turns are real
+ * objects held across takeovers, so every concurrency claim is exercised with the same handles
+ * production code would hold. The dispatcher integration rows in
+ * async-lift-chain-proof-cadence.test.ts keep proving the wiring.
  */
 import { describe, expect, it } from 'vitest';
 import { ChainProofRetrySchedule } from '../src/chain-proof-retry-schedule.js';
@@ -16,16 +16,15 @@ function harness(rand: () => number = () => 0) {
     schedule,
     advance: (ms: number) => { now += ms; },
     now: () => now,
-    /** One healthy pass turn: observe (asserting dueness) and defer in the same pass. */
+    /** One healthy pass turn: observe (asserting admission) and defer in the same pass. */
     turn(jobId: string, identity: string, cadence: 'default' | 'awaiting-confirmations' = 'default') {
-      const token = schedule.beginPass();
-      expect(schedule.isDue(jobId, identity, now, token)).toBe(true);
-      schedule.defer(jobId, identity, cadence, token);
+      const turn = schedule.beginPass(now).observe(jobId, identity);
+      expect(turn).not.toBeNull();
+      turn!.defer(cadence);
     },
-    /** Observe only, on a fresh pass token. */
+    /** Observe on a fresh pass: true when a turn was admitted (due). */
     due(jobId: string, identity: string) {
-      const token = schedule.beginPass();
-      return schedule.isDue(jobId, identity, now, token);
+      return schedule.beginPass(now).observe(jobId, identity) !== null;
     },
   };
 }
@@ -112,58 +111,78 @@ describe('ChainProofRetrySchedule', () => {
     expect(h.due('job', B)).toBe(true);
   });
 
-  it('a settled job leaves no schedule behind', () => {
+  it('a settled turn leaves no schedule behind', () => {
     const h = harness();
-    h.turn('job', A);
-    h.schedule.settled('job', A);
+    const turn = h.schedule.beginPass(h.now()).observe('job', A);
+    turn!.defer('default');
+    h.advance(30_000);
+    const next = h.schedule.beginPass(h.now()).observe('job', A);
+    next!.settled();
     expect(h.schedule.retainedEntryCount()).toBe(0);
     expect(h.due('job', A)).toBe(true);
   });
 
-  it('stale echoes are DROPPED, not retained: the map stays bounded at one entry per job', () => {
-    // r8 (🔴 3882533655) — retention is the observable, not just the successor's cadence.
+  it('stale turns held across a takeover can neither reset nor retain — the map stays bounded', () => {
+    // Retention is the observable, not just the successor's cadence: five stale turns from an
+    // old pass all defer late; the count stays at one and B's backoff is untouched.
     const h = harness();
-    const staleToken = h.schedule.beginPass();
-    h.turn('job', B);
-    for (let i = 0; i < 5; i += 1) {
-      h.schedule.defer('job', `broadcast|recovery_lookup_timeout|${100 + i}|fp1`, 'default', staleToken);
-    }
-    expect(h.schedule.retainedEntryCount()).toBe(1); // only B's entry stands
+    const stalePass = h.schedule.beginPass(h.now());
+    const staleTurns = [A, `${A}x1`, `${A}x2`, `${A}x3`, `${A}x4`].map((id) => {
+      const turn = stalePass.observe('job', id);
+      return turn;
+    });
+    h.turn('job', B); // B takes ownership and defers
+    for (const turn of staleTurns) turn?.defer('default');
+    expect(h.schedule.retainedEntryCount()).toBe(1);
     h.advance(29_999);
-    expect(h.due('job', B)).toBe(false); // and it is B's, untouched
-    h.schedule.settled('job', B);
-    expect(h.schedule.retainedEntryCount()).toBe(0);
+    expect(h.due('job', B)).toBe(false);
+    h.schedule.beginPass(h.now()); // no-op pass; B still owns
+    h.advance(1);
+    expect(h.due('job', B)).toBe(true);
+  });
+
+  it('a stale settlement cannot clear a schedule the successor earned', () => {
+    // PR #2380 r4 (🟡 3883088122) — the restored foreign-settlement regression: a turn admitted
+    // for the predecessor settles AFTER the successor took over and deferred. The write-time
+    // identity check drops it whole: entry retained, B's due time intact.
+    const h = harness();
+    const staleTurn = h.schedule.beginPass(h.now()).observe('job', A);
+    expect(staleTurn).not.toBeNull();
+    h.turn('job', B); // successor takes ownership and earns its 30s
+    staleTurn!.settled(); // predecessor's late settlement: no-op
+    expect(h.schedule.retainedEntryCount()).toBe(1);
+    h.advance(29_999);
+    expect(h.due('job', B)).toBe(false); // B still deferred
+    h.advance(1);
+    expect(h.due('job', B)).toBe(true);
   });
 
   it('a stale echo cannot claim the slot — even from a COMPLETELY EMPTY schedule', () => {
-    // PR #2380 r3 (🔴 3882984347 / 🟡 3882984707) — first contact must install ownership too:
-    // overlapping first passes observe A then B before either completes; the late A deferral
-    // is rejected, B's first backoff lands, and settlement leaves no A leak behind.
+    // Overlapping first passes observe A then B before either completes; the late A deferral
+    // is rejected, B's first backoff lands, and settlement leaves no residue.
     const h = harness();
-    const tokenA = h.schedule.beginPass(); // stale pass (older inventory: incarnation A)
-    const tokenB = h.schedule.beginPass(); // newer pass (incarnation B)
-    expect(h.schedule.isDue('job', A, h.now(), tokenA)).toBe(true); // installs ready(A)
-    expect(h.schedule.isDue('job', B, h.now(), tokenB)).toBe(true); // newer: ready(B)
-    h.schedule.defer('job', A, 'default', tokenA); // stale completion: foreign-dropped
-    h.schedule.defer('job', B, 'default', tokenB); // B's first backoff LANDS
+    const stalePass = h.schedule.beginPass(h.now()); // older inventory: incarnation A
+    const newerPass = h.schedule.beginPass(h.now()); // newer inventory: incarnation B
+    const staleTurn = stalePass.observe('job', A);
+    expect(staleTurn).not.toBeNull(); // first contact installs ready(A)
+    const newerTurn = newerPass.observe('job', B);
+    expect(newerTurn).not.toBeNull(); // newer token: ready(B)
+    staleTurn!.defer('default'); // stale completion: foreign-dropped
+    newerTurn!.defer('default'); // B's first backoff LANDS
     expect(h.schedule.retainedEntryCount()).toBe(1);
     h.advance(29_999);
-    expect(h.due('job', B)).toBe(false); // B's 30s intact
+    expect(h.due('job', B)).toBe(false);
     h.advance(1);
     expect(h.due('job', B)).toBe(true);
-    h.schedule.settled('job', B);
-    expect(h.schedule.retainedEntryCount()).toBe(0); // no stale-A residue possible
   });
 
   it('a repeat observation of the current owner REFRESHES recency — a stale pass cannot slip between', () => {
-    // PR #2380 r3 (🔴 3882984503) — without the refresh, B's entry keeps its original token and
-    // a stale pass issued later than that (but earlier than B's newest observation) reclaims.
     const h = harness();
-    h.turn('job', B); // B deferred with token t1
-    const staleTokenA = h.schedule.beginPass(); // t2: stale pass for A
-    const freshTokenB = h.schedule.beginPass(); // t3: newer pass observing B again
-    expect(h.schedule.isDue('job', B, h.now(), freshTokenB)).toBe(false); // refreshes to t3
-    expect(h.schedule.isDue('job', A, h.now(), staleTokenA)).toBe(false); // t2 < t3: refused
+    h.turn('job', B); // B deferred under token t1
+    const stalePass = h.schedule.beginPass(h.now()); // t2: stale pass for A
+    const freshPass = h.schedule.beginPass(h.now()); // t3: newer pass observing B again
+    expect(freshPass.observe('job', B)).toBeNull(); // not due, but recency refreshed to t3
+    expect(stalePass.observe('job', A)).toBeNull(); // t2 < t3: refused
     h.advance(29_999);
     expect(h.due('job', B)).toBe(false); // B's backoff intact
     h.advance(1);
@@ -171,16 +190,16 @@ describe('ChainProofRetrySchedule', () => {
   });
 
   it('a STALE due check cannot reclaim ownership from a newer incarnation — token order, no clock needed', () => {
-    // PR #2380 r2 (🔴 3882793685) + r3 (🟡 3882984696): the ordering authority is the token, so
-    // the same-millisecond tie the clock allowed cannot occur — this row never advances the
-    // clock at all.
+    // The ordering authority is the token, so the same-millisecond tie a clock would allow
+    // cannot occur — this row never advances the clock at all.
     const h = harness();
     h.turn('job', A); // the slot is A's
-    const staleToken = h.schedule.beginPass();
-    const newerToken = h.schedule.beginPass();
-    expect(h.schedule.isDue('job', B, h.now(), newerToken)).toBe(true); // B takes ownership
-    expect(h.schedule.isDue('job', A, h.now(), staleToken)).toBe(false); // stale pass refused
-    h.schedule.defer('job', B, 'default', newerToken); // B's deferral is NOT foreign-dropped
+    const stalePass = h.schedule.beginPass(h.now());
+    const newerPass = h.schedule.beginPass(h.now());
+    const newerTurn = newerPass.observe('job', B);
+    expect(newerTurn).not.toBeNull(); // B takes ownership
+    expect(stalePass.observe('job', A)).toBeNull(); // stale pass refused
+    newerTurn!.defer('default'); // B's deferral is NOT foreign-dropped
     h.advance(29_999);
     expect(h.due('job', B)).toBe(false);
     h.advance(1);

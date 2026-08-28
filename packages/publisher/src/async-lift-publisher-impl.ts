@@ -2,7 +2,11 @@ import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import { isPendingPublishTransactionStatus } from '@origintrail-official/dkg-chain';
-import { ChainProofRetrySchedule } from './chain-proof-retry-schedule.js';
+import {
+  ChainProofRetrySchedule,
+  type ChainProofSchedulePass,
+  type ChainProofScheduleTurn,
+} from './chain-proof-retry-schedule.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -2123,6 +2127,10 @@ export class TripleStoreAsyncLiftPublisher
     // lane re-reads its candidates under the transition lock before acting, so the shared
     // snapshot only selects candidates and staleness cannot change a disposition.
     const inventory = await this.list();
+    // PR #2380 r4 (🔴 3883088105) — the chain-proof pass scope is opened HERE, synchronously
+    // with the inventory snapshot, so its ordering token reflects snapshot order. Opening it at
+    // the dispatcher would order by dispatcher ARRIVAL, which overlapping passes can invert.
+    const chainProofPass = this.chainProofRetrySchedule.beginPass(this.now());
     let reconciled = await this.recoverInterruptedPreBroadcastJobs(inventory);
     // Same actionability rule the scheduling outlook answers with: executor-owned jobs are
     // skipped up front rather than each burning a transition-lock turn to be skipped deeper in.
@@ -2248,7 +2256,7 @@ export class TripleStoreAsyncLiftPublisher
         .map((job) => (refreshed.has(job.jobId) ? refreshed.get(job.jobId) ?? null : job))
         .filter((job): job is LiftJob => job !== null);
     }
-    reconciled += await this.dispatchFailedJobsOnChainProof(dispatcherInventory);
+    reconciled += await this.dispatchFailedJobsOnChainProof(dispatcherInventory, chainProofPass);
     return { reconciled, pendingWork: remainingLive > 0 || hintedUnresolved > 0 };
   }
 
@@ -2340,7 +2348,10 @@ export class TripleStoreAsyncLiftPublisher
     return this.heldJobSettlement(job, walletId, liftJobOperationKindMarker(job));
   }
 
-  private async dispatchFailedJobsOnChainProof(inventory: readonly LiftJob[]): Promise<number> {
+  private async dispatchFailedJobsOnChainProof(
+    inventory: readonly LiftJob[],
+    chainProofPass: ChainProofSchedulePass,
+  ): Promise<number> {
     // The dispatcher RE-QUEUES work (a proven-absent job goes back to 'accepted') and spends a
     // chain read per held job per tick. `pause()` means this node is not driving publishes, so it
     // must not do either. The interrupted half above deliberately keeps running while paused: it
@@ -2371,12 +2382,9 @@ export class TripleStoreAsyncLiftPublisher
       .map((job) => ({ job, lookup: this.chainProofLookupFor(job) }))
       .filter((candidate): candidate is { job: PersistedFailedJob; lookup: AsyncLiftChainProofLookup } => candidate.lookup !== null)
       .map(({ job, lookup }) => ({ job, lookup, identity: this.heldChainProofIncarnationKey(job, lookup) }));
-    // The pass ordering token (PR #2380 r3): issued at THIS pass's inventory snapshot, it is
-    // the schedule's ownership-recency authority — millisecond timestamps can tie between
-    // overlapping passes, tokens cannot.
-    const passToken = this.chainProofRetrySchedule.beginPass();
-    const dueJobs = withEvidence.filter(({ job, identity }) =>
-      this.chainProofRetrySchedule.isDue(job.jobId, identity, startedAt, passToken));
+    const dueJobs = withEvidence
+      .map((candidate) => ({ ...candidate, turn: chainProofPass.observe(candidate.job.jobId, candidate.identity) }))
+      .filter((candidate): candidate is typeof candidate & { turn: ChainProofScheduleTurn } => candidate.turn !== null);
 
     // r19 (🔴 3816490915) — the lookup is derived BEFORE the batch is taken, because a job that
     // cannot form one costs no round trip and must therefore cost no batch slot either. Deriving
@@ -2398,7 +2406,7 @@ export class TripleStoreAsyncLiftPublisher
     let dispatched = 0;
     try {
       // Bound 2 — at most one batch of RPCs per pass.
-      for (const { job, lookup, identity } of dispatchable.slice(0, Math.max(0, this.chainProofDispatchBatchSize))) {
+      for (const { job, lookup, turn } of dispatchable.slice(0, Math.max(0, this.chainProofDispatchBatchSize))) {
         // Bound 3 — the wall-clock ceiling. Batch size bounds the CALL COUNT; when each call is slow
         // it is time that startup readiness actually depends on. Checked before each turn so a pass
         // cannot start a new round trip once the budget is spent; the rest are asked next cadence.
@@ -2413,7 +2421,7 @@ export class TripleStoreAsyncLiftPublisher
           // the identity re-read; r7 3882283830 — the helper reports only what this loop
           // consumes: the settled count. Stale and deferred turns are 0 by construction, and
           // their scheduling is the helper's/schedule's own business).
-          dispatched += await this.dispatchOneHeldJob(job, lookup, identity, passToken, resolver, deadline);
+          dispatched += await this.dispatchOneHeldJob(job, lookup, turn, resolver, deadline);
         } catch {
           // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
           // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
@@ -2421,7 +2429,7 @@ export class TripleStoreAsyncLiftPublisher
           // The exception path never re-read the record, so this deferral may be a superseded
           // echo — which the schedule's incarnation keying makes harmless BY CONSTRUCTION (r6
           // 3882185608): it can only address this incarnation's own entry, never the successor's.
-          this.chainProofRetrySchedule.defer(job.jobId, identity, 'default', passToken);
+          turn.defer('default');
           continue;
         }
       }
@@ -2438,8 +2446,7 @@ export class TripleStoreAsyncLiftPublisher
   private async dispatchOneHeldJob(
     job: PersistedFailedJob,
     lookup: AsyncLiftChainProofLookup,
-    identity: string,
-    passToken: number,
+    turn: ChainProofScheduleTurn,
     resolver: NonNullable<TripleStoreAsyncLiftPublisher['chainProofResolver']>,
     deadline: AbortController,
   ): Promise<number> {
@@ -2458,7 +2465,7 @@ export class TripleStoreAsyncLiftPublisher
     if (resolution === null) {
       // Deadline established nothing. Echo-safety is the schedule's key model (r6 3882185608):
       // this write can only address this incarnation's own entry.
-      this.chainProofRetrySchedule.defer(job.jobId, identity, 'default', passToken);
+      turn.defer('default');
       return 0;
     }
 
@@ -2483,16 +2490,13 @@ export class TripleStoreAsyncLiftPublisher
       if (!this.isSameHeldFailedJob(job, current, lookup)) return 0;
       const settled = await this.applyChainProofDisposition(current, scope, lookup, resolution, deadline);
       if (settled > 0) {
-        this.chainProofRetrySchedule.settled(job.jobId, identity);
+        turn.settled();
         return settled;
       }
       // Scheduling-only, consumed exactly here — the phase never reaches
       // `applyChainProofDisposition`, whose policy input remains the verdict STATUS alone.
-      this.chainProofRetrySchedule.defer(
-        job.jobId,
-        identity,
+      turn.defer(
         resolution.status === 'pending-awaiting-confirmation' ? 'awaiting-confirmations' : 'default',
-        passToken,
       );
       return 0;
     });
