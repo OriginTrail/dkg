@@ -2346,7 +2346,9 @@ export class TripleStoreAsyncLiftPublisher
     // must not do either. The interrupted half above deliberately keeps running while paused: it
     // repairs jobs this node has ALREADY broadcast, where stopping would leave a live transaction
     // unreconciled — the phantom the pre-send write-ahead exists to make visible.
-    if (this.paused || !this.chainProofResolver) return 0;
+    if (this.paused) return 0;
+    const resolver = this.chainProofResolver;
+    if (!resolver) return 0;
 
     // r18 (🔴 3816322914) — this pass costs one RPC round trip PER HELD JOB, and
     // `AsyncLiftRunner.start()` awaits `recover()`. Unbounded, an incident that leaves a large
@@ -2403,24 +2405,19 @@ export class TripleStoreAsyncLiftPublisher
         // A job whose turn ended in an exception simply stays held and is asked again next tick,
         // which is the same disposition as any other unestablished answer.
         try {
-          // Scheduling now happens INSIDE dispatchOneHeldJob's claim-locked section (r5
-          // 3882010299): verification and mutation share one ownership boundary, so a verdict
-          // that was current at the re-read cannot stomp a successor's schedule written between
-          // an unlocked check and a later mutation. The outer loop only counts.
-          const outcome = await this.dispatchOneHeldJob(job, lookup, identity, deadline);
-          if (outcome.kind === 'settled') dispatched += outcome.jobs;
-          // 'stale': the verdict was about a record that no longer exists — nothing was written,
-          // not even the attempt count. The schedule's identity awareness covers the rest
-          // (r2 3879930149): a predecessor's ladder neither delays the successor's dueness nor
-          // seeds its attempt count.
+          // Scheduling happens INSIDE dispatchOneHeldJob (r5 3882010299 — claim-locked with
+          // the identity re-read; r7 3882283830 — the helper reports only what this loop
+          // consumes: the settled count. Stale and deferred turns are 0 by construction, and
+          // their scheduling is the helper's/schedule's own business).
+          dispatched += await this.dispatchOneHeldJob(job, lookup, identity, resolver, deadline);
         } catch {
           // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
           // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
           // every pass and crowd out jobs that could actually settle.
-          // UNVERIFIED (r4 3881841010): the exception path never re-read the record, so this
-          // deferral may be from a superseded incarnation. It must not touch a schedule the
-          // successor has earned — it lands only on an absent entry or this incarnation's own.
-          this.chainProofRetrySchedule.deferUnverified(job.jobId, identity, 'default');
+          // The exception path never re-read the record, so this deferral may be a superseded
+          // echo — which the schedule's incarnation keying makes harmless BY CONSTRUCTION (r6
+          // 3882185608): it can only address this incarnation's own entry, never the successor's.
+          this.chainProofRetrySchedule.defer(job.jobId, identity, 'default');
           continue;
         }
       }
@@ -2438,16 +2435,9 @@ export class TripleStoreAsyncLiftPublisher
     job: PersistedFailedJob,
     lookup: AsyncLiftChainProofLookup,
     identity: string,
+    resolver: NonNullable<TripleStoreAsyncLiftPublisher['chainProofResolver']>,
     deadline: AbortController,
-  ): Promise<
-    | { kind: 'settled'; jobs: number }
-    | { kind: 'deferred' }
-    | { kind: 'stale' }
-  > {
-    if (!this.chainProofResolver) {
-      this.chainProofRetrySchedule.deferUnverified(job.jobId, identity, 'default');
-      return { kind: 'deferred' };
-    }
+  ): Promise<number> {
     // r19 (🔴 3816490904) — the signal goes to the resolver AND the wait is bounded here. A
     // resolver that honours the signal settles promptly and releases its socket; one that ignores
     // it is abandoned rather than awaited, which is worse for that socket but leaves the ceiling
@@ -2457,13 +2447,14 @@ export class TripleStoreAsyncLiftPublisher
     // semantics, and a successful lookup now removes its listener from the shared pass
     // controller instead of leaving it attached until the pass aborts.
     const resolution = await resolveWithinAbort(
-      (sig) => this.chainProofResolver!(lookup, sig ? { signal: sig } : undefined),
+      (sig) => resolver(lookup, sig ? { signal: sig } : undefined),
       deadline.signal,
     );
     if (resolution === null) {
-      // Deadline established nothing and there was no re-read: unverified deferral only.
-      this.chainProofRetrySchedule.deferUnverified(job.jobId, identity, 'default');
-      return { kind: 'deferred' };
+      // Deadline established nothing. Echo-safety is the schedule's key model (r6 3882185608):
+      // this write can only address this incarnation's own entry.
+      this.chainProofRetrySchedule.defer(job.jobId, identity, 'default');
+      return 0;
     }
 
     // GH#2270 PR-3 r4 — the verdict was earned across an RPC await, against a SNAPSHOT of the
@@ -2481,14 +2472,14 @@ export class TripleStoreAsyncLiftPublisher
       // transaction as the re-read, so verification and mutation are one ownership boundary: a
       // replace-and-re-fail serializes on this boundary, and a verdict that was current at the
       // re-read stays current through its own scheduling write.
-      if (transaction.kind === 'missing') return { kind: 'stale' as const };
+      if (transaction.kind === 'missing') return 0;
       const { current, scope } = transaction;
-      if (!isFailedJob(current)) return { kind: 'stale' as const };
-      if (!this.isSameHeldFailedJob(job, current, lookup)) return { kind: 'stale' as const };
+      if (!isFailedJob(current)) return 0;
+      if (!this.isSameHeldFailedJob(job, current, lookup)) return 0;
       const settled = await this.applyChainProofDisposition(current, scope, lookup, resolution, deadline);
       if (settled > 0) {
         this.chainProofRetrySchedule.settled(job.jobId, identity);
-        return { kind: 'settled' as const, jobs: settled };
+        return settled;
       }
       // Scheduling-only, consumed exactly here — the phase never reaches
       // `applyChainProofDisposition`, whose policy input remains the verdict STATUS alone.
@@ -2497,7 +2488,7 @@ export class TripleStoreAsyncLiftPublisher
         identity,
         resolution.status === 'pending-awaiting-confirmation' ? 'awaiting-confirmations' : 'default',
       );
-      return { kind: 'deferred' as const };
+      return 0;
     });
   }
 

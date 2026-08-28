@@ -295,6 +295,20 @@ export type PublishTransactionResolution =
   | { status: 'not-found' };
 
 /**
+ * The chain observations whose meaning is IDENTICAL on every consumer surface (r7 3882283837):
+ * a mined revert, a mined-but-unrecognized publish, and the two pending shapes say the same
+ * thing wherever they appear, so higher layers may embed them verbatim. Deliberately EXCLUDES
+ * `confirmed` (the publisher maps it to proof-carrying `recovered`) and `not-found` (the
+ * publisher's absence member is PROOF-QUALIFIED — its resolver only earns it behind the
+ * finality-snapshot rules — so that shape must be owned and documented at the resolver
+ * boundary, never inherited structurally).
+ */
+export type PublishTransactionObservation = Exclude<
+  PublishTransactionResolution,
+  { status: 'confirmed' } | { status: 'not-found' }
+>;
+
+/**
  * THE semantic category "still pending" in one place (r4 3881840996): consumers that care only
  * that no mined verdict exists yet — not which pending shape it is — use this predicate instead
  * of repeating the two-status disjunction. Deliberately a plain string predicate so publisher-

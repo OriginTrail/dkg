@@ -233,12 +233,69 @@ describe('GH#2270 chain-proof cadence', () => {
       expect(asks).toBe(5);
     });
 
+    it.each([
+      ['failedFromState', (t: Record<string, unknown>) => ({ ...t, failure: { ...(t.failure as object), failedFromState: 'included' } })],
+      ['failure.code', (t: Record<string, unknown>) => ({ ...t, failure: { ...(t.failure as object), code: 'recovery_chain_unavailable' } })],
+      ['failedAt absent', (t: Record<string, unknown>) => {
+        const timestamps = { ...(t.timestamps as Record<string, unknown>) };
+        delete timestamps.failedAt;
+        return { ...t, timestamps };
+      }],
+    ] as const)(
+      'every incarnation-key component discriminates: a mid-flight %s change makes the verdict stale',
+      async (_component, mutate) => {
+      // r7 (3882283845) — the production key (`heldChainProofIncarnationKey`) is exercised
+      // field by field: while the resolver is in flight the record is replaced with a variant
+      // differing in exactly ONE identity component, and the returning verdict is `not-found` —
+      // the one that would RESET a create if the stale fence failed. The fence holding means:
+      // the replacement stays `failed` (no reset applied), nothing is scheduled for it (the
+      // very next pass asks about the successor immediately), and the run continues on the
+      // successor's own incarnation.
+      let releaseFirst!: () => void;
+      const parked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        chainProofResolver: async () => {
+          asks += 1;
+          if (asks === 1) {
+            await parked;
+            return { status: 'not-found' };
+          }
+          return { status: 'inconclusive' };
+        },
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      const firstPass = publisher.recover();
+      while (asks === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+
+      const current = await publisher.getStatus(jobId);
+      const successor = mutate(current as unknown as Record<string, unknown>);
+      const { jobRef, jobQuads } = serializeJobRecord(successor as never, DEFAULT_CONTROL_GRAPH_URI);
+      await (h.store as unknown as {
+        replaceSubject(graph: string, subject: string, quads: unknown): Promise<void>;
+      }).replaceSubject(DEFAULT_CONTROL_GRAPH_URI, jobRef, jobQuads);
+
+      releaseFirst();
+      await firstPass;
+
+      // The not-found verdict was discarded whole: no create reset, and nothing scheduled —
+      // the successor is immediately due on its own incarnation.
+      expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+      await publisher.recover();
+      expect(asks).toBe(2);
+      expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    });
+
     it("a stale predecessor's late PENDING verdict cannot reset the successor's earned backoff", async () => {
-      // r5 (3882010299) — the verified path's own race: pass A's resolver stalls and later
-      // returns a NORMAL pending verdict (not an exception) after the record was re-failed and
-      // the successor earned its 30s deferral. Scheduling now happens inside the same claim
-      // lock as the identity re-read, so A's verdict is recognized as stale THERE and writes
-      // nothing: the successor is quiet at 29s and asked exactly past its own due time.
+      // r5 (3882010299) / r6 (🔴 3882186065) — honest scope: this row pins the stale-DROP for a
+      // normal pending verdict (the replacement lands before A's re-read), not the re-read-to-
+      // mutation window itself. That window is closed structurally, twice over: the mutation
+      // happens inside the same claim transaction as the re-read, and the schedule is keyed by
+      // incarnation so a cross-incarnation write is unrepresentable — the isolation is proven
+      // directly by the schedule unit rows (echo-drop, foreign-settlement no-op).
       let releaseFirst!: () => void;
       const parked = new Promise<void>((resolve) => { releaseFirst = resolve; });
       let asks = 0;

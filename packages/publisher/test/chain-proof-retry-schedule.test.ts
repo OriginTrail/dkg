@@ -76,7 +76,9 @@ describe('ChainProofRetrySchedule', () => {
   it("a successor's first deferral starts the ladder at the base, not the predecessor's exponent", () => {
     const h = harness();
     for (let i = 0; i < 4; i += 1) h.schedule.defer('job', A, 'default'); // predecessor at attempt 4
-    h.schedule.defer('job', B, 'default'); // successor's FIRST deferral
+    // The inventory observes the successor (re-pointing the index and pruning A)...
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true);
+    h.schedule.defer('job', B, 'default'); // ...and its FIRST deferral is the base.
     h.advance(29_999);
     expect(h.schedule.isDue('job', B, h.now())).toBe(false);
     h.advance(1);
@@ -86,6 +88,7 @@ describe('ChainProofRetrySchedule', () => {
   it("a successor's own earned ladder is never clobbered — it continues on its own identity", () => {
     const h = harness();
     h.schedule.defer('job', A, 'default');
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true); // inventory observes the successor
     h.schedule.defer('job', B, 'default'); // successor attempt 1
     h.advance(30_000);
     h.schedule.defer('job', B, 'default'); // successor attempt 2: 60s
@@ -102,12 +105,15 @@ describe('ChainProofRetrySchedule', () => {
     expect(h.schedule.isDue('job', A, h.now())).toBe(true);
   });
 
-  it('an UNVERIFIED deferral from a superseded incarnation cannot touch what the successor earned', () => {
-    // r4 (3881841010) — the exception path has no re-read, so its deferral may be a late echo
-    // from a stale pass. The successor's entry (due time AND attempt count) must survive it.
+  it('a late echo deferral from a superseded incarnation is dropped whole — key model, no guards', () => {
+    // r4 (3881841010) / r6 (3882185608) — entries are keyed by incarnation and the index is
+    // re-pointed only by the inventory-driven due check, so an echo (an exception or verdict
+    // arriving after the record moved on) can address neither the successor's entry nor the
+    // index. The successor's due time AND attempt count survive by construction.
     const h = harness();
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true); // inventory observes the successor
     h.schedule.defer('job', B, 'default'); // successor earned attempt 1: due in 30s
-    h.schedule.deferUnverified('job', A, 'default'); // predecessor's late exception echo
+    h.schedule.defer('job', A, 'default'); // predecessor's late echo: dropped (foreign index)
     h.advance(29_999);
     expect(h.schedule.isDue('job', B, h.now())).toBe(false); // B's 30s intact, not reset
     h.advance(1);
@@ -120,23 +126,11 @@ describe('ChainProofRetrySchedule', () => {
     expect(h.schedule.isDue('job', B, h.now())).toBe(true);
   });
 
-  it('an UNVERIFIED deferral lands normally on an absent entry or its own', () => {
-    const h = harness();
-    h.schedule.deferUnverified('job', A, 'default'); // absent: attempt 1
-    h.advance(29_999);
-    expect(h.schedule.isDue('job', A, h.now())).toBe(false);
-    h.advance(1);
-    h.schedule.deferUnverified('job', A, 'default'); // own entry: attempt 2
-    h.advance(59_999);
-    expect(h.schedule.isDue('job', A, h.now())).toBe(false);
-    h.advance(1);
-    expect(h.schedule.isDue('job', A, h.now())).toBe(true);
-  });
-
   it('a late settlement echo cannot delete a schedule the successor earned', () => {
     const h = harness();
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true);
     h.schedule.defer('job', B, 'default');
-    h.schedule.settled('job', A); // foreign identity: no-op
+    h.schedule.settled('job', A); // foreign incarnation: deletes nothing of B's
     expect(h.schedule.isDue('job', B, h.now())).toBe(false); // B still deferred
   });
 });

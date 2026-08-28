@@ -33,7 +33,6 @@ import {
   DEFAULT_WALLET_LOCK_GRAPH_URI,
   jobSubject,
   serializeJob,
-  serializeJobRecord,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
 import {

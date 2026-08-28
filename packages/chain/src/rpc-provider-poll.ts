@@ -16,7 +16,7 @@
  * listeners.
  */
 
-import { withRetry } from '@origintrail-official/dkg-core';
+import { resolveWithinAbort, withRetry } from '@origintrail-official/dkg-core';
 
 export async function readAllProvidersWithTransientRetry<TProvider, TResult>(
   providers: readonly TProvider[],
@@ -27,32 +27,25 @@ export async function readAllProvidersWithTransientRetry<TProvider, TResult>(
     signal?: AbortSignal;
   },
 ): Promise<Array<TResult | null> | null> {
-  if (opts.signal?.aborted) return null;
-  let onAbort: (() => void) | undefined;
-  const aborted = opts.signal
-    ? new Promise<null>((resolve) => {
-        onAbort = () => resolve(null);
-        opts.signal?.addEventListener('abort', onAbort, { once: true });
-      })
-    : null;
-  try {
-    const withOneTransientRetry = (provider: TProvider) => withRetry(
-      () => readOne(provider),
-      {
-        maxAttempts: 2,
-        baseDelayMs: opts.retryDelayMs,
-        maxDelayMs: opts.retryDelayMs,
-        jitter: 0,
-        isRetryable: opts.isRetryable,
-        signal: opts.signal,
-      },
-    );
-    const poll = Promise.allSettled(providers.map(withOneTransientRetry))
-      .then((settled) => settled.map((r) => (r.status === 'fulfilled' ? r.value : null)));
-    const result = aborted ? await Promise.race([poll, aborted]) : await poll;
-    if (!result || opts.signal?.aborted) return null;
-    return result;
-  } finally {
-    if (onAbort) opts.signal?.removeEventListener('abort', onAbort);
-  }
+  // The abort race and its listener lifecycle are the SHARED boundary's job (r6 3882186074):
+  // this module keeps only provider-polling policy. `resolveWithinAbort` owns the pre-start
+  // check, the null-on-abort completion, and finally-removed listener hygiene.
+  const withOneTransientRetry = (provider: TProvider) => withRetry(
+    () => readOne(provider),
+    {
+      maxAttempts: 2,
+      baseDelayMs: opts.retryDelayMs,
+      maxDelayMs: opts.retryDelayMs,
+      jitter: 0,
+      isRetryable: opts.isRetryable,
+      signal: opts.signal,
+    },
+  );
+  const result = await resolveWithinAbort(
+    () => Promise.allSettled(providers.map(withOneTransientRetry))
+      .then((settled) => settled.map((r) => (r.status === 'fulfilled' ? r.value : null))),
+    opts.signal,
+  );
+  if (!result || opts.signal?.aborted) return null;
+  return result;
 }

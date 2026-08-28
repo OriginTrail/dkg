@@ -73,6 +73,33 @@ describe('readAllProvidersWithTransientRetry', () => {
     expect(outstanding()).toBe(0);
   });
 
+  it('an abort DURING the retry delay stops the retry — the signal reaches withRetry itself', async () => {
+    // r6 (3882185855) — distinguishes signal propagation into the retry primitive from the
+    // outer abort race: the first attempt fails transiently, the abort lands inside the retry
+    // delay, and after the delay would have elapsed the provider must NOT have been asked again.
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      let calls = 0;
+      const poll = readAllProvidersWithTransientRetry(
+        ['endpoint'],
+        async () => {
+          calls += 1;
+          throw Object.assign(new Error('blip'), { code: 'SERVER_ERROR' });
+        },
+        { retryDelayMs: 5_000, isRetryable: isContractViewRetryable, signal: controller.signal },
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(calls).toBe(1);
+      controller.abort();
+      await expect(poll).resolves.toBeNull();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(calls).toBe(1); // no post-abort provider call
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('retries a transient failure once per endpoint and settles the slot null past the budget', async () => {
     let firstCalls = 0;
     let secondCalls = 0;

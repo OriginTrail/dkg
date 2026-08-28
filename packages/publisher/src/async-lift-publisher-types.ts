@@ -20,7 +20,7 @@ import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
 import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
-import type { PublishTransactionResolution } from '@origintrail-official/dkg-chain';
+import type { PublishTransactionObservation } from '@origintrail-official/dkg-chain';
 import type { TerminalJobClearOutcome } from './terminal-job-clear.js';
 
 export class AsyncLiftJobConflictError extends Error {
@@ -564,12 +564,19 @@ export type AsyncLiftChainProofResolution =
    *  publisher-side image of the chain contract's `confirmed`. */
   | { status: 'recovered'; recovery: AsyncLiftPublisherRecoveryResult }
   /**
-   * Every non-confirmed chain verdict is the CHAIN contract, not a copy (r2 3879930), so the
-   * boundary has one owner: `reverted`, `unrecognized`, `pending` (with its optional
-   * scheduling-only `phase`), and `not-found` — semantics documented on
-   * {@link PublishTransactionResolution}. A resolver passes them through verbatim.
+   * The observation variants whose meaning is identical on both surfaces are the CHAIN
+   * contract's named sub-type, not a copy (r2 3879930, narrowed r7 3882283837): `reverted`,
+   * `unrecognized`, and both pending shapes pass through resolvers verbatim.
    */
-  | Exclude<PublishTransactionResolution, { status: 'confirmed' }>
+  | PublishTransactionObservation
+  /**
+   * PROOF-QUALIFIED absence, publisher-owned (r7 3882283837 — deliberately NOT inherited from
+   * the chain contract's weaker `not-found`): the resolver may only answer this behind the
+   * finality-snapshot absence rules (nonce consumed, token unminted at a canonical pinned
+   * block), because the disposition table authorizes a CREATE resend on it. A chain adapter's
+   * bare "I have neither receipt nor transaction" is NOT this and must be mapped deliberately.
+   */
+  | { status: 'not-found' }
   /** Publisher-only: nothing was established. Never absence, never proof. */
   | { status: 'inconclusive' };
 

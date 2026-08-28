@@ -4,15 +4,17 @@
  * publisher loop consumes dispatch outcomes and delegates scheduling without carrying backoff
  * arithmetic or phase branches. INTERNAL — deliberately not exported from the package barrel.
  *
- * Scheduling state is IDENTITY-AWARE (r2 3879930149): entries are keyed by jobId — the queue's
- * stable handle — but each entry remembers which held-job INCARNATION earned it
- * (`failedFromState|code|failedAt`; a re-failed successor always carries a fresh `failedAt`
- * from the injected clock). A successor sharing the predecessor's jobId neither waits out the
- * predecessor's due time nor inherits its attempt count: it is due immediately and its first
- * deferral starts the ladder at the base. The identity comparison happens at BOTH read points
- * (dueness and deferral), so a stale verdict's no-op cannot strand the predecessor's ladder on
- * the successor, and a concurrent successor's own earned entry is never clobbered — a deferral
- * only continues a ladder its own incarnation built.
+ * Entries are keyed by the IMMUTABLE incarnation identity (r6 3882185608), not by jobId: a
+ * writer can only address its own incarnation's entry, so a late echo from a superseded pass
+ * cannot clobber a successor's schedule BY CONSTRUCTION — the verified/unverified mutation
+ * split this replaces was guarding a hazard the key model now makes unrepresentable. The jobId
+ * enters only through a pruning index with ONE authority rule: only `isDue` — driven by the
+ * pass's inventory snapshot, the authoritative statement of which incarnation currently owns a
+ * jobId — may re-point the index (pruning the superseded incarnation's entry); `defer` records
+ * an outcome for a turn the inventory admitted, so a defer whose identity disagrees with the
+ * index is a superseded echo and is dropped whole. This keeps the map bounded (one live entry
+ * per jobId once its current incarnation is observed) without ever trusting a writer about
+ * currency.
  *
  * The ladder (r18 🔴 3816322914 anti-herd design, unchanged): base 30s doubling per attempt,
  * jittered by +0..25% of the computed delay so a population held by ONE incident does not come
@@ -21,7 +23,7 @@
  * observed but not yet at the operator-selected confirmation depth — an answer changing block
  * by block) tightens ONLY the ceiling, and that ceiling is TRUE post-jitter: the ladder base is
  * capped at `ceiling / (1 + jitter)` so the jittered delay can never exceed two minutes, while
- * jitter keeps its spread below it. Growth and the shared attempt count are cadence-independent.
+ * jitter keeps its spread below it. Growth and the attempt count are cadence-independent.
  */
 
 const CHAIN_PROOF_BACKOFF_BASE_MS = 30_000;
@@ -36,69 +38,56 @@ const CHAIN_PROOF_AWAITING_CONFIRMATIONS_BASE_CAP_MS = Math.floor(
 export type ChainProofRetryCadence = 'awaiting-confirmations' | 'default';
 
 export class ChainProofRetrySchedule {
-  private readonly entries = new Map<string, { dueAt: number; attempts: number; identity: string }>();
+  /** Backoff state per INCARNATION — the key a stale writer cannot forge. */
+  private readonly entries = new Map<string, { dueAt: number; attempts: number }>();
+  /** jobId → the incarnation the inventory last observed owning it; pruning only. */
+  private readonly currentIncarnation = new Map<string, string>();
 
   constructor(
     private readonly deps: { now(): number; rand(): number },
   ) {}
 
   /**
-   * Due when never deferred, when the deferral's time has passed, or when the entry belongs to
-   * a DIFFERENT incarnation — the successor never waits out the predecessor's due time.
-   * `atMs` is the caller's pass snapshot so one pass judges the whole population at one instant.
+   * Due when this incarnation was never deferred or its deferral has elapsed. The inventory
+   * snapshot behind this call is the ONE authority on which incarnation owns `jobId` now, so
+   * this is also where a superseded incarnation's entry is pruned and the index re-pointed —
+   * a successor never waits out a predecessor's due time. `atMs` is the caller's pass snapshot
+   * so one pass judges the whole population at one instant.
    */
   isDue(jobId: string, identity: string, atMs: number): boolean {
-    const entry = this.entries.get(jobId);
+    const known = this.currentIncarnation.get(jobId);
+    if (known !== undefined && known !== identity) this.entries.delete(known);
+    this.currentIncarnation.set(jobId, identity);
+    const entry = this.entries.get(identity);
     if (!entry) return true;
-    if (entry.identity !== identity) return true;
     return entry.dueAt <= atMs;
   }
 
   /**
-   * A VERIFIED turn that established nothing defers the next one — verified meaning the caller
-   * re-read the record under the claim lock and confirmed it is still this incarnation, so a
-   * predecessor's leftover entry may be superseded: a different prior identity starts the
-   * ladder at the base (the predecessor's exponent is its own history, not the successor's).
+   * A turn that established nothing defers the next one — for the incarnation the inventory
+   * admitted. A defer whose identity disagrees with the index is a superseded echo (a resolver
+   * that rejected or settled late, after the record moved on) and is dropped whole: it can
+   * address neither the successor's entry (foreign key) nor the index (isDue-only authority).
    */
   defer(jobId: string, identity: string, cadence: ChainProofRetryCadence): void {
-    const prior = this.entries.get(jobId);
-    this.write(jobId, identity, cadence,
-      (prior && prior.identity === identity ? prior.attempts : 0) + 1);
-  }
-
-  /**
-   * An UNVERIFIED deferral (r4 3881841010) — the caller could not re-establish which
-   * incarnation the jobId currently names (the exception path has no re-read). It lands only on
-   * an absent entry or this incarnation's own; a FOREIGN entry is schedule the successor
-   * earned, and a late echo from a superseded pass may not touch it — not the due time, not the
-   * attempt count.
-   */
-  deferUnverified(jobId: string, identity: string, cadence: ChainProofRetryCadence): void {
-    const prior = this.entries.get(jobId);
-    if (prior && prior.identity !== identity) return;
-    this.write(jobId, identity, cadence, (prior ? prior.attempts : 0) + 1);
-  }
-
-  private write(jobId: string, identity: string, cadence: ChainProofRetryCadence, attempts: number): void {
+    const known = this.currentIncarnation.get(jobId);
+    if (known !== undefined && known !== identity) return;
+    this.currentIncarnation.set(jobId, identity);
+    const prior = this.entries.get(identity);
+    const attempts = (prior ? prior.attempts : 0) + 1;
     const capMs = cadence === 'awaiting-confirmations'
       ? CHAIN_PROOF_AWAITING_CONFIRMATIONS_BASE_CAP_MS
       : CHAIN_PROOF_BACKOFF_MAX_MS;
     const backoffMs = Math.min(CHAIN_PROOF_BACKOFF_BASE_MS * 2 ** (attempts - 1), capMs);
-    this.entries.set(jobId, {
+    this.entries.set(identity, {
       dueAt: this.deps.now() + backoffMs + Math.floor(this.deps.rand() * backoffMs * CHAIN_PROOF_BACKOFF_JITTER),
       attempts,
-      identity,
     });
   }
 
-  /**
-   * A settled job's schedule is history. Identity-guarded as a belt (r4 3881841010): settlement
-   * follows a verified disposition so a foreign entry should be unreachable here, but a late
-   * echo must still not delete what a successor earned.
-   */
+  /** A settled job's schedule is history — for the settling incarnation and its index slot. */
   settled(jobId: string, identity: string): void {
-    const entry = this.entries.get(jobId);
-    if (entry && entry.identity !== identity) return;
-    this.entries.delete(jobId);
+    this.entries.delete(identity);
+    if (this.currentIncarnation.get(jobId) === identity) this.currentIncarnation.delete(jobId);
   }
 }
