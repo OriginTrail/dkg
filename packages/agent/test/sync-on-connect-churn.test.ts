@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
@@ -214,6 +214,76 @@ describe('sync-on-connect churn gates', () => {
 
     await flushTimers();
     expect(calls).toEqual([PEER_A]);
+  });
+
+  it('upgrades one queued connection owner with an exact mixed RFC-64 plan', async () => {
+    const agent = await createUnstartedAgent('Rfc64MixedPlanSingleQueueOwner');
+    allowAllNetworkAdmission(agent);
+    (agent as any).started = true;
+    (agent as any).getSyncReconcilerProbe = async () => ({
+      connected: true,
+      hasSyncProtocol: true,
+    });
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    const authorized = {
+      kind: 'rfc64-authorized-swm-recovery-v1' as const,
+      providerPeerId: PEER_A,
+      targets: [
+        { contextGraphId: 'private-cg', lane: 'ordinary-private' as const },
+        { contextGraphId: 'public-cg', lane: 'selected-public' as const },
+      ],
+    };
+    (agent as any).rfc64SwmRecoveryCoordinatorV1 = {
+      authorize: vi.fn(() => authorized),
+      revalidate: vi.fn(() => authorized),
+    };
+    const selectedSync = vi.fn(async () => ({
+      kind: 'selected-shared-memory' as const,
+      shared: emptyDetailedSync({ completedPhases: 2 }),
+      selectedScopeComplete: false,
+      recoveryPlanComplete: true,
+    }));
+    (agent as any).syncSelectedSharedMemoryFromPeerDetailed = selectedSync;
+    const genericRun = vi.spyOn(agent as any, 'runSyncFromPeerOnConnect');
+    const selectedRun = vi.spyOn(agent as any, 'runSelectedSwmRetryFromPeerOnConnect');
+    const errors: unknown[] = [];
+    const handleSyncError = (_peerId: string, error: unknown) => { errors.push(error); };
+
+    // The connection event schedules the canonical owner first. Bootstrap then
+    // upgrades that pending run instead of creating a second timer/ledger.
+    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
+    expect((agent as any).queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+      {
+        providerPeerId: PEER_A,
+        targets: authorized.targets,
+      },
+      handleSyncError,
+      0,
+    )).toBe(true);
+    expect((agent as any).catchupOnConnectAt.size).toBe(1);
+    expect((agent as any).queuedSyncOnConnectPeers.size).toBe(1);
+    expect((agent as any).pendingRfc64SwmRecoveries.get(PEER_A).plan).toBe(authorized);
+
+    await vi.waitFor(() => expect(selectedSync).toHaveBeenCalledOnce());
+
+    expect(genericRun).not.toHaveBeenCalled();
+    expect(selectedRun).toHaveBeenCalledOnce();
+    expect(selectedSync).toHaveBeenCalledWith(
+      PEER_A,
+      ['private-cg', 'public-cg'],
+      expect.objectContaining({
+        sharedMemorySyncPlan: {
+          publicContextGraphIds: ['public-cg'],
+          privateRecoverFromCurator: ['private-cg'],
+          eligibleContextGraphIds: ['private-cg', 'public-cg'],
+        },
+        selectedSwmPriority: true,
+      }),
+    );
+    expect((agent as any).queuedSyncOnConnectPeers.size).toBe(0);
+    expect((agent as any).pendingRfc64SwmRecoveries.size).toBe(0);
+    expect((agent as any).syncReconcilerBackoff.has(PEER_A)).toBe(false);
+    expect(errors).toEqual([]);
   });
 
   it('retries incomplete selected SWM past generic freshness without creating a loop', async () => {

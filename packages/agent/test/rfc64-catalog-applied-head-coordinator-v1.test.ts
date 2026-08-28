@@ -47,8 +47,13 @@ function privateSnapshot(source: ContextGraphPolicyV1['source']) {
   });
 }
 
-async function seedExactStaleTwin(store: OxigraphStore) {
-  const kaUal = `did:dkg:otp:20430/${RFC64_VM_AUTHOR}/1`;
+async function seedExactStaleTwin(
+  store: OxigraphStore,
+  options: { readonly kaNumber?: bigint; readonly marker?: string } = {},
+) {
+  const kaNumber = options.kaNumber ?? 1n;
+  const marker = options.marker ?? 'stale-twin';
+  const kaUal = `did:dkg:otp:20430/${RFC64_VM_AUTHOR}/${kaNumber}`;
   const assertionVersion = '2';
   const scope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);
   const vmGraph = knowledgeAssetLayerGraphUri(
@@ -62,14 +67,15 @@ async function seedExactStaleTwin(store: OxigraphStore) {
     scope,
   );
   const payload = [
-    { subject: 'urn:rfc64:stale-twin', predicate: 'urn:value', object: '"exact"', graph: vmGraph },
-    { subject: 'urn:rfc64:stale-twin', predicate: 'urn:version', object: '"2"', graph: vmGraph },
+    { subject: `urn:rfc64:${marker}`, predicate: 'urn:value', object: '"exact"', graph: vmGraph },
+    { subject: `urn:rfc64:${marker}`, predicate: 'urn:version', object: '"2"', graph: vmGraph },
   ];
   const merkleRoot = ethers.hexlify(computeFlatKCRootV10(
     payload.map((quad) => ({ ...quad, graph: '' })),
     [],
   ));
   const placement = await createRfc64FinalizedVmPlacementFixture({
+    kaNumber,
     assertionRoot: merkleRoot as `0x${string}`,
     publicTripleCount: payload.length,
   });
@@ -78,7 +84,7 @@ async function seedExactStaleTwin(store: OxigraphStore) {
   const vmMetaGraph = `did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta`;
   const swmMetaGraph = contextGraphSharedMemoryMetaUri(RFC64_VM_CONTEXT_GRAPH_NAME);
   const headSubject = `${kaUal}#dkg-swm-head`;
-  const shareOperationId = 'owner-signed-stale-twin';
+  const shareOperationId = `owner-signed-${marker}`;
   const operationSubject =
     `urn:dkg:share:${RFC64_VM_CONTEXT_GRAPH_NAME}:${shareOperationId}`;
   await store.insert([
@@ -178,6 +184,57 @@ describe('RFC-64 catalog applied-head coordinator', () => {
     await lifecycle.transaction!.rollback(cause);
 
     expect(primary.rollback).toHaveBeenCalledWith(cause);
+  });
+
+  it('reconciles independent post-head twins concurrently and waits for every row', async () => {
+    const store = new OxigraphStore();
+    const first = await seedExactStaleTwin(store, {
+      kaNumber: 1n,
+      marker: 'blocked-twin',
+    });
+    const second = await seedExactStaleTwin(store, {
+      kaNumber: 2n,
+      marker: 'free-twin',
+    });
+    let signalFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => { signalFirstEntered = resolve; });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const completed: string[] = [];
+    const handler = createRfc64CatalogAppliedHeadCoordinatorV1({
+      acceptedPolicySnapshotForCatalogScope: () => privateSnapshot(
+        acceptedRfc64VmPolicySnapshot().policy.source,
+      ),
+      finalizedPolicyPrecommit: vi.fn(async () => transaction()),
+      finalizedVmPrecommit: vi.fn(async () => transaction()),
+      store,
+      writeLocks: new Map(),
+      retire: vi.fn(async ({ swmGraph }) => {
+        if (swmGraph === first.swmGraph) {
+          signalFirstEntered();
+          await firstGate;
+        }
+        completed.push(swmGraph);
+      }),
+    });
+    const lifecycle = await handler(Object.freeze({
+      ...first.plan,
+      rows: Object.freeze([...first.plan.rows, ...second.plan.rows]),
+    }), new AbortController().signal);
+    const afterAppliedHead = lifecycle.afterAppliedHead!();
+
+    try {
+      await firstEntered;
+      await vi.waitFor(() => expect(completed).toContain(second.swmGraph));
+      // The hook is still pending on the held row even though its independent
+      // sibling has completed.
+      expect(completed).not.toContain(first.swmGraph);
+    } finally {
+      releaseFirst();
+    }
+    await afterAppliedHead;
+    expect(completed).toEqual(expect.arrayContaining([first.swmGraph, second.swmGraph]));
+    await store.close();
   });
 
   it('keeps an exact stale finalized SWM twin under owner-signed-unregistered authority', async () => {

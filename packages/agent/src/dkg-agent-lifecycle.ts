@@ -640,6 +640,7 @@ import {
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
   resolveRfc64SelectedRecoveryContextGraphIdsV1,
   resolveRfc64SwmRecoveryLaneV1,
+  type Rfc64AuthorizedSwmRecoveryPlanV1,
   type Rfc64PeerSwmRecoveryPlanV1,
 } from './rfc64/swm-recovery-plan-v1.js';
 
@@ -4208,7 +4209,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.lastSuccessfulSyncAt.delete(remotePeer);
     this.lastSyncProgressAt.delete(remotePeer);
     this.selectedSwmBootstrapAdmission.clear(remotePeer);
-    this.rfc64SwmRecoveryCoordinatorV1.clearPeer(remotePeer);
+    this.queuedSyncOnConnectPeers.delete(remotePeer);
+    this.pendingRfc64SwmRecoveries.delete(remotePeer);
     this.syncReconcilerBackoff.delete(remotePeer);
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
@@ -4242,10 +4244,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     handleSyncError: (remotePeer: string, err: unknown) => void,
     delayMs = 3000,
   ): boolean {
-    return this.rfc64SwmRecoveryCoordinatorV1.queue(
-      recoveryPlan,
+    if (!this.networkAdmissionCoordinator.isAcceptedPeer(recoveryPlan.providerPeerId)) {
+      return false;
+    }
+    const authorized = this.rfc64SwmRecoveryCoordinatorV1.authorize(recoveryPlan);
+    if (authorized === null) return false;
+    return this.queueSyncFromPeerOnConnect(
+      recoveryPlan.providerPeerId,
       handleSyncError,
       delayMs,
+      { selectedSwmRetry: true, rfc64RecoveryPlan: authorized },
     );
   }
 
@@ -4296,11 +4304,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     delayMs = 3000,
     options: {
       selectedSwmRetry?: boolean;
+      rfc64RecoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
     } = {},
   ): boolean {
     const syncTiming = this.config.syncReconcilerTiming;
-    const selectedSwmRetryRequired = options.selectedSwmRetry === true
-      && this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer);
+    const selectedSwmRetryRequired = options.rfc64RecoveryPlan !== undefined
+      || (
+        options.selectedSwmRetry === true
+        && this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)
+      );
     if (!syncOnConnectEnabled(this.config) && !selectedSwmRetryRequired) return false;
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return false;
@@ -4319,6 +4331,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const lastQueued = this.catchupOnConnectAt.get(remotePeer) ?? 0;
     if (lastQueued > disconnectBoundary && now - lastQueued < CATCHUP_ON_CONNECT_COOLDOWN_MS) {
+      if (
+        options.rfc64RecoveryPlan !== undefined
+        && this.queuedSyncOnConnectPeers.has(remotePeer)
+      ) {
+        // Upgrade the already-scheduled generic owner in place. Its dispatch
+        // reads this mailbox after the delay, so a mixed recovery plan cannot
+        // be lost to connection-event ordering.
+        this.pendingRfc64SwmRecoveries.set(remotePeer, Object.freeze({
+          plan: options.rfc64RecoveryPlan,
+          handleSyncError,
+        }));
+        return true;
+      }
       return false;
     }
 
@@ -4327,13 +4352,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return false;
     }
 
+    if (options.rfc64RecoveryPlan !== undefined) {
+      this.pendingRfc64SwmRecoveries.set(remotePeer, Object.freeze({
+        plan: options.rfc64RecoveryPlan,
+        handleSyncError,
+      }));
+    }
     this.catchupOnConnectAt.set(remotePeer, now);
+    this.queuedSyncOnConnectPeers.add(remotePeer);
     setTimeout(() => {
-      const run = selectedSwmRetryRequired
-        ? this.runSelectedSwmRetryFromPeerOnConnect(remotePeer, handleSyncError)
-        : this.runSyncFromPeerOnConnect(remotePeer, handleSyncError);
+      this.queuedSyncOnConnectPeers.delete(remotePeer);
+      const pendingRecovery = this.pendingRfc64SwmRecoveries.get(remotePeer);
+      this.pendingRfc64SwmRecoveries.delete(remotePeer);
+      const effectiveErrorHandler = pendingRecovery?.handleSyncError ?? handleSyncError;
+      const run = pendingRecovery !== undefined || selectedSwmRetryRequired
+        ? this.runSelectedSwmRetryFromPeerOnConnect(
+          remotePeer,
+          effectiveErrorHandler,
+          pendingRecovery?.plan,
+        )
+        : this.runSyncFromPeerOnConnect(remotePeer, effectiveErrorHandler);
       run.catch((err: unknown) => {
-        handleSyncError(remotePeer, err);
+        effectiveErrorHandler(remotePeer, err);
       });
     }, delayMs);
     return true;
@@ -4365,8 +4405,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
     handleSyncError: (remotePeer: string, err: unknown) => void,
+    recoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
   ): Promise<void> {
-    if (!this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)) return;
+    if (
+      recoveryPlan === undefined
+      && !this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)
+    ) return;
     const now = Date.now();
     const backoff = this.syncReconcilerBackoff.get(remotePeer);
     if (backoff && now < backoff.nextRetryAt) return;
@@ -4377,6 +4421,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeer,
         probe,
         'on-connect',
+        recoveryPlan,
       );
     } catch (err: unknown) {
       handleSyncError(remotePeer, err);
@@ -4402,8 +4447,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     probe: SyncReconcilerProbe,
     source: SyncAdmissionSource = 'on-connect',
+    recoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
   ): Promise<SyncReconcilerAttemptOutcome> {
-    if (!this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)) return 'not-started';
+    if (
+      recoveryPlan === undefined
+      && !this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)
+    ) return 'not-started';
     return this.accountSyncAttemptWithReconciler(
       remotePeer,
       probe,
@@ -4411,6 +4460,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeer,
         onSyncAccounting,
         source,
+        recoveryPlan,
       ),
     );
   }
@@ -4663,25 +4713,52 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
     source: SyncAdmissionSource = 'on-connect',
+    recoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
-    if (!this.started || !this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)) {
+    if (
+      !this.started
+      || (
+        recoveryPlan === undefined
+        && !this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)
+      )
+    ) {
       return 'not-started';
     }
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return 'not-started';
     }
-    const requestedContextGraphIds = this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer);
+    const validatedRecoveryPlan = recoveryPlan === undefined
+      ? null
+      : this.rfc64SwmRecoveryCoordinatorV1.revalidate(recoveryPlan);
+    const requestedContextGraphIds = validatedRecoveryPlan?.targets.map(
+      ({ contextGraphId }) => contextGraphId,
+    )
+      ?? this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer);
     if (requestedContextGraphIds.length === 0) {
       this.selectedSwmBootstrapAdmission.request(remotePeer, requestedContextGraphIds);
       return 'not-started';
     }
-    const sharedMemorySyncPlan = await this.planSharedMemorySyncContextGraphs(
-      remotePeer,
-      this.config.syncContextGraphs ?? [],
-      createOperationContext('sync'),
-      { requireCompleteProviderMatch: true },
-    );
-    if (sharedMemorySyncPlan.publicContextGraphIds.length === 0) {
+    const sharedMemorySyncPlan = validatedRecoveryPlan === null
+      ? await this.planSharedMemorySyncContextGraphs(
+        remotePeer,
+        this.config.syncContextGraphs ?? [],
+        createOperationContext('sync'),
+        { requireCompleteProviderMatch: true },
+      )
+      : {
+        publicContextGraphIds: validatedRecoveryPlan.targets
+          .filter(({ lane }) => lane === 'selected-public')
+          .map(({ contextGraphId }) => contextGraphId),
+        privateRecoverFromCurator: validatedRecoveryPlan.targets
+          .filter(({ lane }) => lane === 'ordinary-private')
+          .map(({ contextGraphId }) => contextGraphId),
+        eligibleContextGraphIds: validatedRecoveryPlan.targets
+          .map(({ contextGraphId }) => contextGraphId),
+      };
+    if (
+      validatedRecoveryPlan === null
+      && sharedMemorySyncPlan.publicContextGraphIds.length === 0
+    ) {
       // A configured scope that cannot yet be planned remains retryable. RPC,
       // binding, or policy evidence may become available on a later bounded
       // bootstrap pass; only an actually empty operator scope is terminal.
@@ -4692,7 +4769,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncingPeers: this.syncingPeers,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       selectedSharedMemoryLane: {
-        getContextGraphIds: () => sharedMemorySyncPlan.publicContextGraphIds,
+        getContextGraphIds: () => [...requestedContextGraphIds],
         syncFromPeer: (peerId, contextGraphIds) => (
           this.syncSelectedSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
             stopOnBackoffWorthyFailure: true,
@@ -4702,6 +4779,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             selectedSwmPriority: true,
           })
         ),
+        ...(validatedRecoveryPlan === null
+          ? {}
+          : {
+            isScopeComplete: (result: SelectedSharedMemorySyncResult) =>
+              result.recoveryPlanComplete === true,
+          }),
       },
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => {
@@ -5052,11 +5135,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.catchupOnConnectAt.delete(peerId);
       }
     }
-    this.rfc64SwmRecoveryCoordinatorV1.pruneQueueState(
-      now,
-      syncTiming.stalenessThresholdMs,
-      (peerId) => connected.has(peerId),
-    );
     for (const [peerId, ts] of this.lastSyncDisconnectedAt) {
       if (now - ts >= syncTiming.stalenessThresholdMs) {
         this.lastSyncDisconnectedAt.delete(peerId);

@@ -836,53 +836,6 @@ export class DKGAgent extends DKGAgentBase {
         isPeerAccepted: (peerId) =>
           this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
         isStarted: () => this.started,
-        disconnectBoundary: (peerId, now) =>
-          this.syncOnConnectDisconnectBoundary(peerId, now),
-        backoffRetryAt: (peerId) =>
-          this.syncReconcilerBackoff.get(peerId)?.nextRetryAt ?? null,
-      },
-      scheduling: {
-        schedule: (run, delayMs) => { setTimeout(run, delayMs); },
-        getProbe: (peerId) => this.getSyncReconcilerProbe(peerId),
-        accountAttempt: (peerId, probe, attempt) =>
-          this.accountSyncAttemptWithReconciler(peerId, probe, attempt),
-      },
-      execution: {
-        syncingPeers: () => this.syncingPeers,
-        getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
-        syncRecoveryRequest: async (request) => {
-          const result = await this.syncSelectedSharedMemoryFromPeerDetailed(
-            request.providerPeerId,
-            [...request.eligibleContextGraphIds],
-            {
-              stopOnBackoffWorthyFailure: true,
-              source: 'on-connect',
-              sharedMemorySyncPlan: {
-                publicContextGraphIds: [...request.publicContextGraphIds],
-                privateRecoverFromCurator: [...request.privateRecoverFromCurator],
-                eligibleContextGraphIds: [...request.eligibleContextGraphIds],
-              },
-              priority: 2_000,
-              selectedSwmPriority: true,
-            },
-          );
-          return {
-            ...result,
-            recoveryPlanComplete: result.recoveryPlanComplete === true,
-          };
-        },
-        logInfo: (ctx, message) => this.log.info(ctx, message),
-        onPeerSkippedNoSync: (peerId) => this.skippedNoSyncPeers.add(peerId),
-        onPeerSynced: (peerId, outcome, onSyncAccounting) => {
-          const progressAt = Math.max(
-            Date.now(),
-            (this.lastSyncProgressAt.get(peerId) ?? 0) + 1,
-          );
-          if (outcome?.progress) this.lastSyncProgressAt.set(peerId, progressAt);
-          this.skippedNoSyncPeers.delete(peerId);
-          this.syncReconcilerBackoff.delete(peerId);
-          if (outcome !== undefined) onSyncAccounting?.(outcome);
-        },
       },
     });
   }

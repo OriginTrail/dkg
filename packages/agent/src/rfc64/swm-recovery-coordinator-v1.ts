@@ -1,15 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { OperationContext } from '@origintrail-official/dkg-core';
-
-import { CATCHUP_ON_CONNECT_COOLDOWN_MS } from '../dkg-agent-constants.js';
-import type { SyncReconcilerProbe } from '../dkg-agent-types.js';
-import {
-  runSelectedSharedMemoryRetry,
-  type SyncOnConnectOutcome,
-  type SyncOnConnectPeerOutcome,
-} from '../sync/on-connect/sync-on-connect.js';
-import type { SelectedSharedMemorySyncResult } from '../sync/shared-memory-freshness.js';
 import {
   canonicalizeRfc64SwmRecoveryTargetsV1,
   sameRfc64SwmRecoveryTargetsV1,
@@ -31,65 +21,18 @@ export interface Rfc64SwmRecoveryAdmissionPortV1 {
     (providerPeerId: string) => Readonly<Rfc64PeerSwmRecoveryPlanV1>;
   readonly isPeerAccepted: (providerPeerId: string) => boolean;
   readonly isStarted: () => boolean;
-  readonly disconnectBoundary: (providerPeerId: string, now: number) => number;
-  readonly backoffRetryAt: (providerPeerId: string) => number | null;
-}
-
-export interface Rfc64SwmRecoverySchedulingPortV1 {
-  readonly schedule: (run: () => void, delayMs: number) => void;
-  readonly getProbe: (providerPeerId: string) => Promise<SyncReconcilerProbe>;
-  readonly accountAttempt: (
-    providerPeerId: string,
-    probe: SyncReconcilerProbe,
-    attempt: (
-      onSyncAccounting: (outcome: SyncOnConnectPeerOutcome) => void,
-    ) => Promise<SyncOnConnectOutcome | 'not-started'>,
-  ) => Promise<unknown>;
-}
-
-export interface Rfc64SwmRecoveryExecutionPortV1 {
-  readonly syncingPeers: () => Set<string>;
-  readonly getPeerProtocols: (providerPeerId: string) => Promise<string[]>;
-  readonly syncRecoveryRequest: (
-    request: Readonly<Rfc64SwmRecoveryExecutionRequestV1>,
-  ) => Promise<Rfc64SwmRecoveryExecutionResultV1>;
-  readonly logInfo: (ctx: OperationContext, message: string) => void;
-  readonly onPeerSkippedNoSync: (providerPeerId: string) => void;
-  readonly onPeerSynced: (
-    providerPeerId: string,
-    outcome: SyncOnConnectPeerOutcome | undefined,
-    onSyncAccounting: ((outcome: SyncOnConnectPeerOutcome) => void) | undefined,
-  ) => void;
-}
-
-export interface Rfc64SwmRecoveryExecutionResultV1 extends SelectedSharedMemorySyncResult {
-  /** Terminal verdict for every authorized public and private target. */
-  readonly recoveryPlanComplete: boolean;
-}
-
-export interface Rfc64SwmRecoveryExecutionRequestV1 {
-  readonly providerPeerId: string;
-  readonly eligibleContextGraphIds: readonly string[];
-  readonly publicContextGraphIds: readonly string[];
-  readonly privateRecoverFromCurator: readonly string[];
 }
 
 export interface Rfc64SwmRecoveryCoordinatorDependenciesV1 {
   readonly admission: Rfc64SwmRecoveryAdmissionPortV1;
-  readonly scheduling: Rfc64SwmRecoverySchedulingPortV1;
-  readonly execution: Rfc64SwmRecoveryExecutionPortV1;
-  readonly now?: () => number;
 }
 
 /**
- * RFC-64's complete-provider state machine. It owns policy-plan admission,
- * the independent kill-switch exception, queue/cooldown dispatch, exact lane
- * execution and accounting. The generic on-connect scheduler never sees an
- * RFC-64 mode or feature boolean.
+ * RFC-64's complete-provider authorization boundary. Queueing, cooldown,
+ * dispatch and reconciler accounting remain owned by the canonical selected-
+ * SWM on-connect scheduler; this class only admits and revalidates typed plans.
  */
 export class Rfc64SwmRecoveryCoordinatorV1 {
-  private readonly queuedAt = new Map<string, number>();
-
   constructor(private readonly deps: Rfc64SwmRecoveryCoordinatorDependenciesV1) {}
 
   authorize(
@@ -121,96 +64,9 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
     });
   }
 
-  queue(
-    recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
-    handleSyncError: (providerPeerId: string, error: unknown) => void,
-    delayMs = 3_000,
-  ): boolean {
-    if (!this.deps.admission.isPeerAccepted(recoveryPlan.providerPeerId)) return false;
-    const authorized = this.authorize(recoveryPlan);
-    if (authorized === null) return false;
-    const now = (this.deps.now ?? Date.now)();
-    const disconnectBoundary = this.deps.admission.disconnectBoundary(
-      authorized.providerPeerId,
-      now,
-    );
-    const lastQueued = this.queuedAt.get(authorized.providerPeerId) ?? 0;
-    if (lastQueued > disconnectBoundary && now - lastQueued < CATCHUP_ON_CONNECT_COOLDOWN_MS) {
-      return false;
-    }
-    const retryAt = this.deps.admission.backoffRetryAt(authorized.providerPeerId);
-    if (retryAt !== null && now < retryAt) return false;
-    this.queuedAt.set(authorized.providerPeerId, now);
-    this.deps.scheduling.schedule(() => {
-      void this.run(authorized, handleSyncError);
-    }, delayMs);
-    return true;
-  }
-
-  clearPeer(providerPeerId: string): void {
-    this.queuedAt.delete(providerPeerId);
-  }
-
-  pruneQueueState(
-    now: number,
-    stalenessThresholdMs: number,
-    isConnected: (providerPeerId: string) => boolean,
-  ): void {
-    for (const [providerPeerId, queuedAt] of this.queuedAt) {
-      if (!isConnected(providerPeerId) && now - queuedAt >= stalenessThresholdMs) {
-        this.queuedAt.delete(providerPeerId);
-      }
-    }
-  }
-
-  async run(
+  revalidate(
     authorized: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
-    handleSyncError: (providerPeerId: string, error: unknown) => void,
-  ): Promise<void> {
-    try {
-      const now = (this.deps.now ?? Date.now)();
-      const retryAt = this.deps.admission.backoffRetryAt(authorized.providerPeerId);
-      if (retryAt !== null && now < retryAt) return;
-      const probe = await this.deps.scheduling.getProbe(authorized.providerPeerId);
-      await this.deps.scheduling.accountAttempt(
-        authorized.providerPeerId,
-        probe,
-        (onSyncAccounting) => this.execute(authorized, onSyncAccounting),
-      );
-    } catch (error) {
-      handleSyncError(authorized.providerPeerId, error);
-    }
-  }
-
-  async execute(
-    authorized: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
-    onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
-  ): Promise<SyncOnConnectOutcome | 'not-started'> {
-    const remotePeer = authorized.providerPeerId;
-    if (!this.deps.admission.isStarted()
-      || !this.deps.admission.isPeerAccepted(remotePeer)) {
-      return 'not-started';
-    }
-    return runSelectedSharedMemoryRetry({
-      remotePeer,
-      syncingPeers: this.deps.execution.syncingPeers(),
-      getPeerProtocols: this.deps.execution.getPeerProtocols,
-      selectedSharedMemoryLane: {
-        getContextGraphIds: () => authorized.targets.map(({ contextGraphId }) => contextGraphId),
-        syncFromPeer: () => this.syncAuthorizedPlan(authorized),
-        isScopeComplete: (result) => result.recoveryPlanComplete === true,
-      },
-      logInfo: this.deps.execution.logInfo,
-      onPeerSkippedNoSync: (peerId) => this.deps.execution.onPeerSkippedNoSync(peerId),
-      onPeerSynced: (peerId, outcome) => {
-        this.deps.execution.onPeerSynced(peerId, outcome, onSyncAccounting);
-      },
-    });
-  }
-
-  private async syncAuthorizedPlan(
-    authorized: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>,
-  ): Promise<Rfc64SwmRecoveryExecutionResultV1> {
+  ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> {
     if (
       !this.deps.admission.isStarted()
       || !this.deps.admission.isPeerAccepted(authorized.providerPeerId)
@@ -251,18 +107,11 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
       throw new Error('RFC-64 SWM recovery plan is not authorized by current configuration');
     }
 
-    return this.deps.execution.syncRecoveryRequest(Object.freeze({
+    return Object.freeze({
+      kind: 'rfc64-authorized-swm-recovery-v1',
       providerPeerId: authorized.providerPeerId,
-      eligibleContextGraphIds: Object.freeze(
-        suppliedTargets.map(({ contextGraphId }) => contextGraphId),
-      ),
-      publicContextGraphIds: Object.freeze(suppliedTargets
-        .filter(({ lane }) => lane === 'selected-public')
-        .map(({ contextGraphId }) => contextGraphId)),
-      privateRecoverFromCurator: Object.freeze(suppliedTargets
-        .filter(({ lane }) => lane === 'ordinary-private')
-        .map(({ contextGraphId }) => contextGraphId)),
-    }));
+      targets: Object.freeze(suppliedTargets),
+    });
   }
 }
 

@@ -1590,6 +1590,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
     const commit = vi.fn();
     const rollback = vi.fn();
+    const afterAppliedHead = vi.fn();
     const receiver = fixture.createReceiver({
       readAppliedCatalogHeadV1:
         fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
@@ -1600,13 +1601,16 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       },
     }, undefined, undefined, fixture.receiverStore, async () => {
       await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
-      return appliedHeadLifecycleV1({
-        commit,
-        rollback: async (cause) => {
-          rollback(cause);
-          await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+      return appliedHeadLifecycleV1(
+        {
+          commit,
+          rollback: async (cause) => {
+            rollback(cause);
+            await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+          },
         },
-      });
+        afterAppliedHead,
+      );
     });
 
     await expect(fixture.synchronize(fixture.announcement, receiver)).rejects.toMatchObject({
@@ -1624,6 +1628,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       .resolves.toBe('predecessor');
     expect(rollback).toHaveBeenCalledOnce();
     expect(commit).not.toHaveBeenCalled();
+    expect(afterAppliedHead).not.toHaveBeenCalled();
   }, 30_000);
 
   it('keeps target SWM and VM when the committed head post-read fails', async () => {
@@ -1644,6 +1649,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     });
     const commit = vi.fn();
     const rollback = vi.fn();
+    const afterAppliedHead = vi.fn();
     const receiver = fixture.createReceiver({
       readAppliedCatalogHeadV1,
       compareAndSwapAppliedCatalogHeadV1:
@@ -1652,13 +1658,16 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
         ),
     }, undefined, undefined, fixture.receiverStore, async () => {
       await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
-      return appliedHeadLifecycleV1({
-        commit,
-        rollback: async (cause) => {
-          rollback(cause);
-          await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+      return appliedHeadLifecycleV1(
+        {
+          commit,
+          rollback: async (cause) => {
+            rollback(cause);
+            await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+          },
         },
-      });
+        afterAppliedHead,
+      );
     });
 
     await expect(fixture.synchronize(fixture.announcement, receiver)).rejects.toThrow(
@@ -1676,6 +1685,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       .resolves.toBe('target');
     expect(commit).toHaveBeenCalledOnce();
     expect(rollback).not.toHaveBeenCalled();
+    expect(afterAppliedHead).not.toHaveBeenCalled();
   }, 30_000);
 
   it('keeps target SWM and VM when the durable head CAS succeeds but precommit commit throws', async () => {
@@ -1686,6 +1696,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       throw new Error('injected precommit commit failure after durable head CAS');
     });
     const rollback = vi.fn();
+    const afterAppliedHead = vi.fn();
     const receiver = fixture.createReceiver(
       fixture.receiverPersistence.inventory,
       undefined,
@@ -1693,13 +1704,16 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.receiverStore,
       async () => {
         await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
-        return appliedHeadLifecycleV1({
-          commit,
-          rollback: async (cause) => {
-            rollback(cause);
-            await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+        return appliedHeadLifecycleV1(
+          {
+            commit,
+            rollback: async (cause) => {
+              rollback(cause);
+              await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+            },
           },
-        });
+          afterAppliedHead,
+        );
       },
     );
 
@@ -1718,6 +1732,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       .resolves.toBe('target');
     expect(commit).toHaveBeenCalledOnce();
     expect(rollback).not.toHaveBeenCalled();
+    expect(afterAppliedHead).not.toHaveBeenCalled();
   }, 30_000);
 
   it('finalizes the transaction before post-head cleanup and retries cleanup on exact replay', async () => {

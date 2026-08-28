@@ -721,6 +721,8 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       queueAgent.lastSuccessfulSyncAt = new Map([[PEER, Date.now()]]);
       queueAgent.lastSyncDisconnectedAt = new Map<string, number>();
       queueAgent.catchupOnConnectAt = new Map<string, number>();
+      queueAgent.queuedSyncOnConnectPeers = new Set<string>();
+      queueAgent.pendingRfc64SwmRecoveries = new Map();
       queueAgent.syncReconcilerBackoff = new Map<string, unknown>();
       queueAgent.syncOnConnectDisconnectBoundary =
         LifecycleSyncMethods.prototype.syncOnConnectDisconnectBoundary;

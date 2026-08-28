@@ -8,6 +8,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
+import { mapWithConcurrency } from '../map-with-concurrency.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
 import type {
   Rfc64PublicCatalogNativeAppliedHeadLifecycleV1,
@@ -19,6 +20,8 @@ import {
   reconcileFinalizedSwmTwinFromCatalogProjection,
   type FinalizedSwmTwinRetirement,
 } from '../sync/requester/finalized-swm-twin-reconciliation.js';
+
+const POST_HEAD_TWIN_RECONCILIATION_CONCURRENCY_V1 = 4;
 
 export interface Rfc64CatalogAppliedHeadCoordinatorOptionsV1 {
   readonly acceptedPolicySnapshotForCatalogScope:
@@ -76,16 +79,17 @@ export function createRfc64CatalogAppliedHeadCoordinatorV1(
       transaction: primaryTransaction ?? null,
       afterAppliedHead: retirementAuthorized ? async () => {
         const ctx = createOperationContext('sync');
-        let retired = 0;
-        for (const evidence of catalogProjectionEvidence) {
-          const outcome = await reconcileFinalizedSwmTwinFromCatalogProjection({
+        const outcomes = await mapWithConcurrency(
+          catalogProjectionEvidence,
+          POST_HEAD_TWIN_RECONCILIATION_CONCURRENCY_V1,
+          (evidence) => reconcileFinalizedSwmTwinFromCatalogProjection({
             store: options.store,
             writeLocks: options.writeLocks,
             evidence,
             retire: (retirement) => options.retire(retirement, ctx),
-          });
-          if (outcome === 'retired') retired += 1;
-        }
+          }),
+        );
+        const retired = outcomes.filter((outcome) => outcome === 'retired').length;
         if (retired > 0) {
           options.logInfo?.(
             ctx,
