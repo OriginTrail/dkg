@@ -195,6 +195,17 @@ describe('tool router', () => {
     }).profile).toBe('status');
   });
 
+  it('recognizes Context Graph acronyms and plurals as DKG discovery intent', () => {
+    for (const prompt of [
+      'What CGs do you see?',
+      'Which context graphs are available?',
+    ]) {
+      const route = routeTools({ prompt, tools: surface });
+      expect(route.profile).toBe('read');
+      expect(route.tools[0]?.name).toBe('dkg_list_context_graphs');
+    }
+  });
+
   it('routes a partner-domain prompt to profile tools without hard-coded domain words', () => {
     const partnerTools: McpToolDefinition[] = [{
       name: 'partner_trace_configuration',

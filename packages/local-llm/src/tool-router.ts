@@ -62,7 +62,7 @@ export const WRITE_TOOL_NAMES = [
 
 const KNOWN_READ_TOOLS = new Set<string>(READ_TOOL_NAMES);
 const KNOWN_WRITE_TOOLS = new Set<string>(WRITE_TOOL_NAMES);
-const DKG_SIGNAL = /\b(?:dkg|context\s+graph|sub-?graph|knowledge\s+asset|triples?|rdf|sparql|entity|provenance|verifiable\s+memory|query[-\s]+catalog|saved\s+quer(?:y|ies)|peer|wallet|inbox)\b/i;
+const DKG_SIGNAL = /\b(?:dkg|cgs?|context\s+graphs?|sub-?graphs?|knowledge\s+assets?|triples?|rdf|sparql|entities?|provenance|verifiable\s+memory|query[-\s]+catalogs?|saved\s+quer(?:y|ies)|peers?|wallet|inbox)\b/i;
 const STATUS_SIGNAL = /\b(?:status|health|healthy|peers?|wallet|balances?|joined\s+(?:context\s+)?graphs?)\b/i;
 const CATALOG_SIGNAL = /\b(?:query[-\s]+catalog|saved\s+quer(?:y|ies)|catalog\s+quer(?:y|ies))\b/i;
 const WRITE_ACTION_SIGNAL = /\b(?:create|insert|add|write|update|save|publish|share|finalize|discard|delete|import|enrich|register|subscribe|send|mutate)\b/gi;
