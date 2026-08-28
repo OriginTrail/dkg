@@ -1256,7 +1256,7 @@ export class TripleStoreAsyncLiftPublisher
           current,
           origin.lookup,
           resolution.recovery,
-          { ...(signal ? { signal } : {}) },
+          signal ? { signal } : undefined,
         );
         if (!resolved) { unresolved += 1; return; }
         // The node has observed inclusion through its OWN canonical proof: stamp it truthfully,
