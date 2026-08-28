@@ -14,12 +14,12 @@
  * boundary means pagination and every other discovery consumer see the same
  * typed rows instead of each repairing query-engine artifacts independently.
  *
- * CURSOR STABILITY. Pages are ordered by a digest of the canonical REGISTRY
- * row, and the cursor names the digest of the last row returned. Live
- * connection fields (latency, last-seen, connected-since) are excluded from
- * that key on purpose — they change between requests, and a cursor keyed on
- * them would drift or skip. Keyset (strictly-after) semantics mean a row
- * inserted or removed between pages shifts nothing else.
+ * CURSOR STABILITY. Pages are ordered by a digest of the canonical agent URI,
+ * and the cursor names the digest of the last identity returned. Every mutable
+ * profile and live-connection field is excluded, so routine profile updates
+ * cannot move a row across an in-progress walk. Keyset (strictly-after)
+ * semantics mean an identity inserted or removed between pages shifts nothing
+ * else.
  *
  * The cursor is a DIGEST, not the row itself, for two reasons. Size: row
  * fields are other agents' self-published profile literals, so a row-embedding
@@ -29,17 +29,14 @@
  * of the filters it was issued under, so continuing a walk with different
  * filters is a 400 instead of a plausible-looking wrong continuation.
  */
+import {
+  discoveredAgentIdentityKey,
+  discoveredAgentRowKey,
+  type DiscoveredAgent,
+} from '@origintrail-official/dkg-agent';
 import { createHash } from 'node:crypto';
 import { jsonResponse } from '../http-utils.js';
 import type { RequestContext } from './context.js';
-
-/**
- * A raw registry row as returned by `discovery.findAgents()`. The generic
- * helpers below constrain to `object` rather than this alias so callers can
- * pass their own row interfaces (e.g. `DiscoveredAgent`, which has no index
- * signature) without widening casts.
- */
-export type AgentRegistryRow = Record<string, unknown>;
 
 export type AgentConnectionStatus = 'self' | 'connected' | 'disconnected';
 
@@ -58,10 +55,8 @@ export interface AgentsListFilters {
 
 export interface AgentsListQuery extends AgentsListFilters {
   limit?: number;
-  /** Digest of the last row of the previous page (decoded, validated). */
+  /** Opaque token from the previous page. Cursor internals stay inside the pager/codec. */
   cursor?: string;
-  /** Fingerprint of every filter parameter, bound into issued cursors. */
-  filterFingerprint: string;
 }
 
 /**
@@ -135,28 +130,15 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
     limit = Number(rawLimit);
   }
 
-  const query: AgentsListQuery = {
-    ...filters,
-    filterFingerprint: filterFingerprint(filters),
-  };
+  const query: AgentsListQuery = { ...filters };
   if (limit !== undefined) query.limit = limit;
 
   const cursor = searchParams.get('cursor');
   if (cursor !== null) {
-    const decoded = decodeCursor(cursor);
-    if (decoded === undefined) {
+    if (decodeCursor(cursor) === undefined) {
       return { ok: false, error: '"cursor" is not a cursor from a previous response' };
     }
-    if (decoded.fingerprint !== query.filterFingerprint) {
-      // Continuing under different filters would be a coherent-looking wrong
-      // continuation — refuse rather than guess.
-      return {
-        ok: false,
-        error: '"cursor" was issued under different filter parameters; ' +
-          'repeat the exact framework/skill_type/connectionStatus/local values from the first page',
-      };
-    }
-    query.cursor = decoded.digest;
+    query.cursor = cursor;
   }
 
   return { ok: true, query };
@@ -180,67 +162,78 @@ function filterFingerprint(filters: AgentsListFilters): string {
   return createHash('sha256').update(serialized, 'utf8').digest('hex').slice(0, 16);
 }
 
-/**
- * Canonical serialization of a registry row: the key both dedupe and page
- * ordering share. Keys are sorted so two rows differing only in property
- * insertion order still collide, and `undefined` values are dropped the same
- * way JSON round-tripping would drop them.
- */
-function canonicalRowKey(row: object): string {
-  const entries = Object.entries(row as Record<string, unknown>)
-    .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return JSON.stringify(entries);
-}
-
-export interface AgentsPage<T> {
-  rows: T[];
+export interface AgentsPage {
+  rows: DiscoveredAgent[];
   /** Present only when a `limit` was given and rows remain past this page. */
   nextCursor?: string;
 }
 
-/** Bounded, deterministic sort key: the digest of the canonical row. */
-export function rowDigest(row: object): string {
-  return createHash('sha256').update(canonicalRowKey(row), 'utf8').digest('hex');
+export class AgentsCursorError extends Error {
+  override readonly name = 'AgentsCursorError';
 }
 
 /**
- * Keyset pagination over deduplicated rows.
+ * Keyset pagination over stable discovered-agent identity.
  *
  * No `limit` and no `cursor` returns the rows untouched, in their original
- * order — the compatibility contract for parameterless callers. Any use of
- * pagination switches to digest order: arbitrary but deterministic, which is
- * the property that makes the cursor mean the same thing on the next request.
+ * order — the compatibility contract for parameterless callers. Paginated
+ * requests resolve conflicting rows for one identity deterministically and
+ * order by a digest of the canonical agent URI. Mutable profile fields never
+ * affect page position.
  */
-export function paginateAgentRows<T extends object>(
-  rows: T[],
-  query: Pick<AgentsListQuery, 'limit' | 'cursor' | 'filterFingerprint'>,
-): AgentsPage<T> {
+export function paginateAgentRows(
+  rows: DiscoveredAgent[],
+  query: AgentsListQuery,
+): AgentsPage {
   if (query.limit === undefined && query.cursor === undefined) {
     return { rows };
   }
-  const keyed = rows
-    .map((row) => ({ row, digest: rowDigest(row) }))
+
+  const fingerprint = filterFingerprint(query);
+  const decodedCursor = query.cursor === undefined ? undefined : decodeCursor(query.cursor);
+  if (query.cursor !== undefined && decodedCursor === undefined) {
+    throw new AgentsCursorError('"cursor" is not a cursor from a previous response');
+  }
+  if (decodedCursor && decodedCursor.fingerprint !== fingerprint) {
+    throw new AgentsCursorError(
+      '"cursor" was issued under different filter parameters; ' +
+      'repeat the exact framework/skill_type/connectionStatus/local values from the first page',
+    );
+  }
+
+  const rowByIdentity = new Map<string, DiscoveredAgent>();
+  for (const row of rows) {
+    const identity = discoveredAgentIdentityKey(row);
+    const existing = rowByIdentity.get(identity);
+    if (!existing || discoveredAgentRowKey(row) < discoveredAgentRowKey(existing)) {
+      rowByIdentity.set(identity, row);
+    }
+  }
+  const keyed = [...rowByIdentity.entries()]
+    .map(([identity, row]) => ({
+      row,
+      digest: createHash('sha256').update(identity, 'utf8').digest('hex'),
+    }))
     .sort((a, b) => (a.digest < b.digest ? -1 : a.digest > b.digest ? 1 : 0));
   // Strictly-after: the cursor names a position, not a row, so a row deleted
   // between requests cannot wedge the walk.
-  const after = query.cursor === undefined
+  const after = decodedCursor === undefined
     ? keyed
-    : keyed.filter((k) => k.digest > query.cursor!);
+    : keyed.filter((k) => k.digest > decodedCursor.digest);
   if (query.limit === undefined || after.length <= query.limit) {
     return { rows: after.map((k) => k.row) };
   }
   const page = after.slice(0, query.limit);
   return {
     rows: page.map((k) => k.row),
-    nextCursor: encodeCursor(query.filterFingerprint, page[page.length - 1]!.digest),
+    nextCursor: encodeCursor(fingerprint, page[page.length - 1]!.digest),
   };
 }
 
 /**
  * Cursors are opaque to callers but versioned here, so a future layout change
  * can reject old cursors with a clear 400 instead of returning wrong pages.
- * Layout: `v1:<16-hex filter fingerprint>:<64-hex row digest>` — fixed size
+ * Layout: `v1:<16-hex filter fingerprint>:<64-hex identity digest>` — fixed size
  * by construction, whatever the registry rows contain.
  */
 const CURSOR_PREFIX = 'v1:';
@@ -278,9 +271,6 @@ export async function handleAgentsListRoute(ctx: RequestContext): Promise<void> 
     skillType,
     connectionStatus,
     local,
-    limit,
-    cursor,
-    filterFingerprint,
   } = parsedQuery.query;
   const agents = await agent.findAgents(framework ? { framework } : undefined);
   let filteredAgents = agents;
@@ -308,16 +298,21 @@ export async function handleAgentsListRoute(ctx: RequestContext): Promise<void> 
     }
   }
 
-  // The registry is network-published data. Only the daemon's local identity
-  // store proves ownership; a foreign row cannot become `self` by copying this
-  // node's peer ID. Unpublished local identities are intentionally not
-  // synthesized—the endpoint remains a view of discovered registry rows.
-  const localAgentAddresses = new Set(
-    agent.listLocalAgents().map((localAgent) => localAgent.agentAddress.toLowerCase()),
-  );
+  // The registry is network-published data, so a wallet-address match alone is
+  // not provenance. The daemon publishes exactly its default profile; require
+  // its canonical DID and current peer binding together. A stale/co-registered
+  // remote row reusing any local wallet therefore cannot become `self`.
+  const defaultAgentAddress = agent.getDefaultAgentAddress();
+  const defaultAgentAddressLower = defaultAgentAddress?.toLowerCase();
+  const defaultAgentUri = defaultAgentAddressLower
+    ? `did:dkg:agent:${defaultAgentAddressLower}`
+    : undefined;
   const isLocalAgent = (candidate: typeof filteredAgents[number]): boolean =>
-    typeof candidate.agentAddress === 'string'
-    && localAgentAddresses.has(candidate.agentAddress.toLowerCase());
+    defaultAgentAddressLower !== undefined
+    && defaultAgentUri !== undefined
+    && candidate.peerId === agent.peerId
+    && candidate.agentAddress?.toLowerCase() === defaultAgentAddressLower
+    && discoveredAgentIdentityKey(candidate) === defaultAgentUri;
   const statusOf = (candidate: typeof filteredAgents[number]): AgentConnectionStatus =>
     isLocalAgent(candidate)
       ? 'self'
@@ -336,7 +331,14 @@ export async function handleAgentsListRoute(ctx: RequestContext): Promise<void> 
     );
   }
 
-  const page = paginateAgentRows(filteredAgents, { limit, cursor, filterFingerprint });
+  let page: AgentsPage;
+  try {
+    page = paginateAgentRows(filteredAgents, parsedQuery.query);
+  } catch (error) {
+    if (!(error instanceof AgentsCursorError)) throw error;
+    jsonResponse(res, 400, { error: error.message });
+    return;
+  }
   const healthByPeer = agent.getPeerHealth();
   const enriched = page.rows.map((candidate) => {
     const connection = connectionByPeer.get(candidate.peerId);

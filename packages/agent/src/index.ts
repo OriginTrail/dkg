@@ -24,7 +24,14 @@ export {
   type SkillOfferingConfig,
 } from './profile.js';
 export { ProfileManager } from './profile-manager.js';
-export { DiscoveryClient, type DiscoveredAgent, type DiscoveredOffering, type SkillSearchOptions } from './discovery.js';
+export {
+  DiscoveryClient,
+  discoveredAgentIdentityKey,
+  discoveredAgentRowKey,
+  type DiscoveredAgent,
+  type DiscoveredOffering,
+  type SkillSearchOptions,
+} from './discovery.js';
 export {
   signAgentDelegation,
   verifyAgentDelegation,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   paginateAgentRows,
   parseAgentsListQuery,
@@ -24,21 +24,11 @@ function row(over: Record<string, unknown> = {}) {
 
 describe('parseAgentsListQuery (GH#310)', () => {
   const parse = (qs: string) => parseAgentsListQuery(new URLSearchParams(qs));
-  /** The fingerprint parse derives for a given filter set. */
-  const fpOf = (qs: string) => {
-    const r = parse(qs);
-    if (!r.ok) throw new Error(r.error);
-    return r.query.filterFingerprint;
-  };
 
   it('accepts an empty query', () => {
     const r = parse('');
     expect(r.ok).toBe(true);
-    if (r.ok) {
-      const { filterFingerprint, ...rest } = r.query;
-      expect(rest).toEqual({});
-      expect(filterFingerprint).toMatch(/^[0-9a-f]{16}$/);
-    }
+    if (r.ok) expect(r.query).toEqual({});
   });
 
   it('accepts each documented value', () => {
@@ -46,8 +36,7 @@ describe('parseAgentsListQuery (GH#310)', () => {
       const r = parse(qs);
       expect(r.ok).toBe(true);
       if (!r.ok) throw new Error(r.error);
-      const { filterFingerprint: _filterFingerprint, ...rest } = r.query;
-      return rest;
+      return r.query;
     };
     expect(q('framework=OpenClaw')).toEqual({ framework: 'OpenClaw' });
     expect(q('skill_type=ImageAnalysis')).toEqual({ skillType: 'ImageAnalysis' });
@@ -85,27 +74,30 @@ describe('parseAgentsListQuery (GH#310)', () => {
 
   it('round-trips a cursor produced by pagination under the same filters', () => {
     const rows = [row(), row({ agentUri: 'did:dkg:agent/2', name: 'beta' })];
-    const page = paginateAgentRows(rows, { limit: 1, filterFingerprint: fpOf('limit=1') });
+    const page = paginateAgentRows(rows, { limit: 1 });
     expect(page.nextCursor).toBeDefined();
     const parsed = parse(`cursor=${page.nextCursor}`);
     expect(parsed.ok).toBe(true);
-    if (parsed.ok) expect(typeof parsed.query.cursor).toBe('string');
+    if (parsed.ok) {
+      expect(typeof parsed.query.cursor).toBe('string');
+      expect(paginateAgentRows(rows, parsed.query).rows).toHaveLength(1);
+    }
   });
 
   it('rejects a cursor issued under different filters', () => {
     // Page 1 walked with a filter; page 2 requested without it. Continuing
     // would return a coherent-looking wrong continuation — must be a 400.
     const rows = [row(), row({ agentUri: 'did:dkg:agent/2', name: 'beta' })];
-    const page = paginateAgentRows(rows, {
-      limit: 1,
-      filterFingerprint: fpOf('connectionStatus=connected&limit=1'),
-    });
+    const page = paginateAgentRows(rows, { limit: 1, connectionStatus: 'connected' });
     const withoutFilter = parse(`cursor=${page.nextCursor}`);
-    expect(withoutFilter.ok).toBe(false);
-    if (!withoutFilter.ok) expect(withoutFilter.error).toContain('different filter');
+    expect(withoutFilter.ok).toBe(true);
+    if (withoutFilter.ok) {
+      expect(() => paginateAgentRows(rows, withoutFilter.query)).toThrow('different filter');
+    }
     // Repeating the filter continues fine.
     const withFilter = parse(`connectionStatus=connected&cursor=${page.nextCursor}`);
     expect(withFilter.ok).toBe(true);
+    if (withFilter.ok) expect(paginateAgentRows(rows, withFilter.query).rows).toHaveLength(1);
   });
 
   it('binds cursors to unambiguous normalized filter tuples', () => {
@@ -113,16 +105,20 @@ describe('parseAgentsListQuery (GH#310)', () => {
     // fingerprint was derived from the typed filter model.
     const firstFilters = 'framework=x%26skill_type%3Dy&skill_type=z';
     const secondFilters = 'framework=x&skill_type=y%26skill_type%3Dz';
-    expect(fpOf(firstFilters)).not.toBe(fpOf(secondFilters));
-    expect(fpOf('framework=x&skill_type=y')).toBe(fpOf('skill_type=y&framework=x'));
-
-    const page = paginateAgentRows(
-      [row(), row({ agentUri: 'did:dkg:agent/2', peerId: 'peer-2' })],
-      { limit: 1, filterFingerprint: fpOf(firstFilters) },
-    );
+    const rows = [row(), row({ agentUri: 'did:dkg:agent/2', peerId: 'peer-2' })];
+    const first = parse(`${firstFilters}&limit=1`);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const page = paginateAgentRows(rows, first.query);
     const crossFilter = parse(`${secondFilters}&cursor=${page.nextCursor}`);
-    expect(crossFilter.ok).toBe(false);
-    if (!crossFilter.ok) expect(crossFilter.error).toContain('different filter');
+    expect(crossFilter.ok).toBe(true);
+    if (crossFilter.ok) {
+      expect(() => paginateAgentRows(rows, crossFilter.query)).toThrow('different filter');
+    }
+
+    const reordered = parse(`skill_type=z&framework=x%26skill_type%3Dy&cursor=${page.nextCursor}`);
+    expect(reordered.ok).toBe(true);
+    if (reordered.ok) expect(() => paginateAgentRows(rows, reordered.query)).not.toThrow();
   });
 
   it('cursor size is bounded regardless of row content', () => {
@@ -133,7 +129,7 @@ describe('parseAgentsListQuery (GH#310)', () => {
       row({ name: 'x'.repeat(50_000) }),
       row({ agentUri: 'did:dkg:agent/2', name: 'y'.repeat(50_000), peerId: 'peer-2' }),
     ];
-    const page = paginateAgentRows(hostile, { limit: 1, filterFingerprint: fpOf('limit=1') });
+    const page = paginateAgentRows(hostile, { limit: 1 });
     expect(page.nextCursor).toBeDefined();
     expect(page.nextCursor!.length).toBeLessThan(200);
   });
@@ -143,15 +139,9 @@ describe('paginateAgentRows (GH#310)', () => {
   const many = Array.from({ length: 7 }, (_, i) =>
     row({ agentUri: `did:dkg:agent/${i}`, name: `agent-${i}`, peerId: `peer-${i}` }));
 
-  const FP = (() => {
-    const r = parseAgentsListQuery(new URLSearchParams(''));
-    if (!r.ok) throw new Error(r.error);
-    return r.query.filterFingerprint;
-  })();
-
   it('returns rows untouched, in original order, when neither limit nor cursor is given', () => {
     const shuffled = [many[3]!, many[0]!, many[5]!];
-    const page = paginateAgentRows(shuffled, { filterFingerprint: FP });
+    const page = paginateAgentRows(shuffled, {});
     expect(page.rows).toEqual(shuffled);
     expect(page.nextCursor).toBeUndefined();
   });
@@ -174,14 +164,46 @@ describe('paginateAgentRows (GH#310)', () => {
     expect(new Set(collected.map((r: any) => r.agentUri)).size).toBe(many.length);
   });
 
+  it('profile mutations and new optional fields do not move identities between pages', () => {
+    const collected: string[] = [];
+    let cursor: string | undefined;
+    let generation = 0;
+    do {
+      const current = many.map((agent, index) => ({
+        ...agent,
+        name: `${agent.name}-generation-${generation}`,
+        lastSeen: `2026-08-28T00:00:0${(generation + index) % 10}Z`,
+      }));
+      const parsed = parseAgentsListQuery(
+        new URLSearchParams(cursor ? `limit=2&cursor=${cursor}` : 'limit=2'),
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      const page = paginateAgentRows(current, parsed.query);
+      collected.push(...page.rows.map((agent) => agent.agentUri));
+      cursor = page.nextCursor;
+      generation++;
+    } while (cursor && generation < 10);
+
+    expect(collected).toHaveLength(many.length);
+    expect(new Set(collected)).toEqual(new Set(many.map((agent) => agent.agentUri)));
+  });
+
+  it('resolves conflicting rows for one stable identity before pagination', () => {
+    const conflict = row({ name: 'zeta', peerId: 'peer-conflict' });
+    const page = paginateAgentRows([row(), conflict, many[2]!], { limit: 2 });
+    expect(page.rows).toHaveLength(2);
+    expect(new Set(page.rows.map((agent) => agent.agentUri)).size).toBe(2);
+  });
+
   it('omits nextCursor on the final exactly-full page', () => {
-    const page1 = paginateAgentRows(many.slice(0, 3), { limit: 3, filterFingerprint: FP });
+    const page1 = paginateAgentRows(many.slice(0, 3), { limit: 3 });
     expect(page1.rows).toHaveLength(3);
     expect(page1.nextCursor).toBeUndefined();
   });
 
   it('a row deleted between requests cannot wedge or repeat the walk', () => {
-    const first = paginateAgentRows(many, { limit: 3, filterFingerprint: FP });
+    const first = paginateAgentRows(many, { limit: 3 });
     const deleted = first.rows[2]! as any;
     const remaining = many.filter((r) => r.agentUri !== deleted.agentUri);
     const parsed = parseAgentsListQuery(new URLSearchParams(`cursor=${first.nextCursor}`));
@@ -207,7 +229,7 @@ function fakeAgent(over: Partial<Record<string, unknown>> = {}) {
   const localAgentAddress = '0x1111111111111111111111111111111111111111';
   const registry = [
     {
-      agentUri: 'did:dkg:agent/self',
+      agentUri: `did:dkg:agent:${localAgentAddress}`,
       name: 'self-agent',
       peerId: 'peer-self',
       agentAddress: localAgentAddress,
@@ -229,6 +251,7 @@ function fakeAgent(over: Partial<Record<string, unknown>> = {}) {
     peerId: 'peer-self',
     findAgents: async () => registry.map((r) => ({ ...r })),
     findSkills: async () => [],
+    getDefaultAgentAddress: () => localAgentAddress,
     listLocalAgents: () => [{ agentAddress: localAgentAddress, name: 'self-agent' }],
     getPeerHealth: () => new Map([['peer-conn', { lastSeen: 123, latencyMs: 9 }]]),
     node: {
@@ -294,15 +317,22 @@ describe('GET /api/agents (GH#310)', () => {
     expect(body.agents[0]).toMatchObject({ peerId: 'peer-self', connectionStatus: 'self' });
   });
 
-  it('uses local wallet ownership, not a registry peer-id claim, for self', async () => {
+  it('requires the canonical default profile and current peer binding for self', async () => {
     const localAddress = '0x1111111111111111111111111111111111111111';
+    const secondaryLocalAddress = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     const foreignAddress = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     const registry = [
       {
-        agentUri: 'did:dkg:agent/local',
+        agentUri: `did:dkg:agent:${localAddress}`,
         name: 'local',
-        peerId: 'peer-old-publication',
+        peerId: 'peer-self',
         agentAddress: localAddress,
+      },
+      {
+        agentUri: `did:dkg:agent:${secondaryLocalAddress}`,
+        name: 'remote-reusing-local-wallet',
+        peerId: 'peer-remote',
+        agentAddress: secondaryLocalAddress,
       },
       {
         agentUri: 'did:dkg:agent/foreign',
@@ -317,7 +347,7 @@ describe('GET /api/agents (GH#310)', () => {
       // into this registry-backed endpoint.
       listLocalAgents: () => [
         { agentAddress: localAddress, name: 'local' },
-        { agentAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', name: 'unpublished' },
+        { agentAddress: secondaryLocalAddress, name: 'secondary' },
       ],
     });
 
@@ -327,6 +357,7 @@ describe('GET /api/agents (GH#310)', () => {
       expect(body.agents).toHaveLength(1);
       expect(body.agents[0]).toMatchObject({
         agentAddress: localAddress,
+        peerId: 'peer-self',
         connectionStatus: 'self',
       });
     }
@@ -336,6 +367,30 @@ describe('GET /api/agents (GH#310)', () => {
     const { status, body } = await getAgents(fakeAgent(), '?connectionStatus=connected');
     expect(status).toBe(200);
     expect(body.agents.map((a: any) => a.peerId)).toEqual(['peer-conn']);
+  });
+
+  it('forwards framework and intersects skill offerings through the route', async () => {
+    const findAgents = vi.fn(async () => [
+      row({ agentUri: 'did:dkg:agent/oc-image', peerId: 'peer-image' }),
+      row({ agentUri: 'did:dkg:agent/oc-text', peerId: 'peer-text' }),
+    ]);
+    const findSkills = vi.fn(async () => [{
+      agentUri: 'did:dkg:agent/oc-image',
+      agentName: 'image',
+      offeringUri: 'did:dkg:offering/image',
+      skillType: 'ImageAnalysis',
+    }]);
+    const { status, body } = await getAgents(
+      fakeAgent({ findAgents, findSkills }),
+      '?framework=OpenClaw&skill_type=ImageAnalysis',
+    );
+
+    expect(status).toBe(200);
+    expect(findAgents).toHaveBeenCalledWith({ framework: 'OpenClaw' });
+    expect(findSkills).toHaveBeenCalledWith({ skillType: 'ImageAnalysis' });
+    expect(body.agents.map((agent: any) => agent.agentUri)).toEqual([
+      'did:dkg:agent/oc-image',
+    ]);
   });
 
   it('pages the registry with limit/cursor and terminates', async () => {
@@ -351,6 +406,16 @@ describe('GET /api/agents (GH#310)', () => {
       expect(++guard).toBeLessThan(10);
     }
     expect(seen.sort()).toEqual(['peer-conn', 'peer-gone', 'peer-self']);
+  });
+
+  it('rejects a cursor when route filters change between pages', async () => {
+    const first = await getAgents(fakeAgent(), '?local=false&limit=1');
+    expect(first.status).toBe(200);
+    expect(first.body.nextCursor).toBeDefined();
+
+    const second = await getAgents(fakeAgent(), `?cursor=${first.body.nextCursor}`);
+    expect(second.status).toBe(400);
+    expect(second.body.error).toContain('different filter');
   });
 
   it('rejects a bad parameter instead of silently returning the registry', async () => {

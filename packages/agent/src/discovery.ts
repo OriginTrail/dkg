@@ -30,6 +30,36 @@ export interface DiscoveredAgent {
   lastSeen?: string;
 }
 
+/**
+ * Stable identity used by keyset pagination and identity-level conflict handling.
+ *
+ * Only the canonical agent URI participates. Mutable profile fields are deliberately excluded,
+ * so changing a name, peer binding, framework, or future optional field cannot move an agent
+ * across an in-progress page walk. EVM-address DIDs are case-normalized to the same canonical
+ * shape emitted by the profile writer.
+ */
+export function discoveredAgentIdentityKey(
+  agent: Pick<DiscoveredAgent, 'agentUri'>,
+): string {
+  const match = /^(did:dkg:agent:)(0x[0-9a-fA-F]{40})$/.exec(agent.agentUri);
+  return match ? `${match[1]}${match[2]!.toLowerCase()}` : agent.agentUri;
+}
+
+/** Explicit exact-row key for the current public DiscoveredAgent model. */
+export function discoveredAgentRowKey(agent: DiscoveredAgent): string {
+  return JSON.stringify([
+    discoveredAgentIdentityKey(agent),
+    agent.name,
+    agent.peerId,
+    agent.framework ?? null,
+    agent.nodeRole ?? null,
+    agent.relayAddress ?? null,
+    agent.agentAddress ?? null,
+    agent.multiaddrs ? [...agent.multiaddrs].sort() : null,
+    agent.lastSeen ?? null,
+  ]);
+}
+
 export interface DiscoveredOffering {
   agentUri: string;
   agentName: string;
@@ -73,8 +103,6 @@ export class DiscoveryClient {
       filter += `\n      ?agent <${DKG}agentAddress> "${escapeSparqlLiteral(options.agentAddress)}" .`;
     }
 
-    const limitClause = options.limit ? `LIMIT ${options.limit}` : '';
-
     const sparql = `
       SELECT DISTINCT ?agent ?name ?peerId ?framework ?nodeRole ?relayAddress ?agentAddress WHERE {
         ?agent a <${DKG}Agent> ;
@@ -85,7 +113,6 @@ export class DiscoveryClient {
         OPTIONAL { ?agent <${DKG}relayAddress> ?relayAddress }
         OPTIONAL { ?agent <${DKG}agentAddress> ?agentAddress }
       }
-      ${limitClause}
     `;
 
     const result = await this.engine.query(sparql, {
@@ -107,20 +134,15 @@ export class DiscoveryClient {
     // typed-row fence as well because different RDF term encodings can
     // normalize to the same public string values after `stripQuotes`.
     const seen = new Set<string>();
-    return discovered.filter((agent) => {
-      const key = JSON.stringify([
-        agent.agentUri,
-        agent.name,
-        agent.peerId,
-        agent.framework ?? null,
-        agent.nodeRole ?? null,
-        agent.relayAddress ?? null,
-        agent.agentAddress ?? null,
-      ]);
+    const unique = discovered.filter((agent) => {
+      const key = discoveredAgentRowKey(agent);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
+    // RDF-distinct bindings may normalize to one public row. Applying LIMIT in SPARQL would let
+    // those encodings consume the caller-visible slots and hide later unique agents permanently.
+    return options.limit === undefined ? unique : unique.slice(0, options.limit);
   }
 
   /**
