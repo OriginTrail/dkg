@@ -115,6 +115,21 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect((await p.getStatus(accepted))?.status).toBe('accepted');
   });
 
+  it('rejects a public update that would persist a state shape the reader refuses', async () => {
+    const p = createPublisher();
+    const jobId = await p.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'write-shape' }));
+    const before = await p.getStatus(jobId);
+
+    await expect(p.update(jobId, 'accepted', {
+      claim: { walletId: 'wallet-poison' },
+    } as never)).rejects.toThrow(/claim is forbidden for status accepted/);
+
+    // Validation happens before persistJobRecord: the prior row remains readable and byte-for-byte
+    // equivalent at the public boundary, and queue inventory is not poisoned by the rejected patch.
+    await expect(p.getStatus(jobId)).resolves.toEqual(before);
+    expect((await p.list()).filter((job) => job.jobId === jobId)).toEqual([before]);
+  });
+
   it('rejects a validated job as nonterminal without mutation', async () => {
     const p = createPublisher();
     const validated = await driveToValidated(p);

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { AdmissionJournalEntry, LiftJob, LiftJobHex, LiftJobRequest, PersistedJournalKind } from './lift-job.js';
+import type { AdmissionJournalEntry, LiftJob, LiftJobHex, LiftJobRequest, PersistedJournalKind, PersistedLiftJob } from './lift-job.js';
 
 export const DEFAULT_CONTROL_GRAPH_URI = 'urn:dkg:publisher:control-plane';
 export const DEFAULT_WALLET_LOCK_GRAPH_URI = 'urn:dkg:publisher:wallet-locks';
@@ -321,7 +321,7 @@ export function knowledgeAssetVmPublishLifecycleKey(publish: {
  * backfill so the index is built identically everywhere. Intent exactness is
  * derived from the parsed payload at lookup time (no separate intentKey triple).
  */
-export function serializeVmPublishIntentIndex(job: LiftJob, graphUri: string): Quad[] {
+export function serializeVmPublishIntentIndex(job: PersistedLiftJob, graphUri: string): Quad[] {
   if (job.request.jobType !== 'knowledge-asset-vm-publish') return [];
   const jobRef = jobSubject(job.jobId);
   const publish = job.request.knowledgeAssetVmPublish;

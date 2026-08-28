@@ -2,6 +2,7 @@ import type {
   AdmissionJournalEntry,
   KnowledgeAssetVmPublishRequest,
   LiftJob,
+  PersistedLiftJob,
   LiftJobBroadcast,
   LiftJobClaimed,
   LiftJobClaimMetadata,
@@ -140,9 +141,9 @@ export interface IntentLookupInput {
  */
 export type IntentLookupResult =
   | { readonly kind: 'none' }
-  | { readonly kind: 'active'; readonly job: LiftJob; readonly superseded: LiftJob[]; readonly exactIntentMatch?: boolean }
-  | { readonly kind: 'superseded'; readonly jobs: LiftJob[]; readonly exactIntentMatch?: boolean }
-  | { readonly kind: 'conflict'; readonly jobs: LiftJob[] };
+  | { readonly kind: 'active'; readonly job: PersistedLiftJob; readonly superseded: PersistedLiftJob[]; readonly exactIntentMatch?: boolean }
+  | { readonly kind: 'superseded'; readonly jobs: PersistedLiftJob[]; readonly exactIntentMatch?: boolean }
+  | { readonly kind: 'conflict'; readonly jobs: PersistedLiftJob[] };
 
 /**
  * Queue-layer facts about an admission, supplied alongside the operation request.
@@ -180,10 +181,10 @@ export interface AsyncLiftPublisher {
    * @deprecated Prefer `administrative.updateById`; workers must use `openClaimSession`.
    */
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
-  getStatus(jobId: string): Promise<LiftJob | null>;
-  list(filter?: { status?: LiftJobState }): Promise<LiftJob[]>;
+  getStatus(jobId: string): Promise<PersistedLiftJob | null>;
+  list(filter?: { status?: LiftJobState }): Promise<PersistedLiftJob[]>;
   inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
-  processNext(walletId: string): Promise<LiftJob | null>;
+  processNext(walletId: string): Promise<PersistedLiftJob | null>;
   /** @deprecated Prefer `administrative.recordPublishResultById`; workers use a claim session. */
   recordPublishResult(jobId: string, publishResult: PublishResult, options?: { publicByteSize?: number }): Promise<LiftJob>;
   /** @deprecated Prefer `administrative.recordPublishFailureById`; workers use a claim session. */
@@ -299,7 +300,7 @@ export interface AsyncLiftDetailedRetrier {
  * that will never fire.
  */
 export interface AsyncLiftRetryStateReader {
-  describeConfiguredRetryState(job: LiftJob): LiftJobRetryProjection;
+  describeConfiguredRetryState(job: PersistedLiftJob): LiftJobRetryProjection;
 }
 
 /**
@@ -511,7 +512,7 @@ export interface AsyncKnowledgeAssetVmPublishRecoveryInput {
    * had dropped, and cast. The boundary now takes the record as it is, and the facts a caller
    * needs about the transaction arrive separately and typed.
    */
-  readonly job: LiftJob;
+  readonly job: PersistedLiftJob;
   /**
    * GH#2270 PR-3 r3 — the transaction facts, typed, from whichever carrier the record has. The
    * consumer needs the queued tx hash to bind the resolved receipt to it, and a failed job held
@@ -675,7 +676,7 @@ export type AsyncLiftPublisherRecoveryResolver = (
 ) => Promise<AsyncLiftChainProofResolution>;
 
 export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
-  job: LiftJob,
+  job: PersistedLiftJob,
   lookup: AsyncLiftChainProofLookup,
   /**
    * PR #2300 r2 — the dispatcher's verdict recovery, when this finalize follows one. For an

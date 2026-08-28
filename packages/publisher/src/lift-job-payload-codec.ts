@@ -17,10 +17,12 @@ import {
   type LiftJobHex,
   type LiftJobInclusionMetadata,
   type LiftJobRecoveryMetadata,
-  type LiftJobRequest,
+  type LiftJobRecoveryFinalizedFromChain,
+  type LiftJobRecoveryResetToAccepted,
   type LiftJobRetryMetadata,
   type LiftJobTimestamps,
   type LiftJobValidationMetadata,
+  type PersistedLiftJob,
 } from './lift-job.js';
 import { parseLiteral } from './async-lift-control-plane.js';
 import { normalizePersistedLiftJobRequest } from './async-lift-publisher-utils.js';
@@ -30,23 +32,15 @@ import { normalizePersistedLiftJobRequest } from './async-lift-publisher-utils.j
  * Every field exposed here has been parsed into its canonical runtime type; state membership and
  * the exact cross-state field contract are applied separately by {@link knownLiftJobPayload}.
  */
-export interface StructurallyValidLiftJobPayload {
-  readonly jobId: string;
-  readonly jobSlug: string;
-  readonly request: LiftJobRequest;
-  readonly admission?: LiftJobAdmissionMetadata;
+export type StructurallyValidLiftJobPayload = Omit<LiftJobBase, 'status'> & {
   readonly status: string;
-  readonly timestamps: LiftJobTimestamps;
-  readonly retries: LiftJobRetryMetadata;
-  readonly recovery?: LiftJobRecoveryMetadata;
-  readonly controlPlane?: LiftJobControlPlaneRefs;
   readonly claim?: LiftJobClaimMetadata;
   readonly validation?: LiftJobValidationMetadata;
   readonly broadcast?: LiftJobBroadcastMetadata;
   readonly inclusion?: StructurallyValidLiftJobInclusion;
   readonly finalization?: LiftJobFinalizationMetadata;
   readonly failure?: LiftJobFailureMetadata;
-}
+};
 
 type StructurallyValidLiftJobInclusion = Omit<LiftJobInclusionMetadata, 'txHash'> & {
   readonly txHash?: LiftJobHex;
@@ -75,7 +69,24 @@ export function decodeLiftJobPayload(binding?: string): LiftJobPayloadDecodeResu
 }
 
 /** Build the exact canonical union member, or null when only the status enum is unrecognized. */
-export function knownLiftJobPayload(job: StructurallyValidLiftJobPayload): LiftJob | null {
+export function knownLiftJobPayload(job: StructurallyValidLiftJobPayload): PersistedLiftJob | null {
+  switch (job.status) {
+    case 'broadcast':
+      return parsePersistedBroadcast(job);
+    case 'finalized':
+      return parsePersistedFinalized(job);
+    case 'failed':
+      return parsePersistedFailed(job);
+    default:
+      return canonicalLiftJobPayload(job);
+  }
+}
+
+/**
+ * Construct a current writable lifecycle union member. Compatibility projections are deliberately
+ * excluded: callers use this at every write boundary before durable state can be changed.
+ */
+export function canonicalLiftJobPayload(job: StructurallyValidLiftJobPayload): LiftJob | null {
   switch (job.status) {
     case 'accepted':
       rejectDefined(job, ['claim', 'validation', 'broadcast', 'inclusion', 'finalization', 'failure']);
@@ -92,7 +103,7 @@ export function knownLiftJobPayload(job: StructurallyValidLiftJobPayload): LiftJ
         validation: required(job.validation, 'validation'),
       };
     case 'broadcast':
-      return parseBroadcast(job);
+      return parseCanonicalBroadcast(job);
     case 'included': {
       rejectDefined(job, ['finalization', 'failure']);
       const broadcast = required(job.broadcast, 'broadcast');
@@ -106,16 +117,33 @@ export function knownLiftJobPayload(job: StructurallyValidLiftJobPayload): LiftJ
       };
     }
     case 'finalized':
-      return parseFinalized(job);
+      return parseCanonicalFinalized(job);
     case 'failed':
-      return parseFailed(job);
+      return parseCanonicalFailed(job);
     default:
       return null;
   }
 }
 
+/** Validate an in-memory write candidate with the same structural and state schemas as restart. */
+export function assertCanonicalLiftJobPayload(value: unknown): LiftJob {
+  const job = parseStructuralPayload(value);
+  const canonical = canonicalLiftJobPayload(job);
+  if (canonical === null) throw new Error(`Unsupported LiftJob status: ${job.status}`);
+  return canonical;
+}
+
+/** Runtime guard used before a persisted record receives normal lifecycle transition authority. */
+export function isCanonicalLiftJob(job: PersistedLiftJob): job is LiftJob {
+  try {
+    return canonicalLiftJobPayload(parseStructuralPayload(job)) !== null;
+  } catch {
+    return false;
+  }
+}
+
 /** Ordinary read policy: absence is nullable, but corrupt or unknown durable state fails closed. */
-export function decodedLiftJobOrThrow(decoded: LiftJobPayloadDecodeResult): LiftJob | null {
+export function decodedLiftJobOrThrow(decoded: LiftJobPayloadDecodeResult): PersistedLiftJob | null {
   switch (decoded.kind) {
     case 'absent':
       return null;
@@ -132,34 +160,7 @@ export function decodedLiftJobOrThrow(decoded: LiftJobPayloadDecodeResult): Lift
 }
 
 function parseStructuralPayload(value: unknown): StructurallyValidLiftJobPayload {
-  const record = expectRecord(value, 'payload');
-  return {
-    jobId: expectNonEmptyString(record['jobId'], 'jobId'),
-    jobSlug: expectNonEmptyString(record['jobSlug'], 'jobSlug'),
-    request: normalizePersistedLiftJobRequest(record['request']),
-    ...(record['admission'] === undefined ? {} : { admission: parseAdmission(record['admission']) }),
-    status: expectNonEmptyString(record['status'], 'status'),
-    timestamps: parseTimestamps(record['timestamps']),
-    retries: parseRetries(record['retries']),
-    ...(record['recovery'] === undefined ? {} : { recovery: parseRecovery(record['recovery']) }),
-    ...(record['controlPlane'] === undefined
-      ? {}
-      : { controlPlane: parseControlPlane(record['controlPlane']) }),
-    ...(record['claim'] === undefined ? {} : { claim: parseClaim(record['claim']) }),
-    ...(record['validation'] === undefined
-      ? {}
-      : { validation: parseValidation(record['validation']) }),
-    ...(record['broadcast'] === undefined
-      ? {}
-      : { broadcast: parseBroadcastMetadata(record['broadcast']) }),
-    ...(record['inclusion'] === undefined
-      ? {}
-      : { inclusion: parseInclusion(record['inclusion']) }),
-    ...(record['finalization'] === undefined
-      ? {}
-      : { finalization: parseFinalization(record['finalization']) }),
-    ...(record['failure'] === undefined ? {} : { failure: parseFailure(record['failure']) }),
-  };
+  return structuralPayloadParser(value, 'payload');
 }
 
 function base(job: StructurallyValidLiftJobPayload): Omit<LiftJobBase, 'status'> {
@@ -175,30 +176,46 @@ function base(job: StructurallyValidLiftJobPayload): Omit<LiftJobBase, 'status'>
   };
 }
 
-function parseBroadcast(job: StructurallyValidLiftJobPayload): LiftJob {
+function baseWithoutRecovery(
+  job: StructurallyValidLiftJobPayload,
+): Omit<LiftJobBase, 'status' | 'recovery'> {
+  const { recovery: _recovery, ...withoutRecovery } = base(job);
+  return withoutRecovery;
+}
+
+function parseCanonicalBroadcast(job: StructurallyValidLiftJobPayload): LiftJob {
   rejectDefined(job, ['inclusion', 'finalization', 'failure']);
-  const claim = required(job.claim, 'claim');
-  if (job.validation === undefined && job.broadcast === undefined && job.request.jobType === 'lift') {
-    return { ...base(job), status: 'broadcast', request: job.request, claim };
-  }
   return {
     ...base(job),
     status: 'broadcast',
-    claim,
+    claim: required(job.claim, 'claim'),
     validation: required(job.validation, 'validation'),
     broadcast: required(job.broadcast, 'broadcast'),
   };
 }
 
-function parseFinalized(job: StructurallyValidLiftJobPayload): LiftJob {
+function parsePersistedBroadcast(job: StructurallyValidLiftJobPayload): PersistedLiftJob {
+  try {
+    return parseCanonicalBroadcast(job);
+  } catch (canonicalError) {
+    rejectDefined(job, ['validation', 'broadcast', 'inclusion', 'finalization', 'failure']);
+    if (job.request.jobType !== 'lift') throw canonicalError;
+    return {
+      ...base(job),
+      status: 'broadcast',
+      request: job.request,
+      claim: required(job.claim, 'claim'),
+    };
+  }
+}
+
+function parseCanonicalFinalized(job: StructurallyValidLiftJobPayload): LiftJob {
   rejectDefined(job, ['failure']);
   const claim = required(job.claim, 'claim');
   const validation = required(job.validation, 'validation');
   const finalization = required(job.finalization, 'finalization');
-  // Older/current transition callers can retain transaction fields while stamping a local/noop
-  // result. Those fields are not part of either canonical terminal variant, so the constructive
-  // projection deliberately omits them instead of lying about the returned union member.
   if (finalization.mode === 'noop') {
+    rejectDefined(job, ['broadcast', 'inclusion']);
     return {
       ...base(job),
       status: 'finalized',
@@ -208,6 +225,7 @@ function parseFinalized(job: StructurallyValidLiftJobPayload): LiftJob {
     };
   }
   if (finalization.mode === 'local') {
+    rejectDefined(job, ['broadcast', 'inclusion']);
     return {
       ...base(job),
       status: 'finalized',
@@ -229,152 +247,326 @@ function parseFinalized(job: StructurallyValidLiftJobPayload): LiftJob {
   };
 }
 
-function parseFailed(job: StructurallyValidLiftJobPayload): LiftJob {
+function parsePersistedFinalized(job: StructurallyValidLiftJobPayload): PersistedLiftJob {
+  try {
+    return parseCanonicalFinalized(job);
+  } catch (canonicalError) {
+    rejectDefined(job, ['failure']);
+    const finalization = required(job.finalization, 'finalization');
+    if (finalization.mode !== 'noop' && finalization.mode !== 'local') throw canonicalError;
+    const broadcast = job.broadcast;
+    return {
+      ...base(job),
+      status: 'finalized',
+      claim: required(job.claim, 'claim'),
+      validation: required(job.validation, 'validation'),
+      ...(broadcast ? { broadcast } : {}),
+      ...(job.inclusion && broadcast
+        ? { inclusion: canonicalInclusion(job.inclusion, broadcast) }
+        : {}),
+      finalization: { ...finalization, mode: finalization.mode },
+    };
+  }
+}
+
+function parseCanonicalFailed(job: StructurallyValidLiftJobPayload): LiftJob {
   rejectDefined(job, ['finalization']);
   const failure = required(job.failure, 'failure');
-  // Failure progress is historical: it may describe an earlier attempt than failedFromState and
-  // can be deliberately incomplete. LiftJobPersistedFailure is the exact read-model member for
-  // that durable contract; policy consumers already inspect its optional evidence defensively.
-  return {
-    ...base(job),
-    status: 'failed',
-    ...(job.claim ? { claim: job.claim } : {}),
-    ...(job.validation ? { validation: job.validation } : {}),
-    ...(job.broadcast ? { broadcast: job.broadcast } : {}),
-    ...(job.inclusion && job.broadcast
-      ? { inclusion: canonicalInclusion(job.inclusion, job.broadcast) }
-      : {}),
-    failure,
+  const recovery = canonicalFailureRecovery(job.recovery);
+  switch (failure.failedFromState) {
+    case 'accepted':
+      rejectDefined(job, ['claim', 'validation', 'broadcast', 'inclusion', 'recovery']);
+      return {
+        ...baseWithoutRecovery(job),
+        status: 'failed',
+        failure: { ...failure, failedFromState: 'accepted' },
+      };
+    case 'claimed': {
+      rejectDefined(job, ['validation', 'broadcast', 'inclusion']);
+      return {
+        ...baseWithoutRecovery(job),
+        ...(recovery ? { recovery } : {}),
+        status: 'failed',
+        claim: required(job.claim, 'claim'),
+        failure: { ...failure, failedFromState: 'claimed' },
+      };
+    }
+    case 'validated': {
+      rejectDefined(job, ['broadcast', 'inclusion']);
+      return {
+        ...baseWithoutRecovery(job),
+        ...(recovery ? { recovery } : {}),
+        status: 'failed',
+        claim: required(job.claim, 'claim'),
+        validation: required(job.validation, 'validation'),
+        failure: { ...failure, failedFromState: 'validated' },
+      };
+    }
+    case 'broadcast': {
+      rejectDefined(job, ['inclusion']);
+      const claim = required(job.claim, 'claim');
+      const validation = required(job.validation, 'validation');
+      const failure = required(job.failure, 'failure');
+      if (job.broadcast === undefined) {
+        return {
+          ...baseWithoutRecovery(job),
+          ...(recovery ? { recovery } : {}),
+          status: 'failed',
+          claim,
+          validation,
+          failure: { ...failure, failedFromState: 'broadcast' },
+        };
+      }
+      return {
+        ...baseWithoutRecovery(job),
+        ...(recovery ? { recovery } : {}),
+        status: 'failed',
+        claim,
+        validation,
+        broadcast: job.broadcast,
+        failure: { ...failure, failedFromState: 'broadcast' },
+      };
+    }
+    case 'included': {
+      const validation = required(job.validation, 'validation');
+      const claim = required(job.claim, 'claim');
+      const failure = required(job.failure, 'failure');
+      if (job.broadcast === undefined) {
+        rejectDefined(job, ['inclusion']);
+        return {
+          ...baseWithoutRecovery(job),
+          ...(recovery ? { recovery } : {}),
+          status: 'failed',
+          claim,
+          validation,
+          failure: { ...failure, failedFromState: 'included' },
+        };
+      }
+      const broadcast = job.broadcast;
+      return {
+        ...baseWithoutRecovery(job),
+        ...(recovery ? { recovery } : {}),
+        status: 'failed',
+        claim,
+        validation,
+        broadcast,
+        inclusion: canonicalInclusion(required(job.inclusion, 'inclusion'), broadcast),
+        failure: { ...failure, failedFromState: 'included' },
+      };
+    }
+  }
+}
+
+function canonicalFailureRecovery(
+  recovery: LiftJobRecoveryMetadata | undefined,
+): LiftJobRecoveryResetToAccepted | undefined {
+  if (recovery === undefined) return undefined;
+  if (recovery.action !== 'reset_to_accepted') {
+    throw new Error('failed jobs may carry only reset_to_accepted recovery provenance');
+  }
+  return recovery;
+}
+
+function parsePersistedFailed(job: StructurallyValidLiftJobPayload): PersistedLiftJob {
+  try {
+    return parseCanonicalFailed(job);
+  } catch {
+    rejectDefined(job, ['finalization']);
+    const failure = required(job.failure, 'failure');
+    const broadcast = job.broadcast;
+    return {
+      ...base(job),
+      status: 'failed',
+      ...(job.claim ? { claim: job.claim } : {}),
+      ...(job.validation ? { validation: job.validation } : {}),
+      ...(broadcast ? { broadcast } : {}),
+      ...(job.inclusion && broadcast
+        ? { inclusion: canonicalInclusion(job.inclusion, broadcast) }
+        : {}),
+      failure,
+    };
+  }
+}
+
+type RuntimeParser<T> = (value: unknown, path: string) => T;
+type OptionalRuntimeParser<T> = { readonly optional: true; readonly parser: RuntimeParser<T> };
+type OptionalKeys<T extends object> = {
+  [K in keyof T]-?: undefined extends T[K] ? K : never
+}[keyof T];
+type RequiredKeys<T extends object> = Exclude<keyof T, OptionalKeys<T>>;
+type ObjectRuntimeSchema<T extends object> =
+  & { readonly [K in RequiredKeys<T>]: RuntimeParser<T[K]> }
+  & { readonly [K in OptionalKeys<T>]: OptionalRuntimeParser<Exclude<T[K], undefined>> };
+
+function optional<T>(parser: RuntimeParser<T>): OptionalRuntimeParser<T> {
+  return { optional: true, parser };
+}
+
+/**
+ * The schema map is exhaustive over T, including optional fields. Adding a metadata field now
+ * breaks this declaration at compile time instead of silently making newly written rows unreadable.
+ */
+function objectParser<T extends object>(schema: ObjectRuntimeSchema<T>): RuntimeParser<T> {
+  return (value, path) => {
+    const record = expectRecord(value, path);
+    const parsed: Record<string, unknown> = {};
+    for (const [key, field] of Object.entries(schema)) {
+      if (typeof field === 'object' && field !== null && 'optional' in field) {
+        const descriptor = field as OptionalRuntimeParser<unknown>;
+        if (record[key] !== undefined) parsed[key] = descriptor.parser(record[key], `${path}.${key}`);
+      } else {
+        parsed[key] = (field as RuntimeParser<unknown>)(record[key], `${path}.${key}`);
+      }
+    }
+    return parsed as T;
   };
 }
 
-function parseTimestamps(value: unknown): LiftJobTimestamps {
-  const record = expectRecord(value, 'timestamps');
-  return {
-    acceptedAt: expectFiniteNumber(record['acceptedAt'], 'timestamps.acceptedAt'),
-    ...optionalNumber(record, 'claimedAt', 'timestamps'),
-    ...optionalNumber(record, 'validatedAt', 'timestamps'),
-    ...optionalNumber(record, 'broadcastAt', 'timestamps'),
-    ...optionalNumber(record, 'rpcAcceptedAt', 'timestamps'),
-    ...optionalNumber(record, 'includedAt', 'timestamps'),
-    ...optionalNumber(record, 'finalizedAt', 'timestamps'),
-    ...optionalNumber(record, 'failedAt', 'timestamps'),
-    ...optionalNumber(record, 'lastRetriedAt', 'timestamps'),
-    ...optionalNumber(record, 'nextRetryAt', 'timestamps'),
-    ...optionalNumber(record, 'lastRecoveredAt', 'timestamps'),
-    updatedAt: expectFiniteNumber(record['updatedAt'], 'timestamps.updatedAt'),
+const stringParser: RuntimeParser<string> = expectString;
+const nonEmptyStringParser: RuntimeParser<string> = expectNonEmptyString;
+const numberParser: RuntimeParser<number> = expectFiniteNumber;
+const booleanParser: RuntimeParser<boolean> = expectBoolean;
+const hexParser: RuntimeParser<LiftJobHex> = expectHexString;
+const stringArrayParser: RuntimeParser<readonly string[]> = expectStringArray;
+const operationKindParser: RuntimeParser<'create' | 'update'> = (value, path) =>
+  expectEnum(value, ['create', 'update'] as const, path);
+
+function enumParser<const T extends readonly string[]>(allowed: T): RuntimeParser<T[number]> {
+  return (value, path) => expectEnum(value, allowed, path);
+}
+
+function literalParser<const T extends string>(literal: T): RuntimeParser<T> {
+  return (value, path) => {
+    if (value !== literal) throw new Error(`${path} must be ${literal}`);
+    return literal;
   };
+}
+
+const stringRecordParser: RuntimeParser<Readonly<Record<string, string>>> = (value, path) => {
+  const record = expectRecord(value, path);
+  if (!Object.values(record).every((item) => typeof item === 'string')) {
+    throw new Error(`${path} must map strings to strings`);
+  }
+  return record as Record<string, string>;
+};
+
+const timestampsParser = objectParser<LiftJobTimestamps>({
+  acceptedAt: numberParser,
+  claimedAt: optional(numberParser),
+  validatedAt: optional(numberParser),
+  broadcastAt: optional(numberParser),
+  rpcAcceptedAt: optional(numberParser),
+  includedAt: optional(numberParser),
+  finalizedAt: optional(numberParser),
+  failedAt: optional(numberParser),
+  lastRetriedAt: optional(numberParser),
+  nextRetryAt: optional(numberParser),
+  lastRecoveredAt: optional(numberParser),
+  updatedAt: numberParser,
+});
+
+const retriesParser = objectParser<LiftJobRetryMetadata>({
+  retryCount: numberParser,
+  maxRetries: numberParser,
+  lastRetryReason: optional(stringParser),
+});
+
+const admissionParser = objectParser<LiftJobAdmissionMetadata>({
+  byAgentAddress: nonEmptyStringParser,
+});
+
+const controlPlaneParser = objectParser<LiftJobControlPlaneRefs>({
+  jobRef: optional(stringParser),
+  walletLockRef: optional(stringParser),
+});
+
+function parseTimestamps(value: unknown): LiftJobTimestamps {
+  return timestampsParser(value, 'timestamps');
 }
 
 function parseRetries(value: unknown): LiftJobRetryMetadata {
-  const record = expectRecord(value, 'retries');
-  return {
-    retryCount: expectFiniteNumber(record['retryCount'], 'retries.retryCount'),
-    maxRetries: expectFiniteNumber(record['maxRetries'], 'retries.maxRetries'),
-    ...optionalString(record, 'lastRetryReason', 'retries'),
-  };
+  return retriesParser(value, 'retries');
 }
 
 function parseAdmission(value: unknown): LiftJobAdmissionMetadata {
-  const record = expectRecord(value, 'admission');
-  return {
-    byAgentAddress: expectNonEmptyString(record['byAgentAddress'], 'admission.byAgentAddress'),
-  };
+  return admissionParser(value, 'admission');
 }
 
 function parseControlPlane(value: unknown): LiftJobControlPlaneRefs {
-  const record = expectRecord(value, 'controlPlane');
-  return {
-    ...optionalString(record, 'jobRef', 'controlPlane'),
-    ...optionalString(record, 'walletLockRef', 'controlPlane'),
-  };
+  return controlPlaneParser(value, 'controlPlane');
 }
 
+const recoveryResetParser = objectParser<LiftJobRecoveryResetToAccepted>({
+  action: literalParser('reset_to_accepted'),
+  recoveredFromStatus: enumParser(['claimed', 'validated', 'broadcast', 'included'] as const),
+  txHashChecked: optional(hexParser),
+  txHashAccounted: optional(booleanParser),
+  operationKind: optional(operationKindParser),
+  walletIdChecked: optional(stringParser),
+  nonceChecked: optional(numberParser),
+  note: optional(stringParser),
+});
+
+const recoveryFinalizedParser = objectParser<LiftJobRecoveryFinalizedFromChain>({
+  action: literalParser('finalized_from_chain'),
+  recoveredFromStatus: enumParser(['broadcast', 'included'] as const),
+  txHashChecked: hexParser,
+  note: optional(stringParser),
+});
+
+const claimParser = objectParser<LiftJobClaimMetadata>({
+  walletId: nonEmptyStringParser,
+  claimedBy: optional(stringParser),
+  claimToken: optional(stringParser),
+  claimLeaseExpiresAt: optional(numberParser),
+});
+
+const validationParser = objectParser<LiftJobValidationMetadata>({
+  canonicalRoots: stringArrayParser,
+  canonicalRootMap: stringRecordParser,
+  swmQuadCount: numberParser,
+  authorityProofRef: nonEmptyStringParser,
+  transitionType: enumParser(LIFT_TRANSITION_TYPES),
+  priorVersion: optional(stringParser),
+});
+
+const broadcastMetadataParser = objectParser<LiftJobBroadcastMetadata>({
+  txHash: hexParser,
+  walletId: nonEmptyStringParser,
+  merkleRoot: optional(hexParser),
+  publicByteSize: optional(numberParser),
+  nonce: optional(numberParser),
+  operationKind: optional(operationKindParser),
+});
+
+const inclusionParser = objectParser<StructurallyValidLiftJobInclusion>({
+  txHash: optional(hexParser),
+  blockNumber: numberParser,
+  blockHash: optional(hexParser),
+  blockTimestamp: optional(numberParser),
+});
+
 function parseRecovery(value: unknown): LiftJobRecoveryMetadata {
-  const record = expectRecord(value, 'recovery');
-  const action = record['action'];
-  const recoveredFromStatus = record['recoveredFromStatus'];
-  if (action === 'finalized_from_chain') {
-    if (recoveredFromStatus !== 'broadcast' && recoveredFromStatus !== 'included') {
-      throw new Error('recovery.finalized_from_chain requires a broadcast or included origin');
-    }
-    return {
-      action,
-      recoveredFromStatus,
-      txHashChecked: expectHexString(record['txHashChecked'], 'recovery.txHashChecked'),
-      ...optionalString(record, 'note', 'recovery'),
-    };
-  }
-  if (action !== 'reset_to_accepted') throw new Error('recovery.action is unsupported');
-  if (!['claimed', 'validated', 'broadcast', 'included'].includes(String(recoveredFromStatus))) {
-    throw new Error('recovery.recoveredFromStatus is unsupported');
-  }
-  return {
-    action,
-    recoveredFromStatus: recoveredFromStatus as 'claimed' | 'validated' | 'broadcast' | 'included',
-    ...(record['txHashChecked'] === undefined
-      ? {}
-      : { txHashChecked: expectHexString(record['txHashChecked'], 'recovery.txHashChecked') }),
-    ...optionalBoolean(record, 'txHashAccounted', 'recovery'),
-    ...optionalOperationKind(record, 'operationKind', 'recovery'),
-    ...optionalString(record, 'walletIdChecked', 'recovery'),
-    ...optionalNumber(record, 'nonceChecked', 'recovery'),
-    ...optionalString(record, 'note', 'recovery'),
-  };
+  const action = expectRecord(value, 'recovery')['action'];
+  if (action === 'reset_to_accepted') return recoveryResetParser(value, 'recovery');
+  if (action === 'finalized_from_chain') return recoveryFinalizedParser(value, 'recovery');
+  throw new Error('recovery.action is unsupported');
 }
 
 function parseClaim(value: unknown): LiftJobClaimMetadata {
-  const record = expectRecord(value, 'claim');
-  return {
-    walletId: expectNonEmptyString(record['walletId'], 'claim.walletId'),
-    ...optionalString(record, 'claimedBy', 'claim'),
-    ...optionalString(record, 'claimToken', 'claim'),
-    ...optionalNumber(record, 'claimLeaseExpiresAt', 'claim'),
-  };
+  return claimParser(value, 'claim');
 }
 
 function parseValidation(value: unknown): LiftJobValidationMetadata {
-  const record = expectRecord(value, 'validation');
-  const rootMap = expectRecord(record['canonicalRootMap'], 'validation.canonicalRootMap');
-  if (!Object.values(rootMap).every((item) => typeof item === 'string')) {
-    throw new Error('validation.canonicalRootMap must map strings to strings');
-  }
-  return {
-    canonicalRoots: expectStringArray(record['canonicalRoots'], 'validation.canonicalRoots'),
-    canonicalRootMap: rootMap as Record<string, string>,
-    swmQuadCount: expectFiniteNumber(record['swmQuadCount'], 'validation.swmQuadCount'),
-    authorityProofRef: expectNonEmptyString(record['authorityProofRef'], 'validation.authorityProofRef'),
-    transitionType: expectEnum(record['transitionType'], LIFT_TRANSITION_TYPES, 'validation.transitionType'),
-    ...optionalString(record, 'priorVersion', 'validation'),
-  };
+  return validationParser(value, 'validation');
 }
 
 function parseBroadcastMetadata(value: unknown): LiftJobBroadcastMetadata {
-  const record = expectRecord(value, 'broadcast');
-  return {
-    txHash: expectHexString(record['txHash'], 'broadcast.txHash'),
-    walletId: expectNonEmptyString(record['walletId'], 'broadcast.walletId'),
-    ...(record['merkleRoot'] === undefined
-      ? {}
-      : { merkleRoot: expectHexString(record['merkleRoot'], 'broadcast.merkleRoot') }),
-    ...optionalNumber(record, 'publicByteSize', 'broadcast'),
-    ...optionalNumber(record, 'nonce', 'broadcast'),
-    ...optionalOperationKind(record, 'operationKind', 'broadcast'),
-  };
+  return broadcastMetadataParser(value, 'broadcast');
 }
 
 function parseInclusion(value: unknown): StructurallyValidLiftJobInclusion {
-  const record = expectRecord(value, 'inclusion');
-  return {
-    ...(record['txHash'] === undefined
-      ? {}
-      : { txHash: expectHexString(record['txHash'], 'inclusion.txHash') }),
-    blockNumber: expectFiniteNumber(record['blockNumber'], 'inclusion.blockNumber'),
-    ...(record['blockHash'] === undefined
-      ? {}
-      : { blockHash: expectHexString(record['blockHash'], 'inclusion.blockHash') }),
-    ...optionalNumber(record, 'blockTimestamp', 'inclusion'),
-  };
+  return inclusionParser(value, 'inclusion');
 }
 
 function canonicalInclusion(
@@ -384,58 +576,62 @@ function canonicalInclusion(
   return { ...inclusion, txHash: inclusion.txHash ?? broadcast.txHash };
 }
 
+const finalizationParser = objectParser<LiftJobFinalizationMetadata>({
+  mode: optional(enumParser(['published', 'noop', 'local'] as const)),
+  txHash: optional(hexParser),
+  ual: optional(stringParser),
+  batchId: optional(stringParser),
+  startKAId: optional(stringParser),
+  endKAId: optional(stringParser),
+  publisherAddress: optional(hexParser),
+});
+
+const timeoutParser = objectParser<NonNullable<LiftJobFailureMetadata['timeout']>>({
+  timeoutMs: numberParser,
+  timeoutAt: numberParser,
+  handling: enumParser(LIFT_JOB_TIMEOUT_HANDLINGS),
+});
+
+const failureParser = objectParser<LiftJobFailureMetadata>({
+  failedFromState: enumParser(['accepted', 'claimed', 'validated', 'broadcast', 'included'] as const),
+  phase: enumParser(LIFT_JOB_FAILURE_PHASES),
+  mode: enumParser(LIFT_JOB_FAILURE_MODES),
+  retryable: booleanParser,
+  resolution: enumParser(LIFT_JOB_FAILURE_RESOLUTIONS),
+  code: enumParser(LIFT_JOB_FAILURE_CODES),
+  // Diagnostics are strings, not identifiers. Empty values are legitimate writer output.
+  message: stringParser,
+  errorPayloadRef: stringParser,
+  stackTraceRef: optional(stringParser),
+  rpcResponseRef: optional(stringParser),
+  revertReasonRef: optional(stringParser),
+  timeout: optional(timeoutParser),
+});
+
+const structuralPayloadParser = objectParser<StructurallyValidLiftJobPayload>({
+  jobId: nonEmptyStringParser,
+  jobSlug: nonEmptyStringParser,
+  request: (value) => normalizePersistedLiftJobRequest(value),
+  admission: optional((value) => parseAdmission(value)),
+  status: nonEmptyStringParser,
+  timestamps: (value) => parseTimestamps(value),
+  retries: (value) => parseRetries(value),
+  recovery: optional((value) => parseRecovery(value)),
+  controlPlane: optional((value) => parseControlPlane(value)),
+  claim: optional((value) => parseClaim(value)),
+  validation: optional((value) => parseValidation(value)),
+  broadcast: optional((value) => parseBroadcastMetadata(value)),
+  inclusion: optional((value) => parseInclusion(value)),
+  finalization: optional((value) => parseFinalization(value)),
+  failure: optional((value) => parseFailure(value)),
+});
+
 function parseFinalization(value: unknown): LiftJobFinalizationMetadata {
-  const record = expectRecord(value, 'finalization');
-  const mode = record['mode'];
-  if (mode !== undefined && mode !== 'published' && mode !== 'noop' && mode !== 'local') {
-    throw new Error('finalization.mode is unsupported');
-  }
-  return {
-    ...(mode === undefined ? {} : { mode }),
-    ...(record['txHash'] === undefined
-      ? {}
-      : { txHash: expectHexString(record['txHash'], 'finalization.txHash') }),
-    ...optionalString(record, 'ual', 'finalization'),
-    ...optionalString(record, 'batchId', 'finalization'),
-    ...optionalString(record, 'startKAId', 'finalization'),
-    ...optionalString(record, 'endKAId', 'finalization'),
-    ...(record['publisherAddress'] === undefined
-      ? {}
-      : { publisherAddress: expectHexString(record['publisherAddress'], 'finalization.publisherAddress') }),
-  };
+  return finalizationParser(value, 'finalization');
 }
 
 function parseFailure(value: unknown): LiftJobFailureMetadata {
-  const record = expectRecord(value, 'failure');
-  return {
-    failedFromState: expectEnum(
-      record['failedFromState'],
-      ['accepted', 'claimed', 'validated', 'broadcast', 'included'] as const,
-      'failure.failedFromState',
-    ),
-    phase: expectEnum(record['phase'], LIFT_JOB_FAILURE_PHASES, 'failure.phase'),
-    mode: expectEnum(record['mode'], LIFT_JOB_FAILURE_MODES, 'failure.mode'),
-    retryable: expectBoolean(record['retryable'], 'failure.retryable'),
-    resolution: expectEnum(record['resolution'], LIFT_JOB_FAILURE_RESOLUTIONS, 'failure.resolution'),
-    code: expectEnum(record['code'], LIFT_JOB_FAILURE_CODES, 'failure.code'),
-    // Diagnostics are strings, not identifiers. Empty values are legitimate output from Error('')
-    // and from legacy callers, so the codec must accept what the public writer can persist.
-    message: expectString(record['message'], 'failure.message'),
-    errorPayloadRef: expectString(record['errorPayloadRef'], 'failure.errorPayloadRef'),
-    ...optionalString(record, 'stackTraceRef', 'failure'),
-    ...optionalString(record, 'rpcResponseRef', 'failure'),
-    ...optionalString(record, 'revertReasonRef', 'failure'),
-    ...(record['timeout'] === undefined ? {} : { timeout: parseTimeout(record['timeout']) }),
-  };
-}
-
-function parseTimeout(value: unknown): NonNullable<LiftJobFailureMetadata['timeout']> {
-  const record = expectRecord(value, 'failure.timeout');
-  return {
-    timeoutMs: expectFiniteNumber(record['timeoutMs'], 'failure.timeout.timeoutMs'),
-    timeoutAt: expectFiniteNumber(record['timeoutAt'], 'failure.timeout.timeoutAt'),
-    handling: expectEnum(record['handling'], LIFT_JOB_TIMEOUT_HANDLINGS, 'failure.timeout.handling'),
-  };
+  return failureParser(value, 'failure');
 }
 
 function malformed(reason: string): LiftJobPayloadDecodeResult {
@@ -504,45 +700,4 @@ function expectEnum<const T extends readonly string[]>(value: unknown, allowed: 
     throw new Error(`${path} is unsupported`);
   }
   return value as T[number];
-}
-
-function optionalString<K extends string>(
-  record: Record<string, unknown>,
-  key: K,
-  path: string,
-): { readonly [P in K]?: string } {
-  return record[key] === undefined
-    ? {}
-    : { [key]: expectString(record[key], `${path}.${key}`) } as { [P in K]: string };
-}
-
-function optionalNumber<K extends string>(
-  record: Record<string, unknown>,
-  key: K,
-  path: string,
-): { readonly [P in K]?: number } {
-  return record[key] === undefined
-    ? {}
-    : { [key]: expectFiniteNumber(record[key], `${path}.${key}`) } as { [P in K]: number };
-}
-
-function optionalBoolean<K extends string>(
-  record: Record<string, unknown>,
-  key: K,
-  path: string,
-): { readonly [P in K]?: boolean } {
-  return record[key] === undefined
-    ? {}
-    : { [key]: expectBoolean(record[key], `${path}.${key}`) } as { [P in K]: boolean };
-}
-
-function optionalOperationKind<K extends string>(
-  record: Record<string, unknown>,
-  key: K,
-  path: string,
-): { readonly [P in K]?: 'create' | 'update' } {
-  if (record[key] === undefined) return {};
-  const value = record[key];
-  if (value !== 'create' && value !== 'update') throw new Error(`${path}.${key} is unsupported`);
-  return { [key]: value } as { [P in K]: 'create' | 'update' };
 }

@@ -5,10 +5,16 @@ import type {
   LiftJob,
   LiftJobAccepted,
   LiftJobClaimed,
+  LiftJobBroadcast,
+  LiftJobFailedFromBroadcast,
+  LiftJobLegacyEvidenceFreeBroadcast,
+  LiftJobPersistedFailure,
+  PersistedLiftJob,
   TripleStoreAsyncLiftPublisher,
 } from '../../src/index.js';
 import {
   knownLiftJobPayload,
+  canonicalLiftJobPayload,
   type StructurallyValidLiftJobPayload,
 } from '../../src/lift-job-payload-codec.js';
 
@@ -43,6 +49,33 @@ const uncheckedJob: LiftJob = structurallyDecoded;
 void uncheckedJob;
 const narrowedJob = knownLiftJobPayload(structurallyDecoded);
 if (narrowedJob) {
-  const checkedJob: LiftJob = narrowedJob;
+  const checkedJob: PersistedLiftJob = narrowedJob;
   void checkedJob;
+}
+const canonicalJob = canonicalLiftJobPayload(structurallyDecoded);
+if (canonicalJob) {
+  const writableJob: LiftJob = canonicalJob;
+  void writableJob;
+}
+
+declare const canonicalBroadcast: LiftJobBroadcast;
+declare const canonicalBroadcastFailure: LiftJobFailedFromBroadcast;
+declare const legacyBroadcast: LiftJobLegacyEvidenceFreeBroadcast;
+declare const irregularFailure: LiftJobPersistedFailure;
+const broadcastHash: `0x${string}` = canonicalBroadcast.broadcast.txHash;
+const failedBroadcastHash: `0x${string}` = canonicalBroadcastFailure.broadcast.txHash;
+void broadcastHash;
+void failedBroadcastHash;
+// @ts-expect-error A compatibility broadcast cannot enter the writable lifecycle union.
+const writableLegacyBroadcast: LiftJob = legacyBroadcast;
+// @ts-expect-error A broad historical failure cannot erase canonical failed-state guarantees.
+const writableIrregularFailure: LiftJob = irregularFailure;
+void writableLegacyBroadcast;
+void writableIrregularFailure;
+
+declare const persistedRead: PersistedLiftJob;
+if (persistedRead.status === 'broadcast') {
+  // @ts-expect-error A persisted compatibility broadcast must be migrated before evidence is assumed.
+  const uncheckedBroadcastHash: `0x${string}` = persistedRead.broadcast.txHash;
+  void uncheckedBroadcastHash;
 }

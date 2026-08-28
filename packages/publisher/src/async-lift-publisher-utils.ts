@@ -8,6 +8,7 @@ import type {
   KnowledgeAssetVmPublishJobRequest,
   KnowledgeAssetVmPublishRequest,
   LiftJob,
+  PersistedLiftJob,
   LiftJobAccepted,
   LiftJobHex,
   LiftJobResettableState,
@@ -55,7 +56,7 @@ export { parseLiteral };
 // their one precedence is documented. Each of them reads the same job, and keeping them apart is
 // how they drift.
 
-export type PersistedFailedJob = Extract<LiftJob, { status: 'failed' }>;
+export type PersistedFailedJob = Extract<PersistedLiftJob, { status: 'failed' }>;
 
 export function expectBindings(result: QueryResult): Array<Record<string, string>> {
   if (result.type !== 'bindings') {
@@ -64,7 +65,7 @@ export function expectBindings(result: QueryResult): Array<Record<string, string
   return result.bindings;
 }
 
-export function compareAcceptedJobs(a: LiftJob, b: LiftJob): number {
+export function compareAcceptedJobs(a: PersistedLiftJob, b: PersistedLiftJob): number {
   const timeDelta = a.timestamps.acceptedAt - b.timestamps.acceptedAt;
   if (timeDelta !== 0) return timeDelta;
   return a.jobId.localeCompare(b.jobId);
@@ -83,14 +84,14 @@ export function compareAcceptedJobs(a: LiftJob, b: LiftJob): number {
  * Structural, not policy: this answers "what hash does this job carry", never "what does carrying
  * it mean" — that is `hasBroadcastEvidence` in the disposition module.
  */
-export function getLiftJobTransactionEvidence(job: LiftJob): LiftJobHex | undefined {
+export function getLiftJobTransactionEvidence(job: PersistedLiftJob): LiftJobHex | undefined {
   if ('broadcast' in job && job.broadcast) {
     return job.broadcast.txHash;
   }
   return job.recovery?.txHashChecked;
 }
 
-export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
+export function isFailedJob(job: PersistedLiftJob): job is PersistedFailedJob {
   return job.status === 'failed' && 'failure' in job;
 }
 
@@ -108,7 +109,7 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
  *
  * `undefined` on anything malformed or absent: this feeds a guard, so it fails closed.
  */
-export function pinnedPublishIdentityKaId(job: LiftJob): string | undefined {
+export function pinnedPublishIdentityKaId(job: PersistedLiftJob): string | undefined {
   const request = job.request as { knowledgeAssetVmPublish?: { seal?: { reservedKaId?: unknown } } };
   const raw = request?.knowledgeAssetVmPublish?.seal?.reservedKaId
     ?? (job.request as { lift?: { seal?: { reservedKaId?: unknown } } })?.lift?.seal?.reservedKaId;
@@ -144,7 +145,7 @@ export function pinnedPublishIdentityKaId(job: LiftJob): string | undefined {
  * written at the write-ahead (`broadcast.operationKind`) or carried across a reset in the recovery
  * record. Either carrier is the transaction's own testimony; nothing else is.
  */
-export function liftJobOperationKindMarker(job: LiftJob): 'create' | 'update' | undefined {
+export function liftJobOperationKindMarker(job: PersistedLiftJob): 'create' | 'update' | undefined {
   const broadcast = (job as { broadcast?: { operationKind?: 'create' | 'update' } }).broadcast;
   const recovery = (job as { recovery?: { operationKind?: 'create' | 'update' } }).recovery;
   return broadcast?.operationKind ?? recovery?.operationKind;
@@ -157,20 +158,20 @@ export function liftJobOperationKindMarker(job: LiftJob): 'create' | 'update' | 
  * wallet for the next attempt, and pairing it with an inherited hash builds a
  * transaction/account combination that never existed on chain.
  */
-export function liftJobCheckedSigner(job: LiftJob): string | undefined {
+export function liftJobCheckedSigner(job: PersistedLiftJob): string | undefined {
   const broadcast = (job as { broadcast?: { txHash?: string; walletId?: string } }).broadcast;
   if (broadcast?.txHash && broadcast.walletId) return broadcast.walletId;
   return (job as { recovery?: { walletIdChecked?: string } }).recovery?.walletIdChecked;
 }
 
 /** The nonce that accompanies {@link liftJobCheckedSigner}'s hash, from the same carrier. */
-export function liftJobCheckedNonce(job: LiftJob): number | undefined {
+export function liftJobCheckedNonce(job: PersistedLiftJob): number | undefined {
   const broadcast = (job as { broadcast?: { txHash?: string; nonce?: number } }).broadcast;
   if (broadcast?.txHash && broadcast.nonce !== undefined) return broadcast.nonce;
   return (job as { recovery?: { nonceChecked?: number } }).recovery?.nonceChecked;
 }
 
-export function queuedLiftOperationKind(job: LiftJob): 'create' | 'update' {
+export function queuedLiftOperationKind(job: PersistedLiftJob): 'create' | 'update' {
   if (isKnowledgeAssetVmPublishJobRequest(job.request)) {
     // The DURABLE marker first: it records what actually signed. Everything else is inference, and
     // for a named KA the request cannot carry the answer — `publishQueuedKnowledgeAssetVmPublish`
@@ -255,7 +256,7 @@ export function resetFailedLiftJobToAccepted(
  * (an attempt was spent) from a recovery reset (the job was interrupted, not re-attempted).
  */
 export function buildLiftJobAcceptedReset(
-  job: LiftJob,
+  job: PersistedLiftJob,
   options: {
     readonly now: number;
     readonly recoveredFrom: LiftJobResettableState | undefined;

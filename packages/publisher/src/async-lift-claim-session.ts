@@ -3,9 +3,11 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type {
   JournalKind,
   LiftJob,
+  LiftJobCompatibility,
   LiftJobAccepted,
   LiftJobClaimed,
   LiftJobState,
+  PersistedLiftJob,
 } from './lift-job.js';
 import type {
   ActiveLiftJobClaim,
@@ -34,6 +36,7 @@ import {
 } from './async-lift-publisher-utils.js';
 import {
   decodedLiftJobOrThrow,
+  isCanonicalLiftJob,
   knownLiftJobPayload,
   type LiftJobPayloadDecodeResult,
   type StructurallyValidLiftJobPayload,
@@ -43,16 +46,19 @@ export interface ActiveLiftJobClaimTransitionBoundary {
   run<T>(transition: (current: LiftJob, scope: LiftJobTransitionScope) => Promise<T>): Promise<T>;
 }
 
-export interface LiftJobTransitionScope {
-  commit(next: LiftJob, kind: JournalKind): Promise<LiftJob>;
+export interface LiftJobRecoveryTransitionScope {
   commitRecoveryReset(reset: LiftJobAccepted): Promise<LiftJobAccepted>;
-  commitProofInclusion(included: LiftJob): Promise<LiftJob>;
   commitProofFailure(failed: LiftJob): Promise<LiftJob>;
   commitProofFinalization(
     finalize: () => Promise<LiftJob | null>,
   ): Promise<LiftJob | null>;
   commitReaccept(accepted: LiftJobAccepted): Promise<LiftJobAccepted>;
   commitRemoval(): Promise<void>;
+}
+
+export interface LiftJobTransitionScope extends LiftJobRecoveryTransitionScope {
+  commit(next: LiftJob, kind: JournalKind): Promise<LiftJob>;
+  commitProofInclusion(included: LiftJob): Promise<LiftJob>;
 }
 
 /** One atomic per-job read under the lock that owns its transition scope. */
@@ -62,6 +68,11 @@ export type LiftJobTransaction =
     readonly kind: 'present';
     readonly current: LiftJob;
     readonly scope: LiftJobTransitionScope;
+  }
+  | {
+    readonly kind: 'compatibility';
+    readonly current: LiftJobCompatibility;
+    readonly scope: LiftJobRecoveryTransitionScope;
   };
 
 /** Diagnostic read variants exposed only to the targeted terminal-clear operation. */
@@ -71,8 +82,8 @@ export type ClassifiedLiftJobClearTransaction =
   | { readonly kind: 'unknown'; readonly current: StructurallyValidLiftJobPayload }
   | {
     readonly kind: 'present';
-    readonly current: LiftJob;
-    readonly scope: LiftJobTransitionScope;
+    readonly current: PersistedLiftJob;
+    readonly scope: LiftJobRecoveryTransitionScope;
   };
 
 /**
@@ -156,20 +167,20 @@ interface WalletLockSnapshot {
 
 export type AsyncLiftClaimProcessingRelease =
   | { readonly kind: 'processed'; readonly job: LiftJob }
-  | { readonly kind: 'replaced'; readonly job: LiftJob }
+  | { readonly kind: 'replaced'; readonly job: PersistedLiftJob }
   | { readonly kind: 'stale' }
   | { readonly kind: 'faulted' };
 
 export type AsyncLiftClaimProcessingOutcome =
   | { readonly kind: 'idle' }
   | { readonly kind: 'processed'; readonly job: LiftJob }
-  | { readonly kind: 'replaced'; readonly job: LiftJob }
-  | { readonly kind: 'recovered'; readonly job: LiftJob | null };
+  | { readonly kind: 'replaced'; readonly job: PersistedLiftJob }
+  | { readonly kind: 'recovered'; readonly job: PersistedLiftJob | null };
 
 export type LiftJobOwnershipMode = 'released' | 'lease-bound' | 'proof-bound';
 
 /** The single lifecycle policy for whether and how a job owns its signing wallet. */
-export function classifyLiftJobOwnershipMode(job: LiftJob): LiftJobOwnershipMode {
+export function classifyLiftJobOwnershipMode(job: PersistedLiftJob): LiftJobOwnershipMode {
   switch (job.status) {
     case 'accepted':
     case 'finalized':
@@ -366,12 +377,12 @@ export class AsyncLiftClaimCoordinator {
     return this.activeProcessClaimTokens.has(jobId);
   }
 
-  private claimFenceMatches(job: LiftJob, expected: ActiveLiftJobClaim): boolean {
+  private claimFenceMatches(job: PersistedLiftJob, expected: ActiveLiftJobClaim): boolean {
     return job.claim?.walletId === expected.claim.walletId
       && job.claim.claimToken === expected.claim.claimToken;
   }
 
-  private async recoverUnreplacedExpiredClaim(claim: ActiveLiftJobClaim): Promise<LiftJob | null> {
+  private async recoverUnreplacedExpiredClaim(claim: ActiveLiftJobClaim): Promise<PersistedLiftJob | null> {
     await this.dependencies.ensureGraph();
     return await this.withClaimLock(() => this.withJobTransitionLock(claim.jobId, async () => {
       const current = await this.getStatus(claim.jobId);
@@ -437,14 +448,14 @@ export class AsyncLiftClaimCoordinator {
     }
   }
 
-  async isJobOwnershipActive(job: LiftJob): Promise<boolean> {
+  async isJobOwnershipActive(job: PersistedLiftJob): Promise<boolean> {
     const walletId = job.claim?.walletId;
     if (!walletId) return false;
     const currentLock = await this.readWalletLock(walletId);
     return currentLock !== null && this.isUsableActiveLock(currentLock, job);
   }
 
-  private async releaseJobOwnership(job: LiftJob): Promise<void> {
+  private async releaseJobOwnership(job: PersistedLiftJob): Promise<void> {
     const walletId = job.claim?.walletId;
     if (!walletId) return;
     const currentLock = await this.readWalletLock(walletId);
@@ -536,9 +547,10 @@ export class AsyncLiftClaimCoordinator {
       jobId,
       async () => {
         const current = decodedLiftJobOrThrow(await this.dependencies.readStatus(jobId));
-        return await operation(current
+        if (!current) return await operation({ kind: 'missing' });
+        return await operation(isCanonicalLiftJob(current)
           ? { kind: 'present', current, scope: this.createTransitionScope(current) }
-          : { kind: 'missing' });
+          : { kind: 'compatibility', current, scope: this.createCompatibilityScope(current) });
       },
     );
   }
@@ -575,7 +587,9 @@ export class AsyncLiftClaimCoordinator {
       return await operation({
         kind: 'present',
         current: known,
-        scope: this.createTransitionScope(known),
+        scope: isCanonicalLiftJob(known)
+          ? this.createTransitionScope(known)
+          : this.createCompatibilityScope(known),
       });
     }));
   }
@@ -637,11 +651,11 @@ export class AsyncLiftClaimCoordinator {
     });
   }
 
-  private createTransitionScope(initial: LiftJob): LiftJobTransitionScope {
-    let current: LiftJob | null = initial;
+  private createTransitionScope(initial: PersistedLiftJob): LiftJobTransitionScope {
+    let current: PersistedLiftJob | null = initial;
     const transition = async <T>(
-      operation: (before: LiftJob) => Promise<T>,
-      nextState: (result: T) => LiftJob | null,
+      operation: (before: PersistedLiftJob) => Promise<T>,
+      nextState: (result: T) => PersistedLiftJob | null,
     ): Promise<T> => {
       if (current === null) {
         throw new Error(`LiftJob transition scope for ${initial.jobId} is closed`);
@@ -651,17 +665,22 @@ export class AsyncLiftClaimCoordinator {
       return result;
     };
     const advance = async (
-      operation: (before: LiftJob) => Promise<LiftJob>,
+      operation: (before: PersistedLiftJob) => Promise<LiftJob>,
     ): Promise<LiftJob> => await transition(operation, (next) =>
       next.status === 'accepted' || next.status === 'failed' || next.status === 'finalized'
         ? null
         : next);
-    const close = async <T>(operation: (before: LiftJob) => Promise<T>): Promise<T> =>
+    const close = async <T>(operation: (before: PersistedLiftJob) => Promise<T>): Promise<T> =>
       await transition(operation, () => null);
 
     return {
       commit: async (next, kind) => await advance(
-        async (before) => await this.commitTransition(before, next, kind),
+        async (before) => {
+          if (!isCanonicalLiftJob(before)) {
+            throw new Error(`Compatibility LiftJob ${before.jobId} cannot use a normal transition scope`);
+          }
+          return await this.commitTransition(before, next, kind);
+        },
       ),
       commitRecoveryReset: async (reset) => await close(async (before) => {
         this.assertLifecycleTransition(before, reset, 'accepted');
@@ -671,6 +690,9 @@ export class AsyncLiftClaimCoordinator {
         return reset;
       }),
       commitProofInclusion: async (included) => await close(async (before) => {
+        if (!isCanonicalLiftJob(before)) {
+          throw new Error(`Compatibility LiftJob ${before.jobId} cannot commit proof inclusion`);
+        }
         this.assertLifecycleTransition(before, included, 'included');
         // Inclusion becomes visible before release so a woken worker never observes an active
         // transaction as claimable. An already-included retry only repeats the release.
@@ -710,7 +732,19 @@ export class AsyncLiftClaimCoordinator {
     };
   }
 
-  private assertSameJob(current: LiftJob, next: LiftJob): void {
+  /** Compatibility rows receive only recovery/clear operations, never ordinary transition commit. */
+  private createCompatibilityScope(initial: LiftJobCompatibility): LiftJobRecoveryTransitionScope {
+    const scope = this.createTransitionScope(initial);
+    return {
+      commitRecoveryReset: scope.commitRecoveryReset,
+      commitProofFailure: scope.commitProofFailure,
+      commitProofFinalization: scope.commitProofFinalization,
+      commitReaccept: scope.commitReaccept,
+      commitRemoval: scope.commitRemoval,
+    };
+  }
+
+  private assertSameJob(current: PersistedLiftJob, next: LiftJob): void {
     if (next.jobId !== current.jobId) {
       throw new Error(
         `Lifecycle transition cannot replace LiftJob ${current.jobId} with ${next.jobId}`,
@@ -719,7 +753,7 @@ export class AsyncLiftClaimCoordinator {
   }
 
   private assertLifecycleTransition(
-    current: LiftJob,
+    current: PersistedLiftJob,
     next: LiftJob,
     expectedStatus: LiftJobState,
   ): void {
@@ -798,10 +832,13 @@ export class AsyncLiftClaimCoordinator {
   private async getRequiredJob(jobId: string): Promise<LiftJob> {
     const job = await this.getStatus(jobId);
     if (!job) throw new Error(`LiftJob not found: ${jobId}`);
+    if (!isCanonicalLiftJob(job)) {
+      throw new Error(`Compatibility LiftJob ${jobId} requires recovery before normal transitions`);
+    }
     return job;
   }
 
-  private async getStatus(jobId: string): Promise<LiftJob | null> {
+  private async getStatus(jobId: string): Promise<PersistedLiftJob | null> {
     return decodedLiftJobOrThrow(await this.dependencies.readStatus(jobId));
   }
 
@@ -862,7 +899,7 @@ export class AsyncLiftClaimCoordinator {
 
   private isUsableActiveLock(
     lock: WalletLockSnapshot,
-    job: LiftJob,
+    job: PersistedLiftJob,
     now = this.config.now(),
   ): boolean {
     if (lock.status !== 'active') return false;
@@ -878,13 +915,13 @@ export class AsyncLiftClaimCoordinator {
   }
 
   /** Extract proof identity only; ownership policy itself lives in the classifier above. */
-  private proofBoundWalletId(job: LiftJob): string | undefined {
+  private proofBoundWalletId(job: PersistedLiftJob): string | undefined {
     if (job.status === 'broadcast' || job.status === 'included') return job.broadcast?.walletId;
     if (isFailedJob(job)) return liftJobCheckedSigner(job);
     return undefined;
   }
 
-  private lockMatchesJob(lock: WalletLockSnapshot, job: LiftJob): boolean {
+  private lockMatchesJob(lock: WalletLockSnapshot, job: PersistedLiftJob): boolean {
     if (lock.jobId !== job.jobId) return false;
     if (job.claim?.walletId && lock.walletId !== job.claim.walletId) return false;
     if (job.claim?.claimToken) return lock.claimToken === job.claim.claimToken;
