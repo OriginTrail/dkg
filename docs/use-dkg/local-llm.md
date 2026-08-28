@@ -450,6 +450,159 @@ The default endpoint is
 `http://127.0.0.1:8080/v1/chat/completions`. Override it with `--llama-url` or
 `DKG_LLM_URL`.
 
+## Use the local LLM from Node UI
+
+Node UI exposes the same tested local-LLM runtime in the **Agents** panel. It
+does not put a second router in the browser and it does not connect the model
+directly to DKG. The browser sends a bounded request to the daemon; the daemon
+owns the session, MCP child process, DKG tool discovery, schema validation,
+read-only policy, and text trace.
+
+Set the model endpoint and model name in the environment that starts the DKG
+daemon:
+
+```bash
+export DKG_LLM_URL=http://127.0.0.1:8080/v1/chat/completions
+export DKG_LLM_MODEL=qwen3-8b-q4-k-m
+dkg start
+```
+
+If the daemon is already running, restart it after changing these variables.
+Keep `llama-server` running in its own terminal, then open Node UI and select
+**DKG Local LLM** in the Agents panel. The integration remains read-only: the
+daemon always creates this UI runtime with writes disabled.
+
+The selected Context Graph is sent with the first chat turn and becomes the
+session lock. Selecting another graph does not silently retarget the active
+conversation. Use the integration menu to clear the session first, then select
+the new graph and send the next message.
+
+### Startup and readiness
+
+The daemon creates only the lightweight service during startup. MCP tool
+discovery and the model runtime are initialized lazily on the first chat turn.
+
+```mermaid
+sequenceDiagram
+  actor Operator
+  participant Llama as llama-server
+  participant Daemon as DKG daemon
+  participant Service as LocalLlmService
+  participant UI as Node UI
+
+  Operator->>Llama: Start GGUF model on 127.0.0.1:8080
+  Operator->>Daemon: Start DKG with DKG_LLM_URL and DKG_LLM_MODEL
+  Daemon->>Service: Create read-only service
+  Note over Service: No MCP child and no model session yet
+  UI->>Daemon: GET /api/local-llm/health
+  Daemon->>Service: health()
+  Service->>Llama: GET /health
+  Llama-->>Service: 200 {status: "ok"}
+  Service-->>Daemon: ready, reachable, busy, initialized
+  Daemon-->>UI: Render DKG Local LLM as available
+```
+
+### Grounded chat and Query Catalog tool loop
+
+The runtime discovers MCP tools and their schemas with `tools/list`. Each model
+tool call is selected from that metadata, validated, executed through MCP, and
+returned to the model as DKG evidence. The UI receives the final answer plus
+the tool names and trace path; it never executes a DKG tool itself.
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant UI as Node UI
+  participant API as DKG daemon API
+  participant Service as LocalLlmService
+  participant Runtime as DkgLocalLlmRuntime
+  participant Llama as llama-server
+  participant MCP as dkg mcp serve
+  participant DKG as DKG node and store
+  participant Trace as Text trace
+
+  User->>UI: Ask a question for the selected Context Graph
+  UI->>API: POST /api/local-llm/chat<br/>{message, sessionId, contextGraphId}
+  API->>API: Validate body and Context Graph ID
+  API->>Service: chat(message, contextGraphId)
+  Service->>Llama: GET /health
+  alt First turn in the daemon-owned session
+    Service->>MCP: Start private stdio MCP child
+    Service->>Runtime: Create read-only bounded runtime
+    Runtime->>MCP: tools/list
+    MCP-->>Runtime: Tool names and JSON schemas
+    Service->>Service: Lock session to Context Graph
+  end
+  Runtime->>Llama: System context, history, and routed tool schemas
+  Llama-->>Runtime: dkg_query_catalog_list or dkg_query_catalog_run
+  Runtime->>Runtime: Validate schema, policy, and tool budget
+  Runtime->>MCP: tools/call with explicit projectId
+  MCP->>DKG: Execute catalog read
+  DKG-->>MCP: DKG evidence
+  MCP-->>Runtime: Structured tool result
+  Runtime->>Llama: DKG evidence for final answer
+  Llama-->>Runtime: Grounded response
+  Runtime->>Trace: Append requests, tool calls, evidence, and answer
+  Runtime-->>Service: Answer, tool calls, and trace path
+  Service-->>API: Read-only response envelope
+  API-->>UI: Render answer and tool metadata
+```
+
+The default UI session allows at most four tool calls per turn, exposes at most
+eight routed tools, retains six turns and 8,000 history characters, and caps
+tool/evidence payloads before they return to the model.
+
+### Clear the session and switch Context Graphs
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant UI as Node UI
+  participant API as DKG daemon API
+  participant Service as LocalLlmService
+  participant Runtime as DkgLocalLlmRuntime
+  participant MCP as dkg mcp serve
+
+  User->>UI: Clear DKG Local LLM session
+  UI->>API: POST /api/local-llm/session/clear {}
+  API->>Service: clear()
+  alt A turn is still running
+    Service-->>API: 409 LOCAL_LLM_BUSY
+    API-->>UI: Wait for the active turn
+  else Session is idle
+    Service->>Runtime: Clear bounded history
+    Service->>MCP: Close private child
+    Service->>Service: Release Context Graph lock
+    Service-->>API: {ok: true, readOnly: true}
+    API-->>UI: Clear rendered conversation
+  end
+  Note over UI,Service: The next turn may lock a different Context Graph
+```
+
+### Example: run a parameterized saved query
+
+The screenshots below show a real local Qwen/llama.cpp session against a DKG
+Query Catalog. The Context Graph and selector are demonstration data, not
+hardcoded routing rules.
+
+1. Select **DKG Local LLM** and the evidence Context Graph.
+
+   ![DKG Local LLM agent and selected Context Graph](../assets/local-llm-node-ui/01-local-llm-agent-and-context-graph.jpg)
+
+2. Ask the model to list the saved queries. The final response reports
+   `dkg_query_catalog_list` and renders the catalog metadata.
+
+   ![Query Catalog list prompt](../assets/local-llm-node-ui/02-query-catalog-prompt.jpg)
+
+   ![Query Catalog list result](../assets/local-llm-node-ui/03-query-catalog-result.jpg)
+
+3. Run the returned selector with a typed parameter. The result reports
+   `dkg_query_catalog_run` and contains only the DKG-backed model and label.
+
+   ![Parameterized Query Catalog prompt](../assets/local-llm-node-ui/04-parametric-query-prompt.jpg)
+
+   ![Parameterized Query Catalog result](../assets/local-llm-node-ui/05-parametric-query-result.jpg)
+
 ## Agent smoke test
 
 Run these prompts in order:
