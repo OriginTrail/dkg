@@ -23,7 +23,7 @@ import {
   type V10UpdateKAParams,
 } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { buildUpdateSeal, mockSealCtx, withSeal } from './_helpers/seal.js';
 
@@ -445,6 +445,35 @@ describe('DKGPublisher.publish awaits the pre-broadcast signal [GH#2270]', () =>
 
     expect(result.status).not.toBe('failed');
     expect(chain.sent).toBe(true);
+  });
+
+  it('publishFromSharedMemory forwards onPublishConfirmed to publish() as the same reference [GH#2359 r12]', async () => {
+    // r12 (3878010163) - this public entry point built its inner options field by field and
+    // silently dropped the new hook. The row pins FORWARDING IDENTITY at the publish() seam
+    // (the changed code): the inner call must receive the exact caller-supplied function.
+    // Firing-with-receipt semantics are already pinned by the publish()-level rows above, so
+    // publish() itself is spy-stubbed and the shared-memory read path is fed one staged quad.
+    const chain = new PublishSignalRecordingChain();
+    const store = new OxigraphStore();
+    const publisher = await publishOver(chain, store);
+    const gm = new GraphManager(store);
+    await store.insert([{
+      subject: 'urn:sm:entity',
+      predicate: 'http://schema.org/name',
+      object: '"from shared memory"',
+      graph: gm.sharedMemoryUri(CG_ID),
+    }]);
+
+    const hook = () => {};
+    let forwarded: unknown = 'unset';
+    (publisher as unknown as { publish: (o: { onPublishConfirmed?: unknown }) => Promise<unknown> }).publish =
+      async (options: { onPublishConfirmed?: unknown }) => {
+        forwarded = options.onPublishConfirmed;
+        return { status: 'confirmed', merkleRoot: new Uint8Array(32), kaManifest: [] };
+      };
+
+    await publisher.publishFromSharedMemory(CG_ID, 'all', { onPublishConfirmed: hook });
+    expect(forwarded).toBe(hook);
   });
 
   it('POSITIVE CONTROL: a plain publish reaches the chain and fires the signal', async () => {

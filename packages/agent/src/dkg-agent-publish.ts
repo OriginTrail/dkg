@@ -1945,8 +1945,9 @@ export class PublishMethods extends DKGAgentBase {
 
   async update(this: DKGAgent,
     kaId: bigint, contextGraphId: string, quads: Quad[], privateQuads?: Quad[],
-    opts?: {
-      onPhase?: PhaseCallback;
+    // r12 (3878010410) — the lifecycle hooks come in through the ONE shared contract; a hook
+    // added to PublishLifecycleHooks flows through this boundary without editing this list.
+    opts?: PublishLifecycleHooks & {
       operationCtx?: OperationContext;
       precomputedUpdateAttestation?: PublishOptions['precomputedUpdateAttestation'];
       publisherOverride?: DKGPublisher;
@@ -1960,15 +1961,6 @@ export class PublishMethods extends DKGAgentBase {
       [INTERNAL_ROOTLESS_UPDATE_ORIGIN]?: true;
       accessPolicy?: PublishOptions['accessPolicy'];
       allowedPeers?: PublishOptions['allowedPeers'];
-      /**
-       * GH#2270 PR-3 r3 — the durable pre-send write-ahead. It has to be threaded explicitly:
-       * this option bag is built field by field rather than spread, so anything not named here is
-       * silently dropped, and a dropped write-ahead means a KA update transaction goes out with
-       * nothing on disk recording it.
-       */
-      onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
-      onBroadcastAccepted?: PublishOptions['onBroadcastAccepted'];
-      onPublishConfirmed?: PublishOptions['onPublishConfirmed'];
     },
   ): Promise<PublishResult> {
     return withRootlessUpdateLock(contextGraphId, kaId, async () => {

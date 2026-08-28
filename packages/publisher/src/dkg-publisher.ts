@@ -7,7 +7,8 @@ import type { AssertionSeal } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { GraphManager, invalidateSwmMaterializationWitness, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
-import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
+import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
+import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -2099,12 +2100,12 @@ export class DKGPublisher implements Publisher {
   async publishFromSharedMemory(
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
-    options?: {
+    // r12 (3878010163) — the lifecycle hooks enter as the ONE shared contract (intersected,
+    // not re-declared field by field), so a hook added to PublishLifecycleHooks is available
+    // at this public entry point without editing this list.
+    options?: PublishLifecycleHooks & {
       operationCtx?: OperationContext;
       clearSharedMemoryAfter?: boolean;
-      onPhase?: PhaseCallback;
-      onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
-      onBroadcastAccepted?: (record: PreBroadcastRecord) => Promise<void> | void;
       /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
       publishContextGraphId?: string;
       /** On-chain CG ID for the V10 chain tx (ACK digest + publishDirect). Does NOT trigger remap. */
@@ -2304,9 +2305,9 @@ export class DKGPublisher implements Publisher {
       quads: quads.map((q) => ({ ...q, graph: '' })),
       ...(graphPublish ? { privateQuads } : {}),
       operationCtx: ctx,
-      onPhase: options?.onPhase,
-      onBeforeBroadcast: options?.onBeforeBroadcast,
-      onBroadcastAccepted: options?.onBroadcastAccepted,
+      // r12 (3878010163) — the hooks travel as one unit through the shared picker; the
+      // previous field-by-field list silently dropped onPublishConfirmed at this entry point.
+      ...pickPublishLifecycleHooks(options ?? {}),
       publisherPeerId: options?.publisherPeerId,
       v10ACKProvider: options?.v10ACKProvider,
       trustedNonManifestCatalogTriples: options?.trustedNonManifestCatalogTriples,
