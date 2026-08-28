@@ -5,6 +5,7 @@ import {
 import {
   classifySharedMemoryFreshness,
   type SharedMemoryFreshnessSummary,
+  type SelectedSharedMemorySyncResult,
 } from '../shared-memory-freshness.js';
 
 type SyncProgressSummary = SharedMemoryFreshnessSummary & {
@@ -24,17 +25,10 @@ interface SelectedSharedMemorySyncLane {
   syncFromPeer: (
     peerId: string,
     contextGraphIds: string[],
-  ) => Promise<SelectedSharedMemoryLaneResult>;
+  ) => Promise<SelectedSharedMemorySyncResult>;
 }
 
-/** One normalized completion contract consumed by generic sync accounting. */
-export interface SelectedSharedMemoryLaneResult {
-  readonly kind: 'selected-shared-memory-lane';
-  readonly shared: SyncProgressSummary;
-  readonly scopeComplete: boolean;
-}
-
-type SyncAccountingResult = DurableSyncFromPeerResult | SelectedSharedMemoryLaneResult;
+type SyncAccountingResult = DurableSyncFromPeerResult | SelectedSharedMemorySyncResult;
 
 export interface SyncOnConnectPeerOutcome {
   fresh: boolean;
@@ -311,7 +305,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     const selectedResult = phase === 'shared'
       && typeof result !== 'number'
       && 'kind' in result
-      && result.kind === 'selected-shared-memory-lane'
+      && result.kind === 'selected-shared-memory'
         ? result
         : undefined;
     const syncResult = (selectedResult?.shared ?? result) as SyncFromPeerResult;

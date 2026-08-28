@@ -15,6 +15,10 @@ import type {
   SharedMemorySyncResult,
   SwmSnapshotCoverage,
 } from '../src/dkg-agent-types.js';
+import type {
+  SelectedSharedMemoryRequestedScope,
+  SelectedSharedMemorySyncResult,
+} from '../src/sync/shared-memory-freshness.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   type SelectedSwmMetaContinuation,
@@ -301,13 +305,11 @@ export interface SelectedProviderSelectionAgent {
   syncSelectedSharedMemoryFromPeerDetailed: (
     peerId: string,
     contextGraphIds: readonly string[],
-    options: { selectedSwmPriority: true },
-  ) => Promise<{
-    kind: 'selected-shared-memory';
-    shared: SharedMemorySyncResult;
-    selectedScopeComplete: boolean;
-    recoveryPlanComplete: boolean;
-  }>;
+    options: {
+      selectedSwmPriority: true;
+      requestedScope: SelectedSharedMemoryRequestedScope;
+    },
+  ) => Promise<SelectedSharedMemorySyncResult>;
   log: { info: () => void; warn: () => void; debug: () => void };
   getSelectedSwmMetaTransfers: () => SelectedSwmMetaTransferCoordinator;
   closeSelectedSwmMetaTransfers: () => Promise<void>;
@@ -469,9 +471,16 @@ export interface SelectedSwmLifecycleHarness {
   readonly close: () => Promise<void>;
 }
 
-export type SelectedSyncSharedMemoryOptions = Parameters<
+type ProductionSelectedSyncSharedMemoryOptions = Parameters<
   typeof LifecycleSyncMethods.prototype.syncSelectedSharedMemoryFromPeerDetailed
 >[2];
+
+export type SelectedSyncSharedMemoryOptions = Omit<
+ProductionSelectedSyncSharedMemoryOptions,
+'requestedScope'
+> & {
+  requestedScope?: SelectedSharedMemoryRequestedScope;
+};
 
 export type SyncSharedMemoryOptions = Parameters<
   typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed
@@ -481,24 +490,17 @@ export const callSelectedSharedMemoryFromPeerDetailed = (
   agent: SelectedSwmLifecycleAgentFixture,
   contextGraphIds: string[],
   options: SelectedSyncSharedMemoryOptions,
-): Promise<{
-  kind: 'selected-shared-memory';
-  shared: SharedMemorySyncResult;
-  selectedScopeComplete: boolean;
-  recoveryPlanComplete: boolean;
-}> => {
+): Promise<SelectedSharedMemorySyncResult> => {
   const method = LifecycleSyncMethods.prototype.syncSelectedSharedMemoryFromPeerDetailed as unknown as (
     this: SelectedSwmLifecycleAgentFixture,
     remotePeerId: string,
     ids: string[],
-    syncOptions: SelectedSyncSharedMemoryOptions,
-  ) => Promise<{
-    kind: 'selected-shared-memory';
-    shared: SharedMemorySyncResult;
-    selectedScopeComplete: boolean;
-    recoveryPlanComplete: boolean;
-  }>;
-  return method.call(agent, PEER, contextGraphIds, options);
+    syncOptions: ProductionSelectedSyncSharedMemoryOptions,
+  ) => Promise<SelectedSharedMemorySyncResult>;
+  return method.call(agent, PEER, contextGraphIds, {
+    ...options,
+    requestedScope: options.requestedScope ?? { kind: 'selected-public' },
+  });
 };
 
 export const callSelectedSharedMemorySummary = async (

@@ -1741,6 +1741,10 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     const events: string[] = [];
     const rollback = vi.fn();
     let cleanupAttempts = 0;
+    let signalCommitStarted!: () => void;
+    let releaseCommit!: () => void;
+    const commitStarted = new Promise<void>((resolve) => { signalCommitStarted = resolve; });
+    const commitGate = new Promise<void>((resolve) => { releaseCommit = resolve; });
     const receiver = fixture.createReceiver(
       fixture.receiverPersistence.inventory,
       undefined,
@@ -1748,7 +1752,12 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.receiverStore,
       async () => appliedHeadLifecycleV1(
         {
-          commit: async () => { events.push('primary-commit'); },
+          commit: async () => {
+            events.push('primary-commit-start');
+            signalCommitStarted();
+            await commitGate;
+            events.push('primary-commit-finished');
+          },
           rollback: async (cause) => { rollback(cause); },
         },
         async () => {
@@ -1763,10 +1772,27 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       ),
     );
 
-    await expect(fixture.synchronize(fixture.announcement, receiver)).rejects.toThrow(
+    const firstSynchronization = fixture.synchronize(fixture.announcement, receiver);
+    let synchronizationSettled = false;
+    void firstSynchronization.then(
+      () => { synchronizationSettled = true; },
+      () => { synchronizationSettled = true; },
+    );
+
+    await commitStarted;
+    expect(synchronizationSettled).toBe(false);
+    expect(cleanupAttempts).toBe(0);
+    expect(events).toEqual(['primary-commit-start']);
+
+    releaseCommit();
+    await expect(firstSynchronization).rejects.toThrow(
       'injected post-head cleanup failure',
     );
-    expect(events).toEqual(['primary-commit', 'after-head-1']);
+    expect(events).toEqual([
+      'primary-commit-start',
+      'primary-commit-finished',
+      'after-head-1',
+    ]);
     expect(rollback).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       fixture.scopeDigest,
@@ -1777,9 +1803,11 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       appliedHeadStatus: 'existing',
     });
     expect(events).toEqual([
-      'primary-commit',
+      'primary-commit-start',
+      'primary-commit-finished',
       'after-head-1',
-      'primary-commit',
+      'primary-commit-start',
+      'primary-commit-finished',
       'after-head-2',
     ]);
     expect(rollback).not.toHaveBeenCalled();

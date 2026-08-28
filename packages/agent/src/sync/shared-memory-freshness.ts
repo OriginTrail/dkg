@@ -23,14 +23,24 @@ export interface SharedMemoryFreshnessSummary extends DurableProgressSummary {
  * orchestration consumer so every producer and consumer shares the same
  * fail-closed, discriminated result shape.
  */
+export type SelectedSharedMemoryRequestedScope = Readonly<
+  | { readonly kind: 'selected-public' }
+  | { readonly kind: 'rfc64-recovery-plan' }
+>;
+
 export interface SelectedSharedMemorySyncResult {
   readonly kind: 'selected-shared-memory';
+  /** The producer-selected accounting scope; consumers never reinterpret it. */
+  readonly requestedScope: SelectedSharedMemoryRequestedScope;
   /** Full diagnostics stay available even though completion is lane-specific. */
   readonly shared: SharedMemorySyncResult;
-  /** Terminal verdict for the selected-public subset. */
-  readonly selectedScopeComplete: boolean;
-  /** Terminal verdict for the exact public/private RFC-64 recovery request. */
-  readonly recoveryPlanComplete: boolean;
+  /** The sole terminal verdict consumed by generic orchestration. */
+  readonly scopeComplete: boolean;
+  /** RFC-64 producer diagnostics retained without competing accounting fields. */
+  readonly completion: Readonly<{
+    selectedPublicScopeComplete: boolean;
+    recoveryPlanComplete: boolean;
+  }>;
 }
 
 /**

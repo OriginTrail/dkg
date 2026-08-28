@@ -512,4 +512,65 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       await harness.close();
     }
   });
+
+  it('does not coalesce different selected accounting scopes into one flight', async () => {
+    const publicCg = 'selected-requested-scope-single-flight-isolation';
+    let signalFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { signalFirstStarted = resolve; });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: snapshotManifest(publicCg, 0),
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      reportEmptyResponse: true,
+      onMetaFetch: async ({ fetch }) => {
+        if (fetch === 1) {
+          signalFirstStarted();
+          await firstGate;
+        }
+      },
+    });
+    const plan = {
+      publicContextGraphIds: [publicCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [publicCg],
+    };
+
+    try {
+      const selectedPublic = callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          requestedScope: { kind: 'selected-public' },
+          priority: 2_000,
+          sharedMemorySyncPlan: plan,
+        },
+      );
+      await firstStarted;
+      const recoveryPlan = callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          requestedScope: { kind: 'rfc64-recovery-plan' },
+          priority: 2_000,
+          sharedMemorySyncPlan: plan,
+        },
+      );
+
+      releaseFirst();
+      const [selectedResult, recoveryResult] = await Promise.all([
+        selectedPublic,
+        recoveryPlan,
+      ]);
+      expect(selectedResult.requestedScope).toEqual({ kind: 'selected-public' });
+      expect(recoveryResult.requestedScope).toEqual({ kind: 'rfc64-recovery-plan' });
+      expect(selectedResult).not.toBe(recoveryResult);
+    } finally {
+      releaseFirst();
+      await harness.close();
+    }
+  });
 });

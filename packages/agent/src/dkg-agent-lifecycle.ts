@@ -340,11 +340,14 @@ import {
   runSelectedSharedMemoryRetry,
   runSyncOnConnect,
   SyncOnConnectPostSyncError,
-  type SelectedSharedMemoryLaneResult,
   type SyncOnConnectOutcome,
   type SyncOnConnectPeerOutcome,
 } from './sync/on-connect/sync-on-connect.js';
-import type { SelectedSharedMemorySyncResult } from './sync/shared-memory-freshness.js';
+import type {
+  SelectedSharedMemoryRequestedScope,
+  SelectedSharedMemorySyncResult,
+} from './sync/shared-memory-freshness.js';
+import { planPrivateRecoverySource } from './sync/private-recovery-source-planner.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
@@ -679,21 +682,18 @@ interface SharedMemorySyncFromPeerOptions {
   priority?: number;
   /** Bounded admission origin for node-wide scheduler diagnostics. */
   source?: SyncAdmissionSource;
-  /** Internal execution selector; excluded from the ordinary public method. */
-  selectedSwmPriority?: boolean;
 }
 
-type OrdinarySharedMemorySyncFromPeerOptions = Omit<
-SharedMemorySyncFromPeerOptions,
-'selectedSwmPriority'
->;
+interface OrdinarySharedMemorySyncFromPeerOptions extends SharedMemorySyncFromPeerOptions {
+  /** Keeps the execution boundary discriminated from the selected lane. */
+  selectedSwmPriority?: false;
+}
 
-interface SelectedSharedMemorySyncFromPeerOptions extends Omit<
-SharedMemorySyncFromPeerOptions,
-'selectedSwmPriority'
-> {
+interface SelectedSharedMemorySyncFromPeerOptions extends SharedMemorySyncFromPeerOptions {
   /** Selects the graph-complete RFC-64 SWM lane and its terminal verdict. */
   selectedSwmPriority: true;
+  /** Exact scope whose terminal verdict generic retry accounting consumes. */
+  requestedScope: SelectedSharedMemoryRequestedScope;
 }
 
 interface OrdinarySharedMemorySyncExecution {
@@ -1039,6 +1039,7 @@ function sharedMemorySyncSingleFlightKey(params: {
   privateRecoverFromCurator: readonly string[];
   priority?: number;
   selectedSwm: boolean;
+  requestedScope: SelectedSharedMemoryRequestedScope | null;
 }): string {
   return syncSingleFlightKey('shared-memory-sync', {
     remotePeerId: params.remotePeerId,
@@ -1048,6 +1049,7 @@ function sharedMemorySyncSingleFlightKey(params: {
     privateRecoverFromCurator: params.privateRecoverFromCurator,
     priority: params.priority ?? null,
     selectedSwm: params.selectedSwm,
+    requestedScope: params.requestedScope?.kind ?? null,
   });
 }
 
@@ -4615,11 +4617,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             getContextGraphIds: async (peerId: string) => (
               await getPrioritySharedMemorySyncPlan(peerId)
             ).publicContextGraphIds,
-            syncFromPeer: async (
-              peerId: string,
-              contextGraphIds: string[],
-            ): Promise<SelectedSharedMemoryLaneResult> => {
-              const selected = await this.syncSelectedSharedMemoryFromPeerDetailed(
+            syncFromPeer: async (peerId: string, contextGraphIds: string[]) => (
+              this.syncSelectedSharedMemoryFromPeerDetailed(
                 peerId,
                 contextGraphIds,
                 {
@@ -4628,14 +4627,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
                   priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
                   selectedSwmPriority: true,
+                  requestedScope: { kind: 'selected-public' },
                 },
-              );
-              return Object.freeze({
-                kind: 'selected-shared-memory-lane',
-                shared: selected.shared,
-                scopeComplete: selected.selectedScopeComplete,
-              });
-            },
+              )
+            ),
           },
         }
         : {}),
@@ -4784,11 +4779,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       selectedSharedMemoryLane: {
         getContextGraphIds: () => [...requestedContextGraphIds],
-        syncFromPeer: async (
-          peerId,
-          contextGraphIds,
-        ): Promise<SelectedSharedMemoryLaneResult> => {
-          const selected = await this.syncSelectedSharedMemoryFromPeerDetailed(
+        syncFromPeer: (peerId, contextGraphIds) => (
+          this.syncSelectedSharedMemoryFromPeerDetailed(
             peerId,
             contextGraphIds,
             {
@@ -4797,16 +4789,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               sharedMemorySyncPlan,
               priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
               selectedSwmPriority: true,
+              requestedScope: validatedRecoveryPlan === null
+                ? { kind: 'selected-public' }
+                : { kind: 'rfc64-recovery-plan' },
             },
-          );
-          return Object.freeze({
-            kind: 'selected-shared-memory-lane',
-            shared: selected.shared,
-            scopeComplete: validatedRecoveryPlan === null
-              ? selected.selectedScopeComplete
-              : selected.recoveryPlanComplete,
-          });
-        },
+          )
+        ),
       },
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => {
@@ -4897,82 +4885,53 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           eligibleContextGraphIds.push(contextGraphId);
           continue;
         }
-        // RFC-64 private catalog activation pins one or more graph-complete SWM
-        // providers for the exact target. That explicit operator authorization is
-        // stronger than best-effort AGENTS discovery, which can legitimately be
-        // empty during a receiver's cold bootstrap. Preserve the curator invariant
-        // below, then recover directly from the connecting pinned provider instead
-        // of waiting indefinitely for its wallet -> peer registry row to arrive.
         const completeProviderSelected = completeSwmProviders.includes(remotePeerId);
-        // The curator (curator-leader) is the authoritative SWM replica; it never
-        // reverse-syncs a CG it owns. Decide curatorship AND resolve the curator's
-        // peer by the STRUCTURAL curator — the wallet-scoped id prefix `0x<addr>` —
-        // NOT the dkg:curator/dkg:creator triples. A member that locally pre-created
-        // the CG (the rfc38 multi-member onboarding pattern) self-stamps its OWN
-        // wallet as a dkg:curator triple and its OWN peer as dkg:creator, which makes
-        // BOTH isCuratorOf() and resolveCuratorPeerId() resolve the member AS the
-        // curator — so the gate would skip the member's own recovery and it would
-        // silently never converge (a zero-byte-core durability failure). The id
-        // prefix is authoritative; only the node owning that agent is the curator.
-        const structuralCuratorDid = deriveCuratorDidFromCgId(contextGraphId);
-        if (structuralCuratorDid) {
-          const structuralAgent = structuralCuratorDid.slice('did:dkg:agent:'.length).toLowerCase();
-          if ([...this.localAgents.keys()].some((addr) => addr.toLowerCase() === structuralAgent)) {
-            this.log.debug(ctx, `SWM sync: skipping "${contextGraphId}" — local node is the curator (never reverse-syncs a CG it owns)`);
-            continue;
-          }
-          if (completeProviderSelected) {
-            this.log.info(ctx, `SWM recovery ENQUEUED for private CG "${contextGraphId.slice(0, 28)}" from RFC-64 complete provider ${remotePeerId.slice(0, 12)}`);
-            privateRecoverFromCurator.push(contextGraphId);
-            eligibleContextGraphIds.push(contextGraphId);
-            continue;
-          }
-          // Resolve the structural curator's peer via the agent registry. On a
-          // reconnect the registry may not be populated yet, so refresh meta once.
-          let curatorPeers = await resolveAgentPeers(structuralAgent);
-          if (curatorPeers.length === 0) {
-            await this.refreshMetaFromCurator(contextGraphId).catch(() => undefined);
-            cachedAgents = undefined; // force a fresh registry read after the refresh
-            curatorPeers = await resolveAgentPeers(structuralAgent);
-          }
-          if (curatorPeers.length === 0) {
-            this.log.info(ctx, `SWM recovery skipped for private CG "${contextGraphId.slice(0, 28)}": curator (${structuralAgent.slice(0, 10)}) peer not resolved yet`);
-          } else if (!curatorPeers.includes(remotePeerId)) {
-            this.log.info(ctx, `SWM recovery deferred for private CG "${contextGraphId.slice(0, 28)}": connecting peer ${remotePeerId.slice(0, 12)} is not among the curator's ${curatorPeers.length} registered peer(s)`);
-          } else {
-            this.log.info(ctx, `SWM recovery ENQUEUED for private CG "${contextGraphId.slice(0, 28)}" from curator peer ${remotePeerId.slice(0, 12)}`);
-            privateRecoverFromCurator.push(contextGraphId);
-            eligibleContextGraphIds.push(contextGraphId);
-          }
-          continue;
-        }
-        // Legacy non-wallet-scoped CG (no structural curator): fall back to the
-        // triple-based curator resolution.
-        if (await this.isCuratorOf(contextGraphId)) {
+        const recoverySource = await planPrivateRecoverySource({
+          contextGraphId,
+          remotePeerId,
+          completeProviderSelected,
+          localAgentAddresses: this.localAgents.keys(),
+          localPeerId,
+          isLegacyLocalCurator: () => this.isCuratorOf(contextGraphId),
+          resolveStructuralCuratorPeers: async (structuralAgent) => {
+            let curatorPeers = await resolveAgentPeers(structuralAgent);
+            if (curatorPeers.length === 0) {
+              await this.refreshMetaFromCurator(contextGraphId).catch(() => undefined);
+              cachedAgents = undefined;
+              curatorPeers = await resolveAgentPeers(structuralAgent);
+            }
+            return curatorPeers;
+          },
+          resolveLegacyCuratorPeer: async () => {
+            let curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
+            if (!curatorPeerId) {
+              await this.refreshMetaFromCurator(contextGraphId).catch(() => undefined);
+              curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
+            }
+            return curatorPeerId;
+          },
+        });
+
+        if (recoverySource.kind === 'recover') {
+          const source = recoverySource.source === 'rfc64-complete-provider'
+            ? 'RFC-64 complete provider'
+            : recoverySource.source === 'structural-curator'
+              ? 'curator peer'
+              : 'curator';
+          this.log.info(ctx, `SWM recovery ENQUEUED for private CG "${contextGraphId.slice(0, 28)}" from ${source} ${recoverySource.curatorPeerId.slice(0, 12)}`);
+          privateRecoverFromCurator.push(contextGraphId);
+          eligibleContextGraphIds.push(contextGraphId);
+        } else if (recoverySource.reason === 'local-curator') {
           this.log.debug(ctx, `SWM sync: skipping "${contextGraphId}" — local node is the curator (never reverse-syncs a CG it owns)`);
-          continue;
-        }
-        if (completeProviderSelected) {
-          this.log.info(ctx, `SWM recovery ENQUEUED for private CG "${contextGraphId.slice(0, 28)}" from RFC-64 complete provider ${remotePeerId.slice(0, 12)}`);
-          privateRecoverFromCurator.push(contextGraphId);
-          eligibleContextGraphIds.push(contextGraphId);
-          continue;
-        }
-        let curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
-        if (!curatorPeerId) {
-          await this.refreshMetaFromCurator(contextGraphId).catch(() => undefined);
-          curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
-        }
-        if (!curatorPeerId) {
-          this.log.info(ctx, `SWM recovery skipped for private CG "${contextGraphId.slice(0, 28)}": curator peerId not resolved`);
-        } else if (localPeerId && curatorPeerId === localPeerId) {
-          this.log.info(ctx, `SWM recovery skipped for private CG "${contextGraphId.slice(0, 28)}": local node resolves AS the curator`);
-        } else if (curatorPeerId !== remotePeerId) {
-          this.log.info(ctx, `SWM recovery deferred for private CG "${contextGraphId.slice(0, 28)}": connecting peer is not the curator`);
+        } else if (recoverySource.reason === 'curator-unresolved') {
+          const unresolved = recoverySource.authority === 'structural'
+            ? `curator (${recoverySource.structuralAgent!.slice(0, 10)}) peer not resolved yet`
+            : 'curator peerId not resolved';
+          this.log.info(ctx, `SWM recovery skipped for private CG "${contextGraphId.slice(0, 28)}": ${unresolved}`);
+        } else if (recoverySource.authority === 'structural') {
+          this.log.info(ctx, `SWM recovery deferred for private CG "${contextGraphId.slice(0, 28)}": connecting peer ${remotePeerId.slice(0, 12)} is not among the curator's ${recoverySource.curatorPeerIds!.length} registered peer(s)`);
         } else {
-          this.log.info(ctx, `SWM recovery ENQUEUED for private CG "${contextGraphId.slice(0, 28)}" from curator ${curatorPeerId.slice(0, 12)}`);
-          privateRecoverFromCurator.push(contextGraphId);
-          eligibleContextGraphIds.push(contextGraphId);
+          this.log.info(ctx, `SWM recovery deferred for private CG "${contextGraphId.slice(0, 28)}": connecting peer is not the curator`);
         }
         continue;
       }
@@ -6931,20 +6890,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async syncSharedMemoryFromPeerDetailedExecution(this: DKGAgent,
     remotePeerId: string,
     contextGraphIds: string[],
-    options?: SharedMemorySyncFromPeerOptions,
+    options?: OrdinarySharedMemorySyncFromPeerOptions | SelectedSharedMemorySyncFromPeerOptions,
   ): Promise<SharedMemorySyncExecution> {
     const ctx = createOperationContext('sync');
-    const selectedRequest = options?.selectedSwmPriority === true;
+    const requestedScope = options?.selectedSwmPriority === true
+      ? options.requestedScope
+      : null;
+    const selectedRequest = requestedScope !== null;
     const execution = (
       shared: SharedMemorySyncResult,
       selectedScopeComplete = false,
       recoveryPlanComplete = false,
-    ): SharedMemorySyncExecution => selectedRequest
+    ): SharedMemorySyncExecution => requestedScope !== null
       ? {
         kind: 'selected-shared-memory',
+        requestedScope,
         shared,
-        selectedScopeComplete,
-        recoveryPlanComplete,
+        scopeComplete: requestedScope.kind === 'rfc64-recovery-plan'
+          ? recoveryPlanComplete
+          : selectedScopeComplete,
+        completion: Object.freeze({
+          selectedPublicScopeComplete: selectedScopeComplete,
+          recoveryPlanComplete,
+        }),
       }
       : { kind: 'ordinary-shared-memory', shared };
     if (!durableSyncEnabled(this.config)) {
@@ -7070,6 +7038,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       privateRecoverFromCurator,
       priority: options?.priority,
       selectedSwm: selectedSwmEnabled,
+      requestedScope,
     });
 
     const runSync = async (
