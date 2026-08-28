@@ -5,7 +5,12 @@
     "composite": false,
     "rootDir": "."
   },
-  "include": ["src", "test/_helpers/ka-vm-publish.ts", "test/_helpers/legacy-raw-lift.ts"],
+  "include": [
+    "src",
+    "test/_helpers/ka-vm-publish.ts",
+    "test/_helpers/legacy-raw-lift.ts",
+    "test/_helpers/receipt-hint-scenario.ts"
+  ],
   "references": [
     { "path": "../core" },
     { "path": "../storage" },
