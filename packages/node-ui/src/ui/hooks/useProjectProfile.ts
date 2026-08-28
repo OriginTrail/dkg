@@ -504,10 +504,9 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
           runProjectQuery(buildTypeBindingsQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildViewConfigsQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildFilterChipsQuery(contextGraphId), contextGraphId).catch(() => []),
-          // Query catalogs live in the local `.../meta/query-catalog` graph,
-          // which is intentionally outside the scoped `/api/query` graph
-          // allow-list. Use the dedicated profile endpoint so persisted
-          // catalogs are not silently mistaken for an empty result.
+          // Query catalogs are assertions in the Context Graph's registered
+          // `meta` subgraph. Use the dedicated profile endpoint so it can
+          // merge WM/SWM/VM and the temporary legacy migration source.
           readProjectQueryCatalog(contextGraphId)
             .then(rows => ({ rows, error: undefined }))
             .catch((catalogError: unknown) => ({

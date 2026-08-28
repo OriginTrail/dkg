@@ -1,4 +1,5 @@
 import { GET_VIEWS, type GetView } from './memory-model.js';
+import { contextGraphSubGraphUri, validateSubGraphName } from './constants.js';
 import {
   assertQueryCatalogTemplate,
   normalizeQueryCatalogParameters,
@@ -8,11 +9,12 @@ import {
   type QueryCatalogParameterDefinition,
 } from './query-catalog-parameters.js';
 
-export const QUERY_CATALOG_SCHEMA_VERSION = 1;
+export const QUERY_CATALOG_SCHEMA_VERSION = 2;
 export const QUERY_CATALOG_READ_CAPABILITIES = Object.freeze({
   canonicalItems: true,
   queryParameters: true,
   executionView: true,
+  graphScopeIri: true,
 } as const);
 export const CONTEXT_GRAPH_QUERY_SUBGRAPH = '__context_graph';
 export const USER_QUERY_CATALOG_SLUG = 'ui-saved-queries';
@@ -38,6 +40,8 @@ export interface QueryCatalogItem {
   catalogDescription?: string;
   catalogRank: number;
   subGraph: string;
+  /** Canonical Context Graph or registered subgraph IRI used for execution. */
+  scopeGraph: string;
   parameters: QueryCatalogParameterDefinition[];
   view?: GetView;
 }
@@ -82,12 +86,48 @@ export interface QueryCatalogWriteQuad {
 
 export interface DecodeQueryCatalogOptions {
   legacyView?: (queryIri: string, catalogIri: string) => GetView | undefined;
+  /** Required to validate and decode canonical prof:scopeGraph IRIs. */
+  contextGraphId?: string;
 }
 
 export interface PreparedQueryCatalogExecution {
   sparql: string;
   view?: GetView;
   subGraphName?: string;
+}
+
+export function queryCatalogScopeGraphUri(contextGraphId: string, subGraph: string): string {
+  if (subGraph === CONTEXT_GRAPH_QUERY_SUBGRAPH) {
+    return `did:dkg:context-graph:${contextGraphId}`;
+  }
+  const validation = validateSubGraphName(subGraph);
+  if (!validation.valid) {
+    throw new Error(`Invalid query-catalog subgraph "${subGraph}": ${validation.reason}`);
+  }
+  return contextGraphSubGraphUri(contextGraphId, subGraph);
+}
+
+export function queryCatalogSubGraphFromScopeGraph(
+  contextGraphId: string,
+  scopeGraph: string,
+): string {
+  const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+  if (scopeGraph === contextGraphUri) return CONTEXT_GRAPH_QUERY_SUBGRAPH;
+  const prefix = `${contextGraphUri}/`;
+  if (!scopeGraph.startsWith(prefix)) {
+    throw new Error(
+      `Query-catalog scope graph <${scopeGraph}> is outside context graph "${contextGraphId}".`,
+    );
+  }
+  const subGraph = scopeGraph.slice(prefix.length);
+  const validation = validateSubGraphName(subGraph);
+  if (!validation.valid) {
+    throw new Error(`Invalid query-catalog scope graph <${scopeGraph}>: ${validation.reason}`);
+  }
+  if (contextGraphSubGraphUri(contextGraphId, subGraph) !== scopeGraph) {
+    throw new Error(`Query-catalog scope graph <${scopeGraph}> is not a canonical subgraph IRI.`);
+  }
+  return subGraph;
 }
 
 export function prepareQueryCatalogExecution(
@@ -194,6 +234,31 @@ export function decodeQueryCatalogBindings(
       throw new Error(`Saved query ${queryIri} has conflicting executionView and view values.`);
     }
     const explicitView = executionView ?? legacyView;
+    const storedScopeGraph = oneValue(rows, 'scopeGraph', queryIri);
+    const legacySubGraph = oneValue(rows, 'subGraph', queryIri);
+    let subGraph = legacySubGraph || CONTEXT_GRAPH_QUERY_SUBGRAPH;
+    let scopeGraph: string;
+    if (storedScopeGraph) {
+      if (!options.contextGraphId) {
+        throw new Error(`Saved query ${queryIri} has a scopeGraph but no context graph was supplied for validation.`);
+      }
+      subGraph = queryCatalogSubGraphFromScopeGraph(options.contextGraphId, storedScopeGraph);
+      if (legacySubGraph && legacySubGraph !== subGraph) {
+        throw new Error(
+          `Saved query ${queryIri} has conflicting scopeGraph and forSubGraph values.`,
+        );
+      }
+      scopeGraph = storedScopeGraph;
+    } else {
+      if (!options.contextGraphId) {
+        // Legacy in-process callers can continue decoding literal-only rows.
+        // The daemon always supplies the context graph and therefore always
+        // emits the canonical scopeGraph in its versioned DTO.
+        scopeGraph = '';
+      } else {
+        scopeGraph = queryCatalogScopeGraphUri(options.contextGraphId, subGraph);
+      }
+    }
     items.push({
       queryIri,
       catalogIri,
@@ -209,7 +274,8 @@ export function decodeQueryCatalogBindings(
       catalogName: oneValue(rows, 'catalogName', queryIri) || 'Queries',
       catalogDescription: oneValue(rows, 'catalogDescription', queryIri) || undefined,
       catalogRank: parseRank(oneValue(rows, 'catalogRank', queryIri), 999),
-      subGraph: oneValue(rows, 'subGraph', queryIri) || CONTEXT_GRAPH_QUERY_SUBGRAPH,
+      subGraph,
+      scopeGraph,
       parameters: parseQueryCatalogParameters(
         oneValue(rows, 'queryParameters', queryIri) || undefined,
       ),
@@ -240,6 +306,7 @@ export function encodeQueryCatalogBindings(
       ? { queryParameters: serializeQueryCatalogParameters(item.parameters) }
       : {}),
     ...(item.view ? { executionView: item.view } : {}),
+    ...(item.scopeGraph ? { scopeGraph: item.scopeGraph } : {}),
     subGraph: item.subGraph,
     rank: String(item.rank),
     catalogName: item.catalogName,
@@ -265,6 +332,7 @@ export function decodeQueryCatalogReadResponse(response: unknown): QueryCatalogI
     || capabilities?.canonicalItems !== true
     || capabilities?.queryParameters !== true
     || capabilities?.executionView !== true
+    || capabilities?.graphScopeIri !== true
     || !Array.isArray(envelope.items)
   ) {
     throw new QueryCatalogContractError();
@@ -284,6 +352,7 @@ export function decodeQueryCatalogReadResponse(response: unknown): QueryCatalogI
       'catalogSlug',
       'catalogName',
       'subGraph',
+      'scopeGraph',
     ] as const;
     for (const field of requiredStrings) {
       if (typeof item[field] !== 'string') {
@@ -302,6 +371,26 @@ export function decodeQueryCatalogReadResponse(response: unknown): QueryCatalogI
     if (item.view !== undefined && view === undefined) {
       throw new QueryCatalogContractError(`Invalid query-catalog item ${index}: unsupported execution view.`);
     }
+    const scopeGraph = item.scopeGraph as string;
+    const contextGraphId = typeof envelope.contextGraphId === 'string'
+      ? envelope.contextGraphId
+      : undefined;
+    if (!contextGraphId) {
+      throw new QueryCatalogContractError('Invalid query-catalog response: contextGraphId must be a string.');
+    }
+    let scopedSubGraph: string;
+    try {
+      scopedSubGraph = queryCatalogSubGraphFromScopeGraph(contextGraphId, scopeGraph);
+    } catch (error) {
+      throw new QueryCatalogContractError(
+        `Invalid query-catalog item ${index}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (scopedSubGraph !== item.subGraph) {
+      throw new QueryCatalogContractError(
+        `Invalid query-catalog item ${index}: scopeGraph and subGraph do not match.`,
+      );
+    }
     return {
       queryIri: item.queryIri as string,
       catalogIri: item.catalogIri as string,
@@ -318,6 +407,7 @@ export function decodeQueryCatalogReadResponse(response: unknown): QueryCatalogI
         : {}),
       catalogRank: item.catalogRank as number,
       subGraph: item.subGraph as string,
+      scopeGraph,
       parameters: normalizeQueryCatalogParameters(item.parameters),
       ...(view ? { view } : {}),
     } satisfies QueryCatalogItem;
@@ -411,13 +501,18 @@ export function buildQueryCatalogWrite(input: {
   const catalogUri = queryCatalogProfileUri(input.contextGraphId, 'catalog', input.catalogSlug);
   const queryUri = queryCatalogProfileUri(input.contextGraphId, 'query', slug);
   const parameters = normalizeQueryCatalogParameters(input.parameters);
+  const scopeGraph = queryCatalogScopeGraphUri(input.contextGraphId, input.subGraph);
   assertQueryCatalogTemplate(input.sparql, parameters);
   const quads: QueryCatalogWriteQuad[] = [
     { subject: catalogUri, predicate: RDF_TYPE, object: `${PROFILE_NS}QueryCatalog`, graph: '' },
+    { subject: catalogUri, predicate: `${PROFILE_NS}scopeGraph`, object: scopeGraph, graph: '' },
+    // Transitional read-old/write-both field. Remove after old clients no
+    // longer consume raw bindings from the compatibility response.
     { subject: catalogUri, predicate: `${PROFILE_NS}forSubGraph`, object: literal(input.subGraph), graph: '' },
     { subject: catalogUri, predicate: `${PROFILE_NS}displayName`, object: literal(input.catalogName), graph: '' },
     { subject: catalogUri, predicate: `${PROFILE_NS}rank`, object: intLiteral(input.catalogRank), graph: '' },
     { subject: queryUri, predicate: RDF_TYPE, object: `${PROFILE_NS}SavedQuery`, graph: '' },
+    { subject: queryUri, predicate: `${PROFILE_NS}scopeGraph`, object: scopeGraph, graph: '' },
     { subject: queryUri, predicate: `${PROFILE_NS}forSubGraph`, object: literal(input.subGraph), graph: '' },
     { subject: queryUri, predicate: `${PROFILE_NS}inCatalog`, object: catalogUri, graph: '' },
     { subject: queryUri, predicate: `${PROFILE_NS}displayName`, object: literal(input.name), graph: '' },
@@ -464,6 +559,7 @@ export function buildQueryCatalogWrite(input: {
       catalogDescription: input.catalogDescription,
       catalogRank: input.catalogRank,
       subGraph: input.subGraph,
+      scopeGraph,
       parameters,
       view: input.view,
       queryUri,

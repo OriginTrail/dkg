@@ -7,6 +7,9 @@ import {
   groupQueryCatalogItems,
   prepareQueryCatalogExecution,
   QUERY_CATALOG_READ_CAPABILITIES,
+  QUERY_CATALOG_SCHEMA_VERSION,
+  queryCatalogScopeGraphUri,
+  queryCatalogSubGraphFromScopeGraph,
 } from '../src/query-catalog.js';
 
 const binding = (value: string) => ({ type: 'literal', value });
@@ -24,7 +27,7 @@ describe('query catalog codec', () => {
       executionView: binding('working-memory'),
       rank: binding('2'),
       catalogRank: binding('3'),
-    }]);
+    }], { contextGraphId: 'test' });
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       slug: 'trace',
@@ -33,6 +36,7 @@ describe('query catalog codec', () => {
       view: 'working-memory',
       rank: 2,
       catalogRank: 3,
+      scopeGraph: 'did:dkg:context-graph:test/incidents',
       parameters: [{ name: 'id', type: 'string' }],
     });
     expect(groupQueryCatalogItems(items)[0]?.queries).toHaveLength(1);
@@ -132,13 +136,57 @@ describe('query catalog codec', () => {
     });
     expect(write.savedQuery).toMatchObject({
       subGraph: 'incidents',
+      scopeGraph: 'did:dkg:context-graph:test/incidents',
       view: 'working-memory',
       parameters: [{ name: 'id', type: 'string' }],
     });
     expect(write.quads).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        subject: write.savedQuery.queryUri,
+        predicate: 'http://dkg.io/ontology/profile/scopeGraph',
+        object: 'did:dkg:context-graph:test/incidents',
+      }),
       expect.objectContaining({ predicate: 'http://dkg.io/ontology/profile/executionView', object: '"working-memory"' }),
       expect.objectContaining({ predicate: 'http://dkg.io/ontology/profile/queryParameters' }),
     ]));
+  });
+
+  it('maps execution scopes to canonical Context Graph IRIs', () => {
+    expect(queryCatalogScopeGraphUri('test', '__context_graph')).toBe(
+      'did:dkg:context-graph:test',
+    );
+    expect(queryCatalogScopeGraphUri('test', 'incidents')).toBe(
+      'did:dkg:context-graph:test/incidents',
+    );
+    expect(queryCatalogSubGraphFromScopeGraph(
+      'test',
+      'did:dkg:context-graph:test/incidents',
+    )).toBe('incidents');
+    expect(() => queryCatalogSubGraphFromScopeGraph(
+      'test',
+      'did:dkg:context-graph:other/incidents',
+    )).toThrow(/outside context graph/);
+    expect(() => queryCatalogSubGraphFromScopeGraph(
+      'test',
+      'did:dkg:context-graph:test/incidents/nested',
+    )).toThrow(/Invalid query-catalog scope graph/);
+  });
+
+  it('requires canonical and legacy execution scopes to agree', () => {
+    const row = {
+      q: 'urn:dkg:profile:test:query:trace',
+      catalog: 'urn:dkg:profile:test:catalog:operations',
+      sparql: 'SELECT * WHERE {}',
+      scopeGraph: 'did:dkg:context-graph:test/incidents',
+      subGraph: 'incidents',
+    };
+    expect(decodeQueryCatalogBindings([row], { contextGraphId: 'test' })[0]).toMatchObject({
+      scopeGraph: 'did:dkg:context-graph:test/incidents',
+      subGraph: 'incidents',
+    });
+    expect(() => decodeQueryCatalogBindings([
+      { ...row, subGraph: 'archive' },
+    ], { contextGraphId: 'test' })).toThrow(/conflicting scopeGraph and forSubGraph/);
   });
 
   it('prepares one rendered request with exact view and subgraph scope', () => {
@@ -160,10 +208,11 @@ describe('query catalog codec', () => {
       catalog: 'urn:dkg:profile:test:catalog:operations',
       sparql: 'SELECT * WHERE {}',
       subGraph: '__context_graph',
-    }])[0]!;
+    }], { contextGraphId: 'test' })[0]!;
     expect(decodeQueryCatalogReadResponse({
-      schemaVersion: 1,
+      schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
       capabilities: QUERY_CATALOG_READ_CAPABILITIES,
+      contextGraphId: 'test',
       items: [item],
     })).toEqual([item]);
 
@@ -171,9 +220,22 @@ describe('query catalog codec', () => {
       result: { type: 'bindings', bindings: [] },
     })).toThrow(/Incompatible query-catalog daemon contract/);
     expect(() => decodeQueryCatalogReadResponse({
-      schemaVersion: 1,
+      schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
       capabilities: { ...QUERY_CATALOG_READ_CAPABILITIES, executionView: false },
+      contextGraphId: 'test',
       items: [item],
     })).toThrow(/Incompatible query-catalog daemon contract/);
+    expect(() => decodeQueryCatalogReadResponse({
+      schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
+      capabilities: { ...QUERY_CATALOG_READ_CAPABILITIES, graphScopeIri: false },
+      contextGraphId: 'test',
+      items: [item],
+    })).toThrow(/Incompatible query-catalog daemon contract/);
+    expect(() => decodeQueryCatalogReadResponse({
+      schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
+      capabilities: QUERY_CATALOG_READ_CAPABILITIES,
+      contextGraphId: 'test',
+      items: [{ ...item, scopeGraph: 'did:dkg:context-graph:other' }],
+    })).toThrow(/Invalid query-catalog item 0/);
   });
 });

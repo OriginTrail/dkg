@@ -10,6 +10,7 @@ import { readProfileQueryCatalog } from '../src/ui/api.js';
 import {
   decodeQueryCatalogBindings,
   QUERY_CATALOG_READ_CAPABILITIES,
+  QUERY_CATALOG_SCHEMA_VERSION,
 } from '@origintrail-official/dkg-core/query-catalog';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -17,14 +18,15 @@ import {
 vi.mock('../src/ui/api.js', () => ({
   executeQuery: vi.fn(async () => ({ result: { bindings: [] } })),
   readProfileQueryCatalog: vi.fn(async () => ({
-    schemaVersion: 1,
+    schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
     capabilities: {
       canonicalItems: true,
       queryParameters: true,
       executionView: true,
+      graphScopeIri: true,
     },
     contextGraphId: 'cg-test',
-    graph: 'did:dkg:context-graph:cg-test/meta/query-catalog',
+    graph: 'did:dkg:context-graph:cg-test/meta',
     items: [],
     result: { type: 'bindings', bindings: [] },
   })),
@@ -35,11 +37,11 @@ function queryCatalogResponse(
   contextGraphId = 'cg-test',
 ) {
   return {
-    schemaVersion: 1 as const,
+    schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
     capabilities: QUERY_CATALOG_READ_CAPABILITIES,
     contextGraphId,
-    graph: `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`,
-    items: decodeQueryCatalogBindings(bindings),
+    graph: `did:dkg:context-graph:${contextGraphId}/meta`,
+    items: decodeQueryCatalogBindings(bindings, { contextGraphId }),
     result: { type: 'bindings' as const, bindings },
   };
 }
