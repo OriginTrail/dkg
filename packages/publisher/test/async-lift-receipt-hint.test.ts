@@ -654,4 +654,83 @@ describe('async-lift receipt-hint lane', () => {
       releaseTail();
     }
   });
+
+  it('a persistently failing release escalates to the error path instead of looping silently', async () => {
+    // r8 (3877817604) - transient containment has a budget. The lock deletion fails on EVERY
+    // attempt: the first two passes are contained (pending work, hint retained), the third
+    // escalates the error out of the pass to the runner's reporting and backoff. The hint
+    // survives, so once the fault clears the release still completes.
+    const { publisher, jobId, releaseTail } = await parkedHintScenario();
+    const originalDelete = store.deleteByPattern.bind(store);
+    let failLockDeletes = true;
+    (store as unknown as { deleteByPattern: typeof originalDelete }).deleteByPattern =
+      async (pattern: { subject?: string; graph?: string }) => {
+        if (failLockDeletes && pattern?.subject === walletLockSubject('wallet-1')) {
+          throw new Error('store rejects the lock deletion');
+        }
+        return originalDelete(pattern as never);
+      };
+    try {
+      expect(await publisher.reconciliationScheduling.reconcile())
+        .toEqual({ reconciled: 0, pendingWork: true });
+      expect(await publisher.reconciliationScheduling.reconcile())
+        .toEqual({ reconciled: 0, pendingWork: true });
+      await expect(publisher.reconcileTransactions()).rejects.toThrow('store rejects the lock deletion');
+
+      // The fault clears: the retained hint completes the release on the next pass.
+      failLockDeletes = false;
+      await publisher.reconcileTransactions();
+      expect((await publisher.getStatus(jobId))?.status).toBe('included');
+      await expectWalletLock('wallet-1', 'released');
+    } finally {
+      releaseTail();
+    }
+  });
+
+  it('a stale cached proof for a superseded transaction is ignored at consumption time', async () => {
+    // r8 (3877817702) - the consumption-time hash guard: cached evidence whose hint hash no
+    // longer matches the persisted broadcast (a reset and re-run happened between caching and
+    // settle) must not finalize the job; the canonical resolver is asked fresh. The stale
+    // cache is injected directly - constructing it naturally needs a full reset cycle, and the
+    // guard under test only sees the map state.
+    let proofAsks = 0;
+    let recoveryAsks = 0;
+    const { publisher, jobId, releaseTail } = await parkedHintScenario({
+      config: {
+        chainProofResolver: async () => {
+          proofAsks += 1;
+          return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
+        },
+        knowledgeAssetVmPublishRecoveryResolver: async () => {
+          recoveryAsks += 1;
+          return {
+            inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+            finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+          } as never;
+        },
+      },
+    });
+    const hints = (publisher as unknown as {
+      executorProofHints: Map<string, { txHash: string; proof?: unknown }>;
+    }).executorProofHints;
+    hints.set(jobId, {
+      txHash: `0x${'99'.repeat(32)}`,
+      proof: {
+        recovery: { txHash: `0x${'99'.repeat(32)}` },
+        resolved: {
+          inclusion: { blockNumber: 999, txHash: `0x${'99'.repeat(32)}` },
+          finalization: { merkleRoot: `0x${'99'.repeat(32)}` },
+        },
+      },
+    });
+
+    releaseTail();
+    await publisher.drainDetachedExecutions();
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
+    // The stale cache was bypassed: both canonical reads happened fresh.
+    expect(proofAsks).toBe(1);
+    expect(recoveryAsks).toBe(1);
+    expect(hints.has(jobId)).toBe(false);
+  });
 });

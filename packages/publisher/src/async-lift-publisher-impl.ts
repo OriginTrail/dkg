@@ -488,8 +488,12 @@ export class TripleStoreAsyncLiftPublisher
       readonly recovery: AsyncLiftPublisherRecoveryResult;
       readonly resolved: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
     };
+    /** r8 (3877817604) — contained transition/release failures for THIS hint, see the catch. */
+    transitionFailures?: number;
   }>();
   private static readonly EXECUTOR_PROOF_HINT_CAP = 512;
+  /** r8 (3877817604) — contained retries of the write/release window before escalating. */
+  private static readonly EXECUTOR_HINT_TRANSITION_RETRY_LIMIT = 3;
   private executorHintPassOffset = 0;
   /** Poked when a tx-bearing job stops being executor-owned; see setReconciliationDemandListener. */
   /** The one atomically-attached scheduling owner; see attachScheduler. */
@@ -1321,7 +1325,16 @@ export class TripleStoreAsyncLiftPublisher
               );
             }
             await this.releaseWalletLockForJob(current);
-          } catch {
+          } catch (error) {
+            // r8 (3877817604) — transient is a HYPOTHESIS with a budget, not a verdict: the
+            // first few failures are contained (the r2 retry case), but a persistently
+            // failing write/release escalates out of the pass to the runner's error path -
+            // reported and backoff-paced instead of silently repeating at the active cadence
+            // forever. The hint survives either way, so the release stays retryable.
+            hint.transitionFailures = (hint.transitionFailures ?? 0) + 1;
+            if (hint.transitionFailures >= TripleStoreAsyncLiftPublisher.EXECUTOR_HINT_TRANSITION_RETRY_LIMIT) {
+              throw error;
+            }
             unresolved += 1;
             return;
           }
