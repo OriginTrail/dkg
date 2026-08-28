@@ -282,6 +282,7 @@ describe('PromoteWidget — promote flow (#1382)', () => {
     await clickPromote(container);
     for (let i = 0; i < 30 && order.length < 1; i++) await flush();
     expect(order).toEqual(['promote']);
+    expect(apiMocks.listAssertions).toHaveBeenCalledWith('cg', 'wm');
     expect(apiMocks.knowledgeAssetFinalize).not.toHaveBeenCalled();
     expect(apiMocks.promoteAssertion).toHaveBeenCalledWith('cg', 'a1', { subGraphName: 'sg1' });
     expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Shared 1 complete Knowledge Asset to Shared Memory');
@@ -308,6 +309,36 @@ describe('PromoteWidget — promote flow (#1382)', () => {
     expect(err?.textContent).toContain('[promote:resolveKaNumber]');
     // The success testid must be ABSENT — a testid-agnostic reader can no longer read the error as a result.
     expect(container.querySelector('[data-testid="layer-action-result"]')).toBeNull();
+    await unmount();
+  });
+});
+
+describe('LayerWidgetStrip — visibility does not widen mutation scope', () => {
+  it('keeps visible catalog entities in stats without rendering a bulk lifecycle action for them', async () => {
+    const catalogEntity = {
+      uri: 'urn:test:catalog',
+      label: 'Catalog',
+      types: ['http://dkg.io/ontology/profile/QueryCatalog'],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(),
+      properties: new Map(),
+      connections: [],
+      tripleCount: 1,
+    } as any;
+    const { container, unmount } = await render(
+      React.createElement(LayerWidgetStrip, {
+        layer: 'swm',
+        entities: [catalogEntity],
+        entityCount: 1,
+        actionEntityCount: 0,
+        tripleCount: 1,
+        contextGraphId: 'cg',
+      }),
+    );
+
+    expect(container.textContent).toContain('QueryCatalog');
+    expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeNull();
     await unmount();
   });
 });

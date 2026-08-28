@@ -7,6 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const apiMocks = vi.hoisted(() => ({
   listAssertions: vi.fn(),
   promoteAssertion: vi.fn(),
+  describePromoteResult: vi.fn((name: string) => ({ message: `Shared ${name}` })),
+  describePromoteError: vi.fn(() => null),
+  fetchAssertionUals: vi.fn(async () => ({})),
 }));
 
 // PR #2131 — SubGraphBar/SubGraphOverviewGrid now call `fetchSubGraphs`
@@ -24,6 +27,9 @@ vi.mock('../src/ui/api.js', () => ({
   listParticipants: vi.fn(async () => ({ allowedAgents: [] })),
   listAssertions: apiMocks.listAssertions,
   promoteAssertion: apiMocks.promoteAssertion,
+  describePromoteResult: apiMocks.describePromoteResult,
+  describePromoteError: apiMocks.describePromoteError,
+  fetchAssertionUals: apiMocks.fetchAssertionUals,
   executeQuery: vi.fn(),
   writeProfileQueryCatalog: vi.fn(),
   fetchSubGraphs: vi.fn(async () => ({ subGraphs: [] })),
@@ -41,6 +47,7 @@ const {
 
 const {
   AssertionsList,
+  LayerContent,
   LayerGraphPanel,
   VerifiableMemoryHeroBanner,
 } = await import('../src/ui/views/project/components.js');
@@ -476,6 +483,138 @@ describe('Context Graph shared empty/stat patterns', () => {
     await unmount();
   });
 
+  it('threads query-catalog visibility into the assertions listing', async () => {
+    apiMocks.listAssertions.mockResolvedValueOnce([]);
+    const { container, unmount } = await render(
+      React.createElement(AssertionsList, {
+        contextGraphId: 'cg-test',
+        layer: 'swm',
+        includeQueryCatalog: true,
+        onComplete: vi.fn(),
+      }),
+    );
+
+    await waitForText(container, 'No Shared Working Memory assertions listed yet.');
+    expect(apiMocks.listAssertions).toHaveBeenCalledWith(
+      'cg-test',
+      'swm',
+      { includeQueryCatalog: true },
+    );
+
+    await unmount();
+  });
+
+  it('keeps catalog lifecycle explicit while bulk scope stays catalog-blind', async () => {
+    const catalog = {
+      name: 'query-catalog-deadbeef',
+      graphUri: 'did:dkg:context-graph:cg-test/meta/assertion/0xabc/query-catalog-deadbeef',
+      subGraph: 'meta',
+      tripleCount: 12,
+    };
+    const userAssertion = {
+      name: 'user-notes',
+      graphUri: 'did:dkg:context-graph:cg-test/assertion/0xabc/user-notes',
+      tripleCount: 3,
+    };
+    apiMocks.listAssertions
+      .mockResolvedValueOnce([catalog, userAssertion])
+      .mockResolvedValueOnce([userAssertion])
+      .mockResolvedValueOnce([catalog, userAssertion]);
+    apiMocks.promoteAssertion.mockResolvedValue({ promotedCount: 1 });
+
+    const { container, unmount } = await render(
+      React.createElement(AssertionsList, {
+        contextGraphId: 'cg-test',
+        layer: 'wm',
+        includeQueryCatalog: true,
+        onComplete: vi.fn(),
+      }),
+    );
+
+    await waitForText(container, 'query-catalog-deadbeef');
+    await waitForText(container, 'user-notes');
+    await act(async () => {
+      (container.querySelector('.v10-layer-expand-footer-btn.promote') as HTMLButtonElement).click();
+    });
+    await waitForText(container, 'Shared 1 complete Knowledge Asset');
+
+    expect(apiMocks.listAssertions).toHaveBeenNthCalledWith(
+      1,
+      'cg-test',
+      'wm',
+      { includeQueryCatalog: true },
+    );
+    expect(apiMocks.listAssertions).toHaveBeenNthCalledWith(2, 'cg-test', 'wm');
+    expect(apiMocks.promoteAssertion).toHaveBeenCalledTimes(1);
+    expect(apiMocks.promoteAssertion).toHaveBeenCalledWith('cg-test', 'user-notes', {});
+    expect(apiMocks.promoteAssertion).not.toHaveBeenCalledWith(
+      'cg-test',
+      'query-catalog-deadbeef',
+      expect.anything(),
+    );
+
+    await unmount();
+  });
+
+  it('keeps an explicit catalog assertion row action available', async () => {
+    const catalog = {
+      name: 'query-catalog-deadbeef',
+      graphUri: 'did:dkg:context-graph:cg-test/meta/assertion/0xabc/query-catalog-deadbeef',
+      subGraph: 'meta',
+      tripleCount: 12,
+    };
+    apiMocks.listAssertions.mockResolvedValue([catalog]);
+    apiMocks.promoteAssertion.mockResolvedValue({ promotedCount: 1 });
+
+    const { container, unmount } = await render(
+      React.createElement(AssertionsList, {
+        contextGraphId: 'cg-test',
+        layer: 'wm',
+        includeQueryCatalog: true,
+        onComplete: vi.fn(),
+      }),
+    );
+
+    await waitForText(container, 'query-catalog-deadbeef');
+    expect(Array.from(container.querySelectorAll('button')).some(
+      button => button.textContent?.includes('Share Complete KAs'),
+    )).toBe(false);
+    await act(async () => {
+      (container.querySelector('[data-testid="assertion-row-action"]') as HTMLButtonElement).click();
+    });
+    await waitForText(container, 'Shared query-catalog-deadbeef');
+    expect(apiMocks.promoteAssertion).toHaveBeenCalledWith(
+      'cg-test',
+      'query-catalog-deadbeef',
+      { subGraphName: 'meta' },
+    );
+
+    await unmount();
+  });
+
+  it('hides the SWM bulk publish button when only the visible catalog is listed', async () => {
+    apiMocks.listAssertions.mockResolvedValue([{
+      name: 'query-catalog-deadbeef',
+      graphUri: 'did:dkg:context-graph:cg-test/meta/assertion/0xabc/query-catalog-deadbeef',
+      subGraph: 'meta',
+      tripleCount: 12,
+    }]);
+
+    const { container, unmount } = await render(
+      React.createElement(AssertionsList, {
+        contextGraphId: 'cg-test',
+        layer: 'swm',
+        includeQueryCatalog: true,
+        onComplete: vi.fn(),
+      }),
+    );
+
+    await waitForText(container, 'query-catalog-deadbeef');
+    expect(container.textContent).not.toContain('Publish all to Verifiable Memory');
+    expect(container.querySelector('[data-testid="assertion-row-action"]')?.textContent).toBe('Publish to VM');
+    await unmount();
+  });
+
   it('keeps graph and VM empty states inside the shared content gutter', async () => {
     const { container, unmount } = await render(
       React.createElement(React.Fragment, null,
@@ -499,6 +638,52 @@ describe('Context Graph shared empty/stat patterns', () => {
     expect(container.querySelector('.v10-layer-expand-body.entities-tab > .v10-vm-hero')).toBeTruthy();
     expect(container.textContent).toContain('No triples in Working Memory');
     expect(container.textContent).toContain('No Knowledge Assets yet.');
+
+    await unmount();
+  });
+
+  it('offers an opt-in query-catalog visibility checkbox on WM/SWM layers', async () => {
+    const onVisibilityChange = vi.fn();
+    const memory = {
+      entities: new Map(),
+      entityList: [],
+      allTriples: [],
+      graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 0, swm: 0, vm: 0, total: 0 },
+      loading: false,
+      error: null,
+      partial: false,
+      layerStatus: { wm: 'ok', swm: 'ok', vm: 'ok' },
+      refresh: vi.fn(),
+    } as any;
+    const { container, unmount } = await render(
+      React.createElement(LayerContent, {
+        layer: 'swm',
+        entities: [],
+        tripleCount: 0,
+        layerTriples: [],
+        contextGraphId: 'cg-test',
+        memory,
+        activeTab: 'graph',
+        onTabChange: vi.fn(),
+        onSelectEntity: vi.fn(),
+        showQueryCatalog: false,
+        onShowQueryCatalogChange: onVisibilityChange,
+      }),
+    );
+
+    const checkbox = container.querySelector(
+      '.v10-query-catalog-visibility input[type="checkbox"]',
+    ) as HTMLInputElement | null;
+    expect(checkbox).toBeTruthy();
+    expect(checkbox?.checked).toBe(false);
+    expect(container.textContent).toContain('Show query catalog');
+
+    await act(async () => {
+      checkbox?.click();
+    });
+    expect(onVisibilityChange).toHaveBeenCalledWith(true);
 
     await unmount();
   });
