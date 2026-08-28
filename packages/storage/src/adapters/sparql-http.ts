@@ -52,11 +52,13 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
-  buildRfc64AuthorCommitCasUpdateV1,
   isAtomicGraphReplaceStagingGraph,
+} from '../atomic-graph-replace.js';
+import {
+  buildRfc64AuthorCommitCasUpdateV1,
   type Rfc64AuthorCommitCasInputV1,
   type Rfc64AuthorCommitCasResultV1,
-} from '../atomic-graph-replace.js';
+} from '../rfc64-author-commit-cas.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
 import {
   assertQuadLiteralsMutf8Safe,
@@ -226,6 +228,12 @@ export interface SparqlHttpStoreOptions {
    * oxigraph-server, which is known transactional, and imply this flag.
    */
   atomicUpdates?: boolean;
+  /**
+   * Declare that a query issued after a completed update observes that update.
+   * Required only by receipt-bearing CAS capabilities; transactionality alone
+   * does not prevent a query endpoint backed by a lagging replica.
+   */
+  readAfterWriteConsistency?: boolean;
   /** Emit sampled slow-query events after this duration. Default 10_000 ms; set 0 to disable. */
   slowQueryThresholdMs?: number;
   /** Sampling rate for slow-query events, from 0 to 1. Default 1. */
@@ -253,6 +261,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly onClientTimeout?: (operation: string) => void;
   private readonly getRecoveryState?: () => SparqlHttpRecoveryState;
   private readonly atomicUpdates: boolean;
+  private readonly readAfterWriteConsistency: boolean;
   private readonly scheduler: StorePriorityScheduler;
 
   private readonly now: () => number;
@@ -281,6 +290,8 @@ export class SparqlHttpStore implements TripleStore {
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
     this.atomicUpdates = options.atomicUpdates === true || this.managedOxigraph;
+    this.readAfterWriteConsistency = options.readAfterWriteConsistency === true
+      || this.managedOxigraph;
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
@@ -741,17 +752,17 @@ export class SparqlHttpStore implements TripleStore {
     input: Rfc64AuthorCommitCasInputV1,
     options?: QueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1> {
-    if (!this.atomicUpdates) {
+    if (!this.atomicUpdates || !this.readAfterWriteConsistency) {
       throw new UnsupportedTripleStoreCapabilityError(
         'rfc64AuthorCommitCasV1',
         'SparqlHttpStore',
       );
     }
-    assertQuadLiteralsMutf8Safe(rfc64AuthorCommitQuads(input), {
+    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    assertQuadLiteralsMutf8Safe(plan.semanticQuads, {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.rfc64AuthorCommitCasV1',
     });
-    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [...plan.touchedGraphs] },
       update: plan.update,
@@ -1130,14 +1141,6 @@ export class SparqlHttpStore implements TripleStore {
     // close. A fresh generation is installed only after the drain completes.
     await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
   }
-}
-
-function rfc64AuthorCommitQuads(input: Rfc64AuthorCommitCasInputV1): DKGQuad[] {
-  return [
-    ...input.sharedProjectionQuads,
-    ...input.authorSealQuads,
-    ...input.stateReplacements.flatMap(({ quads }) => quads),
-  ];
 }
 
 function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {

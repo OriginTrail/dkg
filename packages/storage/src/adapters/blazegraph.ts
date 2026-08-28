@@ -32,11 +32,13 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
-  buildRfc64AuthorCommitCasUpdateV1,
   isAtomicGraphReplaceStagingGraph,
+} from '../atomic-graph-replace.js';
+import {
+  buildRfc64AuthorCommitCasUpdateV1,
   type Rfc64AuthorCommitCasInputV1,
   type Rfc64AuthorCommitCasResultV1,
-} from '../atomic-graph-replace.js';
+} from '../rfc64-author-commit-cas.js';
 import { quadToNQuad } from '../bounded-rdf.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
@@ -467,11 +469,11 @@ export class BlazegraphStore implements TripleStore {
     input: Rfc64AuthorCommitCasInputV1,
     options?: QueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1> {
-    assertQuadLiteralsMutf8Safe(rfc64AuthorCommitQuads(input), {
+    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    assertQuadLiteralsMutf8Safe(plan.semanticQuads, {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'BlazegraphStore.rfc64AuthorCommitCasV1',
     });
-    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
     try {
       await this.sparqlUpdate(
         plan.update,
@@ -726,14 +728,6 @@ export class BlazegraphStore implements TripleStore {
       }
     });
   }
-}
-
-function rfc64AuthorCommitQuads(input: Rfc64AuthorCommitCasInputV1): DKGQuad[] {
-  return [
-    ...input.sharedProjectionQuads,
-    ...input.authorSealQuads,
-    ...input.stateReplacements.flatMap(({ quads }) => quads),
-  ];
 }
 
 // =====================================================================

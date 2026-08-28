@@ -61,3 +61,11 @@ export function hasStoreOperationOutcome(
     && shaped.storeOperation === storeOperation
     && shaped.outcome === outcome;
 }
+
+/** True only when the canonical outcome contract proves this operation never started. */
+export function isStoreOperationNotStarted(
+  error: unknown,
+  storeOperation: StoreOperation,
+): boolean {
+  return hasStoreOperationOutcome(error, storeOperation, 'not_started');
+}

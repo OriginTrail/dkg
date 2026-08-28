@@ -14,12 +14,16 @@ import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import {
   UnsupportedTripleStoreCapabilityError,
 } from './unsupported-capability-error.js';
-import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import {
+  isAtomicGraphReplaceStagingGraph,
+} from './atomic-graph-replace.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
-} from './atomic-graph-replace.js';
+} from './rfc64-author-commit-cas.js';
+import { normalizeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-cas.js';
 import { isAtomicReplaceOperationNotStarted } from './atomic-replace-failure.js';
+import { isStoreOperationNotStarted } from './store-operation-outcome.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -483,7 +487,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     try {
       result = await this.inner.rfc64AuthorCommitCasV1(input, options);
     } catch (error) {
-      if (!isAtomicReplaceOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
+      if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
         this.scheduleFullRefresh('rfc64AuthorCommitCasV1');
       }
       throw error;
@@ -782,12 +786,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 }
 
 function rfc64AuthorCommitTouchedGraphs(input: Rfc64AuthorCommitCasInputV1): string[] {
-  return [...new Set([
-    input.sharedProjectionGraph,
-    input.authorSealGraph,
-    input.currentHeadGraph,
-    ...input.stateReplacements.map(({ graphUri }) => graphUri),
-  ])];
+  return [...normalizeRfc64AuthorCommitCasV1(input).touchedGraphs];
 }
 
 function namedGraphsFromQuads(quads: Quad[]): string[] {

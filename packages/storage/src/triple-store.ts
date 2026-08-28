@@ -21,7 +21,7 @@ import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-
 import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
-} from './atomic-graph-replace.js';
+} from './rfc64-author-commit-cas.js';
 
 export interface Quad {
   subject: string;
@@ -551,9 +551,14 @@ function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknow
   // `managedByDkg` has two independent meanings in SparqlHttpStore: it owns
   // the adapter-local graph-list cache and it identifies the transactional
   // daemon-managed Oxigraph endpoint. The outer GraphSetIndexStore replaces
-  // only the cache, so preserve the endpoint's atomic-update capability when
-  // clearing the cache-ownership flag.
-  return { ...config.options, managedByDkg: false, atomicUpdates: true };
+  // only the cache, so preserve the endpoint's atomic-update and same-server
+  // read-after-write guarantees when clearing the cache-ownership flag.
+  return {
+    ...config.options,
+    managedByDkg: false,
+    atomicUpdates: true,
+    readAfterWriteConsistency: true,
+  };
 }
 
 function wrapGraphSetIndex(

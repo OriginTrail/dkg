@@ -32,19 +32,24 @@ export {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
-  buildRfc64AuthorCommitCasUpdateV1,
   isAtomicGraphReplaceStagingGraph,
+  type AtomicGraphAndSubjectReplaceUpdate,
+  type AtomicGraphReplaceUpdate,
+} from './atomic-graph-replace.js';
+export {
+  buildRfc64AuthorCommitCasUpdateV1,
+  normalizeRfc64AuthorCommitCasV1,
   RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
   RFC64_AUTHOR_COMMIT_MAX_STATE_GUARDS_V1,
   RFC64_AUTHOR_COMMIT_MAX_STATE_REPLACEMENTS_V1,
-  type AtomicGraphAndSubjectReplaceUpdate,
-  type AtomicGraphReplaceUpdate,
   type Rfc64AuthorCommitCasInputV1,
   type Rfc64AuthorCommitCasResultV1,
   type Rfc64AuthorCommitCasUpdateV1,
+  type NormalizedRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitStateTransitionV1,
   type Rfc64AuthorCommitSubjectReplacementV1,
   type Rfc64AuthorCommitValueGuardV1,
-} from './atomic-graph-replace.js';
+} from './rfc64-author-commit-cas.js';
 export {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
@@ -78,6 +83,7 @@ export {
   STORE_OPERATION_OUTCOME_TAG,
   STORE_OPERATIONS,
   hasStoreOperationOutcome,
+  isStoreOperationNotStarted,
   isStoreOperation,
   type StoreOperation,
   type StoreOperationOutcome,

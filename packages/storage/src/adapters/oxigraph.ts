@@ -23,11 +23,13 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
-  buildRfc64AuthorCommitCasUpdateV1,
   isAtomicGraphReplaceStagingGraph,
+} from '../atomic-graph-replace.js';
+import {
+  buildRfc64AuthorCommitCasUpdateV1,
   type Rfc64AuthorCommitCasInputV1,
   type Rfc64AuthorCommitCasResultV1,
-} from '../atomic-graph-replace.js';
+} from '../rfc64-author-commit-cas.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
 import {
   assertQuadLiteralsMutf8Safe,
@@ -435,7 +437,8 @@ export class OxigraphStore implements TripleStore {
   async rfc64AuthorCommitCasV1(
     input: Rfc64AuthorCommitCasInputV1,
   ): Promise<Rfc64AuthorCommitCasResultV1> {
-    const guarded = rfc64AuthorCommitQuads(input).filter(
+    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    const guarded = plan.semanticQuads.filter(
       (quad) => !(quad.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(quad.graph)),
     );
     if (guarded.length > 0) {
@@ -444,7 +447,6 @@ export class OxigraphStore implements TripleStore {
         label: 'OxigraphStore.rfc64AuthorCommitCasV1',
       });
     }
-    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
     try {
       this.store.update(plan.update);
     } catch (error) {
@@ -584,14 +586,6 @@ export class OxigraphStore implements TripleStore {
     }
     await this.flushNow();
   }
-}
-
-function rfc64AuthorCommitQuads(input: Rfc64AuthorCommitCasInputV1): DKGQuad[] {
-  return [
-    ...input.sharedProjectionQuads,
-    ...input.authorSealQuads,
-    ...input.stateReplacements.flatMap(({ quads }) => quads),
-  ];
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
