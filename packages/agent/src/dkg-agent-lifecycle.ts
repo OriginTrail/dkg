@@ -340,6 +340,7 @@ import {
   runSelectedSharedMemoryRetry,
   runSyncOnConnect,
   SyncOnConnectPostSyncError,
+  type SelectedSharedMemoryLaneResult,
   type SyncOnConnectOutcome,
   type SyncOnConnectPeerOutcome,
 } from './sync/on-connect/sync-on-connect.js';
@@ -695,13 +696,14 @@ SharedMemorySyncFromPeerOptions,
   selectedSwmPriority: true;
 }
 
-interface SharedMemorySyncExecution {
+interface OrdinarySharedMemorySyncExecution {
+  readonly kind: 'ordinary-shared-memory';
   readonly shared: SharedMemorySyncResult;
-  /** Null for ordinary/private SWM; boolean only for the selected public lane. */
-  readonly selectedScopeComplete: boolean | null;
-  /** Null for ordinary callers; boolean for the exact selected RFC-64 request. */
-  readonly recoveryPlanComplete: boolean | null;
 }
+
+type SharedMemorySyncExecution =
+  | OrdinarySharedMemorySyncExecution
+  | SelectedSharedMemorySyncResult;
 
 type InFlightSyncPageFetch = {
   promise: Promise<SyncPageResult>;
@@ -4613,15 +4615,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             getContextGraphIds: async (peerId: string) => (
               await getPrioritySharedMemorySyncPlan(peerId)
             ).publicContextGraphIds,
-            syncFromPeer: async (peerId: string, contextGraphIds: string[]) => (
-              this.syncSelectedSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
-                stopOnBackoffWorthyFailure: true,
-                source,
-                sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
-                priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
-                selectedSwmPriority: true,
-              })
-            ),
+            syncFromPeer: async (
+              peerId: string,
+              contextGraphIds: string[],
+            ): Promise<SelectedSharedMemoryLaneResult> => {
+              const selected = await this.syncSelectedSharedMemoryFromPeerDetailed(
+                peerId,
+                contextGraphIds,
+                {
+                  stopOnBackoffWorthyFailure: true,
+                  source,
+                  sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
+                  priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
+                  selectedSwmPriority: true,
+                },
+              );
+              return Object.freeze({
+                kind: 'selected-shared-memory-lane',
+                shared: selected.shared,
+                scopeComplete: selected.selectedScopeComplete,
+              });
+            },
           },
         }
         : {}),
@@ -4770,21 +4784,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       selectedSharedMemoryLane: {
         getContextGraphIds: () => [...requestedContextGraphIds],
-        syncFromPeer: (peerId, contextGraphIds) => (
-          this.syncSelectedSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
-            stopOnBackoffWorthyFailure: true,
-            source,
-            sharedMemorySyncPlan,
-            priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
-            selectedSwmPriority: true,
-          })
-        ),
-        ...(validatedRecoveryPlan === null
-          ? {}
-          : {
-            isScopeComplete: (result: SelectedSharedMemorySyncResult) =>
-              result.recoveryPlanComplete === true,
-          }),
+        syncFromPeer: async (
+          peerId,
+          contextGraphIds,
+        ): Promise<SelectedSharedMemoryLaneResult> => {
+          const selected = await this.syncSelectedSharedMemoryFromPeerDetailed(
+            peerId,
+            contextGraphIds,
+            {
+              stopOnBackoffWorthyFailure: true,
+              source,
+              sharedMemorySyncPlan,
+              priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
+              selectedSwmPriority: true,
+            },
+          );
+          return Object.freeze({
+            kind: 'selected-shared-memory-lane',
+            shared: selected.shared,
+            scopeComplete: validatedRecoveryPlan === null
+              ? selected.selectedScopeComplete
+              : selected.recoveryPlanComplete,
+          });
+        },
       },
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => {
@@ -6899,12 +6921,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphIds,
       options,
     );
-    return {
-      kind: 'selected-shared-memory',
-      shared: execution.shared,
-      selectedScopeComplete: execution.selectedScopeComplete === true,
-      recoveryPlanComplete: execution.recoveryPlanComplete === true,
-    };
+    if (execution.kind !== 'selected-shared-memory') {
+      throw new Error('Selected shared-memory execution returned an ordinary result');
+    }
+    return execution;
   }
 
   /** Internal producer shared by the ordinary and selected typed boundaries. */
@@ -6919,11 +6939,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       shared: SharedMemorySyncResult,
       selectedScopeComplete = false,
       recoveryPlanComplete = false,
-    ): SharedMemorySyncExecution => ({
-      shared,
-      selectedScopeComplete: selectedRequest ? selectedScopeComplete : null,
-      recoveryPlanComplete: selectedRequest ? recoveryPlanComplete : null,
-    });
+    ): SharedMemorySyncExecution => selectedRequest
+      ? {
+        kind: 'selected-shared-memory',
+        shared,
+        selectedScopeComplete,
+        recoveryPlanComplete,
+      }
+      : { kind: 'ordinary-shared-memory', shared };
     if (!durableSyncEnabled(this.config)) {
       this.log.warn(ctx, `Skipping shared-memory sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return execution(emptySharedMemorySyncResult());

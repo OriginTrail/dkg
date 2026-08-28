@@ -5,7 +5,6 @@ import {
 import {
   classifySharedMemoryFreshness,
   type SharedMemoryFreshnessSummary,
-  type SelectedSharedMemorySyncResult,
 } from '../shared-memory-freshness.js';
 
 type SyncProgressSummary = SharedMemoryFreshnessSummary & {
@@ -25,12 +24,17 @@ interface SelectedSharedMemorySyncLane {
   syncFromPeer: (
     peerId: string,
     contextGraphIds: string[],
-  ) => Promise<SelectedSharedMemorySyncResult>;
-  /** Override only when the lane owns a wider scope than selected public SWM. */
-  isScopeComplete?: (result: SelectedSharedMemorySyncResult) => boolean;
+  ) => Promise<SelectedSharedMemoryLaneResult>;
 }
 
-type SyncAccountingResult = DurableSyncFromPeerResult | SelectedSharedMemorySyncResult;
+/** One normalized completion contract consumed by generic sync accounting. */
+export interface SelectedSharedMemoryLaneResult {
+  readonly kind: 'selected-shared-memory-lane';
+  readonly shared: SyncProgressSummary;
+  readonly scopeComplete: boolean;
+}
+
+type SyncAccountingResult = DurableSyncFromPeerResult | SelectedSharedMemoryLaneResult;
 
 export interface SyncOnConnectPeerOutcome {
   fresh: boolean;
@@ -228,12 +232,10 @@ export async function runSelectedSharedMemoryRetry(
       `Retrying ${contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
     );
     const selected = await selectedSharedMemoryLane.syncFromPeer(remotePeer, contextGraphIds);
-    const scopeComplete = selectedSharedMemoryLane.isScopeComplete?.(selected)
-      ?? selected.selectedScopeComplete;
     const accounting = classifySyncResult(
       selected.shared,
       'shared',
-      scopeComplete,
+      selected.scopeComplete,
     );
     logInfo(
       ctx,
@@ -251,7 +253,7 @@ export async function runSelectedSharedMemoryRetry(
     // whole peer fresh: durable and unrelated CG work were intentionally not
     // run. Explicit incomplete/no-progress remains silent so reconciler
     // accounting grows its bounded retry backoff.
-    const selectedRetryResolved = scopeComplete
+    const selectedRetryResolved = selected.scopeComplete
       && !accounting.backoffWorthyFailure
       && !accounting.failed
       && !accounting.denied;
@@ -309,13 +311,12 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     const selectedResult = phase === 'shared'
       && typeof result !== 'number'
       && 'kind' in result
-      && result.kind === 'selected-shared-memory'
+      && result.kind === 'selected-shared-memory-lane'
         ? result
         : undefined;
     const syncResult = (selectedResult?.shared ?? result) as SyncFromPeerResult;
     const complete = selectedResult !== undefined
-      ? selectedSharedMemoryLane?.isScopeComplete?.(selectedResult)
-        ?? selectedResult.selectedScopeComplete
+      ? selectedResult.scopeComplete
       : (
       phase === 'durable'
       && typeof result !== 'number'

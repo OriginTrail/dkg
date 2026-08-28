@@ -27,12 +27,10 @@ export interface SelectedSharedMemorySyncResult {
   readonly kind: 'selected-shared-memory';
   /** Full diagnostics stay available even though completion is lane-specific. */
   readonly shared: SharedMemorySyncResult;
+  /** Terminal verdict for the selected-public subset. */
   readonly selectedScopeComplete: boolean;
-  /**
-   * Completion of the exact RFC-64 recovery plan, including ordinary-private
-   * targets. Absent for legacy producers and consumers outside that boundary.
-   */
-  readonly recoveryPlanComplete?: boolean;
+  /** Terminal verdict for the exact public/private RFC-64 recovery request. */
+  readonly recoveryPlanComplete: boolean;
 }
 
 /**

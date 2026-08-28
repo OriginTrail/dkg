@@ -114,13 +114,13 @@ describe('runSyncOnConnect callbacks', () => {
         syncFromPeer: async (_peerId, contextGraphIds) => {
           order.push(`shared:${contextGraphIds.join(',')}:selected`);
           return {
-            kind: 'selected-shared-memory',
+            kind: 'selected-shared-memory-lane',
             shared: {
               insertedTriples: 0,
               completedPhases: 1,
               checkpointAdvances: 0,
             },
-            selectedScopeComplete: true,
+            scopeComplete: true,
           };
         },
       },

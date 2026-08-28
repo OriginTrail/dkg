@@ -384,6 +384,7 @@ describe('sync-on-connect churn gates', () => {
         insertedDataTriples: 4,
       }),
       selectedScopeComplete: true,
+      recoveryPlanComplete: true,
     }));
     const durableSync = recorder(async () => emptyDetailedSync({ completedPhases: 1 }));
     const ordinarySharedSync = recorder(async () => emptyDetailedSync({ completedPhases: 1 }));
@@ -589,9 +590,9 @@ describe('sync-on-connect churn gates', () => {
       selectedSharedMemoryLane: {
         getContextGraphIds: () => ['selected-cg'],
         syncFromPeer: async () => ({
-          kind: 'selected-shared-memory',
+          kind: 'selected-shared-memory-lane',
           shared: emptyDetailedSync(),
-          selectedScopeComplete: false,
+          scopeComplete: false,
         }),
       },
       onPeerSynced: (_peerId, outcome) => {
@@ -639,6 +640,7 @@ describe('sync-on-connect churn gates', () => {
         insertedDataTriples: 4,
       }),
       selectedScopeComplete: false,
+      recoveryPlanComplete: false,
     });
     (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
     (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-cg'];

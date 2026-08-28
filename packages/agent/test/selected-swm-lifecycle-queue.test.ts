@@ -401,9 +401,9 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       selectedSharedMemoryLane: {
         getContextGraphIds: () => [contextGraphId],
         syncFromPeer: async () => ({
-          kind: 'selected-shared-memory',
+          kind: 'selected-shared-memory-lane',
           shared,
-          selectedScopeComplete: true,
+          scopeComplete: true,
         }),
       },
       syncFromPeer: async () => 0,

@@ -72,8 +72,11 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           getPeerProtocols: async () => [PROTOCOL_SYNC],
           selectedSharedMemoryLane: {
             getContextGraphIds: () => [privateCg],
-            syncFromPeer: async () => recovery,
-            isScopeComplete: (result) => result.recoveryPlanComplete === true,
+            syncFromPeer: async () => ({
+              kind: 'selected-shared-memory-lane',
+              shared: recovery.shared,
+              scopeComplete: recovery.recoveryPlanComplete,
+            }),
           },
           onPeerSynced: (_peerId, outcome) => {
             if (outcome) onSyncAccounting(outcome);
@@ -401,6 +404,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           kind: 'selected-shared-memory',
           shared: cleanDurableResult(),
           selectedScopeComplete: true,
+          recoveryPlanComplete: true,
         };
       },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
@@ -465,6 +469,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         // The producer carries whole-selected-scope completeness explicitly;
         // freshness accounting must not depend on ambient peer state.
         selectedScopeComplete: false,
+        recoveryPlanComplete: false,
       }),
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -550,7 +555,11 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         getSharedMemorySyncContextGraphs: () => [publicCg],
         selectedSharedMemoryLane: {
           getContextGraphIds: () => [publicCg],
-          syncFromPeer: async () => selected,
+          syncFromPeer: async () => ({
+            kind: 'selected-shared-memory-lane',
+            shared: selected.shared,
+            scopeComplete: selected.selectedScopeComplete,
+          }),
         },
         syncFromPeer: async () => 0,
         refreshMetaSyncedFlags: async () => undefined,
