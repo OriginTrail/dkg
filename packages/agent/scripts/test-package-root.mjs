@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = await import('@origintrail-official/dkg-agent');
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
+const legacyChainReconciler = await import(
+  '@origintrail-official/dkg-agent/dist/chain-reconciler.js'
+);
 const legacyCatalogSync = await import(
   '@origintrail-official/dkg-agent/dist/dkg-agent-rfc64-catalog-sync.js'
 );
@@ -132,6 +135,26 @@ if (
 }
 if (packageManifest.name !== '@origintrail-official/dkg-agent') {
   throw new Error('historical package.json subpath no longer resolves');
+}
+const legacyReconcileResult = await legacyChainReconciler.reconcileContextGraph(
+  {
+    getKCCount: async () => 2,
+    getHeadBlock: async () => undefined,
+    reconcileOrdinal: async () => ({ status: 'pending' }),
+    maxOrdinalsPerPass: 1,
+    persistWatermark: () => undefined,
+    confirmationDepth: 0,
+    log: () => undefined,
+  },
+  { watermark: 0, ahead: new Map(), scanOrdinal: 0 },
+  'package-subpath-compatibility',
+  1n,
+);
+if (
+  legacyReconcileResult.hasMore !== true
+  || legacyReconcileResult.shouldContinueImmediately !== false
+) {
+  throw new Error('historical chain reconciler result lost hasMore compatibility');
 }
 if (typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationConfigV1 !== 'function') {
   throw new Error('public RFC-64 activation subpath did not expose the complete resolver');
