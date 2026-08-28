@@ -186,6 +186,35 @@ describe('query catalog codec', () => {
     ], { contextGraphId: 'test' })).toThrow(/conflicting scopeGraph and forSubGraph/);
   });
 
+  it('uses collision-resistant content identities for immutable query revisions', () => {
+    const build = (overrides: Partial<Parameters<typeof buildQueryCatalogWrite>[0]> = {}) =>
+      buildQueryCatalogWrite({
+        contextGraphId: 'test',
+        name: 'Revenue / Q1',
+        sparql: 'SELECT * WHERE {}',
+        subGraph: 'finance',
+        catalogSlug: 'reports',
+        catalogName: 'Reports',
+        rank: 99,
+        catalogRank: 20,
+        ...overrides,
+      });
+
+    const first = build();
+    const collidingName = build({ name: 'Revenue Q1' });
+    const otherCatalog = build({ catalogSlug: 'audits', catalogName: 'Audits' });
+    expect(new Set([
+      first.savedQuery.queryUri,
+      collidingName.savedQuery.queryUri,
+      otherCatalog.savedQuery.queryUri,
+    ])).toHaveLength(3);
+
+    expect(build().savedQuery.queryUri).toBe(first.savedQuery.queryUri);
+    expect(build({ sparql: 'SELECT ?updated WHERE {}' }).savedQuery.queryUri)
+      .not.toBe(first.savedQuery.queryUri);
+    expect(build({ rank: 1 }).savedQuery.queryUri).not.toBe(first.savedQuery.queryUri);
+  });
+
   it('prepares one rendered request with exact view and subgraph scope', () => {
     expect(prepareQueryCatalogExecution({
       sparql: 'SELECT * WHERE { BIND({{id}} AS ?id) }',

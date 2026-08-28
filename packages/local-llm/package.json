@@ -1,0 +1,47 @@
+{
+  "name": "@origintrail-official/dkg-local-llm",
+  "version": "10.0.14",
+  "description": "Bounded local-LLM tool runtime for the DKG MCP surface.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "benchmark:dkg": "pnpm build && node benchmark/real-dkg.mjs",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1",
+    "@types/node": "^22",
+    "vitest": "^4.0.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg.git",
+    "directory": "packages/local-llm"
+  },
+  "keywords": [
+    "dkg",
+    "llama.cpp",
+    "local-llm",
+    "mcp",
+    "origintrail"
+  ]
+}
