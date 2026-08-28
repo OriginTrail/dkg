@@ -27,6 +27,7 @@ function savedQuery(overrides: Partial<QueryCatalogItem> = {}): QueryCatalogItem
     catalogDescription: 'Lifecycle traceability queries.',
     catalogRank: 10,
     subGraph: 'digital-twin',
+    scopeGraph: 'did:dkg:context-graph:test-cg/digital-twin',
     parameters: [{ name: 'configurationId', type: 'string' }],
     view: 'verifiable-memory',
     ...overrides,
@@ -264,11 +265,10 @@ describe('query-catalog MCP tools', () => {
     expect(result.content[0].text).toContain('selector is ambiguous');
   });
 
-  it('builds canonical RDF and delegates save to the daemon atomic-upsert route', async () => {
+  it('builds canonical RDF and delegates an immutable save to the daemon', async () => {
     let writeCall: {
       contextGraphId: string;
       quads: QueryCatalogWriteQuad[];
-      mode?: 'insert' | 'upsert';
     } | undefined;
     const client = new FakeClient({
       writeQueryCatalog: async (args) => {
@@ -276,10 +276,15 @@ describe('query-catalog MCP tools', () => {
         return {
           ok: true as const,
           contextGraphId: args.contextGraphId,
-          graph: `did:dkg:context-graph:${args.contextGraphId}/meta/query-catalog`,
-          mode: args.mode ?? 'upsert',
-          subjectsUpserted: 2,
+          graph: `did:dkg:context-graph:${args.contextGraphId}/meta`,
+          subGraphName: 'meta' as const,
+          assertionName: 'query-catalog-test',
+          assertionUri: `did:dkg:context-graph:${args.contextGraphId}/assertion/default/query-catalog-test`,
+          scopeGraphs: [`did:dkg:context-graph:${args.contextGraphId}/digital-twin`],
+          scopeGraph: `did:dkg:context-graph:${args.contextGraphId}/digital-twin`,
+          queryCount: 1,
           triplesWritten: args.quads.length,
+          alreadyExists: false,
         };
       },
     });
@@ -298,10 +303,12 @@ describe('query-catalog MCP tools', () => {
     });
 
     expect(result.isError).toBeFalsy();
-    expect(writeCall).toMatchObject({ contextGraphId: 'test-cg', mode: 'upsert' });
+    expect(writeCall).toMatchObject({ contextGraphId: 'test-cg' });
+    expect(writeCall).not.toHaveProperty('mode');
     expect(writeCall!.quads.length).toBeGreaterThan(10);
     expect(writeCall!.quads.some((quad) =>
       quad.predicate === 'http://dkg.io/ontology/profile/queryParameters')).toBe(true);
     expect(result.content[0].text).toContain('digital-twin/kamstrup-lifecycle/');
+    expect(result.content[0].text).toContain('assertion=query-catalog-test');
   });
 });

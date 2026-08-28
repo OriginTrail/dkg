@@ -282,8 +282,7 @@ Example MCP payload for a reviewed catalog entry:
         "required": true
       }
     ],
-    "resultColumn": "product",
-    "mode": "upsert"
+    "resultColumn": "product"
   }
 }
 ```

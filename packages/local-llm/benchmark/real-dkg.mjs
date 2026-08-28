@@ -112,7 +112,6 @@ function canonicalCatalogInput(target) {
     catalogName: 'Local LLM benchmark',
     parameters: [{ name: 'category', type: 'string', required: true }],
     view: 'working-memory',
-    mode: 'upsert',
   };
 }
 
@@ -254,7 +253,7 @@ function buildPhases(options, state) {
     {
       id: '06-save-parametric-catalog-query',
       group: 'catalog-write',
-      prompt: `Save a parameterized DKG query-catalog entry in context graph ${target.graphId}. Name it "Models by category", use catalog slug local-llm-benchmark, subgraph model-families, Working Memory view, and one required string parameter named category. Its SELECT must return ?model and ?label for ModelFamily entities whose schema:category equals {{category}}, ordered by model. Use upsert and do not run or publish anything else.`,
+      prompt: `Save one immutable parameterized DKG query-catalog entry in context graph ${target.graphId}. Name it "Models by category", use catalog slug local-llm-benchmark, subgraph model-families, Working Memory view, and one required string parameter named category. Its SELECT must return ?model and ?label for ModelFamily entities whose schema:category equals {{category}}, ordered by model. Do not run or publish anything else.`,
       evaluate: ({ calls }) => successfulCalls(calls, 'dkg_query_catalog_save').some((call) =>
         call.args.catalogSlug === 'local-llm-benchmark'
         && call.args.subGraph === 'model-families'

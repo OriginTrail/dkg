@@ -214,7 +214,7 @@ type; callers never interpolate raw strings into SPARQL.
 | `dkg_query_catalog_context_graphs` | Inspect accessible Context Graphs and return only graphs that actually contain saved catalog entries. Read-only. |
 | `dkg_query_catalog_list` | List saved queries with stable selectors, declared parameters, execution views, and sub-graph scopes. Read-only. |
 | `dkg_query_catalog_run` | Execute one saved query by selector, slug, or exact name. Parameter values are validated and safely rendered before the canonical `/api/query` call. Read-only. |
-| `dkg_query_catalog_save` | Save or atomically upsert a parameterized query through the guarded profile-catalog route. Mutates local DKG state and should only be called on an explicit user request. |
+| `dkg_query_catalog_save` | Save an immutable parameterized query revision through the guarded profile-catalog route. Exact retries are idempotent; changed definitions create new revisions. Mutates local DKG state and should only be called on an explicit user request. |
 
 ### Messaging (agent-to-agent)
 

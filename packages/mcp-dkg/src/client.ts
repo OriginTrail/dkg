@@ -39,9 +39,14 @@ export interface QueryCatalogWriteResponse {
   ok: true;
   contextGraphId: string;
   graph: string;
-  mode: 'insert' | 'upsert';
-  subjectsUpserted?: number;
+  subGraphName: 'meta';
+  assertionName: string;
+  assertionUri: string;
+  scopeGraphs: string[];
+  scopeGraph?: string;
+  queryCount: number;
   triplesWritten: number;
+  alreadyExists: boolean;
 }
 
 function normalizeDaemonQueryResult(result: unknown, sparql: string): SparqlResult {
@@ -517,13 +522,12 @@ export class DkgClient {
 
   /**
    * Write canonical catalog RDF through the daemon's guarded profile route.
-   * The daemon owns graph assignment, authorization, literal limits, and the
-   * atomic-upsert contract; MCP deliberately does not write the store itself.
+   * The daemon owns authorization, validation, and immutable assertion
+   * persistence; MCP deliberately does not write the store itself.
    */
   async writeQueryCatalog(args: {
     contextGraphId: string;
     quads: QueryCatalogWriteQuad[];
-    mode?: 'insert' | 'upsert';
   }): Promise<QueryCatalogWriteResponse> {
     return this.request<QueryCatalogWriteResponse>(
       'POST',
@@ -531,7 +535,6 @@ export class DkgClient {
       {
         contextGraphId: normalizeContextGraphId(args.contextGraphId),
         quads: args.quads,
-        mode: args.mode ?? 'upsert',
       },
     );
   }

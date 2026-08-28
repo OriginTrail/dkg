@@ -36,10 +36,15 @@ describe('DkgClient query-catalog routes', () => {
           : {
               ok: true,
               contextGraphId: body.contextGraphId,
-              graph: `did:dkg:context-graph:${body.contextGraphId}/meta/query-catalog`,
-              mode: body.mode,
-              subjectsUpserted: 2,
+              graph: `did:dkg:context-graph:${body.contextGraphId}/meta`,
+              subGraphName: 'meta',
+              assertionName: 'query-catalog-test',
+              assertionUri: `did:dkg:context-graph:${body.contextGraphId}/assertion/default/query-catalog-test`,
+              scopeGraphs: [`did:dkg:context-graph:${body.contextGraphId}`],
+              scopeGraph: `did:dkg:context-graph:${body.contextGraphId}`,
+              queryCount: 1,
               triplesWritten: Array.isArray(body.quads) ? body.quads.length : 0,
+              alreadyExists: false,
             };
         return new Response(JSON.stringify(response), {
           status: 200,
@@ -63,7 +68,7 @@ describe('DkgClient query-catalog routes', () => {
     expect(result.schemaVersion).toBe(QUERY_CATALOG_SCHEMA_VERSION);
   });
 
-  it('delegates canonical quads and atomic-upsert mode to the daemon', async () => {
+  it('delegates canonical quads without a mutable write mode', async () => {
     const { client, calls } = makeClient();
     const quads = [{
       subject: 'urn:query:1',
@@ -74,14 +79,18 @@ describe('DkgClient query-catalog routes', () => {
     const result = await client.writeQueryCatalog({
       contextGraphId: 'did:dkg:context-graph:test-cg',
       quads,
-      mode: 'upsert',
     });
 
     expect(calls[0]).toMatchObject({
       url: 'http://localhost:9200/api/profile/query-catalog/write',
       method: 'POST',
-      body: { contextGraphId: 'test-cg', quads, mode: 'upsert' },
+      body: { contextGraphId: 'test-cg', quads },
     });
-    expect(result).toMatchObject({ ok: true, triplesWritten: 1, subjectsUpserted: 2 });
+    expect(result).toMatchObject({
+      ok: true,
+      triplesWritten: 1,
+      assertionName: 'query-catalog-test',
+      alreadyExists: false,
+    });
   });
 });

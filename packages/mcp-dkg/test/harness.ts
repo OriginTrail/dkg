@@ -464,9 +464,15 @@ export class FakeClient {
     return {
       ok: true as const,
       contextGraphId: args.contextGraphId,
-      graph: `did:dkg:context-graph:${args.contextGraphId}/meta/query-catalog`,
-      mode: args.mode ?? 'upsert',
+      graph: `did:dkg:context-graph:${args.contextGraphId}/meta`,
+      subGraphName: 'meta' as const,
+      assertionName: 'query-catalog-test',
+      assertionUri: `did:dkg:context-graph:${args.contextGraphId}/assertion/default/query-catalog-test`,
+      scopeGraphs: [`did:dkg:context-graph:${args.contextGraphId}`],
+      scopeGraph: `did:dkg:context-graph:${args.contextGraphId}`,
+      queryCount: 1,
       triplesWritten: args.quads.length,
+      alreadyExists: false,
     };
   }
 

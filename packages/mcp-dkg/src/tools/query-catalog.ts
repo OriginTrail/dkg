@@ -2,7 +2,7 @@
  * Query-catalog MCP facade.
  *
  * The catalog contract (encoding, parameter rendering, execution view, and
- * atomic upsert) belongs to dkg-core + the daemon. These tools intentionally
+ * immutable persistence) belongs to dkg-core + the daemon. These tools intentionally
  * stay thin so CLI, UI, adapters, and local LLM clients execute the same
  * contract rather than growing subtly different catalog implementations.
  */
@@ -416,9 +416,10 @@ export function registerQueryCatalogTools(
     {
       title: 'Save Query Catalog Entry',
       description:
-        'Save or atomically update a parameterized SPARQL query in the Context ' +
+        'Save an immutable parameterized SPARQL query revision in the Context ' +
         'Graph profile catalog. This mutates local DKG state. Never call it ' +
-        'unless the user explicitly asks to save or update a catalog query. ' +
+        'unless the user explicitly asks to save a catalog query. Repeating the ' +
+        'exact same definition is idempotent; changed definitions create new revisions. ' +
         'Use raw SPARQL and wrap absolute or compact quad IRIs in angle brackets ' +
         '(for example `<urn:item:1>`, `<rdf:type>`, and `<schema:category>`).',
       annotations: {
@@ -440,14 +441,10 @@ export function registerQueryCatalogTools(
         catalogName: z.string().trim().min(1).max(160).optional().default(USER_QUERY_CATALOG_NAME),
         catalogDescription: z.string().trim().min(1).max(2_000).optional().default(USER_QUERY_CATALOG_DESCRIPTION),
         resultColumn: z.string().trim().min(1).optional(),
-        queryId: z.string().trim().min(1).max(160).optional().describe(
-          'Stable caller-owned query identity. Reuse it to update the same saved query after renaming or moving it.',
-        ),
         rank: z.number().int().min(0).max(1_000_000).optional().default(99),
         catalogRank: z.number().int().min(0).max(1_000_000).optional().default(999),
         parameters: z.array(parameterDefinitionSchema).max(50).optional().default([]),
         view: z.enum(['working-memory', 'shared-working-memory', 'verifiable-memory']).optional(),
-        mode: z.enum(['insert', 'upsert']).optional().default('upsert'),
       },
     },
     async (input): Promise<ToolResult> => {
@@ -464,7 +461,6 @@ export function registerQueryCatalogTools(
           catalogName: input.catalogName,
           catalogDescription: input.catalogDescription,
           resultColumn: input.resultColumn,
-          queryId: input.queryId,
           rank: input.rank,
           catalogRank: input.catalogRank,
           parameters: input.parameters,
@@ -473,11 +469,11 @@ export function registerQueryCatalogTools(
         const response = await client.writeQueryCatalog({
           contextGraphId: pid,
           quads: write.quads,
-          mode: input.mode,
         });
         return ok(
-          `Saved query **${write.savedQuery.name}** as \`${qualifiedSelector(write.savedQuery)}\` `
-          + `in Context Graph \`${pid}\` (${response.triplesWritten} triples, mode=${response.mode}).`,
+          `${response.alreadyExists ? 'Query already exists' : 'Saved query'} **${write.savedQuery.name}** as `
+          + `\`${qualifiedSelector(write.savedQuery)}\` in Context Graph \`${pid}\` `
+          + `(${response.triplesWritten} triples, assertion=${response.assertionName}).`,
           {
             ...response,
             selector: qualifiedSelector(write.savedQuery),
