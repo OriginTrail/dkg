@@ -1984,13 +1984,12 @@ export class TripleStoreAsyncLiftPublisher
     const passBudgetMs = Math.max(0, this.chainProofDispatchTimeBudgetMs);
     const halfBudgetMs = Math.max(1, Math.floor(passBudgetMs / 2));
     // r15 (3878098525) — ONE absolute pass deadline: the configured budget is the operator's
-    // latency ceiling for recovery work, and no lane may LAUNCH chain reads past it (an
-    // already-started durable transition still completes — it is never aborted mid-write —
-    // but its overrun ends the pass rather than opening a fresh window, the r13 shape this
-    // replaces). Fairness across passes comes from alternation instead: the leading lane runs
-    // under a half-budget sub-deadline, the trailing lane gets whatever remains, and the lead
-    // alternates every pass — so an overrun costs the other lane at most one pass, with its
-    // candidates reported pending for the active cadence to retry.
+    // latency ceiling, and no lane may LAUNCH chain reads past it. An already-started durable
+    // transition still completes (never aborted mid-write); its overrun ends the pass. Fairness
+    // across passes comes from alternation: the leading lane runs under a half-budget
+    // sub-deadline, the trailing lane gets the remainder, and the lead alternates every pass —
+    // an overrun costs the other lane at most one pass, its candidates reported pending for
+    // the active cadence to retry.
     let hintedUnresolved = 0;
     const passDeadline = new AbortController();
     const passTimer = setTimeout(() => passDeadline.abort(), passBudgetMs);

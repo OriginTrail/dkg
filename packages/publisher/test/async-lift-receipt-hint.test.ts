@@ -869,4 +869,48 @@ describe('async-lift receipt-hint lane', () => {
     expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
     await expectWalletLock('wallet-1', 'released');
   });
+
+  it('a walk-led overrun costs the hinted lane at most one pass', async () => {
+    // r17 (3878148764) - the reverse half of lane fairness. The walk leads (lead pinned
+    // directly: priming with a spare pass would consume the parked hint first) and its
+    // ordinary job overruns the absolute deadline during an awaited durable release; the
+    // trailing hint lane is cut off and its candidate reported pending. The next, hint-led
+    // pass releases the hinted wallet.
+    const { publisher, jobA, jobB, releaseTails } = await parkedTwoWalletScenario({
+      hinted: 'first',
+      config: { chainProofDispatchTimeBudgetMs: 150 },
+    });
+    (publisher as unknown as { hintLaneLeads: boolean }).hintLaneLeads = false;
+    // Ordinary job B's release (wallet-2) overruns the whole pass budget.
+    const originalDelete = store.deleteByPattern.bind(store);
+    let slowNextLockDelete = true;
+    (store as unknown as { deleteByPattern: typeof originalDelete }).deleteByPattern =
+      async (pattern: { subject?: string; graph?: string }) => {
+        if (slowNextLockDelete && pattern?.subject === walletLockSubject('wallet-2')) {
+          slowNextLockDelete = false;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        return originalDelete(pattern as never);
+      };
+    try {
+      // Pass 1 (walk leads): B's already-started release completes past the deadline (the
+      // wallet frees), but the mutating repair may not START past it (the r26 rule), so B
+      // stays tx-bearing; the trailing hint lane is cut off and A stays pending, wallet held.
+      const outcome = await publisher.reconciliationScheduling.reconcile();
+      expect(outcome.pendingWork).toBe(true);
+      expect((await publisher.getStatus(jobB))?.status).toBe('broadcast');
+      await expectWalletLock('wallet-2', 'released');
+      expect((await publisher.getStatus(jobA))?.status).toBe('broadcast');
+      await expectWalletLock('wallet-1', 'held');
+
+      // Pass 2 (hints lead): the hinted wallet is reached and released; the trailing walk
+      // finishes B within the normal budget.
+      await publisher.reconcileTransactions();
+      expect((await publisher.getStatus(jobA))?.status).toBe('included');
+      await expectWalletLock('wallet-1', 'released');
+      expect((await publisher.getStatus(jobB))?.status).toBe('finalized');
+    } finally {
+      releaseTails();
+    }
+  });
 });
