@@ -590,6 +590,103 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(intent.sealMerkleRoot).toMatch(/^0x[0-9a-f]+$/);
   }, 30_000);
 
+  it('forwards onPublishConfirmed through the real queued rails on create and update [GH#2359 r2 3877540365]', async () => {
+    // The production glue this pins: the async publisher injects its receipt hook into the
+    // execution input, the REAL handler hands publishOptions to
+    // publishQueuedKnowledgeAssetVmPublish, the agent's one-object executionHooks spread
+    // forwards it, and DKGPublisher fires it at receipt time. The spies wrap (never stub) the
+    // underlying publisher entry points to prove the SAME callback arrived and fires — for the
+    // create branch and the update branch. Dropping the field at any reconstruction turns the
+    // captured hook undefined and this row red.
+    const agent = await createAgent('QueuedConfirmForwardBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Confirm Forward E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-confirm-forward';
+    const root = `${ENTITY_BASE}:queued-confirm-forward`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Confirm Forward v1"' },
+    ]);
+    await agent.assertion.promote(CG_ID, name);
+    const createIntent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+
+    const underlying = (agent as any).publisher;
+    // r5 (3877726512) - IDENTITY, not just presence: the hook captured at the real handler
+    // boundary must be the SAME reference that reaches each underlying publisher entry point,
+    // so a substitution anywhere in the agent's option reconstructions cannot pass.
+    const handlerHooks: unknown[] = [];
+    let createHookForwarded: unknown = 'unset';
+    const createFired: string[] = [];
+    const realPublish = underlying.publish.bind(underlying);
+    underlying.publish = async (options: any) => {
+      const original = options.onPublishConfirmed;
+      createHookForwarded = original;
+      return realPublish({
+        ...options,
+        onPublishConfirmed: (confirmation: { txHash: string }) => {
+          createFired.push(confirmation.txHash);
+          return original?.(confirmation);
+        },
+      });
+    };
+
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+      knowledgeAssetVmPublishHandler: {
+        preflight: ({ request }) => agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+        execute: async ({ request, publishOptions }) => {
+          handlerHooks.push(publishOptions.onPublishConfirmed);
+          return agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions);
+        },
+      },
+    });
+    const createJob = await asyncPublisher.enqueueKnowledgeAssetVmPublish(createIntent);
+    const createProcessed = await asyncPublisher.processNext('wallet-1');
+    expect(createProcessed?.jobId).toBe(createJob);
+    expect(createProcessed?.status).toBe('finalized');
+    // The async publisher's injected hook survived every option reconstruction to the
+    // underlying publisher AS THE SAME REFERENCE, and fired with the receipt hash.
+    expect(typeof handlerHooks[0]).toBe('function');
+    expect(createHookForwarded).toBe(handlerHooks[0]);
+    expect(createFired).toHaveLength(1);
+    expect(createFired[0]).toMatch(/^0x[0-9a-f]+$/i);
+
+    // UPDATE branch: reopen the published assertion, revise, promote - the second intent
+    // resolves to the update rails.
+    const reopened = await agent.assertion.pullFrom(CG_ID, name, 'vm', { onConflict: 'replace' });
+    expect(reopened.seeded).toBe(1);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Confirm Forward v2"' },
+    ]);
+    await agent.assertion.finalize(CG_ID, name);
+    await agent.assertion.promote(CG_ID, name);
+    const updateIntent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+
+    let updateHookForwarded: unknown = 'unset';
+    const updateFired: string[] = [];
+    const realUpdate = underlying.updateKnowledgeAssetFromSharedMemory.bind(underlying);
+    underlying.updateKnowledgeAssetFromSharedMemory = async (kaId: bigint, options: any) => {
+      const original = options.onPublishConfirmed;
+      updateHookForwarded = original;
+      return realUpdate(kaId, {
+        ...options,
+        onPublishConfirmed: (confirmation: { txHash: string }) => {
+          updateFired.push(confirmation.txHash);
+          return original?.(confirmation);
+        },
+      });
+    };
+
+    const updateJob = await asyncPublisher.enqueueKnowledgeAssetVmPublish(updateIntent);
+    const updateProcessed = await asyncPublisher.processNext('wallet-1');
+    expect(updateProcessed?.jobId).toBe(updateJob);
+    expect(updateProcessed?.status).toBe('finalized');
+    expect(typeof handlerHooks[1]).toBe('function');
+    expect(updateHookForwarded).toBe(handlerHooks[1]);
+    expect(updateFired).toHaveLength(1);
+    expect(updateFired[0]).toMatch(/^0x[0-9a-f]+$/i);
+  }, 90_000);
+
   it('async VM publish executes the queued share snapshot after live SWM is drained', async () => {
     const agent = await createAgent('QueuedAsyncVmPublishBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Publish E2E' });

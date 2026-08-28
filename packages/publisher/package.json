@@ -5,11 +5,12 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && pnpm run test:helper-types",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:coverage": "vitest run --coverage",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "test:helper-types": "tsc --project tsconfig.test-helpers.json"
   },
   "dependencies": {
     "@multiformats/multiaddr": "^13.0.3",

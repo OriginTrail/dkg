@@ -1,4 +1,6 @@
 import type { PreBroadcastRecord } from './publisher.js';
+import { bestEffortNotify } from './best-effort-notify.js';
+import { resolveWithinAbort } from './abort-boundary.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -38,6 +40,7 @@ import type {
   AsyncLiftChainProofLookup,
   AsyncLiftChainProofResolution,
   AsyncLiftAdmissionContext,
+  AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   AsyncLiftPublisherRecoveryResolver,
   AsyncLiftPublisherRecoveryResult,
   AsyncLiftRetryOutcome,
@@ -470,6 +473,31 @@ export class TripleStoreAsyncLiftPublisher
   private readonly activeProcessJobIds = new Set<string>();
   /** Receipt tasks that continue after the RPC-acceptance fast return. */
   private readonly detachedExecutions = new Map<string, Promise<void>>();
+  /**
+   * GH#2359 item 2 — executor receipt SCHEDULING hints, by jobId. An entry records only that
+   * the executor reported a confirmed receipt for `txHash`; it authorizes nothing. The early
+   * release lane validates the hash against the job's PERSISTED write-ahead evidence and then
+   * runs the reconciler's own canonical chain proof — only that proof releases the wallet.
+   * After a successful early release the entry carries the proof, so the settle-time finalize
+   * consumes it instead of re-paying the chain reads. Bounded FIFO; entries are dropped on
+   * consumption, invalidation (hash mismatch / terminal disposition), or eviction.
+   */
+  private readonly executorProofHints = new Map<string, {
+    readonly txHash: string;
+    proof?: {
+      readonly recovery: AsyncLiftPublisherRecoveryResult;
+      readonly resolved: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
+    };
+    /** r8 (3877817604) — contained transition/release failures for THIS hint, see the catch. */
+    transitionFailures?: number;
+  }>();
+  private static readonly EXECUTOR_PROOF_HINT_CAP = 512;
+  /** r8 (3877817604) — contained retries of the write/release window before escalating. */
+  private static readonly EXECUTOR_HINT_TRANSITION_RETRY_LIMIT = 3;
+  private executorHintPassOffset = 0;
+  /** r15 (3878098525) — which lane leads the next pass; alternates so an overrun in one lane
+   * cannot repeatedly consume the other lane's opportunity. Hints lead first for latency. */
+  private hintLaneLeads = true;
   /** Poked when a tx-bearing job stops being executor-owned; see setReconciliationDemandListener. */
   /** The one atomically-attached scheduling owner; see attachScheduler. */
   private schedulerListener?: {
@@ -985,6 +1013,24 @@ export class TripleStoreAsyncLiftPublisher
         signalBroadcastAccepted = resolve;
       });
       const inheritedBroadcastAccepted = prepared.publishOptions.onBroadcastAccepted;
+      const inheritedPublishConfirmed = prepared.publishOptions.onPublishConfirmed;
+      // Detachment eligibility is knowable BEFORE execution (wallet + queued operation kind),
+      // and the internal receipt hint only means anything to detached-receipt reconciliation:
+      // gating the recording here keeps non-detachable publishes from accreting dead hint
+      // entries that could evict a still-useful proof (r1 3877430478).
+      const canDetachReceiptReconciliation = this.detachReceiptReconciliation
+        && this.chainProofResolver !== undefined
+        && this.knowledgeAssetVmPublishRecoveryResolver !== undefined
+        && (this.chainProofCapableForWallet?.(
+          walletId,
+          queuedLiftOperationKind(claimed),
+        ) ?? true);
+      // r9 (3877850638) — early release additionally requires a lifecycle finalizer: without
+      // finalizeRecovered the settle path answers 'unsupported' and expects the wallet lock it
+      // would otherwise synchronize, so a hint-driven release would strand an internally
+      // inconsistent held job. Detachment itself is NOT gated on this (existing behavior).
+      const canReleaseOnReceiptHint = canDetachReceiptReconciliation
+        && this.knowledgeAssetVmPublishHandler?.finalizeRecovered !== undefined;
       const executionInput = {
         walletId,
         request,
@@ -1007,6 +1053,18 @@ export class TripleStoreAsyncLiftPublisher
               signalBroadcastAccepted(record);
             }
           },
+          // GH#2359 item 2 — the executor's receipt-confirmed scheduling hint: recorded and
+          // poked so a demanded pass can prove the transaction with the reconciler's OWN chain
+          // reads while the executor finishes its local post-receipt tail. Never trusted as
+          // evidence.
+          onPublishConfirmed: (confirmation: { txHash: string }) => {
+            if (canReleaseOnReceiptHint) {
+              this.recordExecutorProofHint(claimed.jobId, confirmation);
+            }
+            // Scheduling-only: an inherited listener failure — synchronous or an async
+            // rejection — must not touch the execution (r1 3877430465, r2 3877540214).
+            bestEffortNotify(inheritedPublishConfirmed, confirmation);
+          },
         },
       };
       const execution = this.knowledgeAssetVmPublishHandler.execute(executionInput);
@@ -1014,13 +1072,6 @@ export class TripleStoreAsyncLiftPublisher
         execution.then((result) => ({ kind: 'settled' as const, result })),
         broadcastAccepted.then(() => ({ kind: 'accepted' as const })),
       ]);
-      const canDetachReceiptReconciliation = this.detachReceiptReconciliation
-        && this.chainProofResolver !== undefined
-        && this.knowledgeAssetVmPublishRecoveryResolver !== undefined
-        && (this.chainProofCapableForWallet?.(
-          walletId,
-          queuedLiftOperationKind(claimed),
-        ) ?? true);
       if (outcome.kind === 'accepted' && canDetachReceiptReconciliation) {
         // Receipt success, revert, timeout, or temporary lookup failure is now
         // owned solely by chain-proof recovery. The execution continues so the
@@ -1031,6 +1082,9 @@ export class TripleStoreAsyncLiftPublisher
         return await this.getRequiredJob(claimed.jobId);
       }
       publishResult = outcome.kind === 'settled' ? outcome.result : await execution;
+      // Inline completion: the normal result path owns this record from here, so a recorded
+      // receipt hint has no consumer left (the early lane requires a DETACHED execution).
+      this.executorProofHints.delete(claimed.jobId);
     } catch (error) {
       // #1864 — switch on the typed pre-send boundary outcome (no `executorReturned` flag,
       // no `getStatus` re-read). The tx send happens strictly AFTER the write-ahead durably
@@ -1139,6 +1193,172 @@ export class TripleStoreAsyncLiftPublisher
       this.notifyReconciliationDemand();
     });
     this.detachedExecutions.set(jobId, tracked);
+  }
+
+  /**
+   * GH#2359 item 2 — record the executor's receipt-confirmed hint and invite a demanded pass.
+   * The entry stores the reported hash ONLY; consumption re-validates it against the job's
+   * persisted write-ahead evidence under the transition lock, and release requires the
+   * reconciler's own canonical proof. A re-fired hint for the same job replaces the entry
+   * (consume-once per attempt); the map is bounded FIFO as a backstop.
+   */
+  private recordExecutorProofHint(jobId: string, confirmation: { readonly txHash?: unknown }): void {
+    const txHash = confirmation?.txHash;
+    if (typeof txHash !== 'string' || txHash.length === 0) return;
+    this.executorProofHints.delete(jobId);
+    while (this.executorProofHints.size >= TripleStoreAsyncLiftPublisher.EXECUTOR_PROOF_HINT_CAP) {
+      const oldest = this.executorProofHints.keys().next().value;
+      if (oldest === undefined) break;
+      this.executorProofHints.delete(oldest);
+    }
+    this.executorProofHints.set(jobId, { txHash });
+    this.notifyReconciliationDemand();
+  }
+
+  /**
+   * GH#2359 item 2 — the early wallet-release lane. For a hinted job the executor still owns,
+   * the pass may prove the transaction NOW (the reconciler's own two canonical reads, identical
+   * to the settle path) and, on a `recovered` verdict, stamp `included` and free the wallet —
+   * while the executor's local post-receipt tail keeps running. This applies the finalize
+   * path's existing rule ("chain proof is sufficient to reuse the signing wallet; local
+   * lifecycle repair can retry independently") at the earliest moment the proof can succeed,
+   * instead of serializing the wallet behind the executor tail plus a later proof.
+   *
+   * The MUTATING repair (`finalizeRecovered`) deliberately stays at settle: it must never run
+   * concurrently with a live executor (the r26 two-writer rule). The established proof is
+   * cached on the hint so the settle-time finalize consumes it instead of re-asking the chain.
+   *
+   * Returns the number of hinted jobs whose proof is still unresolved (`pending`), so the pass
+   * outcome can hold the active cadence for them.
+   */
+  private async releaseWalletsOnExecutorProofHints(
+    inventory: readonly LiftJob[],
+    signal?: AbortSignal,
+  ): Promise<number> {
+    if (this.executorProofHints.size === 0) return 0;
+    // Rotated like the main tx-bearing walk (r1 3877430474): without this, a hinted job whose
+    // chain lookup eats the pass budget would be re-asked first every pass and starve later
+    // hints. Settle remains every hint's fallback, so starvation would cost latency, not
+    // correctness — but the rotation removes even that.
+    const candidates = inventory.filter((snapshot) => {
+      const hint = this.executorProofHints.get(snapshot.jobId);
+      return hint !== undefined && hint.proof === undefined
+        && this.detachedExecutions.has(snapshot.jobId);
+    });
+    if (candidates.length === 0) return 0;
+    const hintOffset = this.executorHintPassOffset++ % candidates.length;
+    const rotatedCandidates = candidates.slice(hintOffset).concat(candidates.slice(0, hintOffset));
+    let unresolved = 0;
+    for (let i = 0; i < rotatedCandidates.length; i += 1) {
+      const snapshot = rotatedCandidates[i];
+      if (signal?.aborted) {
+        // r4 (3877669330) — candidates the deadline cut off are still pending work: they are
+        // deliberately invisible to the ordinary lane while executor-owned, so if they were
+        // dropped here the coalesced wake would be consumed and the runner would fall back to
+        // the idle cadence with hinted wallets still locked. Count the still-eligible ones.
+        for (let j = i; j < rotatedCandidates.length; j += 1) {
+          const skipped = this.executorProofHints.get(rotatedCandidates[j].jobId);
+          if (skipped !== undefined && skipped.proof === undefined
+            && this.detachedExecutions.has(rotatedCandidates[j].jobId)) {
+            unresolved += 1;
+          }
+        }
+        return unresolved;
+      }
+      const hint = this.executorProofHints.get(snapshot.jobId);
+      if (!hint || hint.proof) continue;
+      if (!this.detachedExecutions.has(snapshot.jobId)) continue;
+      if (!isKnowledgeAssetVmPublishJobRequest(snapshot.request)) {
+        this.executorProofHints.delete(snapshot.jobId);
+        continue;
+      }
+      await this.withJobTransitionLock(snapshot.jobId, async () => {
+          const current = await this.getStatus(snapshot.jobId);
+          // 'included' is accepted deliberately (r2 3877540018): a prior attempt may have
+          // persisted the included stamp and then failed the wallet-lock deletion. Restricting
+          // the lane to 'broadcast' would strand that wallet until the executor tail settles.
+          if (!current || (current.status !== 'broadcast' && current.status !== 'included')) return;
+          const recoverable = current as LiftJobBroadcast | LiftJobIncluded;
+          const persistedTxHash = recoverable.broadcast?.txHash;
+          if (!persistedTxHash || persistedTxHash.toLowerCase() !== hint.txHash.toLowerCase()) {
+            // The hint describes an attempt that is not the persisted one (stale attempt after a
+            // reset, or an executor that misreported). It must never influence this record.
+            this.executorProofHints.delete(snapshot.jobId);
+            return;
+          }
+          const origin = liveChainRecoveryOrigin(recoverable);
+          const resolution = await this.resolveChainProofWithinSignal(origin.lookup, signal);
+          if (resolution === null) { unresolved += 1; return; }
+          if (resolution.status !== 'recovered') {
+            if (resolution.status === 'pending' || resolution.status === 'inconclusive') {
+              // Receipt not yet final at the operator's confirmation depth (or the read could
+              // not settle): keep the hint and let the active cadence retry before settle does.
+              unresolved += 1;
+            } else {
+              // reverted / not-found: the settle path owns that interpretation; the hint has
+              // nothing left to say.
+              this.executorProofHints.delete(snapshot.jobId);
+            }
+            return;
+          }
+          if (!this.knowledgeAssetVmPublishRecoveryResolver) return;
+          // r1 (3877430460) — the same read-only deadline bound the settle-time finalize has:
+          // a resolver that ignores the abort signal must not hold the whole pass (and every
+          // other wallet) hostage. Timeout resolves null — no transition, pending, retry later.
+          const resolved = await resolveWithinAbort(
+            (sig) => this.knowledgeAssetVmPublishRecoveryResolver!(
+              current,
+              origin.lookup,
+              resolution.recovery,
+              sig ? { signal: sig } : undefined,
+            ),
+            signal,
+          );
+          if (!resolved) { unresolved += 1; return; }
+          // r18 (3878212037) — the evidence must BIND to the persisted transaction before
+          // anything durable happens with it: an inclusion for some other hash must never be
+          // stamped into this record or cached. A mismatch is treated as unresolved — nothing
+          // persisted, nothing cached — so the next pass performs fresh canonical reads.
+          if (resolved.inclusion.txHash.toLowerCase() !== persistedTxHash.toLowerCase()) {
+            unresolved += 1;
+            return;
+          }
+          // The node has observed inclusion through its OWN canonical proof: stamp it
+          // truthfully, then free the wallet (write-before-release — the poke must find
+          // claim-visible state). A retry that already persisted 'included' skips the write.
+          //
+          // r6 (3877748379) — the containment is deliberately NARROW: only this
+          // transition-and-release window is the retryable case (r2 3877540018 — a transient
+          // store failure here must cost the candidate's turn, not the pass; the hint
+          // survives and the next pass resumes). Resolver failures and programming errors
+          // are NOT contained: they propagate out of the pass to the runner's error path,
+          // where they are reported and backed off instead of becoming a silent active-cadence
+          // retry loop — the same observability the canonical walk's failures have.
+          try {
+            if (recoverable.status === 'broadcast') {
+              await this.writeJob(
+                this.mergeJob(recoverable, 'included', { inclusion: resolved.inclusion }),
+                'included',
+              );
+            }
+            await this.releaseWalletLockForJob(current);
+          } catch (error) {
+            // r8 (3877817604) — transient is a HYPOTHESIS with a budget, not a verdict: the
+            // first few failures are contained (the r2 retry case), but a persistently
+            // failing write/release escalates out of the pass to the runner's error path -
+            // reported and backoff-paced instead of silently repeating at the active cadence
+            // forever. The hint survives either way, so the release stays retryable.
+            hint.transitionFailures = (hint.transitionFailures ?? 0) + 1;
+            if (hint.transitionFailures >= TripleStoreAsyncLiftPublisher.EXECUTOR_HINT_TRANSITION_RETRY_LIMIT) {
+              throw error;
+            }
+            unresolved += 1;
+            return;
+          }
+          hint.proof = { recovery: resolution.recovery, resolved };
+        });
+    }
+    return unresolved;
   }
 
   async drainDetachedExecutions(): Promise<void> {
@@ -1304,7 +1524,17 @@ export class TripleStoreAsyncLiftPublisher
     const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
     const origin = liveChainRecoveryOrigin(recoverable);
     if (this.chainProofResolver) {
-      const resolution = await this.resolveChainProofWithinSignal(origin.lookup, options?.signal);
+      // GH#2359 item 2 — an early release already proved this transaction with this
+      // reconciler's own reads; consume that proof instead of re-paying the chain. The hash
+      // re-check makes a stale hint (reset + re-run between the passes) inert.
+      const hint = this.executorProofHints.get(job.jobId);
+      const cachedProof = hint?.proof !== undefined
+        && hint.txHash.toLowerCase() === (recoverable.broadcast?.txHash ?? '').toLowerCase()
+        ? hint.proof
+        : undefined;
+      const resolution = cachedProof
+        ? { status: 'recovered' as const, recovery: cachedProof.recovery }
+        : await this.resolveChainProofWithinSignal(origin.lookup, options?.signal);
       if (resolution === null) return false;
       if (resolution.status === 'recovered') {
         const outcome = await this.finalizeProvenKnowledgeAssetVmPublish(
@@ -1312,9 +1542,19 @@ export class TripleStoreAsyncLiftPublisher
           origin,
           resolution.recovery,
           options,
+          cachedProof?.resolved,
         );
+        if (outcome === 'finalized') this.executorProofHints.delete(job.jobId);
+        // r18 (3878212037) — a deferred repair may mean the repair REJECTED this evidence, not
+        // just that the store hiccuped. Cached evidence must not outlive that doubt: drop it so
+        // the retry performs fresh canonical reads (a later corrected chain answer can then
+        // repair the job instead of the cache replaying the rejected evidence forever).
+        if (outcome === 'repair-deferred') this.executorProofHints.delete(job.jobId);
         return outcome === 'finalized';
       }
+      // Any non-recovered verdict supersedes the hint: the chain (not the executor's claim)
+      // owns this record's interpretation from here.
+      this.executorProofHints.delete(job.jobId);
       if (resolution.status === 'reverted') {
         const failure = createLiftJobFailureMetadata({
           failedFromState: recoverable.status,
@@ -1398,6 +1638,9 @@ export class TripleStoreAsyncLiftPublisher
     // the same budget the proof was. Optional: the LIVE interrupted lane runs outside a
     // chain-proof pass and has no deadline to give.
     options?: { readonly signal?: AbortSignal },
+    // GH#2359 item 2 — canonical evidence this reconciler already resolved at the early
+    // wallet release; consuming it here skips the read-only phase's chain read entirely.
+    preResolved?: AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   ): Promise<'finalized' | 'unresolved' | 'repair-deferred' | 'unsupported'> {
     if (!this.knowledgeAssetVmPublishRecoveryResolver) return 'unresolved';
     // r26 (🔴 3821028709) — the race bounds the WAIT, it does not cancel the loser, and r25 put
@@ -1416,21 +1659,15 @@ export class TripleStoreAsyncLiftPublisher
     // never returns holds the pass open. That is deliberate. Blocking is strictly safer than a
     // repair racing the queue it was supposed to reconcile, and it is a handler defect we would
     // rather surface than paper over.
-    const deadlineReached = Symbol('deadline');
-    const awaitDeadline = () => new Promise<typeof deadlineReached>((resolve) => {
-      const signal = options?.signal;
-      if (!signal) return;
-      if (signal.aborted) { resolve(deadlineReached); return; }
-      signal.addEventListener('abort', () => resolve(deadlineReached), { once: true });
-    });
-
-    // --- read-only phase: raced, safe to abandon ---
-    const resolvedOrTimeout = await Promise.race([
-      this.knowledgeAssetVmPublishRecoveryResolver(job, origin.lookup, verdictRecovery, options),
-      awaitDeadline(),
-    ]);
-    if (resolvedOrTimeout === deadlineReached) return 'unresolved';
-    const resolved = resolvedOrTimeout;
+    // --- read-only phase: raced through the ONE lazy abort boundary, safe to abandon
+    // (skipped when the early release already resolved the canonical evidence). A deadline
+    // win and a resolver that answered null both mean the same thing here: unresolved, no
+    // transition (r4 3877695872 — the former symbol sentinel distinguished two paths that
+    // returned identically).
+    const resolved = preResolved ?? await resolveWithinAbort(
+      () => this.knowledgeAssetVmPublishRecoveryResolver!(job, origin.lookup, verdictRecovery, options),
+      options?.signal,
+    );
     if (!resolved) return 'unresolved';
     if (
       !this.knowledgeAssetVmPublishHandler?.finalizeRecovered
@@ -1757,34 +1994,94 @@ export class TripleStoreAsyncLiftPublisher
     // the same pass — with only the shared start-of-pass snapshot they would wait out the idle
     // sweep holding their wallets, which per-lane inventories never made them do.
     const settledLive: string[] = [];
-    const deadline = new AbortController();
-    const deadlineTimer = setTimeout(
-      () => deadline.abort(),
-      Math.max(0, this.chainProofDispatchTimeBudgetMs),
-    );
-    try {
-      for (let i = 0; i < rotatedTxBearing.length; i += 1) {
-        if (deadline.signal.aborted) {
-          remainingLive += rotatedTxBearing.length - i;
-          break;
-        }
-        const snapshot = rotatedTxBearing[i];
-        await this.withJobTransitionLock(snapshot.jobId, async () => {
-          const current = await this.getStatus(snapshot.jobId);
-          // Settled or re-owned since the pre-filter: no longer this pass's remaining work.
-          if (!current || (current.status !== 'broadcast' && current.status !== 'included')) return;
-          if (this.activeProcessJobIds.has(current.jobId)) return;
-          if (await this.jobHandlerFor(current.request).recoverInterrupted(current, { signal: deadline.signal })) {
-            reconciled += 1;
-            settledLive.push(current.jobId);
-          } else {
-            remainingLive += 1;
+    const passBudgetMs = Math.max(0, this.chainProofDispatchTimeBudgetMs);
+    const halfBudgetMs = Math.max(1, Math.floor(passBudgetMs / 2));
+    // r15 (3878098525) — ONE absolute pass deadline: the configured budget is the operator's
+    // latency ceiling, and no lane may LAUNCH chain reads past it. An already-started durable
+    // transition still completes (never aborted mid-write); its overrun ends the pass. Fairness
+    // across passes comes from alternation: the leading lane runs under a half-budget
+    // sub-deadline, the trailing lane gets the remainder, and the lead alternates every pass —
+    // an overrun costs the other lane at most one pass, its candidates reported pending for
+    // the active cadence to retry.
+    let hintedUnresolved = 0;
+    const passDeadline = new AbortController();
+    const passTimer = setTimeout(() => passDeadline.abort(), passBudgetMs);
+    const leadSignal = (): { signal: AbortSignal; dispose: () => void } => {
+      const lead = new AbortController();
+      const leadTimer = setTimeout(() => lead.abort(), halfBudgetMs);
+      const onPassAbort = () => lead.abort();
+      passDeadline.signal.addEventListener('abort', onPassAbort, { once: true });
+      return {
+        signal: lead.signal,
+        dispose: () => {
+          clearTimeout(leadTimer);
+          passDeadline.signal.removeEventListener('abort', onPassAbort);
+          lead.abort();
+        },
+      };
+    };
+    const runHintLane = async (leading: boolean): Promise<void> => {
+      const bounded = leading ? leadSignal() : undefined;
+      try {
+        hintedUnresolved = await this.releaseWalletsOnExecutorProofHints(
+          inventory,
+          bounded?.signal ?? passDeadline.signal,
+        );
+      } finally {
+        bounded?.dispose();
+      }
+    };
+    const runWalkLane = async (leading: boolean): Promise<void> => {
+      const bounded = leading ? leadSignal() : undefined;
+      const signal = bounded?.signal ?? passDeadline.signal;
+      try {
+        for (let i = 0; i < rotatedTxBearing.length; i += 1) {
+          if (signal.aborted) {
+            remainingLive += rotatedTxBearing.length - i;
+            break;
           }
-        });
+          const snapshot = rotatedTxBearing[i];
+          await this.withJobTransitionLock(snapshot.jobId, async () => {
+            const current = await this.getStatus(snapshot.jobId);
+            // Settled or re-owned since the pre-filter: no longer this pass's remaining work.
+            if (!current || (current.status !== 'broadcast' && current.status !== 'included')) return;
+            if (this.activeProcessJobIds.has(current.jobId)) return;
+            if (await this.jobHandlerFor(current.request).recoverInterrupted(current, { signal })) {
+              reconciled += 1;
+              settledLive.push(current.jobId);
+            } else {
+              remainingLive += 1;
+            }
+          });
+        }
+      } finally {
+        bounded?.dispose();
+      }
+    };
+    // r20 (3878410728) — the half-budget split (and the lead toggle) apply only when BOTH
+    // lanes actually have eligible work this pass: a lone lane gets the full absolute budget,
+    // and empty passes do not consume alternation turns.
+    const hintLaneHasWork = this.executorProofHints.size > 0
+      && inventory.some((snapshot) => {
+        const hint = this.executorProofHints.get(snapshot.jobId);
+        return hint !== undefined && hint.proof === undefined
+          && this.detachedExecutions.has(snapshot.jobId);
+      });
+    const walkLaneHasWork = rotatedTxBearing.length > 0;
+    const lanesCompete = hintLaneHasWork && walkLaneHasWork;
+    const hintLeads = this.hintLaneLeads;
+    if (lanesCompete) this.hintLaneLeads = !this.hintLaneLeads;
+    try {
+      if (hintLeads) {
+        if (hintLaneHasWork) await runHintLane(lanesCompete);
+        if (walkLaneHasWork) await runWalkLane(false);
+      } else {
+        if (walkLaneHasWork) await runWalkLane(lanesCompete);
+        if (hintLaneHasWork) await runHintLane(false);
       }
     } finally {
-      clearTimeout(deadlineTimer);
-      deadline.abort();
+      clearTimeout(passTimer);
+      passDeadline.abort();
     }
 
     // The dispatcher's view: the shared snapshot with this pass's own settlements made current
@@ -1800,7 +2097,7 @@ export class TripleStoreAsyncLiftPublisher
         .filter((job): job is LiftJob => job !== null);
     }
     reconciled += await this.dispatchFailedJobsOnChainProof(dispatcherInventory);
-    return { reconciled, pendingWork: remainingLive > 0 };
+    return { reconciled, pendingWork: remainingLive > 0 || hintedUnresolved > 0 };
   }
 
   private async resolveChainProofWithinSignal(
@@ -1808,21 +2105,13 @@ export class TripleStoreAsyncLiftPublisher
     signal?: AbortSignal,
   ): Promise<AsyncLiftChainProofResolution | null> {
     if (!this.chainProofResolver) return null;
-    if (!signal) return await this.chainProofResolver(lookup);
-    if (signal.aborted) return null;
-    let onAbort!: () => void;
-    const aborted = new Promise<null>((resolve) => {
-      onAbort = () => resolve(null);
-      signal.addEventListener('abort', onAbort, { once: true });
-    });
-    try {
-      return await Promise.race([
-        this.chainProofResolver(lookup, { signal }),
-        aborted,
-      ]);
-    } finally {
-      signal.removeEventListener('abort', onAbort);
-    }
+    // r4 (3877695872) — delegated to the ONE lazy abort boundary; the result semantics
+    // (unbounded without a signal, null when pre-aborted or when the deadline wins) are the
+    // helper's contract, no longer a local copy that can drift.
+    return await resolveWithinAbort(
+      (sig) => this.chainProofResolver!(lookup, sig ? { signal: sig } : undefined),
+      signal,
+    );
   }
 
   private async recoverInterruptedPreBroadcastJobs(inventory: readonly LiftJob[]): Promise<number> {
@@ -2005,13 +2294,13 @@ export class TripleStoreAsyncLiftPublisher
     // it is abandoned rather than awaited, which is worse for that socket but leaves the ceiling
     // real. Either way the deadline establishes NOTHING, so the caller records it exactly like an
     // inconclusive verdict: the job stays held and is asked again later.
-    const resolution = await Promise.race([
-      this.chainProofResolver(lookup, { signal: deadline.signal }),
-      new Promise<null>((resolve) => {
-        if (deadline.signal.aborted) { resolve(null); return; }
-        deadline.signal.addEventListener('abort', () => resolve(null), { once: true });
-      }),
-    ]);
+    // r7 (3877773504) — through the ONE lazy abort boundary: identical null-on-deadline
+    // semantics, and a successful lookup now removes its listener from the shared pass
+    // controller instead of leaving it attached until the pass aborts.
+    const resolution = await resolveWithinAbort(
+      (sig) => this.chainProofResolver!(lookup, sig ? { signal: sig } : undefined),
+      deadline.signal,
+    );
     if (resolution === null) return 0;
 
     // GH#2270 PR-3 r4 — the verdict was earned across an RPC await, against a SNAPSHOT of the
@@ -3017,7 +3306,20 @@ export class TripleStoreAsyncLiftPublisher
     return withKeyedLocks(TripleStoreAsyncLiftPublisher.jobTransitionQueues, [key], fn);
   }
 
-  private mergeJob(current: LiftJob, status: LiftJobState, data: Partial<LiftJob>): LiftJob {
+  // r4 (3877669534) — the canonical transition API expresses the one union-member-specific
+  // transition this train performs: broadcast -> included with required inclusion metadata,
+  // returning the TARGET state type. The generic signature remains for same-shape merges.
+  private mergeJob(
+    current: LiftJobBroadcast,
+    status: 'included',
+    data: { inclusion: LiftJobInclusionMetadata },
+  ): LiftJobIncluded;
+  private mergeJob(current: LiftJob, status: LiftJobState, data: Partial<LiftJob>): LiftJob;
+  private mergeJob(
+    current: LiftJob,
+    status: LiftJobState,
+    data: Partial<LiftJob> & { inclusion?: LiftJobInclusionMetadata },
+  ): LiftJob {
     const now = this.now();
     if (current.status !== status) assertLiftJobTransition(current.status, status);
 

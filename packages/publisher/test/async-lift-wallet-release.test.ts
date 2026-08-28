@@ -439,4 +439,5 @@ describe('async-lift wallet release channel', () => {
     expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
     await probe.expectLastPokeClaimable('wallet-1');
   });
+
 });

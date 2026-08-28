@@ -177,6 +177,7 @@ import {
   type EncodedWorkspaceGossipPayload,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
+import { pickPublishLifecycleHooks, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
@@ -1979,8 +1980,9 @@ export class PublishMethods extends DKGAgentBase {
 
   async update(this: DKGAgent,
     kaId: bigint, contextGraphId: string, quads: Quad[], privateQuads?: Quad[],
-    opts?: {
-      onPhase?: PhaseCallback;
+    // r12 (3878010410) — the lifecycle hooks come in through the ONE shared contract; a hook
+    // added to PublishLifecycleHooks flows through this boundary without editing this list.
+    opts?: PublishLifecycleHooks & {
       operationCtx?: OperationContext;
       precomputedUpdateAttestation?: PublishOptions['precomputedUpdateAttestation'];
       publisherOverride?: DKGPublisher;
@@ -1994,14 +1996,6 @@ export class PublishMethods extends DKGAgentBase {
       [INTERNAL_ROOTLESS_UPDATE_ORIGIN]?: true;
       accessPolicy?: PublishOptions['accessPolicy'];
       allowedPeers?: PublishOptions['allowedPeers'];
-      /**
-       * GH#2270 PR-3 r3 — the durable pre-send write-ahead. It has to be threaded explicitly:
-       * this option bag is built field by field rather than spread, so anything not named here is
-       * silently dropped, and a dropped write-ahead means a KA update transaction goes out with
-       * nothing on disk recording it.
-       */
-      onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
-      onBroadcastAccepted?: PublishOptions['onBroadcastAccepted'];
     },
   ): Promise<PublishResult> {
     return withRootlessUpdateLock(contextGraphId, kaId, async () => {
@@ -2300,9 +2294,10 @@ export class PublishMethods extends DKGAgentBase {
       publisherPeerId: this.node.peerId.toString(),
       publishContextGraphId: updateOnChainId ?? undefined,
       operationCtx: ctx,
-      onPhase,
-      onBeforeBroadcast: opts?.onBeforeBroadcast,
-      onBroadcastAccepted: opts?.onBroadcastAccepted,
+      // r10 (3877910013) — one-unit hook forwarding at the update boundary; the spread's
+      // required-keys type carries onPhase (= opts?.onPhase, the same value the local
+      // shorthand held), so no separate onPhase entry may precede it (TS2783).
+      ...pickPublishLifecycleHooks(opts ?? {}),
       subGraphName: opts?.subGraphName,
       precomputedUpdateAttestation: opts.precomputedUpdateAttestation,
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -5252,14 +5247,12 @@ export class PublishMethods extends DKGAgentBase {
     // write-ahead. One object, spread into both branches, makes "the branch dropped a hook" a
     // structural impossibility rather than a review item; computed per-branch fields stay
     // explicit where they are.
-    const executionHooks: {
-      readonly onPhase?: PhaseCallback;
-      readonly onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
-      readonly onBroadcastAccepted?: PublishOptions['onBroadcastAccepted'];
-    } = {
+    // r10 (3877910013) — ONE typed extraction of the lifecycle hooks (adding a hook happens
+    // in the shared type + picker, never in per-boundary field lists); only the queued
+    // onPhase override precedence is applied on top.
+    const executionHooks: PublishLifecycleHooks = {
+      ...pickPublishLifecycleHooks(publishOptions),
       onPhase: opts?.onPhase ?? publishOptions.onPhase,
-      onBeforeBroadcast: publishOptions.onBeforeBroadcast,
-      onBroadcastAccepted: publishOptions.onBroadcastAccepted,
     };
     if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();

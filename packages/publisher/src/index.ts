@@ -1,4 +1,5 @@
 export * from './publisher.js';
+export { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
 export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 export {
