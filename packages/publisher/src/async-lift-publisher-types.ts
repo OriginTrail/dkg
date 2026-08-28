@@ -189,8 +189,18 @@ export interface AsyncLiftPublisher {
   recordPublishResult(jobId: string, publishResult: PublishResult, options?: { publicByteSize?: number }): Promise<LiftJob>;
   /** @deprecated Prefer `administrative.recordPublishFailureById`; workers use a claim session. */
   recordPublishFailure(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob>;
+  /**
+   * Run one reconciliation pass and report how many jobs it settled.
+   *
+   * CONCURRENCY CONTRACT: safe to call at any time, including concurrently with any other
+   * in-flight pass; every call performs its own FRESH pass over fresh state — calls are
+   * neither queued behind nor coalesced into an existing pass.
+   */
   recover(): Promise<number>;
-  /** Reconcile interrupted work without restarting the runner. Older implementations can omit it. */
+  /**
+   * Reconcile interrupted work without restarting the runner. Older implementations can omit
+   * it. Same concurrency contract as {@link recover}.
+   */
   reconcileTransactions?(): Promise<number>;
   /** Wait until every receipt task detached after RPC acceptance has stopped. Older implementations can omit it. */
   drainDetachedExecutions?(): Promise<void>;
@@ -751,6 +761,12 @@ export interface AsyncLiftPublisherConfig {
    * exhausts the budget stops and the remaining jobs are asked on the next cadence.
    */
   chainProofDispatchTimeBudgetMs?: number;
+  /**
+   * How long one reconciliation pass's inventory acquisition waits behind the previous pass's
+   * (acquisitions are ordered; the wait is bounded so one hung store read degrades ordering,
+   * not availability). Default 30s.
+   */
+  reconciliationAcquisitionWaitCapMs?: number;
   /**
    * GH#2270 PR-3 r20 (🔴 3815617109) — can the chain-proof lane actually settle a job signed by
    * THIS wallet? A node may mix adapters, and the presence of a resolver is a node-wide fact while
