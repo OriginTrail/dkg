@@ -9,16 +9,10 @@
  * byte-shape identical for existing consumers (node-ui's `fetchAgents()`
  * takes no arguments; the MCP `dkg_find_agents` tool passes none either).
  *
- * DUPLICATE ROWS. `discovery.findAgents()` selects several OPTIONAL profile
- * properties in one SPARQL query, so an agent with N values for one property
- * comes back as N rows — the sibling `findAgentPeerIdsByAddress` documents
- * exactly this hazard. Pagination over a list with duplicates would repeat
- * agents across pages, so rows are deduplicated first. Dedupe is EXACT-ROW,
- * deliberately not by `agentUri` or `peerId`: the registry legitimately holds
- * one agent URI under several peer IDs (re-registration from a new peer) and
- * one peer serving several agents, and node-ui's peer grouping depends on
- * seeing those distinct rows. Only rows identical in every field are
- * multiplication artifacts; removing them loses nothing.
+ * DUPLICATE ROWS. `DiscoveryClient.findAgents()` owns the invariant that
+ * registry rows are duplicate-free. Keeping that guarantee at the discovery
+ * boundary means pagination and every other discovery consumer see the same
+ * typed rows instead of each repairing query-engine artifacts independently.
  *
  * CURSOR STABILITY. Pages are ordered by a digest of the canonical REGISTRY
  * row, and the cursor names the digest of the last row returned. Live
@@ -36,6 +30,8 @@
  * filters is a 400 instead of a plausible-looking wrong continuation.
  */
 import { createHash } from 'node:crypto';
+import { jsonResponse } from '../http-utils.js';
+import type { RequestContext } from './context.js';
 
 /**
  * A raw registry row as returned by `discovery.findAgents()`. The generic
@@ -53,9 +49,14 @@ const CONNECTION_STATUSES: readonly AgentConnectionStatus[] = [
   'disconnected',
 ];
 
-export interface AgentsListQuery {
+export interface AgentsListFilters {
+  framework?: string;
+  skillType?: string;
   connectionStatus?: AgentConnectionStatus;
   local?: boolean;
+}
+
+export interface AgentsListQuery extends AgentsListFilters {
   limit?: number;
   /** Digest of the last row of the previous page (decoded, validated). */
   cursor?: string;
@@ -96,9 +97,13 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
       };
     }
   }
-  const query: AgentsListQuery = {
-    filterFingerprint: filterFingerprint(searchParams),
-  };
+  const filters: AgentsListFilters = {};
+
+  // Empty values retain the pre-GH#310 behavior: they mean "no filter".
+  const framework = searchParams.get('framework');
+  if (framework) filters.framework = framework;
+  const skillType = searchParams.get('skill_type');
+  if (skillType) filters.skillType = skillType;
 
   const status = searchParams.get('connectionStatus');
   if (status !== null) {
@@ -108,7 +113,7 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
         error: `"connectionStatus" must be one of ${CONNECTION_STATUSES.join(', ')}`,
       };
     }
-    query.connectionStatus = status as AgentConnectionStatus;
+    filters.connectionStatus = status as AgentConnectionStatus;
   }
 
   const local = searchParams.get('local');
@@ -116,18 +121,25 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
     if (local !== 'true' && local !== 'false') {
       return { ok: false, error: '"local" must be "true" or "false"' };
     }
-    query.local = local === 'true';
+    filters.local = local === 'true';
   }
 
-  const limit = searchParams.get('limit');
-  if (limit !== null) {
+  const rawLimit = searchParams.get('limit');
+  let limit: number | undefined;
+  if (rawLimit !== null) {
     // Digits only — Number() would also admit '+5', '1e2' and '0x10', all
     // unambiguous but all outside the documented contract.
-    if (!/^[0-9]+$/.test(limit) || Number(limit) <= 0 || !Number.isSafeInteger(Number(limit))) {
+    if (!/^[0-9]+$/.test(rawLimit) || Number(rawLimit) <= 0 || !Number.isSafeInteger(Number(rawLimit))) {
       return { ok: false, error: '"limit" must be a positive integer' };
     }
-    query.limit = Number(limit);
+    limit = Number(rawLimit);
   }
+
+  const query: AgentsListQuery = {
+    ...filters,
+    filterFingerprint: filterFingerprint(filters),
+  };
+  if (limit !== undefined) query.limit = limit;
 
   const cursor = searchParams.get('cursor');
   if (cursor !== null) {
@@ -155,11 +167,17 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
  * pre-#310 ones — a page walked under `framework=eliza` must not continue
  * without it.
  */
-function filterFingerprint(searchParams: URLSearchParams): string {
-  const parts = ['framework', 'skill_type', 'connectionStatus', 'local']
-    .map((k) => `${k}=${searchParams.get(k) ?? ''}`)
-    .join('&');
-  return createHash('sha256').update(parts, 'utf8').digest('hex').slice(0, 16);
+function filterFingerprint(filters: AgentsListFilters): string {
+  // An ordered JSON tuple preserves field boundaries even when a valid value
+  // contains query-string delimiters such as `&skill_type=`. It is also
+  // independent of the order in which parameters appeared in the URL.
+  const serialized = JSON.stringify([
+    filters.framework ?? null,
+    filters.skillType ?? null,
+    filters.connectionStatus ?? null,
+    filters.local ?? null,
+  ]);
+  return createHash('sha256').update(serialized, 'utf8').digest('hex').slice(0, 16);
 }
 
 /**
@@ -168,24 +186,11 @@ function filterFingerprint(searchParams: URLSearchParams): string {
  * insertion order still collide, and `undefined` values are dropped the same
  * way JSON round-tripping would drop them.
  */
-export function canonicalRowKey(row: object): string {
+function canonicalRowKey(row: object): string {
   const entries = Object.entries(row as Record<string, unknown>)
     .filter(([, v]) => v !== undefined)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   return JSON.stringify(entries);
-}
-
-/** Remove exact-duplicate rows, preserving first-occurrence order. */
-export function dedupeExactRows<T extends object>(rows: T[]): T[] {
-  const seen = new Set<string>();
-  const out: T[] = [];
-  for (const row of rows) {
-    const key = canonicalRowKey(row);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(row);
-  }
-  return out;
 }
 
 export interface AgentsPage<T> {
@@ -253,4 +258,105 @@ function decodeCursor(cursor: string): { fingerprint: string; digest: string } |
   const m = CURSOR_BODY_RE.exec(decoded.slice(CURSOR_PREFIX.length));
   if (!m) return undefined;
   return { fingerprint: m[1]!, digest: m[2]! };
+}
+
+/**
+ * Complete `GET /api/agents` workflow. The parent route module only dispatches
+ * here; parsing, discovery, filtering, enrichment, pagination and response
+ * ownership stay together at this endpoint boundary.
+ */
+export async function handleAgentsListRoute(ctx: RequestContext): Promise<void> {
+  const { res, agent, url } = ctx;
+  const parsedQuery = parseAgentsListQuery(url.searchParams);
+  if (!parsedQuery.ok) {
+    jsonResponse(res, 400, { error: parsedQuery.error });
+    return;
+  }
+
+  const {
+    framework,
+    skillType,
+    connectionStatus,
+    local,
+    limit,
+    cursor,
+    filterFingerprint,
+  } = parsedQuery.query;
+  const agents = await agent.findAgents(framework ? { framework } : undefined);
+  let filteredAgents = agents;
+  if (skillType) {
+    const offerings = await agent.findSkills({ skillType });
+    const agentUris = new Set(offerings.map((offering) => offering.agentUri));
+    filteredAgents = agents.filter((candidate) => agentUris.has(candidate.agentUri));
+  }
+
+  const allConnections = agent.node.libp2p.getConnections();
+  const connectionByPeer = new Map<
+    string,
+    { transport: string; direction: string; sinceMs: number }
+  >();
+  for (const connection of allConnections) {
+    const peerId = connection.remotePeer.toString();
+    if (!connectionByPeer.has(peerId)) {
+      connectionByPeer.set(peerId, {
+        transport: connection.remoteAddr?.toString().includes('/p2p-circuit')
+          ? 'relayed'
+          : 'direct',
+        direction: connection.direction,
+        sinceMs: connection.timeline?.open ? Date.now() - connection.timeline.open : 0,
+      });
+    }
+  }
+
+  // The registry is network-published data. Only the daemon's local identity
+  // store proves ownership; a foreign row cannot become `self` by copying this
+  // node's peer ID. Unpublished local identities are intentionally not
+  // synthesized—the endpoint remains a view of discovered registry rows.
+  const localAgentAddresses = new Set(
+    agent.listLocalAgents().map((localAgent) => localAgent.agentAddress.toLowerCase()),
+  );
+  const isLocalAgent = (candidate: typeof filteredAgents[number]): boolean =>
+    typeof candidate.agentAddress === 'string'
+    && localAgentAddresses.has(candidate.agentAddress.toLowerCase());
+  const statusOf = (candidate: typeof filteredAgents[number]): AgentConnectionStatus =>
+    isLocalAgent(candidate)
+      ? 'self'
+      : connectionByPeer.has(candidate.peerId)
+        ? 'connected'
+        : 'disconnected';
+
+  if (local !== undefined) {
+    filteredAgents = filteredAgents.filter(
+      (candidate) => isLocalAgent(candidate) === local,
+    );
+  }
+  if (connectionStatus !== undefined) {
+    filteredAgents = filteredAgents.filter(
+      (candidate) => statusOf(candidate) === connectionStatus,
+    );
+  }
+
+  const page = paginateAgentRows(filteredAgents, { limit, cursor, filterFingerprint });
+  const healthByPeer = agent.getPeerHealth();
+  const enriched = page.rows.map((candidate) => {
+    const connection = connectionByPeer.get(candidate.peerId);
+    const health = healthByPeer.get(candidate.peerId);
+    return {
+      ...candidate,
+      connectionStatus: statusOf(candidate),
+      connectionTransport: connection?.transport ?? null,
+      connectionDirection: connection?.direction ?? null,
+      connectedSinceMs: connection?.sinceMs ?? null,
+      lastSeen: isLocalAgent(candidate) ? Date.now() : (health?.lastSeen ?? null),
+      latencyMs: health?.latencyMs ?? null,
+    };
+  });
+
+  jsonResponse(
+    res,
+    200,
+    page.nextCursor === undefined
+      ? { agents: enriched }
+      : { agents: enriched, nextCursor: page.nextCursor },
+  );
 }

@@ -76,7 +76,7 @@ export class DiscoveryClient {
     const limitClause = options.limit ? `LIMIT ${options.limit}` : '';
 
     const sparql = `
-      SELECT ?agent ?name ?peerId ?framework ?nodeRole ?relayAddress ?agentAddress WHERE {
+      SELECT DISTINCT ?agent ?name ?peerId ?framework ?nodeRole ?relayAddress ?agentAddress WHERE {
         ?agent a <${DKG}Agent> ;
                <${SCHEMA}name> ?name ;
                <${DKG}peerId> ?peerId .${filter}
@@ -93,7 +93,7 @@ export class DiscoveryClient {
       signal: options.signal,
     });
 
-    return result.bindings.map((row) => ({
+    const discovered = result.bindings.map((row) => ({
       agentUri: row['agent'],
       name: stripQuotes(row['name']),
       peerId: stripQuotes(row['peerId']),
@@ -102,6 +102,25 @@ export class DiscoveryClient {
       relayAddress: row['relayAddress'] ? stripQuotes(row['relayAddress']) : undefined,
       agentAddress: row['agentAddress'] ? stripQuotes(row['agentAddress']) : undefined,
     }));
+
+    // DISTINCT is the primary query-boundary guarantee. Keep an explicit
+    // typed-row fence as well because different RDF term encodings can
+    // normalize to the same public string values after `stripQuotes`.
+    const seen = new Set<string>();
+    return discovered.filter((agent) => {
+      const key = JSON.stringify([
+        agent.agentUri,
+        agent.name,
+        agent.peerId,
+        agent.framework ?? null,
+        agent.nodeRole ?? null,
+        agent.relayAddress ?? null,
+        agent.agentAddress ?? null,
+      ]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   /**

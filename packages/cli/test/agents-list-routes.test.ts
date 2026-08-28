@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  canonicalRowKey,
-  dedupeExactRows,
   paginateAgentRows,
   parseAgentsListQuery,
 } from '../src/daemon/routes/agents-list.js';
@@ -48,9 +46,11 @@ describe('parseAgentsListQuery (GH#310)', () => {
       const r = parse(qs);
       expect(r.ok).toBe(true);
       if (!r.ok) throw new Error(r.error);
-      const { filterFingerprint, ...rest } = r.query;
+      const { filterFingerprint: _filterFingerprint, ...rest } = r.query;
       return rest;
     };
+    expect(q('framework=OpenClaw')).toEqual({ framework: 'OpenClaw' });
+    expect(q('skill_type=ImageAnalysis')).toEqual({ skillType: 'ImageAnalysis' });
     expect(q('connectionStatus=connected')).toEqual({ connectionStatus: 'connected' });
     expect(q('connectionStatus=self')).toEqual({ connectionStatus: 'self' });
     expect(q('local=true')).toEqual({ local: true });
@@ -108,6 +108,23 @@ describe('parseAgentsListQuery (GH#310)', () => {
     expect(withFilter.ok).toBe(true);
   });
 
+  it('binds cursors to unambiguous normalized filter tuples', () => {
+    // These pairs produced the same delimiter-joined string before the
+    // fingerprint was derived from the typed filter model.
+    const firstFilters = 'framework=x%26skill_type%3Dy&skill_type=z';
+    const secondFilters = 'framework=x&skill_type=y%26skill_type%3Dz';
+    expect(fpOf(firstFilters)).not.toBe(fpOf(secondFilters));
+    expect(fpOf('framework=x&skill_type=y')).toBe(fpOf('skill_type=y&framework=x'));
+
+    const page = paginateAgentRows(
+      [row(), row({ agentUri: 'did:dkg:agent/2', peerId: 'peer-2' })],
+      { limit: 1, filterFingerprint: fpOf(firstFilters) },
+    );
+    const crossFilter = parse(`${secondFilters}&cursor=${page.nextCursor}`);
+    expect(crossFilter.ok).toBe(false);
+    if (!crossFilter.ok) expect(crossFilter.error).toContain('different filter');
+  });
+
   it('cursor size is bounded regardless of row content', () => {
     // Row fields are other agents' self-published literals. A row-embedding
     // cursor would let one hostile multi-KB profile push every client's
@@ -119,34 +136,6 @@ describe('parseAgentsListQuery (GH#310)', () => {
     const page = paginateAgentRows(hostile, { limit: 1, filterFingerprint: fpOf('limit=1') });
     expect(page.nextCursor).toBeDefined();
     expect(page.nextCursor!.length).toBeLessThan(200);
-  });
-});
-
-describe('dedupeExactRows (GH#310)', () => {
-  it('removes only rows identical in every field, keeping first-occurrence order', () => {
-    const a = row();
-    const rows = [
-      a,
-      // Same agent re-registered from a NEW peer — a real registry fact that
-      // node-ui's peer grouping depends on. Must survive.
-      row({ peerId: 'peer-2' }),
-      // Pure SPARQL OPTIONAL-multiplication artifact. Must go.
-      { ...a },
-      // Same fields, different property insertion order — still the same row.
-      { framework: 'eliza', peerId: 'peer-1', name: 'alpha', agentUri: 'did:dkg:agent/1' },
-    ];
-    const out = dedupeExactRows(rows);
-    expect(out).toEqual([a, row({ peerId: 'peer-2' })]);
-  });
-
-  it('treats an absent field and an undefined field as the same row', () => {
-    // findAgents() builds rows with conditional spreads, so the same agent can
-    // surface as {framework: undefined} in one row and no key at all in
-    // another. JSON over the wire cannot tell them apart; neither may dedupe.
-    const withUndef = { agentUri: 'u', name: 'n', peerId: 'p', framework: undefined };
-    const without = { agentUri: 'u', name: 'n', peerId: 'p' };
-    expect(canonicalRowKey(withUndef)).toBe(canonicalRowKey(without));
-    expect(dedupeExactRows([withUndef, without])).toHaveLength(1);
   });
 });
 
@@ -215,18 +204,32 @@ function fakeRes() {
 }
 
 function fakeAgent(over: Partial<Record<string, unknown>> = {}) {
+  const localAgentAddress = '0x1111111111111111111111111111111111111111';
   const registry = [
-    // 'self-agent' duplicated: OPTIONAL multiplication as findAgents really
-    // produces it — identical rows, same reference shape.
-    { agentUri: 'did:dkg:agent/self', name: 'self-agent', peerId: 'peer-self' },
-    { agentUri: 'did:dkg:agent/self', name: 'self-agent', peerId: 'peer-self' },
-    { agentUri: 'did:dkg:agent/conn', name: 'conn-agent', peerId: 'peer-conn' },
-    { agentUri: 'did:dkg:agent/gone', name: 'gone-agent', peerId: 'peer-gone' },
+    {
+      agentUri: 'did:dkg:agent/self',
+      name: 'self-agent',
+      peerId: 'peer-self',
+      agentAddress: localAgentAddress,
+    },
+    {
+      agentUri: 'did:dkg:agent/conn',
+      name: 'conn-agent',
+      peerId: 'peer-conn',
+      agentAddress: '0x2222222222222222222222222222222222222222',
+    },
+    {
+      agentUri: 'did:dkg:agent/gone',
+      name: 'gone-agent',
+      peerId: 'peer-gone',
+      agentAddress: '0x3333333333333333333333333333333333333333',
+    },
   ];
   return {
     peerId: 'peer-self',
     findAgents: async () => registry.map((r) => ({ ...r })),
     findSkills: async () => [],
+    listLocalAgents: () => [{ agentAddress: localAgentAddress, name: 'self-agent' }],
     getPeerHealth: () => new Map([['peer-conn', { lastSeen: 123, latencyMs: 9 }]]),
     node: {
       libp2p: {
@@ -264,7 +267,7 @@ async function getAgents(agent: any, qs = '') {
 }
 
 describe('GET /api/agents (GH#310)', () => {
-  it('parameterless response keeps its exact pre-#310 shape, minus duplicate rows', async () => {
+  it('parameterless response keeps its exact pre-#310 shape', async () => {
     const { status, body } = await getAgents(fakeAgent());
     expect(status).toBe(200);
     // The shape node-ui's fetchAgents() consumes: {agents} and nothing else.
@@ -289,6 +292,44 @@ describe('GET /api/agents (GH#310)', () => {
     expect(status).toBe(200);
     expect(body.agents).toHaveLength(1);
     expect(body.agents[0]).toMatchObject({ peerId: 'peer-self', connectionStatus: 'self' });
+  });
+
+  it('uses local wallet ownership, not a registry peer-id claim, for self', async () => {
+    const localAddress = '0x1111111111111111111111111111111111111111';
+    const foreignAddress = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const registry = [
+      {
+        agentUri: 'did:dkg:agent/local',
+        name: 'local',
+        peerId: 'peer-old-publication',
+        agentAddress: localAddress,
+      },
+      {
+        agentUri: 'did:dkg:agent/foreign',
+        name: 'foreign-spoof',
+        peerId: 'peer-self',
+        agentAddress: foreignAddress,
+      },
+    ];
+    const agent = fakeAgent({
+      findAgents: async () => registry,
+      // The second local identity is unpublished and must not be synthesized
+      // into this registry-backed endpoint.
+      listLocalAgents: () => [
+        { agentAddress: localAddress, name: 'local' },
+        { agentAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', name: 'unpublished' },
+      ],
+    });
+
+    for (const query of ['?local=true', '?connectionStatus=self']) {
+      const { status, body } = await getAgents(agent, query);
+      expect(status).toBe(200);
+      expect(body.agents).toHaveLength(1);
+      expect(body.agents[0]).toMatchObject({
+        agentAddress: localAddress,
+        connectionStatus: 'self',
+      });
+    }
   });
 
   it('connectionStatus=connected returns only live peers', async () => {

@@ -333,11 +333,7 @@ import {
 import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
 import { classifyAgentConnectError } from './agent-connect-error.js';
 import type { RequestContext } from './context.js';
-import {
-  dedupeExactRows,
-  paginateAgentRows,
-  parseAgentsListQuery,
-} from './agents-list.js';
+import { handleAgentsListRoute } from './agents-list.js';
 import type { PublishOptions } from '@origintrail-official/dkg-publisher';
 
 function parsePrecomputedUpdateAttestation(
@@ -639,89 +635,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // Optional query params: ?framework=X &skill_type=X &connectionStatus=X
   //                        &local=true|false &limit=N &cursor=X   (GH#310)
   if (req.method === "GET" && path === "/api/agents") {
-    const parsedQuery = parseAgentsListQuery(url.searchParams);
-    if (!parsedQuery.ok) {
-      return jsonResponse(res, 400, { error: parsedQuery.error });
-    }
-    const { connectionStatus, local, limit, cursor, filterFingerprint } = parsedQuery.query;
-    const frameworkFilter = url.searchParams.get("framework") || undefined;
-    const skillTypeFilter = url.searchParams.get("skill_type") || undefined;
-    const agents = await agent.findAgents({
-      ...(frameworkFilter ? { framework: frameworkFilter } : {}),
-    });
-    // If skill_type filter is requested, find agents offering that skill and intersect
-    let filteredAgents = agents;
-    if (skillTypeFilter) {
-      const offerings = await agent.findSkills({ skillType: skillTypeFilter });
-      const agentUris = new Set(offerings.map((o: any) => o.agentUri));
-      filteredAgents = agents.filter((a: any) => agentUris.has(a.agentUri));
-    }
-    // GH#310 — findAgents' OPTIONAL properties can multiply one agent into
-    // several identical rows; paginating over duplicates would repeat agents
-    // across pages. Exact-row only: distinct (agentUri, peerId) pairings are
-    // real registry facts and must survive.
-    filteredAgents = dedupeExactRows(filteredAgents);
-    const allConns = agent.node.libp2p.getConnections();
-    const connByPeer = new Map<
-      string,
-      { transport: string; direction: string; sinceMs: number }
-    >();
-    for (const c of allConns) {
-      const pid = c.remotePeer.toString();
-      if (!connByPeer.has(pid)) {
-        connByPeer.set(pid, {
-          transport: c.remoteAddr?.toString().includes("/p2p-circuit")
-            ? "relayed"
-            : "direct",
-          direction: c.direction,
-          sinceMs: c.timeline?.open ? Date.now() - c.timeline.open : 0,
-        });
-      }
-    }
-    const myPeerId = agent.peerId;
-    const healthMap = agent.getPeerHealth();
-    // One status expression shared by the filter and the enrichment below —
-    // a row must never be selected by one definition and labeled by another.
-    const statusOf = (a: any): string =>
-      a.peerId === myPeerId
-        ? "self"
-        : connByPeer.has(a.peerId)
-          ? "connected"
-          : "disconnected";
-    if (local !== undefined) {
-      filteredAgents = filteredAgents.filter(
-        (a: any) => (a.peerId === myPeerId) === local,
-      );
-    }
-    if (connectionStatus !== undefined) {
-      filteredAgents = filteredAgents.filter(
-        (a: any) => statusOf(a) === connectionStatus,
-      );
-    }
-    const page = paginateAgentRows(filteredAgents, { limit, cursor, filterFingerprint });
-    // Enrichment runs on the returned page only — with pagination in use the
-    // whole point is not to pay for 750 rows to serve 20.
-    const enriched = page.rows.map((a: any) => {
-      const isSelf = a.peerId === myPeerId;
-      const conn = connByPeer.get(a.peerId);
-      const health = healthMap.get(a.peerId);
-      return {
-        ...a,
-        connectionStatus: statusOf(a),
-        connectionTransport: conn?.transport ?? null,
-        connectionDirection: conn?.direction ?? null,
-        connectedSinceMs: conn?.sinceMs ?? null,
-        lastSeen: isSelf ? Date.now() : (health?.lastSeen ?? null),
-        latencyMs: health?.latencyMs ?? null,
-      };
-    });
-    return jsonResponse(
-      res,
-      200,
-      page.nextCursor !== undefined
-        ? { agents: enriched, nextCursor: page.nextCursor }
-        : { agents: enriched },
-    );
+    return handleAgentsListRoute(ctx);
   }
 
   // GET /api/peer-info?peerId=<id>
