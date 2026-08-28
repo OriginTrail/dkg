@@ -1978,36 +1978,40 @@ export class TripleStoreAsyncLiftPublisher
     // the same pass — with only the shared start-of-pass snapshot they would wait out the idle
     // sweep holding their wallets, which per-lane inventories never made them do.
     const settledLive: string[] = [];
-    const deadline = new AbortController();
-    const deadlineTimer = setTimeout(
-      () => deadline.abort(),
-      Math.max(0, this.chainProofDispatchTimeBudgetMs),
-    );
+    const passBudgetMs = Math.max(0, this.chainProofDispatchTimeBudgetMs);
+    const halfBudgetMs = Math.max(1, Math.floor(passBudgetMs / 2));
+    const passStartedAt = Date.now();
     // GH#2359 item 2 — hinted executor-owned jobs are proven and wallet-released FIRST: the
     // whole point of the hint is to free the wallet before the executor tail (and this walk)
     // finish. Unresolved hinted proofs hold the active cadence below.
     //
     // r5 (3877726336) — first, but never ALL of the budget: the hint lane runs under its own
-    // half-budget sub-deadline (also aborted by the pass deadline), so one perpetually hanging
-    // hinted lookup cannot consume every pass and starve ordinary live transactions whose own
-    // proofs would resolve immediately. The ordinary walk below always keeps at least half.
+    // half-budget sub-deadline, so one perpetually hanging hinted lookup cannot consume every
+    // pass and starve ordinary live transactions.
     let hintedUnresolved = 0;
     const hintDeadline = new AbortController();
-    const hintTimer = setTimeout(
-      () => hintDeadline.abort(),
-      Math.max(1, Math.floor(this.chainProofDispatchTimeBudgetMs / 2)),
-    );
-    const onPassAbort = () => hintDeadline.abort();
-    deadline.signal.addEventListener('abort', onPassAbort, { once: true });
+    const hintTimer = setTimeout(() => hintDeadline.abort(), halfBudgetMs);
     try {
-      try {
-        hintedUnresolved = await this.releaseWalletsOnExecutorProofHints(inventory, hintDeadline.signal);
-      } finally {
-        clearTimeout(hintTimer);
-        deadline.signal.removeEventListener('abort', onPassAbort);
-      }
+      hintedUnresolved = await this.releaseWalletsOnExecutorProofHints(inventory, hintDeadline.signal);
+    } finally {
+      clearTimeout(hintTimer);
+      hintDeadline.abort();
+    }
+    // r13 (3878037023) — the walk's budget is measured from ITS OWN start and is never less
+    // than half the pass budget: the sub-deadline above bounds the hint lane's READS, but an
+    // already-started transition (deliberately never aborted mid-write) can overrun it, and
+    // under a shared clock that overrun would consume the ordinary lane's opportunity on every
+    // pass. The pass may then run to hint-overrun + half — bounded, and the ordinary lane's
+    // turn is unconditional.
+    const walkBudgetMs = Math.max(
+      passBudgetMs - (Date.now() - passStartedAt),
+      halfBudgetMs,
+    );
+    const walkDeadline = new AbortController();
+    const walkTimer = setTimeout(() => walkDeadline.abort(), walkBudgetMs);
+    try {
       for (let i = 0; i < rotatedTxBearing.length; i += 1) {
-        if (deadline.signal.aborted) {
+        if (walkDeadline.signal.aborted) {
           remainingLive += rotatedTxBearing.length - i;
           break;
         }
@@ -2017,7 +2021,7 @@ export class TripleStoreAsyncLiftPublisher
           // Settled or re-owned since the pre-filter: no longer this pass's remaining work.
           if (!current || (current.status !== 'broadcast' && current.status !== 'included')) return;
           if (this.activeProcessJobIds.has(current.jobId)) return;
-          if (await this.jobHandlerFor(current.request).recoverInterrupted(current, { signal: deadline.signal })) {
+          if (await this.jobHandlerFor(current.request).recoverInterrupted(current, { signal: walkDeadline.signal })) {
             reconciled += 1;
             settledLive.push(current.jobId);
           } else {
@@ -2026,8 +2030,8 @@ export class TripleStoreAsyncLiftPublisher
         });
       }
     } finally {
-      clearTimeout(deadlineTimer);
-      deadline.abort();
+      clearTimeout(walkTimer);
+      walkDeadline.abort();
     }
 
     // The dispatcher's view: the shared snapshot with this pass's own settlements made current

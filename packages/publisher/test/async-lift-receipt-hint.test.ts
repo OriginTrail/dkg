@@ -827,4 +827,79 @@ describe('async-lift receipt-hint lane', () => {
     expect(proofAsks).toBe(1);
     expect(recoveryAsks).toBe(1);
   });
+
+  it('a slow successful hinted release does not consume the ordinary walk opportunity', async () => {
+    // r13 (3878037023) - the half-budget sub-deadline bounds the hint lane's reads, but an
+    // already-started transition is deliberately never aborted mid-write: wallet-1's lock
+    // deletion succeeds SLOWLY, overrunning the whole 150ms pass budget. Ordinary broadcast
+    // job B (executor settled, instant resolvers) must still be proven and finalized in the
+    // SAME pass: the walk's budget is measured from its own start and is never below half.
+    let hinted = 0;
+    const tails: Array<() => void> = [];
+    let executions = 0;
+    const publisher = createPublisher({
+      chainProofDispatchTimeBudgetMs: 150,
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => (
+        { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          executions += 1;
+          const myExecution = executions;
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            operationKind: 'create',
+          });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          if (myExecution === 1) {
+            input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+            hinted += 1;
+            await new Promise<void>((resolve) => { tails.push(resolve); });
+          }
+          throw new Error('post-write-ahead failure: recovery owns the record from here');
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    await stageKnowledgeAssetShareSnapshot({ store, graphManager, shareOperationId: 'share-op-2' });
+    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const jobB = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ name: 'albums-next', shareOperationId: 'share-op-2' }),
+    );
+    await publisher.processNext('wallet-1');
+    await publisher.processNext('wallet-2');
+    await waitForCondition(() => hinted === 1, 'the first executor must fire its hint');
+    await waitForCondition(() => executions === 2, 'the second executor must run');
+
+    // Installed after the claims: wallet-1's release succeeds but takes longer than the
+    // ENTIRE pass budget.
+    const originalDelete = store.deleteByPattern.bind(store);
+    let slowNextLockDelete = true;
+    (store as unknown as { deleteByPattern: typeof originalDelete }).deleteByPattern =
+      async (pattern: { subject?: string; graph?: string }) => {
+        if (slowNextLockDelete && pattern?.subject === walletLockSubject('wallet-1')) {
+          slowNextLockDelete = false;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        return originalDelete(pattern as never);
+      };
+
+    try {
+      const outcome = await publisher.reconciliationScheduling.reconcile();
+      // A released (slowly) AND B fully reconciled in the same pass.
+      expect(outcome.reconciled).toBeGreaterThanOrEqual(1);
+      expect((await publisher.getStatus(jobA))?.status).toBe('included');
+      await expectWalletLock('wallet-1', 'released');
+      expect((await publisher.getStatus(jobB))?.status).toBe('finalized');
+      await expectWalletLock('wallet-2', 'released');
+    } finally {
+      for (const release of tails) release();
+    }
+  });
 });
