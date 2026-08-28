@@ -56,6 +56,26 @@ export class LiftJobPendingChainProofError extends Error {
   }
 }
 
+/**
+ * The worker that started an execution no longer owns the persisted claim.
+ *
+ * A fresh claim token is written on every wallet acquisition. Recovery may
+ * legitimately expire and replace that claim while an older asynchronous
+ * frame is still unwinding. That frame must stop without changing the newer
+ * job; this typed error is the ownership-boundary signal consumed by
+ * `processNext()`.
+ */
+export class StaleLiftJobClaimError extends Error {
+  override readonly name = 'StaleLiftJobClaimError';
+
+  constructor(
+    readonly jobId: string,
+    reason: string,
+  ) {
+    super(`Stale LiftJob claim for ${jobId}: ${reason}`);
+  }
+}
+
 /** #1828 — the immutable facts a client retains to recover a lost VM-publish admission. */
 export interface IntentLookupInput {
   readonly contextGraphId: string;
@@ -630,6 +650,8 @@ export interface AsyncLiftPublisherConfig {
   recoveryLookupTimeoutMs?: number;
   now?: () => number;
   idGenerator?: () => string;
+  /** Defaults to `crypto.randomUUID()`. Must return a fresh value for every wallet claim. */
+  claimTokenGenerator?: () => string;
   /** Jitter source, injectable for determinism exactly like `now`/`idGenerator`. Defaults to Math.random. */
   rand?: () => number;
   /**

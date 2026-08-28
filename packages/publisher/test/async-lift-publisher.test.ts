@@ -1059,6 +1059,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
 
+    now += 6 * 60 * 1000;
     expect(await publisher.reconcileTransactions()).toBe(1);
     expect(await publisher.getStatus(jobId)).toMatchObject({
       jobId,
@@ -1879,6 +1880,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       broadcast: { txHash: '0xbbb', walletId: 'wallet-2' },
     });
 
+    now += 6 * 60 * 1000;
     const recovered = await publisher.recover();
     const claimed = await publisher.getStatus(claimedId);
     const broadcast = await publisher.getStatus(broadcastId);

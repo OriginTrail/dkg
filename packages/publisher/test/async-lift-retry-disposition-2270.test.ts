@@ -366,6 +366,8 @@ describe('GH#2270 failed-job retry disposition', () => {
     await h.store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
     await h.store.insert(serializeJob(carriedInRecoveryOnly, DEFAULT_CONTROL_GRAPH_URI));
 
+    // Recovery may only reset the claim after its durable ownership lease expires.
+    h.advance(6 * 60_000);
     expect(await publisher.recover()).toBe(1);
 
     const reset = await publisher.getStatus(jobId);

@@ -288,6 +288,7 @@ export {
 export {
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,
+  StaleLiftJobClaimError,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftAdmissionContext,
   type AsyncLiftDetailedRetrier,
