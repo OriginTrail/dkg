@@ -60,7 +60,7 @@ import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chai
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
-import type { AsyncPreparedPublishPayload, LiftJob, LiftJobRetryProjection } from '@origintrail-official/dkg-publisher';
+import type { AsyncPreparedPublishPayload, LiftJobRetryProjection, PersistedLiftJob } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -389,9 +389,9 @@ function parsePublisherLifecycleFactsFromQuery(
  */
 function wrappedJobDetailBody(
   ctx: JobDetailContext,
-  job: LiftJob,
+  job: PersistedLiftJob,
   payload?: AsyncPreparedPublishPayload | null,
-): { job: LiftJob; payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
+): { job: PersistedLiftJob; payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
   return {
     job,
     ...(payload === undefined ? {} : { payload }),
@@ -402,9 +402,9 @@ function wrappedJobDetailBody(
 /** The legacy shape: the job spread at the top level, where `payload` already lives. */
 function legacyJobDetailBody(
   ctx: JobDetailContext,
-  job: LiftJob,
+  job: PersistedLiftJob,
   payload?: AsyncPreparedPublishPayload | null,
-): LiftJob & { payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
+): PersistedLiftJob & { payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
   return {
     ...job,
     ...(payload === undefined ? {} : { payload }),
@@ -416,7 +416,7 @@ type JobDetailContext = Pick<RequestContext, 'publisherControl' | 'publisherStat
 
 /** The ONE place the operator-facing retry answer is derived: the publisher's configured view, */
 /** narrowed by this daemon's runtime availability. */
-function runtimeRetryState(ctx: JobDetailContext, job: LiftJob): LiftJobRetryProjection {
+function runtimeRetryState(ctx: JobDetailContext, job: PersistedLiftJob): LiftJobRetryProjection {
   return narrowRetryStateToRuntime(
     ctx.publisherControl.describeConfiguredRetryState(job),
     ctx.publisherState.availability,
