@@ -539,6 +539,51 @@ describe('GH#2270 chain-proof cadence', () => {
       expect(events).toEqual(['enter', 'exit', 'enter', 'exit']);
     });
 
+    it('one hung read promotes ONE head — queued successors stay single-file, no burst bypass', async () => {
+      // r12 (🔴 3884393225) — the cap is a lease on the OWNER's execution, not a per-waiter
+      // entry timer: with per-waiter timers, B and C queued during A's hang both bypass at
+      // ~the same instant and their reads overlap, re-opening the capture-order inversion
+      // (a higher-token stale capture can replace a newly deferred entry). With the lease, A's
+      // expiry promotes exactly B; C follows only after B settles (or B's own fresh lease).
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        reconciliationAcquisitionWaitCapMs: 50,
+        chainProofResolver: async () => ({ status: 'pending-mempool' }),
+      });
+      await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      const events: string[] = [];
+      const originalList = publisher.list.bind(publisher);
+      let listCalls = 0;
+      (publisher as { list: typeof publisher.list }).list = async (filter) => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          return new Promise(() => undefined); // A: hangs forever
+        }
+        events.push('enter');
+        const result = await originalList(filter);
+        events.push('exit');
+        return result;
+      };
+
+      vi.useFakeTimers();
+      try {
+        const passA = publisher.recover(); // owner: hangs in list()
+        void passA;
+        const passB = publisher.recover(); // head waiter
+        const passC = publisher.recover(); // queued behind B, NOT behind A
+        await vi.advanceTimersByTimeAsync(49);
+        expect(events).toEqual([]); // both still fenced behind A's live lease
+        await vi.advanceTimersByTimeAsync(1); // A's lease expires: B alone is promoted
+        await passB;
+        await passC; // C ran only after B settled
+        expect(events).toEqual(['enter', 'exit', 'enter', 'exit']); // strictly single-file
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('a read bypassed at the cap completes late RANKED OLD — its sweep spares the successor', async () => {
       // r11 (🔴 3884193885) — the ordering token is drawn BEFORE the read, so a hung
       // acquisition that a successor bypassed keeps its old rank when it finally completes.

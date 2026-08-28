@@ -473,8 +473,16 @@ export class TripleStoreAsyncLiftPublisher
     rand: () => this.rand(),
   });
 
-  /** Serializes {@link takeReconciliationSnapshot} acquisitions; see its r6/r10 notes. */
-  private reconciliationAcquisitionChain: Promise<void> = Promise.resolve();
+  /**
+   * The tail of the acquisition queue in {@link takeReconciliationSnapshot}: each slot carries
+   * the acquisition's settlement AND its lease expiry (capMs after it STARTED executing), so a
+   * successor is promoted only past an owner that actually held the seam too long — never past
+   * a healthy owner mid-read, and never in a burst (r12 🔴 3884393225).
+   */
+  private reconciliationAcquisitionTail: { settled: Promise<void>; leaseExpired: Promise<void> } = {
+    settled: Promise.resolve(),
+    leaseExpired: Promise.resolve(),
+  };
 
   private readonly reconciliationAcquisitionWaitCapMs: number;
   /**
@@ -2147,17 +2155,21 @@ export class TripleStoreAsyncLiftPublisher
     // NOT the package's `withKeyedLocks`: that primitive's contract is strict unbounded
     // exclusion (what its publish/CAS/SWM callers need), and borrowing it would import the
     // very unbounded wait this bound removes.
-    const predecessor = this.reconciliationAcquisitionChain;
+    // r12 (🔴 3884393225) — the cap is a LEASE on the owner's execution, not a per-waiter
+    // timer: a waiter is promoted only when its immediate predecessor has either settled or
+    // held the seam for capMs after STARTING to execute. A burst of waiters queued behind one
+    // hung read therefore promotes exactly one head (whose fresh lease then covers the next
+    // waiter), instead of all bypassing on their own entry-relative timers and re-opening the
+    // overlapping-read inversion the queue exists to prevent. A healthy-but-slow owner
+    // mid-read is likewise never bypassed before ITS lease runs out.
+    const predecessor = this.reconciliationAcquisitionTail;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
     const acquisition = (async () => {
-      await new Promise<void>((resolve) => {
-        const cap = setTimeout(resolve, Math.max(0, this.reconciliationAcquisitionWaitCapMs));
-        void predecessor.finally(() => {
-          clearTimeout(cap);
-          resolve();
-        });
-      });
+      await Promise.race([predecessor.settled, predecessor.leaseExpired]);
+      markStarted();
       // r11 (🔴 3884193885) — ordering authority is reserved BEFORE the read, not after it:
-      // a hung read whose successor bypassed it at the cap keeps the token it drew at its
+      // a hung read whose successor was promoted past it keeps the token it drew at its
       // section start, so when it eventually completes it is fenced as OLDER — its sweep (the
       // one consumer of token order with deletion authority over other jobs' entries, which no
       // identity guard contains) cannot collect what the successor installed from genuinely
@@ -2168,8 +2180,16 @@ export class TripleStoreAsyncLiftPublisher
       const inventory = await this.list();
       return { inventory, chainProofPass };
     })();
-    // The chain must survive a failed acquisition — carry only settlement, never the result.
-    this.reconciliationAcquisitionChain = acquisition.then(() => undefined, () => undefined);
+    // The queue must survive a failed acquisition — carry only settlement, never the result.
+    const settled = acquisition.then(() => undefined, () => undefined);
+    const leaseExpired = started.then(() => new Promise<void>((resolve) => {
+      const lease = setTimeout(resolve, Math.max(0, this.reconciliationAcquisitionWaitCapMs));
+      void settled.finally(() => {
+        clearTimeout(lease);
+        resolve();
+      });
+    }));
+    this.reconciliationAcquisitionTail = { settled, leaseExpired };
     return acquisition;
   }
 
