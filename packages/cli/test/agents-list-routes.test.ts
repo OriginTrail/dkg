@@ -26,6 +26,12 @@ function row(over: Record<string, unknown> = {}) {
   };
 }
 
+function validatedQuery(qs: string) {
+  const parsed = parseAgentsListQuery(new URLSearchParams(qs));
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.query;
+}
+
 describe('parseAgentsListQuery (GH#310)', () => {
   const parse = (qs: string) => parseAgentsListQuery(new URLSearchParams(qs));
 
@@ -84,7 +90,9 @@ describe('parseAgentsListQuery (GH#310)', () => {
     const parsed = parse(`cursor=${page.nextCursor}`);
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
-      expect(typeof parsed.query.cursor).toBe('string');
+      expect(parsed.query.cursor).toEqual({
+        identityDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
       expect(paginateAgentRows(rows, parsed.query).rows).toHaveLength(1);
     }
   });
@@ -95,10 +103,10 @@ describe('parseAgentsListQuery (GH#310)', () => {
     const rows = [row(), row({ agentUri: 'did:dkg:agent/2', name: 'beta' })];
     const page = paginateAgentRows(rows, { limit: 1, connectionStatus: 'connected' });
     const withoutFilter = parse(`cursor=${page.nextCursor}`);
-    expect(withoutFilter.ok).toBe(true);
-    if (withoutFilter.ok) {
-      expect(() => paginateAgentRows(rows, withoutFilter.query)).toThrow('different filter');
-    }
+    expect(withoutFilter).toEqual({
+      ok: false,
+      error: expect.stringContaining('different filter'),
+    });
     // Repeating the filter continues fine.
     const withFilter = parse(`connectionStatus=connected&cursor=${page.nextCursor}`);
     expect(withFilter.ok).toBe(true);
@@ -116,10 +124,10 @@ describe('parseAgentsListQuery (GH#310)', () => {
     if (!first.ok) return;
     const page = paginateAgentRows(rows, first.query);
     const crossFilter = parse(`${secondFilters}&cursor=${page.nextCursor}`);
-    expect(crossFilter.ok).toBe(true);
-    if (crossFilter.ok) {
-      expect(() => paginateAgentRows(rows, crossFilter.query)).toThrow('different filter');
-    }
+    expect(crossFilter).toEqual({
+      ok: false,
+      error: expect.stringContaining('different filter'),
+    });
 
     const reordered = parse(`skill_type=z&framework=x%26skill_type%3Dy&cursor=${page.nextCursor}`);
     expect(reordered.ok).toBe(true);
@@ -203,10 +211,10 @@ describe('paginateAgentRows (GH#310)', () => {
     const collected: string[] = [];
     let cursor: string | undefined;
     do {
-      const page = paginateAgentRows(input, {
-        limit: 2,
-        ...(cursor ? { cursor } : {}),
-      });
+      const page = paginateAgentRows(
+        input,
+        validatedQuery(cursor ? `limit=2&cursor=${cursor}` : 'limit=2'),
+      );
       expect(page.rows.length).toBeLessThanOrEqual(2);
       collected.push(...page.rows.map((agent) => agent.peerId));
       cursor = page.nextCursor;
@@ -232,7 +240,7 @@ describe('paginateAgentRows (GH#310)', () => {
     do {
       const page = paginateAgentRows(
         [many[2]!, stale, many[3]!, current],
-        { limit: 1, ...(cursor ? { cursor } : {}) },
+        validatedQuery(cursor ? `limit=1&cursor=${cursor}` : 'limit=1'),
       );
       pages.push(page);
       cursor = page.nextCursor;
@@ -301,7 +309,10 @@ describe('paginateAgentRows (GH#310)', () => {
     let cursor = first.nextCursor;
     let guard = 0;
     while (cursor) {
-      const page = paginateAgentRows(remaining, { limit: 1, cursor });
+      const page = paginateAgentRows(
+        remaining,
+        validatedQuery(`limit=1&cursor=${cursor}`),
+      );
       expect(page.rows.length).toBeLessThanOrEqual(1);
       collected.push(...page.rows.map((agent) => agent.peerId));
       cursor = page.nextCursor;
@@ -597,14 +608,23 @@ describe('GET /api/agents (GH#310)', () => {
     expect(seen.sort()).toEqual(['peer-conn', 'peer-gone', 'peer-self']);
   });
 
-  it('rejects a cursor when route filters change between pages', async () => {
+  it('rejects malformed and cross-filter cursors before discovery', async () => {
     const first = await getAgents(fakeAgent(), '?local=false&limit=1');
     expect(first.status).toBe(200);
     expect(first.body.nextCursor).toBeDefined();
 
-    const second = await getAgents(fakeAgent(), `?cursor=${first.body.nextCursor}`);
-    expect(second.status).toBe(400);
-    expect(second.body.error).toContain('different filter');
+    const findAgents = vi.fn(async () => {
+      throw new Error('cursor validation must run before discovery');
+    });
+    const agent = fakeAgent({ findAgents });
+    const malformed = await getAgents(agent, '?cursor=not-a-cursor');
+    expect(malformed.status).toBe(400);
+    expect(malformed.body.error).toBe('"cursor" is not a cursor from a previous response');
+
+    const crossFilter = await getAgents(agent, `?cursor=${first.body.nextCursor}`);
+    expect(crossFilter.status).toBe(400);
+    expect(crossFilter.body.error).toContain('different filter');
+    expect(findAgents).not.toHaveBeenCalled();
   });
 
   it('rejects a bad parameter instead of silently returning the registry', async () => {

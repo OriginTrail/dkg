@@ -55,10 +55,15 @@ export interface AgentsListFilters {
   local?: boolean;
 }
 
+interface AgentsListCursor {
+  readonly identityDigest: string;
+  readonly rowDigest?: string;
+}
+
 export interface AgentsListQuery extends AgentsListFilters {
   limit?: number;
-  /** Opaque token from the previous page. Cursor internals stay inside the pager/codec. */
-  cursor?: string;
+  /** Decoded only by request parsing and already proven to belong to these filters. */
+  cursor?: AgentsListCursor;
 }
 
 /**
@@ -137,10 +142,21 @@ export function parseAgentsListQuery(searchParams: URLSearchParams): AgentsListQ
 
   const cursor = searchParams.get('cursor');
   if (cursor !== null) {
-    if (decodeCursor(cursor) === undefined) {
+    const decodedCursor = decodeCursor(cursor);
+    if (decodedCursor === undefined) {
       return { ok: false, error: '"cursor" is not a cursor from a previous response' };
     }
-    query.cursor = cursor;
+    if (decodedCursor.fingerprint !== filterFingerprint(filters)) {
+      return {
+        ok: false,
+        error: '"cursor" was issued under different filter parameters; ' +
+          'repeat the exact framework/skill_type/connectionStatus/local values from the first page',
+      };
+    }
+    query.cursor = {
+      identityDigest: decodedCursor.identityDigest,
+      ...(decodedCursor.rowDigest === undefined ? {} : { rowDigest: decodedCursor.rowDigest }),
+    };
   }
 
   return { ok: true, query };
@@ -170,10 +186,6 @@ export interface AgentsPage {
   nextCursor?: string;
 }
 
-export class AgentsCursorError extends Error {
-  override readonly name = 'AgentsCursorError';
-}
-
 /**
  * Keyset pagination over stable discovered-agent identity.
  *
@@ -193,16 +205,7 @@ export function paginateAgentRows(
   }
 
   const fingerprint = filterFingerprint(query);
-  const decodedCursor = query.cursor === undefined ? undefined : decodeCursor(query.cursor);
-  if (query.cursor !== undefined && decodedCursor === undefined) {
-    throw new AgentsCursorError('"cursor" is not a cursor from a previous response');
-  }
-  if (decodedCursor && decodedCursor.fingerprint !== fingerprint) {
-    throw new AgentsCursorError(
-      '"cursor" was issued under different filter parameters; ' +
-      'repeat the exact framework/skill_type/connectionStatus/local values from the first page',
-    );
-  }
+  const cursorPosition = query.cursor;
 
   const keyed = groupDiscoveredAgentIdentityRows(rows)
     .flatMap((group) => {
@@ -230,14 +233,14 @@ export function paginateAgentRows(
     ));
   // Strictly-after: the cursor names a position, not a row, so a row deleted
   // between requests cannot wedge the walk.
-  const after = decodedCursor === undefined
+  const after = cursorPosition === undefined
     ? keyed
     : keyed.filter((entry) => (
-      entry.identityDigest > decodedCursor.identityDigest
+      entry.identityDigest > cursorPosition.identityDigest
       || (
-        decodedCursor.rowDigest !== undefined
-        && entry.identityDigest === decodedCursor.identityDigest
-        && entry.rowDigest > decodedCursor.rowDigest
+        cursorPosition.rowDigest !== undefined
+        && entry.identityDigest === cursorPosition.identityDigest
+        && entry.rowDigest > cursorPosition.rowDigest
       )
     ));
   if (query.limit === undefined || after.length <= query.limit) {
@@ -378,14 +381,7 @@ export async function handleAgentsListRoute(ctx: RequestContext): Promise<void> 
     );
   }
 
-  let page: AgentsPage;
-  try {
-    page = paginateAgentRows(filteredAgents, parsedQuery.query);
-  } catch (error) {
-    if (!(error instanceof AgentsCursorError)) throw error;
-    jsonResponse(res, 400, { error: error.message });
-    return;
-  }
+  const page = paginateAgentRows(filteredAgents, parsedQuery.query);
   const healthByPeer = agent.getPeerHealth();
   const enriched = page.rows.map((candidate) => {
     const connection = connectionByPeer.get(candidate.peerId);
