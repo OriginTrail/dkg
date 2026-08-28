@@ -133,4 +133,30 @@ describe('ChainProofRetrySchedule', () => {
     h.schedule.settled('job', A); // foreign incarnation: deletes nothing of B's
     expect(h.schedule.isDue('job', B, h.now())).toBe(false); // B still deferred
   });
+
+  it('stale echoes are DROPPED, not retained: the map stays bounded at one entry per job', () => {
+    // r8 (🔴 3882533655) — the previous suite only proved the successor's cadence survived; a
+    // hidden stale entry could leak per superseded incarnation. The retention count makes the
+    // boundedness claim a testable number.
+    const h = harness();
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true);
+    h.schedule.defer('job', B, 'default');
+    for (let i = 0; i < 5; i += 1) {
+      h.schedule.defer('job', `broadcast|recovery_lookup_timeout|${100 + i}`, 'default');
+    }
+    expect(h.schedule.retainedEntryCount()).toBe(1); // only B's entry stands
+    expect(h.schedule.isDue('job', B, h.now())).toBe(false); // and it is B's, untouched
+    h.schedule.settled('job', B);
+    expect(h.schedule.retainedEntryCount()).toBe(0); // settlement clears the slot entirely
+  });
+
+  it('a successor observation replaces the predecessor entry — never leaks it', () => {
+    const h = harness();
+    h.schedule.defer('job', A, 'default');
+    expect(h.schedule.retainedEntryCount()).toBe(1);
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true); // replaces A's entry
+    expect(h.schedule.retainedEntryCount()).toBe(0);
+    h.schedule.defer('job', B, 'default');
+    expect(h.schedule.retainedEntryCount()).toBe(1);
+  });
 });

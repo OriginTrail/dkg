@@ -241,6 +241,13 @@ describe('GH#2270 chain-proof cadence', () => {
         delete timestamps.failedAt;
         return { ...t, timestamps };
       }],
+      // r8 (3882533673) — the fourth component: TRANSACTION EVIDENCE. Only the broadcast hash
+      // changes; failure state, code, and timestamps stay identical, so this case is red iff
+      // `chainProofLookupFingerprint(lookup)` participates in the incarnation key.
+      ['transaction evidence', (t: Record<string, unknown>) => ({
+        ...t,
+        broadcast: { ...(t.broadcast as object), txHash: `0x${'77'.repeat(32)}` },
+      })],
     ] as const)(
       'every incarnation-key component discriminates: a mid-flight %s change makes the verdict stale',
       async (_component, mutate) => {

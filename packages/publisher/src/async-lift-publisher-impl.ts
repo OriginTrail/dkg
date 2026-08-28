@@ -1,6 +1,6 @@
 import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
-import { resolveWithinAbort } from './abort-boundary.js';
+import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import { isPendingPublishTransactionStatus } from '@origintrail-official/dkg-chain';
 import { ChainProofRetrySchedule } from './chain-proof-retry-schedule.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
