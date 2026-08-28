@@ -22,6 +22,7 @@ import type { DkgClient, SparqlResult } from '../client.js';
 import type { DkgConfig } from '../config.js';
 import { bindingsToTable } from '../sparql.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './context-graph-description.js';
+import { resolveWorkingMemoryAgentAddress } from './working-memory-identity.js';
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -97,27 +98,46 @@ function renderParameters(item: QueryCatalogItem): string {
   }).join(', ');
 }
 
-function renderQueryResult(result: SparqlResult, limit: number): string {
+function capQueryResult(result: SparqlResult, limit: number): {
+  result: SparqlResult;
+  totalCount: number;
+  truncated: boolean;
+} {
+  if (result.type === 'boolean') {
+    return { result, totalCount: 1, truncated: false };
+  }
+  if (result.type === 'quads') {
+    return {
+      result: { ...result, quads: result.quads.slice(0, limit) },
+      totalCount: result.quads.length,
+      truncated: result.quads.length > limit,
+    };
+  }
+  return {
+    result: { ...result, bindings: result.bindings.slice(0, limit) },
+    totalCount: result.bindings.length,
+    truncated: result.bindings.length > limit,
+  };
+}
+
+function renderQueryResult(result: SparqlResult, totalCount: number): string {
   if (result.type === 'boolean') return String(result.value);
   if (result.type === 'quads') {
-    const all = result.quads;
-    const capped = all.slice(0, limit);
-    const rows = capped.map((quad) => ({
+    const rows = result.quads.map((quad) => ({
       subject: quad.subject,
       predicate: quad.predicate,
       object: quad.object,
       graph: quad.graph ?? '',
     }));
-    const tail = capped.length < all.length
-      ? `\n\n_(showing ${capped.length} of ${all.length})_`
+    const tail = result.quads.length < totalCount
+      ? `\n\n_(showing ${result.quads.length} of ${totalCount})_`
       : '';
     return `${bindingsToTable(rows)}${tail}`;
   }
-  const capped = result.bindings.slice(0, limit);
-  const tail = capped.length < result.bindings.length
-    ? `\n\n_(showing ${capped.length} of ${result.bindings.length})_`
+  const tail = result.bindings.length < totalCount
+    ? `\n\n_(showing ${result.bindings.length} of ${totalCount})_`
     : '';
-  return `${bindingsToTable(capped)}${tail}`;
+  return `${bindingsToTable(result.bindings)}${tail}`;
 }
 
 async function readCatalog(client: DkgClient, projectId: string): Promise<QueryCatalogItem[]> {
@@ -230,15 +250,20 @@ export function registerQueryCatalogTools(
         const match = findSavedQuery(items, selector);
         if (!match) return err(`Saved query not found: ${selector}`);
         const execution = prepareQueryCatalogExecution(match, parameters);
+        const agentAddress = execution.view === 'working-memory'
+          ? await resolveWorkingMemoryAgentAddress(client)
+          : undefined;
         const result = await client.query({
           sparql: execution.sparql,
           contextGraphId: pid,
           ...(execution.subGraphName ? { subGraphName: execution.subGraphName } : {}),
           ...(execution.view ? { view: execution.view } : {}),
+          ...(agentAddress ? { agentAddress } : {}),
         });
+        const capped = capQueryResult(result, limit);
         return ok(
           `Saved query **${match.name}** (\`${qualifiedSelector(match)}\`) in \`${pid}\`:\n\n`
-          + renderQueryResult(result, limit),
+          + renderQueryResult(capped.result, capped.totalCount),
           {
             contextGraphId: pid,
             selector: qualifiedSelector(match),
@@ -250,7 +275,16 @@ export function registerQueryCatalogTools(
               view: match.view,
               parameters: match.parameters,
             },
-            result,
+            result: capped.result,
+            resultMetadata: {
+              totalCount: capped.totalCount,
+              returnedCount: capped.result.type === 'boolean'
+                ? 1
+                : capped.result.type === 'quads'
+                  ? capped.result.quads.length
+                  : capped.result.bindings.length,
+              truncated: capped.truncated,
+            },
           },
         );
       } catch (error) {

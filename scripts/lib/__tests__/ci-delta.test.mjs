@@ -257,6 +257,14 @@ test('leaf and shared package snapshots include conservative downstream consumer
   assert.deepEqual(selectedLanes(networkSim), ['kosava_supporting']);
   assert.deepEqual(networkSim.evmScopes, []);
 
+  const localLlm = pullRequestPlan([change('packages/local-llm/src/runtime.ts')]);
+  assert.deepEqual(selectedLanes(localLlm), [
+    'bura_cli',
+    'kosava_supporting',
+    'kosava_hardhat_plugins',
+  ]);
+  assert.deepEqual(localLlm.evmScopes, []);
+
   const core = pullRequestPlan([change('packages/core/src/index.ts')]);
   assert.deepEqual(selectedLanes(core), [
     'tornado_core',

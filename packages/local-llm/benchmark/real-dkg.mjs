@@ -168,6 +168,19 @@ function callsContain(calls, name, pattern) {
   return successfulCalls(calls, name).some((call) => pattern.test(call.text));
 }
 
+function escapedPattern(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function applyPersistenceVerification(report, verification) {
+  report.persistenceVerification = verification;
+  if (!verification.pass) {
+    report.pass = false;
+    report.error ??= `Persistence verification failed: ${verification.detail || 'expected DKG state was not found'}`;
+  }
+  return report;
+}
+
 function buildPhases(options, state) {
   const target = state.target;
   return [
@@ -176,6 +189,11 @@ function buildPhases(options, state) {
       group: 'core-write',
       prompt: `Create a private DKG context graph named "Local LLM Benchmark" with the exact id ${target.graphId}. Use invite-only sharing and curators-only contribution.`,
       evaluate: ({ calls }) => hasSuccessful(calls, 'dkg_context_graph_create'),
+      verify: async () => {
+        const result = await state.mcp.callFixture('dkg_list_context_graphs', { scope: 'all' });
+        const pass = new RegExp(`\\b${escapedPattern(target.graphId)}\\b`).test(contentText(result));
+        return { pass, detail: pass ? 'Context Graph is discoverable.' : 'Created Context Graph is not discoverable.' };
+      },
       after: () => ensureContextGraph(state.mcp, target),
     },
     {
@@ -186,6 +204,12 @@ function buildPhases(options, state) {
         const names = new Set(successfulCalls(calls, 'dkg_sub_graph_create').map((call) => call.args.subGraphName));
         return names.has('model-families') && names.has('model-capabilities');
       },
+      verify: async () => {
+        const result = await state.mcp.callFixture('dkg_sub_graph_list', { projectId: target.graphId });
+        const text = contentText(result);
+        const pass = /model-families/.test(text) && /model-capabilities/.test(text);
+        return { pass, detail: pass ? 'Both subgraphs are listed.' : 'One or both subgraphs are absent.' };
+      },
       after: () => ensureSubGraphs(state.mcp, target),
     },
     {
@@ -193,6 +217,25 @@ function buildPhases(options, state) {
       group: 'core-write',
       prompt: `In DKG context graph ${target.graphId}, subgraph model-families, create knowledge asset ${target.assetName}. Add at least 10 useful RDF triples about distinct local LLM model families using stable urn: subjects, rdfs:label, rdf:type, and schema:description or schema:category, then finalize the asset. Do not share or publish it.`,
       evaluate: ({ calls }) => modelAssetLifecyclePass(calls, target, 10),
+      verify: async () => {
+        const result = await state.mcp.callFixture('dkg_knowledge_asset_query', {
+          projectId: target.graphId,
+          subGraphName: 'model-families',
+          name: target.assetName,
+        });
+        const text = contentText(result);
+        const count = Number(text.match(/(\d+) quad\(s\)/i)?.[1] ?? 0);
+        const pass = count >= 10
+          && /rdfs:label/.test(text)
+          && /rdf:type/.test(text)
+          && /schema:(?:description|category)/.test(text);
+        return {
+          pass,
+          detail: pass
+            ? `Model-authored asset persisted with ${count} quads.`
+            : `Model-authored asset persistence did not prove the requested RDF shape (${count} quads found).`,
+        };
+      },
       after: () => ensureFixtureAsset(state.mcp, target),
     },
     {
@@ -216,6 +259,24 @@ function buildPhases(options, state) {
         call.args.catalogSlug === 'local-llm-benchmark'
         && call.args.subGraph === 'model-families'
         && call.args.parameters?.some((parameter) => parameter.name === 'category')),
+      verify: async () => {
+        const result = await state.mcp.callFixture('dkg_query_catalog_list', {
+          projectId: target.graphId,
+          catalogSlug: 'local-llm-benchmark',
+        });
+        const items = Array.isArray(result.structuredContent?.items)
+          ? result.structuredContent.items
+          : [];
+        const match = items.find((item) => item.name === 'Models by category'
+          && item.subGraph === 'model-families'
+          && item.view === 'working-memory'
+          && item.parameters?.some((parameter) => parameter.name === 'category' && parameter.type === 'string'));
+        if (typeof match?.selector === 'string') state.catalogSelector = match.selector;
+        return {
+          pass: Boolean(match),
+          detail: match ? `Saved selector ${match.selector}.` : 'Saved catalog entry was not independently readable.',
+        };
+      },
       after: async () => { state.catalogSelector = await ensureCatalog(state.mcp, target); },
     },
     {
@@ -378,7 +439,18 @@ async function main() {
         error = caught;
       }
       const calls = modelCallsSince(guardedMcp, offset);
-      phases.push(phaseReport(effectivePhase, result, calls, error));
+      const report = phaseReport(effectivePhase, result, calls, error);
+      if (phase.verify) {
+        try {
+          applyPersistenceVerification(report, await phase.verify());
+        } catch (verificationError) {
+          applyPersistenceVerification(report, {
+            pass: false,
+            detail: verificationError instanceof Error ? verificationError.message : String(verificationError),
+          });
+        }
+      }
+      phases.push(report);
       if (phase.after) {
         try {
           await phase.after();

@@ -39,6 +39,7 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     const lastCall = client.queryCalls.at(-1)!;
     expect(lastCall.view).toBe('working-memory');
     expect(lastCall.includeSharedMemory).toBe(true);
+    expect(lastCall.agentAddress).toBe('peer-test');
   });
 
   it('renders CONSTRUCT quads instead of dropping graph-shaped results', async () => {
@@ -235,6 +236,7 @@ describe('F1 schema-migration sweep — no public tool exposes legacy `layer` fi
       view: 'working-memory',
     });
     for (const call of client.queryCalls) expect(call.view).toBe('working-memory');
+    for (const call of client.queryCalls) expect(call.agentAddress).toBe('peer-test');
   });
 
   it('dkg_get_entity implements working-memory plus SWM as two strict scoped reads', async () => {

@@ -4,6 +4,7 @@ import {
   modelAssetLifecyclePass,
   validateBenchmarkCall,
 } from './harness.mjs';
+import { applyPersistenceVerification } from './real-dkg.mjs';
 
 const target = {
   graphId: 'bench-1',
@@ -63,5 +64,17 @@ describe('asset lifecycle scoring', () => {
       { ...base, name: 'dkg_knowledge_asset_write', args: { name: 'models-1', quads: Array.from({ length: 10 }, () => ({})) } },
       { ...base, name: 'dkg_knowledge_asset_finalize', args: { name: 'models-1' } },
     ], target)).toBe(true);
+  });
+});
+
+describe('real-DKG persistence scoring', () => {
+  it('fails a model phase when its reported DKG mutation did not persist', () => {
+    const report = { pass: true, error: null };
+    applyPersistenceVerification(report, { pass: false, detail: 'asset missing' });
+    expect(report).toMatchObject({
+      pass: false,
+      error: 'Persistence verification failed: asset missing',
+      persistenceVerification: { pass: false, detail: 'asset missing' },
+    });
   });
 });

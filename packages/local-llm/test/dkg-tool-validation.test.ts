@@ -34,4 +34,20 @@ describe('DKG SPARQL preflight', () => {
       'SELECT ?model WHERE { ?model <rdf:type> <urn:test:Class> ; <schema:name> ?name . ?model <schema:category> ?category }',
     );
   });
+
+  it('rewrites only predicate tokens while preserving literals, IRIs, and comments byte-for-byte', () => {
+    const input = [
+      'SELECT ?s WHERE {',
+      '  ?s <schema:description> "?x rdf:type legacy; schema:name untouched" ; schema:name ?name .',
+      '  ?s schema:link <urn:example:rdf:type> .',
+      '  # ?s rdf:type <urn:comment> ; schema:name ?ignored',
+      '}',
+    ].join('\n');
+    const rewritten = rewriteCompactPredicatesForDkg(input);
+    expect(rewritten).toContain('"?x rdf:type legacy; schema:name untouched"');
+    expect(rewritten).toContain('<urn:example:rdf:type>');
+    expect(rewritten).toContain('# ?s rdf:type <urn:comment> ; schema:name ?ignored');
+    expect(rewritten).toContain('; <schema:name> ?name');
+    expect(rewritten).toContain('?s <schema:link> <urn:example:rdf:type>');
+  });
 });

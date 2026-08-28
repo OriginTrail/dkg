@@ -63,7 +63,7 @@ export const WRITE_TOOL_NAMES = [
 const KNOWN_READ_TOOLS = new Set<string>(READ_TOOL_NAMES);
 const KNOWN_WRITE_TOOLS = new Set<string>(WRITE_TOOL_NAMES);
 const DKG_SIGNAL = /\b(?:dkg|context\s+graph|sub-?graph|knowledge\s+asset|triples?|rdf|sparql|entity|provenance|verifiable\s+memory|query[-\s]+catalog|saved\s+quer(?:y|ies)|peer|wallet|inbox)\b/i;
-const STATUS_SIGNAL = /\b(?:status|health|healthy|peer|wallet|balance|joined|available|list|which)\b/i;
+const STATUS_SIGNAL = /\b(?:status|health|healthy|peers?|wallet|balances?|joined\s+(?:context\s+)?graphs?)\b/i;
 const CATALOG_SIGNAL = /\b(?:query[-\s]+catalog|saved\s+quer(?:y|ies)|catalog\s+quer(?:y|ies))\b/i;
 const WRITE_ACTION_SIGNAL = /\b(?:create|insert|add|write|update|save|publish|share|finalize|discard|delete|import|enrich|register|subscribe|send|mutate)\b/gi;
 const FOLLOW_UP_SIGNAL = /\b(?:it|its|that|those|them|their|same|previous|above|result|entity|asset|graph|query)\b/i;
@@ -74,7 +74,9 @@ export function isMutatingTool(tool: McpToolDefinition): boolean {
   if (tool.annotations?.destructiveHint === true) return true;
   if (tool.annotations?.readOnlyHint === true) return false;
   if (tool.annotations?.readOnlyHint === false) return true;
-  return /_(?:create|discard|finalize|import|publish|register|save|send|share|subscribe|write)(?:_|$)/.test(tool.name);
+  // Unknown adapter tools without MCP safety annotations fail closed. A name
+  // heuristic can miss mutations such as `partner_apply` or `admin_reset`.
+  return true;
 }
 
 function hasWriteIntent(
@@ -247,7 +249,7 @@ export function routeTools(options: {
 
   const unique = [...new Set(desired)];
   let tools = selectByNames(options.tools, unique, maxTools);
-  tools = tools.filter((tool) => allowWrite || !isMutatingTool(tool));
+  tools = tools.filter((tool) => (allowWrite && resolved === 'write') || !isMutatingTool(tool));
 
   return {
     profile: resolved,

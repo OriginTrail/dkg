@@ -137,6 +137,32 @@ describe('DkgLocalLlmRuntime', () => {
     expect(retryRequest.tools[0].function.name).toBe('dkg_query_catalog_run');
   });
 
+  it('closes an MCP tool-call turn with a tool error before requesting an argument retry', async () => {
+    const mcp = makeMcp();
+    mcp.callTool
+      .mockResolvedValueOnce({
+        isError: true,
+        content: [{ type: 'text', text: 'Invalid arguments: selector is required' }],
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Found lifecycle query.' }],
+      });
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_run', { selector: 'bad' }, 'call-bad'))
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_run', { selector: 'supply/lifecycle' }, 'call-good'))
+      .mockResolvedValueOnce(answerResponse('Lifecycle evidence returned.'));
+    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+
+    await runtime.run('Run the saved DKG query catalog query supply/lifecycle');
+
+    const retryRequest = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
+    const retryMessages = retryRequest.messages.slice(-3);
+    expect(retryMessages.map((message: { role: string }) => message.role))
+      .toEqual(['assistant', 'tool', 'user']);
+    expect(retryMessages[1]).toMatchObject({ role: 'tool', tool_call_id: 'call-bad' });
+    expect(retryMessages[1].content).toContain('Invalid arguments');
+  });
+
   it('blocks write intent before contacting the model', async () => {
     const save: McpToolDefinition = {
       name: 'dkg_query_catalog_save',
@@ -212,6 +238,28 @@ describe('DkgLocalLlmRuntime', () => {
     expect(mcp.callTool).toHaveBeenCalledTimes(2);
     const retryRequest = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
     expect(retryRequest.messages.at(-1).content).toContain('<rdf:type>');
+  });
+
+  it('preserves quoted text byte-for-byte during the compact-predicate retry', async () => {
+    const mcp = makeMcp([dkgQuery]);
+    mcp.callTool
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: '(no results)' }] })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: '| model |\n|---|\n| urn:test:item |' }] });
+    const original = 'SELECT ?model WHERE { ?model a <urn:test:Class> ; schema:description "?x rdf:type legacy; schema:name untouched" }';
+    const corrected = 'SELECT ?model WHERE { ?model <rdf:type> <urn:test:Class> ; <schema:description> "?x rdf:type legacy; schema:name untouched" }';
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(toolResponse('dkg_query', { sparql: original }))
+      .mockResolvedValueOnce(toolResponse('dkg_query', { sparql: corrected }, 'call-2'))
+      .mockResolvedValueOnce(answerResponse('Found urn:test:item.'));
+    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+
+    await runtime.run('Use DKG SPARQL to find urn:test:Class entities by their exact description');
+
+    expect(mcp.callTool).toHaveBeenNthCalledWith(2, {
+      name: 'dkg_query',
+      arguments: { sparql: corrected },
+    });
+    expect(corrected).toContain('"?x rdf:type legacy; schema:name untouched"');
   });
 
   it('lets one duplicate-call correction finish from existing evidence', async () => {

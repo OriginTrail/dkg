@@ -3,28 +3,54 @@ export interface DkgToolValidationResult {
   errors: string[];
 }
 
-function maskStringsAndIris(value: string): { masked: string; unterminated: boolean } {
+function maskStringsIrisAndComments(value: string): { masked: string; unterminated: boolean } {
   let masked = '';
   let quote: '"' | "'" | undefined;
+  let tripleQuoted = false;
   let inIri = false;
+  let inComment = false;
   let escaped = false;
   for (let index = 0; index < value.length; index++) {
     const character = value[index];
+    if (inComment) {
+      if (character === '\n' || character === '\r') {
+        inComment = false;
+        masked += character;
+      } else {
+        masked += ' ';
+      }
+      continue;
+    }
     if (quote) {
-      masked += ' ';
+      if (tripleQuoted && value.slice(index, index + 3) === quote.repeat(3)) {
+        masked += quote.repeat(3);
+        index += 2;
+        quote = undefined;
+        tripleQuoted = false;
+        escaped = false;
+        continue;
+      }
+      masked += character === quote && !tripleQuoted && !escaped ? character : ' ';
       if (escaped) escaped = false;
       else if (character === '\\') escaped = true;
-      else if (character === quote) quote = undefined;
+      else if (character === quote && !tripleQuoted) quote = undefined;
       continue;
     }
     if (inIri) {
-      masked += ' ';
+      masked += character === '>' ? '>' : ' ';
       if (character === '>') inIri = false;
+      continue;
+    }
+    if (character === '#') {
+      inComment = true;
+      masked += ' ';
       continue;
     }
     if (character === '"' || character === "'") {
       quote = character;
-      masked += ' ';
+      tripleQuoted = value.slice(index, index + 3) === character.repeat(3);
+      masked += tripleQuoted ? character.repeat(3) : character;
+      if (tripleQuoted) index += 2;
       continue;
     }
     if (character === '<') {
@@ -32,7 +58,7 @@ function maskStringsAndIris(value: string): { masked: string; unterminated: bool
       const candidate = closing >= 0 ? value.slice(index + 1, closing) : '';
       if (candidate && !/\s/.test(candidate)) {
         inIri = true;
-        masked += ' ';
+        masked += '<';
         continue;
       }
     }
@@ -68,7 +94,7 @@ export function validateSparqlForDkg(value: unknown): DkgToolValidationResult {
       .map((match) => match[1].toLowerCase()),
   );
   const withoutPrefixes = sparql.replace(/^(?:\s*PREFIX\s+[^\s:]*:\s*<[^>]+>\s*)+/i, '');
-  const { masked, unterminated } = maskStringsAndIris(withoutPrefixes);
+  const { masked, unterminated } = maskStringsIrisAndComments(withoutPrefixes);
   if (unterminated) errors.push('close the unterminated string literal or IRI');
   if (!/^(?:\s*)(?:SELECT|ASK|CONSTRUCT)\b/i.test(masked)) {
     errors.push('query must start with SELECT, ASK, or CONSTRUCT');
@@ -91,7 +117,7 @@ export function validateSparqlForDkg(value: unknown): DkgToolValidationResult {
   // Prefixed names (schema:name) are valid. Absolute identifiers copied from
   // DKG evidence (urn:..., did:..., http://...) are not prefixed names and
   // must be enclosed in <...> when used as SPARQL terms.
-  const bareAbsolute = masked.match(/\b(urn|https?|did|ipfs|ipns|tag|mailto):[^\s;,.(){}\[\]<>]+/i);
+  const bareAbsolute = masked.match(/\b(urn|https?|did|ipfs|ipns|tag|mailto):[^\s;,.(){}[\]<>]+/i);
   if (bareAbsolute && !declaredPrefixes.has(bareAbsolute[1].toLowerCase())) {
     errors.push(`wrap absolute IRI ${bareAbsolute[0]} in angle brackets`);
   }
@@ -118,10 +144,26 @@ export function validateDkgToolCall(
 export function rewriteCompactPredicatesForDkg(sparql: string): string {
   const subject = String.raw`(?:\?[A-Za-z_][A-Za-z0-9_]*|<[^>]+>|_:[A-Za-z][A-Za-z0-9_-]*)`;
   const predicateAnchor = String.raw`(?:${subject}\s+|;\s*)`;
-  return sparql
-    .replace(new RegExp(`(${predicateAnchor})a(\\s+)`, 'gi'), '$1<rdf:type>$2')
-    .replace(
-      new RegExp(`(${predicateAnchor})((?:rdf|rdfs|schema):[A-Za-z_][A-Za-z0-9_.-]*)(\\s+)`, 'gi'),
-      '$1<$2>$3',
+  const { masked, unterminated } = maskStringsIrisAndComments(sparql);
+  if (unterminated) return sparql;
+  const edits: Array<{ start: number; end: number; value: string }> = [];
+  const shorthand = new RegExp(`(${predicateAnchor})a(\\s+)`, 'gi');
+  for (const match of masked.matchAll(shorthand)) {
+    const start = (match.index ?? 0) + match[1].length;
+    edits.push({ start, end: start + 1, value: '<rdf:type>' });
+  }
+  const compact = new RegExp(
+    `(${predicateAnchor})((?:rdf|rdfs|schema):[A-Za-z_][A-Za-z0-9_.-]*)(\\s+)`,
+    'gi',
+  );
+  for (const match of masked.matchAll(compact)) {
+    const start = (match.index ?? 0) + match[1].length;
+    edits.push({ start, end: start + match[2].length, value: `<${match[2]}>` });
+  }
+  return edits
+    .sort((left, right) => right.start - left.start)
+    .reduce(
+      (rewritten, edit) => rewritten.slice(0, edit.start) + edit.value + rewritten.slice(edit.end),
+      sparql,
     );
 }

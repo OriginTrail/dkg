@@ -148,6 +148,53 @@ describe('tool router', () => {
     })).toBe(true);
   });
 
+  it('fails closed for unknown adapter tools without read-only annotations', () => {
+    expect(isMutatingTool({
+      name: 'partner_apply',
+      inputSchema: {},
+    })).toBe(true);
+  });
+
+  it('never exposes mutation tools on a read route even when writes are enabled globally', () => {
+    const route = routeTools({
+      prompt: 'Trace configuration 748387 through its lifecycle',
+      tools: [
+        ...surface,
+        {
+          name: 'partner_trace_configuration',
+          inputSchema: { type: 'object' },
+          annotations: { readOnlyHint: true },
+        },
+        {
+          name: 'partner_apply_configuration',
+          inputSchema: { type: 'object' },
+          annotations: { readOnlyHint: false },
+        },
+      ],
+      allowWrite: true,
+      domainKeywords: ['configuration', 'lifecycle'],
+      additionalReadToolNames: ['partner_trace_configuration'],
+      additionalToolNames: ['partner_apply_configuration'],
+    });
+    expect(route.profile).toBe('read');
+    expect(route.tools.map((tool) => tool.name)).toContain('partner_trace_configuration');
+    expect(route.tools.map((tool) => tool.name)).not.toContain('partner_apply_configuration');
+  });
+
+  it('does not misroute general list/which entity questions to node status', () => {
+    for (const prompt of [
+      'List DKG entities whose rdf:type is urn:test:Model',
+      'Which DKG knowledge assets mention configuration 748387?',
+    ]) {
+      const route = routeTools({ prompt, tools: surface });
+      expect(route.profile).toBe('read');
+    }
+    expect(routeTools({
+      prompt: 'What is the DKG node status?',
+      tools: surface,
+    }).profile).toBe('status');
+  });
+
   it('routes a partner-domain prompt to profile tools without hard-coded domain words', () => {
     const partnerTools: McpToolDefinition[] = [{
       name: 'partner_trace_configuration',

@@ -31,6 +31,7 @@ import {
   type EntitySource,
 } from './sparql.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './tools/context-graph-description.js';
+import { resolveWorkingMemoryAgentAddress } from './tools/working-memory-identity.js';
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -225,12 +226,16 @@ export function registerReadTools(
       if (!pid) return projectErr();
       const fullSparql = sparql.startsWith('PREFIX') ? sparql : `${PREFIXES}\n${sparql}`;
       try {
+        const agentAddress = view === 'working-memory'
+          ? await resolveWorkingMemoryAgentAddress(client)
+          : undefined;
         const result = await client.query({
           sparql: fullSparql,
           contextGraphId: pid,
           subGraphName,
           view,
           includeSharedMemory,
+          agentAddress,
         });
         if (result.type === 'boolean') {
           return ok(String(result.value));
@@ -324,6 +329,9 @@ export function registerReadTools(
             ]
           : [{ includeSharedMemory: includeSharedMemory ?? true }];
       try {
+        const agentAddress = scopes.some((scope) => 'view' in scope && scope.view === 'working-memory')
+          ? await resolveWorkingMemoryAgentAddress(client)
+          : undefined;
         // NOTE: no explicit `GRAPH ?g { … }` wrapper here — the query
         // engine injects one that scopes to the requested CG. Adding our
         // own skips that scoping and lets results bleed across other
@@ -336,6 +344,7 @@ SELECT DISTINCT ?p ?o WHERE { <${uri}> ?p ?o }`,
               contextGraphId: pid,
               subGraphName,
               ...scope,
+              ...('view' in scope && scope.view === 'working-memory' ? { agentAddress } : {}),
             }),
             client.query({
               sparql: `${PREFIXES}
@@ -343,6 +352,7 @@ SELECT DISTINCT ?s ?p WHERE { ?s ?p <${uri}> } LIMIT 50`,
               contextGraphId: pid,
               subGraphName,
               ...scope,
+              ...('view' in scope && scope.view === 'working-memory' ? { agentAddress } : {}),
             }),
           ])));
         const dedupeBindings = <T>(bindings: T[]): T[] =>

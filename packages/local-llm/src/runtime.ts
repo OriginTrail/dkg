@@ -198,9 +198,23 @@ function assistantToolMessage(toolCall: ToolCall): ChatMessage {
 }
 
 export function normalizeFinalAnswer(value: string): string {
-  return value
+  const withoutControls = [...value]
+    .filter((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return !(
+        codePoint <= 0x08
+        || codePoint === 0x0b
+        || codePoint === 0x0c
+        || (codePoint >= 0x0e && codePoint <= 0x1f)
+        || codePoint === 0x7f
+        || (codePoint >= 0x200b && codePoint <= 0x200d)
+        || codePoint === 0x2060
+        || codePoint === 0xfeff
+      );
+    })
+    .join('');
+  return withoutControls
     .replace(/<\|[^|>]{1,80}\|>/g, '')
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200D\u2060\uFEFF]/g, '')
     .split('\n')
     .filter((line) => !/^\s*[\p{Extended_Pictographic}\p{Emoji_Presentation}\uFE0F\s]{2,}\s*$/u.test(line))
     .join('\n')
@@ -552,8 +566,8 @@ export class DkgLocalLlmRuntime {
         await scheduleRepair(`The model requested unavailable tool '${toolCall.function.name}'.`, signature);
         continue;
       }
-      if (isMutatingTool(tool) && !this.allowWrite) {
-        throw new Error(`Blocked unauthorized mutation tool call: ${tool.name}`);
+      if (isMutatingTool(tool) && (!this.allowWrite || route.profile !== 'write')) {
+        throw new Error(`Blocked mutation tool call outside an authorized write route: ${tool.name}`);
       }
       const parsed = parseAndValidateToolArguments(toolCall.function.arguments, tool);
       if (!parsed.ok) {
@@ -625,6 +639,17 @@ export class DkgLocalLlmRuntime {
       await this.trace.write(`TOOL RESULT ${executed.length + 1}`, result);
       const resultText = toolResultText(result);
       if (result.isError) {
+        // Preserve the OpenAI tool-call protocol before asking the model to
+        // repair its arguments: every assistant tool_call must be followed by
+        // a tool-role result with the matching id.
+        messages.push({
+          role: 'tool',
+          tool_call_id: callId,
+          content: JSON.stringify({
+            isError: true,
+            content: [{ type: 'text', text: compactText(resultText || 'unknown MCP error', this.maxEvidenceChars) }],
+          }),
+        });
         if (ARGUMENT_ERROR.test(resultText)) {
           await scheduleRepair(`MCP rejected arguments for ${tool.name}: ${resultText}`, signature, tool.name);
           continue;

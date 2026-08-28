@@ -952,6 +952,7 @@ jobs:
           pnpm \
             --filter @origintrail-official/dkg-epcis \
             --filter @origintrail-official/dkg-mcp \
+            --filter @origintrail-official/dkg-local-llm \
             --filter @origintrail-official/dkg-network-sim \
             --filter @origintrail-official/dkg-graph-viz \
             --filter @origintrail-official/dkg-okf \

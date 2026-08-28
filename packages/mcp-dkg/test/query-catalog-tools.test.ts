@@ -150,6 +150,59 @@ describe('query-catalog MCP tools', () => {
     expect(result.content[0].text).toContain('urn:commitment:42');
   });
 
+  it('supplies the daemon identity when a saved query targets Working Memory', async () => {
+    const client = new FakeClient({
+      readQueryCatalog: async () => catalogResponse([
+        savedQuery({ view: 'working-memory' }),
+      ]),
+      query: async () => ({ type: 'bindings' as const, bindings: [] }),
+    });
+    client.agentIdentity = {
+      peerId: 'peer-fallback',
+      agentAddress: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
+    };
+    const server = new FakeServer();
+    registerQueryCatalogTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+
+    const result = await server.call('dkg_query_catalog_run', {
+      selector: 'digital-twin/kamstrup-lifecycle/configuration-commitments-1',
+      parameters: { configurationId: '748387' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(client.queryCalls[0]).toMatchObject({
+      view: 'working-memory',
+      agentAddress: '0x1111111111111111111111111111111111111111',
+    });
+  });
+
+  it('applies result limits to authoritative structured bindings as well as rendered text', async () => {
+    const client = new FakeClient({
+      readQueryCatalog: async () => catalogResponse([savedQuery()]),
+      query: async () => ({
+        type: 'bindings' as const,
+        bindings: [
+          { commitment: { type: 'uri' as const, value: 'urn:commitment:1' } },
+          { commitment: { type: 'uri' as const, value: 'urn:commitment:2' } },
+        ],
+      }),
+    });
+    const server = new FakeServer();
+    registerQueryCatalogTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+
+    const result = await server.call('dkg_query_catalog_run', {
+      selector: 'digital-twin/kamstrup-lifecycle/configuration-commitments-1',
+      parameters: { configurationId: '748387' },
+      limit: 1,
+    });
+
+    expect(result.content[0].text).toContain('showing 1 of 2');
+    expect(result.structuredContent).toMatchObject({
+      result: { type: 'bindings', bindings: [{ commitment: { value: 'urn:commitment:1' } }] },
+      resultMetadata: { totalCount: 2, returnedCount: 1, truncated: true },
+    });
+  });
+
   it('fails closed on an ambiguous unqualified selector', async () => {
     const client = new FakeClient({
       readQueryCatalog: async () => catalogResponse([
