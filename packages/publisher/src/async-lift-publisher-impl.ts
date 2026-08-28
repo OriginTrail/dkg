@@ -495,6 +495,9 @@ export class TripleStoreAsyncLiftPublisher
   /** r8 (3877817604) — contained retries of the write/release window before escalating. */
   private static readonly EXECUTOR_HINT_TRANSITION_RETRY_LIMIT = 3;
   private executorHintPassOffset = 0;
+  /** r15 (3878098525) — which lane leads the next pass; alternates so an overrun in one lane
+   * cannot repeatedly consume the other lane's opportunity. Hints lead first for latency. */
+  private hintLaneLeads = true;
   /** Poked when a tx-bearing job stops being executor-owned; see setReconciliationDemandListener. */
   /** The one atomically-attached scheduling owner; see attachScheduler. */
   private schedulerListener?: {
@@ -1980,58 +1983,82 @@ export class TripleStoreAsyncLiftPublisher
     const settledLive: string[] = [];
     const passBudgetMs = Math.max(0, this.chainProofDispatchTimeBudgetMs);
     const halfBudgetMs = Math.max(1, Math.floor(passBudgetMs / 2));
-    const passStartedAt = Date.now();
-    // GH#2359 item 2 — hinted executor-owned jobs are proven and wallet-released FIRST: the
-    // whole point of the hint is to free the wallet before the executor tail (and this walk)
-    // finish. Unresolved hinted proofs hold the active cadence below.
-    //
-    // r5 (3877726336) — first, but never ALL of the budget: the hint lane runs under its own
-    // half-budget sub-deadline, so one perpetually hanging hinted lookup cannot consume every
-    // pass and starve ordinary live transactions.
+    // r15 (3878098525) — ONE absolute pass deadline: the configured budget is the operator's
+    // latency ceiling for recovery work, and no lane may LAUNCH chain reads past it (an
+    // already-started durable transition still completes — it is never aborted mid-write —
+    // but its overrun ends the pass rather than opening a fresh window, the r13 shape this
+    // replaces). Fairness across passes comes from alternation instead: the leading lane runs
+    // under a half-budget sub-deadline, the trailing lane gets whatever remains, and the lead
+    // alternates every pass — so an overrun costs the other lane at most one pass, with its
+    // candidates reported pending for the active cadence to retry.
     let hintedUnresolved = 0;
-    const hintDeadline = new AbortController();
-    const hintTimer = setTimeout(() => hintDeadline.abort(), halfBudgetMs);
-    try {
-      hintedUnresolved = await this.releaseWalletsOnExecutorProofHints(inventory, hintDeadline.signal);
-    } finally {
-      clearTimeout(hintTimer);
-      hintDeadline.abort();
-    }
-    // r13 (3878037023) — the walk's budget is measured from ITS OWN start and is never less
-    // than half the pass budget: the sub-deadline above bounds the hint lane's READS, but an
-    // already-started transition (deliberately never aborted mid-write) can overrun it, and
-    // under a shared clock that overrun would consume the ordinary lane's opportunity on every
-    // pass. The pass may then run to hint-overrun + half — bounded, and the ordinary lane's
-    // turn is unconditional.
-    const walkBudgetMs = Math.max(
-      passBudgetMs - (Date.now() - passStartedAt),
-      halfBudgetMs,
-    );
-    const walkDeadline = new AbortController();
-    const walkTimer = setTimeout(() => walkDeadline.abort(), walkBudgetMs);
-    try {
-      for (let i = 0; i < rotatedTxBearing.length; i += 1) {
-        if (walkDeadline.signal.aborted) {
-          remainingLive += rotatedTxBearing.length - i;
-          break;
-        }
-        const snapshot = rotatedTxBearing[i];
-        await this.withJobTransitionLock(snapshot.jobId, async () => {
-          const current = await this.getStatus(snapshot.jobId);
-          // Settled or re-owned since the pre-filter: no longer this pass's remaining work.
-          if (!current || (current.status !== 'broadcast' && current.status !== 'included')) return;
-          if (this.activeProcessJobIds.has(current.jobId)) return;
-          if (await this.jobHandlerFor(current.request).recoverInterrupted(current, { signal: walkDeadline.signal })) {
-            reconciled += 1;
-            settledLive.push(current.jobId);
-          } else {
-            remainingLive += 1;
+    const passDeadline = new AbortController();
+    const passTimer = setTimeout(() => passDeadline.abort(), passBudgetMs);
+    const leadSignal = (): { signal: AbortSignal; dispose: () => void } => {
+      const lead = new AbortController();
+      const leadTimer = setTimeout(() => lead.abort(), halfBudgetMs);
+      const onPassAbort = () => lead.abort();
+      passDeadline.signal.addEventListener('abort', onPassAbort, { once: true });
+      return {
+        signal: lead.signal,
+        dispose: () => {
+          clearTimeout(leadTimer);
+          passDeadline.signal.removeEventListener('abort', onPassAbort);
+          lead.abort();
+        },
+      };
+    };
+    const runHintLane = async (leading: boolean): Promise<void> => {
+      const bounded = leading ? leadSignal() : undefined;
+      try {
+        hintedUnresolved = await this.releaseWalletsOnExecutorProofHints(
+          inventory,
+          bounded?.signal ?? passDeadline.signal,
+        );
+      } finally {
+        bounded?.dispose();
+      }
+    };
+    const runWalkLane = async (leading: boolean): Promise<void> => {
+      const bounded = leading ? leadSignal() : undefined;
+      const signal = bounded?.signal ?? passDeadline.signal;
+      try {
+        for (let i = 0; i < rotatedTxBearing.length; i += 1) {
+          if (signal.aborted) {
+            remainingLive += rotatedTxBearing.length - i;
+            break;
           }
-        });
+          const snapshot = rotatedTxBearing[i];
+          await this.withJobTransitionLock(snapshot.jobId, async () => {
+            const current = await this.getStatus(snapshot.jobId);
+            // Settled or re-owned since the pre-filter: no longer this pass's remaining work.
+            if (!current || (current.status !== 'broadcast' && current.status !== 'included')) return;
+            if (this.activeProcessJobIds.has(current.jobId)) return;
+            if (await this.jobHandlerFor(current.request).recoverInterrupted(current, { signal })) {
+              reconciled += 1;
+              settledLive.push(current.jobId);
+            } else {
+              remainingLive += 1;
+            }
+          });
+        }
+      } finally {
+        bounded?.dispose();
+      }
+    };
+    const hintLeads = this.hintLaneLeads;
+    this.hintLaneLeads = !this.hintLaneLeads;
+    try {
+      if (hintLeads) {
+        await runHintLane(true);
+        await runWalkLane(false);
+      } else {
+        await runWalkLane(true);
+        await runHintLane(false);
       }
     } finally {
-      clearTimeout(walkTimer);
-      walkDeadline.abort();
+      clearTimeout(passTimer);
+      passDeadline.abort();
     }
 
     // The dispatcher's view: the shared snapshot with this pass's own settlements made current

@@ -144,6 +144,64 @@ describe('async-lift receipt-hint lane', () => {
     }
   }
 
+  /**
+   * r15 (3878098531) — the two-wallet variant: two jobs on two wallets, both detached, with
+   * per-row control over which executions fire hints (parked) versus fail immediately
+   * (ordinary live broadcasts owned by the normal walk). Rows keep only their distinguishing
+   * resolvers, budgets, and injected store behavior.
+   */
+  async function parkedTwoWalletScenario(options: {
+    hinted?: 'both' | 'first';
+    config?: Partial<AsyncLiftPublisherConfig>;
+  } = {}) {
+    let executions = 0;
+    let hintedCount = 0;
+    const tails: Array<() => void> = [];
+    const publisher = createPublisher({
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => recoveredResolution(),
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
+      ...options.config,
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          executions += 1;
+          // Captured at entry: the shared counter moves while this execution sleeps.
+          const myExecution = executions;
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            operationKind: 'create',
+          });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          if (options.hinted !== 'first' || myExecution === 1) {
+            input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+            hintedCount += 1;
+            await new Promise<void>((resolve) => { tails.push(resolve); });
+          }
+          throw new Error('post-write-ahead failure: recovery owns the record from here');
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    await stageKnowledgeAssetShareSnapshot({ store, graphManager, shareOperationId: 'share-op-2' });
+    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const jobB = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ name: 'albums-next', shareOperationId: 'share-op-2' }),
+    );
+    await publisher.processNext('wallet-1');
+    await publisher.processNext('wallet-2');
+    const expectedHints = options.hinted === 'first' ? 1 : 2;
+    await waitForCondition(() => hintedCount === expectedHints, 'executors must fire their hints');
+    await waitForCondition(() => executions === 2, 'both executors must run');
+    return {
+      publisher,
+      jobA,
+      jobB,
+      releaseTails: () => { for (const release of tails) release(); },
+    };
+  }
+
   it('frees the wallet through the receipt hint while the executor tail is still running', async () => {
     // GH#2359 item 2 - the headline discriminator. The executor confirms its receipt (fires
     // onPublishConfirmed) and then PARKS in its local post-receipt tail. Without the hint lane,
@@ -382,52 +440,24 @@ describe('async-lift receipt-hint lane', () => {
   });
 
   it('rotates past a budget-consuming hinted proof so a second hinted wallet is released', async () => {
-    // r4 (3877669618 + 3877669330) - two wallets, two detached hinted jobs. Wallet-1's proof
-    // lookup never settles and ignores the signal, so it consumes the whole (short) pass
-    // budget. Pass 1 starts at wallet-1, times out, and must still report the SKIPPED hinted
-    // candidate as pending work (the truncation fix) - otherwise the coalesced wake is consumed
-    // and the runner idles with hinted wallets locked. Pass 2's rotation starts at wallet-2,
-    // which proves, stamps included, and releases ONLY its wallet.
-    let hinted = 0;
-    const tails: Array<() => void> = [];
-    const publisher = createPublisher({
-      chainProofDispatchTimeBudgetMs: 100,
-      detachReceiptReconciliation: true,
-      chainProofResolver: (lookup: { walletId: string }) => (lookup.walletId === 'wallet-1'
-        ? new Promise(() => {})
-        : Promise.resolve(recoveredResolution())),
-      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
-      knowledgeAssetVmPublishHandler: {
-        execute: async (input) => {
-          await input.publishOptions.onBeforeBroadcast?.({
-            txHash: KA_VM_EXECUTOR_TX_HASH,
-            operationKind: 'create',
-          });
-          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
-          hinted += 1;
-          await new Promise<void>((resolve) => { tails.push(resolve); });
-        },
-        finalizeRecovered: async () => {},
+    // r4 (3877669618 + 3877669330) - two detached hinted jobs; wallet-1's proof never settles
+    // and ignores the signal, consuming the leading lane's sub-budget. Pass 1 must still
+    // report the skipped hinted candidate as pending; a later hint-leading pass rotates to
+    // wallet-2, proves it, stamps included, and releases ONLY its wallet.
+    const { publisher, jobA, jobB, releaseTails } = await parkedTwoWalletScenario({
+      config: {
+        chainProofDispatchTimeBudgetMs: 100,
+        chainProofResolver: (lookup: { walletId: string }) => (lookup.walletId === 'wallet-1'
+          ? new Promise(() => {})
+          : Promise.resolve(recoveredResolution())),
       },
     });
-    await stageShareSnapshot();
-    await stageKnowledgeAssetShareSnapshot({ store, graphManager, shareOperationId: 'share-op-2' });
-    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
-    const jobB = await publisher.enqueueKnowledgeAssetVmPublish(
-      kaVmPublishRequest({ name: 'albums-next', shareOperationId: 'share-op-2' }),
-    );
-    await publisher.processNext('wallet-1');
-    await publisher.processNext('wallet-2');
-    await waitForCondition(() => hinted === 2, 'both executors must fire their hints');
-
     try {
-      // Pass 1: wallet-1 consumes the budget; the skipped wallet-2 hint keeps the pass pending.
+      // Pass 1 (hints lead): wallet-1 eats the sub-budget; skipped wallet-2 stays pending.
       expect(await publisher.reconciliationScheduling.reconcile())
         .toEqual({ reconciled: 0, pendingWork: true });
-
-      // Pass 2: rotation starts at wallet-2 - proven, stamped, released; wallet-1 untouched.
+      // Pass 2 (walk leads - both jobs executor-owned, so it is empty and fast); the hint
+      // lane then rotates to wallet-2 and releases it.
       expect(await publisher.reconciliationScheduling.reconcile())
         .toEqual({ reconciled: 0, pendingWork: true });
       expect((await publisher.getStatus(jobB))?.status).toBe('included');
@@ -435,52 +465,19 @@ describe('async-lift receipt-hint lane', () => {
       expect((await publisher.getStatus(jobA))?.status).toBe('broadcast');
       await expectWalletLock('wallet-1', 'held');
     } finally {
-      for (const release of tails) release();
+      releaseTails();
     }
   });
 
   it('keeps a deadline-skipped hinted candidate pending when the budget went to a successful release', async () => {
-    // r4 (3877669330) - the sharp version of deadline truncation: candidate A's proof and
-    // release SUCCEED, but its lock deletion is slow enough that the pass budget expires while
-    // it completes (the release path deliberately never re-checks the signal mid-transition).
-    // A therefore contributes nothing to the unresolved count, and candidate B is cut off by
-    // the abort. Without the truncation accounting the pass would report pendingWork:false,
-    // consuming the coalesced wake while B's wallet stays locked behind a parked executor.
-    let hinted = 0;
-    const tails: Array<() => void> = [];
-    const publisher = createPublisher({
-      chainProofDispatchTimeBudgetMs: 150,
-      detachReceiptReconciliation: true,
-      chainProofResolver: async () => (
-        recoveredResolution()),
-      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
-      knowledgeAssetVmPublishHandler: {
-        execute: async (input) => {
-          await input.publishOptions.onBeforeBroadcast?.({
-            txHash: KA_VM_EXECUTOR_TX_HASH,
-            operationKind: 'create',
-          });
-          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
-          hinted += 1;
-          await new Promise<void>((resolve) => { tails.push(resolve); });
-        },
-        finalizeRecovered: async () => {},
-      },
+    // r4 (3877669330) - candidate A's proof and release SUCCEED, but the lock deletion overruns
+    // the whole pass budget (the release path never re-checks the signal mid-transition). A
+    // contributes nothing to the unresolved count, candidate B is cut off by the absolute pass
+    // deadline - only the truncation accounting keeps B pending, so the coalesced wake is not
+    // consumed with B's wallet still locked.
+    const { publisher, jobA, jobB, releaseTails } = await parkedTwoWalletScenario({
+      config: { chainProofDispatchTimeBudgetMs: 150 },
     });
-    await stageShareSnapshot();
-    await stageKnowledgeAssetShareSnapshot({ store, graphManager, shareOperationId: 'share-op-2' });
-    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
-    const jobB = await publisher.enqueueKnowledgeAssetVmPublish(
-      kaVmPublishRequest({ name: 'albums-next', shareOperationId: 'share-op-2' }),
-    );
-    await publisher.processNext('wallet-1');
-    await publisher.processNext('wallet-2');
-    await waitForCondition(() => hinted === 2, 'both executors must fire their hints');
-
-    // Installed AFTER the claims: wallet-1's lock deletion (the release) completes
-    // successfully but takes longer than the pass budget.
     const originalDelete = store.deleteByPattern.bind(store);
     let slowNextLockDelete = true;
     (store as unknown as { deleteByPattern: typeof originalDelete }).deleteByPattern =
@@ -491,9 +488,7 @@ describe('async-lift receipt-hint lane', () => {
         }
         return originalDelete(pattern as never);
       };
-
     try {
-      // A releases (slowly, past the deadline); B is cut off. The pass must stay pending for B.
       expect(await publisher.reconciliationScheduling.reconcile())
         .toEqual({ reconciled: 0, pendingWork: true });
       expect((await publisher.getStatus(jobA))?.status).toBe('included');
@@ -501,68 +496,34 @@ describe('async-lift receipt-hint lane', () => {
       expect((await publisher.getStatus(jobB))?.status).toBe('broadcast');
       await expectWalletLock('wallet-2', 'held');
 
-      // The next pass reaches B and releases it.
+      // Pass 2 (walk leads, empty) reaches B through the hint lane and releases it.
       await publisher.reconcileTransactions();
       expect((await publisher.getStatus(jobB))?.status).toBe('included');
       await expectWalletLock('wallet-2', 'released');
     } finally {
-      for (const release of tails) release();
+      releaseTails();
     }
   });
 
   it('a hanging hinted proof cannot starve an ordinary broadcast job out of the pass', async () => {
-    // r5 (3877726336) - the hint lane runs first but under a half-budget sub-deadline: hinted
-    // job A's proof never settles and ignores the signal, ordinary broadcast job B (no hint,
-    // executor settled) has instant resolvers. One pass must still reconcile B - the walk
-    // always keeps at least half the budget - while A stays pending.
-    let hinted = false;
-    const tails: Array<() => void> = [];
-    let executions = 0;
-    const publisher = createPublisher({
-      chainProofDispatchTimeBudgetMs: 300,
-      detachReceiptReconciliation: true,
-      chainProofResolver: (lookup: { walletId: string }) => (lookup.walletId === 'wallet-1'
-        ? new Promise(() => {})
-        : Promise.resolve(recoveredResolution())),
-      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
-      knowledgeAssetVmPublishHandler: {
-        execute: async (input) => {
-          executions += 1;
-          // Captured at entry: the shared counter moves while this execution sleeps.
-          const myExecution = executions;
-          await input.publishOptions.onBeforeBroadcast?.({
-            txHash: KA_VM_EXECUTOR_TX_HASH,
-            operationKind: 'create',
-          });
-          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          if (myExecution === 1) {
-            // Job A: hinted, executor tail parked - the hint lane's candidate.
-            input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
-            hinted = true;
-            await new Promise<void>((resolve) => { tails.push(resolve); });
-          }
-          // Job B: NO hint; the executor fails post-write-ahead, settling immediately, so B is
-          // an ordinary live broadcast owned by the normal reconciliation walk.
-          throw new Error('post-write-ahead failure: recovery owns the record from here');
+    // r5 (3877726336) - hinted job A's proof never settles and ignores the signal; ordinary
+    // broadcast job B (executor settled, small real macrotask proof) must still be proven and
+    // finalized in the SAME pass: the leading hint lane is bounded by its half-budget
+    // sub-deadline, and the trailing walk keeps the remainder.
+    const { publisher, jobA, jobB, releaseTails } = await parkedTwoWalletScenario({
+      hinted: 'first',
+      config: {
+        chainProofDispatchTimeBudgetMs: 300,
+        chainProofResolver: async (lookup: { walletId: string }) => {
+          if (lookup.walletId === 'wallet-1') return new Promise(() => {}) as never;
+          // A REAL (small) macrotask, as any RPC would pay: an in-memory instant resolver
+          // would win even a zero-budget abort race on microtasks alone.
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return recoveredResolution();
         },
-        finalizeRecovered: async () => {},
       },
     });
-    await stageShareSnapshot();
-    await stageKnowledgeAssetShareSnapshot({ store, graphManager, shareOperationId: 'share-op-2' });
-    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
-    const jobB = await publisher.enqueueKnowledgeAssetVmPublish(
-      kaVmPublishRequest({ name: 'albums-next', shareOperationId: 'share-op-2' }),
-    );
-    await publisher.processNext('wallet-1');
-    await publisher.processNext('wallet-2');
-    await waitForCondition(() => hinted, 'the first executor must fire its hint');
-    await waitForCondition(() => executions === 2, 'the second executor must run');
-
     try {
-      // One pass: A's hint eats its half-budget and stays pending; B still gets proven,
-      // finalized, and its wallet released in the SAME pass.
       const outcome = await publisher.reconciliationScheduling.reconcile();
       expect(outcome.reconciled).toBeGreaterThanOrEqual(1);
       expect(outcome.pendingWork).toBe(true);
@@ -571,7 +532,7 @@ describe('async-lift receipt-hint lane', () => {
       expect((await publisher.getStatus(jobA))?.status).toBe('broadcast');
       await expectWalletLock('wallet-1', 'held');
     } finally {
-      for (const release of tails) release();
+      releaseTails();
     }
   });
 
@@ -800,59 +761,27 @@ describe('async-lift receipt-hint lane', () => {
     expect(recoveryAsks).toBe(1);
   });
 
-  it('a slow successful hinted release does not consume the ordinary walk opportunity', async () => {
-    // r13 (3878037023) - the half-budget sub-deadline bounds the hint lane's reads, but an
-    // already-started transition is deliberately never aborted mid-write: wallet-1's lock
-    // deletion succeeds SLOWLY, overrunning the whole 150ms pass budget. Ordinary broadcast
-    // job B (executor settled, instant resolvers) must still be proven and finalized in the
-    // SAME pass: the walk's budget is measured from its own start and is never below half.
-    let hinted = 0;
-    const tails: Array<() => void> = [];
-    let executions = 0;
-    const publisher = createPublisher({
-      chainProofDispatchTimeBudgetMs: 150,
-      detachReceiptReconciliation: true,
-      chainProofResolver: async (lookup: { walletId: string }) => {
-        // Job B's proof pays a REAL (small) macrotask, as any RPC would: an in-memory instant
-        // resolver would win even a zero-budget abort race on microtasks alone and mask a
-        // remaining-budget-only regression (the round-2 lesson, applied here deliberately).
-        if (lookup.walletId === 'wallet-2') await new Promise((resolve) => setTimeout(resolve, 5));
-        return recoveredResolution();
-      },
-      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
-      knowledgeAssetVmPublishHandler: {
-        execute: async (input) => {
-          executions += 1;
-          const myExecution = executions;
-          await input.publishOptions.onBeforeBroadcast?.({
-            txHash: KA_VM_EXECUTOR_TX_HASH,
-            operationKind: 'create',
-          });
-          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          if (myExecution === 1) {
-            input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
-            hinted += 1;
-            await new Promise<void>((resolve) => { tails.push(resolve); });
+  it('a hint-transition overrun ends the pass instead of launching post-deadline proof reads', async () => {
+    // r15 (3878098525) - the configured budget is an ABSOLUTE ceiling on launching recovery
+    // reads. Wallet-1's lock deletion succeeds but overruns the whole 150ms pass: the
+    // already-started transition completes (never aborted mid-write), ordinary job B is NOT
+    // probed in that pass (zero proof asks - no fresh window after the deadline, the r13 shape
+    // this replaces), and B is reported pending. The next pass, with the walk leading, probes
+    // and finalizes B.
+    let ordinaryAsks = 0;
+    const { publisher, jobA, jobB, releaseTails } = await parkedTwoWalletScenario({
+      hinted: 'first',
+      config: {
+        chainProofDispatchTimeBudgetMs: 150,
+        chainProofResolver: async (lookup: { walletId: string }) => {
+          if (lookup.walletId === 'wallet-2') {
+            ordinaryAsks += 1;
+            await new Promise((resolve) => setTimeout(resolve, 5));
           }
-          throw new Error('post-write-ahead failure: recovery owns the record from here');
+          return recoveredResolution();
         },
-        finalizeRecovered: async () => {},
       },
     });
-    await stageShareSnapshot();
-    await stageKnowledgeAssetShareSnapshot({ store, graphManager, shareOperationId: 'share-op-2' });
-    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
-    const jobB = await publisher.enqueueKnowledgeAssetVmPublish(
-      kaVmPublishRequest({ name: 'albums-next', shareOperationId: 'share-op-2' }),
-    );
-    await publisher.processNext('wallet-1');
-    await publisher.processNext('wallet-2');
-    await waitForCondition(() => hinted === 1, 'the first executor must fire its hint');
-    await waitForCondition(() => executions === 2, 'the second executor must run');
-
-    // Installed after the claims: wallet-1's release succeeds but takes longer than the
-    // ENTIRE pass budget.
     const originalDelete = store.deleteByPattern.bind(store);
     let slowNextLockDelete = true;
     (store as unknown as { deleteByPattern: typeof originalDelete }).deleteByPattern =
@@ -863,17 +792,23 @@ describe('async-lift receipt-hint lane', () => {
         }
         return originalDelete(pattern as never);
       };
-
     try {
       const outcome = await publisher.reconciliationScheduling.reconcile();
-      // A released (slowly) AND B fully reconciled in the same pass.
-      expect(outcome.reconciled).toBeGreaterThanOrEqual(1);
+      // A's release completed (slowly); B was never probed after the deadline and is pending.
       expect((await publisher.getStatus(jobA))?.status).toBe('included');
       await expectWalletLock('wallet-1', 'released');
+      expect(ordinaryAsks).toBe(0);
+      expect(outcome.pendingWork).toBe(true);
+      expect((await publisher.getStatus(jobB))?.status).toBe('broadcast');
+
+      // Pass 2: the walk leads and B is proven and finalized within the normal budget.
+      const outcome2 = await publisher.reconciliationScheduling.reconcile();
+      expect(outcome2.reconciled).toBeGreaterThanOrEqual(1);
+      expect(ordinaryAsks).toBe(1);
       expect((await publisher.getStatus(jobB))?.status).toBe('finalized');
       await expectWalletLock('wallet-2', 'released');
     } finally {
-      for (const release of tails) release();
+      releaseTails();
     }
   });
 
