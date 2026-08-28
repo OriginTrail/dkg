@@ -220,6 +220,7 @@ const blockedRfc64Modules = [
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
   'public-catalog-issuer-delegation-v1.js',
+  'public-catalog-successor-asset-v1.js',
   'public-catalog-successor-producer-v1.js',
   'public-catalog-transport-v1.js',
   'recoverable-author-attestation-v1.js',

@@ -6,8 +6,8 @@
  * stable synchronization invariant.
  *
  * The supported vertical slice is intentionally narrow: one successor head,
- * one bucket with 1..1,024 rows, the root context-graph lane, and complete
- * bundles for every signed row.
+ * zero or one bucket with 0..1,024 rows, the root context-graph lane, and
+ * complete bundles for every signed row.
  * Every network hop is RFC-64 catalog-native. Activation happens only after
  * signed head/path/bucket verification, transfer verification, canonical
  * projection verification, one atomic projection-plus-seal replace, exact
@@ -36,6 +36,7 @@ import {
   canonicalizeAuthorSealStoreRoundTripRowV1,
   computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
+  contextGraphMetaUri,
   contextGraphWorkspaceGraphUri,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   deriveAuthorCatalogScopeFromHeadV1,
@@ -121,6 +122,18 @@ const MAX_TRANSITION_GRAPH_QUADS_V1 =
 // wider than the verified projection-byte ceiling while remaining finite.
 const MAX_TRANSITION_GRAPH_NQUADS_BYTES_V1 = 256 * 1024 * 1024;
 const MAX_TRANSITION_SEAL_SUBJECT_ROWS_V1 = 15;
+
+type Rfc64BoundedSuccessorTargetV1 =
+  | Readonly<{
+    kind: 'empty';
+    rows: readonly [];
+  }>
+  | Readonly<{
+    kind: 'bucket';
+    rows: readonly AuthorCatalogRowV1[];
+    bucket: SignedAuthorCatalogBucketEnvelopeV1;
+    fetchedBucket: FetchedRfc64PublicCatalogObjectV1;
+  }>;
 
 export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
   /** Fetch-only capability; lifecycle ownership remains with the catalog service. */
@@ -816,10 +829,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       );
     }
 
-    let fetchedBucket: FetchedRfc64PublicCatalogObjectV1 | null = null;
-    let bucket: SignedAuthorCatalogBucketEnvelopeV1 | null = null;
-    if (!isEmptyTarget) {
-      fetchedBucket = await this.fetchCatalogObjectWithCacheV1(
+    let target: Rfc64BoundedSuccessorTargetV1;
+    if (isEmptyTarget) {
+      target = Object.freeze({ kind: 'empty' as const, rows: Object.freeze([] as []) });
+    } else {
+      const fetchedBucket = await this.fetchCatalogObjectWithCacheV1(
         remotePeerId,
         scope,
         AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
@@ -829,6 +843,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       if (fetchedBucket === null) {
         fail('catalog-native-receiver-not-found', 'successor catalog bucket was not found');
       }
+      let bucket: SignedAuthorCatalogBucketEnvelopeV1;
       try {
         assertSignedAuthorCatalogBucketEnvelopeV1(fetchedBucket.envelope);
         bucket = fetchedBucket.envelope;
@@ -854,8 +869,14 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         fetchedBucket,
         'verified successor bucket could not be staged for restart-safe recovery',
       );
+      target = Object.freeze({
+        kind: 'bucket' as const,
+        rows: bucket.payload.rows,
+        bucket,
+        fetchedBucket,
+      });
     }
-    const targetRows = bucket?.payload.rows ?? Object.freeze([]);
+    const targetRows = target.rows;
     try {
       assertRfc64PublicCatalogExactSetBundleBytesV1(
         targetRows.map((row) => row.transfer.byteLength),
@@ -879,7 +900,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     }> = [];
     for (const row of targetRows) {
       throwIfAborted(signal);
-      if (bucket === null || fetchedBucket === null) {
+      if (target.kind !== 'bucket') {
         fail('catalog-native-receiver-catalog', 'non-empty catalog target lost its bucket proof');
       }
       let authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
@@ -894,8 +915,8 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           directoryPathEnvelopes: [directory],
           directoryPathSignatures: [fetchedDirectory.issuerSignature],
           directoryPathProof,
-          catalogBucket: bucket,
-          catalogBucketSignature: fetchedBucket.issuerSignature,
+          catalogBucket: target.bucket,
+          catalogBucketSignature: target.fetchedBucket.issuerSignature,
           targetKaId: row.kaId,
         });
         authorship = readVerifiedAuthorCatalogRowAuthorshipV1(authorshipCapability);
@@ -1071,7 +1092,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         fetchedHead,
         fetchedDirectory,
       ];
-      if (fetchedBucket !== null) verifiedObjects.push(fetchedBucket);
+      if (target.kind === 'bucket') verifiedObjects.push(target.fetchedBucket);
       await this.options.controlObjects.stageVerifiedObjects(verifiedObjects);
     } catch (cause) {
       fail(
@@ -2032,10 +2053,7 @@ async function assertColdBootstrapHasNoOmittedSemanticStateV1(
     );
   }
 
-  const metaGraph = targets[0]?.sealMetaGraph;
-  if (metaGraph === undefined) {
-    fail('catalog-native-receiver-history', 'cold successor has no semantic target scope');
-  }
+  const metaGraph = contextGraphMetaUri(scope.contextGraphId);
   let sealSubjects;
   try {
     sealSubjects = await store.query(

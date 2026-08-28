@@ -21,6 +21,9 @@ import { produceDirectAuthorCatalogIssuerDelegationV1 } from '../src/rfc64/publi
 import {
   Rfc64PublicCatalogSuccessorProducerV1,
 } from '../src/rfc64/public-catalog-successor-producer-v1.js';
+import {
+  snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1,
+} from '../src/rfc64/public-catalog-successor-asset-v1.js';
 import { RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 } from '../src/rfc64/public-catalog-native-transport-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'66'.repeat(32)}`);
@@ -217,6 +220,31 @@ describe('RFC-64 public/open one-row successor producer', () => {
     expect(ordered.publication.bucket).toEqual(unordered.publication.bucket);
     expect(stageKaBundle).toHaveBeenCalledTimes(5);
     expect(stageVerifiedObjects).toHaveBeenCalledTimes(3);
+  });
+
+  it('shares one ordered immutable asset snapshot across producer and reconciler boundaries', async () => {
+    const firstProjection = new Uint8Array(PROJECTION);
+    const first = {
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: firstProjection,
+      seal: await authorSeal(AUTHOR_WALLET),
+    };
+    const second = {
+      assertionCoordinate: 'gate-2-object' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(AUTHOR_WALLET, SECOND_KA_NUMBER),
+    };
+
+    const snapshot = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1([second, first]);
+    firstProjection[0] = 0;
+
+    expect(snapshot.map((asset) => asset.seal.reservedKaId)).toEqual([KA_ID, SECOND_KA_ID]);
+    expect(snapshot[0]?.projectionBytes).toEqual(PROJECTION);
+    expect(snapshot[0]?.projectionBytes).not.toBe(firstProjection);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot[0])).toBe(true);
+    expect(() => snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1([first, first]))
+      .toThrow(/duplicate KA/u);
   });
 
   it('produces the canonical zero-row successor for the final removal', async () => {
@@ -527,7 +555,7 @@ describe('RFC-64 public/open one-row successor producer', () => {
     expect(stageVerifiedObjects).not.toHaveBeenCalled();
   });
 
-  it('snapshots a stateful projection getter once before validation and encoding', async () => {
+  it('rejects a stateful projection getter without invoking it', async () => {
     const { genesis, authorization } = await producerHistory();
     const stageKaBundle = vi.fn(durableBundleReceipt);
     const stageVerifiedObjects = vi.fn(async () => Object.freeze({
@@ -551,7 +579,7 @@ describe('RFC-64 public/open one-row successor producer', () => {
       seal: await authorSeal(AUTHOR_WALLET),
     };
 
-    const result = await producer.produceAndStageExactSet({
+    await expect(producer.produceAndStageExactSet({
       previousHead: genesis.head,
       previousDirectoryPath: genesis.directoryPath,
       previousBucket: null,
@@ -560,14 +588,11 @@ describe('RFC-64 public/open one-row successor producer', () => {
       issuedAt: '1773900001000' as never,
       catalogSigner: catalogSigner(),
       catalogIssuerAuthorization: authorization,
-    });
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-input' });
 
-    expect(projectionReads).toBe(1);
-    expect(decodeOpaqueKaBundleV1(result.assets[0]!.bundleBytes).projectionBytes).toEqual(
-      PROJECTION,
-    );
-    expect(stageKaBundle).toHaveBeenCalledOnce();
-    expect(stageVerifiedObjects).toHaveBeenCalledOnce();
+    expect(projectionReads).toBe(0);
+    expect(stageKaBundle).not.toHaveBeenCalled();
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
   });
 
   it('fails control-object staging only after the bundle is durably staged first', async () => {

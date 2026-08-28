@@ -338,36 +338,42 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     }) as SwmAuthorInventoryScopeV1;
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-    const snapshot = persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
-      computeSwmAuthorInventoryScopeDigestV1(inventoryScope),
-      params.authorAddress,
+    const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(inventoryScope);
+    return rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
+      `${inventoryScopeDigest}\n${params.authorAddress}`,
+      async () => {
+        const snapshot = persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
+          inventoryScopeDigest,
+          params.authorAddress,
+        );
+        if (snapshot === null) return null;
+        const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
+          snapshot,
+          resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
+            params.contextGraphId,
+            params.authorAddress,
+            row,
+          ),
+        });
+        lane.service.acceptedPolicySnapshotForCatalogScope(prepared.catalogScope);
+        const reconciled = await this.reconcileRfc64PublicRootCatalogExactSetV1({
+          scope: prepared.catalogScope,
+          author: this.createRfc64CatalogAuthorSignerV1(params.authorAddress),
+          assets: prepared.assets,
+          deployment: await this.resolveRfc64AutoPublishDeploymentProfileV1(lane.networkId),
+          peers: lane.autoPublishConfig.peers,
+          catalogIssuerDelegationEffectiveAt:
+            lane.autoPublishConfig.catalogIssuerDelegationEffectiveAt
+            ?? ('0' as TimestampMsV1),
+          catalogIssuerDelegationExpiresAt:
+            lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
+        });
+        return Object.freeze({
+          ...reconciled,
+          inventoryHeadObjectDigest: prepared.inventoryHeadObjectDigest as Digest32V1,
+        });
+      },
     );
-    if (snapshot === null) return null;
-    const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
-      snapshot,
-      resolveAsset: (row) => this.resolveRfc64SwmInventoryCatalogAssetV1(
-        params.contextGraphId,
-        params.authorAddress,
-        row,
-      ),
-    });
-    lane.service.acceptedPolicySnapshotForCatalogScope(prepared.catalogScope);
-    const reconciled = await this.reconcileRfc64PublicRootCatalogExactSetV1({
-      scope: prepared.catalogScope,
-      author: this.createRfc64CatalogAuthorSignerV1(params.authorAddress),
-      assets: prepared.assets,
-      deployment: await this.resolveRfc64AutoPublishDeploymentProfileV1(lane.networkId),
-      peers: lane.autoPublishConfig.peers,
-      catalogIssuerDelegationEffectiveAt:
-        lane.autoPublishConfig.catalogIssuerDelegationEffectiveAt
-        ?? ('0' as TimestampMsV1),
-      catalogIssuerDelegationExpiresAt:
-        lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
-    });
-    return Object.freeze({
-      ...reconciled,
-      inventoryHeadObjectDigest: prepared.inventoryHeadObjectDigest as Digest32V1,
-    });
   }
 
   /** Read-only process-local evidence; authoritative state remains the signed SQLite snapshot. */
@@ -494,28 +500,32 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
       const signer = this.createRfc64CatalogAuthorSignerV1(canonicalSeal.authorAddress);
       const issuedAt = Math.max(Date.now(), Number(sharedAt)).toString() as TimestampMsV1;
-      const maintained = await maintainRfc64SwmAuthorInventoryV1(
-        persistence.swmAuthorInventory,
-        {
-          scope,
-          row: Object.freeze({
-            assertionCoordinate: params.assertionCoordinate,
-            assertionVersion: canonicalSeal.assertionVersion,
-            kaUal: canonicalSeal.kaUal,
-            shareOperationId,
-            projectionDigest: computeKaProjectionDigestV1(projectionBytes),
-            publicTripleCount: canonicalSeal.publicTripleCount,
-            privateTripleCount: canonicalSeal.privateTripleCount,
-            sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalSeal),
-            sharedAt,
-            expiresAt: null,
-          }),
-          issuedAt,
-          signer: Object.freeze({
-            issuer: signer.address as EvmAddressV1,
-            signDigest: signer.signMessage,
-          }),
-        },
+      const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(scope);
+      const maintained = await rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
+        `${inventoryScopeDigest}\n${canonicalSeal.authorAddress}`,
+        () => maintainRfc64SwmAuthorInventoryV1(
+          persistence.swmAuthorInventory,
+          {
+            scope,
+            row: Object.freeze({
+              assertionCoordinate: params.assertionCoordinate as AssertionCoordinateV1,
+              assertionVersion: canonicalSeal.assertionVersion,
+              kaUal: canonicalSeal.kaUal,
+              shareOperationId,
+              projectionDigest: computeKaProjectionDigestV1(projectionBytes),
+              publicTripleCount: canonicalSeal.publicTripleCount,
+              privateTripleCount: canonicalSeal.privateTripleCount,
+              sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalSeal),
+              sharedAt,
+              expiresAt: null,
+            }),
+            issuedAt,
+            signer: Object.freeze({
+              issuer: signer.address as EvmAddressV1,
+              signDigest: signer.signMessage,
+            }),
+          },
+        ),
       );
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
         shadowResult(
@@ -565,21 +575,25 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       const persistence = this.rfc64PersistenceV1;
       if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
       const signer = this.createRfc64CatalogAuthorSignerV1(seal.authorAddress);
-      const removed = await removeRfc64SwmAuthorInventoryRowV1(
-        persistence.swmAuthorInventory,
-        {
-        scope,
-        expectedRow: Object.freeze({
-          kaUal: seal.kaUal,
-          assertionVersion: seal.assertionVersion,
-          sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
-        }),
-        issuedAt: Date.now().toString() as TimestampMsV1,
-        signer: Object.freeze({
-          issuer: signer.address as EvmAddressV1,
-          signDigest: signer.signMessage,
-        }),
-        },
+      const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(scope);
+      const removed = await rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
+        `${inventoryScopeDigest}\n${seal.authorAddress}`,
+        () => removeRfc64SwmAuthorInventoryRowV1(
+          persistence.swmAuthorInventory,
+          {
+            scope,
+            expectedRow: Object.freeze({
+              kaUal: seal.kaUal,
+              assertionVersion: seal.assertionVersion,
+              sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
+            }),
+            issuedAt: Date.now().toString() as TimestampMsV1,
+            signer: Object.freeze({
+              issuer: signer.address as EvmAddressV1,
+              signDigest: signer.signMessage,
+            }),
+          },
+        ),
       );
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
         shadowResult(

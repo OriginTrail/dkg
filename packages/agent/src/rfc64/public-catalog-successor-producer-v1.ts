@@ -20,12 +20,10 @@ import {
   calculateOpaqueKaBundleByteLengthV1,
   canonicalizeAuthorCatalogRowV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
-  compareAuthorCatalogKaIdsV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaChunkTreeRootV1,
   encodeOpaqueKaBundleV1,
   parseCanonicalAuthorCatalogRowV1,
-  parseCanonicalGraphScopedAuthorSealV1,
   readVerifiedCatalogSealBindingV1,
   readVerifiedCgSharedProjectionMetadataV1,
   readVerifiedTransferredCatalogBundleMetadataV1,
@@ -72,6 +70,13 @@ import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1,
   addRfc64PublicCatalogExactSetBundleBytesV1,
 } from './public-catalog-native-transport-v1.js';
+import {
+  snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1,
+  type Rfc64PublicCatalogSuccessorAssetInputV1,
+} from './public-catalog-successor-asset-v1.js';
+
+export type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
+  './public-catalog-successor-asset-v1.js';
 
 export type Rfc64PublicCatalogSuccessorProducerErrorCodeV1 =
   | 'catalog-successor-producer-input'
@@ -130,13 +135,6 @@ export interface ProduceAndStagePublicOpenOneRowSuccessorInputV1 {
   readonly catalogSigner: Rfc64AuthorCatalogEip191SignerV1;
   /** Exact author/delegation closure authorizing the catalog signer for this lane. */
   readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
-}
-
-/** One member of the complete bounded live set committed by a successor. */
-export interface Rfc64PublicCatalogSuccessorAssetInputV1 {
-  readonly assertionCoordinate: AssertionCoordinateV1;
-  readonly projectionBytes: Uint8Array;
-  readonly seal: CanonicalGraphScopedAuthorSealV1;
 }
 
 /**
@@ -485,58 +483,31 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
 }
 
 function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV1) {
-  const assets = input?.assets;
-  if (!Array.isArray(assets) || Object.getPrototypeOf(assets) !== Array.prototype) {
-    fail('catalog-successor-producer-input', 'assets must be an ordinary dense Array');
-  }
-  const ownKeys = Reflect.ownKeys(assets);
-  if (
-    ownKeys.some((key) => typeof key !== 'string')
-    || ownKeys.length !== assets.length + 1
-    || !ownKeys.includes('length')
-  ) {
-    fail('catalog-successor-producer-input', 'assets must be a dense Array without properties');
-  }
-  if (assets.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
-    fail(
-      'catalog-successor-producer-input',
-      `assets must contain 0..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} entries`,
+  let assets: readonly Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[];
+  try {
+    assets = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
+      input?.assets,
+      'RFC-64 successor assets',
     );
+  } catch (cause) {
+    fail('catalog-successor-producer-input', 'assets are not one canonical exact set', cause);
   }
   const snapshots: PreparedRfc64PublicCatalogSuccessorAssetSnapshotV1[] = [];
   let aggregateBundleBytes = 0n;
-  for (let index = 0; index < assets.length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(assets, String(index));
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      fail(
-        'catalog-successor-producer-input',
-        'assets must contain only enumerable data elements',
-      );
-    }
-    const asset = descriptor.value as Rfc64PublicCatalogSuccessorAssetInputV1;
+  for (const asset of assets) {
     try {
-      // Snapshot each caller-owned field exactly once. In particular, no
-      // stateful projectionBytes getter can change validation vs encoding.
-      const assertionCoordinate = asset?.assertionCoordinate;
-      const projectionInput = asset?.projectionBytes;
-      const sealInput = asset?.seal;
-      if (!(projectionInput instanceof Uint8Array)) {
-        throw new TypeError('projectionBytes must be a Uint8Array');
-      }
       // Reject a projection that cannot possibly fit the Gate-1 transport
       // before allocating its detached snapshot.
       if (
-        BigInt(projectionInput.byteLength)
+        BigInt(asset.projectionBytes.byteLength)
         > BigInt(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1)
           - MIN_KA_BUNDLE_BYTES_V1
       ) {
         throw new RangeError('projection exceeds the Gate-1 complete-bundle ceiling');
       }
-      const projectionBytes = new Uint8Array(projectionInput);
-      const sealBytes = canonicalizeCanonicalGraphScopedAuthorSealBytesV1(sealInput);
-      const seal = parseCanonicalGraphScopedAuthorSealV1(sealBytes);
+      const sealBytes = canonicalizeCanonicalGraphScopedAuthorSealBytesV1(asset.seal);
       const bundleByteLength = calculateOpaqueKaBundleByteLengthV1(
-        BigInt(projectionBytes.byteLength),
+        BigInt(asset.projectionBytes.byteLength),
         BigInt(sealBytes.byteLength),
       );
       if (bundleByteLength > BigInt(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1)) {
@@ -548,9 +519,9 @@ function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV
         canonicalBundleByteLength,
       );
       snapshots.push(Object.freeze({
-        assertionCoordinate,
-        projectionBytes,
-        seal,
+        assertionCoordinate: asset.assertionCoordinate,
+        projectionBytes: new Uint8Array(asset.projectionBytes),
+        seal: asset.seal,
         sealBytes,
         bundleByteLength,
       }));
@@ -567,20 +538,6 @@ function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV
     input.previousHead,
     input.deployment,
   ));
-  prepared.sort((left, right) => compareAuthorCatalogKaIdsV1(left.row.kaId, right.row.kaId));
-  for (let index = 1; index < prepared.length; index += 1) {
-    const previous = prepared[index - 1];
-    const current = prepared[index];
-    if (previous === undefined || current === undefined) {
-      fail('catalog-successor-producer-input', 'assets are not a dense exact set');
-    }
-    if (previous.row.kaId === current.row.kaId) {
-      fail(
-        'catalog-successor-producer-input',
-        `assets contain duplicate kaId ${current.row.kaId}`,
-      );
-    }
-  }
   return Object.freeze(prepared);
 }
 
