@@ -53,6 +53,76 @@ describe('Genesis Knowledge', () => {
     });
 
 
+    it('liveness-checks an authoritative subscription before an unregistered marker', async () => {
+      const store = new OxigraphStore();
+      const chain = new CapturingContextGraphChainAdapter();
+      const activeCheck = vi.spyOn(chain, 'isContextGraphActiveOnChain')
+        .mockResolvedValue(true);
+      const agent = await DKGAgent.create({
+        name: 'RegistrationAuthoritativeBindingBot',
+        store,
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
+      const contextGraphId = 'authoritative-binding-precedence';
+      const curatorAddress = ethers.getAddress(chain.signerAddress);
+
+      await agent.createContextGraph({
+        id: contextGraphId,
+        name: 'Authoritative binding precedence',
+        callerAgentAddress: curatorAddress,
+      });
+      const subscription = (agent as any).subscribedContextGraphs.get(contextGraphId);
+      (agent as any).setContextGraphSubscription(contextGraphId, {
+        ...subscription,
+        onChainId: '42',
+      });
+
+      await expect(agent.registerContextGraph(contextGraphId, {
+        callerAgentAddress: curatorAddress,
+      })).resolves.toMatchObject({ onChainId: '42' });
+      expect(activeCheck).toHaveBeenCalledWith(42n);
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(0);
+      await agent.stop().catch(() => {});
+    });
+
+
+    it('registers with a conforming custom store that omits optional update()', async () => {
+      const backingStore = new OxigraphStore();
+      const storeWithoutUpdate = new Proxy(backingStore as any, {
+        get(target, property) {
+          if (property === 'update') return undefined;
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const chain = new CapturingContextGraphChainAdapter();
+      const agent = await DKGAgent.create({
+        name: 'RegistrationOptionalUpdateStoreBot',
+        store: storeWithoutUpdate,
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
+      const contextGraphId = 'optional-update-store';
+      const curatorAddress = ethers.getAddress(chain.signerAddress);
+
+      await agent.createContextGraph({
+        id: contextGraphId,
+        name: 'Optional update store',
+        callerAgentAddress: curatorAddress,
+      });
+      await expect(agent.registerContextGraph(contextGraphId, {
+        callerAgentAddress: curatorAddress,
+      })).resolves.toMatchObject({ onChainId: '1' });
+      await expect((agent as any).getContextGraphRegistrationStatus(contextGraphId))
+        .resolves.toBe('registered');
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(1);
+      await agent.stop().catch(() => {});
+    });
+
+
     it('fails closed when registration is interrupted before receipt persistence', async () => {
       const store = new OxigraphStore();
       const chain = new CapturingContextGraphChainAdapter();
