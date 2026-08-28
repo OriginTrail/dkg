@@ -598,6 +598,44 @@ describe('GH#2270 chain-proof cadence', () => {
       expect((await publisher.getStatus(jobId))?.status).toBe('failed');
     });
 
+    it('a HUNG inventory read cannot block later passes — the acquisition wait is bounded', async () => {
+      // r10 (🔴 3883959795) — one non-settling store read must degrade ordering, not
+      // availability: with an unbounded chain, every later recover() queues behind the hung
+      // read forever, the opposite of the documented fresh-pass contract. The bounded wait
+      // releases the successor at the cap, and the successor's own settlement replaces the
+      // chain so the hung acquisition wedges nobody after it either.
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        reconciliationAcquisitionWaitCapMs: 50,
+        chainProofResolver: async () => {
+          asks += 1;
+          return { status: 'pending-mempool' };
+        },
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      const originalList = publisher.list.bind(publisher);
+      let firstListCall = true;
+      (publisher as { list: typeof publisher.list }).list = async (filter) => {
+        if (firstListCall) {
+          firstListCall = false;
+          return new Promise(() => undefined); // a store read that never settles
+        }
+        return originalList(filter);
+      };
+
+      const hung = publisher.recover(); // acquisition 1: wedged inside list() forever
+      void hung;
+      await publisher.recover(); // must wait at most the 50ms cap, then acquire fresh
+      expect(asks).toBe(1); // ...and do real work: the held job was dispatched
+      expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+      h.advance(31_000);
+      await publisher.recover(); // the chain is owned by settled acquisitions again
+      expect(asks).toBe(2); // past the 30s deferral: the lane keeps running after the hung head
+    });
+
     it('a held job cleared while its verdict is in flight releases its schedule slot', async () => {
       // r6 (🔴 3883453613) — the record is DELETED (operator clear) while the resolver is in
       // flight; the locked re-read finds nothing. The turn must release its slot: without the

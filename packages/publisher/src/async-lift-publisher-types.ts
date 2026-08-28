@@ -192,13 +192,9 @@ export interface AsyncLiftPublisher {
   /**
    * Run one reconciliation pass and report how many jobs it settled.
    *
-   * CONCURRENCY CONTRACT: safe to call at any time, including concurrently with a pass the
-   * runner (or another caller) already has in flight — operator tooling relies on getting a
-   * FRESH pass over fresh state rather than queueing behind or coalescing into a stuck one.
-   * Overlapping passes are made safe by the held-job schedule's snapshot-ordered ownership
-   * protocol (inventory acquisition itself is serialized; everything after overlaps). The
-   * built-in runner additionally single-flights its own cadence, so overlap in practice comes
-   * from external callers, not the runner.
+   * CONCURRENCY CONTRACT: safe to call at any time, including concurrently with any other
+   * in-flight pass; every call performs its own FRESH pass over fresh state — calls are
+   * neither queued behind nor coalesced into an existing pass.
    */
   recover(): Promise<number>;
   /**
@@ -765,6 +761,12 @@ export interface AsyncLiftPublisherConfig {
    * exhausts the budget stops and the remaining jobs are asked on the next cadence.
    */
   chainProofDispatchTimeBudgetMs?: number;
+  /**
+   * How long one reconciliation pass's inventory acquisition waits behind the previous pass's
+   * (acquisitions are ordered; the wait is bounded so one hung store read degrades ordering,
+   * not availability). Default 30s.
+   */
+  reconciliationAcquisitionWaitCapMs?: number;
   /**
    * GH#2270 PR-3 r20 (🔴 3815617109) — can the chain-proof lane actually settle a job signed by
    * THIS wallet? A node may mix adapters, and the presence of a resolver is a node-wide fact while

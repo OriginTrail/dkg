@@ -473,8 +473,10 @@ export class TripleStoreAsyncLiftPublisher
     rand: () => this.rand(),
   });
 
-  /** Serializes {@link takeReconciliationSnapshot} acquisitions; see its r6 ordering note. */
+  /** Serializes {@link takeReconciliationSnapshot} acquisitions; see its r6/r10 notes. */
   private reconciliationAcquisitionChain: Promise<void> = Promise.resolve();
+
+  private readonly reconciliationAcquisitionWaitCapMs: number;
   /**
    * r26 (🔴 3821028709) — jobs whose MUTATING recovery repair is currently running. A deadline
    * may stop the dispatcher waiting, but it must never let a second pass enter the same repair
@@ -610,6 +612,7 @@ export class TripleStoreAsyncLiftPublisher
     this.chainProofCapableForWallet = config.chainProofCapableForWallet;
     this.chainProofDispatchBatchSize = config.chainProofDispatchBatchSize ?? 25;
     this.chainProofDispatchTimeBudgetMs = config.chainProofDispatchTimeBudgetMs ?? 15_000;
+    this.reconciliationAcquisitionWaitCapMs = config.reconciliationAcquisitionWaitCapMs ?? 30_000;
     this.knowledgeAssetVmPublishRecoveryResolver = config.knowledgeAssetVmPublishRecoveryResolver;
     this.detachReceiptReconciliation = config.detachReceiptReconciliation ?? false;
     this.publishExecutor = config.publishExecutor;
@@ -2133,11 +2136,30 @@ export class TripleStoreAsyncLiftPublisher
     // pool), so adjacency alone orders tokens by query COMPLETION. Chaining acquisitions makes
     // capture order equal completion order equal token order — a real linearization boundary,
     // scoped to the seam so passes themselves still overlap everywhere else.
-    const acquisition = this.reconciliationAcquisitionChain.then(async () => {
+    //
+    // r10 (🔴 3883959795) — the wait on the predecessor is BOUNDED: one non-settling store
+    // read must degrade ordering, not availability — an unbounded chain turns it into a
+    // permanent reconciliation outage for every later pass, the opposite of the documented
+    // fresh-pass contract. A successor that stops waiting replaces the chain with its own
+    // settlement, so the hung acquisition wedges nobody after it. Within the cap the FIFO is
+    // exact; past it, the rare inversion this window re-opens is still bounded by the
+    // schedule's write-time identity guards and the claim-locked re-read. This is deliberately
+    // NOT the package's `withKeyedLocks`: that primitive's contract is strict unbounded
+    // exclusion (what its publish/CAS/SWM callers need), and borrowing it would import the
+    // very unbounded wait this bound removes.
+    const predecessor = this.reconciliationAcquisitionChain;
+    const acquisition = (async () => {
+      await new Promise<void>((resolve) => {
+        const cap = setTimeout(resolve, Math.max(0, this.reconciliationAcquisitionWaitCapMs));
+        void predecessor.finally(() => {
+          clearTimeout(cap);
+          resolve();
+        });
+      });
       const inventory = await this.list();
       const chainProofPass = this.chainProofRetrySchedule.beginPass(this.now());
       return { inventory, chainProofPass };
-    });
+    })();
     // The chain must survive a failed acquisition — carry only settlement, never the result.
     this.reconciliationAcquisitionChain = acquisition.then(() => undefined, () => undefined);
     return acquisition;
@@ -2405,14 +2427,16 @@ export class TripleStoreAsyncLiftPublisher
       .map((job) => ({ job, lookup: this.chainProofLookupFor(job) }))
       .filter((candidate): candidate is { job: PersistedFailedJob; lookup: AsyncLiftChainProofLookup } => candidate.lookup !== null)
       .map(({ job, lookup }) => ({ job, lookup, identity: this.heldChainProofIncarnationKey(job, lookup) }));
-    // r6 (🔴 3883453613) — the sweep: an entry no newer snapshot can observe belongs to a job
-    // that left the held state (or lost its evidence), so it can never be settled or deferred
-    // again — without this it would be retained forever (e.g. installed by a stale pass after
-    // the owner settled, then never dispatched because the batch or deadline truncated the walk).
-    chainProofPass.prune(new Set(withEvidence.map(({ job }) => job.jobId)));
+    // ONE atomic snapshot admission (r10 3883959998): the schedule sweeps dead residue (r6
+    // 🔴 3883453613 — e.g. an entry installed by a stale pass after the owner settled, then
+    // never dispatched because the batch or deadline truncated the walk) and admits the due
+    // turns in the same call, so this dispatcher cannot hold the sequence wrong.
+    const turns = chainProofPass.observeSnapshot(
+      withEvidence.map(({ job, identity }) => ({ jobId: job.jobId, identity })),
+    );
     const dueJobs = withEvidence
-      .map((candidate) => ({ ...candidate, turn: chainProofPass.observe(candidate.job.jobId, candidate.identity) }))
-      .filter((candidate): candidate is typeof candidate & { turn: ChainProofScheduleTurn } => candidate.turn !== null);
+      .map((candidate) => ({ ...candidate, turn: turns.get(candidate.job.jobId) }))
+      .filter((candidate): candidate is typeof candidate & { turn: ChainProofScheduleTurn } => candidate.turn !== undefined);
 
     // r19 (🔴 3816490915) — the lookup is derived BEFORE the batch is taken, because a job that
     // cannot form one costs no round trip and must therefore cost no batch slot either. Deriving
