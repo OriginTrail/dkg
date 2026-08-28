@@ -428,9 +428,17 @@ describe('#1837 lift publisher clearTerminalJob', () => {
         : entry);
     await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
     await store.insert(quads);
+    const before = await store.query(
+      `SELECT ?payload WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${CONTROL_PAYLOAD}> ?payload } }`,
+    );
 
     expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'unknown' });
-    expect((await p.getStatus(jobId))?.status).toBe('future-state');
+    await expect(p.getStatus(jobId)).rejects.toThrow(
+      'Malformed persisted LiftJob payload: Unsupported LiftJob status: future-state',
+    );
+    expect(await store.query(
+      `SELECT ?payload WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${CONTROL_PAYLOAD}> ?payload } }`,
+    )).toEqual(before);
   });
 
   it('rejects an empty or SPARQL-unsafe jobId as malformed without querying/mutating', async () => {

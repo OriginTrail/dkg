@@ -1,6 +1,12 @@
 import type { QueryResult } from '@origintrail-official/dkg-storage';
 import {
   LIFT_AUTHORITY_TYPES,
+  LIFT_JOB_FAILURE_CODES,
+  LIFT_JOB_FAILURE_MODES,
+  LIFT_JOB_FAILURE_PHASES,
+  LIFT_JOB_FAILURE_RESOLUTIONS,
+  LIFT_JOB_STATES,
+  LIFT_JOB_TIMEOUT_HANDLINGS,
   LIFT_TRANSITION_TYPES,
 } from './lift-job.js';
 import { LIFT_JOB_IMMUTABLE_FIELDS } from './lift-job.js';
@@ -67,7 +73,16 @@ export function expectBindings(result: QueryResult): Array<Record<string, string
 export type LiftJobPayloadDecodeResult =
   | { readonly kind: 'absent' }
   | { readonly kind: 'malformed'; readonly reason: string }
-  | { readonly kind: 'job'; readonly job: LiftJob };
+  | { readonly kind: 'job'; readonly job: StructurallyValidLiftJobPayload };
+
+/**
+ * The part of a persisted job that is safe before status enum membership has been established.
+ * Keeping `status` as `string` prevents an unknown future state from entering lifecycle code as a
+ * `LiftJob`; the classified terminal-clear boundary is the sole consumer that needs this view.
+ */
+export type StructurallyValidLiftJobPayload = Omit<LiftJob, 'status'> & {
+  readonly status: string;
+};
 
 /** Classify one persisted job payload without hiding malformed state behind null or an exception. */
 export function decodeLiftJobPayload(binding?: string): LiftJobPayloadDecodeResult {
@@ -77,13 +92,35 @@ export function decodeLiftJobPayload(binding?: string): LiftJobPayloadDecodeResu
     if (typeof payload !== 'string') {
       return { kind: 'malformed', reason: 'payload is not an RDF literal' };
     }
-    const parsed = JSON.parse(payload) as LiftJob & { request: unknown };
+    const parsed = JSON.parse(payload) as unknown;
+    if (!isRecord(parsed)) return malformedLiftJobPayload('payload is not an object');
+    if (!isNonEmptyString(parsed['jobId'])) return malformedLiftJobPayload('jobId must be a non-empty string');
+    if (!isNonEmptyString(parsed['jobSlug'])) return malformedLiftJobPayload('jobSlug must be a non-empty string');
+    if (!isNonEmptyString(parsed['status'])) return malformedLiftJobPayload('status must be a non-empty string');
+
+    const timestampsError = validateLiftJobTimestamps(parsed['timestamps']);
+    if (timestampsError) return malformedLiftJobPayload(timestampsError);
+    const retriesError = validateLiftJobRetries(parsed['retries']);
+    if (retriesError) return malformedLiftJobPayload(retriesError);
+    const admissionError = validateOptionalLiftJobAdmission(parsed['admission']);
+    if (admissionError) return malformedLiftJobPayload(admissionError);
+    const controlPlaneError = validateOptionalLiftJobControlPlane(parsed['controlPlane']);
+    if (controlPlaneError) return malformedLiftJobPayload(controlPlaneError);
+    const recoveryError = validateOptionalLiftJobRecovery(parsed['recovery']);
+    if (recoveryError) return malformedLiftJobPayload(recoveryError);
+
+    const status = parsed['status'];
+    const normalized: Record<string, unknown> = {
+      ...parsed,
+      request: normalizePersistedLiftJobRequest(parsed['request']),
+    };
+    if ((LIFT_JOB_STATES as readonly string[]).includes(status)) {
+      const stateShapeError = validateKnownLiftJobStateShape(normalized);
+      if (stateShapeError) return malformedLiftJobPayload(stateShapeError);
+    }
     return {
       kind: 'job',
-      job: {
-        ...parsed,
-        request: normalizePersistedLiftJobRequest(parsed.request),
-      } as LiftJob,
+      job: normalized as unknown as StructurallyValidLiftJobPayload,
     };
   } catch (error) {
     return {
@@ -93,16 +130,270 @@ export function decodeLiftJobPayload(binding?: string): LiftJobPayloadDecodeResu
   }
 }
 
+/** Narrow a structurally decoded payload only after its state enum and state shape are valid. */
+export function isKnownLiftJobPayload(
+  job: StructurallyValidLiftJobPayload,
+): job is LiftJob {
+  return (LIFT_JOB_STATES as readonly string[]).includes(job.status)
+    && validateKnownLiftJobStateShape(job as unknown as Record<string, unknown>) === null;
+}
+
 /** Ordinary read policy: absence is nullable, but corrupt durable state always fails closed. */
 export function decodedLiftJobOrThrow(decoded: LiftJobPayloadDecodeResult): LiftJob | null {
   switch (decoded.kind) {
     case 'absent':
       return null;
-    case 'job':
+    case 'job': {
+      if (!isKnownLiftJobPayload(decoded.job)) {
+        throw new Error(`Malformed persisted LiftJob payload: Unsupported LiftJob status: ${decoded.job.status}`);
+      }
       return decoded.job;
+    }
     case 'malformed':
       throw new Error(`Malformed persisted LiftJob payload: ${decoded.reason}`);
   }
+}
+
+function malformedLiftJobPayload(reason: string): LiftJobPayloadDecodeResult {
+  return { kind: 'malformed', reason };
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function optionalStringError(record: Record<string, unknown>, key: string, path: string): string | null {
+  return record[key] === undefined || typeof record[key] === 'string'
+    ? null
+    : `${path}.${key} must be a string`;
+}
+
+function optionalFiniteNumberError(record: Record<string, unknown>, key: string, path: string): string | null {
+  return record[key] === undefined || isFiniteNumber(record[key])
+    ? null
+    : `${path}.${key} must be a finite number`;
+}
+
+function validateLiftJobTimestamps(value: unknown): string | null {
+  if (!isRecord(value)) return 'timestamps must be an object';
+  if (!isFiniteNumber(value['acceptedAt'])) return 'timestamps.acceptedAt must be a finite number';
+  if (!isFiniteNumber(value['updatedAt'])) return 'timestamps.updatedAt must be a finite number';
+  for (const key of [
+    'claimedAt', 'validatedAt', 'broadcastAt', 'rpcAcceptedAt', 'includedAt', 'finalizedAt',
+    'failedAt', 'lastRetriedAt', 'nextRetryAt', 'lastRecoveredAt',
+  ]) {
+    const error = optionalFiniteNumberError(value, key, 'timestamps');
+    if (error) return error;
+  }
+  return null;
+}
+
+function validateLiftJobRetries(value: unknown): string | null {
+  if (!isRecord(value)) return 'retries must be an object';
+  if (!isFiniteNumber(value['retryCount'])) return 'retries.retryCount must be a finite number';
+  if (!isFiniteNumber(value['maxRetries'])) return 'retries.maxRetries must be a finite number';
+  return optionalStringError(value, 'lastRetryReason', 'retries');
+}
+
+function validateOptionalLiftJobAdmission(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (!isRecord(value) || !isNonEmptyString(value['byAgentAddress'])) {
+    return 'admission.byAgentAddress must be a non-empty string';
+  }
+  return null;
+}
+
+function validateOptionalLiftJobControlPlane(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (!isRecord(value)) return 'controlPlane must be an object';
+  return optionalStringError(value, 'jobRef', 'controlPlane')
+    ?? optionalStringError(value, 'walletLockRef', 'controlPlane');
+}
+
+function validateOptionalLiftJobRecovery(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (!isRecord(value)) return 'recovery must be an object';
+  if (value['action'] !== 'reset_to_accepted' && value['action'] !== 'finalized_from_chain') {
+    return 'recovery.action is unsupported';
+  }
+  if (!['claimed', 'validated', 'broadcast', 'included'].includes(String(value['recoveredFromStatus']))) {
+    return 'recovery.recoveredFromStatus is unsupported';
+  }
+  if (
+    value['action'] === 'finalized_from_chain'
+    && value['recoveredFromStatus'] !== 'broadcast'
+    && value['recoveredFromStatus'] !== 'included'
+  ) {
+    return 'recovery.finalized_from_chain requires a broadcast or included origin';
+  }
+  for (const key of ['txHashChecked', 'walletIdChecked', 'note']) {
+    const error = optionalStringError(value, key, 'recovery');
+    if (error) return error;
+  }
+  const nonceError = optionalFiniteNumberError(value, 'nonceChecked', 'recovery');
+  if (nonceError) return nonceError;
+  if (value['txHashAccounted'] !== undefined && typeof value['txHashAccounted'] !== 'boolean') {
+    return 'recovery.txHashAccounted must be a boolean';
+  }
+  if (value['operationKind'] !== undefined && value['operationKind'] !== 'create' && value['operationKind'] !== 'update') {
+    return 'recovery.operationKind is unsupported';
+  }
+  if (value['action'] === 'finalized_from_chain' && !isNonEmptyString(value['txHashChecked'])) {
+    return 'recovery.txHashChecked must be a non-empty string';
+  }
+  return null;
+}
+
+function validateKnownLiftJobStateShape(job: Record<string, unknown>): string | null {
+  const claim = validateLiftJobClaim(job['claim']);
+  const validation = validateLiftJobValidation(job['validation']);
+  const broadcast = validateLiftJobBroadcast(job['broadcast']);
+  const inclusion = validateLiftJobInclusion(job['inclusion']);
+  const finalization = validateLiftJobFinalization(job['finalization']);
+  const failure = validateLiftJobFailure(job['failure']);
+  const required = (error: string | null, key: string): string | null =>
+    job[key] === undefined ? `${key} is required` : error;
+
+  switch (job['status']) {
+    case 'accepted':
+      return null;
+    case 'claimed':
+      return required(claim, 'claim');
+    case 'validated':
+      return required(claim, 'claim') ?? required(validation, 'validation');
+    case 'broadcast': {
+      const request = job['request'];
+      const isLegacyEvidenceFreeRawCrash = isRecord(request)
+        && request['jobType'] === 'lift'
+        && job['validation'] === undefined
+        && job['broadcast'] === undefined;
+      return required(claim, 'claim') ?? (isLegacyEvidenceFreeRawCrash
+        ? null
+        : required(validation, 'validation') ?? required(broadcast, 'broadcast'));
+    }
+    case 'included':
+      return required(claim, 'claim') ?? required(validation, 'validation')
+        ?? required(broadcast, 'broadcast') ?? required(inclusion, 'inclusion');
+    case 'finalized': {
+      const base = required(claim, 'claim') ?? required(validation, 'validation')
+        ?? required(finalization, 'finalization');
+      if (base) return base;
+      const mode = (job['finalization'] as Record<string, unknown>)['mode'];
+      return mode === 'noop' || mode === 'local'
+        ? null
+        : required(broadcast, 'broadcast') ?? required(inclusion, 'inclusion');
+    }
+    // A failed record's progress metadata is intentionally historical rather than a strict copy
+    // of `failedFromState`: legacy/pre-WAL failures can name broadcast without carrying a signed
+    // transaction, while the recovery carrier may retain the only available evidence. Validate
+    // the failure discriminator itself, but do not invent stricter persistence semantics here.
+    case 'failed':
+      return required(failure, 'failure');
+    default:
+      return null;
+  }
+}
+
+function validateLiftJobClaim(value: unknown): string | null {
+  if (!isRecord(value)) return 'claim must be an object';
+  if (!isNonEmptyString(value['walletId'])) return 'claim.walletId must be a non-empty string';
+  return optionalStringError(value, 'claimedBy', 'claim')
+    ?? optionalStringError(value, 'claimToken', 'claim')
+    ?? optionalFiniteNumberError(value, 'claimLeaseExpiresAt', 'claim');
+}
+
+function validateLiftJobValidation(value: unknown): string | null {
+  if (!isRecord(value)) return 'validation must be an object';
+  if (!Array.isArray(value['canonicalRoots']) || !value['canonicalRoots'].every((item) => typeof item === 'string')) {
+    return 'validation.canonicalRoots must be a string array';
+  }
+  if (!isRecord(value['canonicalRootMap']) || !Object.values(value['canonicalRootMap']).every((item) => typeof item === 'string')) {
+    return 'validation.canonicalRootMap must map strings to strings';
+  }
+  if (!isFiniteNumber(value['swmQuadCount'])) return 'validation.swmQuadCount must be a finite number';
+  if (!isNonEmptyString(value['authorityProofRef'])) return 'validation.authorityProofRef must be a non-empty string';
+  if (!(LIFT_TRANSITION_TYPES as readonly unknown[]).includes(value['transitionType'])) {
+    return 'validation.transitionType is unsupported';
+  }
+  return optionalStringError(value, 'priorVersion', 'validation');
+}
+
+function validateLiftJobBroadcast(value: unknown): string | null {
+  if (!isRecord(value)) return 'broadcast must be an object';
+  if (!isNonEmptyString(value['txHash'])) return 'broadcast.txHash must be a non-empty string';
+  if (!isNonEmptyString(value['walletId'])) return 'broadcast.walletId must be a non-empty string';
+  const optionalString = optionalStringError(value, 'merkleRoot', 'broadcast');
+  if (optionalString) return optionalString;
+  const numberError = optionalFiniteNumberError(value, 'publicByteSize', 'broadcast')
+    ?? optionalFiniteNumberError(value, 'nonce', 'broadcast');
+  if (numberError) return numberError;
+  if (value['operationKind'] !== undefined && value['operationKind'] !== 'create' && value['operationKind'] !== 'update') {
+    return 'broadcast.operationKind is unsupported';
+  }
+  return null;
+}
+
+function validateLiftJobInclusion(value: unknown): string | null {
+  if (!isRecord(value)) return 'inclusion must be an object';
+  if (value['txHash'] !== undefined && !isNonEmptyString(value['txHash'])) {
+    return 'inclusion.txHash must be a non-empty string';
+  }
+  if (!isFiniteNumber(value['blockNumber'])) return 'inclusion.blockNumber must be a finite number';
+  return optionalStringError(value, 'blockHash', 'inclusion')
+    ?? optionalFiniteNumberError(value, 'blockTimestamp', 'inclusion');
+}
+
+function validateLiftJobFinalization(value: unknown): string | null {
+  if (!isRecord(value)) return 'finalization must be an object';
+  if (value['mode'] !== undefined && !['published', 'noop', 'local'].includes(String(value['mode']))) {
+    return 'finalization.mode is unsupported';
+  }
+  for (const key of ['txHash', 'ual', 'batchId', 'startKAId', 'endKAId', 'publisherAddress']) {
+    const error = optionalStringError(value, key, 'finalization');
+    if (error) return error;
+  }
+  return null;
+}
+
+function validateLiftJobFailure(value: unknown): string | null {
+  if (!isRecord(value)) return 'failure must be an object';
+  if (!['accepted', 'claimed', 'validated', 'broadcast', 'included'].includes(String(value['failedFromState']))) {
+    return 'failure.failedFromState is unsupported';
+  }
+  if (!(LIFT_JOB_FAILURE_PHASES as readonly unknown[]).includes(value['phase'])) {
+    return 'failure.phase is unsupported';
+  }
+  if (!(LIFT_JOB_FAILURE_MODES as readonly unknown[]).includes(value['mode'])) {
+    return 'failure.mode is unsupported';
+  }
+  if (!(LIFT_JOB_FAILURE_RESOLUTIONS as readonly unknown[]).includes(value['resolution'])) {
+    return 'failure.resolution is unsupported';
+  }
+  if (!(LIFT_JOB_FAILURE_CODES as readonly unknown[]).includes(value['code'])) {
+    return 'failure.code is unsupported';
+  }
+  for (const key of ['message', 'errorPayloadRef']) {
+    if (!isNonEmptyString(value[key])) return `failure.${key} must be a non-empty string`;
+  }
+  if (typeof value['retryable'] !== 'boolean') return 'failure.retryable must be a boolean';
+  for (const key of ['stackTraceRef', 'rpcResponseRef', 'revertReasonRef']) {
+    const error = optionalStringError(value, key, 'failure');
+    if (error) return error;
+  }
+  if (value['timeout'] !== undefined) {
+    if (!isRecord(value['timeout'])) return 'failure.timeout must be an object';
+    if (!isFiniteNumber(value['timeout']['timeoutMs']) || !isFiniteNumber(value['timeout']['timeoutAt'])) {
+      return 'failure.timeout values must be finite numbers';
+    }
+    if (!(LIFT_JOB_TIMEOUT_HANDLINGS as readonly unknown[]).includes(value['timeout']['handling'])) {
+      return 'failure.timeout.handling is unsupported';
+    }
+  }
+  return null;
 }
 
 export function compareAcceptedJobs(a: LiftJob, b: LiftJob): number {

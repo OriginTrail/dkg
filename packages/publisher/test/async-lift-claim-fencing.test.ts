@@ -180,6 +180,32 @@ describe('async-lift claim fencing', () => {
     expect(await publisher.getStatus(jobId)).toEqual(before);
   });
 
+  it('fails closed before an ordinary cancel callback can mutate a malformed job', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-corrupt-cancel',
+      now: () => now,
+    });
+    const job = await publisher.getStatus(jobId);
+    if (!job || job.status !== 'accepted') throw new Error('expected accepted job');
+    const corrupt = serializeJob(job, DEFAULT_CONTROL_GRAPH_URI).map((entry) =>
+      entry.predicate === CONTROL_PAYLOAD
+        ? { ...entry, object: literal('{not-json') }
+        : entry,
+    );
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(corrupt);
+    const readRawPayload = async () => await store.query(
+      `SELECT ?payload WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${CONTROL_PAYLOAD}> ?payload } }`,
+    );
+    const before = await readRawPayload();
+
+    await expect(publisher.cancel(jobId)).rejects.toThrow('Malformed persisted LiftJob payload');
+
+    expect(await readRawPayload()).toEqual(before);
+    await expect(publisher.getStatus(jobId)).rejects.toThrow('Malformed persisted LiftJob payload');
+  });
+
   it('closes a transaction scope after removing its job', async () => {
     const publisher = createPublisher();
     const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {

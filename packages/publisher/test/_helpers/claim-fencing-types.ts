@@ -7,6 +7,10 @@ import type {
   LiftJobClaimed,
   TripleStoreAsyncLiftPublisher,
 } from '../../src/index.js';
+import {
+  isKnownLiftJobPayload,
+  type StructurallyValidLiftJobPayload,
+} from '../../src/async-lift-publisher-utils.js';
 
 declare const publisher: TripleStoreAsyncLiftPublisher;
 declare const accepted: LiftJobAccepted;
@@ -32,3 +36,12 @@ type LegacyAsyncLiftPublisher =
 declare const legacyPublisher: LegacyAsyncLiftPublisher;
 const compatiblePublisher: AsyncLiftPublisher = legacyPublisher;
 void compatiblePublisher;
+
+declare const structurallyDecoded: StructurallyValidLiftJobPayload;
+// @ts-expect-error An unchecked status:string cannot enter lifecycle code as a LiftJob.
+const uncheckedJob: LiftJob = structurallyDecoded;
+void uncheckedJob;
+if (isKnownLiftJobPayload(structurallyDecoded)) {
+  const checkedJob: LiftJob = structurallyDecoded;
+  void checkedJob;
+}

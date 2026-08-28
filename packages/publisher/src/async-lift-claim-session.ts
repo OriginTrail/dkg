@@ -26,12 +26,14 @@ import {
   decodedLiftJobOrThrow,
   expectBindings,
   isFailedJob,
+  isKnownLiftJobPayload,
   liftJobCheckedSigner,
   literal,
   parseIntegerLiteral,
   parseLiteral,
   serializeWalletLock,
   type LiftJobPayloadDecodeResult,
+  type StructurallyValidLiftJobPayload,
   walletLockSubject,
 } from './async-lift-publisher-utils.js';
 
@@ -54,22 +56,22 @@ export interface LiftJobTransitionScope {
 /** One atomic per-job read under the lock that owns its transition scope. */
 export type LiftJobTransaction =
   | { readonly kind: 'missing' }
-  | { readonly kind: 'malformed'; readonly reason: string }
   | {
     readonly kind: 'present';
     readonly current: LiftJob;
     readonly scope: LiftJobTransitionScope;
   };
 
-/** Select the ordinary transaction policy: corrupt durable state is never treated as missing. */
-export function failClosedLiftJobTransaction(
-  transaction: LiftJobTransaction,
-): Exclude<LiftJobTransaction, { readonly kind: 'malformed' }> {
-  if (transaction.kind === 'malformed') {
-    throw new Error(`Malformed persisted LiftJob payload: ${transaction.reason}`);
-  }
-  return transaction;
-}
+/** Diagnostic read variants exposed only to the targeted terminal-clear operation. */
+export type ClassifiedLiftJobClearTransaction =
+  | { readonly kind: 'missing' }
+  | { readonly kind: 'malformed'; readonly reason: string }
+  | { readonly kind: 'unknown'; readonly current: StructurallyValidLiftJobPayload }
+  | {
+    readonly kind: 'present';
+    readonly current: LiftJob;
+    readonly scope: LiftJobTransitionScope;
+  };
 
 /**
  * A worker checkpoint may observe proof advancing its exact claim before the callback runs.
@@ -531,12 +533,9 @@ export class AsyncLiftClaimCoordinator {
     return await this.withJobTransitionLock(
       jobId,
       async () => {
-        const decoded = await this.dependencies.readStatus(jobId);
-        if (decoded.kind === 'malformed') {
-          return await operation(decoded);
-        }
-        return await operation(decoded.kind === 'job'
-          ? { kind: 'present', current: decoded.job, scope: this.createTransitionScope(decoded.job) }
+        const current = decodedLiftJobOrThrow(await this.dependencies.readStatus(jobId));
+        return await operation(current
+          ? { kind: 'present', current, scope: this.createTransitionScope(current) }
           : { kind: 'missing' });
       },
     );
@@ -548,6 +547,34 @@ export class AsyncLiftClaimCoordinator {
     operation: (transaction: LiftJobTransaction) => Promise<T>,
   ): Promise<T> {
     return await this.withClaimLock(() => this.runJobTransaction(jobId, operation));
+  }
+
+  /**
+   * Targeted-clear-only boundary. It preserves global-claim -> per-job lock order and performs one
+   * payload read, while allowing that administrative API to report malformed and future states as
+   * bounded outcomes. Ordinary lifecycle transactions deliberately use the fail-closed boundary.
+   */
+  async runClassifiedClearTransaction<T>(
+    jobId: string,
+    operation: (transaction: ClassifiedLiftJobClearTransaction) => Promise<T>,
+  ): Promise<T> {
+    await this.dependencies.ensureGraph();
+    return await this.withClaimLock(() => this.withJobTransitionLock(jobId, async () => {
+      const decoded = await this.dependencies.readStatus(jobId);
+      if (decoded.kind === 'absent' || decoded.kind === 'malformed') {
+        return await operation(decoded.kind === 'absent'
+          ? { kind: 'missing' }
+          : decoded);
+      }
+      if (!isKnownLiftJobPayload(decoded.job)) {
+        return await operation({ kind: 'unknown', current: decoded.job });
+      }
+      return await operation({
+        kind: 'present',
+        current: decoded.job,
+        scope: this.createTransitionScope(decoded.job),
+      });
+    }));
   }
 
   /** Canonical administrative transition boundary: lock, re-read, and validate live ownership. */
