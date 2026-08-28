@@ -360,6 +360,7 @@ export const DKG_ONTOLOGY = {
   SKILL_OFFERS: 'https://dkg.origintrail.io/skill#offersSkill',
   SKILL_FRAMEWORK: 'https://dkg.origintrail.io/skill#framework',
   DKG_REGISTRATION_STATUS: `${DKG}registrationStatus`,
+  DKG_REGISTRATION_TX_HASH: `${DKG}registrationTransactionHash`,
   DKG_CURATOR: `${DKG}curator`,
   DKG_ALLOWED_PEER: `${DKG}allowedPeer`,
   DKG_ALLOWED_AGENT: `${DKG}allowedAgent`,

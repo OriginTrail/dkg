@@ -378,6 +378,294 @@ import type { DKGAgent } from './dkg-agent.js';
 import { isCanonicalPositiveContextGraphId } from './context-graph-binding-state.js';
 
 export class ContextGraphRegistryMethods extends DKGAgentBase {
+  /** Read the local registration-state marker without choosing a binding. */
+  async getContextGraphRegistrationStatus(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<string | undefined> {
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    const result = await this.store.query(
+      `SELECT DISTINCT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } }`,
+      { source: 'agent.contextGraph.registrationStatus' },
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
+    const statuses = [...new Set(result.bindings
+      .map((binding) => binding['status']?.replace(/^"|"$/g, ''))
+      .filter((status): status is string => typeof status === 'string'))];
+    if (statuses.length !== 1) {
+      throw new Error(
+        `Context graph "${contextGraphId}" has conflicting registration states: ${statuses.join(', ')}`,
+      );
+    }
+    return statuses[0];
+  }
+
+  /**
+   * Registration-specific binding boundary.
+   *
+   * An explicit `unregistered` marker means this local graph is distinct even
+   * when another deployment used the same label, so historical name-hash
+   * discovery is forbidden. A durable subscription id or a receipt-stamped
+   * `_meta` id is authoritative. An interrupted attempt without either exact
+   * binding fails closed because submitting another transaction could mint an
+   * irreversible duplicate.
+   */
+  async resolveContextGraphRegistrationOnChainId(
+    this: DKGAgent,
+    contextGraphId: string,
+    knownRegistrationStatus?: string,
+  ): Promise<string | null> {
+    const registrationStatus = knownRegistrationStatus
+      ?? await this.getContextGraphRegistrationStatus(contextGraphId);
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    const currentBinding = this.contextGraphBindingState.currentBindingFor(
+      contextGraphId,
+      subscription,
+    );
+    if (currentBinding?.bindingKind === 'authoritative') {
+      return currentBinding.onChainId;
+    }
+
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    const receipt = await this.store.query(
+      `SELECT DISTINCT ?id ?txHash WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id .
+          OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ?txHash }
+        }
+      }`,
+      { source: 'agent.contextGraph.registrationReceipt' },
+    );
+    if (receipt.type === 'bindings' && receipt.bindings.length > 0) {
+      const ids = [...new Set(receipt.bindings
+        .map((binding) => binding['id']?.replace(/^"|"$/g, ''))
+        .filter((id): id is string => isCanonicalPositiveContextGraphId(id)))];
+      if (ids.length > 1) {
+        throw new Error(
+          `Context graph "${contextGraphId}" has conflicting durable registration ids: ${ids.join(', ')}`,
+        );
+      }
+      const hasReceiptProvenance = receipt.bindings.some((binding) => (
+        typeof binding['txHash'] === 'string'
+        && /^"?0x[0-9a-fA-F]+"?$/.test(binding['txHash'])
+      ));
+      if (
+        ids.length === 1
+        && (registrationStatus === 'registered'
+          || registrationStatus?.startsWith('registering:') === true
+          || hasReceiptProvenance)
+      ) {
+        return ids[0];
+      }
+    }
+
+    if (registrationStatus === 'unregistered') return null;
+    if (registrationStatus?.startsWith('registering:')) {
+      throw new Error(
+        `Context graph "${contextGraphId}" has an interrupted on-chain registration attempt ` +
+        'without a durable receipt binding. Refusing to submit another transaction; recover or ' +
+        'clear the original attempt after verifying its chain outcome.',
+      );
+    }
+    return this.getContextGraphOnChainId(contextGraphId);
+  }
+
+  /** Atomically claim the single transaction-submission slot for this graph. */
+  async beginContextGraphRegistrationAttempt(
+    this: DKGAgent,
+    contextGraphId: string,
+    expectedStatus: string | undefined,
+  ): Promise<string> {
+    if (expectedStatus !== undefined && expectedStatus !== 'unregistered') {
+      throw new Error(
+        `Context graph "${contextGraphId}" cannot begin registration from state ${expectedStatus}`,
+      );
+    }
+    const cgMetaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    const contextGraphUri = assertSafeIri(`did:dkg:context-graph:${contextGraphId}`);
+    const attemptStatus = `registering:${randomUUID()}`;
+    const expectedPattern = expectedStatus === undefined
+      ? `FILTER NOT EXISTS { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?existingStatus } }`
+      : `GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "unregistered" }`;
+    const deletePattern = expectedStatus === undefined
+      ? ''
+      : `DELETE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "unregistered" } }`;
+    const updated = await tryUpdateWithTouchedGraphs(
+      this.store,
+      `${deletePattern}
+       INSERT { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ${sparqlString(attemptStatus)} } }
+       WHERE { ${expectedPattern} }`,
+      [cgMetaGraph],
+      { source: 'agent.contextGraph.registrationAttempt.begin' },
+    );
+    if (!updated) {
+      throw new Error('Context Graph registration requires atomic SPARQL UPDATE support.');
+    }
+    await this.store.flush?.({ source: 'agent.contextGraph.registrationAttempt.begin.flush' });
+    const currentStatus = await this.getContextGraphRegistrationStatus(contextGraphId);
+    if (currentStatus !== attemptStatus) {
+      throw new Error(
+        `Context graph "${contextGraphId}" registration was claimed concurrently; refusing a second transaction`,
+      );
+    }
+    return attemptStatus;
+  }
+
+  /** Persist exact post-receipt provenance before any other local projection. */
+  async persistContextGraphRegistrationReceipt(
+    this: DKGAgent,
+    contextGraphId: string,
+    attemptStatus: string,
+    onChainId: string,
+    txHash: string,
+  ): Promise<void> {
+    if (!attemptStatus.startsWith('registering:')) {
+      throw new Error(`Invalid Context Graph registration attempt state: ${attemptStatus}`);
+    }
+    if (!isCanonicalPositiveContextGraphId(onChainId)) {
+      throw new Error(`Invalid Context Graph registration receipt id: ${onChainId}`);
+    }
+    // Production EVM receipts are bytes32; the in-memory adapter intentionally
+    // appends a deterministic suffix so parallel tests can retain uniqueness.
+    if (!/^0x[0-9a-fA-F]+$/.test(txHash)) {
+      throw new Error(`Invalid Context Graph registration transaction hash: ${txHash}`);
+    }
+    const cgMetaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    const contextGraphUri = assertSafeIri(`did:dkg:context-graph:${contextGraphId}`);
+    const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+    const updated = await tryUpdateWithTouchedGraphs(
+      this.store,
+      `DELETE { GRAPH <${cgMetaGraph}> {
+         <${contextGraphUri}> <${onChainIdPredicate}> ?oldId .
+         <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ?oldTxHash .
+       } }
+       INSERT { GRAPH <${cgMetaGraph}> {
+         <${contextGraphUri}> <${onChainIdPredicate}> ${sparqlString(onChainId)} .
+         <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ${sparqlString(txHash.toLowerCase())} .
+       } }
+       WHERE {
+         GRAPH <${cgMetaGraph}> {
+           <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ${sparqlString(attemptStatus)} .
+           OPTIONAL { <${contextGraphUri}> <${onChainIdPredicate}> ?oldId }
+           OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ?oldTxHash }
+         }
+       }`,
+      [cgMetaGraph],
+      { source: 'agent.contextGraph.registrationAttempt.receipt' },
+    );
+    if (!updated) {
+      throw new Error('Context Graph registration receipt persistence requires atomic SPARQL UPDATE support.');
+    }
+    await this.store.flush?.({ source: 'agent.contextGraph.registrationAttempt.receipt.flush' });
+    const recovered = await this.resolveContextGraphRegistrationOnChainId(
+      contextGraphId,
+      attemptStatus,
+    );
+    if (recovered !== onChainId) {
+      throw new Error(
+        `Context graph "${contextGraphId}" registration receipt was not durably persisted`,
+      );
+    }
+  }
+
+  /** Atomically publish the complete local binding after receipt persistence. */
+  async completeContextGraphRegistrationProjection(
+    this: DKGAgent,
+    contextGraphId: string,
+    onChainId: string,
+    nameHash: string,
+  ): Promise<void> {
+    if (!isCanonicalPositiveContextGraphId(onChainId)) {
+      throw new Error(`Invalid Context Graph registration projection id: ${onChainId}`);
+    }
+    if (!/^0x[0-9a-fA-F]{64}$/.test(nameHash)) {
+      throw new Error(`Invalid Context Graph registration name hash: ${nameHash}`);
+    }
+    const cgMetaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    const ontologyGraph = assertSafeIri(contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY));
+    const contextGraphUri = assertSafeIri(`did:dkg:context-graph:${contextGraphId}`);
+    const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+    const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
+    const updated = await tryUpdateWithTouchedGraphs(
+      this.store,
+      `DELETE {
+         GRAPH <${cgMetaGraph}> {
+           <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?oldStatus .
+           <${contextGraphUri}> <${onChainIdPredicate}> ?oldMetaId .
+           <${contextGraphUri}> <${onChainHashPredicate}> ?oldNameHash .
+         }
+         GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${onChainIdPredicate}> ?oldOntologyId }
+       }
+       INSERT {
+         GRAPH <${cgMetaGraph}> {
+           <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "registered" .
+           <${contextGraphUri}> <${onChainIdPredicate}> ${sparqlString(onChainId)} .
+           <${contextGraphUri}> <${onChainHashPredicate}> ${sparqlString(nameHash.toLowerCase())} .
+         }
+         GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${onChainIdPredicate}> ${sparqlString(onChainId)} }
+       }
+       WHERE {
+         OPTIONAL { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?oldStatus } }
+         OPTIONAL { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${onChainIdPredicate}> ?oldMetaId } }
+         OPTIONAL { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${onChainHashPredicate}> ?oldNameHash } }
+         OPTIONAL { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${onChainIdPredicate}> ?oldOntologyId } }
+       }`,
+      [cgMetaGraph, ontologyGraph],
+      { source: 'agent.contextGraph.registrationAttempt.complete' },
+    );
+    if (!updated) {
+      throw new Error('Context Graph registration completion requires atomic SPARQL UPDATE support.');
+    }
+    await this.store.flush?.({ source: 'agent.contextGraph.registrationAttempt.complete.flush' });
+    const status = await this.getContextGraphRegistrationStatus(contextGraphId);
+    const resolved = await this.resolveContextGraphRegistrationOnChainId(contextGraphId, status);
+    if (status !== 'registered' || resolved !== onChainId) {
+      throw new Error(`Context graph "${contextGraphId}" registration projection did not commit`);
+    }
+  }
+
+  /** Clear a receipt only after chain truth proves that numeric slot inactive. */
+  async resetInactiveContextGraphRegistration(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<void> {
+    const cgMetaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    const ontologyGraph = assertSafeIri(contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY));
+    const contextGraphUri = assertSafeIri(`did:dkg:context-graph:${contextGraphId}`);
+    const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+    const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
+    const updated = await tryUpdateWithTouchedGraphs(
+      this.store,
+      `DELETE {
+         GRAPH <${cgMetaGraph}> {
+           <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?oldStatus .
+           <${contextGraphUri}> <${onChainIdPredicate}> ?oldMetaId .
+           <${contextGraphUri}> <${onChainHashPredicate}> ?oldNameHash .
+           <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ?oldTxHash .
+         }
+         GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${onChainIdPredicate}> ?oldOntologyId }
+       }
+       INSERT { GRAPH <${cgMetaGraph}> {
+         <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "unregistered"
+       } }
+       WHERE {
+         OPTIONAL { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?oldStatus } }
+         OPTIONAL { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${onChainIdPredicate}> ?oldMetaId } }
+         OPTIONAL { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${onChainHashPredicate}> ?oldNameHash } }
+         OPTIONAL { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_TX_HASH}> ?oldTxHash } }
+         OPTIONAL { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${onChainIdPredicate}> ?oldOntologyId } }
+       }`,
+      [cgMetaGraph, ontologyGraph],
+      { source: 'agent.contextGraph.registrationAttempt.resetInactive' },
+    );
+    if (!updated) {
+      throw new Error('Context Graph registration reset requires atomic SPARQL UPDATE support.');
+    }
+    await this.store.flush?.({ source: 'agent.contextGraph.registrationAttempt.resetInactive.flush' });
+  }
+
   /**
    * Check whether a context graph has been registered on-chain.
    */

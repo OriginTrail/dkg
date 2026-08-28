@@ -53,7 +53,71 @@ describe('Genesis Knowledge', () => {
     });
 
 
-  	  it('requires address-scoped curator authority for on-chain registration', async () => {
+    it('fails closed when registration is interrupted before receipt persistence', async () => {
+      const store = new OxigraphStore();
+      const chain = new CapturingContextGraphChainAdapter();
+      const agent = await DKGAgent.create({
+        name: 'RegistrationReceiptFailClosedBot',
+        store,
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
+      const curatorAddress = ethers.getAddress(chain.signerAddress);
+
+      await agent.createContextGraph({
+        id: 'receipt-fail-closed',
+        name: 'Receipt fail closed',
+        callerAgentAddress: curatorAddress,
+      });
+      const persistReceipt = vi.spyOn(
+        agent as any,
+        'persistContextGraphRegistrationReceipt',
+      ).mockRejectedValueOnce(new Error('injected post-receipt persistence failure'));
+
+      await expect(agent.registerContextGraph('receipt-fail-closed', { callerAgentAddress: curatorAddress }))
+        .rejects.toThrow(/injected post-receipt persistence failure/);
+      persistReceipt.mockRestore();
+      await expect(agent.registerContextGraph('receipt-fail-closed', { callerAgentAddress: curatorAddress }))
+        .rejects.toThrow(/interrupted on-chain registration attempt/);
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(1);
+      await agent.stop().catch(() => {});
+    });
+
+
+    it('recovers a durable receipt binding after later projection failure', async () => {
+      const store = new OxigraphStore();
+      const chain = new CapturingContextGraphChainAdapter();
+      const agent = await DKGAgent.create({
+        name: 'RegistrationReceiptRecoveryBot',
+        store,
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
+      const curatorAddress = ethers.getAddress(chain.signerAddress);
+
+      await agent.createContextGraph({
+        id: 'receipt-binding-recovery',
+        name: 'Receipt binding recovery',
+        callerAgentAddress: curatorAddress,
+      });
+      const completeProjection = vi.spyOn(
+        agent as any,
+        'completeContextGraphRegistrationProjection',
+      ).mockRejectedValueOnce(new Error('injected post-receipt projection failure'));
+
+      await expect(agent.registerContextGraph('receipt-binding-recovery', { callerAgentAddress: curatorAddress }))
+        .rejects.toThrow(/injected post-receipt projection failure/);
+      completeProjection.mockRestore();
+      await expect(agent.registerContextGraph('receipt-binding-recovery', { callerAgentAddress: curatorAddress }))
+        .resolves.toMatchObject({ onChainId: '1' });
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(1);
+      await agent.stop().catch(() => {});
+    });
+
+
+    it('requires address-scoped curator authority for on-chain registration', async () => {
       const store = new OxigraphStore();
       const chain = new CapturingContextGraphChainAdapter();
       const agent = await DKGAgent.create({
