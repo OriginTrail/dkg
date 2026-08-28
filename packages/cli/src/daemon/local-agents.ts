@@ -79,6 +79,7 @@ export interface LocalAgentIntegrationDefinition {
   name: string;
   description: string;
   transportKind?: string;
+  daemonOwned?: boolean;
   capabilities: LocalAgentIntegrationCapabilities;
   manifest?: LocalAgentIntegrationManifest;
 }
@@ -96,6 +97,17 @@ export interface LocalAgentIntegrationRecord extends LocalAgentIntegrationConfig
 }
 
 export const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentIntegrationDefinition> = {
+  'local-llm': {
+    id: 'local-llm',
+    name: 'DKG Local LLM',
+    description: 'Chat with a local llama.cpp model through the DKG MCP tool surface.',
+    transportKind: 'dkg-local-llm',
+    daemonOwned: true,
+    capabilities: {
+      localChat: true,
+      connectFromUi: false,
+    },
+  },
   openclaw: {
     id: 'openclaw',
     name: 'OpenClaw',
@@ -305,6 +317,19 @@ export function buildLocalAgentIntegrationRecord(
       : { id },
     stored ?? { id },
   );
+  if (definition?.daemonOwned) {
+    merged.name = definition.name;
+    merged.description = definition.description;
+    merged.capabilities = { ...definition.capabilities };
+    merged.transport = definition.transportKind ? { kind: definition.transportKind } : {};
+    merged.manifest = definition.manifest;
+    merged.enabled = true;
+    merged.runtime = {
+      status: 'configured',
+      ready: false,
+      lastError: null,
+    };
+  }
   const status = computeLocalAgentIntegrationStatus(merged);
   return {
     ...merged,

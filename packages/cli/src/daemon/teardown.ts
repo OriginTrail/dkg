@@ -87,6 +87,8 @@ export interface ProducerQuiescentTeardownSteps {
   /** Stop accepting new connections. Initiated, not awaited — in-flight
    *  requests keep their sockets and everything below is still alive. */
   closeServer: () => void;
+  /** Close the daemon-owned MCP child before the DKG agent/store retires. */
+  closeLocalLlm: () => Promise<void>;
   /** Grace period for retained catch-up jobs, WHILE THE WORKER IS ALIVE,
    *  followed by a terminal record for every job still owed one. */
   drainCatchupJobs: () => Promise<void>;
@@ -128,6 +130,7 @@ export type TeardownStepName = keyof ProducerQuiescentTeardownSteps;
  */
 const TEARDOWN_ORDER = [
   'closeServer',
+  'closeLocalLlm',
   'drainCatchupJobs',
   'flushTelemetry',
   'stopPublisherRuntime',
@@ -300,6 +303,7 @@ export async function closeDaemonBackingStoresAfterTeardown(
  */
 export interface ProducerQuiescentTeardownDeps {
   server: { close: () => void };
+  closeLocalLlm: () => Promise<void>;
   drainCatchupJobs: (budgetMs: number, log: (message: string) => void) => Promise<unknown>;
   flushTelemetry: (options: { log: (message: string) => void }) => Promise<void>;
   /** Publisher runtime; stops first because it feeds the promote queue. */
@@ -321,6 +325,7 @@ export function buildProducerQuiescentTeardownSteps(
 ): ProducerQuiescentTeardownSteps {
   return {
     closeServer: () => deps.server.close(),
+    closeLocalLlm: () => deps.closeLocalLlm(),
     drainCatchupJobs: async () => {
       await deps.drainCatchupJobs(
         deps.drainBudgetMs ?? CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS,
