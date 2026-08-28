@@ -2371,8 +2371,12 @@ export class TripleStoreAsyncLiftPublisher
       .map((job) => ({ job, lookup: this.chainProofLookupFor(job) }))
       .filter((candidate): candidate is { job: PersistedFailedJob; lookup: AsyncLiftChainProofLookup } => candidate.lookup !== null)
       .map(({ job, lookup }) => ({ job, lookup, identity: this.heldChainProofIncarnationKey(job, lookup) }));
+    // The pass ordering token (PR #2380 r3): issued at THIS pass's inventory snapshot, it is
+    // the schedule's ownership-recency authority — millisecond timestamps can tie between
+    // overlapping passes, tokens cannot.
+    const passToken = this.chainProofRetrySchedule.beginPass();
     const dueJobs = withEvidence.filter(({ job, identity }) =>
-      this.chainProofRetrySchedule.isDue(job.jobId, identity, startedAt));
+      this.chainProofRetrySchedule.isDue(job.jobId, identity, startedAt, passToken));
 
     // r19 (🔴 3816490915) — the lookup is derived BEFORE the batch is taken, because a job that
     // cannot form one costs no round trip and must therefore cost no batch slot either. Deriving
@@ -2409,7 +2413,7 @@ export class TripleStoreAsyncLiftPublisher
           // the identity re-read; r7 3882283830 — the helper reports only what this loop
           // consumes: the settled count. Stale and deferred turns are 0 by construction, and
           // their scheduling is the helper's/schedule's own business).
-          dispatched += await this.dispatchOneHeldJob(job, lookup, identity, resolver, deadline);
+          dispatched += await this.dispatchOneHeldJob(job, lookup, identity, passToken, resolver, deadline);
         } catch {
           // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
           // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
@@ -2417,7 +2421,7 @@ export class TripleStoreAsyncLiftPublisher
           // The exception path never re-read the record, so this deferral may be a superseded
           // echo — which the schedule's incarnation keying makes harmless BY CONSTRUCTION (r6
           // 3882185608): it can only address this incarnation's own entry, never the successor's.
-          this.chainProofRetrySchedule.defer(job.jobId, identity, 'default');
+          this.chainProofRetrySchedule.defer(job.jobId, identity, 'default', passToken);
           continue;
         }
       }
@@ -2435,6 +2439,7 @@ export class TripleStoreAsyncLiftPublisher
     job: PersistedFailedJob,
     lookup: AsyncLiftChainProofLookup,
     identity: string,
+    passToken: number,
     resolver: NonNullable<TripleStoreAsyncLiftPublisher['chainProofResolver']>,
     deadline: AbortController,
   ): Promise<number> {
@@ -2453,7 +2458,7 @@ export class TripleStoreAsyncLiftPublisher
     if (resolution === null) {
       // Deadline established nothing. Echo-safety is the schedule's key model (r6 3882185608):
       // this write can only address this incarnation's own entry.
-      this.chainProofRetrySchedule.defer(job.jobId, identity, 'default');
+      this.chainProofRetrySchedule.defer(job.jobId, identity, 'default', passToken);
       return 0;
     }
 
@@ -2487,6 +2492,7 @@ export class TripleStoreAsyncLiftPublisher
         job.jobId,
         identity,
         resolution.status === 'pending-awaiting-confirmation' ? 'awaiting-confirmations' : 'default',
+        passToken,
       );
       return 0;
     });
