@@ -840,8 +840,13 @@ describe('async-lift receipt-hint lane', () => {
     const publisher = createPublisher({
       chainProofDispatchTimeBudgetMs: 150,
       detachReceiptReconciliation: true,
-      chainProofResolver: async () => (
-        { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
+      chainProofResolver: async (lookup: { walletId: string }) => {
+        // Job B's proof pays a REAL (small) macrotask, as any RPC would: an in-memory instant
+        // resolver would win even a zero-budget abort race on microtasks alone and mask a
+        // remaining-budget-only regression (the round-2 lesson, applied here deliberately).
+        if (lookup.walletId === 'wallet-2') await new Promise((resolve) => setTimeout(resolve, 5));
+        return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
+      },
       knowledgeAssetVmPublishRecoveryResolver: async () => ({
         inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
         finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
