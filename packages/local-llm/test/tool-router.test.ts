@@ -37,7 +37,10 @@ describe('tool router', () => {
   it('ranks catalog tools first without exposing catalog mutations for discovery', () => {
     const route = routeTools({ prompt: 'Which DKG query catalog queries are saved?', tools: surface });
     expect(route.profile).toBe('catalog');
-    expect(route.tools[0]?.name).toBe('dkg_query_catalog_context_graphs');
+    expect(route.tools.map((tool) => tool.name).slice(0, 2)).toEqual([
+      'dkg_query_catalog_list',
+      'dkg_query_catalog_run',
+    ]);
     expect(route.tools.map((tool) => tool.name)).toContain('dkg_query_catalog_list');
     expect(route.tools.map((tool) => tool.name)).toContain('dkg_query_catalog_run');
     expect(route.tools.map((tool) => tool.name)).not.toContain('dkg_query_catalog_save');
@@ -47,7 +50,16 @@ describe('tool router', () => {
   });
 
   it('routes cross-graph catalog discovery to evidence instead of graph descriptions', () => {
-    const route = routeTools({ prompt: 'List CGs that have catalogs', tools: surface });
+    const metadataSurface = surface.map((tool) => tool.name === 'dkg_query_catalog_context_graphs'
+      ? {
+          ...tool,
+          description:
+            'Inspect accessible DKG Context Graphs and return only graphs that actually contain saved query-catalog entries. '
+            + 'Use for explicit cross-graph questions such as which/all Context Graphs have catalogs.',
+          annotations: { readOnlyHint: true },
+        }
+      : tool);
+    const route = routeTools({ prompt: 'List CGs that have catalogs', tools: metadataSurface });
     expect(route.profile).toBe('catalog');
     expect(route.tools[0]?.name).toBe('dkg_query_catalog_context_graphs');
     expect(route.tools.some(isMutatingTool)).toBe(false);

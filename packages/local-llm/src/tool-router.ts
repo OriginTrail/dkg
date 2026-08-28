@@ -57,7 +57,6 @@ const LEGACY_UNANNOTATED_READ_TOOL_NAMES = new Set<string>([
   'dkg_knowledge_asset_import_artifact_read_markdown',
   'dkg_check_inbox',
   'dkg_query_catalog_list',
-  'dkg_query_catalog_context_graphs',
   'dkg_query_catalog_run',
 ]);
 
@@ -80,7 +79,6 @@ const LEGACY_UNANNOTATED_WRITE_TOOL_NAMES = new Set<string>([
 ]);
 const STATUS_SIGNAL = /\b(?:node\s+status|status|health|healthy|peers?|wallet|balances?|connectivity)\b/i;
 const CATALOG_SIGNAL = /\b(?:query[-\s]+catalogs?|saved\s+quer(?:y|ies)|catalog\s+quer(?:y|ies)|catalogs?)\b/i;
-const CONTEXT_GRAPH_DISCOVERY_SIGNAL = /\b(?:cgs?|context\s+graphs?|graph\s+projects?)\b/i;
 const WRITE_ACTION_SIGNAL = /\b(?:create|insert|add|write|update|save|publish|share|finalize|discard|delete|import|enrich|register|subscribe|send|mutate|populate|pull|apply|approve|reject|cancel|reset)\b/gi;
 const WRITE_ACTION_TOKENS = new Set([
   'create', 'insert', 'add', 'write', 'update', 'save', 'publish', 'share',
@@ -282,9 +280,6 @@ function createRoute(
 
   const pinned = new Set([
     ...explicitNames,
-    ...(resolved === 'read' && CONTEXT_GRAPH_DISCOVERY_SIGNAL.test(prompt)
-      ? ['dkg_list_context_graphs']
-      : []),
     ...(options.additionalToolNames ?? []),
     ...(domainIntent && resolved === 'write' ? options.additionalWriteToolNames ?? [] : []),
     ...(domainIntent && resolved !== 'write' ? options.additionalReadToolNames ?? [] : []),

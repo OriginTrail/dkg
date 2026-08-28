@@ -51,7 +51,7 @@ const EXPANSIONS = new Map<string, readonly string[]>([
   ['running', ['health', 'status', 'connectivity']],
   ['populate', ['create', 'write', 'knowledge', 'asset']],
   ['fact', ['knowledge', 'asset', 'write', 'query']],
-  ['graph', ['context', 'sub', 'query']],
+  ['graph', ['context', 'query']],
   ['project', ['context', 'graph']],
   ['cg', ['context', 'graph', 'list']],
   ['cgs', ['context', 'graph', 'list']],
