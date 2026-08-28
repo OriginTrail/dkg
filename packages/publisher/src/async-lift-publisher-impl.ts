@@ -2240,20 +2240,16 @@ export class TripleStoreAsyncLiftPublisher
         // A job whose turn ended in an exception simply stays held and is asked again next tick,
         // which is the same disposition as any other unestablished answer.
         try {
-          const outcome = await this.dispatchOneHeldJob(job, lookup, deadline);
-          if (outcome.kind === 'settled') {
-            dispatched += outcome.jobs;
-            this.chainProofRetrySchedule.settled(job.jobId, identity);
-          } else if (outcome.kind === 'defer') {
-            // Verified: the claim-lock re-read inside dispatchOneHeldJob agreed this is still
-            // the incarnation the chain was asked about, so this deferral may supersede a
-            // predecessor's leftover entry.
-            this.chainProofRetrySchedule.defer(job.jobId, identity, outcome.cadence);
-          }
-          // 'stale': the verdict was about a record that no longer exists, so it may not touch
-          // the successor's schedule — not even the attempt count. The schedule's identity
-          // awareness closes the other half (r2 3879930149): the predecessor's accumulated
-          // ladder can neither delay the successor's dueness nor seed its attempt count.
+          // Scheduling now happens INSIDE dispatchOneHeldJob's claim-locked section (r5
+          // 3882010299): verification and mutation share one ownership boundary, so a verdict
+          // that was current at the re-read cannot stomp a successor's schedule written between
+          // an unlocked check and a later mutation. The outer loop only counts.
+          const outcome = await this.dispatchOneHeldJob(job, lookup, identity, deadline);
+          if (outcome.kind === 'settled') dispatched += outcome.jobs;
+          // 'stale': the verdict was about a record that no longer exists — nothing was written,
+          // not even the attempt count. The schedule's identity awareness covers the rest
+          // (r2 3879930149): a predecessor's ladder neither delays the successor's dueness nor
+          // seeds its attempt count.
         } catch {
           // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
           // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
@@ -2278,13 +2274,17 @@ export class TripleStoreAsyncLiftPublisher
   private async dispatchOneHeldJob(
     job: PersistedFailedJob,
     lookup: AsyncLiftChainProofLookup,
+    identity: string,
     deadline: AbortController,
   ): Promise<
     | { kind: 'settled'; jobs: number }
-    | { kind: 'defer'; cadence: 'awaiting-confirmations' | 'default' }
+    | { kind: 'deferred' }
     | { kind: 'stale' }
   > {
-    if (!this.chainProofResolver) return { kind: 'defer', cadence: 'default' };
+    if (!this.chainProofResolver) {
+      this.chainProofRetrySchedule.deferUnverified(job.jobId, identity, 'default');
+      return { kind: 'deferred' };
+    }
     // r19 (🔴 3816490904) — the signal goes to the resolver AND the wait is bounded here. A
     // resolver that honours the signal settles promptly and releases its socket; one that ignores
     // it is abandoned rather than awaited, which is worse for that socket but leaves the ceiling
@@ -2297,7 +2297,11 @@ export class TripleStoreAsyncLiftPublisher
       (sig) => this.chainProofResolver!(lookup, sig ? { signal: sig } : undefined),
       deadline.signal,
     );
-    if (resolution === null) return { kind: 'defer', cadence: 'default' };
+    if (resolution === null) {
+      // Deadline established nothing and there was no re-read: unverified deferral only.
+      this.chainProofRetrySchedule.deferUnverified(job.jobId, identity, 'default');
+      return { kind: 'deferred' };
+    }
 
     // GH#2270 PR-3 r4 — the verdict was earned across an RPC await, against a SNAPSHOT of the
     // job. While it was in flight, an operator's `clearTerminalJob` or a client's fresh mandate
@@ -2307,26 +2311,30 @@ export class TripleStoreAsyncLiftPublisher
     // transitions serialize on, against a RE-READ of the record, and only when it is still the
     // identical held job the chain was asked about — same failure identity, same transaction
     // evidence. Anything else drops the verdict; the next tick asks about whatever now exists.
-    const settled = await this.withClaimLock(async () => {
+    return this.withClaimLock(async () => {
       const current = await this.getStatus(job.jobId);
-      if (!current || !isFailedJob(current)) return null;
-      if (!this.isSameHeldFailedJob(job, current, lookup)) return null;
-      return this.applyChainProofDisposition(current, lookup, resolution, deadline);
+      // A verdict rejected at the identity boundary is discarded WHOLE — no disposition, no
+      // scheduling, not even the attempt count: its cadence metadata belongs to the same stale
+      // answer. r5 (3882010299) — the schedule mutation happens HERE, inside the same claim
+      // lock as the re-read, so verification and mutation are one ownership boundary: a
+      // replace-and-re-fail serializes on this lock, and a verdict that was current at the
+      // re-read stays current through its own scheduling write.
+      if (!current || !isFailedJob(current)) return { kind: 'stale' as const };
+      if (!this.isSameHeldFailedJob(job, current, lookup)) return { kind: 'stale' as const };
+      const settled = await this.applyChainProofDisposition(current, lookup, resolution, deadline);
+      if (settled > 0) {
+        this.chainProofRetrySchedule.settled(job.jobId, identity);
+        return { kind: 'settled' as const, jobs: settled };
+      }
+      // Scheduling-only, consumed exactly here — the phase never reaches
+      // `applyChainProofDisposition`, whose policy input remains the verdict STATUS alone.
+      this.chainProofRetrySchedule.defer(
+        job.jobId,
+        identity,
+        resolution.status === 'pending-awaiting-confirmation' ? 'awaiting-confirmations' : 'default',
+      );
+      return { kind: 'deferred' as const };
     });
-    // A verdict rejected at the identity boundary is discarded WHOLE: its scheduling phase is
-    // metadata of the same stale answer and must not leak onto the successor record. The defer
-    // cadence is therefore classified only on the non-stale path, after the re-read agreed this
-    // is still the job the chain was asked about. Scheduling-only, consumed exactly here — the
-    // phase never reaches `applyChainProofDisposition`, whose policy input remains the verdict
-    // STATUS alone.
-    if (settled === null) return { kind: 'stale' };
-    if (settled > 0) return { kind: 'settled', jobs: settled };
-    return {
-      kind: 'defer',
-      cadence: resolution.status === 'pending-awaiting-confirmation'
-        ? 'awaiting-confirmations'
-        : 'default',
-    };
   }
 
   /**

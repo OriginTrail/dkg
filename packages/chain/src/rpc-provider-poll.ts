@@ -16,18 +16,17 @@
  * listeners.
  */
 
-import type { JsonRpcProvider } from 'ethers';
 import { withRetry } from '@origintrail-official/dkg-core';
 
-export async function readAllProvidersWithTransientRetry<T>(
-  providers: readonly JsonRpcProvider[],
-  readOne: (provider: JsonRpcProvider) => Promise<T | null>,
+export async function readAllProvidersWithTransientRetry<TProvider, TResult>(
+  providers: readonly TProvider[],
+  readOne: (provider: TProvider) => Promise<TResult | null>,
   opts: {
     retryDelayMs: number;
     isRetryable: (err: unknown) => boolean;
     signal?: AbortSignal;
   },
-): Promise<Array<T | null> | null> {
+): Promise<Array<TResult | null> | null> {
   if (opts.signal?.aborted) return null;
   let onAbort: (() => void) | undefined;
   const aborted = opts.signal
@@ -37,7 +36,7 @@ export async function readAllProvidersWithTransientRetry<T>(
       })
     : null;
   try {
-    const withOneTransientRetry = (provider: JsonRpcProvider) => withRetry(
+    const withOneTransientRetry = (provider: TProvider) => withRetry(
       () => readOne(provider),
       {
         maxAttempts: 2,

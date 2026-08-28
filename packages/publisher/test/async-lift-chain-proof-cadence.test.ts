@@ -233,6 +233,54 @@ describe('GH#2270 chain-proof cadence', () => {
       expect(asks).toBe(5);
     });
 
+    it("a stale predecessor's late PENDING verdict cannot reset the successor's earned backoff", async () => {
+      // r5 (3882010299) — the verified path's own race: pass A's resolver stalls and later
+      // returns a NORMAL pending verdict (not an exception) after the record was re-failed and
+      // the successor earned its 30s deferral. Scheduling now happens inside the same claim
+      // lock as the identity re-read, so A's verdict is recognized as stale THERE and writes
+      // nothing: the successor is quiet at 29s and asked exactly past its own due time.
+      let releaseFirst!: () => void;
+      const parked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        chainProofResolver: async () => {
+          asks += 1;
+          if (asks === 1) await parked;
+          return { status: 'pending-mempool' };
+        },
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      const firstPass = publisher.recover();
+      while (asks === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+
+      const current = await publisher.getStatus(jobId);
+      const successor = {
+        ...current!,
+        timestamps: { ...current!.timestamps, failedAt: (current!.timestamps as { failedAt: number }).failedAt + 1 },
+      };
+      const { jobRef, jobQuads } = serializeJobRecord(successor as never, DEFAULT_CONTROL_GRAPH_URI);
+      await (h.store as unknown as {
+        replaceSubject(graph: string, subject: string, quads: unknown): Promise<void>;
+      }).replaceSubject(DEFAULT_CONTROL_GRAPH_URI, jobRef, jobQuads);
+
+      await publisher.recover();
+      expect(asks).toBe(2);
+
+      releaseFirst();
+      await firstPass;
+
+      h.advance(29_000);
+      await publisher.recover();
+      expect(asks).toBe(2);
+      h.advance(2_000);
+      await publisher.recover();
+      expect(asks).toBe(3);
+      expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    });
+
     it("a stale predecessor's late EXCEPTION cannot reset the successor's earned backoff", async () => {
       // r4 (3881841010) — the mutation-side twin of the stale guarantees: pass A's resolver call
       // stalls, the record is re-failed, the successor earns its 30s deferral on its own pass,
