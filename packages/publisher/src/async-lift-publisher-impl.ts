@@ -2221,13 +2221,13 @@ export class TripleStoreAsyncLiftPublisher
     // it is abandoned rather than awaited, which is worse for that socket but leaves the ceiling
     // real. Either way the deadline establishes NOTHING, so the caller records it exactly like an
     // inconclusive verdict: the job stays held and is asked again later.
-    const resolution = await Promise.race([
-      this.chainProofResolver(lookup, { signal: deadline.signal }),
-      new Promise<null>((resolve) => {
-        if (deadline.signal.aborted) { resolve(null); return; }
-        deadline.signal.addEventListener('abort', () => resolve(null), { once: true });
-      }),
-    ]);
+    // r7 (3877773504) — through the ONE lazy abort boundary: identical null-on-deadline
+    // semantics, and a successful lookup now removes its listener from the shared pass
+    // controller instead of leaving it attached until the pass aborts.
+    const resolution = await resolveWithinAbort(
+      (sig) => this.chainProofResolver!(lookup, sig ? { signal: sig } : undefined),
+      deadline.signal,
+    );
     if (resolution === null) return 0;
 
     // GH#2270 PR-3 r4 — the verdict was earned across an RPC await, against a SNAPSHOT of the
