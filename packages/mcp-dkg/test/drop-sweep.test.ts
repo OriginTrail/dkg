@@ -128,8 +128,11 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
   // Query-catalog MCP facade: +3 contract-backed tools (list / run / save),
   // taking the complete production surface from 30 → 33. List and run are
   // read-only; save is an explicit local-state mutation.
-  it('registered surface contains exactly 33 tools (full production surface, post-PR locked count)', () => {
-    expect(server.tools.size).toBe(33);
+  // Cross-graph query-catalog discovery: +1 read-only tool, taking the full
+  // surface from 33 → 34. It verifies catalog presence instead of inferring it
+  // from context-graph names or descriptions.
+  it('registered surface contains exactly 34 tools (full production surface, post-PR locked count)', () => {
+    expect(server.tools.size).toBe(34);
   });
 });
 

@@ -22,6 +22,7 @@ import type { DkgClient, SparqlResult } from '../client.js';
 import type { DkgConfig } from '../config.js';
 import { bindingsToTable } from '../sparql.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './context-graph-description.js';
+import { filterContextGraphsForScope } from './context-graph-scope.js';
 import { resolveWorkingMemoryAgentAddress } from './working-memory-identity.js';
 
 type ToolResult = {
@@ -150,6 +151,120 @@ export function registerQueryCatalogTools(
   client: DkgClient,
   config: DkgConfig,
 ): void {
+  server.registerTool(
+    'dkg_query_catalog_context_graphs',
+    {
+      title: 'Find Context Graph Query Catalogs',
+      description:
+        'Inspect accessible DKG Context Graphs and return only graphs that actually contain saved query-catalog entries. ' +
+        'Use only for explicit cross-graph questions such as which/all Context Graphs have catalogs; never infer catalog presence ' +
+        'from graph names or descriptions. This tool does not resolve words such as default or current to one graph.',
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      inputSchema: {
+        scope: z.enum(['mine', 'all']).optional().default('mine').describe(
+          'Defaults to "mine" (created/joined Context Graphs). Use "all" for every graph known to this node.',
+        ),
+        limit: z.number().int().min(1).max(200).optional().default(100).describe(
+          'Maximum number of Context Graphs to inspect.',
+        ),
+        selectorLimit: z.number().int().min(0).max(50).optional().default(10).describe(
+          'Maximum saved-query selectors returned per matching Context Graph. Use 0 when only graph ids and counts are needed.',
+        ),
+      },
+    },
+    async ({ scope = 'mine', limit = 100, selectorLimit = 10 }): Promise<ToolResult> => {
+      try {
+        const accessible = filterContextGraphsForScope(await client.listProjects(), scope);
+        const inspected = accessible.slice(0, limit);
+        const outcomes: Array<{
+          row: (typeof inspected)[number];
+          items?: QueryCatalogItem[];
+          error?: string;
+        }> = inspected.map((row) => ({ row, error: 'not inspected' }));
+        const workerCount = Math.min(6, inspected.length);
+        let nextIndex = 0;
+        await Promise.all(Array.from({ length: workerCount }, async () => {
+          while (nextIndex < inspected.length) {
+            const index = nextIndex++;
+            const row = inspected[index];
+            try {
+              outcomes[index] = { row, items: await readCatalog(client, row.id) };
+            } catch (error) {
+              outcomes[index] = { row, error: formatError(error) };
+            }
+          }
+        }));
+
+        const matches = outcomes.flatMap((outcome) => {
+          if (!outcome.items?.length) return [];
+          const selectors = outcome.items.map(qualifiedSelector);
+          return [{
+            contextGraphId: outcome.row.id,
+            name: outcome.row.name,
+            count: outcome.items.length,
+            catalogs: [...new Set(outcome.items.map((item) => item.catalogSlug))],
+            selectors: selectors.slice(0, selectorLimit),
+            selectorsTruncated: selectors.length > selectorLimit,
+          }];
+        });
+        const failures = outcomes.flatMap((outcome) => outcome.error
+          ? [{ contextGraphId: outcome.row.id, error: outcome.error }]
+          : []);
+        const truncated = accessible.length > inspected.length;
+        if (!matches.length) {
+          const qualifier = failures.length
+            ? ` ${failures.length} graph(s) could not be inspected.`
+            : '';
+          const tail = truncated ? ` Inspection was limited to ${inspected.length} of ${accessible.length} graphs.` : '';
+          return ok(`No saved query catalogs found in ${inspected.length} inspected Context Graph(s).${qualifier}${tail}`, {
+            scope,
+            accessibleCount: accessible.length,
+            inspectedCount: inspected.length,
+            matchingCount: 0,
+            truncated,
+            items: [],
+            failures,
+          });
+        }
+        const lines = matches.map((match) => {
+          const name = match.name ? ` — ${match.name}` : '';
+          const catalogLabel = match.catalogs.length
+            ? ` · catalog(s): ${match.catalogs.map((slug) => `\`${slug}\``).join(', ')}`
+            : '';
+          const selectorLines = match.selectors.length
+            ? `\n  Selectors: ${match.selectors.map((selector) => `\`${selector}\``).join(', ')}`
+              + (match.selectorsTruncated ? ' …' : '')
+            : '';
+          return `- **${match.contextGraphId}**${name} · ${match.count} saved query(s)${catalogLabel}${selectorLines}`;
+        });
+        const warnings = [
+          ...(truncated ? [`Only ${inspected.length} of ${accessible.length} accessible graphs were inspected.`] : []),
+          ...(failures.length ? [`${failures.length} graph(s) could not be inspected.`] : []),
+        ];
+        return ok(
+          `Context Graphs with saved query catalogs (${matches.length}):\n\n${lines.join('\n')}`
+          + (warnings.length ? `\n\n${warnings.join(' ')}` : ''),
+          {
+            scope,
+            accessibleCount: accessible.length,
+            inspectedCount: inspected.length,
+            matchingCount: matches.length,
+            truncated,
+            items: matches,
+            failures,
+          },
+        );
+      } catch (error) {
+        return err(`Failed to discover query catalogs: ${formatError(error)}`);
+      }
+    },
+  );
+
   server.registerTool(
     'dkg_query_catalog_list',
     {

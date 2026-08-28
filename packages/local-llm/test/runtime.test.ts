@@ -317,6 +317,55 @@ describe('DkgLocalLlmRuntime', () => {
     expect(mcp.callTool).not.toHaveBeenCalled();
   });
 
+  it('rejects an unresolved default/current graph alias before calling the model', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn();
+    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+
+    await expect(runtime.run('List query catalogs for the default Context Graph.')).rejects.toThrow(
+      'No Session Context Graph is selected',
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(mcp.callTool).not.toHaveBeenCalled();
+  });
+
+  it('never forwards a config path invented as a graph id', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', { projectId: '.dkg/config.yaml' }));
+    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+
+    await expect(runtime.run('List the catalog for the default graph.')).rejects.toThrow(
+      'projectId=".dkg/config.yaml" (config-path)',
+    );
+    expect(mcp.callTool).not.toHaveBeenCalled();
+    const request = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    expect(JSON.stringify(request.tools)).not.toContain('Defaults to .dkg/config.yaml');
+  });
+
+  it('replaces an invented config-path target with the explicit session graph', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', { projectId: '.dkg/config.yaml' }))
+      .mockResolvedValueOnce(answerResponse('No saved queries were returned.'));
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      projectId: 'session-graph',
+    });
+
+    const result = await runtime.run('List the catalog for this graph.');
+
+    expect(result.toolCalls).toEqual([{
+      name: 'dkg_query_catalog_list',
+      arguments: { projectId: 'session-graph' },
+    }]);
+    expect(mcp.callTool).toHaveBeenCalledWith({
+      name: 'dkg_query_catalog_list',
+      arguments: { projectId: 'session-graph' },
+    });
+  });
+
   it('uses the one repair retry for malformed DKG SPARQL before calling MCP', async () => {
     const mcp = makeMcp([dkgQuery]);
     const fetcher = vi.fn()

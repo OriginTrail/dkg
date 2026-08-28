@@ -16,6 +16,7 @@ const surface = tools(
   'dkg_get_entity',
   'dkg_get_entity_sources',
   'dkg_memory_search',
+  'dkg_query_catalog_context_graphs',
   'dkg_query_catalog_list',
   'dkg_query_catalog_run',
   'dkg_query_catalog_save',
@@ -36,14 +37,20 @@ describe('tool router', () => {
   it('ranks catalog tools first without exposing catalog mutations for discovery', () => {
     const route = routeTools({ prompt: 'Which DKG query catalog queries are saved?', tools: surface });
     expect(route.profile).toBe('catalog');
-    expect(route.tools.map((tool) => tool.name).slice(0, 2)).toEqual([
-      'dkg_query_catalog_list',
-      'dkg_query_catalog_run',
-    ]);
+    expect(route.tools[0]?.name).toBe('dkg_query_catalog_context_graphs');
+    expect(route.tools.map((tool) => tool.name)).toContain('dkg_query_catalog_list');
+    expect(route.tools.map((tool) => tool.name)).toContain('dkg_query_catalog_run');
     expect(route.tools.map((tool) => tool.name)).not.toContain('dkg_query_catalog_save');
     expect(route.tools).toHaveLength(8);
     expect(route.jsonBytes).toBeGreaterThan(0);
     expect(route.reason).toContain('Data-driven catalog route');
+  });
+
+  it('routes cross-graph catalog discovery to evidence instead of graph descriptions', () => {
+    const route = routeTools({ prompt: 'List CGs that have catalogs', tools: surface });
+    expect(route.profile).toBe('catalog');
+    expect(route.tools[0]?.name).toBe('dkg_query_catalog_context_graphs');
+    expect(route.tools.some(isMutatingTool)).toBe(false);
   });
 
   it('keeps general reads within the configured tool budget', () => {

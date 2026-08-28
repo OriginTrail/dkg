@@ -15,7 +15,7 @@
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { DkgClient, ProjectRow } from './client.js';
+import type { DkgClient } from './client.js';
 import { normalizeContextGraphId } from './client.js';
 import type { DkgConfig } from './config.js';
 import {
@@ -31,6 +31,7 @@ import {
   type EntitySource,
 } from './sparql.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './tools/context-graph-description.js';
+import { filterContextGraphsForScope } from './tools/context-graph-scope.js';
 import { resolveWorkingMemoryAgentAddress } from './tools/working-memory-identity.js';
 
 type ToolResult = {
@@ -63,21 +64,6 @@ const projectErr = (): ToolResult =>
   err(
     'No project specified. Either pass `projectId` to this tool, set `DKG_PROJECT` in the environment, or pin `contextGraph:` in `.dkg/config.yaml`.',
   );
-
-function contextGraphBelongsToCaller(row: ProjectRow): boolean {
-  if (row.isSystem === true) return false;
-  if (row.callerInvolved === true) return true;
-  if (row.callerInvolved === false) return false;
-  const role = typeof row.role === 'string' ? row.role.trim().toLowerCase() : '';
-  if (['curator', 'creator', 'owner', 'participant', 'member'].includes(role)) return true;
-  // Older daemons did not include callerInvolved. Preserve compatibility by
-  // leaving those unscoped rows visible instead of hiding everything.
-  return true;
-}
-
-function filterContextGraphsForScope(rows: ProjectRow[], scope: 'mine' | 'all'): ProjectRow[] {
-  return scope === 'all' ? rows : rows.filter(contextGraphBelongsToCaller);
-}
 
 export function registerReadTools(
   server: McpServer,

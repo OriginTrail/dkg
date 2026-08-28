@@ -16,6 +16,9 @@ import { NOOP_TRACE, type InteractionTrace } from './text-trace.js';
 import type { DkgLocalLlmDomainProfile } from './domain-profile.js';
 import {
   rewriteCompactPredicatesForDkg,
+  referencesUnresolvedContextGraphAlias,
+  sanitizeContextGraphArguments,
+  sanitizeDkgToolForLocalLlm,
   validateDkgToolCall,
 } from './dkg-tool-validation.js';
 
@@ -180,14 +183,14 @@ function toolResultText(result: { content?: unknown[] }): string {
     .join('\n');
 }
 
-function toolAcceptsProjectId(tool: McpToolDefinition): boolean {
+function toolContextGraphArgument(
+  tool: McpToolDefinition,
+): 'projectId' | 'contextGraphId' | undefined {
   const properties = tool.inputSchema.properties;
-  return Boolean(
-    properties
-    && typeof properties === 'object'
-    && !Array.isArray(properties)
-    && Object.hasOwn(properties, 'projectId'),
-  );
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return undefined;
+  if (Object.hasOwn(properties, 'projectId')) return 'projectId';
+  if (Object.hasOwn(properties, 'contextGraphId')) return 'contextGraphId';
+  return undefined;
 }
 
 function structuredEvidence(value: string): Record<string, unknown> | undefined {
@@ -362,7 +365,7 @@ export class DkgLocalLlmRuntime {
     for (const rawTool of listed.tools) {
       try {
         const normalized = normalizeToolForLlama(rawTool);
-        tools.push(normalized.tool);
+        tools.push(sanitizeDkgToolForLocalLlm(normalized.tool));
         if (normalized.changes.length) {
           normalizations.push({ name: rawTool.name, changes: normalized.changes });
         }
@@ -523,6 +526,12 @@ export class DkgLocalLlmRuntime {
   async run(userPrompt: string): Promise<DkgLocalLlmResult> {
     const prompt = userPrompt.trim();
     if (!prompt) throw new Error('A non-empty user prompt is required.');
+    if (!this.projectId && referencesUnresolvedContextGraphAlias(prompt)) {
+      throw new Error(
+        'No Session Context Graph is selected, so "default/current Context Graph" is unresolved in local LLM mode. '
+        + 'Name the exact graph id in the request or restart with --project <id>; MCP configuration defaults are intentionally ignored.',
+      );
+    }
 
     const route = this.toolRouter({
       prompt,
@@ -694,19 +703,34 @@ export class DkgLocalLlmRuntime {
         await scheduleRepair(`Invalid arguments for ${tool.name}: ${parsed.error}`, signature, tool.name);
         continue;
       }
-      if (toolAcceptsProjectId(tool) && parsed.args.projectId === undefined) {
-        const evidenceProjectId = this.catalogEvidenceProjectId(tool.name, parsed.args, sessionEvidence);
+      const sanitized = sanitizeContextGraphArguments(parsed.args);
+      parsed.args = sanitized.args;
+      if (sanitized.removed.length) {
+        await this.trace.write('INVALID CONTEXT GRAPH TARGET REMOVED', {
+          tool: tool.name,
+          reasons: sanitized.reasons,
+        });
+      }
+      const graphArgument = toolContextGraphArgument(tool);
+      if (graphArgument && parsed.args[graphArgument] === undefined) {
+        const evidenceProjectId = graphArgument === 'projectId'
+          ? this.catalogEvidenceProjectId(tool.name, parsed.args, sessionEvidence)
+          : undefined;
         const projectId = evidenceProjectId ?? this.projectId;
         if (!projectId) {
           throw new Error(
             `${tool.name} requires an explicit Context Graph in local LLM mode. `
+            + (sanitized.removed.length
+              ? `The model supplied ${sanitized.reasons.map((item) => `${item.key}=${JSON.stringify(item.value)} (${item.reason})`).join(', ')}, which is not a graph id. `
+              : '')
             + 'Name the exact graph in the request or restart with --project <id>; MCP configuration defaults are not used.',
           );
         }
-        parsed.args.projectId = projectId;
+        parsed.args[graphArgument] = projectId;
         await this.trace.write('TOOL PROJECT SCOPE MATERIALIZED', {
           tool: tool.name,
           projectId,
+          argument: graphArgument,
           source: evidenceProjectId ? 'catalog-evidence' : 'explicit-session-pin',
         });
       }

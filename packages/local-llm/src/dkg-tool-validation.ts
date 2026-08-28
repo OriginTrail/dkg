@@ -1,6 +1,84 @@
+import type { McpToolDefinition } from './schema.js';
+
 export interface DkgToolValidationResult {
   ok: boolean;
   errors: string[];
+}
+
+export interface SanitizedContextGraphArguments {
+  args: Record<string, unknown>;
+  removed: Array<'projectId' | 'contextGraphId'>;
+  reasons: Array<{
+    key: 'projectId' | 'contextGraphId';
+    reason: 'config-path' | 'default-placeholder';
+    value: unknown;
+  }>;
+}
+
+export function isDkgConfigPath(value: unknown): boolean {
+  return typeof value === 'string'
+    && /(?:^|[/\\])(?:\.dkg[/\\])?config\.(?:ya?ml|json)$/i.test(value.trim());
+}
+
+export function isDefaultContextGraphPlaceholder(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().toLowerCase();
+  return /^(?:the[-_ ]?)?default(?:[-_ ]?(?:context[-_ ]?graph)(?:[-_ ]?id)?)?$/.test(normalized)
+    || /^(?:context[-_ ]?graph|project)[-_ ]?id$/.test(normalized);
+}
+
+export function referencesUnresolvedContextGraphAlias(value: string): boolean {
+  return /\b(?:default|current)\s+(?:dkg\s+)?(?:context\s+graphs?|cgs?)\b/i.test(value)
+    || /\b(?:context\s+graphs?|cgs?)\s+(?:called\s+)?(?:the\s+)?(?:default|current)\b/i.test(value);
+}
+
+/**
+ * Ported from the qwen-dkg harness. Local models sometimes copy prose from a
+ * schema description and send `.dkg/config.yaml` (or a placeholder such as
+ * `default-context-graph-id`) as if it were a real graph id. Remove those
+ * synthetic values before scope materialization so they can never reach MCP.
+ */
+export function sanitizeContextGraphArguments(
+  args: Record<string, unknown>,
+): SanitizedContextGraphArguments {
+  const cleaned = { ...args };
+  const removed: SanitizedContextGraphArguments['removed'] = [];
+  const reasons: SanitizedContextGraphArguments['reasons'] = [];
+  for (const key of ['projectId', 'contextGraphId'] as const) {
+    const reason = isDkgConfigPath(cleaned[key])
+      ? 'config-path' as const
+      : isDefaultContextGraphPlaceholder(cleaned[key])
+        ? 'default-placeholder' as const
+        : undefined;
+    if (!reason) continue;
+    reasons.push({ key, reason, value: cleaned[key] });
+    delete cleaned[key];
+    removed.push(key);
+  }
+  return { args: cleaned, removed, reasons };
+}
+
+function rewriteLocalLlmScopeDescriptions(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(rewriteLocalLlmScopeDescriptions);
+  if (!value || typeof value !== 'object') return value;
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    output[key] = key === 'description' && typeof child === 'string'
+      ? child.replace(
+        /Defaults to \.dkg\/config\.yaml\.?/gi,
+        'Omit only when an explicit Session Context Graph is selected. Never pass a config filename or generic placeholder as a graph id.',
+      )
+      : rewriteLocalLlmScopeDescriptions(child);
+  }
+  return output;
+}
+
+/** Remove MCP-default wording that local models can mistake for a literal id. */
+export function sanitizeDkgToolForLocalLlm(tool: McpToolDefinition): McpToolDefinition {
+  return {
+    ...tool,
+    inputSchema: rewriteLocalLlmScopeDescriptions(tool.inputSchema) as Record<string, unknown>,
+  };
 }
 
 function maskStringsIrisAndComments(value: string): { masked: string; unterminated: boolean } {

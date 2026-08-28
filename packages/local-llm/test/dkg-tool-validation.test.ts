@@ -1,11 +1,53 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isDefaultContextGraphPlaceholder,
+  isDkgConfigPath,
+  referencesUnresolvedContextGraphAlias,
   rewriteCompactPredicatesForDkg,
+  sanitizeContextGraphArguments,
+  sanitizeDkgToolForLocalLlm,
   validateDkgToolCall,
   validateSparqlForDkg,
 } from '../src/dkg-tool-validation.js';
 
 describe('DKG SPARQL preflight', () => {
+  it('ports qwen-dkg guards for config paths and generic graph placeholders', () => {
+    expect(isDkgConfigPath('.dkg/config.yaml')).toBe(true);
+    expect(isDkgConfigPath('/tmp/demo/.dkg/config.json')).toBe(true);
+    expect(isDefaultContextGraphPlaceholder('default-context-graph-id')).toBe(true);
+    expect(isDefaultContextGraphPlaceholder('testing')).toBe(false);
+    expect(referencesUnresolvedContextGraphAlias('List catalogs for the default CG.')).toBe(true);
+    expect(referencesUnresolvedContextGraphAlias('Inspect the current context graph.')).toBe(true);
+    expect(referencesUnresolvedContextGraphAlias('Inspect context graph testing.')).toBe(false);
+    expect(sanitizeContextGraphArguments({
+      projectId: '.dkg/config.yaml',
+      contextGraphId: 'the default context graph',
+      selector: 'catalog/query',
+    })).toEqual({
+      args: { selector: 'catalog/query' },
+      removed: ['projectId', 'contextGraphId'],
+      reasons: [
+        { key: 'projectId', reason: 'config-path', value: '.dkg/config.yaml' },
+        { key: 'contextGraphId', reason: 'default-placeholder', value: 'the default context graph' },
+      ],
+    });
+  });
+
+  it('removes configuration-default bait from tool schemas shown to the local model', () => {
+    const tool = sanitizeDkgToolForLocalLlm({
+      name: 'dkg_query_catalog_list',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectId: { type: 'string', description: 'Graph id. Defaults to .dkg/config.yaml.' },
+        },
+      },
+    });
+    const rendered = JSON.stringify(tool.inputSchema);
+    expect(rendered).not.toContain('Defaults to .dkg/config.yaml');
+    expect(rendered).toContain('Never pass a config filename');
+  });
+
   it('rejects bare absolute IRIs but accepts angle-bracketed IRIs', () => {
     expect(validateSparqlForDkg('ASK { urn:test:item <schema:name> "x" }')).toEqual({
       ok: false,

@@ -45,7 +45,7 @@ function catalogResponse(items: QueryCatalogItem[]): QueryCatalogReadResponse {
 }
 
 describe('query-catalog MCP tools', () => {
-  it('exposes the three tools through real MCP tools/list and tools/call', async () => {
+  it('exposes the four tools through real MCP tools/list and tools/call', async () => {
     const item = savedQuery();
     const dkgClient = new FakeClient({
       readQueryCatalog: async () => catalogResponse([item]),
@@ -61,6 +61,7 @@ describe('query-catalog MCP tools', () => {
       const listed = await client.listTools();
       const catalogTools = listed.tools.filter((tool) => tool.name.startsWith('dkg_query_catalog_'));
       expect(catalogTools.map((tool) => tool.name).sort()).toEqual([
+        'dkg_query_catalog_context_graphs',
         'dkg_query_catalog_list',
         'dkg_query_catalog_run',
         'dkg_query_catalog_save',
@@ -86,6 +87,10 @@ describe('query-catalog MCP tools', () => {
     const server = new FakeServer();
     registerQueryCatalogTools(server.asMcpServer(), new FakeClient().asDkgClient(), makeConfig());
 
+    expect(server.get('dkg_query_catalog_context_graphs').config.annotations).toMatchObject({
+      readOnlyHint: true,
+      idempotentHint: true,
+    });
     expect(server.get('dkg_query_catalog_list').config.annotations).toMatchObject({
       readOnlyHint: true,
       idempotentHint: true,
@@ -97,6 +102,39 @@ describe('query-catalog MCP tools', () => {
     expect(server.get('dkg_query_catalog_save').config.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: false,
+    });
+  });
+
+  it('discovers catalog-bearing Context Graphs from actual catalog reads', async () => {
+    const item = savedQuery();
+    const client = new FakeClient({
+      listProjects: async () => [
+        { id: 'described-only', name: 'Catalog in its description', description: 'Has a catalog', callerInvolved: true },
+        { id: 'real-catalog', name: 'Real catalog', callerInvolved: true },
+        { id: 'not-mine', name: 'Other', callerInvolved: false },
+      ],
+      readQueryCatalog: async (contextGraphId) => catalogResponse(
+        contextGraphId === 'real-catalog' ? [item] : [],
+      ),
+    });
+    const server = new FakeServer();
+    registerQueryCatalogTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+
+    const result = await server.call('dkg_query_catalog_context_graphs');
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toContain('**real-catalog**');
+    expect(result.content[0].text).not.toContain('**described-only**');
+    expect(result.structuredContent).toMatchObject({
+      scope: 'mine',
+      accessibleCount: 2,
+      inspectedCount: 2,
+      matchingCount: 1,
+      items: [{
+        contextGraphId: 'real-catalog',
+        count: 1,
+        selectors: ['digital-twin/kamstrup-lifecycle/configuration-commitments-1'],
+      }],
     });
   });
 
