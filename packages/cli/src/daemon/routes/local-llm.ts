@@ -5,6 +5,7 @@ import {
   DaemonLocalLlmError,
   DKG_LOCAL_LLM_UI_SESSION_ID,
 } from '../local-llm-service.js';
+import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
 
 export const LOCAL_LLM_CHAT_BODY_BYTES = 64 * 1024;
 export const LOCAL_LLM_MAX_MESSAGE_CHARS = 16_000;
@@ -25,6 +26,15 @@ function serviceErrorResponse(
     error: error instanceof Error ? error.message : String(error),
     code: 'LOCAL_LLM_RUNTIME_ERROR',
   });
+}
+
+function isNodeAdminCaller(ctx: RequestContext): boolean {
+  if (ctx.config.auth?.enabled === false) return true;
+  return Boolean(
+    ctx.requestToken
+    && ctx.validTokens.has(ctx.requestToken)
+    && !ctx.agent.resolveAgentByToken(ctx.requestToken),
+  );
 }
 
 async function readJsonObject(ctx: RequestContext): Promise<Record<string, unknown> | null> {
@@ -56,6 +66,15 @@ async function readJsonObject(ctx: RequestContext): Promise<Record<string, unkno
 export async function handleLocalLlmRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, path, localLlm } = ctx;
   if (!path.startsWith('/api/local-llm/')) return;
+
+  if (!isNodeAdminCaller(ctx)) {
+    return jsonResponse(res, 403, {
+      error:
+        'The daemon-owned local LLM requires a node-level admin token; '
+        + 'agent-scoped tokens cannot access or clear its shared operator session.',
+      code: 'LOCAL_LLM_FORBIDDEN',
+    });
+  }
 
   if (!localLlm) {
     return jsonResponse(res, 503, {
@@ -109,14 +128,23 @@ export async function handleLocalLlmRoutes(ctx: RequestContext): Promise<void> {
         });
       }
     }
+    const requestLifecycle = createStoreQueryRequestLifecycle(
+      req,
+      res,
+      'local-llm-chat',
+    );
     try {
       const result = await localLlm.chat({
         message: body.message,
         ...(typeof body.contextGraphId === 'string' ? { contextGraphId: body.contextGraphId } : {}),
+        signal: requestLifecycle.signal,
       });
       return jsonResponse(res, 200, result);
     } catch (error) {
+      if (requestLifecycle.signal.aborted || res.destroyed) return;
       return serviceErrorResponse(res, error);
+    } finally {
+      requestLifecycle.dispose();
     }
   }
 

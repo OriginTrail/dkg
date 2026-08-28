@@ -11,7 +11,7 @@ function onlineFetch(): typeof fetch {
 }
 
 function fakeSession(options: {
-  run?: (message: string) => Promise<any>;
+  run?: (message: string, options?: { signal?: AbortSignal }) => Promise<any>;
   close?: ReturnType<typeof vi.fn>;
 } = {}) {
   const close = options.close ?? vi.fn(async () => undefined);
@@ -132,6 +132,69 @@ describe('daemon local LLM service', () => {
     });
     release();
     await first;
+  });
+
+  it('does not clear or close a session while its turn is active', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const session = fakeSession({
+      run: async () => {
+        await pending;
+        return { answer: 'done', profile: 'read', toolCalls: [] };
+      },
+    });
+    const service = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg',
+      fetch: onlineFetch(),
+      createSession: vi.fn(async () => session),
+    });
+
+    const turn = service.chat({ message: 'slow', contextGraphId: 'graph-a' });
+    await vi.waitFor(async () => expect((await service.health()).busy).toBe(true));
+    await expect(service.clear()).rejects.toMatchObject({
+      code: 'LOCAL_LLM_BUSY', status: 409,
+    });
+    expect(session.runtime.clearSession).not.toHaveBeenCalled();
+    expect(session.close).not.toHaveBeenCalled();
+    release();
+    await turn;
+  });
+
+  it('forwards caller cancellation, releases busy state, and reuses the clean session', async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const began = new Promise<void>((resolve) => { started = resolve; });
+    const session = fakeSession({
+      run: async (_message, runOptions) => {
+        started();
+        await pending;
+        runOptions?.signal?.throwIfAborted();
+        return { answer: 'clean answer', profile: 'read', toolCalls: [] };
+      },
+    });
+    const createSession = vi.fn(async () => session);
+    const service = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg', fetch: onlineFetch(), createSession,
+    });
+    const controller = new AbortController();
+
+    const turn = service.chat({
+      message: 'slow',
+      contextGraphId: 'graph-a',
+      signal: controller.signal,
+    });
+    await began;
+    controller.abort(new Error('caller disconnected'));
+    release();
+
+    await expect(turn).rejects.toThrow('caller disconnected');
+    expect((await service.health()).busy).toBe(false);
+    expect(session.runtime.clearSession).not.toHaveBeenCalled();
+    expect(session.close).not.toHaveBeenCalled();
+    await expect(service.chat({ message: 'retry', contextGraphId: 'graph-a' }))
+      .resolves.toEqual(expect.objectContaining({ text: 'clean answer' }));
+    expect(createSession).toHaveBeenCalledOnce();
   });
 
   it('requires clear before rebinding, then closes and creates the new graph session', async () => {

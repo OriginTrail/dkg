@@ -53,7 +53,11 @@ export interface DaemonLocalLlmChatResult {
 
 export interface DaemonLocalLlmService {
   health(): Promise<DaemonLocalLlmHealth>;
-  chat(input: { message: string; contextGraphId?: string }): Promise<DaemonLocalLlmChatResult>;
+  chat(input: {
+    message: string;
+    contextGraphId?: string;
+    signal?: AbortSignal;
+  }): Promise<DaemonLocalLlmChatResult>;
   clear(): Promise<{ ok: true; sessionId: string; readOnly: true }>;
   close(): Promise<void>;
 }
@@ -159,6 +163,7 @@ export function createDaemonLocalLlmService(
     },
 
     async chat(input) {
+      input.signal?.throwIfAborted();
       const message = input.message.trim();
       if (!message) {
         throw new DaemonLocalLlmError(
@@ -194,6 +199,7 @@ export function createDaemonLocalLlmService(
       busy = true;
       try {
         const availability = await probe();
+        input.signal?.throwIfAborted();
         if (!availability.reachable) {
           throw new DaemonLocalLlmError(
             'LOCAL_LLM_OFFLINE',
@@ -208,6 +214,8 @@ export function createDaemonLocalLlmService(
               llamaUrl: settings.llamaUrl,
               model: settings.model,
               projectId: requestedProjectId,
+              strictProjectScope: true,
+              strictProjectScopeUnscopedTools: ['dkg_status'],
               profile: 'auto',
               allowWrite: false,
               logDir: settings.logDir,
@@ -224,6 +232,10 @@ export function createDaemonLocalLlmService(
               cwd: options.cwd,
               stderr: options.stderr,
             });
+            if (input.signal?.aborted) {
+              await created.close();
+              input.signal.throwIfAborted();
+            }
             if (closed) {
               await created.close();
               throw new DaemonLocalLlmError(
@@ -238,6 +250,7 @@ export function createDaemonLocalLlmService(
             initFailure = undefined;
           } catch (error) {
             if (error instanceof DaemonLocalLlmError) throw error;
+            if (input.signal?.aborted) input.signal.throwIfAborted();
             initFailure = errorMessage(error);
             throw new DaemonLocalLlmError(
               'LOCAL_LLM_RUNTIME_ERROR',
@@ -248,7 +261,8 @@ export function createDaemonLocalLlmService(
         }
 
         try {
-          const result = await session.runtime.run(message);
+          const result = await session.runtime.run(message, { signal: input.signal });
+          input.signal?.throwIfAborted();
           return {
             text: result.answer,
             sessionId: DKG_LOCAL_LLM_UI_SESSION_ID,
@@ -260,6 +274,7 @@ export function createDaemonLocalLlmService(
           };
         } catch (error) {
           if (error instanceof DaemonLocalLlmError) throw error;
+          if (input.signal?.aborted) input.signal.throwIfAborted();
           const availabilityAfterFailure = await probe();
           if (!availabilityAfterFailure.reachable) {
             throw new DaemonLocalLlmError(

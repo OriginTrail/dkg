@@ -470,12 +470,16 @@ dkg start
 If the daemon is already running, restart it after changing these variables.
 Keep `llama-server` running in its own terminal, then open Node UI and select
 **DKG Local LLM** in the Agents panel. The integration remains read-only: the
-daemon always creates this UI runtime with writes disabled.
+daemon always creates this UI runtime with writes disabled. The HTTP surface is
+also node-admin-only. Agent-scoped bearer tokens receive `403` and cannot start,
+continue, or clear the daemon-owned operator session.
 
 The selected Context Graph is sent with the first chat turn and becomes the
 session lock. Selecting another graph does not silently retarget the active
 conversation. Use the integration menu to clear the session first, then select
-the new graph and send the next message.
+the new graph and send the next message. In this UI mode the lock is enforced at
+the tool-execution boundary: model-supplied graph arguments are pinned to the
+selected graph, and unscoped cross-graph discovery tools are not exposed.
 
 ### Startup and readiness
 

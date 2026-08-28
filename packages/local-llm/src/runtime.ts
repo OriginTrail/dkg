@@ -27,6 +27,8 @@ export interface McpClientLike {
   callTool(input: {
     name: string;
     arguments?: Record<string, unknown>;
+  }, options?: {
+    signal?: AbortSignal;
   }): Promise<{
     isError?: boolean;
     content?: unknown[];
@@ -68,6 +70,14 @@ export interface DkgLocalLlmOptions {
   llamaUrl?: string;
   model?: string;
   projectId?: string;
+  /**
+   * Enforce projectId as a security boundary instead of a missing-argument
+   * default. Used by daemon-owned UI sessions; the interactive CLI keeps its
+   * evidence-driven cross-graph behavior unless this is explicitly enabled.
+   */
+  strictProjectScope?: boolean;
+  /** Unscoped node-level reads that remain visible in strict project mode. */
+  strictProjectScopeUnscopedTools?: string[];
   profile?: ToolProfile;
   allowWrite?: boolean;
   additionalToolNames?: string[];
@@ -84,6 +94,10 @@ export interface DkgLocalLlmOptions {
   maxSessionChars?: number;
   requestTimeoutMs?: number;
   trace?: InteractionTrace;
+}
+
+export interface DkgLocalLlmRunOptions {
+  signal?: AbortSignal;
 }
 
 export interface DkgLocalLlmResult {
@@ -183,14 +197,13 @@ function toolResultText(result: { content?: unknown[] }): string {
     .join('\n');
 }
 
-function toolContextGraphArgument(
+function toolContextGraphArguments(
   tool: McpToolDefinition,
-): 'projectId' | 'contextGraphId' | undefined {
+): Array<'projectId' | 'contextGraphId'> {
   const properties = tool.inputSchema.properties;
-  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return undefined;
-  if (Object.hasOwn(properties, 'projectId')) return 'projectId';
-  if (Object.hasOwn(properties, 'contextGraphId')) return 'contextGraphId';
-  return undefined;
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return [];
+  return (['projectId', 'contextGraphId'] as const)
+    .filter((argument) => Object.hasOwn(properties, argument));
 }
 
 function structuredEvidence(value: string): Record<string, unknown> | undefined {
@@ -310,6 +323,8 @@ export class DkgLocalLlmRuntime {
   private readonly llamaUrl: string;
   private readonly model: string;
   private readonly projectId?: string;
+  private readonly strictProjectScope: boolean;
+  private readonly strictProjectScopeUnscopedTools: Set<string>;
   private readonly profile: ToolProfile;
   private readonly allowWrite: boolean;
   private readonly additionalToolNames: string[];
@@ -337,6 +352,10 @@ export class DkgLocalLlmRuntime {
     this.llamaUrl = options.llamaUrl ?? 'http://127.0.0.1:8080/v1/chat/completions';
     this.model = options.model ?? 'local-model';
     this.projectId = options.projectId?.trim() || undefined;
+    this.strictProjectScope = options.strictProjectScope ?? false;
+    this.strictProjectScopeUnscopedTools = new Set(
+      options.strictProjectScopeUnscopedTools?.map((name) => name.trim()).filter(Boolean) ?? [],
+    );
     this.profile = options.profile ?? 'auto';
     this.allowWrite = options.allowWrite ?? false;
     this.additionalToolNames = [...new Set(options.additionalToolNames ?? [])];
@@ -353,8 +372,17 @@ export class DkgLocalLlmRuntime {
     this.maxSessionChars = positiveIntegerOption('maxSessionChars', options.maxSessionChars, 8_000);
     this.requestTimeoutMs = positiveIntegerOption('requestTimeoutMs', options.requestTimeoutMs, 120_000);
     this.trace = options.trace ?? NOOP_TRACE;
-    this.tools = tools;
-    this.toolRouter = createToolRouter(tools);
+    this.tools = this.strictProjectScope
+      ? tools.filter((tool) => {
+          const graphArguments = toolContextGraphArguments(tool);
+          if (graphArguments.length) return Boolean(this.projectId);
+          return this.strictProjectScopeUnscopedTools.has(tool.name);
+        })
+      : tools;
+    if (!this.tools.length) {
+      throw new Error('MCP tools/list returned no tools compatible with the strict Context Graph scope.');
+    }
+    this.toolRouter = createToolRouter(this.tools);
   }
 
   static async create(options: DkgLocalLlmOptions): Promise<DkgLocalLlmRuntime> {
@@ -431,11 +459,13 @@ export class DkgLocalLlmRuntime {
     user: string,
     assistant: string,
     evidence: DkgChatEvidence[],
+    signal?: AbortSignal,
   ): Promise<void> {
-    this.sessionTurnCounter++;
+    signal?.throwIfAborted();
+    const nextTurn = this.sessionTurnCounter + 1;
     const perField = Math.max(500, Math.floor(this.maxSessionChars / 3));
     const turn: DkgChatTurn = {
-      turn: this.sessionTurnCounter,
+      turn: nextTurn,
       user: compactText(user, perField),
       assistant: compactText(assistant, perField),
       evidence: evidence.map((item) => ({
@@ -450,15 +480,17 @@ export class DkgLocalLlmRuntime {
         } : {}),
       })),
     };
-    this.sessionTurns.push(turn);
-    const droppedTurns = Math.max(0, this.sessionTurns.length - this.maxSessionTurns);
-    if (droppedTurns) this.sessionTurns.splice(0, droppedTurns);
+    const droppedTurns = Math.max(0, this.sessionTurns.length + 1 - this.maxSessionTurns);
     await this.trace.write('SESSION TURN SAVED', {
       turn: turn.turn,
-      retainedTurns: this.sessionTurns.length,
+      retainedTurns: Math.min(this.sessionTurns.length + 1, this.maxSessionTurns),
       droppedTurns,
       evidence: turn.evidence.map((item) => ({ name: item.name, arguments: item.arguments })),
     });
+    signal?.throwIfAborted();
+    this.sessionTurnCounter = nextTurn;
+    this.sessionTurns.push(turn);
+    if (droppedTurns) this.sessionTurns.splice(0, droppedTurns);
   }
 
   private catalogEvidenceProjectId(
@@ -486,6 +518,7 @@ export class DkgLocalLlmRuntime {
     toolChoice: 'required' | 'auto' | undefined,
     round: number,
     maxTokens = this.maxTokens,
+    signal?: AbortSignal,
   ): Promise<LlamaResponse> {
     const body: Record<string, unknown> = {
       model: this.model,
@@ -501,13 +534,19 @@ export class DkgLocalLlmRuntime {
     if (toolChoice) body.tool_choice = toolChoice;
 
     await this.trace.write(`LLAMA REQUEST ${round}`, { endpoint: this.llamaUrl, body });
+    signal?.throwIfAborted();
+    const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs);
+    const requestSignal = signal
+      ? AbortSignal.any([signal, timeoutSignal])
+      : timeoutSignal;
     const response = await this.fetcher(this.llamaUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.requestTimeoutMs),
+      signal: requestSignal,
     });
     const raw = await response.text();
+    signal?.throwIfAborted();
     if (!response.ok) {
       await this.trace.write(`LLAMA HTTP ERROR ${round}`, { status: response.status, body: raw });
       throw new Error(`llama.cpp returned ${response.status}: ${raw}`);
@@ -523,7 +562,12 @@ export class DkgLocalLlmRuntime {
     return parsed;
   }
 
-  async run(userPrompt: string): Promise<DkgLocalLlmResult> {
+  async run(
+    userPrompt: string,
+    options: DkgLocalLlmRunOptions = {},
+  ): Promise<DkgLocalLlmResult> {
+    const { signal } = options;
+    signal?.throwIfAborted();
     const prompt = userPrompt.trim();
     if (!prompt) throw new Error('A non-empty user prompt is required.');
     if (!this.projectId && referencesUnresolvedContextGraphAlias(prompt)) {
@@ -619,6 +663,7 @@ export class DkgLocalLlmRuntime {
     };
 
     for (let round = 1; round <= this.maxToolCalls + 4; round++) {
+      signal?.throwIfAborted();
       const routedTools = finalOnly
         ? []
         : pinnedToolName
@@ -633,6 +678,7 @@ export class DkgLocalLlmRuntime {
         toolChoice,
         round,
         route.profile === 'chat' ? Math.min(this.maxTokens, 256) : this.maxTokens,
+        signal,
       );
       const choice = response.choices?.[0];
       const assistant = choice?.message;
@@ -669,7 +715,7 @@ export class DkgLocalLlmRuntime {
         const answer = normalizeFinalAnswer(String(assistant.content ?? ''));
         if (!answer) throw new Error('llama.cpp returned an empty final answer.');
         await this.trace.write('FINAL ANSWER', answer);
-        await this.rememberTurn(prompt, answer, sessionEvidence);
+        await this.rememberTurn(prompt, answer, sessionEvidence, signal);
         return { answer, profile: route.profile, toolCalls: executed, traceFile: this.trace.filePath };
       }
 
@@ -711,8 +757,25 @@ export class DkgLocalLlmRuntime {
           reasons: sanitized.reasons,
         });
       }
-      const graphArgument = toolContextGraphArgument(tool);
-      if (graphArgument && parsed.args[graphArgument] === undefined) {
+      const graphArguments = toolContextGraphArguments(tool);
+      const graphArgument = graphArguments[0];
+      if (graphArguments.length && this.strictProjectScope) {
+        if (!this.projectId) {
+          throw new Error(`${tool.name} is unavailable without a strict session Context Graph.`);
+        }
+        const suppliedProjectIds = Object.fromEntries(
+          graphArguments.map((argument) => [argument, parsed.args[argument]]),
+        );
+        for (const argument of graphArguments) parsed.args[argument] = this.projectId;
+        if (graphArguments.some((argument) => suppliedProjectIds[argument] !== this.projectId)) {
+          await this.trace.write('TOOL PROJECT SCOPE PINNED', {
+            tool: tool.name,
+            arguments: graphArguments,
+            suppliedProjectIds,
+            projectId: this.projectId,
+          });
+        }
+      } else if (graphArgument && parsed.args[graphArgument] === undefined) {
         const evidenceProjectId = graphArgument === 'projectId'
           ? this.catalogEvidenceProjectId(tool.name, parsed.args, sessionEvidence)
           : undefined;
@@ -789,8 +852,12 @@ export class DkgLocalLlmRuntime {
 
       let result: Awaited<ReturnType<McpClientLike['callTool']>>;
       try {
-        result = await this.mcp.callTool({ name: tool.name, arguments: parsed.args });
+        const input = { name: tool.name, arguments: parsed.args };
+        result = signal
+          ? await this.mcp.callTool(input, { signal })
+          : await this.mcp.callTool(input);
       } catch (error) {
+        signal?.throwIfAborted();
         result = {
           isError: true,
           content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }],

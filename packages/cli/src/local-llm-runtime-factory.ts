@@ -18,6 +18,8 @@ export interface DkgLocalLlmRuntimeSessionOptions {
   llamaUrl: string;
   model: string;
   projectId?: string;
+  strictProjectScope?: boolean;
+  strictProjectScopeUnscopedTools?: readonly string[];
   profile?: ToolProfile;
   allowWrite?: boolean;
   adapterPaths?: readonly string[];
@@ -91,11 +93,21 @@ export async function createDkgLocalLlmRuntimeSession(
   let closed = false;
   try {
     await mcp.connect(transport);
+    const runtimeMcp: McpClientLike = {
+      listTools: () => mcp.listTools(),
+      callTool: async (input, requestOptions) => await mcp.callTool(
+        input,
+        undefined,
+        requestOptions?.signal ? { signal: requestOptions.signal } : undefined,
+      ) as unknown as Awaited<ReturnType<McpClientLike['callTool']>>,
+    };
     const runtime = await DkgLocalLlmRuntime.create({
-      mcp: mcp as unknown as McpClientLike,
+      mcp: runtimeMcp,
       llamaUrl: options.llamaUrl,
       model: options.model,
       projectId,
+      strictProjectScope: options.strictProjectScope,
+      strictProjectScopeUnscopedTools: [...(options.strictProjectScopeUnscopedTools ?? [])],
       profile: options.profile,
       allowWrite: options.allowWrite,
       additionalToolNames: [...(options.additionalToolNames ?? [])],

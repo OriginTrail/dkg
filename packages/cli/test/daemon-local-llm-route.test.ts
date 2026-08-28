@@ -1,4 +1,4 @@
-import { createServer, type Server } from 'node:http';
+import { createServer, request as httpRequest, type Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { handleLocalLlmRoutes } from '../src/daemon/routes/local-llm.js';
 import { DaemonLocalLlmError } from '../src/daemon/local-llm-service.js';
@@ -16,11 +16,27 @@ describe('daemon local LLM routes', () => {
     service: Record<string, any>,
     path: string,
     body?: unknown,
+    auth: {
+      enabled?: boolean;
+      requestToken?: string;
+      validTokens?: string[];
+      agentTokens?: Record<string, string>;
+    } = {},
   ) {
     server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
       await handleLocalLlmRoutes({
-        req, res, url, path: url.pathname, localLlm: service,
+        req,
+        res,
+        url,
+        path: url.pathname,
+        localLlm: service,
+        config: { auth: { enabled: auth.enabled ?? false } },
+        validTokens: new Set(auth.validTokens ?? []),
+        requestToken: auth.requestToken,
+        agent: {
+          resolveAgentByToken: (token: string) => auth.agentTokens?.[token],
+        },
       } as any);
       if (!res.writableEnded) {
         res.statusCode = 404;
@@ -66,7 +82,97 @@ describe('daemon local LLM routes', () => {
         profile: 'catalog', toolCalls: [], traceFile: '/tmp/trace.log', readOnly: true,
       },
     });
-    expect(fake.chat).toHaveBeenCalledWith({ message: 'List saved queries', contextGraphId: 'testing' });
+    expect(fake.chat).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'List saved queries',
+      contextGraphId: 'testing',
+      signal: expect.anything(),
+    }));
+  });
+
+  it('rejects agent-scoped callers before they can start or clear the node-admin session', async () => {
+    const fake = service();
+    const agentAuth = {
+      enabled: true,
+      requestToken: 'agent-token',
+      validTokens: ['node-admin-token', 'agent-token'],
+      agentTokens: { 'agent-token': 'did:dkg:agent:limited' },
+    };
+
+    expect(await request(fake, '/api/local-llm/chat', {
+      message: 'Read graph-b',
+      contextGraphId: 'graph-b',
+    }, agentAuth)).toEqual({
+      status: 403,
+      body: expect.objectContaining({ code: 'LOCAL_LLM_FORBIDDEN' }),
+    });
+    expect(await request(fake, '/api/local-llm/session/clear', {}, agentAuth)).toEqual({
+      status: 403,
+      body: expect.objectContaining({ code: 'LOCAL_LLM_FORBIDDEN' }),
+    });
+    expect(fake.chat).not.toHaveBeenCalled();
+    expect(fake.clear).not.toHaveBeenCalled();
+  });
+
+  it('preserves node-admin access when HTTP authentication is enabled', async () => {
+    const fake = service();
+    const result = await request(fake, '/api/local-llm/chat', {
+      message: 'Read the selected graph',
+      contextGraphId: 'graph-a',
+    }, {
+      enabled: true,
+      requestToken: 'node-admin-token',
+      validTokens: ['node-admin-token'],
+    });
+
+    expect(result.status).toBe(200);
+    expect(fake.chat).toHaveBeenCalledOnce();
+  });
+
+  it('propagates a disconnected HTTP caller into the daemon turn signal', async () => {
+    let aborted!: () => void;
+    const observedAbort = new Promise<void>((resolve) => { aborted = resolve; });
+    const fake = service();
+    fake.chat.mockImplementationOnce(async (input: { signal?: AbortSignal }) => {
+      await new Promise<never>((_resolve, reject) => {
+        input.signal?.addEventListener('abort', () => {
+          aborted();
+          reject(input.signal?.reason);
+        }, { once: true });
+      });
+    });
+    server = createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      await handleLocalLlmRoutes({
+        req,
+        res,
+        url,
+        path: url.pathname,
+        localLlm: fake,
+        config: { auth: { enabled: false } },
+        validTokens: new Set(),
+        requestToken: undefined,
+        agent: { resolveAgentByToken: () => undefined },
+      } as any);
+    });
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('test server did not bind');
+    const client = httpRequest({
+      host: '127.0.0.1',
+      port: address.port,
+      path: '/api/local-llm/chat',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    client.on('error', () => undefined);
+    client.end(JSON.stringify({ message: 'slow', contextGraphId: 'graph-a' }));
+    await vi.waitFor(() => expect(fake.chat).toHaveBeenCalledOnce());
+
+    client.destroy();
+    await observedAbort;
+    expect(fake.chat.mock.calls[0][0].signal.aborted).toBe(true);
+    await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = undefined;
   });
 
   it.each([
