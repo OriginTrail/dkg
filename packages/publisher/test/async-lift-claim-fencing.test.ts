@@ -228,6 +228,38 @@ describe('async-lift claim fencing', () => {
     expect(await publisher.getStatus(jobId)).toBeNull();
   });
 
+  it('constructs compatibility authority with recovery operations only', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-compatibility-scope',
+      now: () => now,
+      overrides: {
+        status: 'broadcast',
+        claim: { walletId: 'wallet-legacy' },
+        timestamps: { acceptedAt: now, claimedAt: now, broadcastAt: now, updatedAt: now },
+      } as never,
+    });
+    const coordinator = (publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator;
+    }).claimCoordinator;
+
+    await coordinator.runJobTransaction(jobId, async (transaction) => {
+      if (transaction.kind !== 'compatibility') throw new Error('expected compatibility job');
+      expect(Object.keys(transaction.scope).sort()).toEqual([
+        'commitProofFailure',
+        'commitProofFinalization',
+        'commitReaccept',
+        'commitRecoveryReset',
+        'commitRemoval',
+      ]);
+      expect('commit' in transaction.scope).toBe(false);
+      expect('commitProofInclusion' in transaction.scope).toBe(false);
+      await transaction.scope.commitRemoval();
+    });
+
+    expect(await publisher.getStatus(jobId)).toBeNull();
+  });
+
   it('classifies every lift-job state through one ownership policy', async () => {
     const publisher = createPublisher();
     const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
@@ -468,6 +500,10 @@ describe('async-lift claim fencing', () => {
       status: 'finalized',
       finalization: { mode: 'noop' },
     });
+    const finalized = await publisher.getStatus(jobId);
+    expect(finalized).not.toHaveProperty('broadcast');
+    expect(finalized).not.toHaveProperty('inclusion');
+    expect(finalized).not.toHaveProperty('failure');
   });
 
   it('does not let an expired worker fail a job reclaimed by the same wallet', async () => {

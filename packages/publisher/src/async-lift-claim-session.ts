@@ -36,8 +36,6 @@ import {
 } from './async-lift-publisher-utils.js';
 import {
   decodedLiftJobOrThrow,
-  isCanonicalLiftJob,
-  knownLiftJobPayload,
   type LiftJobPayloadDecodeResult,
   type StructurallyValidLiftJobPayload,
 } from './lift-job-payload-codec.js';
@@ -546,11 +544,27 @@ export class AsyncLiftClaimCoordinator {
     return await this.withJobTransitionLock(
       jobId,
       async () => {
-        const current = decodedLiftJobOrThrow(await this.dependencies.readStatus(jobId));
-        if (!current) return await operation({ kind: 'missing' });
-        return await operation(isCanonicalLiftJob(current)
-          ? { kind: 'present', current, scope: this.createTransitionScope(current) }
-          : { kind: 'compatibility', current, scope: this.createCompatibilityScope(current) });
+        const decoded = await this.dependencies.readStatus(jobId);
+        switch (decoded.kind) {
+          case 'absent':
+            return await operation({ kind: 'missing' });
+          case 'canonical':
+            return await operation({
+              kind: 'present',
+              current: decoded.job,
+              scope: this.createTransitionScope(decoded.job),
+            });
+          case 'compatibility':
+            return await operation({
+              kind: 'compatibility',
+              current: decoded.job,
+              scope: this.createRecoveryTransitionScope(decoded.job),
+            });
+          case 'malformed':
+          case 'unknown':
+            decodedLiftJobOrThrow(decoded);
+            throw new Error('unreachable persisted LiftJob decode result');
+        }
       },
     );
   }
@@ -580,16 +594,13 @@ export class AsyncLiftClaimCoordinator {
           ? { kind: 'missing' }
           : decoded);
       }
-      const known = knownLiftJobPayload(decoded.job);
-      if (known === null) {
+      if (decoded.kind === 'unknown') {
         return await operation({ kind: 'unknown', current: decoded.job });
       }
       return await operation({
         kind: 'present',
-        current: known,
-        scope: isCanonicalLiftJob(known)
-          ? this.createTransitionScope(known)
-          : this.createCompatibilityScope(known),
+        current: decoded.job,
+        scope: this.createRecoveryTransitionScope(decoded.job),
       });
     }));
   }
@@ -651,11 +662,17 @@ export class AsyncLiftClaimCoordinator {
     });
   }
 
-  private createTransitionScope(initial: PersistedLiftJob): LiftJobTransitionScope {
-    let current: PersistedLiftJob | null = initial;
+  private createScopeState<TJob extends PersistedLiftJob>(initial: TJob): {
+    transition<TResult>(
+      operation: (before: TJob) => Promise<TResult>,
+      nextState: (result: TResult) => TJob | null,
+    ): Promise<TResult>;
+    close<TResult>(operation: (before: TJob) => Promise<TResult>): Promise<TResult>;
+  } {
+    let current: TJob | null = initial;
     const transition = async <T>(
-      operation: (before: PersistedLiftJob) => Promise<T>,
-      nextState: (result: T) => PersistedLiftJob | null,
+      operation: (before: TJob) => Promise<T>,
+      nextState: (result: T) => TJob | null,
     ): Promise<T> => {
       if (current === null) {
         throw new Error(`LiftJob transition scope for ${initial.jobId} is closed`);
@@ -664,43 +681,24 @@ export class AsyncLiftClaimCoordinator {
       current = nextState(result);
       return result;
     };
-    const advance = async (
-      operation: (before: PersistedLiftJob) => Promise<LiftJob>,
-    ): Promise<LiftJob> => await transition(operation, (next) =>
-      next.status === 'accepted' || next.status === 'failed' || next.status === 'finalized'
-        ? null
-        : next);
-    const close = async <T>(operation: (before: PersistedLiftJob) => Promise<T>): Promise<T> =>
+    const close = async <T>(operation: (before: TJob) => Promise<T>): Promise<T> =>
       await transition(operation, () => null);
+    return { transition, close };
+  }
 
+  /** Base authority for any readable row: recovery, reacceptance, or explicit removal only. */
+  private createRecoveryTransitionScope<TJob extends PersistedLiftJob>(
+    initial: TJob,
+    state = this.createScopeState(initial),
+  ): LiftJobRecoveryTransitionScope {
+    const { close } = state;
     return {
-      commit: async (next, kind) => await advance(
-        async (before) => {
-          if (!isCanonicalLiftJob(before)) {
-            throw new Error(`Compatibility LiftJob ${before.jobId} cannot use a normal transition scope`);
-          }
-          return await this.commitTransition(before, next, kind);
-        },
-      ),
       commitRecoveryReset: async (reset) => await close(async (before) => {
         this.assertLifecycleTransition(before, reset, 'accepted');
         // Reset must be claim-visible before the one-shot wallet-release notification fires.
         await this.dependencies.writeJob(reset, 'recover-reset');
         await this.releaseJobOwnership(before);
         return reset;
-      }),
-      commitProofInclusion: async (included) => await close(async (before) => {
-        if (!isCanonicalLiftJob(before)) {
-          throw new Error(`Compatibility LiftJob ${before.jobId} cannot commit proof inclusion`);
-        }
-        this.assertLifecycleTransition(before, included, 'included');
-        // Inclusion becomes visible before release so a woken worker never observes an active
-        // transaction as claimable. An already-included retry only repeats the release.
-        if (before.status !== 'included') {
-          await this.dependencies.writeJob(included, 'included');
-        }
-        await this.releaseJobOwnership(before);
-        return included;
       }),
       commitProofFailure: async (failed) => await close(async (before) => {
         this.assertLifecycleTransition(before, failed, 'failed');
@@ -732,15 +730,31 @@ export class AsyncLiftClaimCoordinator {
     };
   }
 
-  /** Compatibility rows receive only recovery/clear operations, never ordinary transition commit. */
-  private createCompatibilityScope(initial: LiftJobCompatibility): LiftJobRecoveryTransitionScope {
-    const scope = this.createTransitionScope(initial);
+  /** Canonical authority extends the recovery base with normal and proof-inclusion transitions. */
+  private createTransitionScope(initial: LiftJob): LiftJobTransitionScope {
+    const state = this.createScopeState<LiftJob>(initial);
+    const recoveryScope = this.createRecoveryTransitionScope(initial, state);
+    const advance = async (
+      operation: (before: LiftJob) => Promise<LiftJob>,
+    ): Promise<LiftJob> => await state.transition(operation, (next) =>
+      next.status === 'accepted' || next.status === 'failed' || next.status === 'finalized'
+        ? null
+        : next);
     return {
-      commitRecoveryReset: scope.commitRecoveryReset,
-      commitProofFailure: scope.commitProofFailure,
-      commitProofFinalization: scope.commitProofFinalization,
-      commitReaccept: scope.commitReaccept,
-      commitRemoval: scope.commitRemoval,
+      ...recoveryScope,
+      commit: async (next, kind) => await advance(
+        async (before) => await this.commitTransition(before, next, kind),
+      ),
+      commitProofInclusion: async (included) => await state.close(async (before) => {
+        this.assertLifecycleTransition(before, included, 'included');
+        // Inclusion becomes visible before release so a woken worker never observes an active
+        // transaction as claimable. An already-included retry only repeats the release.
+        if (before.status !== 'included') {
+          await this.dependencies.writeJob(included, 'included');
+        }
+        await this.releaseJobOwnership(before);
+        return included;
+      }),
     };
   }
 
@@ -830,12 +844,19 @@ export class AsyncLiftClaimCoordinator {
   }
 
   private async getRequiredJob(jobId: string): Promise<LiftJob> {
-    const job = await this.getStatus(jobId);
-    if (!job) throw new Error(`LiftJob not found: ${jobId}`);
-    if (!isCanonicalLiftJob(job)) {
-      throw new Error(`Compatibility LiftJob ${jobId} requires recovery before normal transitions`);
+    const decoded = await this.dependencies.readStatus(jobId);
+    switch (decoded.kind) {
+      case 'canonical':
+        return decoded.job;
+      case 'compatibility':
+        throw new Error(`Compatibility LiftJob ${jobId} requires recovery before normal transitions`);
+      case 'absent':
+        throw new Error(`LiftJob not found: ${jobId}`);
+      case 'malformed':
+      case 'unknown':
+        decodedLiftJobOrThrow(decoded);
+        throw new Error('unreachable persisted LiftJob decode result');
     }
-    return job;
   }
 
   private async getStatus(jobId: string): Promise<PersistedLiftJob | null> {

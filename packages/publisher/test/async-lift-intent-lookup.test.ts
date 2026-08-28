@@ -8,9 +8,11 @@ import {
 import type { LiftJob } from '../src/lift-job.js';
 import {
   CONTROL_LIFECYCLE_KEY,
+  CONTROL_PAYLOAD,
   DEFAULT_CONTROL_GRAPH_URI,
   jobSubject,
   knowledgeAssetVmPublishLifecycleKey,
+  literal,
   serializeJob,
 } from '../src/async-lift-control-plane.js';
 import {
@@ -183,6 +185,36 @@ describe('#1828 async lift intent lookup', () => {
     // Boot backfill does not abort on the malformed job.
     const indexed = await publisher.ensureVmPublishIntentIndex();
     expect(indexed).toBeGreaterThanOrEqual(0);
+  });
+
+  it('isolates corrupt inventory rows but fails closed for the requested lifecycle', async () => {
+    const publisher = createPublisher();
+    const corruptPayload = async (jobId: string): Promise<void> => {
+      const job = await publisher.getStatus(jobId);
+      if (!job || job.status !== 'accepted') throw new Error('expected accepted job');
+      const corrupt = serializeJob(job, DEFAULT_CONTROL_GRAPH_URI).map((entry) =>
+        entry.predicate === CONTROL_PAYLOAD
+          ? { ...entry, object: literal('{not-json') }
+          : entry,
+      );
+      await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await store.insert(corrupt);
+    };
+
+    const unrelatedId = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ name: 'unrelated-corrupt' }),
+    );
+    await corruptPayload(unrelatedId);
+
+    const requestedId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    expect(typeof requestedId).toBe('string');
+    await expect(publisher.ensureVmPublishIntentIndex()).resolves.toBeGreaterThanOrEqual(0);
+    await expect(publisher.recover()).resolves.toBeGreaterThanOrEqual(0);
+
+    await corruptPayload(requestedId);
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest()),
+    ).rejects.toThrow('Malformed persisted LiftJob payload');
   });
 
   // #1828 review (otReviewAgent): writeJob deletes the job subject BEFORE serializing

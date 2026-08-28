@@ -155,11 +155,54 @@ describe('#1829 admission journal append (writeJob hook)', () => {
       inclusion: KA_VM_INCLUSION,
       finalization: { mode: 'local' },
     });
+    const projected = await publisher.getStatus(jobId);
+    expect(projected).toMatchObject({ status: 'finalized', finalization: { mode: 'local' } });
+    expect(projected).not.toHaveProperty('broadcast');
+    expect(projected).not.toHaveProperty('inclusion');
+    expect(projected).not.toHaveProperty('failure');
     const before = await journalRows();
     expect(before.length).toBeGreaterThan(0);
     await publisher.clear('finalized');
     expect(await publisher.getStatus(jobId)).toBeNull(); // record cleared from control plane
     expect(await journalRows()).toEqual(before); // journal untouched
+  });
+
+  it('persists authoritative broadcast, included, and published-finalized projections', async () => {
+    const publisher = createPublisher();
+    const jobId = await driveToValidated(publisher);
+    await publisher.update(jobId, 'broadcast', { broadcast: KA_VM_BROADCAST_TX });
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      status: 'broadcast',
+      broadcast: KA_VM_BROADCAST_TX,
+    });
+
+    await publisher.update(jobId, 'included', {
+      broadcast: KA_VM_BROADCAST_TX,
+      inclusion: KA_VM_INCLUSION,
+    });
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      status: 'included',
+      broadcast: KA_VM_BROADCAST_TX,
+      inclusion: { ...KA_VM_INCLUSION, txHash: KA_VM_BROADCAST_TX.txHash },
+    });
+
+    await publisher.update(jobId, 'finalized', {
+      broadcast: KA_VM_BROADCAST_TX,
+      inclusion: KA_VM_INCLUSION,
+      finalization: {
+        mode: 'published',
+        txHash: KA_VM_BROADCAST_TX.txHash,
+        ual: 'did:dkg:evm:31337/0xabc/7',
+      },
+    });
+    const finalized = await publisher.getStatus(jobId);
+    expect(finalized).toMatchObject({
+      status: 'finalized',
+      broadcast: KA_VM_BROADCAST_TX,
+      inclusion: { ...KA_VM_INCLUSION, txHash: KA_VM_BROADCAST_TX.txHash },
+      finalization: { mode: 'published', txHash: KA_VM_BROADCAST_TX.txHash },
+    });
+    expect(finalized).not.toHaveProperty('failure');
   });
 
   // #1829 chunk 5 — facts-pure reads.

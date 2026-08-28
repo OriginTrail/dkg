@@ -18,6 +18,7 @@ import {
   type LiftJobCompatibility,
   type PersistedLiftJob,
   type LiftJobFailureCode,
+  type LiftJobFailureMetadata,
   type LiftJobAccepted,
   type LiftJobClaimed,
   type LiftJobBroadcast,
@@ -145,7 +146,6 @@ import {
   decodeLiftJobPayload,
   decodedLiftJobOrThrow,
   assertCanonicalLiftJobPayload,
-  isCanonicalLiftJob,
   type LiftJobPayloadDecodeResult,
 } from './lift-job-payload-codec.js';
 
@@ -650,7 +650,7 @@ export class TripleStoreAsyncLiftPublisher
           ),
         reacceptDueFailedJobs: async (now) => await this.reacceptDueFailedJobs(now),
         toClaimed: (current, walletId) =>
-          this.mergeJob(current, 'claimed', { claim: { walletId } }),
+          this.buildTransitionJob(current, 'claimed', { claim: { walletId } }),
         writeJob: async (job, kind) => await this.writeJob(job, kind),
         deleteJob: async (jobId) => await this.deleteJob(jobId),
         assertJobMatchesStatus: (job) => this.assertJobMatchesStatus(job),
@@ -748,7 +748,7 @@ export class TripleStoreAsyncLiftPublisher
     status: LiftJobState,
     data: Partial<LiftJob> = {},
   ): Promise<void> {
-    const next = this.mergeJob(current, status, data);
+    const next = this.buildTransitionJob(current, status, data);
     this.assertJobMatchesStatus(next);
     if (next.status === 'finalized') {
       await this.promoteFinalizedPrivateStaging(next);
@@ -763,7 +763,7 @@ export class TripleStoreAsyncLiftPublisher
   ): Promise<void> {
     await this.ensureGraph();
     await this.claimCoordinator.transitionAdministrative(jobId, async (current, scope) => {
-      const next = this.mergeJob(current, status, data);
+      const next = this.buildTransitionJob(current, status, data);
       this.assertJobMatchesStatus(next);
       if (next.status === 'finalized') {
         await this.promoteFinalizedPrivateStaging(next);
@@ -871,7 +871,7 @@ export class TripleStoreAsyncLiftPublisher
       { source: 'publisher.asyncLift.list' },
     );
     return expectBindings(result)
-      .map((row) => this.parseJobPayload(row['payload']))
+      .map((row) => this.parseJobPayloadForScan(row['payload']))
       .filter((job): job is PersistedLiftJob => job !== null)
       .sort(compareAcceptedJobs);
   }
@@ -1472,7 +1472,7 @@ export class TripleStoreAsyncLiftPublisher
           // retry loop — the same observability the canonical walk's failures have.
           try {
             const included = recoverable.status === 'broadcast'
-              ? this.mergeJob(recoverable, 'included', { inclusion: resolved.inclusion })
+              ? this.buildTransitionJob(recoverable, 'included', { inclusion: resolved.inclusion })
               : recoverable;
             await scope.commitProofInclusion(included);
           } catch (error) {
@@ -1713,7 +1713,7 @@ export class TripleStoreAsyncLiftPublisher
           errorPayloadRef: `urn:dkg:publisher:error:${recoverable.jobId}:chain-proof-reverted`,
         });
         await scope.commitProofFailure(
-          this.mergeJob(recoverable, 'failed', { failure: failure as any }),
+          this.buildTransitionJob(recoverable, 'failed', { failure: failure as any }),
         );
         return true;
       }
@@ -1885,6 +1885,20 @@ export class TripleStoreAsyncLiftPublisher
     // since a sibling is not chain proof), so the selector groups the queue by lifecycle key and
     // admission reads its own group. The first entry is the record admission must answer for: a
     // held job before anything else, then the lifecycle's newest.
+    //
+    // Decode indexed candidates STRICTLY before the tolerant inventory scan. A corrupt row for
+    // another lifecycle never enters this object-bound query and cannot poison this admission;
+    // a corrupt row indexed to this lifecycle fails closed before a duplicate can be admitted.
+    const indexed = await this.store.query(
+      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(requestKey)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
+      { source: 'publisher.asyncLift.findActiveVmPublish' },
+    );
+    for (const row of expectBindings(indexed)) {
+      const candidate = this.parseJobPayload(row['payload']);
+      if (candidate !== null && lifecycleKeyOfJob(candidate) !== requestKey) {
+        throw new Error(`Malformed persisted LiftJob payload: lifecycle index does not match ${requestKey}`);
+      }
+    }
     const job = selectLifecycleBindingJobs(await this.list(), lifecycleKeyOfJob).get(requestKey)?.at(0);
     if (!job || !isKnowledgeAssetVmPublishJobRequest(job.request)) return null;
     return {
@@ -2041,7 +2055,7 @@ export class TripleStoreAsyncLiftPublisher
 
     let next: LiftJob = current;
     if (mapped.status === 'finalized' && mapped.finalization.mode === 'local') {
-      next = this.mergeJob(next, 'finalized', {
+      next = this.buildTransitionJob(next, 'finalized', {
         finalization: mapped.finalization,
       });
       this.assertJobMatchesStatus(next);
@@ -2066,13 +2080,13 @@ export class TripleStoreAsyncLiftPublisher
     }
 
     if (current.status === 'validated') {
-      next = this.mergeJob(next, 'broadcast', { broadcast: mapped.broadcast });
+      next = this.buildTransitionJob(next, 'broadcast', { broadcast: mapped.broadcast });
       this.assertJobMatchesStatus(next);
       next = await scope.commit(next, 'broadcast');
     }
 
     if (mapped.status === 'included') {
-      next = this.mergeJob(next, 'included', {
+      next = this.buildTransitionJob(next, 'included', {
         broadcast: mapped.broadcast,
         inclusion: mapped.inclusion,
       });
@@ -2081,7 +2095,7 @@ export class TripleStoreAsyncLiftPublisher
     }
 
     if (next.status === 'broadcast') {
-      next = this.mergeJob(next, 'included', {
+      next = this.buildTransitionJob(next, 'included', {
         broadcast: mapped.broadcast,
         inclusion: mapped.inclusion,
       });
@@ -2089,7 +2103,7 @@ export class TripleStoreAsyncLiftPublisher
       next = await scope.commit(next, 'included');
     }
 
-    next = this.mergeJob(next, 'finalized', {
+    next = this.buildTransitionJob(next, 'finalized', {
       broadcast: mapped.broadcast,
       inclusion: mapped.inclusion,
       finalization: mapped.finalization,
@@ -2118,7 +2132,7 @@ export class TripleStoreAsyncLiftPublisher
     scope: LiftJobTransitionScope,
     failure: AsyncLiftPublishFailureInput,
   ): Promise<LiftJob> {
-    const next = this.scheduleRetryIfEligible(this.mergeJob(current, 'failed', {
+    const next = this.scheduleRetryIfEligible(this.buildTransitionJob(current, 'failed', {
       failure: mapPublishExceptionToLiftJobFailure(failure) as any,
     }));
     this.assertJobMatchesStatus(next);
@@ -3018,12 +3032,19 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async getRequiredJob(jobId: string): Promise<LiftJob> {
-    const job = await this.getStatus(jobId);
-    if (!job) throw new Error(`LiftJob not found: ${jobId}`);
-    if (!isCanonicalLiftJob(job)) {
-      throw new Error(`Compatibility LiftJob ${jobId} requires recovery before normal transitions`);
+    const decoded = await this.readJobPayload(jobId);
+    switch (decoded.kind) {
+      case 'canonical':
+        return decoded.job;
+      case 'compatibility':
+        throw new Error(`Compatibility LiftJob ${jobId} requires recovery before normal transitions`);
+      case 'absent':
+        throw new Error(`LiftJob not found: ${jobId}`);
+      case 'malformed':
+      case 'unknown':
+        decodedLiftJobOrThrow(decoded);
+        throw new Error('unreachable persisted LiftJob decode result');
     }
-    return job;
   }
 
   private async applyExecutionFailureTransition(
@@ -3055,7 +3076,7 @@ export class TripleStoreAsyncLiftPublisher
         errorPayloadRef: `urn:dkg:publisher:error:${current.jobId}`,
       });
       const failed = this.scheduleRetryIfEligible(
-        this.mergeJob(current, 'failed', { failure: failure as any }),
+        this.buildTransitionJob(current, 'failed', { failure: failure as any }),
       );
       this.assertJobMatchesStatus(failed);
       return await scope.commit(failed, 'failed');
@@ -3196,7 +3217,7 @@ export class TripleStoreAsyncLiftPublisher
     broadcast: LiftJobBroadcastMetadata,
   ): Promise<void> {
     try {
-      const next = this.mergeJob(current, 'broadcast', { broadcast });
+      const next = this.buildTransitionJob(current, 'broadcast', { broadcast });
       this.assertJobMatchesStatus(next);
       await scope.commit(next, 'broadcast');
       await this.store.flush?.();
@@ -3214,21 +3235,28 @@ export class TripleStoreAsyncLiftPublisher
     return decodedLiftJobOrThrow(decodeLiftJobPayload(binding));
   }
 
-  // r4 (3877669534) — the canonical transition API expresses the one union-member-specific
-  // transition this train performs: broadcast -> included with required inclusion metadata,
-  // returning the TARGET state type. The generic signature remains for same-shape merges.
-  private mergeJob(
+  /** Queue inventories are best-effort selectors; exact reads and indexed admissions stay strict. */
+  private parseJobPayloadForScan(binding?: string): PersistedLiftJob | null {
+    const decoded = decodeLiftJobPayload(binding);
+    return decoded.kind === 'canonical' || decoded.kind === 'compatibility'
+      ? decoded.job
+      : null;
+  }
+
+  // Target-state constructors select only metadata legal for the destination. No transition can
+  // accidentally carry a prior state's progress fields into the new durable union member.
+  private buildTransitionJob(
     current: LiftJobAccepted,
     status: 'claimed',
     data: { claim: { walletId: string } },
   ): LiftJobClaimed;
-  private mergeJob(
+  private buildTransitionJob(
     current: LiftJobBroadcast,
     status: 'included',
     data: { inclusion: LiftJobInclusionMetadata },
   ): LiftJobIncluded;
-  private mergeJob(current: LiftJob, status: LiftJobState, data: Partial<LiftJob>): LiftJob;
-  private mergeJob(
+  private buildTransitionJob(current: LiftJob, status: LiftJobState, data: Partial<LiftJob>): LiftJob;
+  private buildTransitionJob(
     current: LiftJob,
     status: LiftJobState,
     data: Partial<LiftJob> & { inclusion?: LiftJobInclusionMetadata },
@@ -3236,51 +3264,225 @@ export class TripleStoreAsyncLiftPublisher
     const now = this.now();
     if (current.status !== status) assertLiftJobTransition(current.status, status);
 
-    let merged = {
+    const patched = {
       ...current,
       ...data,
-      status,
-      timestamps: {
-        ...current.timestamps,
-        ...(data.timestamps ?? {}),
-        updatedAt: now,
-      },
-    } as LiftJob;
+    };
+    const patchedTimestamps = {
+      ...current.timestamps,
+      ...(data.timestamps ?? {}),
+    };
+    const timestamps = {
+      ...patchedTimestamps,
+      claimedAt: status === 'claimed' ? (patchedTimestamps.claimedAt ?? now) : patchedTimestamps.claimedAt,
+      validatedAt: status === 'validated' ? (patchedTimestamps.validatedAt ?? now) : patchedTimestamps.validatedAt,
+      broadcastAt: status === 'broadcast' ? (patchedTimestamps.broadcastAt ?? now) : patchedTimestamps.broadcastAt,
+      includedAt: status === 'included' ? (patchedTimestamps.includedAt ?? now) : patchedTimestamps.includedAt,
+      finalizedAt: status === 'finalized' ? (patchedTimestamps.finalizedAt ?? now) : patchedTimestamps.finalizedAt,
+      failedAt: status === 'failed' ? (patchedTimestamps.failedAt ?? now) : patchedTimestamps.failedAt,
+      updatedAt: now,
+    };
+    const base = {
+      jobId: patched.jobId,
+      jobSlug: patched.jobSlug,
+      request: patched.request,
+      ...(patched.admission !== undefined ? { admission: patched.admission } : {}),
+      timestamps,
+      retries: patched.retries,
+      ...(patched.controlPlane !== undefined ? { controlPlane: patched.controlPlane } : {}),
+    };
+    const baseWithRecovery = {
+      ...base,
+      ...(patched.recovery !== undefined ? { recovery: patched.recovery } : {}),
+    };
+    const requiredMetadata = <T>(value: T | undefined, field: string): T => {
+      if (value === undefined) {
+        throw new Error(`LiftJob ${current.jobId}: ${field} is required for ${status}`);
+      }
+      return value;
+    };
 
-    // A local/noop result is a terminal projection, not another transaction checkpoint. Older
-    // callers can reach it from a record that already carries broadcast/inclusion fields; shed
-    // those fields deliberately so the writer and restart decoder agree on the canonical member.
-    if (
-      status === 'finalized'
-      && (merged.finalization?.mode === 'local' || merged.finalization?.mode === 'noop')
-    ) {
-      const {
-        broadcast: _broadcast,
-        inclusion: _inclusion,
-        failure: _failure,
-        ...localFinalized
-      } = merged;
-      merged = localFinalized as LiftJob;
+    let next: LiftJob;
+    switch (status) {
+      case 'accepted':
+        next = { ...baseWithRecovery, status: 'accepted' };
+        break;
+      case 'claimed':
+        next = {
+          ...baseWithRecovery,
+          status: 'claimed',
+          claim: requiredMetadata(patched.claim, 'claim'),
+        };
+        break;
+      case 'validated':
+        next = {
+          ...baseWithRecovery,
+          status: 'validated',
+          claim: requiredMetadata(patched.claim, 'claim'),
+          validation: requiredMetadata(patched.validation, 'validation'),
+        };
+        break;
+      case 'broadcast':
+        next = {
+          ...baseWithRecovery,
+          status: 'broadcast',
+          claim: requiredMetadata(patched.claim, 'claim'),
+          validation: requiredMetadata(patched.validation, 'validation'),
+          broadcast: requiredMetadata(patched.broadcast, 'broadcast'),
+        };
+        break;
+      case 'included':
+        next = {
+          ...baseWithRecovery,
+          status: 'included',
+          claim: requiredMetadata(patched.claim, 'claim'),
+          validation: requiredMetadata(patched.validation, 'validation'),
+          broadcast: requiredMetadata(patched.broadcast, 'broadcast'),
+          inclusion: requiredMetadata(patched.inclusion, 'inclusion'),
+        };
+        break;
+      case 'finalized': {
+        const claim = requiredMetadata(patched.claim, 'claim');
+        const validation = requiredMetadata(patched.validation, 'validation');
+        const finalization = requiredMetadata(patched.finalization, 'finalization');
+        if (finalization.mode === 'local') {
+          next = {
+            ...baseWithRecovery,
+            status: 'finalized',
+            claim,
+            validation,
+            finalization: { ...finalization, mode: 'local' },
+          };
+          break;
+        }
+        if (finalization.mode === 'noop') {
+          next = {
+            ...baseWithRecovery,
+            status: 'finalized',
+            claim,
+            validation,
+            finalization: { ...finalization, mode: 'noop' },
+          };
+          break;
+        }
+        next = {
+          ...baseWithRecovery,
+          status: 'finalized',
+          claim,
+          validation,
+          broadcast: requiredMetadata(patched.broadcast, 'broadcast'),
+          inclusion: requiredMetadata(patched.inclusion, 'inclusion'),
+          finalization,
+        };
+        break;
+      }
+      case 'failed': {
+        const failure: LiftJobFailureMetadata = requiredMetadata(patched.failure, 'failure');
+        const recovery = patched.recovery;
+        if (failure.failedFromState === 'accepted') {
+          if (recovery !== undefined) {
+            throw new Error(`LiftJob ${current.jobId}: recovery is forbidden for accepted failure`);
+          }
+          next = {
+            ...base,
+            status: 'failed',
+            failure: { ...failure, failedFromState: 'accepted' },
+          };
+          break;
+        }
+        if (recovery !== undefined && recovery.action !== 'reset_to_accepted') {
+          throw new Error(`LiftJob ${current.jobId}: failed jobs require reset_to_accepted recovery`);
+        }
+        const failedBase = {
+          ...base,
+          ...(recovery !== undefined ? { recovery } : {}),
+          status: 'failed' as const,
+        };
+        if (failure.failedFromState === 'claimed') {
+          next = {
+            ...failedBase,
+            claim: requiredMetadata(patched.claim, 'claim'),
+            failure: { ...failure, failedFromState: 'claimed' },
+          };
+          break;
+        }
+        if (failure.failedFromState === 'validated') {
+          next = {
+            ...failedBase,
+            claim: requiredMetadata(patched.claim, 'claim'),
+            validation: requiredMetadata(patched.validation, 'validation'),
+            failure: { ...failure, failedFromState: 'validated' },
+          };
+          break;
+        }
+        if (failure.failedFromState === 'broadcast') {
+          const claim = requiredMetadata(patched.claim, 'claim');
+          const validation = requiredMetadata(patched.validation, 'validation');
+          next = patched.broadcast === undefined
+            ? {
+                ...failedBase,
+                claim,
+                validation,
+                failure: { ...failure, failedFromState: 'broadcast' },
+              }
+            : {
+                ...failedBase,
+                claim,
+                validation,
+                broadcast: patched.broadcast,
+                failure: { ...failure, failedFromState: 'broadcast' },
+              };
+          break;
+        }
+        const claim = requiredMetadata(patched.claim, 'claim');
+        const validation = requiredMetadata(patched.validation, 'validation');
+        next = patched.broadcast === undefined
+          ? {
+              ...failedBase,
+              claim,
+              validation,
+              failure: { ...failure, failedFromState: 'included' },
+            }
+          : {
+              ...failedBase,
+              claim,
+              validation,
+              broadcast: patched.broadcast,
+              inclusion: requiredMetadata(patched.inclusion, 'inclusion'),
+              failure: { ...failure, failedFromState: 'included' },
+            };
+        break;
+      }
     }
 
-    const next = {
-      ...merged,
-      timestamps: {
-        ...merged.timestamps,
-        claimedAt: status === 'claimed' ? (merged.timestamps.claimedAt ?? now) : merged.timestamps.claimedAt,
-        validatedAt: status === 'validated' ? (merged.timestamps.validatedAt ?? now) : merged.timestamps.validatedAt,
-        broadcastAt: status === 'broadcast' ? (merged.timestamps.broadcastAt ?? now) : merged.timestamps.broadcastAt,
-        includedAt: status === 'included' ? (merged.timestamps.includedAt ?? now) : merged.timestamps.includedAt,
-        finalizedAt: status === 'finalized' ? (merged.timestamps.finalizedAt ?? now) : merged.timestamps.finalizedAt,
-        failedAt: status === 'failed' ? (merged.timestamps.failedAt ?? now) : merged.timestamps.failedAt,
-        updatedAt: now,
-      },
-    } as LiftJob;
-    // The immutable set is ENFORCED here, not merely declared, and it is checked against the
-    // MERGE'S OWN OUTPUT rather than the caller's patch. Reasoning about the patch is what
-    // made earlier versions of this guard wrong twice: an explicit `undefined` is spread, not
-    // skipped, and an omitted nested key only survives where the merge deep-merges that
-    // object -- true for `timestamps`, false for `retries`. Reading the result cannot drift.
+    // A caller may redundantly echo metadata already present on the source (several legacy
+    // administrative paths do), but it cannot inject destination-forbidden progress. Comparing
+    // the explicit patch with both source and authoritative target distinguishes those cases.
+    const progressFields = [
+      'claim',
+      'validation',
+      'broadcast',
+      'inclusion',
+      'finalization',
+      'failure',
+      'recovery',
+    ] as const;
+    const patchRecord = data as unknown as Record<string, unknown>;
+    const sourceRecord = current as unknown as Record<string, unknown>;
+    const targetRecord = next as unknown as Record<string, unknown>;
+    for (const field of progressFields) {
+      const supplied = patchRecord[field];
+      if (supplied === undefined) continue;
+      if (JSON.stringify(supplied) === JSON.stringify(targetRecord[field])) continue;
+      // Source-state metadata may be echoed in a cross-state administrative payload (including a
+      // less-normalized inclusion that omits the txHash already carried by the source). The target
+      // constructor still drops it; only a field absent from both source and target is injection.
+      if (sourceRecord[field] !== undefined) continue;
+      throw new Error(`LiftJob ${current.jobId}: ${field} is forbidden for status ${status}`);
+    }
+
+    // Check immutability against the authoritative target record, including replacement semantics
+    // for retries and explicit undefined values supplied by administrative callers.
     assertNoImmutableLiftJobFieldChange(current, next);
     return next;
   }
@@ -3513,7 +3715,7 @@ export class TripleStoreAsyncLiftPublisher
       },
     });
 
-    return this.mergeJob(job, 'failed', { failure: failure as any });
+    return this.buildTransitionJob(job, 'failed', { failure: failure as any });
   }
 
   /**
@@ -3629,12 +3831,12 @@ export class TripleStoreAsyncLiftPublisher
       errorPayloadRef: `urn:dkg:publisher:error:${job.jobId}:ka-recovery-inconclusive`,
     });
 
-    return this.mergeJob(job, 'failed', { failure: failure as any });
+    return this.buildTransitionJob(job, 'failed', { failure: failure as any });
   }
 
   private async finalizeNoopPublish(claim: ActiveLiftJobClaim): Promise<LiftJob> {
     return await this.claimCoordinator.transitionOwned(claim, async (current, scope) => {
-      const finalized = this.mergeJob(current, 'finalized', {
+      const finalized = this.buildTransitionJob(current, 'finalized', {
         finalization: {
           mode: 'noop',
         },
@@ -3653,7 +3855,7 @@ export class TripleStoreAsyncLiftPublisher
     return await this.claimCoordinator.transitionOwned(claim, async (current, scope) => {
       let next = current;
       if (!next.validation) {
-        next = this.mergeJob(next, 'validated', {
+        next = this.buildTransitionJob(next, 'validated', {
           validation: {
             canonicalRoots: [...request.roots],
             canonicalRootMap: Object.fromEntries(request.roots.map((root) => [root, root])),
@@ -3667,7 +3869,7 @@ export class TripleStoreAsyncLiftPublisher
         next = await scope.commit(next, 'validated');
       }
 
-      const finalized = this.mergeJob(next, 'finalized', {
+      const finalized = this.buildTransitionJob(next, 'finalized', {
         finalization: { mode: 'noop' },
       });
       this.assertJobMatchesStatus(finalized);

@@ -12,9 +12,10 @@ import type {
   PersistedLiftJob,
   TripleStoreAsyncLiftPublisher,
 } from '../../src/index.js';
+import type { LiftJobTransaction } from '../../src/async-lift-claim-session.js';
 import {
-  knownLiftJobPayload,
   canonicalLiftJobPayload,
+  type LiftJobPayloadDecodeResult,
   type StructurallyValidLiftJobPayload,
 } from '../../src/lift-job-payload-codec.js';
 
@@ -47,10 +48,17 @@ declare const structurallyDecoded: StructurallyValidLiftJobPayload;
 // @ts-expect-error An unchecked status:string cannot enter lifecycle code as a LiftJob.
 const uncheckedJob: LiftJob = structurallyDecoded;
 void uncheckedJob;
-const narrowedJob = knownLiftJobPayload(structurallyDecoded);
-if (narrowedJob) {
-  const checkedJob: PersistedLiftJob = narrowedJob;
+declare const decoded: LiftJobPayloadDecodeResult;
+if (decoded.kind === 'canonical') {
+  const writableJob: LiftJob = decoded.job;
+  void writableJob;
+}
+if (decoded.kind === 'compatibility') {
+  const checkedJob: PersistedLiftJob = decoded.job;
+  // @ts-expect-error A compatibility classification cannot receive canonical write authority.
+  const writableJob: LiftJob = decoded.job;
   void checkedJob;
+  void writableJob;
 }
 const canonicalJob = canonicalLiftJobPayload(structurallyDecoded);
 if (canonicalJob) {
@@ -78,4 +86,13 @@ if (persistedRead.status === 'broadcast') {
   // @ts-expect-error A persisted compatibility broadcast must be migrated before evidence is assumed.
   const uncheckedBroadcastHash: `0x${string}` = persistedRead.broadcast.txHash;
   void uncheckedBroadcastHash;
+}
+
+declare const transaction: LiftJobTransaction;
+if (transaction.kind === 'compatibility') {
+  transaction.scope.commitRemoval();
+  // @ts-expect-error Compatibility rows are never given ordinary lifecycle transition authority.
+  transaction.scope.commit(transaction.current, 'broadcast');
+  // @ts-expect-error Compatibility rows cannot manufacture proof-inclusion authority.
+  transaction.scope.commitProofInclusion(transaction.current);
 }
