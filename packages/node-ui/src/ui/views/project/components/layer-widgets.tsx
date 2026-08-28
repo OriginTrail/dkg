@@ -173,7 +173,6 @@ function LayerActionShell({ title, footnote, context, result, error, extras, chi
 interface LayerActionProps {
   count: number;
   contextGraphId: string;
-  includeQueryCatalog?: boolean;
   onComplete?: () => void;
   /** Lift the latest outcome to the parent strip so it survives this widget
    * unmounting when the promoted/published layer empties (entityCount → 0). */
@@ -181,7 +180,7 @@ interface LayerActionProps {
 }
 
 /** WM → SWM bulk-promote CTA. Off-chain; never touches the PCA eligibility probe. */
-export function PromoteWidget({ count, contextGraphId, includeQueryCatalog = false, onComplete, onResult }: LayerActionProps) {
+export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: LayerActionProps) {
   const { busy, result, error, run } = useLayerAction(onResult, onComplete);
   const promote = useCallback(() => {
     // Issue #864 — track the in-flight assertion so a mid-loop failure surfaces "<name>: …"
@@ -191,7 +190,7 @@ export function PromoteWidget({ count, contextGraphId, includeQueryCatalog = fal
       async () => {
         // The share route seals and transfers each complete KA atomically. It is
         // off-chain, so no client-side CG pre-registration is needed.
-        const assertions = await listAssertions(contextGraphId, 'wm', { includeQueryCatalog });
+        const assertions = await listAssertions(contextGraphId, 'wm');
         let noopCount = 0;
         for (const a of assertions) {
           currentAssertion = a.name;
@@ -218,7 +217,7 @@ export function PromoteWidget({ count, contextGraphId, includeQueryCatalog = fal
         return typed ? typed.message : (err?.message ?? 'Action failed');
       },
     );
-  }, [contextGraphId, includeQueryCatalog, run]);
+  }, [contextGraphId, run]);
 
   if (count === 0) return null;
   const color = '#f59e0b';
@@ -228,7 +227,7 @@ export function PromoteWidget({ count, contextGraphId, includeQueryCatalog = fal
     <LayerActionShell
       title="Share complete Knowledge Assets"
       footnote="Shares each complete owning Knowledge Asset atomically to Shared Working Memory."
-      context={<>The displayed {noun} will be shared through their complete owning Knowledge Assets for collaborative review.</>}
+      context={<>{count} eligible {noun} will be shared through their complete owning Knowledge Assets for collaborative review.</>}
       result={result}
       error={error}
     >
@@ -247,7 +246,7 @@ export function PromoteWidget({ count, contextGraphId, includeQueryCatalog = fal
 
 /** SWM → VM publish CTA. Consumes the PCA spend-gate (`useVmPublishGate`) for the DANGER
  *  gate + the eligibility chip, and owns the confirmed post-publish discount badge (B8). */
-export function PublishVmWidget({ count, contextGraphId, includeQueryCatalog = false, onComplete, onResult }: LayerActionProps) {
+export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }: LayerActionProps) {
   const [costCovered, setCostCovered] = useState<ConvictionCostCovered | null>(null);
   const { busy, result, error, run } = useLayerAction(onResult, onComplete);
   // Pure-policy hook: gate decision + resolved eligibility. ALL presentation lives here.
@@ -270,7 +269,7 @@ export function PublishVmWidget({ count, contextGraphId, includeQueryCatalog = f
         // per-assertion vm/publish path. No pre-register: the daemon runs preconditions first
         // and only auto-registers on its CG_NOT_REGISTERED retry, so a doomed publish never
         // burns gas.
-        const assertions = await listAssertions(contextGraphId, 'swm', { includeQueryCatalog });
+        const assertions = await listAssertions(contextGraphId, 'swm');
         // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error accounting.
         const r = await publishAssertionsToVm(contextGraphId, assertions);
         if (r.published > 0) {
@@ -287,7 +286,7 @@ export function PublishVmWidget({ count, contextGraphId, includeQueryCatalog = f
       // describePromoteError → null for publish errors). Never says "an assertion".
       (err: any) => err?.message ?? 'Action failed',
     );
-  }, [contextGraphId, includeQueryCatalog, run, gate.blocked]);
+  }, [contextGraphId, run, gate.blocked]);
 
   if (count === 0) return null;
   const noun = layerNoun('swm', count).toLowerCase();
@@ -336,13 +335,14 @@ export function PublishVmWidget({ count, contextGraphId, includeQueryCatalog = f
 
 // ─── Horizontal widget strip (stats + types + CTA) for the Entities tab ──
 
-export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, contextGraphId, includeQueryCatalog = false, onComplete }: {
+export function LayerWidgetStrip({ layer, entities, entityCount, actionEntityCount = entityCount, tripleCount, contextGraphId, onComplete }: {
   layer: 'wm' | 'swm' | 'vm';
   entities: MemoryEntity[];
   entityCount: number;
+  /** Explicit bulk lifecycle scope; may be narrower than the visible entity set. */
+  actionEntityCount?: number;
   tripleCount: number;
   contextGraphId?: string;
-  includeQueryCatalog?: boolean;
   onComplete?: () => void;
 }) {
   // Latest promote/publish outcome, lifted from the action widget so the "✓ Promoted
@@ -384,11 +384,11 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
         <LayerStatsWidget entities={entities} entityCount={entityCount} triples={tripleCount} layer={layer} />
         <TypeBreakdownWidget entities={entities} />
       </div>
-      {(layer === 'wm' || layer === 'swm') && contextGraphId && (
+      {(layer === 'wm' || layer === 'swm') && contextGraphId && actionEntityCount > 0 && (
         <div className="v10-layer-widgets-strip-action">
           {layer === 'wm'
-            ? <PromoteWidget count={entityCount} contextGraphId={contextGraphId} includeQueryCatalog={includeQueryCatalog} onComplete={onComplete} onResult={setLastAction} />
-            : <PublishVmWidget count={entityCount} contextGraphId={contextGraphId} includeQueryCatalog={includeQueryCatalog} onComplete={onComplete} onResult={setLastAction} />}
+            ? <PromoteWidget count={actionEntityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />
+            : <PublishVmWidget count={actionEntityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />}
         </div>
       )}
     </div>

@@ -23,6 +23,16 @@ const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; ic
   verified: { layerKey: 'vm',  icon: '◉', label: 'Verifiable' },
 };
 
+const QUERY_CATALOG_CONFIGURATION_TYPES = new Set([
+  'http://dkg.io/ontology/profile/QueryCatalog',
+  'http://dkg.io/ontology/profile/SavedQuery',
+]);
+
+/** Query-catalog entities are opt-in configuration UI, not implicit bulk lifecycle targets. */
+export function isQueryCatalogConfigurationEntity(entity: MemoryEntity): boolean {
+  return entity.types.some(type => QUERY_CATALOG_CONFIGURATION_TYPES.has(type));
+}
+
 export function EntityList({
   entities,
   layerKey,
@@ -195,6 +205,13 @@ export function LayerContent({
 }) {
   const config = LAYER_CONFIG[layer];
   const itemsLabel = layerNoun(layer, 2);
+  // The visibility checkbox is presentation-only. Catalog KAs remain
+  // shareable/publishable through their explicit assertion-row action, but
+  // revealing them must not widen the existing bulk mutation CTA.
+  const bulkActionEntityCount = useMemo(
+    () => entities.filter(entity => !isQueryCatalogConfigurationEntity(entity)).length,
+    [entities],
+  );
   const vmLayerStatus = memory.layerStatus?.vm ?? (memory.loading ? 'loading' : memory.error ? 'error' : 'ok');
   const isInitialVerifiableMemoryLoad = layer === 'vm' && vmLayerStatus === 'loading' && entities.length === 0;
   const isVerifiableMemoryUnavailable = layer === 'vm' && vmLayerStatus === 'error' && entities.length === 0;
@@ -274,9 +291,9 @@ export function LayerContent({
                 layer={layer}
                 entities={entities}
                 entityCount={entityCount}
+                actionEntityCount={bulkActionEntityCount}
                 tripleCount={tripleCount}
                 contextGraphId={contextGraphId}
-                includeQueryCatalog={showQueryCatalog}
                 onComplete={memory.refresh}
               />
               <EntityList
@@ -483,7 +500,6 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   }, [contextGraphId, layer, refresh, onComplete]);
 
   const handlePromoteAll = useCallback(async () => {
-    if (!assertions?.length) return;
     setBusy('__all__');
     setResult(null);
     setError(null);
@@ -492,12 +508,22 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     // "selected assertion …".
     let currentAssertion: string | null = null;
     try {
+      // Bulk scope is intentionally independent from the display list. When
+      // query-catalog visibility is enabled, catalog assertions remain
+      // explicit row actions and are not silently admitted to this batch.
+      const bulkAssertions = await listAssertions(contextGraphId, layer);
+      if (bulkAssertions.length === 0) {
+        setResult(layer === 'wm'
+          ? 'No user Knowledge Assets are ready to share.'
+          : 'No user Knowledge Assets are ready to publish.');
+        return;
+      }
       // No client-side CG pre-registration (see handleAction): atomic sharing is
       // off-chain, and /vm/publish registers-then-
       // mints only after preconditions pass.
       if (layer === 'wm') {
         let noopCount = 0;
-        for (const a of assertions) {
+        for (const a of bulkAssertions) {
           currentAssertion = a.name;
           // PR #710 — see comment on the single-row handler above.
           const res = await promoteAssertion(
@@ -509,7 +535,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         }
         // Issue #864 — distinguish "some moved, some no-ops" from
         // "literally nothing moved" so the user gets the truth.
-        const sharedCount = assertions.length - noopCount;
+        const sharedCount = bulkAssertions.length - noopCount;
         if (sharedCount > 0) {
           const tail = noopCount > 0 ? ` (${noopCount} already shared or still committing)` : '';
           setResult(`Shared ${sharedCount} complete Knowledge Asset${sharedCount !== 1 ? 's' : ''}${tail}`);
@@ -520,7 +546,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         // Publish each shared assertion as its own Knowledge Asset (Design B) via the
         // shared batch loop (api.ts publishAssertionsToVm) — fail-closed direct publish + 207 partial
         // handling, uniform with the other batch-publish CTAs (carries the partial detail).
-        const r = await publishAssertionsToVm(contextGraphId, assertions);
+        const r = await publishAssertionsToVm(contextGraphId, bulkAssertions);
         if (r.published > 0) {
           const tail = r.failures.length ? ` (${r.failures.length} could not be published)` : '';
           const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
@@ -537,7 +563,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     } finally {
       setBusy(null);
     }
-  }, [assertions, contextGraphId, layer, refresh, onComplete]);
+  }, [contextGraphId, layer, refresh, onComplete]);
 
   const scrollRootStyle = { flex: 1, overflow: 'auto' } as const;
 
@@ -573,19 +599,24 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
 
   const actionLabel = layer === 'wm' ? 'Share Complete KA → Shared' : 'Publish to VM';
   const actionAllLabel = layer === 'wm' ? 'Share Complete KAs → Shared' : 'Publish all to Verifiable Memory';
+  const bulkVisibleAssertionCount = assertions.filter(
+    assertion => assertion.subGraph !== 'meta' || !assertion.name.startsWith('query-catalog-'),
+  ).length;
 
   return (
     <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
       <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)' }}>
         <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
-        <button
-          className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
-          disabled={busy !== null}
-          onClick={handlePromoteAll}
-          style={{ opacity: busy === '__all__' ? 0.5 : 1 }}
-        >
-          {busy === '__all__' ? '...' : actionAllLabel}
-        </button>
+        {bulkVisibleAssertionCount > 0 && (
+          <button
+            className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
+            disabled={busy !== null}
+            onClick={handlePromoteAll}
+            style={{ opacity: busy === '__all__' ? 0.5 : 1 }}
+          >
+            {busy === '__all__' ? '...' : actionAllLabel}
+          </button>
+        )}
       </div>
       {result && (
         <div
