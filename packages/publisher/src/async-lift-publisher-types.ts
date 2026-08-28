@@ -189,8 +189,22 @@ export interface AsyncLiftPublisher {
   recordPublishResult(jobId: string, publishResult: PublishResult, options?: { publicByteSize?: number }): Promise<LiftJob>;
   /** @deprecated Prefer `administrative.recordPublishFailureById`; workers use a claim session. */
   recordPublishFailure(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob>;
+  /**
+   * Run one reconciliation pass and report how many jobs it settled.
+   *
+   * CONCURRENCY CONTRACT: safe to call at any time, including concurrently with a pass the
+   * runner (or another caller) already has in flight — operator tooling relies on getting a
+   * FRESH pass over fresh state rather than queueing behind or coalescing into a stuck one.
+   * Overlapping passes are made safe by the held-job schedule's snapshot-ordered ownership
+   * protocol (inventory acquisition itself is serialized; everything after overlaps). The
+   * built-in runner additionally single-flights its own cadence, so overlap in practice comes
+   * from external callers, not the runner.
+   */
   recover(): Promise<number>;
-  /** Reconcile interrupted work without restarting the runner. Older implementations can omit it. */
+  /**
+   * Reconcile interrupted work without restarting the runner. Older implementations can omit
+   * it. Same concurrency contract as {@link recover}.
+   */
   reconcileTransactions?(): Promise<number>;
   /** Wait until every receipt task detached after RPC acceptance has stopped. Older implementations can omit it. */
   drainDetachedExecutions?(): Promise<void>;
