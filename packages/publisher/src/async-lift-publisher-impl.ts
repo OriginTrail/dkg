@@ -1209,22 +1209,6 @@ export class TripleStoreAsyncLiftPublisher
    * reconciler's own canonical proof. A re-fired hint for the same job replaces the entry
    * (consume-once per attempt); the map is bounded FIFO as a backstop.
    */
-  /**
-   * r2 (3877563239) — the typed broadcast→included transition for a canonically proven
-   * inclusion. `mergeJob`'s generic `Partial<LiftJob>` cannot express a union-member-specific
-   * field, so the shape is checked here against the REAL `LiftJobIncluded` patch type (a later
-   * change to the inclusion metadata IS type-checked at this boundary) and the single widening
-   * to the generic signature is this one annotated spot rather than an `as never` that
-   * suppressed all checking.
-   */
-  private includeOnCanonicalProof(
-    job: LiftJobBroadcast,
-    inclusion: LiftJobInclusionMetadata,
-  ): LiftJob {
-    const patch: Partial<LiftJobIncluded> = { inclusion };
-    return this.mergeJob(job, 'included', patch as Partial<LiftJob>);
-  }
-
   private recordExecutorProofHint(jobId: string, confirmation: { readonly txHash?: unknown }): void {
     const txHash = confirmation?.txHash;
     if (typeof txHash !== 'string' || txHash.length === 0) return;
@@ -1272,8 +1256,22 @@ export class TripleStoreAsyncLiftPublisher
     const hintOffset = this.executorHintPassOffset++ % candidates.length;
     const rotatedCandidates = candidates.slice(hintOffset).concat(candidates.slice(0, hintOffset));
     let unresolved = 0;
-    for (const snapshot of rotatedCandidates) {
-      if (signal?.aborted) return unresolved;
+    for (let i = 0; i < rotatedCandidates.length; i += 1) {
+      const snapshot = rotatedCandidates[i];
+      if (signal?.aborted) {
+        // r4 (3877669330) — candidates the deadline cut off are still pending work: they are
+        // deliberately invisible to the ordinary lane while executor-owned, so if they were
+        // dropped here the coalesced wake would be consumed and the runner would fall back to
+        // the idle cadence with hinted wallets still locked. Count the still-eligible ones.
+        for (let j = i; j < rotatedCandidates.length; j += 1) {
+          const skipped = this.executorProofHints.get(rotatedCandidates[j].jobId);
+          if (skipped !== undefined && skipped.proof === undefined
+            && this.detachedExecutions.has(rotatedCandidates[j].jobId)) {
+            unresolved += 1;
+          }
+        }
+        return unresolved;
+      }
       const hint = this.executorProofHints.get(snapshot.jobId);
       if (!hint || hint.proof) continue;
       if (!this.detachedExecutions.has(snapshot.jobId)) continue;
@@ -1329,7 +1327,10 @@ export class TripleStoreAsyncLiftPublisher
           // truthfully, then free the wallet (write-before-release — the poke must find
           // claim-visible state). A retry that already persisted 'included' skips the write.
           if (recoverable.status === 'broadcast') {
-            await this.writeJob(this.includeOnCanonicalProof(recoverable, resolved.inclusion), 'included');
+            await this.writeJob(
+              this.mergeJob(recoverable, 'included', { inclusion: resolved.inclusion }),
+              'included',
+            );
           }
           await this.releaseWalletLockForJob(current);
           hint.proof = { recovery: resolution.recovery, resolved };
@@ -3244,7 +3245,20 @@ export class TripleStoreAsyncLiftPublisher
     return withKeyedLocks(TripleStoreAsyncLiftPublisher.jobTransitionQueues, [key], fn);
   }
 
-  private mergeJob(current: LiftJob, status: LiftJobState, data: Partial<LiftJob>): LiftJob {
+  // r4 (3877669534) — the canonical transition API expresses the one union-member-specific
+  // transition this train performs: broadcast -> included with required inclusion metadata,
+  // returning the TARGET state type. The generic signature remains for same-shape merges.
+  private mergeJob(
+    current: LiftJobBroadcast,
+    status: 'included',
+    data: { inclusion: LiftJobInclusionMetadata },
+  ): LiftJobIncluded;
+  private mergeJob(current: LiftJob, status: LiftJobState, data: Partial<LiftJob>): LiftJob;
+  private mergeJob(
+    current: LiftJob,
+    status: LiftJobState,
+    data: Partial<LiftJob> & { inclusion?: LiftJobInclusionMetadata },
+  ): LiftJob {
     const now = this.now();
     if (current.status !== status) assertLiftJobTransition(current.status, status);
 

@@ -770,4 +770,65 @@ describe('async-lift wallet release channel', () => {
       releaseTail();
     }
   });
+
+  it('rotates past a budget-consuming hinted proof so a second hinted wallet is released', async () => {
+    // r4 (3877669618 + 3877669330) - two wallets, two detached hinted jobs. Wallet-1's proof
+    // lookup never settles and ignores the signal, so it consumes the whole (short) pass
+    // budget. Pass 1 starts at wallet-1, times out, and must still report the SKIPPED hinted
+    // candidate as pending work (the truncation fix) - otherwise the coalesced wake is consumed
+    // and the runner idles with hinted wallets locked. Pass 2's rotation starts at wallet-2,
+    // which proves, stamps included, and releases ONLY its wallet.
+    let hinted = 0;
+    const tails: Array<() => void> = [];
+    const publisher = createPublisher({
+      chainProofDispatchTimeBudgetMs: 100,
+      detachReceiptReconciliation: true,
+      chainProofResolver: (lookup: { walletId: string }) => (lookup.walletId === 'wallet-1'
+        ? new Promise(() => {})
+        : Promise.resolve({ status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never)),
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
+        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
+        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
+      } as never),
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            operationKind: 'create',
+          });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          hinted += 1;
+          await new Promise<void>((resolve) => { tails.push(resolve); });
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    await stageKnowledgeAssetShareSnapshot({ store, graphManager, shareOperationId: 'share-op-2' });
+    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const jobB = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ name: 'albums-next', shareOperationId: 'share-op-2' }),
+    );
+    await publisher.processNext('wallet-1');
+    await publisher.processNext('wallet-2');
+    await waitForCondition(() => hinted === 2, 'both executors must fire their hints');
+
+    try {
+      // Pass 1: wallet-1 consumes the budget; the skipped wallet-2 hint keeps the pass pending.
+      expect(await publisher.reconciliationScheduling.reconcile())
+        .toEqual({ reconciled: 0, pendingWork: true });
+
+      // Pass 2: rotation starts at wallet-2 - proven, stamped, released; wallet-1 untouched.
+      expect(await publisher.reconciliationScheduling.reconcile())
+        .toEqual({ reconciled: 0, pendingWork: true });
+      expect((await publisher.getStatus(jobB))?.status).toBe('included');
+      await expectWalletLock('wallet-2', 'released');
+      expect((await publisher.getStatus(jobA))?.status).toBe('broadcast');
+      await expectWalletLock('wallet-1', 'held');
+    } finally {
+      for (const release of tails) release();
+    }
+  });
 });
