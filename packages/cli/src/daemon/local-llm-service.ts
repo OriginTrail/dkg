@@ -135,10 +135,12 @@ export function createDaemonLocalLlmService(
   let session: DkgLocalLlmRuntimeSession | undefined;
   let lockedProjectId: string | undefined;
   let hasProjectLock = false;
-  let busy = false;
   let closed = false;
-  let activeTurnController: AbortController | undefined;
-  let activeTurnSettlement: Promise<void> | undefined;
+  let activeOperation: {
+    kind: 'chat' | 'clear';
+    settlement: Promise<void>;
+    controller?: AbortController;
+  } | undefined;
   let closePromise: Promise<void> | undefined;
   let initFailure: string | undefined;
 
@@ -173,7 +175,7 @@ export function createDaemonLocalLlmService(
         ready,
         reachable: availability.reachable,
         offline: !availability.reachable,
-        busy,
+        busy: Boolean(activeOperation),
         initialized: Boolean(session),
         readOnly: true,
         sessionId: DKG_LOCAL_LLM_UI_SESSION_ID,
@@ -201,7 +203,7 @@ export function createDaemonLocalLlmService(
           'The local LLM service is shutting down.',
         );
       }
-      if (busy) {
+      if (activeOperation) {
         throw new DaemonLocalLlmError(
           'LOCAL_LLM_BUSY',
           409,
@@ -224,9 +226,12 @@ export function createDaemonLocalLlmService(
         : turnController.signal;
       let settleTurn!: () => void;
       const turnSettlement = new Promise<void>((resolve) => { settleTurn = resolve; });
-      activeTurnController = turnController;
-      activeTurnSettlement = turnSettlement;
-      busy = true;
+      const operation = {
+        kind: 'chat' as const,
+        settlement: turnSettlement,
+        controller: turnController,
+      };
+      activeOperation = operation;
       try {
         const availability = await probe();
         signal.throwIfAborted();
@@ -244,6 +249,8 @@ export function createDaemonLocalLlmService(
               llamaUrl: settings.llamaUrl,
               model: settings.model,
               projectId: requestedProjectId,
+              signal,
+              initializationTimeoutMs: 15_000,
               strictProjectScope: true,
               strictProjectScopeTools: DKG_LOCAL_LLM_STRICT_PROJECT_TOOLS,
               strictProjectScopeUnscopedTools: ['dkg_status'],
@@ -321,37 +328,49 @@ export function createDaemonLocalLlmService(
           );
         }
       } finally {
-        busy = false;
         settleTurn();
-        if (activeTurnSettlement === turnSettlement) {
-          activeTurnSettlement = undefined;
-          activeTurnController = undefined;
-        }
+        if (activeOperation === operation) activeOperation = undefined;
       }
     },
 
     async clear() {
-      if (busy) {
+      if (closed) {
+        throw new DaemonLocalLlmError(
+          'LOCAL_LLM_RUNTIME_ERROR',
+          503,
+          'The local LLM service is shutting down.',
+        );
+      }
+      if (activeOperation) {
         throw new DaemonLocalLlmError(
           'LOCAL_LLM_BUSY',
           409,
           'Wait for the active local LLM turn before clearing the session.',
         );
       }
-      await closeSession(true);
-      lockedProjectId = undefined;
-      hasProjectLock = false;
-      initFailure = undefined;
-      return { ok: true, sessionId: DKG_LOCAL_LLM_UI_SESSION_ID, readOnly: true };
+      let settleClear!: () => void;
+      const clearSettlement = new Promise<void>((resolve) => { settleClear = resolve; });
+      const operation = { kind: 'clear' as const, settlement: clearSettlement };
+      activeOperation = operation;
+      try {
+        await closeSession(true);
+        lockedProjectId = undefined;
+        hasProjectLock = false;
+        initFailure = undefined;
+        return { ok: true, sessionId: DKG_LOCAL_LLM_UI_SESSION_ID, readOnly: true };
+      } finally {
+        settleClear();
+        if (activeOperation === operation) activeOperation = undefined;
+      }
     },
 
     async close() {
       if (!closePromise) {
         closed = true;
-        const pendingTurn = activeTurnSettlement;
-        activeTurnController?.abort(new Error('The local LLM service is shutting down.'));
+        const pendingOperation = activeOperation;
+        pendingOperation?.controller?.abort(new Error('The local LLM service is shutting down.'));
         closePromise = (async () => {
-          await pendingTurn;
+          await pendingOperation?.settlement;
           await closeSession(false);
         })();
       }

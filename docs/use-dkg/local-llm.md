@@ -490,6 +490,11 @@ enter hidden conversation history.
 
 The daemon creates only the lightweight service during startup. MCP tool
 discovery and the model runtime are initialized lazily on the first chat turn.
+Daemon UI initialization is bounded and uses the same cancellation signal as
+the turn, so shutdown can terminate a stalled MCP connect or `tools/list` and
+dispose the partial child. Chat, clear, and close are exclusive lifecycle
+operations; a clear keeps the service busy until session cleanup and Context
+Graph lock reset are both complete.
 
 ```mermaid
 sequenceDiagram

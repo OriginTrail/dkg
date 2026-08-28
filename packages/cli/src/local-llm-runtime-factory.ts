@@ -18,6 +18,8 @@ export interface DkgLocalLlmRuntimeSessionOptions {
   llamaUrl: string;
   model: string;
   projectId?: string;
+  signal?: AbortSignal;
+  initializationTimeoutMs?: number;
   strictProjectScope?: boolean;
   strictProjectScopeTools?: readonly string[];
   strictProjectScopeUnscopedTools?: readonly string[];
@@ -93,9 +95,22 @@ export async function createDkgLocalLlmRuntimeSession(
   const mcp = new Client({ name: 'dkg-local-llm', version: '10.0.14' });
   let closed = false;
   try {
-    await mcp.connect(transport);
+    const initializationTimeoutMs = options.initializationTimeoutMs ?? 60_000;
+    const timeoutSignal = AbortSignal.timeout(initializationTimeoutMs);
+    const initializationSignal = options.signal
+      ? AbortSignal.any([options.signal, timeoutSignal])
+      : timeoutSignal;
+    initializationSignal.throwIfAborted();
+    await mcp.connect(transport, {
+      signal: initializationSignal,
+      timeout: initializationTimeoutMs,
+    });
+    initializationSignal.throwIfAborted();
     const runtimeMcp: McpClientLike = {
-      listTools: () => mcp.listTools(),
+      listTools: (requestOptions) => mcp.listTools(
+        undefined,
+        requestOptions?.signal ? { signal: requestOptions.signal } : undefined,
+      ),
       callTool: async (input, requestOptions) => await mcp.callTool(
         input,
         undefined,
@@ -107,6 +122,7 @@ export async function createDkgLocalLlmRuntimeSession(
       llamaUrl: options.llamaUrl,
       model: options.model,
       projectId,
+      initializationSignal,
       strictProjectScope: options.strictProjectScope,
       strictProjectScopeTools: [...(options.strictProjectScopeTools ?? [])],
       strictProjectScopeUnscopedTools: [...(options.strictProjectScopeUnscopedTools ?? [])],

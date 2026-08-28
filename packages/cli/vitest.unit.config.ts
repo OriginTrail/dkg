@@ -44,6 +44,7 @@ export default defineConfig({
           'test/llm-command.test.ts',
           'test/daemon-local-llm-route.test.ts',
           'test/daemon-local-llm-service.test.ts',
+          'test/local-llm-runtime-factory.test.ts',
           'test/memory-graph-events.test.ts',
           'test/memory-turn-route.test.ts',
           'test/trust-endpoint-validation.test.ts',

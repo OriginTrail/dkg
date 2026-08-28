@@ -235,6 +235,39 @@ describe('daemon local LLM service', () => {
     expect((await service.health()).busy).toBe(false);
   });
 
+  it('cancels stalled session initialization so shutdown can complete', async () => {
+    let initializationSignal: AbortSignal | undefined;
+    const createSession = vi.fn(async (runtimeOptions: { signal?: AbortSignal }) => {
+      initializationSignal = runtimeOptions.signal;
+      await new Promise<never>((_resolve, reject) => {
+        initializationSignal?.addEventListener(
+          'abort',
+          () => reject(initializationSignal?.reason),
+          { once: true },
+        );
+      });
+    });
+    const service = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg', fetch: onlineFetch(), createSession: createSession as any,
+    });
+
+    const turn = service.chat({ message: 'stalled init', contextGraphId: 'graph-a' });
+    const turnOutcome = turn.then(
+      () => ({ status: 'fulfilled' as const }),
+      (error: unknown) => ({ status: 'rejected' as const, error }),
+    );
+    await vi.waitFor(() => expect(initializationSignal).toBeDefined());
+
+    await service.close();
+
+    expect(initializationSignal?.aborted).toBe(true);
+    await expect(turnOutcome).resolves.toMatchObject({
+      status: 'rejected',
+      error: expect.objectContaining({ message: 'The local LLM service is shutting down.' }),
+    });
+    expect((await service.health()).busy).toBe(false);
+  });
+
   it('forwards caller cancellation, releases busy state, and reuses the clean session', async () => {
     let release!: () => void;
     let started!: () => void;
@@ -292,6 +325,35 @@ describe('daemon local LLM service', () => {
     expect(createSession).toHaveBeenLastCalledWith(expect.objectContaining({ projectId: 'graph-b' }));
     await service.close();
     expect(second.close).toHaveBeenCalledOnce();
+  });
+
+  it('keeps clear exclusive until cleanup and graph-lock reset finish', async () => {
+    let releaseClear!: () => void;
+    const clearPending = new Promise<void>((resolve) => { releaseClear = resolve; });
+    const first = fakeSession();
+    first.runtime.clearSession.mockImplementationOnce(async () => clearPending);
+    const second = fakeSession();
+    const createSession = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second);
+    const service = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg', fetch: onlineFetch(), createSession,
+    });
+    await service.chat({ message: 'bind A', contextGraphId: 'graph-a' });
+
+    const clearing = service.clear();
+    await vi.waitFor(() => expect(first.runtime.clearSession).toHaveBeenCalledOnce());
+    expect((await service.health()).busy).toBe(true);
+    await expect(service.chat({ message: 'race A', contextGraphId: 'graph-a' }))
+      .rejects.toMatchObject({ code: 'LOCAL_LLM_BUSY', status: 409 });
+    expect(createSession).toHaveBeenCalledOnce();
+
+    releaseClear();
+    await clearing;
+    await service.chat({ message: 'bind B', contextGraphId: 'graph-b' });
+    await expect(service.chat({ message: 'must stay B', contextGraphId: 'graph-a' }))
+      .rejects.toMatchObject({ code: 'LOCAL_LLM_PROJECT_MISMATCH', status: 409 });
+    expect(createSession).toHaveBeenCalledTimes(2);
   });
 
   it('surfaces initialization failure in health and closes cleanly', async () => {

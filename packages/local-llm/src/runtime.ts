@@ -23,7 +23,7 @@ import {
 } from './dkg-tool-validation.js';
 
 export interface McpClientLike {
-  listTools(): Promise<{ tools: McpToolDefinition[] }>;
+  listTools(options?: { signal?: AbortSignal }): Promise<{ tools: McpToolDefinition[] }>;
   callTool(input: {
     name: string;
     arguments?: Record<string, unknown>;
@@ -70,6 +70,8 @@ export interface DkgLocalLlmOptions {
   llamaUrl?: string;
   model?: string;
   projectId?: string;
+  /** Cancellation for MCP tool discovery during runtime construction. */
+  initializationSignal?: AbortSignal;
   /**
    * Enforce projectId as a security boundary instead of a missing-argument
    * default. Used by daemon-owned UI sessions; the interactive CLI keeps its
@@ -399,7 +401,9 @@ export class DkgLocalLlmRuntime {
   }
 
   static async create(options: DkgLocalLlmOptions): Promise<DkgLocalLlmRuntime> {
-    const listed = await options.mcp.listTools();
+    options.initializationSignal?.throwIfAborted();
+    const listed = await options.mcp.listTools({ signal: options.initializationSignal });
+    options.initializationSignal?.throwIfAborted();
     const tools: McpToolDefinition[] = [];
     const rejected: Array<{ name: string; error: string }> = [];
     const normalizations: Array<{ name: string; changes: string[] }> = [];
