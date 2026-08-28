@@ -7,7 +7,7 @@
  * prove the WIRING: phase-driven ceilings, shared attempt accounting, jitter bounds, and the
  * stale-successor no-op, each observed via which passes actually re-ask the resolver.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_CONTROL_GRAPH_URI,
   serializeJobRecord,
@@ -539,6 +539,63 @@ describe('GH#2270 chain-proof cadence', () => {
       expect(events).toEqual(['enter', 'exit', 'enter', 'exit']);
     });
 
+    it('a read bypassed at the cap completes late RANKED OLD — its sweep spares the successor', async () => {
+      // r11 (🔴 3884193885) — the ordering token is drawn BEFORE the read, so a hung
+      // acquisition that a successor bypassed keeps its old rank when it finally completes.
+      // Issued after the read, the late pass would carry the NEWEST token with the OLDEST
+      // inventory, and its sweep — which acts on absence, where no identity guard applies —
+      // would delete the successor's earned backoff for a job the old snapshot never saw.
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        reconciliationAcquisitionWaitCapMs: 50,
+        chainProofResolver: async () => {
+          asks += 1;
+          return { status: 'pending-mempool' };
+        },
+      });
+
+      let releaseCapture!: () => void;
+      const gate = new Promise<void>((resolve) => { releaseCapture = resolve; });
+      let signalCaptured!: () => void;
+      const captured = new Promise<void>((resolve) => { signalCaptured = resolve; });
+      const originalList = publisher.list.bind(publisher);
+      let firstListCall = true;
+      (publisher as { list: typeof publisher.list }).list = async (filter) => {
+        if (firstListCall) {
+          firstListCall = false;
+          const result = await originalList(filter); // captures the PRE-held state...
+          signalCaptured();
+          await gate; // ...but resolves only when released, far past the cap
+          return result;
+        }
+        return originalList(filter);
+      };
+
+      const passA = publisher.recover(); // old snapshot drawn; response stalled
+      await captured; // the capture provably predates the job below
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+      void jobId;
+
+      await publisher.recover(); // pass B: bypasses at the 50ms cap, sees the job, defers 30s
+      expect(asks).toBe(1);
+
+      releaseCapture();
+      await passA; // the late pass runs with an inventory that omits the held job
+      const schedule = (publisher as unknown as {
+        chainProofRetrySchedule: { retainedEntryCount(): number };
+      }).chainProofRetrySchedule;
+      expect(schedule.retainedEntryCount()).toBe(1); // the successor's entry SURVIVED the sweep
+
+      h.advance(29_000);
+      await publisher.recover();
+      expect(asks).toBe(1); // earned backoff honored — no immediate re-poll
+      h.advance(2_000);
+      await publisher.recover();
+      expect(asks).toBe(2);
+    });
+
     it("recover() itself sweeps residue a truncated pass left behind", async () => {
       // r8 (🟡 3883812096) — the dispatcher's prune CALL is the wiring under test (the sweep
       // semantics are the schedule's own rows): batch size 0 lets a pass observe the held job
@@ -598,12 +655,13 @@ describe('GH#2270 chain-proof cadence', () => {
       expect((await publisher.getStatus(jobId))?.status).toBe('failed');
     });
 
-    it('a HUNG inventory read cannot block later passes — the acquisition wait is bounded', async () => {
+    it('a HUNG inventory read cannot block later passes — released at EXACTLY the configured cap', async () => {
       // r10 (🔴 3883959795) — one non-settling store read must degrade ordering, not
       // availability: with an unbounded chain, every later recover() queues behind the hung
-      // read forever, the opposite of the documented fresh-pass contract. The bounded wait
-      // releases the successor at the cap, and the successor's own settlement replaces the
-      // chain so the hung acquisition wedges nobody after it either.
+      // read forever. r11 (🔴 3883812279-follow / 3884193991) — the CAP VALUE is the pin, not
+      // mere finiteness: fake timers prove the successor is still fenced at 49ms and released
+      // at exactly the configured 50ms, so a hard-coded cap cannot hide behind the test
+      // timeout.
       let asks = 0;
       const publisher = h.createPublisher({
         chainProofDispatchBatchSize: 1,
@@ -626,10 +684,23 @@ describe('GH#2270 chain-proof cadence', () => {
         return originalList(filter);
       };
 
-      const hung = publisher.recover(); // acquisition 1: wedged inside list() forever
-      void hung;
-      await publisher.recover(); // must wait at most the 50ms cap, then acquire fresh
-      expect(asks).toBe(1); // ...and do real work: the held job was dispatched
+      vi.useFakeTimers();
+      try {
+        const hung = publisher.recover(); // acquisition 1: wedged inside list() forever
+        void hung;
+        let secondSettled = false;
+        const second = publisher.recover().then((n) => {
+          secondSettled = true;
+          return n;
+        });
+        await vi.advanceTimersByTimeAsync(49);
+        expect(secondSettled).toBe(false); // still fenced behind the hung read at 49ms
+        await vi.advanceTimersByTimeAsync(1); // the cap fires at exactly 50ms
+        await second; // fresh acquisition + real work
+        expect(asks).toBe(1); // the held job was dispatched
+      } finally {
+        vi.useRealTimers();
+      }
       expect((await publisher.getStatus(jobId))?.status).toBe('failed');
       h.advance(31_000);
       await publisher.recover(); // the chain is owned by settled acquisitions again

@@ -9,10 +9,13 @@
  *                  `attempts`/`dueAt`.
  *
  * ORDERING — ownership changes are ordered by a monotonic pass token issued by `beginPass`,
- * which the caller MUST invoke synchronously at its inventory snapshot (token order must equal
- * snapshot order; issuing it later — e.g. at dispatch — would let an older snapshot arriving
- * late outrank a newer one). Millisecond clocks can tie between overlapping passes; tokens
- * cannot.
+ * which the caller MUST invoke at the START of its serialized inventory acquisition, before
+ * the read (token order must equal snapshot order; issuing it later — after the read, or at
+ * dispatch — would let an older snapshot COMPLETING late outrank a newer one, and the sweep
+ * would then collect the newer state). In the serialized case start order equals capture
+ * order; when a hung read is bypassed at the caller's wait cap, its pre-drawn token fences it
+ * as older — conservative, since a stale-ranked pass can only be refused, never destructive.
+ * Millisecond clocks can tie between overlapping passes; tokens cannot.
  *
  * PROTOCOL — a pass admits its whole snapshot through ONE `observeSnapshot` call, which
  * sweeps first (entries no newer snapshot can observe are dead) and then observes each
@@ -58,7 +61,9 @@ export interface ChainProofSchedulePass {
    * its entry is dead (a re-failed job is a NEW incarnation and reinstalls fresh); the token
    * guard spares entries from this pass or a newer overlapping one, whose snapshots this one
    * cannot outrank — then observes every candidate, returning the admitted (due) turns keyed
-   * by jobId.
+   * by jobId. Callable EXACTLY ONCE, with the pass's whole snapshot (r11 3884194251): a split
+   * admission would sweep an omitted job and then reinstall it immediately-ready, so a second
+   * call throws instead.
    */
   observeSnapshot(
     candidates: ReadonlyArray<{ readonly jobId: string; readonly identity: string }>,
@@ -84,15 +89,24 @@ export class ChainProofRetrySchedule {
   ) {}
 
   /**
-   * Open a pass scope. MUST be called synchronously at the inventory snapshot (see ORDERING);
-   * `atMs` is that snapshot instant, used for dueness so one pass judges the whole population
-   * at one moment.
+   * Open a pass scope. MUST be called at the start of the caller's serialized inventory
+   * acquisition (see ORDERING); `atMs` is that acquisition instant, used for dueness so one
+   * pass judges the whole population at one moment.
    */
   beginPass(atMs: number): ChainProofSchedulePass {
     this.passTokenCounter += 1;
     const token = this.passTokenCounter;
+    let consumed = false;
     return {
       observeSnapshot: (candidates) => {
+        // r11 (🟡 3884194251) — single-use, enforced: a split admission would first sweep an
+        // omitted job's entry and then reinstall it immediately-ready on the second call —
+        // silently resetting its earned backoff. The whole-snapshot-exactly-once contract
+        // fails loudly here instead of corrupting ownership semantics at a distance.
+        if (consumed) {
+          throw new Error('ChainProofSchedulePass: a pass admits its snapshot exactly once');
+        }
+        consumed = true;
         const observable = new Set(candidates.map((candidate) => candidate.jobId));
         for (const [jobId, entry] of this.entries) {
           if (entry.observedToken < token && !observable.has(jobId)) this.entries.delete(jobId);

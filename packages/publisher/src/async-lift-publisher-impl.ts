@@ -2156,8 +2156,16 @@ export class TripleStoreAsyncLiftPublisher
           resolve();
         });
       });
-      const inventory = await this.list();
+      // r11 (🔴 3884193885) — ordering authority is reserved BEFORE the read, not after it:
+      // a hung read whose successor bypassed it at the cap keeps the token it drew at its
+      // section start, so when it eventually completes it is fenced as OLDER — its sweep (the
+      // one consumer of token order with deletion authority over other jobs' entries, which no
+      // identity guard contains) cannot collect what the successor installed from genuinely
+      // newer state. In the serialized normal case start order equals capture order, so
+      // nothing changes; in the bypass case the ambiguity resolves conservatively (a late pass
+      // can be under-ranked, never over-ranked).
       const chainProofPass = this.chainProofRetrySchedule.beginPass(this.now());
+      const inventory = await this.list();
       return { inventory, chainProofPass };
     })();
     // The chain must survive a failed acquisition — carry only settlement, never the result.

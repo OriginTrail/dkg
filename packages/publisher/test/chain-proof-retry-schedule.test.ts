@@ -129,11 +129,12 @@ describe('ChainProofRetrySchedule', () => {
   });
 
   it('stale turns held across a takeover can neither reset nor retain — the map stays bounded', () => {
-    // Retention is the observable, not just the successor's cadence: five stale turns from an
-    // old pass all defer late; the count stays at one and B's backoff is untouched.
+    // Retention is the observable, not just the successor's cadence: five stale turns, each
+    // from its own old pass (one snapshot admission per pass, as production runs), all defer
+    // late; the count stays at one and B's backoff is untouched.
     const h = harness();
-    const stalePass = h.schedule.beginPass(h.now());
-    const staleTurns = [A, `${A}x1`, `${A}x2`, `${A}x3`, `${A}x4`].map((id) => obs(stalePass, 'job', id));
+    const staleTurns = [A, `${A}x1`, `${A}x2`, `${A}x3`, `${A}x4`]
+      .map((id) => obs(h.schedule.beginPass(h.now()), 'job', id));
     h.turn('job', B); // B takes ownership and defers
     for (const turn of staleTurns) turn?.defer('default');
     expect(h.schedule.retainedEntryCount()).toBe(1);
@@ -142,6 +143,17 @@ describe('ChainProofRetrySchedule', () => {
     h.schedule.beginPass(h.now()); // no-op pass; B still owns
     h.advance(1);
     expect(h.due('job', B)).toBe(true);
+  });
+
+  it('a pass admits its snapshot EXACTLY ONCE — split admission fails loudly, not silently', () => {
+    // PR #2380 r11 (🟡 3884194251) — a split admission would sweep the omitted job's entry on
+    // the first call and reinstall it immediately-ready on the second, resetting its earned
+    // backoff without any error. The single-use guard turns that into a local failure.
+    const h = harness();
+    h.turn('b', B); // b deferred with an earned 30s
+    const pass = h.schedule.beginPass(h.now());
+    pass.observeSnapshot([{ jobId: 'a', identity: A }]);
+    expect(() => pass.observeSnapshot([{ jobId: 'b', identity: B }])).toThrow(/exactly once/);
   });
 
   it('a stale settlement cannot clear a schedule the successor earned', () => {
