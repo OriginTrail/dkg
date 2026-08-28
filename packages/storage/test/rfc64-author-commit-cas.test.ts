@@ -13,6 +13,7 @@ import {
   RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
   SharedMemoryLiteralBlobStore,
   SparqlHttpStore,
+  UnsupportedTripleStoreCapabilityError,
   buildRfc64AuthorCommitCasUpdateV1,
   createTripleStore,
   tryRfc64AuthorCommitCasV1,
@@ -204,6 +205,21 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(await objectFor(store, STATE_GRAPH, MUTATION, P_GENERATION)).toBe('"1"');
     expect(await objectFor(store, STATE_GRAPH, CG_MUTATION, P_GENERATION)).toBe('"10"');
     expect(await objectFor(store, STATE_GRAPH, APPLIED_SET, P_APPLIED)).toBe(OLD_HEAD);
+  });
+
+  it('rejects an oversized non-SWM current-head literal before remote dispatch', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const store = new SparqlHttpStore({
+      queryEndpoint: 'http://oversized-head.test/query',
+      updateEndpoint: 'http://oversized-head.test/update',
+      atomicUpdates: true,
+      readAfterWriteConsistency: true,
+    });
+
+    await expect(store.rfc64AuthorCommitCasV1!(authorCommitInput({
+      nextCurrentHeadObject: `"${'x'.repeat(65_536)}"`,
+    }))).rejects.toThrow(/safe limit of 65535 bytes/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('enforces exact-value and absent-value guard semantics', async () => {
@@ -580,6 +596,76 @@ describe('RFC-64 certified author commit CAS v1', () => {
     );
     expect(store.needsReconcile).toBe(true);
     expect(await objectFor(base, HEAD_GRAPH, AUTHOR, P_HEAD)).toBe(NEW_HEAD);
+  });
+
+  it('rebuilds a warm graph index after an indeterminate RFC-64 commit response', async () => {
+    const base = new OxigraphStore();
+    await seedOldState(base);
+    const committedGraph = 'urn:test:rfc64:new-seal-graph';
+    const committedInput = authorCommitInput({
+      authorSealGraph: committedGraph,
+      authorSealQuads: [quad(SEAL, P_VALUE, '"new-seal"', committedGraph)],
+    });
+    let scans = 0;
+    const inner = overrideStore(base, {
+      listGraphs: async (options?: QueryOptions) => {
+        scans += 1;
+        return base.listGraphs(options);
+      },
+      rfc64AuthorCommitCasV1: async (input, options) => {
+        await base.rfc64AuthorCommitCasV1!(input, options);
+        throw new Error('RFC-64 response lost after commit');
+      },
+    });
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 60_000 });
+    expect(await store.listGraphs()).not.toContain(committedGraph);
+    expect(scans).toBe(1);
+
+    await expect(store.rfc64AuthorCommitCasV1(committedInput))
+      .rejects.toThrow('RFC-64 response lost after commit');
+    expect(await store.listGraphs()).toEqual(expect.arrayContaining([
+      PROJECTION_GRAPH,
+      committedGraph,
+      HEAD_GRAPH,
+      STATE_GRAPH,
+    ]));
+    expect(scans).toBe(2);
+  });
+
+  it('keeps a warm graph index on RFC-64 conflict and proven not-started refusal', async () => {
+    for (const outcome of ['conflict', 'not-started'] as const) {
+      const base = new OxigraphStore();
+      await base.insert([quad('urn:test:rfc64:warm', P_VALUE, '"warm"', OTHER_GRAPH)]);
+      let scans = 0;
+      const inner = overrideStore(base, {
+        listGraphs: async (options?: QueryOptions) => {
+          scans += 1;
+          return base.listGraphs(options);
+        },
+        rfc64AuthorCommitCasV1: async () => {
+          if (outcome === 'not-started') {
+            throw new UnsupportedTripleStoreCapabilityError(
+              'rfc64AuthorCommitCasV1',
+              'refusing-test-store',
+            );
+          }
+          return 'conflict';
+        },
+      });
+      const store = new GraphSetIndexStore(inner, { revalidateMs: 60_000 });
+      expect(await store.listGraphs()).toEqual([OTHER_GRAPH]);
+      expect(scans).toBe(1);
+
+      if (outcome === 'conflict') {
+        await expect(store.rfc64AuthorCommitCasV1(authorCommitInput()))
+          .resolves.toBe('conflict');
+      } else {
+        await expect(store.rfc64AuthorCommitCasV1(authorCommitInput()))
+          .rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
+      }
+      expect(await store.listGraphs()).toEqual([OTHER_GRAPH]);
+      expect(scans).toBe(1);
+    }
   });
 
   it('fails closed on unsupported and non-transactional endpoints before any request', async () => {

@@ -19,17 +19,10 @@ import type {
 } from './rfc64-author-commit-cas.js';
 import { normalizeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-cas.js';
 import { isStoreOperationNotStarted, type StoreOperation } from './store-operation-outcome.js';
-
-interface ActiveBlobUse {
-  readonly hash: string;
-  users: number;
-  preserve: boolean;
-  created: boolean;
-  /** Serialized create/remove lifecycle for this content hash. */
-  ready: Promise<void>;
-}
-
-type BlobUseScope = Map<string, ActiveBlobUse>;
+import {
+  ContentAddressedBlobLeaseManager,
+  type ContentAddressedBlobLeaseScope,
+} from './content-addressed-blob-lease-manager.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
 export const SHARED_MEMORY_GRAPH_SUFFIX = '/_shared_memory';
@@ -62,7 +55,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
-  private readonly activeBlobUses = new Map<string, ActiveBlobUse>();
+  private readonly blobLeases: ContentAddressedBlobLeaseManager;
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {
@@ -75,6 +68,10 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     this.innerStore = inner;
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
+    this.blobLeases = new ContentAddressedBlobLeaseManager({
+      createOrVerify: (hash, term) => this.writeBlobFile(hash, term),
+      remove: (hash) => this.removeBlobFile(hash),
+    });
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -175,67 +172,66 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
     // Normalize first so an incomplete closed manifest cannot create blobs.
     normalizeRfc64AuthorCommitCasV1(input);
-    const scope: BlobUseScope = new Map();
-    let preserve = false;
-    try {
-      const externalizeTransition = async (
-        transition: Rfc64AuthorCommitCasInputV1['kaStateDigest'],
-      ) => ({
-        ...transition,
-        expectedObject: await this.translateGuardObject(
-          transition.graphUri,
-          transition.expectedObject,
-        ),
-        quads: await Promise.all(
-          transition.quads.map((quad) => this.externalizeInsertQuad(quad, scope)),
-        ),
-      });
-      const [
-        sharedProjectionQuads,
-        authorSealQuads,
-        kaStateDigest,
-        subgraphMutationGeneration,
-        contextGraphMutationGeneration,
-        appliedSet,
-        sealInvalidations,
-        expectedCurrentHeadObject,
-        nextCurrentHeadObject,
-      ] = await Promise.all([
-        Promise.all(input.sharedProjectionQuads.map((quad) => this.externalizeInsertQuad(quad, scope))),
-        Promise.all(input.authorSealQuads.map((quad) => this.externalizeInsertQuad(quad, scope))),
-        externalizeTransition(input.kaStateDigest),
-        externalizeTransition(input.subgraphMutationGeneration),
-        externalizeTransition(input.contextGraphMutationGeneration),
-        externalizeTransition(input.appliedSet),
-        Promise.all(input.sealInvalidations.map(async (replacement) => ({
-          ...replacement,
-          quads: await Promise.all(
-            replacement.quads.map((quad) => this.externalizeInsertQuad(quad, scope)),
+    return this.withBlobLeaseScope(
+      'rfc64AuthorCommitCasV1',
+      async (scope) => {
+        const externalizeTransition = async (
+          transition: Rfc64AuthorCommitCasInputV1['kaStateDigest'],
+        ) => ({
+          ...transition,
+          expectedObject: await this.translateGuardObject(
+            transition.graphUri,
+            transition.expectedObject,
           ),
-        }))),
-        this.translateGuardObject(input.currentHeadGraph, input.expectedCurrentHeadObject),
-        this.externalizeScalarObject(input.currentHeadGraph, input.nextCurrentHeadObject, scope),
-      ]);
-      const result = await this.inner.rfc64AuthorCommitCasV1({
-        ...input,
-        sharedProjectionQuads,
-        authorSealQuads,
-        expectedCurrentHeadObject,
-        nextCurrentHeadObject,
-        kaStateDigest,
-        subgraphMutationGeneration,
-        contextGraphMutationGeneration,
-        appliedSet,
-        sealInvalidations,
-      }, options);
-      preserve = result === 'committed';
-      return result;
-    } catch (error) {
-      preserve = !isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1');
-      throw error;
-    } finally {
-      await this.releaseBlobUses(scope, preserve);
-    }
+          quads: await Promise.all(
+            transition.quads.map((quad) => this.externalizeInsertQuad(quad, scope)),
+          ),
+        });
+        const [
+          sharedProjectionQuads,
+          authorSealQuads,
+          kaStateDigest,
+          subgraphMutationGeneration,
+          contextGraphMutationGeneration,
+          appliedSet,
+          sealInvalidations,
+          expectedCurrentHeadObject,
+          nextCurrentHeadObject,
+        ] = await Promise.all([
+          Promise.all(
+            input.sharedProjectionQuads.map((quad) => this.externalizeInsertQuad(quad, scope)),
+          ),
+          Promise.all(
+            input.authorSealQuads.map((quad) => this.externalizeInsertQuad(quad, scope)),
+          ),
+          externalizeTransition(input.kaStateDigest),
+          externalizeTransition(input.subgraphMutationGeneration),
+          externalizeTransition(input.contextGraphMutationGeneration),
+          externalizeTransition(input.appliedSet),
+          Promise.all(input.sealInvalidations.map(async (replacement) => ({
+            ...replacement,
+            quads: await Promise.all(
+              replacement.quads.map((quad) => this.externalizeInsertQuad(quad, scope)),
+            ),
+          }))),
+          this.translateGuardObject(input.currentHeadGraph, input.expectedCurrentHeadObject),
+          this.externalizeScalarObject(input.currentHeadGraph, input.nextCurrentHeadObject, scope),
+        ]);
+        return this.inner.rfc64AuthorCommitCasV1!({
+          ...input,
+          sharedProjectionQuads,
+          authorSealQuads,
+          expectedCurrentHeadObject,
+          nextCurrentHeadObject,
+          kaStateDigest,
+          subgraphMutationGeneration,
+          contextGraphMutationGeneration,
+          appliedSet,
+          sealInvalidations,
+        }, options);
+      },
+      (result) => result === 'committed',
+    );
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
@@ -308,28 +304,41 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     operation: StoreOperation,
     work: (externalized: Quad[]) => Promise<T>,
   ): Promise<T> {
-    const scope: BlobUseScope = new Map();
-    let preserve = false;
-    try {
+    return this.withBlobLeaseScope(operation, async (scope) => {
       const externalized = await Promise.all(
         quads.map((quad) => this.externalizeInsertQuad(quad, scope)),
       );
-      const result = await work(externalized);
-      preserve = true;
+      return work(externalized);
+    });
+  }
+
+  private async withBlobLeaseScope<T>(
+    operation: StoreOperation,
+    work: (scope: ContentAddressedBlobLeaseScope) => Promise<T>,
+    shouldPreserve: (result: T) => boolean = () => true,
+  ): Promise<T> {
+    const scope = this.blobLeases.createScope();
+    let preserve = false;
+    try {
+      const result = await work(scope);
+      preserve = shouldPreserve(result);
       return result;
     } catch (error) {
       preserve = !isStoreOperationNotStarted(error, operation);
       throw error;
     } finally {
-      await this.releaseBlobUses(scope, preserve);
+      await this.blobLeases.release(scope, preserve);
     }
   }
 
-  private async externalizeInsertQuad(quad: Quad, scope: BlobUseScope): Promise<Quad> {
+  private async externalizeInsertQuad(
+    quad: Quad,
+    scope: ContentAddressedBlobLeaseScope,
+  ): Promise<Quad> {
     if (!shouldExternalizeLiteral(quad, this.thresholdBytes)) return quad;
 
     const hash = sha256Term(quad.object);
-    await this.acquireBlobUse(hash, quad.object, scope);
+    await this.blobLeases.acquire(hash, quad.object, scope);
     return { ...quad, object: externalLiteralRefTerm(hash) };
   }
 
@@ -350,11 +359,11 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   private async externalizeScalarObject(
     graphUri: string,
     object: string,
-    scope: BlobUseScope,
+    scope: ContentAddressedBlobLeaseScope,
   ): Promise<string> {
     if (!shouldExternalizeScalar(graphUri, object, this.thresholdBytes)) return object;
     const hash = sha256Term(object);
-    await this.acquireBlobUse(hash, object, scope);
+    await this.blobLeases.acquire(hash, object, scope);
     return externalLiteralRefTerm(hash);
   }
 
@@ -432,66 +441,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
       return externalLiteralRefTerm(sha256Term(term));
     });
     return rewritten === sparql ? undefined : rewritten;
-  }
-
-  private async acquireBlobUse(
-    hash: string,
-    term: string,
-    scope: BlobUseScope,
-  ): Promise<void> {
-    assertSha256Hex(hash);
-    const scoped = scope.get(hash);
-    if (scoped) {
-      await scoped.ready;
-      return;
-    }
-    let active = this.activeBlobUses.get(hash);
-    if (!active) {
-      active = {
-        hash,
-        users: 0,
-        preserve: false,
-        created: false,
-        ready: Promise.resolve(),
-      };
-      this.activeBlobUses.set(hash, active);
-    }
-    active.users += 1;
-    scope.set(hash, active);
-    const state = active;
-    // Chain creation behind any pending cleanup. If a prior losing writer is
-    // already removing this hash, the new user waits for that removal and then
-    // recreates/verifies the file before its store mutation can commit.
-    const ready = state.ready.then(async () => {
-      const created = await this.writeBlobFile(hash, term);
-      state.created ||= created;
-    });
-    state.ready = ready;
-    await ready;
-  }
-
-  private async releaseBlobUses(scope: BlobUseScope, preserve: boolean): Promise<void> {
-    const cleanup: Promise<void>[] = [];
-    for (const state of scope.values()) {
-      state.preserve ||= preserve;
-      state.users -= 1;
-      if (state.users !== 0) continue;
-      const lifecycle = state.ready.then(async () => {
-        // A new acquisition may have joined while this cleanup was queued.
-        if (state.users !== 0 || !state.created || state.preserve) return;
-        await this.removeBlobFile(state.hash);
-        state.created = false;
-      });
-      state.ready = lifecycle;
-      cleanup.push(lifecycle.finally(() => {
-        // Keep the coordination entry installed through deletion. A concurrent
-        // acquisition either prevents removal or chains recreation after it.
-        if (state.users === 0 && this.activeBlobUses.get(state.hash) === state) {
-          this.activeBlobUses.delete(state.hash);
-        }
-      }));
-    }
-    await Promise.all(cleanup);
   }
 
   /** Test seam for deterministic create/delete race coverage. */

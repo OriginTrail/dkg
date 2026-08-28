@@ -189,6 +189,12 @@ export function normalizeRfc64AuthorCommitCasV1(
     ...input.sharedProjectionQuads,
     ...input.authorSealQuads,
     ...stateReplacements.flatMap(({ quads }) => quads),
+    {
+      graph: input.currentHeadGraph,
+      subject: input.currentHeadSubject,
+      predicate: input.currentHeadPredicate,
+      object: input.nextCurrentHeadObject,
+    },
   ]);
   return Object.freeze({
     input,

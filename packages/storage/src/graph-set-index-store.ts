@@ -22,7 +22,6 @@ import type {
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
 import { normalizeRfc64AuthorCommitCasV1 } from './rfc64-author-commit-cas.js';
-import { isAtomicReplaceOperationNotStarted } from './atomic-replace-failure.js';
 import { isStoreOperationNotStarted } from './store-operation-outcome.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
@@ -397,7 +396,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // replace dispatch. A nested post-commit probe can also be rejected by
       // the scheduler, but its storeOperation does not match replaceGraph and
       // therefore still dirties this index.
-      if (!isAtomicReplaceOperationNotStarted(error, 'replaceGraph')) {
+      if (!isStoreOperationNotStarted(error, 'replaceGraph')) {
         this.scheduleFullRefresh('replaceGraph');
       }
       throw error;
@@ -430,7 +429,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         options,
       );
     } catch (error) {
-      if (!isAtomicReplaceOperationNotStarted(error, 'replaceGraphAndSubject')) {
+      if (!isStoreOperationNotStarted(error, 'replaceGraphAndSubject')) {
         this.scheduleFullRefresh('replaceGraphAndSubject');
       }
       throw error;
@@ -463,7 +462,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // A committed subject replace could add/remove the graph's first/last row;
       // dirty the index so a lazy rebuild re-derives membership — unless this was
       // a clean preflight capability refusal, where nothing was mutated.
-      if (!isAtomicReplaceOperationNotStarted(error, 'replaceSubject')) {
+      if (!isStoreOperationNotStarted(error, 'replaceSubject')) {
         this.scheduleFullRefresh('replaceSubject');
       }
       throw error;
