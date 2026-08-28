@@ -9,6 +9,14 @@ import {
   put,
   del,
 } from './http.js';
+import type { GetView } from '@origintrail-official/dkg-core';
+import { classifySparqlOperation } from '@origintrail-official/dkg-core/dist/sparql-operation.js';
+import type {
+  PublicQueryQuad,
+  PublicQueryResponse,
+  PublicQueryResult,
+} from '@origintrail-official/dkg-core/query-result';
+import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 
 // Re-export the shared transport so existing `../api.js` consumers of these
 // keep working (barrel), and the PCA client from its extracted module.
@@ -49,6 +57,12 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
   }
 }
 
+/**
+ * Structured error from the local-agent chat/health endpoints. On a bridge
+ * idle-timeout (504) the daemon forwards any partial turn output as `text`
+ * (flagged by `timedOut`), so panel code can choose to render the partial
+ * reply alongside the timeout instead of dropping what the agent already said.
+ */
 export class LocalAgentApiError extends Error {
   status?: number;
   code?: string;
@@ -60,6 +74,9 @@ export class LocalAgentApiError extends Error {
   route?: string;
   integrationId?: string;
   retryable?: boolean;
+  /** Partial turn output preserved across a bridge timeout. */
+  text?: string;
+  timedOut?: boolean;
 
   constructor(message: string, metadata: Partial<LocalAgentApiError> = {}) {
     super(message);
@@ -591,9 +608,56 @@ export async function importFile(
 // identical `/api/query` POSTs for the WM/SWM/VM fan-out against a
 // multi-GB Oxigraph store. Each duplicate adds seconds of wall time on
 // large stores. Inflight dedup collapses the dupes to one.
-const inflightQuery = new Map<string, Promise<{ result: any }>>();
+export type QueryExecutionResult = PublicQueryResult;
+export type QueryExecutionResponse = PublicQueryResponse;
 
-export function postQueryDeduped(body: Record<string, unknown>): Promise<{ result: any }> {
+export function normalizeQueryExecutionResponse(
+  response: unknown,
+  sparql: string,
+): QueryExecutionResponse {
+  const envelope = response && typeof response === 'object' && !Array.isArray(response)
+    ? response as Record<string, unknown>
+    : {};
+  const candidate = envelope.result ?? envelope.results;
+  const raw = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+    ? candidate as Record<string, unknown>
+    : {};
+
+  if (raw.type === 'boolean' && typeof raw.value === 'boolean') {
+    return { result: { type: 'boolean', value: raw.value } };
+  }
+  if (raw.type === 'quads' && Array.isArray(raw.quads)) {
+    return { result: { type: 'quads', quads: raw.quads as PublicQueryQuad[] } };
+  }
+  if (raw.type === 'bindings' && Array.isArray(raw.bindings)) {
+    return { result: { type: 'bindings', bindings: raw.bindings as Array<Record<string, unknown>> } };
+  }
+
+  const operation = classifySparqlOperation(sparql);
+  const bindings = Array.isArray(raw.bindings)
+    ? raw.bindings as Array<Record<string, unknown>>
+    : [];
+  if (operation.kind === 'read' && operation.form === 'ASK') {
+    const term = bindings[0]?.result;
+    const value = term && typeof term === 'object' && !Array.isArray(term)
+      ? (term as { value?: unknown }).value
+      : term;
+    return { result: { type: 'boolean', value: String(value).toLowerCase() === 'true' } };
+  }
+  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
+    return {
+      result: {
+        type: 'quads',
+        quads: Array.isArray(raw.quads) ? raw.quads as PublicQueryQuad[] : [],
+      },
+    };
+  }
+  return { result: { type: 'bindings', bindings } };
+}
+
+const inflightQuery = new Map<string, Promise<QueryExecutionResponse>>();
+
+export function postQueryDeduped(body: Record<string, unknown>): Promise<QueryExecutionResponse> {
   const key = JSON.stringify(body);
   const existing = inflightQuery.get(key);
   if (existing) return existing;
@@ -608,7 +672,7 @@ export function postQueryDeduped(body: Record<string, unknown>): Promise<{ resul
       const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
       throw new HttpError(res.status, msg, errBody);
     }
-    return res.json() as Promise<{ result: any }>;
+    return normalizeQueryExecutionResponse(await res.json(), String(body.sparql ?? ''));
   })().finally(() => {
     inflightQuery.delete(key);
   });
@@ -616,21 +680,23 @@ export function postQueryDeduped(body: Record<string, unknown>): Promise<{ resul
   return promise;
 }
 
+export type QueryExecutionView = GetView;
+
+export interface QueryExecutionOptions {
+  contextGraphId?: string;
+  subGraphName?: string;
+  includeSharedMemory?: boolean;
+  graphSuffix?: '_shared_memory';
+  view?: QueryExecutionView;
+  /** Include assertion partitions for callers whose query constrains them. */
+  includeContextGraphPartitions?: boolean;
+}
+
 export const executeQuery = (
   sparql: string,
-  contextGraphId?: string,
-  includeSharedMemory?: boolean,
-  graphSuffix?: '_shared_memory',
-  view?: 'verified-memory' | 'shared-working-memory',
-  // Opt the CG-scoped allow-list into the assertion partitions. Without it the
-  // daemon restricts `GRAPH ?g { … }` to the static set
-  // { <cg>, <cg>/_meta, <cg>/_shared_memory_meta } (see the long note on
-  // `listWmAssertions`), so a `GRAPH ?g` enumeration of WM content comes back
-  // empty. Callers that read raw partition triples (e.g. the WM layer view)
-  // pass `true`.
-  includeContextGraphPartitions?: boolean,
+  options: QueryExecutionOptions = {},
 ) =>
-  postQueryDeduped({ sparql, contextGraphId, includeSharedMemory, graphSuffix, view, includeContextGraphPartitions });
+  postQueryDeduped({ sparql, ...options });
 
 /**
  * Map of assertion name → deterministic Option-1 UAL (`dkg:reservedUal`,
@@ -646,7 +712,7 @@ export async function fetchAssertionUals(contextGraphId: string): Promise<Record
           <http://dkg.io/ontology/reservedUal> ?ual .
     }
   }`;
-  const data = await executeQuery(sparql, contextGraphId);
+  const data = await executeQuery(sparql, { contextGraphId });
   const map: Record<string, string> = {};
   for (const b of (data?.result?.bindings ?? [])) {
     const name = typeof b.name === 'string' ? b.name : b.name?.value;
@@ -670,6 +736,13 @@ export const writeProfileQueryCatalog = (
   post<any>('/api/profile/query-catalog/write', {
     contextGraphId,
     quads,
+  });
+
+export type ProfileQueryCatalogReadResponse = QueryCatalogReadResponse;
+
+export const readProfileQueryCatalog = (contextGraphId: string) =>
+  post<ProfileQueryCatalogReadResponse>('/api/profile/query-catalog/read', {
+    contextGraphId,
   });
 
 // --- Knowledge Assets (OT-RFC-43 §10.5 — GitHub-shaped KA surface) ---
@@ -1174,7 +1247,7 @@ export async function listAssertions(
       }
       FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))
     }`;
-    const data = await executeQuery(sparql, contextGraphId);
+    const data = await executeQuery(sparql, { contextGraphId });
     const bindings: any[] = data?.result?.bindings ?? [];
     const published = new Set<string>();
     const rows: Array<{ key: string; name: string; subGraph?: string; g: string }> = [];
@@ -1417,7 +1490,7 @@ export async function listAssertions(
     // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
     // already drops these daemon-side; this guards the parser too.
     if (subGraph === 'meta') continue;
-    const key = `${subGraph ?? ''} ${name}`;
+    const key = `${subGraph ?? ''}\0${name}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const cnt = countByGraph.get(g);
@@ -1780,6 +1853,8 @@ interface LocalAgentChatRequestOptions {
   signal?: AbortSignal;
   identity?: string;
   sessionId?: string;
+  /** One daemon-owned raw/memory pairing for an explicitly selected session. */
+  liveSession?: LocalAgentLiveSession;
   profile?: string;
   persistUserMessage?: string;
   attachments?: LocalAgentChatAttachmentRef[];
@@ -1877,6 +1952,19 @@ export interface LocalAgentHealthResponse {
     error?: string;
   };
   status?: string;
+  sessionCount?: number;
+  sessions?: Array<{
+    sessionId: string;
+    rawSessionId?: string;
+    memorySessionId?: string;
+    startedAt?: string;
+    sessionName?: string;
+  }>;
+  targetMemorySessionId?: string;
+  busy?: boolean;
+  turnState?: 'queued' | 'running';
+  clientConnected?: boolean;
+  clientDisconnectedAt?: string;
   bridge?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
   gateway?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
 }
@@ -1985,6 +2073,14 @@ export async function streamOpenClawLocalChat(
     buffer += decoder.decode(value, { stream: true });
     processLines(false);
     if (streamError) break;
+    // `final` ends the TURN; upstream EOF is a TRANSPORT event and the two need
+    // not coincide. A bridge that holds its socket open for reuse would
+    // otherwise keep the composer spinning long after the answer arrived, so
+    // stop reading as soon as the terminal frame lands.
+    if (finalPayload) {
+      void reader.cancel().catch(() => {});
+      return finalPayload;
+    }
   }
   buffer += decoder.decode();
   processLines(true);
@@ -2019,13 +2115,19 @@ export async function sendHermesLocalChat(
   return res.json();
 }
 
-export async function streamHermesLocalChat(
+/**
+ * SSE client for the `delta`/`final` frame dialect. Hermes defined it and the
+ * Prime Agent bridge speaks the same one, so both channels share this reader —
+ * a second copy would be a second place for the partial-frame handling to drift.
+ */
+async function streamDeltaFrameLocalChat(
+  url: string,
   text: string,
   opts: LocalAgentChatRequestOptions & {
     onEvent?: (event: OpenClawStreamEvent) => void;
   } = {},
 ): Promise<LocalAgentChatResponse> {
-  const res = await fetch('/api/hermes-channel/stream', {
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -2106,6 +2208,14 @@ export async function streamHermesLocalChat(
     buffer += decoder.decode(value, { stream: true });
     processLines(false);
     if (streamError) break;
+    // `final` ends the TURN; upstream EOF is a TRANSPORT event and the two need
+    // not coincide. A bridge that holds its socket open for reuse would
+    // otherwise keep the composer spinning long after the answer arrived, so
+    // stop reading as soon as the terminal frame lands.
+    if (finalPayload) {
+      void reader.cancel().catch(() => {});
+      return finalPayload;
+    }
   }
   buffer += decoder.decode();
   processLines(true);
@@ -2115,8 +2225,46 @@ export async function streamHermesLocalChat(
   return finalPayload;
 }
 
+export const streamHermesLocalChat = (
+  text: string,
+  opts: LocalAgentChatRequestOptions & { onEvent?: (event: OpenClawStreamEvent) => void } = {},
+): Promise<LocalAgentChatResponse> =>
+  streamDeltaFrameLocalChat('/api/hermes-channel/stream', text, opts);
+
 export const fetchHermesLocalHealth = () =>
   get<LocalAgentHealthResponse>('/api/hermes-channel/health');
+
+export async function sendPrimeAgentLocalChat(
+  text: string,
+  opts?: LocalAgentChatRequestOptions,
+): Promise<LocalAgentChatResponse> {
+  const res = await fetch('/api/prime-agent-channel/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
+    signal: opts?.signal,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
+  }
+  return res.json();
+}
+
+export const streamPrimeAgentLocalChat = (
+  text: string,
+  opts: LocalAgentChatRequestOptions & { onEvent?: (event: OpenClawStreamEvent) => void } = {},
+): Promise<LocalAgentChatResponse> =>
+  streamDeltaFrameLocalChat('/api/prime-agent-channel/stream', text, opts);
+
+/**
+ * The Prime Agent channel reports `ok: false` with `sessionCount: 0` when the
+ * adapter is installed but no session is running. That is idle, not broken, so
+ * the session fields are surfaced alongside the standard health shape and the
+ * caller decides how to render it.
+ */
+export const fetchPrimeAgentLocalHealth = () =>
+  get<LocalAgentHealthResponse>('/api/prime-agent-channel/health');
 
 function formatLocalAgentError(body: unknown, fallback: string): string {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return fallback;
@@ -2150,6 +2298,10 @@ function buildLocalAgentApiError(body: unknown, fallback: string, status?: numbe
     const value = record[key];
     return typeof value === 'boolean' ? value : undefined;
   };
+  // Partial turn output is payload, not metadata: forwarded untrimmed so a
+  // rendered partial reply is exactly what the agent produced before the
+  // cutoff.
+  const text = typeof record.text === 'string' && record.text.trim() ? record.text : undefined;
   return new LocalAgentApiError(message, {
     status,
     code: stringField('code'),
@@ -2161,6 +2313,8 @@ function buildLocalAgentApiError(body: unknown, fallback: string, status?: numbe
     route: stringField('route'),
     integrationId: stringField('integrationId'),
     retryable: booleanField('retryable'),
+    text,
+    timedOut: booleanField('timedOut'),
   });
 }
 
@@ -2229,6 +2383,27 @@ export interface LocalAgentIntegration {
   error?: string;
   target?: LocalAgentChannelTarget;
   source: 'live' | 'planned';
+  /**
+   * Number of live agent sessions backing this integration, when the agent has
+   * more than one. Prime Agent publishes a bridge per session, so 0 is a normal
+   * idle state rather than a fault; Hermes and OpenClaw leave this undefined.
+   */
+  sessionCount?: number;
+  /** Which session the node is currently routing to, when several are live. */
+  activeSessionId?: string;
+  /** The selected Prime session currently owns an agent turn. */
+  busy?: boolean;
+  /** Live Prime sessions available for an explicit UI routing choice. */
+  liveSessions?: LocalAgentLiveSession[];
+}
+
+export interface LocalAgentLiveSession {
+  /** DKG memory-session id used for history and UI selection. */
+  sessionId: string;
+  /** Prime-owned id sent to the bridge route. */
+  rawSessionId: string;
+  startedAt?: string;
+  sessionName?: string;
 }
 
 export interface LocalAgentConnectResult {
@@ -2255,20 +2430,14 @@ interface LocalAgentSurface {
     integrationId: string;
     record?: LocalAgentIntegrationRecord;
     health?: LocalAgentHealthResponse | null;
-  }) => string;
+  }) => string | undefined;
   resolveChatContext?: (args: {
     integrationId: string;
     sessionId?: string;
+    liveSession?: LocalAgentLiveSession;
     profile?: string;
   }) => Record<string, unknown>;
-  fetchHealth?: () => Promise<{
-    ok: boolean;
-    target?: LocalAgentChannelTarget;
-    error?: string;
-    profile?: string;
-    memory?: LocalAgentHealthResponse['memory'];
-    status?: string;
-  }>;
+  fetchHealth?: () => Promise<LocalAgentHealthResponse>;
   streamChat?: typeof streamOpenClawLocalChat;
 }
 
@@ -2297,6 +2466,22 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
     }),
     fetchHealth: fetchHermesLocalHealth,
     streamChat: streamHermesLocalChat,
+  },
+  'prime-agent': {
+    connectSupported: true,
+    chatSupported: true,
+    // The daemon owns Prime's raw-vs-memory session contract. The UI consumes
+    // its explicit fields and never reconstructs or strips the memory prefix.
+    defaultSessionId: ({ record, health }) => buildPrimeAgentDefaultSessionId(record, health),
+    resolveChatContext: ({ sessionId, liveSession }) => {
+      if (!liveSession) return {};
+      if (sessionId && liveSession.sessionId !== sessionId) {
+        throw new Error('Prime Agent live session does not match the selected conversation');
+      }
+      return { sessionId: liveSession.rawSessionId };
+    },
+    fetchHealth: fetchPrimeAgentLocalHealth,
+    streamChat: streamPrimeAgentLocalChat,
   },
 };
 
@@ -2431,6 +2616,16 @@ function buildHermesTransportSessionSegment(record?: LocalAgentIntegrationRecord
   return parts.length ? `transport-${stableSessionHash(parts.join('|'))}` : null;
 }
 
+function buildPrimeAgentDefaultSessionId(
+  record?: LocalAgentIntegrationRecord,
+  health?: LocalAgentHealthResponse | null,
+): string | undefined {
+  return firstTrimmedString(
+    record?.metadata?.activeMemorySessionId,
+    health?.sessions?.[0]?.memorySessionId,
+  ) ?? undefined;
+}
+
 function localAgentMemoryLabel(memory: LocalAgentHealthResponse['memory']): string | null {
   if (!memory) return null;
   if (typeof memory === 'string') return memory;
@@ -2544,8 +2739,25 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   );
   const hermesRuntimeDetail = hermesDetail(record, health);
   const defaultSessionId = surface?.defaultSessionId?.({ integrationId: id, record, health });
+  const primeTurnDetached = id === 'prime-agent'
+    && health?.busy === true
+    && health.clientConnected === false;
+  const liveSessions = id === 'prime-agent' && Array.isArray(health?.sessions)
+    ? health.sessions
+        .filter((session) => (
+          typeof session?.rawSessionId === 'string'
+          && session.rawSessionId.trim()
+          && typeof session.memorySessionId === 'string'
+          && session.memorySessionId.trim()
+        ))
+        .map((session) => ({
+          ...session,
+          sessionId: session.memorySessionId!.trim(),
+          rawSessionId: session.rawSessionId!.trim(),
+        }))
+    : undefined;
   const profile = id === 'hermes'
-    ? firstTrimmedString(health?.profile, record.metadata?.profileName, record.metadata?.profile)
+    ? firstTrimmedString(health?.profile, record.metadata?.profileName, record.metadata?.profile) ?? undefined
     : undefined;
 
   let status: LocalAgentIntegrationStatus;
@@ -2565,8 +2777,12 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
       ?? `${record.name} is registered and still starting up.`;
   } else if (bridgeOnline) {
     status = 'chat_ready';
-    statusLabel = 'Chat ready';
-    detail = `${record.name} is connected to this node and ready for chat.`;
+    statusLabel = primeTurnDetached ? 'Still working' : health?.busy ? 'Working' : 'Chat ready';
+    detail = primeTurnDetached
+      ? `${record.name} is still working after the browser stream disconnected. Wait for it to finish before sending another message.`
+      : health?.busy
+        ? `${record.name} is working on the current turn.`
+        : `${record.name} is connected to this node and ready for chat.`;
   } else if (persistentChat) {
     status = 'bridge_offline';
     statusLabel = 'Bridge offline';
@@ -2623,6 +2839,17 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     error: chatReady ? undefined : (health?.error ?? record.runtime?.lastError ?? undefined),
     target: health?.target,
     source: configured || surface ? 'live' : 'planned',
+    // Multi-session agents (Prime Agent) report how many live sessions back the
+    // integration; single-session agents leave these undefined so the UI can
+    // tell "not applicable" apart from "zero sessions".
+    ...(typeof record.metadata?.sessionCount === 'number'
+      ? { sessionCount: record.metadata.sessionCount as number }
+      : {}),
+    ...(typeof record.metadata?.activeSessionId === 'string'
+      ? { activeSessionId: record.metadata.activeSessionId as string }
+      : {}),
+    ...(liveSessions?.length ? { liveSessions } : {}),
+    ...(typeof health?.busy === 'boolean' ? { busy: health.busy } : {}),
   } satisfies LocalAgentIntegration;
 }
 
@@ -2727,6 +2954,7 @@ export async function refreshLocalAgentIntegration(id: string): Promise<LocalAge
 export async function fetchLocalAgentHealth(id: string) {
   if (id === 'openclaw') return fetchOpenClawLocalHealth();
   if (id === 'hermes') return fetchHermesLocalHealth();
+  if (id === 'prime-agent') return fetchPrimeAgentLocalHealth();
   throw new Error(`${id} local health is not available yet.`);
 }
 
@@ -2778,15 +3006,36 @@ export async function streamLocalAgentChat(
   const normalizedId = id.trim().toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[normalizedId];
   if (surface?.streamChat) {
-    const { sessionId, profile, ...transportOpts } = opts;
-    return surface.streamChat(text, {
+    const { sessionId, liveSession, profile, ...transportOpts } = opts;
+    const chatOptions = (
+      resolvedSessionId?: string,
+      resolvedLiveSession?: LocalAgentLiveSession,
+    ) => ({
       ...transportOpts,
       ...surface.resolveChatContext?.({
         integrationId: normalizedId,
-        sessionId,
+        sessionId: resolvedSessionId,
+        liveSession: resolvedLiveSession,
         profile,
       }),
     });
+    try {
+      return await surface.streamChat(text, chatOptions(sessionId, liveSession));
+    } catch (err) {
+      // A Prime session id is an automatic live-session pin, not a durable
+      // user-owned conversation id. If Prime restarted after the panel pinned
+      // it, an explicit miss is guaranteed to have executed nothing; retry
+      // once without the stale id so the daemon can elect the current head.
+      if (
+        normalizedId === 'prime-agent'
+        && liveSession
+        && err instanceof LocalAgentApiError
+        && err.code === 'PRIME_AGENT_NO_SESSION'
+      ) {
+        return surface.streamChat(text, chatOptions());
+      }
+      throw err;
+    }
   }
   throw new Error(`${id} local chat is not available yet.`);
 }
@@ -2861,8 +3110,18 @@ export const shutdownNode = () =>
   post<{ ok: boolean }>('/api/shutdown', {});
 
 // --- Integrations ---
-export const subscribeToContextGraph = (contextGraphId: string) =>
-  post<{ subscribed: string; catchup?: { status: string; jobId: string } }>('/api/subscribe', { contextGraphId });
+export const subscribeToContextGraph = (
+  contextGraphId: string,
+  options?: { syncMode?: 'on-demand' | 'always-on' },
+) =>
+  post<{
+    subscribed: string;
+    syncMode: 'on-demand' | 'always-on';
+    catchup?: { status: string; jobId: string };
+  }>('/api/subscribe', {
+    contextGraphId,
+    syncMode: options?.syncMode ?? 'on-demand',
+  });
 
 // --- Notifications (scoped pane wire contract — implementation-plan §3) ---
 //

@@ -1,0 +1,30 @@
+name: Dependency review
+
+on:
+  pull_request:
+    branches: [main, testnet-canary]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-review-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Reject newly introduced vulnerable dependencies
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          base-ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          head-ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          fail-on-severity: high
+          fail-on-scopes: runtime, development, unknown
+          retry-on-snapshot-warnings: true
+          show-patched-versions: true

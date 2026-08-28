@@ -540,7 +540,11 @@ describe('EVMChainAdapter.verifyKAUpdate', () => {
     });
     expect(updateResult.status).toBe('confirmed');
 
-    const verification = await chain.verifyKAUpdate('0xWRONG', original.kaId, wallet.address);
+    const verification = await chain.verifyKAUpdate(
+      original.onChainResult!.txHash,
+      original.kaId,
+      wallet.address,
+    );
     expect(verification.verified).toBe(false);
   });
 

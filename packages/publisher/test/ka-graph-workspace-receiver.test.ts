@@ -8,7 +8,18 @@ import {
   knowledgeAssetLayerGraphUri,
   type WorkspacePublishRequestMsg,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+  OxigraphStore,
+  readSwmMaterializationWitness,
+  writeSwmMaterializationWitness,
+} from '@origintrail-official/dkg-storage';
+import {
+  computeFlatKCRootV10,
+  readLocallyTrustedKnowledgeAssetControlEnvelope,
+  readLocallyTrustedKnowledgeAssetControls,
+} from '../src/index.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
 
 const CONTEXT_GRAPH = 'rootless-receiver';
@@ -90,6 +101,42 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     // The current-head fence points at the immutable operation, so the digest
     // and private commitment are stored only once.
     expect(meta.quads.filter((quad) => quad.predicate.endsWith('publicQuadsDigest'))).toHaveLength(1);
+  });
+
+  it('drops the catch-up materialization witness when it replaces the graph (#2079)', async () => {
+    // A gossip apply REPLACES this graph under the same `swmKaWriteLockKey` the
+    // catch-up materializer uses. Catch-up's count gate cannot see a replace
+    // (the count can be unchanged), so this path must drop the memo itself —
+    // otherwise a TORN apply (graph replaced, head write throws) leaves
+    // catch-up certifying the OLD digest against NEW content.
+    //
+    // Its own test rather than an assertion bolted onto another: the second
+    // apply below adds metadata, which would break sibling assertions about
+    // final meta state.
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    expect((await handler.handle(v2Request(), PEER_ID)).applied).toBe(true);
+
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    await writeSwmMaterializationWitness(store, swmGraph, 'sha256:stale-witness');
+    expect(await readSwmMaterializationWitness(store, swmGraph, 'sha256:stale-witness')).toBe(true);
+
+    // A genuinely NEW version, not a replay: an identical request is fenced by
+    // durable metadata and never reaches the replace, so it would prove nothing.
+    // All versions of a graph-scoped KA share one assertion graph, so this
+    // replaces exactly the graph the witness was seeded against.
+    const replacement = await handler.handle(v2Request({
+      nquads: new TextEncoder().encode(nquad('urn:entity:2', 'two')),
+      shareOperationId: 'rootless-op-witness',
+      assertionVersion: '2',
+    }), PEER_ID);
+    expect(replacement.applied).toBe(true);
+
+    expect(await readSwmMaterializationWitness(store, swmGraph, 'sha256:stale-witness')).toBe(false);
   });
 
   it('stores canonical Markdown section entities received over SWM', async () => {
@@ -210,11 +257,105 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       { policy: '"allowList"', peer: '"peer-b"' },
     ]);
 
+    const merkleRoot = computeFlatKCRootV10([{
+      subject: 'urn:entity:1',
+      predicate: 'urn:predicate:value',
+      object: '"one"',
+      graph: '',
+    }], []);
+    const visibleMetaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    const trustedControlAnchor = [{
+      subject: UAL,
+      predicate: 'http://dkg.io/ontology/assertionVersion',
+      object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      graph: visibleMetaGraph,
+    }, {
+      subject: UAL,
+      predicate: 'http://dkg.io/ontology/merkleRoot',
+      object: `"${Buffer.from(merkleRoot).toString('hex')}"`,
+      graph: visibleMetaGraph,
+    }];
+    const trustedControlEntry = `${UAL}/_local_controls/1/${Buffer.from(merkleRoot).toString('hex')}`;
+    expect(await store.countQuads(LOCAL_TRUSTED_KA_CONTROLS_GRAPH)).toBe(7);
+    await expect(store.query(`ASK { GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+      <${trustedControlEntry}>
+        <http://dkg.io/ontology/kaUal> <${UAL}> ;
+        <http://dkg.io/ontology/assertionVersion> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+        <http://dkg.io/ontology/merkleRoot> "${Buffer.from(merkleRoot).toString('hex')}" ;
+        <http://dkg.io/ontology/accessPolicy> "allowList" ;
+        <http://dkg.io/ontology/publisherPeerId> "${PEER_ID}" ;
+        <http://dkg.io/ontology/allowedPeer> "peer-a", "peer-b" .
+    } }`)).resolves.toEqual({ type: 'boolean', value: true });
+    const trustedControls = await readLocallyTrustedKnowledgeAssetControls(
+      store,
+      visibleMetaGraph,
+      UAL,
+      trustedControlAnchor,
+    );
+    expect(trustedControls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/accessPolicy',
+        object: '"allowList"',
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/publisherPeerId',
+        object: `"${PEER_ID}"`,
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/allowedPeer',
+        object: '"peer-a"',
+      }),
+    ]));
+    await expect(readLocallyTrustedKnowledgeAssetControlEnvelope(
+      store,
+      visibleMetaGraph,
+      UAL,
+      trustedControlAnchor,
+    )).resolves.toEqual({
+      accessPolicy: 'allowList',
+      allowedPeers: ['peer-a', 'peer-b'],
+      publisherPeerId: PEER_ID,
+    });
+
+    // Preserve the durable SWM graph/head but remove only the local sidecar to
+    // simulate a crash between the two commits. The exact replay below must
+    // recreate the missing controls rather than succeeding on stale evidence.
+    await store.deleteByPattern({ graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH });
+    expect(await readLocallyTrustedKnowledgeAssetControls(
+      store,
+      visibleMetaGraph,
+      UAL,
+      trustedControlAnchor,
+    )).toEqual([]);
+
     const restarted = new SharedMemoryHandler(store, new TypedEventBus());
     expect((await restarted.handle(v2Request({
       accessPolicy: 'allowList',
       allowedPeers: ['peer-a', 'peer-b'],
     }), PEER_ID)).applied).toBe(true);
+    expect(await readLocallyTrustedKnowledgeAssetControls(
+      store,
+      visibleMetaGraph,
+      UAL,
+      trustedControlAnchor,
+    )).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/accessPolicy',
+        object: '"allowList"',
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/publisherPeerId',
+        object: `"${PEER_ID}"`,
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/allowedPeer',
+        object: '"peer-a"',
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/allowedPeer',
+        object: '"peer-b"',
+      }),
+    ]));
 
     const drift = await restarted.handle(v2Request({
       accessPolicy: 'ownerOnly',
@@ -399,5 +540,80 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       expect(outcome.retryable, name).toBe(false);
       expect(outcome.reason, name).toContain(expectedReason);
     }
+  });
+
+  it('defers a retryable inbound share while the local head is multi-valued (GH#2273)', async () => {
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+
+    const applied = await handler.handle(v2Request({}), PEER_ID);
+    expect(applied.applied).toBe(true);
+
+    // Fabricate the GH#2273 corruption exactly the way sync produces it: a bare
+    // set-union of a second shareOperationId row onto the head subject.
+    const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH);
+    await store.insert([{
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: '"storage-ack-2273"',
+      graph: metaGraph,
+    }]);
+
+    // The monotonicity gate cannot read a multi-valued head, so NOTHING is written
+    // (fail closed) — but the rejection is TRANSIENT: the corruption is local state
+    // the sync lane's identity-preserving repair heals, and the sender's outbox
+    // retries are budget-bounded, so a permanent drop would lose a valid newer
+    // share that becomes applicable the moment the head converges. Pre-fix the
+    // resolver answered arbitrarily and this share was applied on top of the
+    // corrupt head.
+    const inbound = v2Request({
+      nquads: new TextEncoder().encode(nquad('urn:entity:2', 'two')),
+      shareOperationId: 'rootless-op-2',
+      assertionVersion: '2',
+    });
+    const outcome = await handler.handle(inbound, PEER_ID);
+    expect(outcome.applied).toBe(false);
+    if (outcome.applied) throw new Error('unreachable');
+    expect(outcome.retryable).toBe(true);
+    expect(outcome.reason).toContain('CORRUPT_SWM_HEAD');
+
+    // The corrupt head must be left byte-untouched for the repair lane: still exactly
+    // two shareOperationId rows.
+    const headIds = await store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${metaGraph}> { <${UAL}#dkg-swm-head> <http://dkg.io/ontology/shareOperationId> ?op } }`,
+    );
+    expect(headIds.type).toBe('bindings');
+    if (headIds.type !== 'bindings') throw new Error('expected bindings');
+    expect(headIds.bindings).toHaveLength(2);
+
+    // And the rejected share must not have mutated SWM CONTENT either — the
+    // fail-closed decision fires BEFORE any graph write. A regression that
+    // replaced the assertion graph and then reported the rejection would pass
+    // the two assertions above while local data silently changed.
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const contentRows = await store.query(
+      `SELECT ?s ?o WHERE { GRAPH <${swmGraph}> { ?s <urn:predicate:value> ?o } }`,
+    );
+    expect(contentRows.type).toBe('bindings');
+    if (contentRows.type !== 'bindings') throw new Error('expected bindings');
+    expect(contentRows.bindings).toEqual([{ s: 'urn:entity:1', o: '"one"' }]);
+
+    // The transient contract's second half: after the head is repaired (here by
+    // removing the union residue the way the sync lane's identity-preserving
+    // repair does), the SAME deferred payload applies cleanly — proving the
+    // sender's kept-queued delivery was worth keeping.
+    await store.delete([{
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: '"storage-ack-2273"',
+      graph: metaGraph,
+    }]);
+    const replay = await handler.handle(inbound, PEER_ID);
+    expect(replay.applied).toBe(true);
   });
 });

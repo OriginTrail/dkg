@@ -58,7 +58,14 @@ export function assertWithinTraversalLimits(
 }
 
 export function createValidator(): EpcisValidator {
-  const ajv = new (Ajv as unknown as typeof Ajv.default)({ allErrors: true, strict: false, validateFormats: true });
+  // This validator runs on attacker-controlled HTTP payloads. The traversal
+  // guard below bounds input shape, while fail-fast schema validation prevents
+  // a wide invalid document from accumulating one error object per bad node.
+  const ajv = new (Ajv as unknown as typeof Ajv.default)({
+    allErrors: false,
+    strict: false,
+    validateFormats: true,
+  });
   (addFormats as unknown as typeof addFormats.default)(ajv);
   const validateSchema = ajv.compile(epcisSchema);
 

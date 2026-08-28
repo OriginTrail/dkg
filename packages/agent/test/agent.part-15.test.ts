@@ -3,6 +3,46 @@ import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAge
 
 
 let _fileSnapshot: string;
+
+function createContextGraphPersistenceFixture() {
+  const persisted = new Map<string, any>();
+  const persistedMembers = new Map<string, any>();
+  const subscriptionStore = {
+    loadAll: async () => [...persisted.values()],
+    save: async (record: any) => {
+      persisted.set(record.id, { ...record });
+    },
+    delete: async (contextGraphId: string) => {
+      persisted.delete(contextGraphId);
+    },
+  };
+  const membershipStore = {
+    upsert: async (record: any) => {
+      persistedMembers.set(
+        `${record.contextGraphId}|${record.principalType}|${record.principalId}`,
+        { ...record },
+      );
+    },
+    delete: async (contextGraphId: string, principalType: string, principalId: string) => {
+      persistedMembers.delete(`${contextGraphId}|${principalType}|${principalId}`);
+    },
+  };
+  return { persisted, persistedMembers, subscriptionStore, membershipStore };
+}
+
+async function createAgentWithContextGraphPersistence(
+  name: string,
+  fixture: ReturnType<typeof createContextGraphPersistenceFixture>,
+) {
+  return DKGAgent.create({
+    name,
+    listenHost: '127.0.0.1',
+    chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    contextGraphSubscriptionStore: fixture.subscriptionStore,
+    contextGraphMembershipStore: fixture.membershipStore,
+  });
+}
+
 beforeAll(async () => {
   _fileSnapshot = await takeSnapshot();
   const { hubAddress } = getSharedContext();
@@ -37,10 +77,16 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       try {
         await agent.start();
         expect((agent as any).config.syncContextGraphs ?? []).not.toContain('runtime-contextGraph');
+        expect(agent.getSyncContextGraphIds()).not.toContain('runtime-contextGraph');
 
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         expect((agent as any).config.syncContextGraphs ?? []).toContain('runtime-contextGraph');
+        const projectedScope = agent.getSyncContextGraphIds();
+        expect(projectedScope).toContain('runtime-contextGraph');
+        expect(Object.isFrozen(projectedScope)).toBe(true);
+        expect(() => (projectedScope as string[]).push('status-reader-mutation')).toThrow();
+        expect(agent.getSyncContextGraphIds()).not.toContain('status-reader-mutation');
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -68,33 +114,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
 
     it('persists runtime subscriptions and rehydrates them on restart', async () => {
-      const persisted = new Map<string, any>();
-      const persistedMembers = new Map<string, any>();
-      const subscriptionStore = {
-        loadAll: async () => [...persisted.values()],
-        save: async (record: any) => {
-          persisted.set(record.id, { ...record });
-        },
-        delete: async (contextGraphId: string) => {
-          persisted.delete(contextGraphId);
-        },
-      };
-      const membershipStore = {
-        upsert: async (record: any) => {
-          persistedMembers.set(`${record.contextGraphId}|${record.principalType}|${record.principalId}`, { ...record });
-        },
-        delete: async (contextGraphId: string, principalType: string, principalId: string) => {
-          persistedMembers.delete(`${contextGraphId}|${principalType}|${principalId}`);
-        },
-      };
-
-      const agentA = await DKGAgent.create({
-        name: 'PersistedSubscriptionsA',
-        listenHost: '127.0.0.1',
-        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-        contextGraphSubscriptionStore: subscriptionStore,
-        contextGraphMembershipStore: membershipStore,
-      });
+      const fixture = createContextGraphPersistenceFixture();
+      const { persisted, persistedMembers } = fixture;
+      const agentA = await createAgentWithContextGraphPersistence('PersistedSubscriptionsA', fixture);
 
       let agentAPeerId = '';
       try {
@@ -130,18 +152,13 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         source: 'subscription',
       });
 
-      const agentB = await DKGAgent.create({
-        name: 'PersistedSubscriptionsB',
-        listenHost: '127.0.0.1',
-        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-        contextGraphSubscriptionStore: subscriptionStore,
-        contextGraphMembershipStore: membershipStore,
-      });
+      const agentB = await createAgentWithContextGraphPersistence('PersistedSubscriptionsB', fixture);
 
       try {
         await agentB.start();
         expect(agentB.getSubscribedContextGraphs().get('persisted-cg')).toMatchObject({
           subscribed: true,
+          syncMode: 'always-on',
           synced: true,
           sharedMemorySynced: true,
           metaSynced: true,
@@ -156,6 +173,278 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           status: 'active',
           source: 'rehydrated-subscription',
         });
+      } finally {
+        await agentB.stop().catch(() => {});
+      }
+    });
+
+
+    it('keeps on-demand subscriptions process-local until explicitly promoted', async () => {
+      const fixture = createContextGraphPersistenceFixture();
+      const { persisted, persistedMembers } = fixture;
+      const agentA = await createAgentWithContextGraphPersistence('OnDemandSubscriptionLifetimeA', fixture);
+
+      try {
+        await agentA.start();
+        agentA.subscribeToContextGraph('selected-cg', { syncMode: 'on-demand' });
+        agentA.markContextGraphSubscriptionState('selected-cg', {
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+        });
+        (agentA as any).persistContextGraphSubscription('selected-cg');
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(agentA.getSubscribedContextGraphs().get('selected-cg')).toMatchObject({
+          subscribed: true,
+          syncMode: 'on-demand',
+          synced: true,
+        });
+        expect(persisted.has('selected-cg')).toBe(false);
+        expect(persistedMembers.has(`selected-cg|node|${agentA.peerId}`)).toBe(false);
+      } finally {
+        await agentA.stop().catch(() => {});
+      }
+
+      const agentB = await createAgentWithContextGraphPersistence('OnDemandSubscriptionLifetimeB', fixture);
+      try {
+        await agentB.start();
+        expect(agentB.getSubscribedContextGraphs().get('selected-cg')).toBeUndefined();
+
+        agentB.subscribeToContextGraph('selected-cg', { syncMode: 'on-demand' });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(persistedMembers.has(`selected-cg|node|${agentB.peerId}`)).toBe(false);
+
+        agentB.subscribeToContextGraph('selected-cg', { syncMode: 'always-on' });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(persisted.get('selected-cg')).toMatchObject({
+          id: 'selected-cg',
+          subscribed: true,
+          synced: false,
+        });
+        expect(agentB.getSubscribedContextGraphs().get('selected-cg')?.syncMode).toBe('always-on');
+        expect(persistedMembers.get(`selected-cg|node|${agentB.peerId}`)).toMatchObject({
+          contextGraphId: 'selected-cg',
+          principalType: 'node',
+          principalId: agentB.peerId,
+          status: 'active',
+          source: 'subscription',
+        });
+
+        // A later UI open is on-demand, but must not silently downgrade an
+        // operator's explicit always-on choice.
+        agentB.subscribeToContextGraph('selected-cg', { syncMode: 'on-demand' });
+        expect(agentB.getSubscribedContextGraphs().get('selected-cg')?.syncMode).toBe('always-on');
+      } finally {
+        await agentB.stop().catch(() => {});
+      }
+    });
+
+
+    it('preserves dormant durable intent when an edge opens the graph on demand', async () => {
+      const fixture = createContextGraphPersistenceFixture();
+      const { persisted, persistedMembers } = fixture;
+      const activeId = 'durable-a-active';
+      const dormantId = 'durable-z-dormant';
+      for (const id of [activeId, dormantId]) {
+        persisted.set(id, {
+          id,
+          name: id,
+          subscribed: true,
+          synced: false,
+          sharedMemorySynced: false,
+          metaSynced: false,
+          syncScoped: true,
+        });
+      }
+
+      const agentA = await DKGAgent.create({
+        name: 'DormantDurableIntentA',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        contextGraphSubscriptionStore: fixture.subscriptionStore,
+        contextGraphMembershipStore: fixture.membershipStore,
+        maxRehydratedContextGraphSubscriptions: 1,
+      });
+
+      try {
+        await agentA.start();
+        expect(agentA.getSubscribedContextGraphs().get(activeId)?.syncMode).toBe('always-on');
+        expect(agentA.getSubscribedContextGraphs().get(dormantId)).toBeUndefined();
+        expect(agentA.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+          activated: 1,
+          dormant: 1,
+          dormantIds: [dormantId],
+        });
+
+        // Opening a capped durable row is expressed by the UI as on-demand.
+        // The agent must recover the stored always-on intent instead of
+        // downgrading it and later deleting it from the durable store.
+        const selected = agentA.subscribeToContextGraph(dormantId, { syncMode: 'on-demand' });
+        expect(selected.syncMode).toBe('always-on');
+        expect(agentA.getSubscribedContextGraphs().get(dormantId)).toMatchObject({
+          subscribed: true,
+          syncMode: 'always-on',
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(persisted.get(dormantId)).toMatchObject({
+          id: dormantId,
+          subscribed: true,
+          syncScoped: true,
+        });
+        expect(persistedMembers.get(`${dormantId}|node|${agentA.peerId}`)).toMatchObject({
+          contextGraphId: dormantId,
+          status: 'active',
+          source: 'subscription',
+        });
+        expect(agentA.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+          activated: 2,
+          dormant: 0,
+          dormantIds: [],
+        });
+      } finally {
+        await agentA.stop().catch(() => {});
+      }
+
+      const agentB = await DKGAgent.create({
+        name: 'DormantDurableIntentB',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        contextGraphSubscriptionStore: fixture.subscriptionStore,
+        contextGraphMembershipStore: fixture.membershipStore,
+        maxRehydratedContextGraphSubscriptions: 0,
+      });
+      try {
+        await agentB.start();
+        expect(agentB.getSubscribedContextGraphs().get(dormantId)).toMatchObject({
+          subscribed: true,
+          syncMode: 'always-on',
+        });
+      } finally {
+        await agentB.stop().catch(() => {});
+      }
+    });
+
+
+    it('promotes an existing on-demand selection when the node creates the graph', async () => {
+      const fixture = createContextGraphPersistenceFixture();
+      const { persisted, persistedMembers } = fixture;
+      const contextGraphId = 'selected-then-created-cg';
+      const agent = await createAgentWithContextGraphPersistence('OnDemandCreatePromotion', fixture);
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph(contextGraphId, { syncMode: 'on-demand' });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(persisted.has(contextGraphId)).toBe(false);
+
+        await agent.createContextGraph({
+          id: contextGraphId,
+          name: 'Selected then created',
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+          subscribed: true,
+          syncMode: 'always-on',
+          synced: true,
+          metaSynced: true,
+        });
+        expect(persisted.get(contextGraphId)).toMatchObject({
+          id: contextGraphId,
+          subscribed: true,
+          synced: true,
+          metaSynced: true,
+          syncScoped: true,
+        });
+        expect(persistedMembers.get(`${contextGraphId}|node|${agent.peerId}`)).toMatchObject({
+          contextGraphId,
+          principalType: 'node',
+          principalId: agent.peerId,
+          status: 'active',
+          source: 'subscription',
+        });
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
+    it('persists a Core hosting obligation without persisting its on-demand member intent', async () => {
+      const persisted = new Map<string, any>();
+      const subscriptionStore = {
+        loadAll: async () => [...persisted.values()],
+        save: async (record: any) => {
+          persisted.set(record.id, { ...record });
+        },
+        delete: async (contextGraphId: string) => {
+          persisted.delete(contextGraphId);
+        },
+      };
+      const localCgId = 'selected-hosted-cg';
+
+      const agentA = await DKGAgent.create({
+        name: 'OnDemandCoreHostA',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        contextGraphSubscriptionStore: subscriptionStore,
+        nodeRole: 'core',
+      });
+      try {
+        await agentA.start();
+        agentA.subscribeToContextGraph(localCgId, { syncMode: 'on-demand' });
+        agentA.markContextGraphSubscriptionState(localCgId, {
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+        });
+        (agentA as any).chain.getContextGraphAccessPolicy = async () => 0;
+        (agentA as any).chain.isContextGraphActiveOnChain = async () => true;
+
+        await (agentA as any).recordCoreHostedPublicCg('14', localCgId);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(agentA.getSubscribedContextGraphs().get(localCgId)).toMatchObject({
+          subscribed: true,
+          syncMode: 'on-demand',
+          synced: true,
+          coreHosted: true,
+          onChainId: '14',
+        });
+        expect(persisted.get(localCgId)).toMatchObject({
+          id: localCgId,
+          subscribed: false,
+          synced: false,
+          sharedMemorySynced: false,
+          metaSynced: false,
+          coreHosted: true,
+          onChainId: '14',
+          syncScoped: false,
+        });
+      } finally {
+        await agentA.stop().catch(() => {});
+      }
+
+      const agentB = await DKGAgent.create({
+        name: 'OnDemandCoreHostB',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        contextGraphSubscriptionStore: subscriptionStore,
+        nodeRole: 'core',
+      });
+      try {
+        await agentB.start();
+        expect(agentB.getSubscribedContextGraphs().get(localCgId)).toMatchObject({
+          subscribed: false,
+          syncMode: 'always-on',
+          synced: false,
+          sharedMemorySynced: false,
+          metaSynced: false,
+          coreHosted: true,
+          onChainId: '14',
+        });
+        expect((agentB as any).config.syncContextGraphs ?? []).not.toContain(localCgId);
       } finally {
         await agentB.stop().catch(() => {});
       }

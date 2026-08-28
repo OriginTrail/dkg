@@ -27,7 +27,14 @@ docker() {
   esac
 }
 curl() {
-  [ "$blazegraph_started" = "1" ]
+  [ "$blazegraph_started" = "1" ] || return 1
+  local arg
+  for arg in "$@"; do
+    if [ "$arg" = "-w" ]; then
+      printf '%s' "${DEVNET_BLAZEGRAPH_SMOKE_NAMESPACE_STATUS:-201}"
+      break
+    fi
+  done
 }
 
 if start_blazegraph; then

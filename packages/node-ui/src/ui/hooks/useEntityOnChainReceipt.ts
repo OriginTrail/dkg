@@ -316,7 +316,7 @@ export function useEntityOnChainReceipt(
         // kept distinct from a clean "no rows" → fallback / 'offchain'.
         const sealRes = await executeQuery(
           buildSealReceiptQuery(contextGraphId, safeEntity),
-          contextGraphId,
+          { contextGraphId },
         );
         if (version !== versionRef.current) return;
         const sealRow = ((sealRes as any)?.result?.bindings ?? [])[0];
@@ -373,7 +373,7 @@ export function useEntityOnChainReceipt(
         // ── LEGACY Hop 2: pull the EXACT on-chain receipt from `_meta` ──
         const receiptRes = await executeQuery(
           buildReceiptQuery(contextGraphId, safeEntity, parsed.addr, parsed.name),
-          contextGraphId,
+          { contextGraphId },
         );
         if (version !== versionRef.current) return;
 

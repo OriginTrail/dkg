@@ -1,3 +1,8 @@
+import {
+  STORE_OPERATION_OUTCOME_TAG,
+  type StoreOperationOutcomeErrorLike,
+} from './store-operation-outcome.js';
+
 /**
  * Optional TripleStore operations that a decorator may expose even when its
  * wrapped backend cannot perform them.
@@ -5,7 +10,8 @@
 export type TripleStoreCapability =
   | 'update'
   | 'replaceGraph'
-  | 'replaceGraphAndSubject';
+  | 'replaceGraphAndSubject'
+  | 'replaceSubject';
 
 /**
  * Typed signal that an optional store capability is unavailable.
@@ -16,14 +22,18 @@ export type TripleStoreCapability =
  * treating a genuine execution failure as "unsupported". Implementations
  * must raise it before starting the operation so a caller can safely fall back.
  */
-export class UnsupportedTripleStoreCapabilityError extends Error {
+export class UnsupportedTripleStoreCapabilityError extends Error implements StoreOperationOutcomeErrorLike {
+  readonly storeOperationOutcomeTag = STORE_OPERATION_OUTCOME_TAG;
+  readonly outcome = 'not_started' as const;
   readonly capability: TripleStoreCapability;
+  readonly storeOperation: TripleStoreCapability;
   readonly storeName: string;
 
   constructor(capability: TripleStoreCapability, storeName: string) {
     super(`${storeName}: inner store does not support ${capability}()`);
     this.name = 'UnsupportedTripleStoreCapabilityError';
     this.capability = capability;
+    this.storeOperation = capability;
     this.storeName = storeName;
   }
 }
@@ -45,5 +55,12 @@ export function isReplaceGraphAndSubjectCapabilityRefusal(error: unknown): boole
   return (
     error instanceof UnsupportedTripleStoreCapabilityError &&
     error.capability === 'replaceGraphAndSubject'
+  );
+}
+
+export function isReplaceSubjectCapabilityRefusal(error: unknown): boolean {
+  return (
+    error instanceof UnsupportedTripleStoreCapabilityError &&
+    error.capability === 'replaceSubject'
   );
 }

@@ -162,6 +162,31 @@ describe('runDaemonInner wires sync options into DKGAgent.create', () => {
     expect(createArg.syncGlobalQueueLimit).toBe(0);
   });
 
+  it('passes partitioned sync admission through unchanged', async () => {
+    const syncAdmission = {
+      globalMaxInflight: 10,
+      fast: { maxInflight: 8, queueLimit: 64, queueTimeoutMs: 5_000 },
+      slow: {
+        maxInflight: 2,
+        foregroundReserved: 1,
+        foregroundQueueLimit: 8,
+        backgroundMaxInflight: 1,
+        backgroundQueueLimit: 0,
+      },
+    } as const;
+    const createArg = await captureCreateArg({ syncAdmission });
+
+    expect(createArg.syncAdmission).toEqual(syncAdmission);
+  });
+
+  it('passes the automatic system Context Graph sync override through unchanged', async () => {
+    const createArg = await captureCreateArg({
+      syncSystemContextGraphsOnConnect: false,
+    });
+
+    expect(createArg.syncSystemContextGraphsOnConnect).toBe(false);
+  });
+
   it('passes snapshot limits and Context Graph priorities through unchanged', async () => {
     const syncResponderSnapshotLimits = {
       global: { rows: 500, bytesEstimate: 600 },

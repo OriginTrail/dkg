@@ -6,6 +6,7 @@ import TOML from '@iarna/toml';
 import { SELECTABLE_SETUP_NETWORKS } from '@origintrail-official/dkg-core';
 import { mcpSetupAction, type McpSetupActionDeps } from '../src/mcp-setup.js';
 import { listBundledNetworkConfigNames, resolveKnownNetworkConfigName } from '../src/config.js';
+import { REQUIRED_SKILL_TOKENS } from '../src/skill-template.js';
 
 /**
  * NO MOCKS. `dkg mcp setup` is a pure CLI ORCHESTRATOR over (a) a real
@@ -3587,4 +3588,36 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect(reParsed).toEqual(written);
   });
 
+
+  // GH#1125 / PR #2331 review — `dkg mcp setup` copies SKILL.md into the
+  // client's skill directory. Once the template carried `{{token}}` syntax for
+  // the daemon's serve-time substitution, delivering the raw file would write
+  // that syntax into ~/.cursor/skills/dkg-node/SKILL.md.
+  //
+  // This asserts the file mcpSetupAction ACTUALLY writes. An earlier test
+  // checked hermes-setup's loader instead and would have stayed green while
+  // this path regressed, because mcp-setup carried its own private copy of it.
+  it('delivers a rendered SKILL.md to the client, never raw node template tokens', async () => {
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+
+    await mcpSetupAction({ verify: false, fund: false }, makeDeps());
+
+    const delivered = join(tmpHome, '.cursor', 'skills', 'dkg-node', 'SKILL.md');
+    expect(existsSync(delivered)).toBe(true);
+    const content = readFileSync(delivered, 'utf-8');
+
+    // The regression: no unsubstituted node-metadata template syntax reaches
+    // the user. Query-catalog placeholders use the same doubled-brace shape,
+    // but are intentionally preserved through the explicit literal escape.
+    for (const token of REQUIRED_SKILL_TOKENS) {
+      expect(content).not.toContain(`{{${token}}}`);
+    }
+    expect(content).toContain('{{configurationId}}');
+    // Nor the pre-token placeholder prose it replaced.
+    expect(content).not.toContain('(dynamic)');
+    // It carries the standalone guidance instead of live node values.
+    expect(content).toContain('- **Node version:** _(run `dkg --version` on your node)_');
+    // And it is still the real skill document.
+    expect(content).toContain('## 1. Node Info');
+  });
 });

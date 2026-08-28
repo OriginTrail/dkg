@@ -27,9 +27,12 @@ import {
   generateEd25519Keypair,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MAX_UINT72_DECIMAL,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import {
   AsyncLiftJobConflictError,
+  LiftJobPendingChainProofError,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
@@ -443,6 +446,151 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
     expect(String(res.body.error)).toContain('re-share');
     expect(enqueueCalls).toBe(0);
+  });
+
+  it('vm/publish-async: KA_WORKSPACE_HEAD_CORRUPT → 503 { code, error, retryable }', async () => {
+    // GH#2273 — a multi-valued SWM head now fails closed in the resolver during the
+    // enqueue-time intent resolution. That is transient SERVER-side corruption the sync
+    // repair heals, not a stale client intent: a 409 would tell the caller to re-share
+    // for nothing, and pre-fix the code matched no catch branch and surfaced as a
+    // generic 500. The 503 + retryable tells the caller to retry the SAME enqueue after
+    // catch-up converges the head.
+    let enqueueCalls = 0;
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => {
+        throw Object.assign(
+          new Error('Corrupt graph-scoped SWM head for did:dkg:test/1: head carries 2 shareOperationId values (op-a, storage-ack-b)'),
+          { code: 'KA_WORKSPACE_HEAD_CORRUPT' },
+        );
+      },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        enqueueCalls += 1;
+        return 'job-should-not-exist';
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('KA_WORKSPACE_HEAD_CORRUPT');
+    expect(res.body.retryable).toBe(true);
+    expect(String(res.body.error)).toContain('shareOperationId');
+    expect(enqueueCalls).toBe(0);
+  });
+
+  it('vm/publish-async: LIFT_JOB_PENDING_CHAIN_PROOF → 503 { code, error, retryable: true, existingJobId }', async () => {
+    // GH#2270 — a re-submit of a job that failed after a transaction may have been sent is
+    // refused by admission: republishing it could double-publish. That is neither a client
+    // mistake (the 409 conflict above would tell them to re-share for nothing) nor a node
+    // bug — pre-fix this code matched no catch branch and surfaced as a generic 500.
+    //
+    // `retryable: false` is the honest half: NO lane in this build clears the hold by itself
+    // (the chain-recovery loop never re-checks a failed KA-VM publish job), so a client that
+    // kept retrying this enqueue would loop forever. The body says who can end it instead.
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'pending-proof-op',
+        roots: ['urn:test:root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        throw new LiftJobPendingChainProofError(
+          'LiftJob job-7 failed as rpc_unavailable after a transaction may have been submitted; '
+            + 'it cannot be republished until chain recovery proves the transaction absent',
+          'job-7',
+          // PR #2300 r1 — retryable is JOB-SPECIFIC, computed at the publisher's throw site from
+          // hasAutomaticRecoveryExit; the route forwards whatever the error carries.
+          true,
+        );
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('LIFT_JOB_PENDING_CHAIN_PROOF');
+    // GH#2270 PR-3 — TRUE when the proof-first dispatcher has a lane for this job (it re-checks
+    // it every recover() tick and releases it on a proven verdict). Retrying this enqueue then
+    // converges without an operator, which is exactly what `retryable` promises.
+    expect(res.body.retryable).toBe(true);
+    expect(res.body.retryable).not.toBe(false);
+    expect(res.body.existingJobId).toBe('job-7');
+    // The message names the automatic lane FIRST and the by-id clear as the impatient-operator
+    // exit, with the exact job to act on.
+    expect(String(res.body.error)).toContain('Chain recovery re-checks this job');
+    expect(String(res.body.error)).toContain('/api/publisher/clear-job');
+    expect(String(res.body.error)).toContain('job-7');
+    // The pre-PR-3 wording promised nobody was coming.
+    expect(String(res.body.error)).not.toContain('No automatic lane resolves this');
+    // GH#2270 follow-up (🔴 3824098486, 🔴 3824353564, 🔴 3824484756) — the command handed
+    // back must be one that WORKS. A held job's clear needs the explicit override, and
+    // retryability does not decide that: a recoverable job can still be `retry_recovery`. This is
+    // asserted on the EMITTED body rather than the source, so an override left in dead source
+    // cannot pass for a usable instruction.
+    expect(String(res.body.error)).toContain('{"jobId":"job-7","allowPendingTransaction":true}');
+  });
+
+  it('vm/publish-async: LIFT_JOB_PENDING_CHAIN_PROOF forwards retryable: FALSE for an operator-only record [PR#2300 r1]', async () => {
+    // The other polarity, so the route cannot pass by hardcoding `true`: a record with no
+    // automatic exit (legacy no-nonce create, an update with no formable recognition) carries
+    // false from the throw site, and the body stops promising convergence and points straight at
+    // the by-id clear.
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'pending-proof-op-false',
+        roots: ['urn:test:root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        throw new LiftJobPendingChainProofError(
+          'LiftJob job-8 failed as rpc_unavailable after a transaction may have been submitted; '
+            + 'it cannot be republished until chain recovery proves the transaction absent',
+          'job-8',
+          false,
+        );
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('LIFT_JOB_PENDING_CHAIN_PROOF');
+    expect(res.body.retryable).toBe(false);
+    expect(res.body.existingJobId).toBe('job-8');
+    expect(String(res.body.error)).toContain('no automatic exit');
+    expect(String(res.body.error)).toContain('/api/publisher/clear-job');
+    expect(String(res.body.error)).toContain('job-8');
+    expect(String(res.body.error)).not.toContain('Chain recovery re-checks this job');
+    // The other polarity of the same guarantee: BOTH retryable values must be handed a command
+    // that can actually clear the job, which is what makes this pair discriminating rather than
+    // a single-branch check that a reversal could satisfy.
+    expect(String(res.body.error)).toContain('{"jobId":"job-8","allowPendingTransaction":true}');
   });
 
   // GH#1778 — the disambiguation error surfaces as a 409 with the candidate
@@ -869,6 +1017,361 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(enqueuedIntents[0]).toMatchObject({ agentAddress: tokenAgentAddress });
   });
 
+  it('vm/publish-async stamps the AUTHENTICATED enqueuer as admission metadata, beside the intent', async () => {
+    // 🟡 3824743785 — this stamp is the authorization basis for the destructive by-id force-clear,
+    // and until now only publisher-level tests exercised it, constructing the field themselves. If
+    // this route line were dropped, those stayed green while every NODE-TOKEN job lost the clear
+    // the daemon advertises to it — the exact dead end GH#2270's follow-up set out to remove.
+    //
+    // The node-token shape is the one under test: `resolveAgentByToken` yields nothing (the author
+    // hint is deliberately absent for a node token), yet the request still has an authenticated
+    // identity.
+    const NODE_OWNER = '0x00000000000000000000000000000000000000n0'.toLowerCase();
+    const enqueueCalls: Array<{ intent: any; admission: any }> = [];
+
+    await startWith({}, {
+      resolveAgentByToken: () => undefined,
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'share-node-token',
+        roots: ['urn:test:node-token-root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'db'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, { requestAgentAddress: NODE_OWNER }, {
+      enqueueKnowledgeAssetVmPublish: async (intent: unknown, admission: unknown) => {
+        enqueueCalls.push({ intent, admission });
+        return 'job-node-token';
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+
+    expect(res.status).toBe(202);
+    expect(enqueueCalls).toHaveLength(1);
+    // The stamp reaches the queue, for a caller that has NO author hint at all.
+    expect(enqueueCalls[0]?.admission).toEqual({ admittedByAgentAddress: NODE_OWNER });
+    // Discriminating half (🟡 3824743779): it travels BESIDE the request, never inside it. If the
+    // principal leaked back into the payload, execution and recovery would carry an authorization
+    // identity they have no use for, and the generic clear boundary would go back to casting.
+    expect(enqueueCalls[0]?.intent).not.toHaveProperty('admittedByAgentAddress');
+    // And it did not become an author-selection input: a node token still resolves no author hint,
+    // so what gets published is unchanged.
+    expect(enqueueCalls[0]?.intent).not.toHaveProperty('callerAgentAddress');
+  });
+
+  // GH#1786 — the resident-author selector. The load-bearing property is that it can
+  // never be silently dropped: a dropped selector publishes the WRONG author with a
+  // success status and real TRAC/gas spent.
+  describe('GH#1786 selectedAuthorAgentAddress', () => {
+    const SELECTED = '0x00000000000000000000000000000000000000b7';
+    const selectorToken = 'curator-token';
+    const curatorAddress = '0x00000000000000000000000000000000000000c1';
+
+    it('vm/publish forwards the selector AND still forwards the token as the caller', async () => {
+      const seen: any[] = [];
+      await startWith({}, {
+        resolveAgentByToken: (t?: string) => (t === selectorToken ? curatorAddress : undefined),
+        publishFromFinalizedAssertion: async (_cg: string, _n: string, opts: any) => {
+          seen.push(opts);
+          return { status: 'confirmed', seal: { authorAddress: SELECTED } };
+        },
+      }, { requestToken: selectorToken, requestAgentAddress: curatorAddress });
+
+      const res = await post('vm/publish', {
+        contextGraphId: CG_ID,
+        selectedAuthorAgentAddress: SELECTED,
+      });
+
+      expect(res.status).toBe(200);
+      // Both identities present: the selector picks the AUTHOR while the token stays
+      // the CALLER, so CG registration / curator stamping is unchanged (GH#1778).
+      expect(seen[0]).toMatchObject({
+        selectedAuthorAgentAddress: SELECTED,
+        callerAgentAddress: curatorAddress,
+      });
+    });
+
+    it('keeps the selector on the CG-registration retry, not just the first attempt', async () => {
+      // The retry re-runs author resolution from scratch, so a per-call-site selector
+      // would be dropped here and publish the wrong author with HTTP 200 — and this is
+      // precisely a curator's FIRST publish into a not-yet-registered CG.
+      const seen: any[] = [];
+      let attempts = 0;
+      await startWith({}, {
+        resolveAgentByToken: (t?: string) => (t === selectorToken ? curatorAddress : undefined),
+        ensureRegisteredForPublish: async () => {},
+        publishFromFinalizedAssertion: async (_cg: string, _n: string, opts: any) => {
+          seen.push(opts);
+          attempts += 1;
+          if (attempts === 1) {
+            throw Object.assign(new Error('cg not registered'), { code: 'CG_NOT_REGISTERED' });
+          }
+          return { status: 'confirmed', seal: { authorAddress: SELECTED } };
+        },
+      }, { requestToken: selectorToken, requestAgentAddress: curatorAddress });
+
+      const res = await post('vm/publish', {
+        contextGraphId: CG_ID,
+        selectedAuthorAgentAddress: SELECTED,
+      });
+
+      expect(res.status).toBe(200);
+      expect(seen).toHaveLength(2);
+      expect(seen[1]).toMatchObject({
+        selectedAuthorAgentAddress: SELECTED,
+        callerAgentAddress: curatorAddress,
+      });
+    });
+
+    it('vm/publish-async forwards the selector and echoes the resolved author', async () => {
+      const seen: any[] = [];
+      await startWith({}, {
+        resolveFinalizedAssertionVmPublishIntent: async (_cg: string, _n: string, opts: any) => {
+          seen.push(opts);
+          return {
+            contextGraphId: CG_ID,
+            name: ASSERTION_NAME,
+            agentAddress: SELECTED,
+            shareOperationId: 'share-selected',
+            roots: ['urn:test:selected-root'],
+            seal: {
+              merkleRoot: `0x${'12'.repeat(32)}`,
+              authorAddress: SELECTED,
+              signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+              schemeVersion: 1,
+            },
+            sealChainId: '31337',
+            sealKav10Address: '0x2222222222222222222222222222222222222222',
+            sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+            sealMerkleRoot: `0x${'12'.repeat(32)}`,
+            intentKey: `sha256:${'cb'.repeat(32)}`,
+          };
+        },
+        preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+      }, {}, {
+        enqueueKnowledgeAssetVmPublish: async () => 'job-selected',
+      });
+
+      const res = await post('vm/publish-async', {
+        contextGraphId: CG_ID,
+        selectedAuthorAgentAddress: SELECTED,
+      });
+
+      expect(res.status).toBe(202);
+      expect(seen[0]).toMatchObject({ selectedAuthorAgentAddress: SELECTED });
+      // Echoed so a client can verify who will be published, and can detect a daemon
+      // that ignored the selector entirely.
+      expect(res.body.agentAddress).toBe(SELECTED);
+    });
+
+    for (const lane of ['vm/publish', 'vm/publish-async'] as const) {
+      it(`${lane} answers a non-resident selection with 409 + candidates, not a generic 500`, async () => {
+        const candidates = [SELECTED, '0x00000000000000000000000000000000000000b8'];
+        const notResident = () => {
+          // The message deliberately contains "is not finalized" and "Invalid" so a
+          // MIS-ORDERED mapping would be swallowed by the precondition branch (sync)
+          // or the message-keyed 400 (async) and this test would fail.
+          throw Object.assign(
+            new Error('selected author is not finalized — Invalid selection'),
+            { code: 'ASSERTION_AUTHOR_NOT_RESIDENT', candidates },
+          );
+        };
+        await startWith({}, {
+          publishFromFinalizedAssertion: notResident,
+          resolveFinalizedAssertionVmPublishIntent: notResident,
+        });
+
+        const res = await post(lane, {
+          contextGraphId: CG_ID,
+          selectedAuthorAgentAddress: SELECTED,
+        });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('ASSERTION_AUTHOR_NOT_RESIDENT');
+        expect(res.body.candidates).toEqual(candidates);
+      });
+
+      // NOTE: this pins the route's error MAPPING (given the agent raises the code, the lane
+      // answers 409 and enqueues nothing). It does NOT claim the async lane detects the
+      // condition in production — with wallet selection deferred the agent deliberately does
+      // not raise it there, which the `does not pre-refuse` test below pins instead.
+      it(`${lane} maps a raised PUBLISH_AUTHOR_NOT_CUSTODIAL to 409 and enqueues nothing`, async () => {
+        const notCustodial = () => {
+          throw Object.assign(
+            new Error('cannot re-sign UpdateAuthorAttestation for author'),
+            { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' },
+          );
+        };
+        const enqueued: unknown[] = [];
+        await startWith({}, {
+          publishFromFinalizedAssertion: notCustodial,
+          resolveFinalizedAssertionVmPublishIntent: notCustodial,
+        }, {}, {
+          enqueueKnowledgeAssetVmPublish: async (intent: unknown) => {
+            enqueued.push(intent);
+            return 'job-should-not-exist';
+          },
+        });
+
+        const res = await post(lane, {
+          contextGraphId: CG_ID,
+          selectedAuthorAgentAddress: SELECTED,
+        });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('PUBLISH_AUTHOR_NOT_CUSTODIAL');
+        // The async lane must refuse BEFORE accepting a job that is known to fail.
+        expect(enqueued).toHaveLength(0);
+      });
+
+      // `null` included deliberately: a present-but-null selector is a common client
+      // serialization of "nothing selected", and treating it as absent would fall back
+      // to normal author resolution and could publish a different author with 200.
+      for (const malformed of ['not-an-address', null, 42, {}] as const) {
+        it(`${lane} rejects a malformed selector (${JSON.stringify(malformed)})`, async () => {
+          const calls: unknown[] = [];
+          await startWith({}, {
+            publishFromFinalizedAssertion: async () => {
+              calls.push('published');
+              return { status: 'confirmed', seal: { authorAddress: SELECTED } };
+            },
+            resolveFinalizedAssertionVmPublishIntent: async () => {
+              calls.push('enqueued');
+              throw new Error('should not be reached');
+            },
+          });
+          const res = await post(lane, {
+            contextGraphId: CG_ID,
+            selectedAuthorAgentAddress: malformed,
+          });
+          expect(res.status).toBe(400);
+          expect(res.body.error).toMatch(/must be a 0x-prefixed 20-byte EVM address/);
+          expect(calls).toHaveLength(0);
+        });
+      }
+
+      it(`${lane} rejects a selector nested inside "options" instead of silently dropping it`, async () => {
+        const calls: any[] = [];
+        await startWith({}, {
+          publishFromFinalizedAssertion: async (_cg: string, _n: string, opts: any) => {
+            calls.push(opts);
+            return { status: 'confirmed', seal: { authorAddress: SELECTED } };
+          },
+          resolveFinalizedAssertionVmPublishIntent: async (_cg: string, _n: string, opts: any) => {
+            calls.push(opts);
+            throw new Error('should not be reached');
+          },
+        });
+
+        const res = await post(lane, {
+          contextGraphId: CG_ID,
+          options: { selectedAuthorAgentAddress: SELECTED },
+        });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/must be supplied at the top level/);
+        // Refused before any publish attempt — no wrong-author spend.
+        expect(calls).toHaveLength(0);
+      });
+    }
+
+    // Production-path counterpart to the mapping test above. The async route does not pass a
+    // publisherOverride, so with wallet selection deferred the agent cannot soundly judge the
+    // signer and deliberately does NOT pre-refuse: the lane accepts (202) and a non-signable
+    // foreign-author update surfaces later as a worker failure. Pinning the accept keeps the
+    // documented contract honest — the immediate 409 is a SYNC-lane guarantee only.
+    it('vm/publish-async accepts (202) a foreign-author update it cannot pre-judge, rather than pre-refusing', async () => {
+      const enqueued: unknown[] = [];
+      await startWith({}, {
+        // The real intent path: no throw — it cannot determine the eventual signer.
+        resolveFinalizedAssertionVmPublishIntent: async (_cg: string, _n: string, opts: any) => {
+          expect(opts.selectedAuthorAgentAddress).toBe(SELECTED);
+          // The route never supplies one, which is exactly why the gate stays silent.
+          expect(opts.publisherOverride).toBeUndefined();
+          return {
+            contextGraphId: CG_ID,
+            name: ASSERTION_NAME,
+            agentAddress: SELECTED,
+            shareOperationId: 'share-deferred',
+            roots: ['urn:test:deferred-root'],
+            seal: {
+              merkleRoot: `0x${'12'.repeat(32)}`,
+              authorAddress: SELECTED,
+              signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+              schemeVersion: 1,
+            },
+            sealChainId: '31337',
+            sealKav10Address: '0x2222222222222222222222222222222222222222',
+            sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+            sealMerkleRoot: `0x${'12'.repeat(32)}`,
+            intentKey: `sha256:${'cc'.repeat(32)}`,
+          };
+        },
+        preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+      }, {}, {
+        enqueueKnowledgeAssetVmPublish: async (intent: unknown) => {
+          enqueued.push(intent);
+          return 'job-deferred';
+        },
+      });
+
+      const res = await post('vm/publish-async', {
+        contextGraphId: CG_ID,
+        selectedAuthorAgentAddress: SELECTED,
+      });
+
+      expect(res.status).toBe(202);
+      expect(res.body.agentAddress).toBe(SELECTED);
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('create+alsoPublishVm rejects the selector in both positions, before any mutation', async () => {
+      // A 400 returned AFTER creating/finalizing would be a much worse regression than no
+      // 400 at all, and status-only assertions cannot tell the two apart.
+      const sideEffects: string[] = [];
+      await startWith({}, {
+        createAssertion: async () => { sideEffects.push('create'); return {}; },
+        writeAssertion: async () => { sideEffects.push('write'); return {}; },
+        finalizeAssertion: async () => { sideEffects.push('finalize'); return {}; },
+        promoteAssertion: async () => { sideEffects.push('promote'); return {}; },
+        shareAssertionToSharedMemory: async () => { sideEffects.push('share'); return {}; },
+        publishFromFinalizedAssertion: async () => { sideEffects.push('publish'); return {}; },
+      });
+      const topLevel = await postRoot({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"' }],
+        alsoPublishVm: true,
+        selectedAuthorAgentAddress: SELECTED,
+      });
+      expect(topLevel.status).toBe(400);
+      expect(topLevel.body.error).toMatch(/not accepted when creating a knowledge asset/);
+
+      const nested = await postRoot({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"' }],
+        alsoPublishVm: { selectedAuthorAgentAddress: SELECTED },
+      });
+      expect(nested.status).toBe(400);
+      expect(nested.body.error).toMatch(/not accepted when creating a knowledge asset/);
+      // Refused as a request-shape error: nothing was created, finalized or published.
+      expect(sideEffects).toEqual([]);
+    });
+  });
+
   it('rejects the retired create promote flag before mutation', async () => {
     for (const promote of [true, false]) {
       let mutations = 0;
@@ -945,8 +1448,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       store,
       keypair,
       chainBase: undefined,
-      pollIntervalMs: 10,
-      errorBackoffMs: 10,
+      runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           executorCalls.push(input);
@@ -1080,8 +1582,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       store,
       keypair,
       chainBase: undefined,
-      pollIntervalMs: 10,
-      errorBackoffMs: 10,
+      runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
       knowledgeAssetVmPublishHandler: {
         execute: createKnowledgeAssetVmPublishHandler(fakeAgent as unknown as DKGAgent).execute,
       },
@@ -1108,6 +1609,135 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(String((publisherOverrides[0] as { publisherAddress?: string }).publisherAddress).toLowerCase()).toBe(
         wallet.address.toLowerCase(),
       );
+    } finally {
+      await runtime.stop();
+      await store.close();
+    }
+  });
+
+  // GH#1786 — the PRODUCTION handler boundary for the post-202 contract. The
+  // publisher-level test in async-lift-broadcast-durability.test.ts injects its own
+  // `execute` stub, so a regression inside `createKnowledgeAssetVmPublishHandler`
+  // (dropping or re-wrapping the structured code on the rethrow path) would leave that
+  // test green while the real worker mis-classified the failure as retryable. This drives
+  // the REAL handler: only `publishQueuedKnowledgeAssetVmPublish` is faked.
+  it('queued vm/publish-async records a non-custodial author as terminal authority_forbidden, never retried', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-ka-vm-not-custodial-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    await addPublisherWallet(dataDir, wallet.privateKey);
+
+    const rootless = await seedRootlessPublicSnapshot(store, {
+      shareOperationId: 'share-not-custodial-rootless',
+      subject: 'urn:test:not-custodial-subject',
+      object: '"Not Custodial Rootless"',
+    });
+
+    const SELECTED_AUTHOR = '0x00000000000000000000000000000000000000b2';
+    const intent = {
+      contextGraphId: CG_ID,
+      name: ASSERTION_NAME,
+      // The SELECTED foreign author (GH#1786); the curator enqueued it.
+      agentAddress: SELECTED_AUTHOR,
+      callerAgentAddress: '0x00000000000000000000000000000000000000c3',
+      shareOperationId: rootless.shareOperationId,
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: rootless.kaUal,
+      assertionVersion: '1',
+      publicTripleCount: rootless.publicTripleCount,
+      privateTripleCount: 0,
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+        authorAddress: ROOTLESS_AUTHOR as `0x${string}`,
+        signature: {
+          r: `0x${'34'.repeat(32)}` as `0x${string}`,
+          vs: `0x${'56'.repeat(32)}` as `0x${string}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+      intentKey: `sha256:${'ab'.repeat(32)}`,
+      kaNumber: rootless.kaNumber,
+      reservedUal: rootless.kaUal,
+    };
+
+    let publishAttempts = 0;
+    let registerAttempts = 0;
+    const fakeAgent = {
+      getDefaultAgentAddress: () => '0x00000000000000000000000000000000000000a1',
+      async ensureRegisteredForPublish() {
+        registerAttempts += 1;
+      },
+      async publishQueuedKnowledgeAssetVmPublish() {
+        publishAttempts += 1;
+        // Exactly what the agent raises when the claiming wallet is neither custodial for
+        // the selected author nor the publisher EOA — coded, message from the shared core
+        // formatter plus this surface's remediation.
+        throw Object.assign(
+          new Error(
+            `${formatPublishAuthorNotCustodialMessage(SELECTED_AUTHOR)} Use the /api/update `
+              + `route with a pre-signed UpdateAuthorAttestation instead.`,
+          ),
+          { code: PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE },
+        );
+      },
+    };
+
+    const runtime = await createPublisherRuntimeFromAgent({
+      dataDir,
+      store,
+      keypair,
+      chainBase: undefined,
+      runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
+      knowledgeAssetVmPublishHandler: {
+        execute: createKnowledgeAssetVmPublishHandler(fakeAgent as unknown as DKGAgent).execute,
+      },
+    });
+
+    try {
+      const jobId = await runtime.publisher.enqueueKnowledgeAssetVmPublish(intent);
+      const processed = await runtime.publisher.processNext(wallet.address);
+
+      expect(processed?.jobId).toBe(jobId);
+      expect(processed?.status).toBe('failed');
+      // Authority, not transport — and explicitly NOT the retryable default.
+      expect(processed?.failure?.code).toBe('authority_forbidden');
+      expect(processed?.failure?.code).not.toBe('rpc_unavailable');
+      expect(processed?.failure?.retryable).toBe(false);
+      expect(processed?.failure?.resolution).toBe('fail_job');
+      // No transaction was ever sent — the refusal happens while building the attestation,
+      // before the pre-send write-ahead. State and phase must both say validation, and the
+      // record must carry no broadcast/tx metadata claiming otherwise.
+      expect(processed?.failure?.failedFromState).toBe('validated');
+      expect(processed?.failure?.phase).toBe('validation');
+      expect(processed?.broadcast).toBeUndefined();
+      expect(processed?.inclusion).toBeUndefined();
+
+      // The real handler rethrew VERBATIM instead of treating this as the
+      // CG-not-registered case: one publish attempt, no auto-registration.
+      expect(publishAttempts).toBe(1);
+      expect(registerAttempts).toBe(0);
+
+      // Stored-job readback — what an operator polling the job actually sees.
+      const persisted = await runtime.publisher.getStatus(jobId);
+      expect(persisted?.status).toBe('failed');
+      expect(persisted?.failure?.code).toBe('authority_forbidden');
+      expect(persisted?.failure?.retryable).toBe(false);
+      expect(persisted?.failure?.resolution).toBe('fail_job');
+      expect(persisted?.failure?.failedFromState).toBe('validated');
+      expect(persisted?.failure?.phase).toBe('validation');
+      expect(persisted?.broadcast).toBeUndefined();
+      expect(persisted?.inclusion).toBeUndefined();
+
+      // Never retried: nothing to recover, and the job stays terminal.
+      expect(await runtime.publisher.recover()).toBe(0);
+      expect((await runtime.publisher.getStatus(jobId))?.status).toBe('failed');
+      expect(publishAttempts).toBe(1);
     } finally {
       await runtime.stop();
       await store.close();

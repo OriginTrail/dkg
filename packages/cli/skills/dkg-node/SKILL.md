@@ -6,17 +6,16 @@ description: The DKG V10 Node is your primary memory system. This skill teaches 
 # DKG V10 Node Skill
 
 You are connected to an **OriginTrail Decentralized Knowledge Graph (DKG) V10** node.
-This skill teaches you the full node API surface so you can operate autonomously.
 
 ## 1. Node Info
 
 > This section is dynamically generated from node state at serve-time.
 
-- **Node version:** (dynamic)
-- **Base URL:** (dynamic)
-- **Peer ID:** (dynamic)
-- **Node role:** (dynamic — `core` or `edge`)
-- **Available extraction pipelines:** (dynamic)
+- **Node version:** {{nodeVersion}}
+- **Base URL:** {{baseUrl}}
+- **Peer ID:** {{peerId}}
+- **Node role:** {{nodeRole}}
+- **Available extraction pipelines:** {{extractionPipelines}}
 
 If the Node UI injects a target context graph for the turn, use that target directly. If no target is injected or configured, call `dkg_list_context_graphs` / `GET /api/context-graph/list`; agent tool surfaces default that list to the caller's created/joined context graphs, with `scope: "all"` for every graph the node knows about.
 
@@ -47,7 +46,7 @@ targets before writing so they cannot accidentally create shadow context graphs.
 - **Do not `git pull`.** Do not clone the repository. Do not edit files under `~/.dkg/releases/` (on Core nodes — Edge nodes have no `~/.dkg/releases/` at all under RFC-41).
 - If `dkg doctor` reports orphan clones at `~/dkg/`, `~/Projects/dkg/`, or similar, ask the operator before touching them — they are not the running daemon.
 - `dkg update --check` previews the available version without applying.
-- `dkg update --allow-prerelease` follows the `next` dist-tag for pre-release builds.
+- `dkg update --allow-prerelease` allows published prerelease channels when the network policy permits.
 - `dkg rollback` reverts to the previous version (Edge: re-installs the prior npm version recorded in `~/.dkg/previous-version`; Core: flips the blue-green slot symlink).
 
 **Detecting current install state:**
@@ -60,18 +59,17 @@ targets before writing so they cannot accidentally create shadow context graphs.
 
 - "There seem to be multiple DKG installations on this machine" → run `dkg doctor`; the `state.cli.globalPath`, `state.daemon.entryPoint`, and orphan-repos check together identify the canonical install and any stray clones.
 - "The UI shows an old version even after I updated" → run `dkg doctor`; the served-UI / source-mismatch check flags stale browser / PWA / service-worker caches.
-- "I ran `npm install -g @origintrail-official/dkg@latest` but the daemon still reports the old version" → on Edge nodes the daemon needs a restart to pick up the new install (`dkg restart`). On Core nodes, the slot mechanism gates the visible version on `dkg update`'s atomic swap, not on `npm install -g` directly — use `dkg update` for Core nodes.
+- "I ran `npm install -g @origintrail-official/dkg@latest` but the daemon still reports the old version" → on Edge nodes, run `dkg stop` and then `dkg start` so the daemon picks up the new install. On Core nodes, the slot mechanism gates the visible version on `dkg update`'s atomic swap, not on `npm install -g` directly — use `dkg update` for Core nodes.
 - "Publishing or context-graph registration intermittently fails with an RPC/503 error" → the node uses **multiple chain RPC endpoints with automatic failover**. Each supported network ships a curated set of public RPCs: `chain.rpcUrl` is the primary and `chain.rpcUrls` is an ordered list of backups. A transient failure (rate-limit/timeout/network) on one endpoint silently fails over to the next; on-chain reverts and other application errors do **not** trigger failover. A `503`/`504` from a publish/register/identity/PCA route means **every** configured endpoint was exhausted — retry, or add a faster/private endpoint. Configure backups via `chain.rpcUrls` in `~/.dkg/config.json` or the **"Backup RPC URLs"** prompt in `dkg init`. Precedence: an operator-set `chain.rpcUrls` **replaces** the network defaults; setting only a private `chain.rpcUrl` keeps the public defaults as failover (set `"rpcUrls": []` to opt out). A wrong-chain backup fails the node loudly at startup (provider network-mismatch), never silently. Inspect failover activity at `GET /api/status` → `chain.rpcFailovers` / `chain.rpcExhaustions` / `chain.rpcFailoversByClass`, and per-endpoint reachability at `GET /api/chain/rpc-health`.
 
-The full design rationale lives in [OT-RFC-41](https://github.com/OriginTrail/dkgv10-spec/blob/main/rfcs/OT-RFC-41-edge-node-npm-only-install-and-update.md).
+The current operator guidance lives in [Updates & Rollback](https://github.com/OriginTrail/dkg/blob/main/docs/use-dkg/updates-and-rollback.md).
 
 ## 2. Capabilities Overview
 
-> **Note:** This skill describes the full DKG V10 API surface. Some endpoints
-> may not yet be available on your node depending on its version. Call
-> `GET /api/status` to check the node version, and rely on error responses
-> (404) to detect unimplemented routes. The node is under active development
-> toward V10.0 — endpoints are being shipped incrementally.
+> **Note:** This skill describes the current DKG V10 API surface. Availability
+> can vary with the installed node version. Call `GET /api/status` to check the
+> version, use `dkg <command> --help` for its CLI surface, and rely on explicit
+> error responses when a route is unavailable.
 
 This node provides a three-layer **verifiable memory system** for AI agents:
 
@@ -79,7 +77,7 @@ This node provides a three-layer **verifiable memory system** for AI agents:
 |-------|-------|------|-------------|-------------|
 | **Working Memory (WM)** | Private to you | Free | Self-attested | Local, survives restarts |
 | **Shared Working Memory (SWM)** | Visible to team | Free | Self-attested (gossip replicated) | TTL-bounded |
-| **Verifiable Memory (VM)** | Permanent, on-chain | TRAC tokens | Self-attested → endorsed → consensus-verified | Permanent |
+| **Verifiable Memory (VM)** | Network-queryable, chain-anchored | Gas + TRAC | Self-attested → endorsed → consensus-verified | Durable |
 
 **What you can do:** create knowledge assertions, import files (PDF, DOCX, Markdown),
 share knowledge with peers, publish to the blockchain, endorse others' knowledge,
@@ -240,7 +238,7 @@ lifecycle (`finalize` = seal; a full `share` seals by default, so the explicit f
 knowledge into Shared Working Memory, author it as a **named knowledge asset** (`dkg_knowledge_asset_create`
 → `dkg_knowledge_asset_share`); there is no separate loose-write or direct-bridge publish tool.
 
-**Bulk imports (>5,000 quads in one logical operation):** the per-call `dkg_knowledge_asset_*` loop IS the chunked-write API; there is no `/api/import/bulk`. Keep `/api/knowledge-assets/<name>/wm/write` payloads under the 10 MB body cap, keep `/api/knowledge-assets/<name>/swm/share` payloads under the 256 KB body cap, and remember that promotion can still fail at the 10 MB gossip-message cap even when the HTTP body is small. For multi-part imports, write a resumable manifest in the `meta` sub-graph (`scripts/lib/manifest.mjs` is the canonical helper), promote import roots in size-aware batches, and halve/retry on 413 rather than restarting the whole import. The expanded contract — chunking budgets, manifest pattern, HTTP 413 recipes, async-promote queue (`/api/knowledge-assets/<name>/swm/share-async`) — is served at `GET /.well-known/skill-importer.md` (the daemon's second canonical skill endpoint, same auth-public + ETag-cacheable shape as `/.well-known/skill.md`). Source checkouts also have the same file at `packages/cli/skills/dkg-importer/SKILL.md`.
+**Bulk imports (>5,000 quads in one logical operation):** the per-call `dkg_knowledge_asset_*` loop IS the chunked-write API; there is no `/api/import/bulk`. Keep `/api/knowledge-assets/<name>/wm/write` payloads under the 10 MB body cap, keep `/api/knowledge-assets/<name>/swm/share` payloads under the 256 KB body cap, and remember that promotion can still fail at the 4 MiB gossip-message cap even when the HTTP body is small. For multi-part imports, write a resumable manifest in the `meta` sub-graph (`scripts/lib/manifest.mjs` is the canonical helper), promote import roots in size-aware batches, and halve/retry on 413 rather than restarting the whole import. The expanded contract — chunking budgets, manifest pattern, HTTP 413 recipes, async-promote queue (`/api/knowledge-assets/<name>/swm/share-async`) — is served at `GET /.well-known/skill-importer.md` (the daemon's second canonical skill endpoint, same auth-public + ETag-cacheable shape as `/.well-known/skill.md`). Source checkouts also have the same file at `packages/cli/skills/dkg-importer/SKILL.md`.
 
 ### HTTP-only operations (no tool wrapper)
 
@@ -305,7 +303,7 @@ SWM is for knowledge you've shared from WM and want peers to see. Agents put dat
 > retired so shared/published data always has a lifecycle name, seal, and audit
 > record.
 
-### Verifiable Memory (VM) — Permanent, on-chain
+### Verifiable Memory (VM) — Durable, chain-anchored
 
 > **Lifecycle VM publishing goes through SWM.** Named WM assertions are finalized,
 > shared to SWM, then published from there. The public daemon API no longer has
@@ -313,10 +311,37 @@ SWM is for knowledge you've shared from WM and want peers to see. Agents put dat
 
 **Canonical publish (the agent path):** `POST /api/knowledge-assets/{name}/vm/publish`.
 Mints (or updates) the **sealed** assertion on chain. The URL `:name` + the seal
-select the assertion and encode the author, so this endpoint takes **no selector** —
-`assertionName`, author overrides, and any `selection` other than `"all"` are
-rejected `400`. It is multi-root-safe (the seal commits the whole assertion).
-Body: `{ "contextGraphId": "...", "subGraphName"?: "...", "options"?: { "publishEpochs"?: N, "publisherNodeIdentityIdOverride"?: "N" } }`.
+select the assertion and encode the author, so authorship cannot be **overridden** here:
+`assertionName`, `authorAgentAddress`, `preSignedAuthorAttestation`, and any `selection`
+other than `"all"` are rejected `400`. It is multi-root-safe (the seal commits the whole
+assertion).
+Body: `{ "contextGraphId": "...", "subGraphName"?: "...", "selectedAuthorAgentAddress"?: "0x...", "options"?: { "publishEpochs"?: N, "publisherNodeIdentityIdOverride"?: "N" } }`.
+
+**Choosing among several authors (GH#1786).** When two or more OTHER members have a
+finalized assertion with this name, publish returns
+`409 { code: "AMBIGUOUS_ASSERTION_AUTHOR", candidates: [...] }`. Retry with
+`selectedAuthorAgentAddress` set to one of those `candidates` to publish that member's KA;
+the authenticated caller remains the identity used for context-graph registration and
+curator stamping. The field **selects among authors that already have a finalized
+assertion** — it never confers authorship. It must be **top level** (inside `options` it is
+rejected `400`), and an address that is not a resident candidate is rejected
+`409 { code: "ASSERTION_AUTHOR_NOT_RESIDENT", candidates: [...] }` rather than publishing
+anything. Publishing another author's KA works for the initial **mint** (their sealed
+attestation is replayed), but an **update** of a foreign author's KA needs that author's key
+to be custodial on this node — otherwise use `/api/update` with a pre-signed
+`UpdateAuthorAttestation`.
+
+How that surfaces differs by lane, deliberately. On the **synchronous** `vm/publish` the node
+knows the signer, so it answers `409 PUBLISH_AUTHOR_NOT_CUSTODIAL` immediately. On
+**`vm/publish-async`** the publisher wallet is chosen later by whichever worker claims the
+job, so at accept time the node cannot know which signer will run it; rather than refuse a
+publish a different wallet could have made, it accepts (`202`) and the condition surfaces
+when the worker runs — as a **terminal** job failure with
+`code: "authority_forbidden"` (`retryable: false`, `resolution: "fail_job"`), carrying the
+signer's message. It is deliberately *not* retried: no amount of retrying makes the node able
+to sign for that author. Poll `/api/publisher/job` for that failure, or read the
+`agentAddress` echoed in the 202 body to confirm which author was selected before the job
+runs.
 **Preconditions:** the assertion must be finalized **and** present in SWM (else
 `409 VM_PUBLISH_PRECONDITION`), and the context graph must be registered on-chain — which
 `vm/publish` does **automatically on first publish** (no flag needed; costs gas/TRAC). Returns the
@@ -447,9 +472,9 @@ Use this decision order:
 5. If the user asks which saved queries exist, call `dkg_query_catalog_list`
    with the selected `context_graph_id` and present the useful candidates.
 6. If the user explicitly asks to run a saved query, call
-   `dkg_query_catalog_run` with the selected `context_graph_id` and the saved
-   query slug or exact display name. If the name is ambiguous, list first and
-   ask/choose by slug.
+   `dkg_query_catalog_run` with the selected `context_graph_id`, saved-query slug
+   or exact name, and declared runtime `parameters`. Ask for missing
+   required values; never use examples. If ambiguous, list first and ask/choose.
 7. If the user asks to save the current/query/SPARQL, call
    `dkg_query_catalog_save` with the selected `context_graph_id`, a concise
    `name`, optional `description`, and the exact read-only SPARQL text. If the
@@ -464,34 +489,30 @@ Use this decision order:
 OpenClaw tool path:
 
 - `dkg_query_catalog_list` input: `{ "context_graph_id": "<contextGraphId>" }`
-- `dkg_query_catalog_run` input:
-  `{ "context_graph_id": "<contextGraphId>", "query": "<slug-or-exact-name>" }`
-- `dkg_query_catalog_save` input:
-  `{ "context_graph_id": "<contextGraphId>", "name": "<display-name>", "sparql": "<read-only-sparql>", "description"?: "...", "result_column"?: "uri" }`
+- `dkg_query_catalog_run` input: `{ "context_graph_id": "<contextGraphId>", "query": "<slug-or-exact-name>", "parameters"?: { "<name>": "<runtime-value>" } }`
+- `dkg_query_catalog_save` input: `{ "context_graph_id": "<contextGraphId>", "name": "<display-name>", "sparql": "<read-only-sparql>", "description"?: "...", "result_column"?: "uri" }`
   Optional advanced fields: `sub_graph` (defaults to `__context_graph`),
-  `catalog_slug`, `catalog_name`, and `catalog_description`.
+  `catalog_slug`, `catalog_name`, `catalog_description`, `parameters`, `execution_view`.
 
 CLI fallback:
 
 ```bash
 dkg query-catalog list <context-graph>
-dkg query-catalog run <context-graph> <query-slug-or-exact-name>
+dkg query-catalog run <context-graph> <query-slug-or-exact-name> --param name=value [--param name=value]
 ```
 
 HTTP fallback:
 
-- `POST /api/profile/query-catalog/read`
-  Body: `{ "contextGraphId": "<contextGraphId>" }`
-  Returns bindings with `q`, `subGraph`, `catalog`, `name`, `description`,
-  `sparql`, `rank`, `catalogName`, `catalogDescription`, and `catalogRank`.
-- `POST /api/profile/query-catalog/write`
-  Body: `{ "contextGraphId": "<contextGraphId>", "quads": [...] }`
-  The daemon stores these triples in
-  `did:dkg:context-graph:<contextGraphId>/meta/query-catalog` regardless of
-  the incoming quad `graph` field. Prefer `dkg_query_catalog_save` for normal
-  user-requested saves. Raw writes append profile triples; prefer a new
-  saved-query URI for new saved queries and avoid overwriting unrelated
-  catalog/profile metadata.
+- `POST /api/profile/query-catalog/read`: body `{ "contextGraphId": "<contextGraphId>" }`;
+  returns saved-query and
+  catalog bindings, including `queryParameters` and `executionView`.
+- `POST /api/profile/query-catalog/write`: body
+  `{ "contextGraphId": "<contextGraphId>", "mode": "upsert", "quads": [...] }`.
+  Stores triples in `did:dkg:context-graph:<contextGraphId>/meta/query-catalog`
+  regardless of incoming `graph`. `upsert` atomically replaces each complete
+  query/catalog subject, preserves unrelated subjects, and is idempotent;
+  omitting `mode` retains legacy append-only `insert` behavior.
+  Prefer `dkg_query_catalog_save` for normal user-requested saves.
 
 Profile RDF shape for writes:
 
@@ -500,26 +521,29 @@ Profile RDF shape for writes:
 @prefix schema: <http://schema.org/> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-
 <urn:dkg:profile:PROJECT:catalog:CATALOG> rdf:type prof:QueryCatalog ;
   prof:forSubGraph "SUBGRAPH" ;
   prof:displayName "Catalog name" ;
   schema:description "Catalog description" ;
   prof:rank "50"^^xsd:integer .
-
 <urn:dkg:profile:PROJECT:query:QUERY> rdf:type prof:SavedQuery ;
   prof:forSubGraph "SUBGRAPH" ;
   prof:inCatalog <urn:dkg:profile:PROJECT:catalog:CATALOG> ;
   prof:displayName "Saved query name" ;
   schema:description "What this query returns" ;
-  prof:sparqlQuery "SELECT ?uri WHERE { ?uri ?p ?o } LIMIT 50" ;
+  prof:sparqlQuery "SELECT ?uri WHERE { ?uri <urn:configuration> {{literal:configurationId}} }" ;
+  prof:queryParameters "[{\"name\":\"configurationId\",\"type\":\"string\",\"label\":\"Configuration ID\"}]" ;
+  prof:executionView "verifiable-memory" ;
   prof:resultColumn "uri" ;
   prof:rank "100"^^xsd:integer .
 ```
 
 When composing saved SPARQL, keep it read-only (`SELECT`, `ASK`, `CONSTRUCT`,
 or `DESCRIBE`). Prefer returning a stable `?uri` column when the result should
-feed entity-list UI surfaces.
+feed entity-list UI surfaces. A `{{literal:name}}` placeholder is one complete
+SPARQL term and must match `prof:queryParameters`. Renderers escape `string`
+values and validate `integer`, `number`, `boolean`, and `iri`; do not quote
+placeholders or interpolate parameter values yourself.
 
 ### Operational constraints
 
@@ -527,7 +551,7 @@ Respect these when producing writes — they're enforced at the node and produce
 
 - **Reorganizing assertions.** There is no rename-assertion or move-between-sub-graphs endpoint. To reorganize, create a new assertion (with `subGraphName?` for a different partition), copy the triples over via `/wm/write`, then `/wm/discard` the original. A new assertion starts a fresh lifecycle record in `_meta`.
 - **Reserved subject IRIs.** Subjects matching `urn:dkg:file:*` or `urn:dkg:extraction:*` are reserved for internal file/extraction metadata and are rejected at write time. Use a different subject IRI.
-- **SWM gossip size cap (10 MB).** A single share (`/swm/share`) must fit in one 10 MB gossip message. Split larger assertions by root entity before sharing — use the `entities` parameter on `/swm/share` to share subsets.
+- **SWM gossip size cap (4 MiB).** A single share (`/swm/share`) must fit in one 4 MiB gossip message. Split larger assertions by root entity before sharing — use the `entities` parameter on `/swm/share` to share subsets.
 - **SWM entity ownership (first-writer-wins).** The first peer to write a root entity in SWM becomes its owner; other peers' promotes or writes against that same root entity are rejected with an ownership error. Partition work by agent-owned root entities to avoid conflicts.
 - **Blank nodes are auto-skolemized.** Any `_:b0`-style blank nodes you submit are deterministically rewritten to UUID-backed URIs before storage, so IDs stay stable across sync and on-chain anchoring. Prefer explicit IRIs in production data.
 
@@ -640,8 +664,9 @@ Implications:
   > programmatic clients that want explicit control.
 - `POST /api/context-graph/register` — register a previously-created local CG on-chain (two-phase creation). Body: `{ id, accessPolicy?, publishPolicy? }`, where `accessPolicy` controls public/private discovery and `publishPolicy` controls open/curated publishing. Use this to promote a free CG to an on-chain identity before publishing to Verifiable Memory. `revealOnChain` is deprecated and ignored on the V10 ContextGraphs path.
 - `POST /api/context-graph/rename` — rename a CG (human-readable name only; the ID is immutable). Body: `{ contextGraphId, name }` (`id` is accepted as an alias for `contextGraphId`; all `/api/context-graph/*` routes accept either).
-- `POST /api/context-graph/subscribe` — subscribe to a context graph. Body: `{ contextGraphId }` (or `{ id }`).
+- `POST /api/context-graph/subscribe` — subscribe to a context graph. Body: `{ contextGraphId }` (or `{ id }`). Pass `includeSharedMemory: true, forceCatchup: true` for a one-shot bounded repair of an existing graph whose persisted readiness may predate exact RFC-64 coverage. The equivalent CLI command is `dkg subscribe <context-graph> --repair`; omission keeps the already-ready fast path.
 - `POST /api/context-graph/reconcile` — node-admin maintenance endpoint that reconciles one subscribed/hosted context graph against its on-chain KC watermark. Body: `{ contextGraphId }` (or `{ id }`). A current watermark returns without VM-slice or peer catch-up work. Requires the node-level admin token when daemon auth is enabled; agent-scoped tokens are rejected.
+- `POST /api/context-graph/fetch-assets` — node-admin endpoint that fetches 1–10 exact RFC64 Knowledge Asset UALs. Body: `{ contextGraphId, uals, peerIds? }` (`id`, `assetUals`, and `remotePeerIds` are accepted aliases). The node proves that every UAL belongs to the named graph, fetches only unresolved assets, and reports each item as `already-present`, `materialized`, `fetched`, or `unresolved`. If `peerIds` is omitted, the node tries up to five suitable peers. This endpoint does not scan or replace the complete graph, start background reconciliation, or change the graph watermark. Requires the node-level admin token when daemon auth is enabled; agent-scoped tokens are rejected.
 - `GET /api/context-graph/list` — list known context graphs; tool wrappers default to the caller's created/joined graphs and can expose all known graphs with `scope: "all"`
 - `GET /api/context-graph/exists` — check if a context graph exists
 - `GET /api/sync/catchup-status?contextGraphId=...` — poll CG sync progress after subscribing
@@ -786,20 +811,42 @@ dkg publisher publish-async <context-graph-id> <name> --publisher-node-identity-
 dkg publisher jobs
 dkg publisher job <job-id>
 dkg publisher stats
+dkg publisher retry     # prints all three counts of the pass (see the retry table below)
 ```
 
 Async publisher wallets need native gas plus PCA agent registration or TRAC for direct spend. They do not need on-chain identities/profiles to claim VM publish jobs. Identity `0` is valid no-attribution mode; a non-zero identity is optional publisher-node attribution only. Separate publisher wallets are not automatically attached to the node's Core identity; use `POST /api/operational-wallets` only when attribution to that node identity is desired. See `docs/use-dkg/async-publisher-wallets.md`.
 
 | Method | Route | Purpose |
 |---|---|---|
-| `POST` | `/api/knowledge-assets/{name}/vm/publish-async` | Enqueue VM publish for a named KA already shared to SWM. Body: `{ contextGraphId, options? }`; `options.publisherNodeIdentityIdOverride: "0"` forces no-attribution. Returns `202 { jobId, status: "accepted" }`. |
+| `POST` | `/api/knowledge-assets/{name}/vm/publish-async` | Enqueue VM publish for a named KA already shared to SWM. Body: `{ contextGraphId, options? }`; `options.publisherNodeIdentityIdOverride: "0"` forces no-attribution. Returns `202 { jobId, status: "accepted" }`. Re-submitting the same request resumes the EXISTING job for that KA; `503 { code: "LIFT_JOB_PENDING_CHAIN_PROOF", retryable, existingJobId }` means that job failed after it may have submitted a transaction and is held. `retryable` is **per-job** now: **true** means an automatic lane exists that can move THIS job — chain recovery re-checks it every recovery tick, and either canonical recognition (the transaction actually landed; applies to creates AND updates) or the create-only proven-absence release (create with a recorded nonce and pinned KA id) will settle it, so re-submitting converges without an operator. For an UPDATE, true is conditional: recognition converges only if its transaction actually mined — an update whose transaction is gone has no absence release (re-applying a stale root over a later third-party update is the hazard) and keeps 503ing until you act. **false** means the record has no automatic exit at all (a legacy job with no recorded nonce, or one whose recognition question cannot be formed): retrying will 503 forever. Either way it is not a deadline — the hold never expires — and the exit you control is the same: check that transaction yourself and clear that job with `POST /api/publisher/clear-job`. Do **not** re-share or publish under a new name to work around it (that is how you double-publish). |
 | `GET`  | `/api/publisher/jobs?status=...` | List jobs, optionally filtered by status. |
-| `GET`  | `/api/publisher/job?id=...` | Fetch one job's status. |
-| `GET`  | `/api/publisher/job-payload?id=...` | Fetch the prepared payload for internal raw LIFT jobs. Named lifecycle publish jobs return no raw payload. |
+| `GET`  | `/api/publisher/job?id=...` | Fetch one job's status: `{ job, retryState }` (see `retryState` below). |
+| `GET`  | `/api/publisher/job-payload?id=...` | Fetch the prepared payload for internal raw LIFT jobs, as `{ job, payload, retryState }`. Named lifecycle publish jobs return no raw payload. |
 | `GET`  | `/api/publisher/stats` | Queue statistics (running / pending / completed / failed). |
 | `POST` | `/api/publisher/cancel` | Cancel a job. Body: `{ jobId }`. |
-| `POST` | `/api/publisher/retry` | Retry a failed job. Body: `{ jobId }`. |
-| `POST` | `/api/publisher/clear` | Clear completed/failed jobs. |
+| `POST` | `/api/publisher/retry` | Reaccept every failed job that is safe to re-run. Body: `{ status: "failed" }`. Returns `200 { retried, blockedPendingRecovery, skipped }` — three counts that partition the failed jobs: reaccepted, left failed because a transaction may exist (awaiting chain proof or owned by recovery), and left failed with nothing to retry (terminal failure or spent retry budget). |
+| `POST` | `/api/publisher/clear` | Clear completed/failed jobs in BULK (`dkg publisher clear <status>`). Safe by default: it skips a failed job that is still held for chain proof and still owns its KA's lifecycle — deleting that record is what would let the next re-submit publish the same KA a second time. |
+| `POST` | `/api/publisher/clear-job` | Clear ONE terminal job by id: `{ jobId }` → `{ outcome: "cleared" \| "already_absent" }`. The deliberate override for a job bulk clear skips — you name the job and take the decision. |
+
+#### Retry behaviour and its knobs (`config.publisher`)
+
+A failed job is retried by the publisher itself only when the failure is one the publisher classifies as safe to re-run — today `quorum_unmet` (the ACK quorum was not reached) and `workspace_unavailable` (the shared-memory head the job reads was missing or corrupt when the job was claimed). Both are established **before** any transaction is signed, so a re-run cannot double-publish. Failures that may have sent a transaction (`rpc_unavailable`, `nonce_conflict`, the timeout codes) are never retried automatically, and whether an operator can re-run one by hand depends on the evidence the job persisted — see the evidence rule below.
+
+An eligible job gets a `nextRetryAt` and is re-accepted with the **same `jobId`** when it comes due — the queue never mints a replacement job for a retry.
+
+No path — automatic, `POST /api/publisher/retry`, or re-submit — re-runs a job that persisted a transaction hash or failed from `included`: whatever its failure code says, that job may have a transaction on chain, so it stays `failed` and is counted as `blockedPendingRecovery` (a re-submit gets the `503 LIFT_JOB_PENDING_CHAIN_PROOF` above). This holds even when the failure is TERMINAL (`confirmation_mismatch`, an unreconcilable recovery), and it holds no matter what happened to that KA afterwards: a later job for the same KA — even one that finalized — is not evidence about the held job's transaction, so the held job keeps its KA's lifecycle and every re-submit keeps getting the 503 until you resolve it. The exits are chain recovery establishing the transaction's fate, or `POST /api/publisher/clear-job` on that exact jobId once you have checked it yourself. Chain recovery now does this for named-KA (`vm/publish-async`) jobs too, not only raw lift ones: every recovery tick asks the chain about each held job and releases it with no operator action — finalizing it if the publish landed, or putting it back on the queue under the same jobId if the transaction is proven to have never landed. "Proven" is strict, and deliberately so: a node simply not finding the transaction is **not** enough, because a broadcast whose response timed out can still be sitting in a mempool that endpoint cannot see and be mined a minute later. The release needs the transaction to be missing, its nonce — recorded on the job when it was signed — to be spent at a **finalized** block by something else (so it can never mine), **and** the knowledge-asset id the job would mint to be provably absent on chain — because a replacement transaction on that same nonce slot could have performed the very same publish, and the nonce alone cannot tell. A job whose record predates that nonce, one that would allocate a fresh id on re-run (an unsealed raw-lift job — there is nothing to check, so a duplicate could not be detected), or one that runs against a deployment with no finalized-block reads, therefore stays held until you clear it by id. There is also deliberately **no** timeout on the wait: a hold that expired on its own would mean resending with no proof, which is the double publish this rule exists to prevent. The exception is a failure that PROVES the transaction had no effect — `tx_reverted` (it reverted on chain) and `insufficient_funds` (refused before entering the mempool) — which supersedes normally, so topping the wallet up and re-submitting works. Read `retryState` on `GET /api/publisher/job` for the per-job answer: `autoRetryEligible` tells you whether this node will retry the job by itself — it requires a retry to be actually SCHEDULED, so a job that failed while `autoRetryEnabled` was off reads `false` even after you switch the lane back on (re-enabling does not schedule past failures; `POST /api/publisher/retry` or a re-submit re-arms them), and `waitingReason` — `backoff` (scheduled), `pending_chain_proof` (a transaction may exist), `recovery` (owned by the chain-recovery loop), `operator` (nothing automatic will move it), `exhausted` (budget spent) — tells you what it is waiting for. `waitingReason` is ABSENT when the job is not waiting on a retry at all: it is still running, finalized, or failed terminally with nothing left to re-arm it. Both fields are derived on read, never stored. A job in `pending_chain_proof` is also skipped by bulk clear, so cleaning up failed jobs cannot silently free its KA for a fresh publish; clear it by id only once you know its transaction's fate. On a node upgraded from a version before this rule, a KA that already has a newer job can still be held by such a predecessor — the same by-id clear releases it.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `autoRetryEnabled` | `true` | Kill-switch for the publisher's own retry lane. `false` collapses it to manual-only: nothing new is scheduled and nothing already scheduled is re-accepted. |
+| `retryBackoffBaseMs` | `5000` | Delay before the first retry; doubles per attempt. |
+| `retryBackoffMaxMs` | `60000` | Hard ceiling on the delay, jitter included. |
+| `retryJitterRatio` | `0.2` | Fraction of the delay the jitter may add or subtract (`0` disables jitter, must stay below `1`). Spreads retries so a fleet doesn't stampede a recovering peer. |
+| `maxRetries` | `10` | Retry **budget** per job — see below. |
+
+`maxRetries` is one counter shared by the automatic retries and by every manual `POST /api/publisher/retry` / re-submit reaccept, snapshot when the job is admitted (changing the config does not re-arm jobs already in the queue). With the defaults, a job's automatic recovery window is 10 attempts over roughly 7 minutes; after that it stays `failed` (`waitingReason: "exhausted"`) until an operator intervenes — except that re-submitting the identical `vm/publish-async` request is a FRESH MANDATE: if the job carries no transaction evidence it is reaccepted on the same `jobId` with the budget re-armed to one full window, which is why an exhausted job never becomes a second job for the same KA.
+
+Two operational notes: turning `autoRetryEnabled` off **strands** jobs that were already scheduled (their `nextRetryAt` passes without firing) — they stay retryable by hand, and turning it back on releases them, at most five per claim; and `retryBackoffBaseMs`/`retryBackoffMaxMs` may be set independently — the daemon validates the **effective** pair (your value combined with the built-in default for the unset one) at startup, so a lone `retryBackoffBaseMs` above the default 60s ceiling is rejected with a message naming both sides. The four retry knobs survive `dkg publisher enable`, which rewrites only the keys it owns (`enabled`, `pollIntervalMs`, `errorBackoffMs`, `maxRetries`).
 
 ### Async promote queue (WM → SWM)
 
@@ -830,7 +877,7 @@ Failure classifications you'll see in `attempt.lastError.classification`:
 | Classification | Retry? | Typical cause | Operator action |
 |---|---|---|---|
 | `transient` | yes (until `maxRetries=5` reached) | `fetch failed` / `ECONNRESET` / `timeout` | Wait — the worker will pick it up after backoff. |
-| `cap_exceeded` | no | `Promoted assertion too large for gossip` (10 MB) or `Request body too large` (256 KB) | Re-enqueue with a smaller `entities` slice — the queue can't subdivide on its own. |
+| `cap_exceeded` | no | `Promoted assertion too large for gossip` (4 MiB) or `Request body too large` (256 KB) | Re-enqueue with a smaller `entities` slice — the queue can't subdivide on its own. |
 | `fatal` | no | Bad request, missing assertion, etc. | Inspect the error message, fix the cause, then `POST /api/knowledge-assets/swm/share-jobs/{jobId}/recover`. |
 
 ### TRAC auto-approve policy (V10 publish + update)
@@ -850,12 +897,16 @@ chain:
   type: evm
   rpcUrl: https://base.llamarpc.com
   hubAddress: '0x...'
+  finalityConfirmations: 1          # operator-selected; 1 has no successor-block reorg buffer
   approvalPolicy:
     mode: per-publish                # 'per-publish' | 'replenishing' | 'unlimited'
     # `replenishing` mode only:
     targetAllowance: '1000000000000000000000'   # decimal wei-TRAC string (1000 TRAC = 10^21)
     refillBelowFraction: 0.1                     # refill when current < target × this (default 10%)
 ```
+
+`finalityConfirmations` is an operator-selected positive integer. It controls when a mined publish receipt becomes terminal and when its publisher wallet may take another queued job. Standard EVM confirmation counting applies: `1` accepts the receipt's own block after verifying that its hash is canonical; `2` waits for one successor, and so on. The default is `1`.
+Lower values reduce publish latency, but they increase reorganization risk. A value of `1` gives no successor-block buffer: a chain reorganization can reverse a receipt after the node has accepted it and released the wallet. Choose a larger value when the network can have reorganizations or when reversal risk is more important than publish speed. The node uses the configured value for receipt finality and recovery proof snapshots; it does not replace the operator's value with the protocol's separate finalized-block tag.
 
 `targetAllowance` is a string because YAML/JSON can't carry bigints natively — the daemon parses it into a bigint at startup, fails fast on garbage input. `refillBelowFraction` clamps to `[0, 1]`; a value of `1` means "refill on every publish" (defeats the policy) and `0` means "never refill until the publish floor (1 wei-TRAC) is breached" (which on a zero-cost CG would mean approve once then never again).
 

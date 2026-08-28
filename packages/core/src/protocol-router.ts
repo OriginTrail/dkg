@@ -29,6 +29,9 @@ export function isRecoverableSendError(err: unknown): boolean {
     msg.includes('stream returned in closed state') ||
     msg.includes('econnreset') ||
     msg.includes('etimedout') ||
+    msg.includes('send timeout') ||
+    msg.includes('operation timed out') ||
+    msg.includes('operation was aborted due to timeout') ||
     msg.includes('econnrefused') ||
     msg.includes('epipe') ||
     msg.includes('aborted') ||
@@ -155,6 +158,34 @@ export interface ProtocolRouterOptions {
     direction: 'inbound' | 'outbound',
     options?: AdmissionCheckOptions,
   ) => boolean | Promise<boolean>;
+  /**
+   * Optional synchronous, side-effect-free "already known to be rejected" check,
+   * consulted on inbound BEFORE the request body is read.
+   *
+   * This exists because {@link ProtocolRouterOptions.isPeerAccepted} is NOT a
+   * cheap local predicate in production: for an unclassified peer it runs an
+   * admission probe, i.e. outbound network I/O back toward the sender. Running
+   * that before draining the inbound stream inverts the I/O order — the receiver
+   * would dial a peer that is itself still blocked writing to us — which
+   * deterministically stalls announce-style request/response exchanges against a
+   * freshly restarted peer whose admission cache is empty.
+   *
+   * So the pre-read gate is deliberately limited to verdicts already cached:
+   * peers we have positively classified as rejected are dropped without
+   * buffering their body, and everything else keeps the existing order (read the
+   * bounded body, then run the full admission check). Implementations MUST NOT
+   * perform I/O or trigger a probe here, and MUST return false when unsure.
+   *
+   * Covers BOTH inbound transports: the one-shot `register()` path and pooled
+   * streams (`enablePooling` installs it as the pool's stream-accept gate,
+   * keyed by the logical protocol id so `admissionExemptProtocols` applies).
+   *
+   * This hook and `isPeerAccepted` are two phases of ONE admission policy and
+   * must consult the same underlying state. Do not wire them from different
+   * sources — use `createNetworkAdmissionRouterPolicy` (dkg-agent) or an
+   * equivalent single constructor that derives both from one coordinator.
+   */
+  isPeerKnownRejected?: (peerId: string, protocolId: string) => boolean;
   admissionExemptProtocols?: Iterable<string>;
 }
 
@@ -167,6 +198,19 @@ export interface ProtocolRegistrationOptions {
   maxReadBytes?: number;
 }
 
+/**
+ * The pooling options a ProtocolRouter caller may supply. `rejectInboundStream`
+ * is omitted: the router owns the pooled pre-read admission gate (installed in
+ * `enablePooling`, keyed by the logical protocol id so admission exemptions
+ * apply) and accepting a caller value it would have to discard makes the API
+ * lie. Construct a `MessageStreamPool` directly to configure the gate yourself.
+ */
+export type ProtocolRouterPoolingOptions = Omit<
+  Partial<MessageStreamPoolOptions>,
+  'rejectInboundStream'
+>;
+
+
 export class QuietRetryableHandlerError extends Error {
   constructor(message: string) {
     super(message);
@@ -178,6 +222,7 @@ export class ProtocolRouter {
   private readonly node: DKGNode;
   private readonly peerResolver?: PeerResolver;
   private readonly isPeerAccepted?: ProtocolRouterOptions['isPeerAccepted'];
+  private readonly isPeerKnownRejected?: ProtocolRouterOptions['isPeerKnownRejected'];
   private readonly admissionExemptProtocols: ReadonlySet<string>;
   private handlers = new Map<string, DKGStreamHandler>();
   /**
@@ -223,8 +268,32 @@ export class ProtocolRouter {
     this.node = node;
     this.peerResolver = options?.peerResolver;
     this.isPeerAccepted = options?.isPeerAccepted;
+    this.isPeerKnownRejected = options?.isPeerKnownRejected;
     this.admissionExemptProtocols = new Set(options?.admissionExemptProtocols ?? []);
     this.maxReadBytes = options?.maxReadBytes ?? DEFAULT_MAX_READ_BYTES;
+  }
+
+  /**
+   * Pre-read inbound gate predicate: cached verdict only, never probes, and
+   * exempt protocols are never gated. Shared by the one-shot inbound path
+   * (throwing wrapper below) and the pooled stream-accept gate installed by
+   * `enablePooling`.
+   */
+  private isKnownRejectedInboundPeer(peerId: string, protocolId: string): boolean {
+    if (!this.isPeerKnownRejected || this.admissionExemptProtocols.has(protocolId)) return false;
+    return this.isPeerKnownRejected(peerId, protocolId);
+  }
+
+  /**
+   * Pre-read inbound gate for the one-shot path. Throws the same shape as
+   * `requirePeerAccepted` so the existing catch-path handling (abort + quiet
+   * logging) is unchanged.
+   */
+  private rejectKnownRejectedInboundPeer(peerId: string, protocolId: string): void {
+    if (!this.isKnownRejectedInboundPeer(peerId, protocolId)) return;
+    throw new Error(
+      `peer ${peerId.slice(-8)} is not admitted for inbound protocol ${protocolId}`,
+    );
   }
 
   private async requirePeerAccepted(
@@ -267,7 +336,7 @@ export class ProtocolRouter {
    */
   enablePooling(
     logicalProtocolId: string,
-    options: Partial<MessageStreamPoolOptions> = {},
+    options: ProtocolRouterPoolingOptions = {},
   ): void {
     const existing = this.pooledByLogical.get(logicalProtocolId);
     if (existing) {
@@ -327,6 +396,12 @@ export class ProtocolRouter {
         protocolId: wireProtocolId,
         maxFrameBytes: options.maxFrameBytes ?? this.maxReadBytes,
         primePeer,
+        // Router-owned; `ProtocolRouterPoolingOptions` omits this field so a
+        // caller cannot supply a competing value. Keyed by the LOGICAL
+        // protocol id (production admission exemptions are logical ids) and
+        // consulting the same cached-verdict predicate as the one-shot path.
+        rejectInboundStream: (peerIdStr: string) =>
+          this.isKnownRejectedInboundPeer(peerIdStr, logicalProtocolId),
       },
     );
     this.pooledByLogical.set(logicalProtocolId, {
@@ -352,40 +427,18 @@ export class ProtocolRouter {
       if (!handler) {
         throw new Error(`no application handler for ${logicalProtocolId}`);
       }
-      // Wrap into the exact same `{ toString, toBytes }` shape the
-      // one-shot register() path passes to application handlers
-      // (see `register()` ~30 lines below). The pool now threads
-      // the REAL `connection.remotePeer` through, so on production
-      // traffic this exposes `.toMultihash().bytes` just like
-      // one-shot. Tests can pass minimal peer-like objects with
-      // only `.toString()` and the wrap still works (toBytes()
-      // surfaces a typed error rather than silently corrupting).
-      // Codex PR #560 round-3.
-      const remote = peerId as {
-        toString: () => string;
-        toMultihash?: () => { bytes: Uint8Array };
-        toBytes?: () => Uint8Array;
-      };
-      const wrappedPeerId = {
-        toString: () => remote.toString(),
-        toBytes: () => {
-          if (typeof remote.toMultihash === 'function') {
-            return remote.toMultihash().bytes;
-          }
-          if (typeof remote.toBytes === 'function') {
-            return remote.toBytes();
-          }
-          throw new Error('peerId.toBytes not available on pooled handler');
-        },
-      };
+      // `peerId` is already the canonical `{ toString, toBytes }` model — the
+      // pool normalizes libp2p's `connection.remotePeer` exactly once at
+      // stream accept (`normalizePooledPeerId`), the same shape the one-shot
+      // register() path provides. No shape re-discovery here.
       const handlerSignalScope = composeAbortSignalsScoped(options?.signal, this.node.stopSignal);
       const handlerSignal = handlerSignalScope.signal;
       try {
         if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
-        await this.requirePeerAccepted(remote.toString(), logicalProtocolId, 'inbound', {
+        await this.requirePeerAccepted(peerId.toString(), logicalProtocolId, 'inbound', {
           signal: handlerSignal,
         });
-        const responseData = await handler(requestData, wrappedPeerId, { signal: handlerSignal });
+        const responseData = await handler(requestData, peerId, { signal: handlerSignal });
         if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
         return responseData;
       } finally {
@@ -463,6 +516,12 @@ export class ProtocolRouter {
       const handlerSignal = handlerSignalScope.signal;
       try {
         const remotePeer = connection.remotePeer.toString();
+        // Drop peers we have ALREADY classified as rejected before buffering
+        // their body. Deliberately not the full `requirePeerAccepted` here: that
+        // probes unclassified peers over the network, and probing outbound while
+        // holding an unread inbound stream inverts the I/O order against a
+        // sender that is still writing to us. See `isPeerKnownRejected`.
+        this.rejectKnownRejectedInboundPeer(remotePeer, protocolId);
         const requestData = await readAllWithSignal(stream, limit, handlerSignal);
         await this.requirePeerAccepted(remotePeer, protocolId, 'inbound', {
           signal: handlerSignal,
@@ -638,7 +697,37 @@ export class ProtocolRouter {
     // is exhausted.
     const overlay = this.pooledByLogical.get(protocolId);
     const memoizedVariant = this.peerWireVariantFor(peerIdStr, protocolId);
-    if (overlay && memoizedVariant !== 'one-shot') {
+    // Relay-only gate for the pooled wire. The pooled variant
+    // multiplexes every request for a peer onto ONE long-lived
+    // substream; over a circuit-relay connection that substream's
+    // life is bounded by the relay's reservation churn (~300 s), and
+    // one request timeout aborts the shared stream — rejecting every
+    // in-flight and queued request at once. Observed on a 10.0.12
+    // Base-mainnet edge node (2026-08-06): sync to a NAT-only peer
+    // reachable exclusively via circuit relays died 4/4 with "pooled
+    // stream reset: request aborted/timeout" while one-shot streams
+    // to the same peer succeeded immediately. So: use the pool only
+    // when the peer has at least one DIRECT connection. Re-evaluated
+    // per send — a later direct connection (e.g. DCUtR upgrade)
+    // re-enables the pool with no memo to clear, and a pool stream
+    // already held for a now-relay-only peer is retired once
+    // quiescent instead of being reused. Cold peers (no connections
+    // at all) keep the pooled path: there is no relayed connection
+    // to observe yet and the pool's own dial may come up direct.
+    // Requester-side selection only — responders that don't
+    // advertise the pooled wire already fall back via
+    // multistream-select.
+    let usePooledWire = overlay !== undefined && memoizedVariant !== 'one-shot';
+    if (usePooledWire && overlay && this.peerHasOnlyRelayedConnections(peerIdStr)) {
+      usePooledWire = false;
+      // Fire-and-forget: retiring the held stream must not delay or
+      // fail this send; if the stream is still busy the retire is a
+      // no-op and a later send's pass lands it once drained.
+      overlay.pool
+        .closePeerIfIdle(peerIdStr, 'relay-only peer: pooled wire bypassed')
+        .catch(() => undefined);
+    }
+    if (overlay && usePooledWire) {
       try {
         const remainingForPool = Math.max(0, timeoutMs - (Date.now() - overallStartedAt));
         const response = await overlay.pool.send(peerIdStr, data, {
@@ -1024,6 +1113,80 @@ export class ProtocolRouter {
     }
     throw lastErr;
   }
+
+  /**
+   * True when the peer currently has at least one OPEN connection and
+   * every one of them rides a circuit relay. Three shapes:
+   *
+   *   * a direct connection is present → false (pooling is safe);
+   *   * open connections exist, all relayed → true;
+   *   * no open connections at all → false — nothing observed yet, so
+   *     the caller keeps its existing behavior rather than penalizing
+   *     a cold peer for connections it doesn't have.
+   *
+   * Walks the RAW connection table and filters by `remotePeer`
+   * ourselves — same Window D rationale as the one-shot fast path
+   * (libp2p's peerId-keyed lookup can return `[]` while the raw walk
+   * shows live matching connections). Matching is by peerId string:
+   * the router, the pool, and libp2p's `PeerId.toString()` all use
+   * the same canonical text form as the peer key.
+   */
+  private peerHasOnlyRelayedConnections(peerIdStr: string): boolean {
+    let all: ReadonlyArray<ObservedConnection>;
+    try {
+      all = this.node.libp2p.getConnections() as ReadonlyArray<ObservedConnection>;
+    } catch {
+      return false;
+    }
+    let sawOpenRelayed = false;
+    for (const conn of all) {
+      let matches = false;
+      try {
+        matches = conn.remotePeer?.toString() === peerIdStr;
+      } catch {
+        matches = false;
+      }
+      if (!matches) continue;
+      if (conn.status && conn.status !== 'open') continue;
+      if (!isRelayedConnection(conn)) return false;
+      sawOpenRelayed = true;
+    }
+    return sawOpenRelayed;
+  }
+}
+
+/**
+ * Structural subset of a libp2p `Connection` used for transport-path
+ * classification. Kept minimal (and every access defensive) for the
+ * same reason as {@link ReusableConnection}: unit tests pass fakes
+ * without re-exporting libp2p internals.
+ */
+interface ObservedConnection {
+  status?: string;
+  limits?: unknown;
+  remotePeer?: { toString: () => string };
+  remoteAddr?: { toString: () => string };
+}
+
+/**
+ * True when the connection reaches the peer via a circuit relay.
+ * `remoteAddr` containing the `/p2p-circuit` component is the
+ * authoritative signal — a direct connection's remote address never
+ * carries it. Fall back to libp2p's limited-connection marker when
+ * the address is unavailable (limited ⇒ circuit-relay-v2 in our
+ * transport set); absent both signals, classify as direct so the
+ * caller defaults to the status quo.
+ */
+function isRelayedConnection(conn: ObservedConnection): boolean {
+  try {
+    const addr = conn.remoteAddr?.toString();
+    if (typeof addr === 'string' && addr.length > 0) {
+      return addr.includes('/p2p-circuit');
+    }
+  } catch {
+    // fall through to the limits marker
+  }
+  return Boolean(conn.limits);
 }
 
 /**

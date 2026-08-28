@@ -1,4 +1,9 @@
-import { NO_FUNDED_PUBLISHER_WALLET_CODE, messageIndicatesNoFundedPublisherWallet } from '@origintrail-official/dkg-core';
+import {
+  NO_FUNDED_PUBLISHER_WALLET_CODE,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  messageIndicatesNoFundedPublisherWallet,
+  messageIndicatesPublishAuthorNotCustodial,
+} from '@origintrail-official/dkg-core';
 import type { PublishResult } from './publisher.js';
 import { isQuorumUnmetError } from './ack-errors.js';
 import {
@@ -120,11 +125,64 @@ export function mapPublishResultToLiftJobSuccess(params: {
   }
 }
 
+/** Throw-safe facts read off an arbitrary thrown publish error. Both the failure-code mapper
+ *  and the pre-acceptance classifier read the SAME low-level extraction here (shared
+ *  mechanics), while each keeps its OWN classification policy. Inspecting a thrown value can
+ *  fail — `String()` on a null-prototype object, or a throwing `.code` accessor / Proxy — so
+ *  every read is guarded and falls back to a safe default (`undefined` code, `''` message).
+ *  A failure to inspect must never throw out of a failure-recording or recovery-decision path. */
+function readPublishErrorFacts(error: unknown): { code: unknown; message: string; lowerMessage: string } {
+  let code: unknown;
+  try {
+    code = (error as { code?: unknown } | null | undefined)?.code;
+  } catch {
+    code = undefined;
+  }
+  let message = '';
+  try {
+    // Prefer a string `.message` even on a NON-Error throw (cross-realm errors, serialized
+    // errors from a worker, some RPC clients): `String(error)` on such a value yields
+    // '[object Object]', which classifies as nothing. `isKnowledgeAssetPublishPreconditionFailure`
+    // read `String(err?.message ?? err)` before it shared this extractor, so keeping the
+    // `.message` preference is parity with the caller it absorbed, not new behaviour.
+    const own = (error as { message?: unknown } | null | undefined)?.message;
+    const raw = error instanceof Error
+      ? error.message
+      : typeof own === 'string' ? own : String(error);
+    if (typeof raw === 'string') message = raw;
+  } catch {
+    message = '';
+  }
+  return { code, message, lowerMessage: message.toLowerCase() };
+}
+
+/**
+ * GH#1786 — is this a PERMANENT author-capability refusal? The node cannot re-sign the
+ * selected author's `UpdateAuthorAttestation` (no custodial key on file, and the author is
+ * not the publisher EOA).
+ *
+ * One canonical predicate because THREE independent decisions key off it, and a copy that
+ * drifted would silently change the outcome depending on where the error surfaced:
+ *   1. the failed-from STATE (`isKnowledgeAssetPublishPreconditionFailure`) — this is raised
+ *      before any send, so the job must fail from 'validated', not 'broadcast';
+ *   2. the failure CODE on that validated path (`recordExecutionFailure`), whose keyword
+ *      chain would otherwise reach `canonicalization_failed`;
+ *   3. the failure CODE on the broadcast path ({@link mapPublishExceptionToLiftJobFailure}),
+ *      whose default is the RETRYABLE `rpc_unavailable` — the forever-retry trap.
+ *
+ * Reads through the throw-safe extractor, so a null-prototype throw or a throwing `.code`
+ * accessor cannot break a failure-recording path.
+ */
+export function isPermanentAuthorCapabilityFailure(error: unknown): boolean {
+  const { code, lowerMessage } = readPublishErrorFacts(error);
+  return code === PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
+    || messageIndicatesPublishAuthorNotCustodial(lowerMessage);
+}
+
 export function mapPublishExceptionToLiftJobFailure(
   input: AsyncLiftPublishFailureInput,
 ): LiftJobFailureMetadata {
-  const message = input.error instanceof Error ? input.error.message : String(input.error);
-  const lower = message.toLowerCase();
+  const { code: errorCode, message, lowerMessage: lower } = readPublishErrorFacts(input.error);
 
   // The funded-wallet-selection error (dkg-chain `InsufficientPublisherFundsError`,
   // code `NO_FUNDED_PUBLISHER_WALLET`) carries a friendly "no operational wallet
@@ -137,10 +195,21 @@ export function mapPublishExceptionToLiftJobFailure(
   // same forever-retry trap #1013/#1121 fixed). `insufficient_funds` is only
   // valid from the 'broadcast' state, so only force it there — funded selection
   // is a broadcast-phase concern; any other state falls back to the classifier.
-  const errorCode = (input.error as { code?: unknown } | null | undefined)?.code;
+  // GH#1786 — the same trap, one class over. The node cannot re-sign this author's
+  // UpdateAuthorAttestation (no custodial key on file, and the author is not the publisher
+  // EOA). That is PERMANENT, so without recognising it here it falls through to the
+  // retryable `rpc_unavailable` default and the queue keeps resetting a job that can never
+  // finalize. Classified as an AUTHORITY failure rather than a transport one; only forced
+  // from 'broadcast', which is where the executor raises it — mid-publish, before any
+  // transaction is sent. Message fallback mirrors the funded-wallet handling above, for
+  // re-wrapped errors that lost `.code` — via the SHARED core matcher, so the agent's
+  // message formatter and this classifier cannot drift apart.
+  const isAuthorNotCustodial = isPermanentAuthorCapabilityFailure(input.error);
   const isNoFundedWallet = errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE
     || messageIndicatesNoFundedPublisherWallet(lower);
-  const code = isNoFundedWallet && input.failedFromState === 'broadcast'
+  const code = isAuthorNotCustodial && input.failedFromState === 'broadcast'
+    ? 'authority_forbidden'
+    : isNoFundedWallet && input.failedFromState === 'broadcast'
     ? 'insufficient_funds'
     : input.failedFromState === 'broadcast' && (
       isQuorumUnmetError(input.error) || lower.includes('quorumunmeterror')
@@ -158,6 +227,49 @@ export function mapPublishExceptionToLiftJobFailure(
     revertReasonRef: input.revertReasonRef,
     timeout: isTimeoutLiftJobFailure(code) ? input.timeout : undefined,
   });
+}
+
+/**
+ * #1867 — a DEFINITIVE pre-acceptance send failure: an error the chain node returns while
+ * REJECTING the transaction before it is admitted to the mempool, so the tx provably never
+ * propagated and can never be mined. Only such errors may short-circuit the write-ahead
+ * `'broadcast'` recovery early-return into an immediate terminal failure. Every ambiguous
+ * error — RPC timeouts, `replacement transaction underpriced`, nonce races, `already known`,
+ * and reverts (post-mempool by definition) — MUST stay on the recovery track, or the #1851
+ * write-ahead durability guarantee regresses and a double-submit becomes possible.
+ *
+ * CONSERVATIVE WHITELIST — only `insufficient funds` (plus the no-funded-wallet selection
+ * failure, which is thrown pre-signing so no tx exists at all). A node rejects a tx it cannot
+ * afford (gas * price + value) at `eth_sendRawTransaction` submission, before the tx enters
+ * the mempool; this reject is never emitted after admission. `nonce` and `tx reverted` are
+ * deliberately EXCLUDED: a nonce error can follow a competing tx already propagating, and a
+ * revert means the tx was mined. Widen only with a per-error pre-mempool proof.
+ *
+ * REVERTS ARE NEVER PRE-ACCEPTANCE: a `revert`/`reverted` message means the tx was mined
+ * (post-mempool), so it is excluded even when its (caller-controlled) revert string contains
+ * "insufficient funds". This keeps ALL reverts uniformly on the recovery track — consistent
+ * with the plain-revert handling elsewhere — and confines the whitelist to node-level
+ * pre-send rejects. go-ethereum's balance pre-check (`insufficient funds for gas * price +
+ * value`) contains no "revert", so the narrowing loses no genuine pre-acceptance case.
+ *
+ * DECISION vs MECHANICS: the throw-safe extraction of code+message is shared with
+ * `mapPublishExceptionToLiftJobFailure` (`readPublishErrorFacts`), but this predicate's
+ * classification policy is deliberately SEPARATE and narrower — it must never track the
+ * mapper's broader signals, or a future mapper code could silently widen this whitelist and
+ * re-open the #1851 double-submit hole. The invariant that every whitelisted error maps to a
+ * terminal `insufficient_funds` from 'broadcast' is pinned by test, not by shared code.
+ *
+ * THROW-SAFE via `readPublishErrorFacts`: this runs on the double-submit safety path — if it
+ * threw, the caller would never reach the ambiguous-recovery branch and the error would
+ * strand off recovery. An unstringifiable value / throwing `.code` accessor / Proxy yields
+ * empty facts → classified non-definitive → stays on recovery.
+ */
+export function isDefinitivePreAcceptanceSendFailure(error: unknown): boolean {
+  const { code, lowerMessage } = readPublishErrorFacts(error);
+  if (code === NO_FUNDED_PUBLISHER_WALLET_CODE) return true;
+  if (messageIndicatesNoFundedPublisherWallet(lowerMessage)) return true;
+  if (lowerMessage.includes('revert')) return false;
+  return lowerMessage.includes('insufficient funds');
 }
 
 function classifyPublishFailureCode(

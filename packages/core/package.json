@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-core",
-  "version": "10.0.8",
+  "version": "10.0.14",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,6 +14,21 @@
       "types": "./dist/project-ontology.d.ts",
       "import": "./dist/project-ontology.js",
       "default": "./dist/project-ontology.js"
+    },
+    "./query-catalog-parameters": {
+      "types": "./dist/query-catalog-parameters.d.ts",
+      "import": "./dist/query-catalog-parameters.js",
+      "default": "./dist/query-catalog-parameters.js"
+    },
+    "./query-catalog": {
+      "types": "./dist/query-catalog.d.ts",
+      "import": "./dist/query-catalog.js",
+      "default": "./dist/query-catalog.js"
+    },
+    "./query-result": {
+      "types": "./dist/query-result.d.ts",
+      "import": "./dist/query-result.js",
+      "default": "./dist/query-result.js"
     },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"

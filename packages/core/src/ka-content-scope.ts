@@ -4,6 +4,28 @@ import {
 } from './constants.js';
 import type { MemoryLayer } from './memory-model.js';
 import { assertSafeIri, isSafeIri } from './sparql-safe.js';
+import {
+  assertCanonicalEvmAddress,
+  type EvmAddressV1,
+} from './sync-wire-scalars.js';
+import {
+  MAX_NETWORK_ID_BYTES_V1,
+  assertNetworkIdV1,
+  type NetworkIdV1,
+} from './sync-wire-identifiers.js';
+
+declare const CANONICAL_DETERMINISTIC_UAL_V1_BRAND: unique symbol;
+declare const CANONICAL_KNOWLEDGE_ASSET_NUMBER_V1_BRAND: unique symbol;
+
+/** A deterministic KA UAL that has already passed the canonical wire check. */
+export type CanonicalDeterministicUalV1 = string & {
+  readonly [CANONICAL_DETERMINISTIC_UAL_V1_BRAND]: true;
+};
+
+/** Canonical base-10 uint96 KA number extracted from a deterministic UAL. */
+export type CanonicalKnowledgeAssetNumberV1 = string & {
+  readonly [CANONICAL_KNOWLEDGE_ASSET_NUMBER_V1_BRAND]: true;
+};
 
 /** Existing V10 KAs may be resolved through the quarantined read-only path. */
 export const LEGACY_ROOT_CONTENT_SCOPE_VERSION = 1 as const;
@@ -60,6 +82,20 @@ export interface DeterministicKnowledgeAssetUalParts {
   readonly kaNumber: string;
 }
 
+/** Complete canonical identity returned to every seal/catalog/inventory consumer. */
+export interface CanonicalDeterministicKnowledgeAssetUalPartsV1 {
+  readonly ual: CanonicalDeterministicUalV1;
+  readonly chainId: NetworkIdV1;
+  readonly agentAddress: EvmAddressV1;
+  readonly kaNumber: CanonicalKnowledgeAssetNumberV1;
+}
+
+export interface DeterministicRootlessKnowledgeAssetIdentity
+  extends DeterministicKnowledgeAssetUalParts {
+  /** Canonical base-10 packed `(uint160(author) << 96) | uint96(number)` id. */
+  readonly kaId: string;
+}
+
 export class LegacyKnowledgeAssetReadOnlyError extends Error {
   readonly code = 'LEGACY_KA_READ_ONLY';
 
@@ -77,6 +113,18 @@ const DETERMINISTIC_KA_UAL_RE = /^did:dkg:([^/]+)\/(0x[0-9a-fA-F]{40})\/([0-9]+)
  * through the packed identity are valid graph identities.
  */
 export const MAX_KNOWLEDGE_ASSET_NUMBER = (1n << 96n) - 1n;
+export const MAX_CANONICAL_KNOWLEDGE_ASSET_NUMBER_DIGITS_V1 =
+  MAX_KNOWLEDGE_ASSET_NUMBER.toString(10).length;
+export const MAX_CANONICAL_DETERMINISTIC_UAL_BYTES_V1 =
+  'did:dkg:'.length
+  + MAX_NETWORK_ID_BYTES_V1
+  + '/'.length
+  + '0x'.length
+  + 40
+  + '/'.length
+  + MAX_CANONICAL_KNOWLEDGE_ASSET_NUMBER_DIGITS_V1;
+const MAX_PACKED_ROOTLESS_KNOWLEDGE_ASSET_ID = (1n << 256n) - 1n;
+const PACKED_ROOTLESS_KNOWLEDGE_ASSET_NUMBER_BITS = 96n;
 
 /**
  * Parse and canonicalize the deterministic Option-1 UAL used as graph identity.
@@ -87,6 +135,13 @@ export function parseDeterministicKnowledgeAssetUal(
   rawUal: string,
 ): DeterministicKnowledgeAssetUalParts {
   const input = String(rawUal ?? '').trim();
+  // Every canonical component is ASCII. Bound the full hostile scalar before
+  // IRI validation, regexp traversal, or BigInt parsing can allocate from it.
+  if (input.length > MAX_CANONICAL_DETERMINISTIC_UAL_BYTES_V1) {
+    throw new Error(
+      `Graph-scoped KA UAL exceeds ${MAX_CANONICAL_DETERMINISTIC_UAL_BYTES_V1} bytes`,
+    );
+  }
   if (!isSafeIri(input)) {
     throw new Error(`Invalid graph-scoped KA UAL: ${input || '(empty)'}`);
   }
@@ -98,6 +153,14 @@ export function parseDeterministicKnowledgeAssetUal(
   }
 
   const [, chainId, rawAgentAddress, rawKaNumber] = match;
+  if (chainId.length > MAX_NETWORK_ID_BYTES_V1) {
+    throw new Error(`Graph-scoped KA network exceeds ${MAX_NETWORK_ID_BYTES_V1} bytes`);
+  }
+  if (rawKaNumber.length > MAX_CANONICAL_KNOWLEDGE_ASSET_NUMBER_DIGITS_V1) {
+    throw new Error(
+      'Graph-scoped KA number exceeds the packed uint96 decimal width',
+    );
+  }
   const agentAddress = canonicalKnowledgeAssetAgentAddress(rawAgentAddress);
   // BigInt canonicalisation prevents leading-zero aliases for one graph.
   const kaNumberValue = BigInt(rawKaNumber);
@@ -113,6 +176,56 @@ export function parseDeterministicKnowledgeAssetUal(
     agentAddress,
     kaNumber,
   };
+}
+
+/**
+ * Assert the exact deterministic KA wire identity without coupling callers to
+ * an author-seal codec. Unlike the lower-level canonicalizer, this refuses
+ * aliases and returns every parsed identity component in one pass.
+ */
+export function assertCanonicalDeterministicUalV1(
+  value: unknown,
+): Readonly<CanonicalDeterministicKnowledgeAssetUalPartsV1> {
+  if (typeof value !== 'string') {
+    throw new Error('kaUal must be a string');
+  }
+  const parsed = parseDeterministicKnowledgeAssetUal(value);
+  assertNetworkIdV1(parsed.chainId, 'kaUal network');
+  assertCanonicalEvmAddress(parsed.agentAddress, 'kaUal author');
+  if (parsed.ual !== value) {
+    throw new Error('kaUal must already be in canonical form');
+  }
+  return Object.freeze({
+    ual: parsed.ual as CanonicalDeterministicUalV1,
+    chainId: parsed.chainId,
+    agentAddress: parsed.agentAddress as EvmAddressV1,
+    kaNumber: parsed.kaNumber as CanonicalKnowledgeAssetNumberV1,
+  });
+}
+
+/**
+ * Unpack the canonical rootless on-chain KA id into the same deterministic
+ * identity used by graph-scoped content. Legacy sequential ids have no author
+ * bits and therefore fail closed instead of aliasing a graph identity.
+ */
+export function unpackDeterministicRootlessKnowledgeAssetId(
+  networkId: NetworkIdV1,
+  kaId: bigint,
+): Readonly<DeterministicRootlessKnowledgeAssetIdentity> {
+  assertNetworkIdV1(networkId, 'rootless Knowledge Asset networkId');
+  if (typeof kaId !== 'bigint' || kaId < 1n || kaId > MAX_PACKED_ROOTLESS_KNOWLEDGE_ASSET_ID) {
+    throw new Error('Rootless Knowledge Asset id must be a nonzero uint256');
+  }
+  const authorValue = kaId >> PACKED_ROOTLESS_KNOWLEDGE_ASSET_NUMBER_BITS;
+  if (authorValue === 0n) {
+    throw new Error('Rootless Knowledge Asset id does not contain a packed author');
+  }
+  const agentAddress = `0x${authorValue.toString(16).padStart(40, '0')}`;
+  const kaNumber = (kaId & MAX_KNOWLEDGE_ASSET_NUMBER).toString(10);
+  const parsed = parseDeterministicKnowledgeAssetUal(
+    `did:dkg:${networkId}/${agentAddress}/${kaNumber}`,
+  );
+  return Object.freeze({ ...parsed, kaId: kaId.toString(10) });
 }
 
 export function canonicalAssertionVersion(

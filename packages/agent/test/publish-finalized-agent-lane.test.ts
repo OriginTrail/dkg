@@ -21,9 +21,11 @@ import {
   sharedMemoryScopeForFinalizedLifecycle,
 } from '../src/finalized-lifecycle-scope.js';
 
-const CG = 'publish-agent-lane';
-const NAME = 'asset';
 const DEFAULT_AGENT = `0x${'11'.repeat(20)}`;
+// The confirmed-publication hook enters RFC-64's canonical control plane, so
+// this fixture must use the same owner/slug identity as a registered CG.
+const CG = `${DEFAULT_AGENT}/publish-agent-lane`;
+const NAME = 'asset';
 const AGENT_B = `0x${'22'.repeat(20)}`;
 const ROOT = 'urn:test:agent-b-root';
 const RESERVED_KA_ID = (BigInt(AGENT_B) << 96n) | 1n;
@@ -140,6 +142,8 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     }> = [];
     const publishCalls: Array<{ contextGraphId: string; selection: any; opts: any }> = [];
     const remainingClearCalls: any[][] = [];
+    const rfc64SwmInventoryRemovalCalls: any[] = [];
+    const warnings: string[] = [];
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
@@ -149,7 +153,10 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       value: '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6',
       configurable: true,
     });
-    agent.log = makeLog();
+    agent.log = {
+      ...makeLog(),
+      warn: (_ctx: unknown, message: string) => { warnings.push(message); },
+    };
     agent.publisher = {
       hasSwmShareComplete: async (
         contextGraphId: string,
@@ -173,6 +180,10 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         status: 'confirmed',
         publicQuads: [],
       };
+    };
+    agent.removeRfc64SwmAuthorInventoryShadowV1 = async (input: any) => {
+      rfc64SwmInventoryRemovalCalls.push(input);
+      throw new Error('simulated escaped RFC-64 SWM inventory removal failure');
     };
 
     // GH#1778 — a genuinely absent name still yields "is not finalized":
@@ -221,6 +232,18 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(remainingClearCalls).toHaveLength(1);
     expect(remainingClearCalls[0].slice(0, 2)).toEqual([CG, undefined]);
     expect(result.status).toBe('confirmed');
+    expect(rfc64SwmInventoryRemovalCalls).toHaveLength(1);
+    expect(rfc64SwmInventoryRemovalCalls[0]).toMatchObject({
+      contextGraphId: CG,
+      seal: {
+        authorAddress: AGENT_B,
+        reservedKaId: RESERVED_KA_ID,
+        kaUal: KA_UAL,
+      },
+    });
+    expect(warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining('simulated escaped RFC-64 SWM inventory removal failure'),
+    ]));
   });
 
   it('maps an empty exact KA graph to the mint no-data precondition', async () => {

@@ -15,11 +15,14 @@ import type {
   DashboardDB,
   OperationTracker,
 } from '@origintrail-official/dkg-node-ui';
-import type { DkgConfig, loadNetworkConfig } from '../../config.js';
 import type {
-  createPublisherControlFromStore,
-  PublisherState,
-} from '../../publisher-runner.js';
+  DkgConfig,
+  ResolvedRfc64CatalogActivationConfig,
+  ResolvedRfc64PublicCatalogActivationConfig,
+  loadNetworkConfig,
+} from '../../config.js';
+import type { VmPublisherControl } from '@origintrail-official/dkg-publisher';
+import type { PublisherState } from '../../publisher-runner.js';
 import type { ExtractionStatusRecord } from '../../extraction-status.js';
 import type { FileStore } from '../../file-store.js';
 import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
@@ -61,10 +64,14 @@ export interface RequestContext {
   req: IncomingMessage;
   res: ServerResponse;
   agent: DKGAgent;
-  publisherControl: ReturnType<typeof createPublisherControlFromStore>;
+  publisherControl: VmPublisherControl;
   /** Lifecycle-owned runtime and readiness as one correlated state. */
   publisherState: PublisherState;
   config: DkgConfig;
+  /** Immutable RFC-64 activation resolved once during daemon startup. */
+  rfc64Catalog?: ResolvedRfc64CatalogActivationConfig;
+  /** Compatibility projection for the selected-public operator surface. */
+  rfc64PublicCatalog: ResolvedRfc64PublicCatalogActivationConfig;
   startedAt: number;
   dashDb: DashboardDB;
   opWallets: OpWalletsConfig;

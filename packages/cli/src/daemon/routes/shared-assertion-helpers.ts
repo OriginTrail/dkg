@@ -8,6 +8,7 @@
 
 import type { ServerResponse } from "node:http";
 import {
+  validateContextGraphId,
   validateSubGraphName,
   validateAssertionName,
   isSafeIri,
@@ -20,7 +21,12 @@ import {
   resolveImportedArtifactMetadata,
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
-import { type PromoteJob, type PromoteJobState } from '@origintrail-official/dkg-publisher';
+import {
+  type PromoteJob,
+  type PromoteJobState,
+  SAFE_JOB_ID_PATTERN,
+  SAFE_JOB_ID_MAX_LENGTH,
+} from '@origintrail-official/dkg-publisher';
 import { daemonState } from '../state.js';
 import {
   jsonResponse,
@@ -28,7 +34,6 @@ import {
   isNoFundedPublisherWalletLike,
   safeDecodeURIComponent,
   normalizeContextGraphIdOrUri,
-  isValidContextGraphId,
 } from '../http-utils.js';
 import { getExtractionStatusRecord } from '../../extraction-status.js';
 import type { RequestContext } from './context.js';
@@ -116,9 +121,12 @@ export class ImportArtifactRouteError extends Error {
 }
 
 export function validatePromoteJobId(jobId: string): { valid: true } | { valid: false; reason: string } {
+  // Grammar + length bound are imported from the publisher (the single authoritative
+  // job-id contract, also enforced control-plane-side by `isSafeJobId`) so route
+  // acceptance and control-plane acceptance cannot drift.
   if (!jobId) return { valid: false, reason: "jobId is required" };
-  if (jobId.length > 256) return { valid: false, reason: "jobId is too long" };
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(jobId)) {
+  if (jobId.length > SAFE_JOB_ID_MAX_LENGTH) return { valid: false, reason: "jobId is too long" };
+  if (!SAFE_JOB_ID_PATTERN.test(jobId)) {
     return {
       valid: false,
       reason: "jobId may only contain letters, numbers, '.', '_', ':', and '-'",
@@ -604,7 +612,7 @@ export async function resolveImportedArtifact(
   if (!contextGraphId) {
     throw new ImportArtifactRouteError(400, '"contextGraphId" is required');
   }
-  if (!isValidContextGraphId(contextGraphId)) {
+  if (!validateContextGraphId(contextGraphId).valid) {
     throw new ImportArtifactRouteError(400, 'Invalid contextGraphId');
   }
 

@@ -11,6 +11,12 @@ import {
   createResponderSubGraphRegistrationMemo,
 } from '../src/sync/responder/graph-plan.js';
 import {
+  SYNC_BYTE_BUDGET_MAX_ROWS,
+  SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+  SYNC_PAGE_SIZE,
+} from '../src/dkg-agent-constants.js';
+import {
   DKG_NS,
   lineGraphsFromNquads,
   linesFromNquads,
@@ -247,6 +253,40 @@ describe('sync responder pagination interleaving', () => {
     })).rejects.toThrow(/expected 2 rows, found 1/);
   });
 
+  it('uses a sentinel row to reject surplus data in page-only exact-graph mode', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'rootless-v2-surplus-page-only';
+    const manifest = graphScopedVmMeta({
+      cgId,
+      ual: 'did:dkg:base:8453/0x00000000000000000000000000000000000000ac/10',
+      publicTripleCount: 1,
+      status: 'confirmed',
+    });
+    await store.insert([
+      ...manifest.quads,
+      q(manifest.graph, 0),
+      q(manifest.graph, 1),
+    ]);
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 10,
+      snapshotBudget: {
+        maxRows: 1_000,
+        maxBytesEstimate: 1_000_000,
+        maxSnapshotRows: 0,
+        maxSnapshotBytesEstimate: 1_000_000,
+      },
+    });
+
+    await expect(cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 10,
+      syncSessionId: 'rootless-v2-surplus-page-only',
+    })).rejects.toThrow(/expected 1 total rows but found a surplus row/);
+  });
+
   it('fails closed instead of treating an incomplete V2 descriptor as legacy data', async () => {
     const store = new OxigraphStore();
     const cgId = 'rootless-v2-incomplete-manifest';
@@ -402,7 +442,7 @@ describe('sync responder pagination interleaving', () => {
     boundedQuery.assertObserved();
   });
 
-  it('preserves durable cursors beyond one million rows instead of replaying the clamp boundary', async () => {
+  it('preserves durable cursors beyond one million rows and fails closed on a short exact graph', async () => {
     const store = new OxigraphStore();
     const cgId = 'rootless-cursor-over-one-million';
     const manifest = graphScopedVmMeta({
@@ -438,7 +478,8 @@ describe('sync responder pagination interleaving', () => {
     };
 
     expect(linesFromNquads(await cap.invoke({ ...base, offset: 0 }))).toHaveLength(1);
-    expect(linesFromNquads(await cap.invoke({ ...base, offset: requestedDeepOffset }))).toHaveLength(0);
+    await expect(cap.invoke({ ...base, offset: requestedDeepOffset }))
+      .rejects.toThrow(/expected 1 rows at offset 1000005, found 0/);
     boundedQuery.assertObserved();
   });
 
@@ -447,10 +488,14 @@ describe('sync responder pagination interleaving', () => {
     const cgId = 'oversized-durable-meta';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
     const metaGraph = `${cgPrefix}/_meta`;
-    // Rows keyed on the CG entity subject survive readDurableMetaRows filtering.
+    // Three DISTINCT admitted subjects (one row each), so the page boundary
+    // falls on a subject boundary and the fallback pages 2 + 1. Since #1788 a
+    // single subject is emitted atomically and would never split across pages,
+    // so distinct subjects are required to exercise paging here. Activity-prefix
+    // subjects survive readDurableMetaRows filtering.
     await store.insert(Array.from({ length: 3 }, (_, i) => ({
       graph: metaGraph,
-      subject: cgPrefix,
+      subject: `did:dkg:activity:${cgId}-${i}`,
       predicate: `http://schema.org/p${i.toString().padStart(3, '0')}`,
       object: `"meta-${i.toString().padStart(3, '0')}"`,
     })));
@@ -477,6 +522,84 @@ describe('sync responder pagination interleaving', () => {
     expect(linesFromNquads(first)).toHaveLength(2);
     expect(linesFromNquads(second)).toHaveLength(1);
     expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+  });
+
+  // Handler-level (through registerSyncHandler): the durable-meta wire branch
+  // handles an oversized admitted subject DIFFERENTLY by negotiation, and both
+  // outcomes are frame-safe with no silent metadata loss (#1788/#1916):
+  //  - NEGOTIATED (byte-budget pageMode): the subject-atomic byte-fit chunks the
+  //    oversized subject under the frame and pages to completion (empty=EOF, so a
+  //    short page is not EOF). A regression returning the whole >4 MiB subject
+  //    would fail (pageCount 1 + over-budget bytes).
+  //  - LEGACY (no pageMode): a legacy requester reads a short page as EOF, so
+  //    byte-fitting would silently drop the rest of the subject; instead the
+  //    responder FAILS LOUD. A regression byte-fitting it would fail (no throw).
+  const oversizedMetaStore = (cgId: string): { store: OxigraphStore; rows: Quad[]; subject: string } => {
+    const store = new OxigraphStore();
+    const metaGraph = `did:dkg:context-graph:${cgId}/_meta`;
+    const subject = `did:dkg:activity:${cgId}-big`;
+    const bigLiteral = `"${'y'.repeat(60_000)}"`; // ~60 KB per row (under the 65535 literal cap)
+    const rows: Quad[] = Array.from({ length: 80 }, (_, i) => ({
+      graph: metaGraph,
+      subject,
+      predicate: `${DKG_NS}p${String(i).padStart(3, '0')}`,
+      object: bigLiteral,
+    })); // ~4.8 MB total > the 4 MiB budget
+    return { store, rows, subject };
+  };
+
+  it('durable-meta handler byte-caps an oversized subject under the frame and pages to completion — negotiated (byte-budget pageMode) (#1916)', async () => {
+    const cgId = 'oversized-meta-frame-neg';
+    const { store, rows } = oversizedMetaStore(cgId);
+    await store.insert(rows);
+    const cap = registerTestSyncHandler(store, { syncPageSize: SYNC_PAGE_SIZE });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'meta' as const,
+      limit: SYNC_PAGE_SIZE,
+      syncSessionId: `${cgId}-session`,
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_BYTE_BUDGET_MAX_ROWS,
+    };
+
+    const enc = new TextEncoder();
+    let offset = 0;
+    let delivered = 0;
+    let pageCount = 0;
+    for (let guard = 0; guard < 100; guard += 1) {
+      const resp = await cap.invoke({ ...base, offset });
+      const n = resp === '' ? 0 : linesFromNquads(resp).length;
+      if (n === 0) break;
+      // Frame-safety: every response stays within the byte budget.
+      expect(enc.encode(resp).byteLength).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+      pageCount += 1;
+      delivered += n;
+      offset += n;
+    }
+    // Chunked (byte cap engaged, not one oversized frame) and every row delivered.
+    expect(pageCount).toBeGreaterThan(1);
+    expect(delivered).toBe(rows.length);
+    await store.close();
+  });
+
+  it('durable-meta handler FAILS LOUD on an oversized subject for a legacy (no pageMode) requester, never a silent short page (#1788)', async () => {
+    const cgId = 'oversized-meta-frame-legacy';
+    const { store, rows } = oversizedMetaStore(cgId);
+    await store.insert(rows);
+    const cap = registerTestSyncHandler(store, { syncPageSize: SYNC_PAGE_SIZE });
+    // No pageMode ⇒ non-negotiated legacy requester. Byte-fitting would return a
+    // short page it reads as EOF (silent loss + #1788 split); the responder must
+    // instead surface a hard, explicit failure — not a successful short response.
+    await expect(cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'meta',
+      limit: SYNC_PAGE_SIZE,
+      offset: 0,
+      syncSessionId: `${cgId}-session`,
+    })).rejects.toThrow(/cannot be served frame-safe/);
+    await store.close();
   });
 
   it('falls back to store-bounded paging for an oversized shared-memory meta snapshot', async () => {
@@ -700,11 +823,15 @@ describe('sync responder pagination interleaving', () => {
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
     const metaGraph = `${cgPrefix}/_meta`;
     const rows: Quad[] = [];
+    // 100 DISTINCT admitted subjects (one row each): since #1788 a single
+    // subject is emitted atomically, so a deep window into ONE subject is no
+    // longer meaningful — distinct subjects let the deep page address a subject
+    // boundary. Activity-prefix subjects survive durable-meta admission.
     for (let index = 0; index < 100; index++) {
       const padded = index.toString().padStart(3, '0');
       rows.push({
         graph: metaGraph,
-        subject: cgPrefix,
+        subject: `did:dkg:activity:m${padded}`,
         predicate: `http://schema.org/p${padded}`,
         object: `"meta-${padded}"`,
       });
@@ -717,9 +844,12 @@ describe('sync responder pagination interleaving', () => {
     });
     await store.insert(rows);
 
-    // The durable-meta read is now store-bounded (subject-membership filter
-    // pushed into the store via EXISTS), so a deep page is a paged store query.
-    const probe = watchBoundedPageQuery(store, metaGraph, 90, 5);
+    // The durable-meta read is store-bounded (subject-membership filter pushed
+    // into the store via EXISTS), so a deep page is a paged store query. Durable
+    // meta reads `limit + 1` rows to detect a subject straddling the page
+    // boundary (#1788) and serves at most `limit` when the boundary is clean, so
+    // the store query's LIMIT is 6 here while the served page stays 5.
+    const probe = watchBoundedPageQuery(store, metaGraph, 90, 6);
     const cap = registerTestSyncHandler(store, { syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,
@@ -1350,6 +1480,136 @@ describe('sync responder pagination interleaving', () => {
     await expect(refreshing).resolves.toEqual(['new']);
     await expect(overlappingRefresh).resolves.toEqual(['new']);
     await expect(deepPage).resolves.toEqual(['new']);
+    expect(calls).toBe(2);
+  });
+
+  it('does not retain a graph list read while a remote mutation is pending', async () => {
+    let generation = 0;
+    let stable = true;
+    let calls = 0;
+    let graphs = ['urn:graph:b', 'urn:graph:a', 'urn:graph:b'];
+    const store = {
+      getWriteRevision: (prefix: string) => {
+        expect(prefix).toBe('');
+        return { generation, stable };
+      },
+      listGraphs: async () => {
+        calls++;
+        return graphs;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'session-1',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'session-2',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(1);
+
+    // Dispatch: the endpoint has not committed yet, so a refresh can still
+    // observe and memoize the old graph set at this intermediate generation.
+    generation++;
+    stable = false;
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'pending-mutation',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(2);
+
+    // The remote mutation is still pending at the same revision. Stability,
+    // not generation change alone, must prevent reuse of the completed read.
+    graphs = ['urn:graph:c', 'urn:graph:a'];
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'same-pending-mutation',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:c']);
+    expect(calls).toBe(3);
+
+    // Settlement must advance again so the next session cannot reuse the
+    // graph list that was read while the mutation was in flight.
+    graphs = ['urn:graph:d', 'urn:graph:a'];
+    generation++;
+    stable = true;
+    await expect(memo.get({
+      refresh: true,
+      refreshGeneration: 'session-3',
+    })).resolves.toEqual(['urn:graph:a', 'urn:graph:d']);
+    expect(calls).toBe(4);
+  });
+
+  it('shares one in-flight graph enumeration at an unstable revision without caching it', async () => {
+    const firstRead = deferred<string[]>();
+    const secondRead = deferred<string[]>();
+    let calls = 0;
+    const store = {
+      getWriteRevision: () => ({ generation: 7, stable: false }),
+      listGraphs: async () => {
+        calls += 1;
+        return calls === 1 ? firstRead.promise : secondRead.promise;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const first = memo.get({ refresh: true });
+    const simultaneous = memo.get({ refresh: true });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    firstRead.resolve(['urn:graph:b', 'urn:graph:a']);
+    await expect(first).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    await expect(simultaneous).resolves.toEqual(['urn:graph:a', 'urn:graph:b']);
+    expect(calls).toBe(1);
+
+    // Unstable completed results are never reused, even though simultaneous
+    // waiters may share the promise that produced them.
+    const later = memo.get({ refresh: true });
+    await vi.waitFor(() => expect(calls).toBe(2));
+    secondRead.resolve(['urn:graph:c']);
+    await expect(later).resolves.toEqual(['urn:graph:c']);
+  });
+
+  it('supersedes an in-flight graph list when write generation changes', async () => {
+    const oldGraphs = deferred<string[]>();
+    const newGraphs = deferred<string[]>();
+    let generation = 0;
+    let calls = 0;
+    const store = {
+      getWriteRevision: () => ({ generation, stable: true }),
+      listGraphs: async () => {
+        calls++;
+        return calls === 1 ? oldGraphs.promise : newGraphs.promise;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const beforeWrite = memo.get({ refresh: true, refreshGeneration: 'old-session' });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    generation++;
+    const afterWrite = memo.get({ refresh: true, refreshGeneration: 'new-session' });
+
+    oldGraphs.resolve(['urn:graph:old']);
+    await expect(beforeWrite).resolves.toEqual(['urn:graph:old']);
+    await vi.waitFor(() => expect(calls).toBe(2));
+    newGraphs.resolve(['urn:graph:new']);
+    await expect(afterWrite).resolves.toEqual(['urn:graph:new']);
+  });
+
+  it('retains the TTL backstop for writers outside the tracked store process', async () => {
+    let calls = 0;
+    const store = {
+      getWriteRevision: () => ({ generation: 0, stable: true }),
+      listGraphs: async () => {
+        calls++;
+        return ['urn:graph:a'];
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store, 0);
+
+    await memo.get({ refresh: true, refreshGeneration: 'session-1' });
+    await memo.get({ refresh: true, refreshGeneration: 'session-2' });
+
     expect(calls).toBe(2);
   });
 

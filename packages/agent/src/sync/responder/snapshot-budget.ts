@@ -28,6 +28,15 @@ type SnapshotBudgetAdmission = Omit<SnapshotBudgetEntry, 'id' | 'pinned'> & {
   key: string;
   /** Existing entry replaced atomically after the new entry passes admission. */
   replaceId?: symbol;
+  /**
+   * Control-plane entries (session pagination plans) are bounded at build time
+   * by their own FIXED construction caps, deliberately not by the
+   * operator/test-shrinkable per-snapshot limits: shrinking the per-snapshot
+   * budget is how a session is forced into plan-paged mode, and rejecting the
+   * plan itself there would turn that degradation into a refusal (#1847
+   * class). Only the GLOBAL rows/bytes budget applies at admission.
+   */
+  controlPlane?: boolean;
 };
 
 export class SyncRowSnapshotBudgetError extends Error {
@@ -137,11 +146,13 @@ export function createSyncResponderSnapshotBudget(
 
   return {
     admit(params) {
-      if (params.rows > limits.maxSnapshotRows) {
-        reject(params, 'snapshot_rows', limits.maxSnapshotRows);
-      }
-      if (params.bytesEstimate > limits.maxSnapshotBytesEstimate) {
-        reject(params, 'snapshot_bytes', limits.maxSnapshotBytesEstimate);
+      if (!params.controlPlane) {
+        if (params.rows > limits.maxSnapshotRows) {
+          reject(params, 'snapshot_rows', limits.maxSnapshotRows);
+        }
+        if (params.bytesEstimate > limits.maxSnapshotBytesEstimate) {
+          reject(params, 'snapshot_bytes', limits.maxSnapshotBytesEstimate);
+        }
       }
 
       const replaced = params.replaceId ? entries.get(params.replaceId) : undefined;

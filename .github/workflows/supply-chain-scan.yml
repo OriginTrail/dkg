@@ -26,7 +26,7 @@ name: Supply chain scan
 
 on:
   pull_request:
-    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary]
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'
@@ -47,13 +47,16 @@ on:
       # until the next unrelated lockfile change.
       - '.github/dependency-deny-list.json'
       - 'scripts/check-dependency-deny-list.mjs'
+      - 'scripts/ci/inspect-ci-policy.mjs'
+      - 'scripts/ci/trusted-controller-pins.mjs'
+      - 'scripts/ci/validate-delta-rollout-ruleset.mjs'
       # Recursive filename deny-list entries that are themselves IoCs.
       # Keep this in sync with denied_filenames[] so an IoC-only PR
       # cannot avoid the scanner by touching no package metadata.
       - '.cursorrules'
       - '**/.cursorrules'
   push:
-    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary]
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'
@@ -64,6 +67,9 @@ on:
       - '.npmrc'
       - '.github/dependency-deny-list.json'
       - 'scripts/check-dependency-deny-list.mjs'
+      - 'scripts/ci/inspect-ci-policy.mjs'
+      - 'scripts/ci/trusted-controller-pins.mjs'
+      - 'scripts/ci/validate-delta-rollout-ruleset.mjs'
       - '.cursorrules'
       - '**/.cursorrules'
   schedule:
@@ -137,106 +143,6 @@ jobs:
           pip install --require-hashes --no-deps -r "${RUNNER_TEMP}/zizmor-requirements.txt"
           zizmor --version
 
-      - name: Guard zizmor `cache-poisoning` exception scope
-        # The `cache-poisoning` rule in `.github/zizmor.yml` ignores entire
-        # workflow files (ci.yml, evm-integration.yml, supply-chain-scan.yml)
-        # on the rationale that they are NOT publishing surfaces — they only
-        # run tests/lints/scanners. The exception is sound for the workflows'
-        # CURRENT shape, but zizmor cannot enforce that they STAY non-
-        # publishing. If a future PR adds a publish step to any ignored
-        # workflow, the cache-poisoning risk becomes real and the exception
-        # must be re-evaluated. This step encodes that invariant: it greps
-        # the ignored workflows for known publishing-action markers, and
-        # fails the audit if any are found.
-        #
-        # Self-match protection: this step itself contains every marker as
-        # a literal string in `PATTERNS`. To avoid a false-positive when
-        # scanning `supply-chain-scan.yml`, the guard's own pattern block
-        # is bracketed with sentinel comments and stripped from the scan
-        # input via `sed` before grep runs. Any future literal-pattern
-        # additions MUST stay inside the sentinels.
-        #
-        # Note: this does NOT catch cross-workflow artifact promotion via
-        # `actions/upload-artifact` consumed by a separate publishing
-        # workflow — that requires its own audit. For now, in-workflow
-        # publish actions are the high-confidence signal.
-        run: |
-          set -euo pipefail
-          IGNORED=(
-            .github/workflows/ci.yml
-            .github/workflows/evm-integration.yml
-            .github/workflows/supply-chain-scan.yml
-          )
-          # zizmor-cache-poisoning-guard-patterns-start
-          # Patterns that indicate a workflow is shipping bytes to a
-          # user-visible publishing surface. Keep this list synced with the
-          # rationale in `.github/zizmor.yml` `cache-poisoning:` block.
-          #
-          # Coverage notes:
-          # - `gh release create|upload`, `softprops/action-gh-release`,
-          #   `actions/create-release`, `actions/upload-release-asset` →
-          #   GitHub Releases (binary or tag-based).
-          # - `npm publish`, `pnpm publish`, `JS-DevTools/npm-publish` → npm.
-          # - `pypa/gh-action-pypi-publish`, `twine upload` → PyPI.
-          # - `docker push`, `docker buildx ... --push` → Docker registries
-          #   via the docker CLI.
-          # - `docker/build-push-action` → Docker registries via the
-          #   official GHA. The action is flagged regardless of `with.push`
-          #   because that input is set in a separate block grep cannot
-          #   correlate; flagging on action-use is conservative (build-only
-          #   adoption is uncommon in CI and an operator can confirm).
-          # - `goreleaser/goreleaser-action` → Go release toolchain.
-          # - `cargo publish` → crates.io.
-          PATTERNS=(
-            'gh release create'
-            'gh release upload'
-            'softprops/action-gh-release'
-            'actions/create-release'
-            'actions/upload-release-asset'
-            'JS-DevTools/npm-publish'
-            'npm publish'
-            'pnpm publish'
-            'pypa/gh-action-pypi-publish'
-            'twine upload'
-            'docker push'
-            'docker buildx[^#]*--push'
-            'docker/build-push-action'
-            'goreleaser/goreleaser-action'
-            'cargo publish'
-          )
-          # zizmor-cache-poisoning-guard-patterns-end
-          fail=0
-          for wf in "${IGNORED[@]}"; do
-            if [ ! -f "$wf" ]; then continue; fi
-            # 1. Strip the guard's own PATTERNS block so the step does not
-            #    self-match on its own literal-pattern array.
-            # 2. Normalize shell backslash-continuations by joining lines
-            #    that end with `\` into a single line. Without this, the
-            #    common multi-line publish form (e.g. `docker buildx build
-            #    \<newline>  --push \<newline>  .`) escapes a single-line
-            #    grep — a future PR could add a real multi-line publish
-            #    step to an ignored workflow and silently pass this guard.
-            #    The `\` gets replaced with a single space so adjacent
-            #    tokens stay separated for the subsequent grep.
-            scan_input=$(sed '/zizmor-cache-poisoning-guard-patterns-start/,/zizmor-cache-poisoning-guard-patterns-end/d' "$wf" \
-              | awk '/\\$/ { sub(/\\$/, " "); printf "%s", $0; next } { print }')
-            for pat in "${PATTERNS[@]}"; do
-              hits=$(echo "$scan_input" | grep -nE "$pat" || true)
-              if [ -n "$hits" ]; then
-                echo "::error file=$wf::cache-poisoning exception applies to this workflow, but it now contains a publishing action (\"$pat\"). Re-evaluate the .github/zizmor.yml exception."
-                echo "$hits"
-                fail=1
-              fi
-            done
-          done
-          if [ "$fail" -ne 0 ]; then
-            echo
-            echo "The cache-poisoning ignore-list in .github/zizmor.yml is scoped to non-publishing CI workflows."
-            echo "One of those workflows now contains a publishing action — the exception is no longer safe."
-            echo "Either remove the publishing action, move it to a workflow not in the ignore-list, or revise the exception."
-            exit 1
-          fi
-
       - name: Resolve zizmor scan targets
         # Scan EVERYTHING under `.github/` that can land code on the runner:
         # workflows + composite actions + reusable workflows. The previous
@@ -262,6 +168,7 @@ jobs:
           printf 'Scanning: %s\n' "${targets[@]}"
 
       - name: Run zizmor (SARIF output)
+        id: zizmor_scan
         # `--persona auditor` enables the strict ruleset (every finding is
         # treated as a defect, including informational ones). `--min-severity
         # low` keeps the CI gate noisy-on-purpose: an informational finding
@@ -306,7 +213,7 @@ jobs:
         # `security-events: write` to read-only on `pull_request` runs
         # from forks, so the upload step would 403 with `Resource not
         # accessible by integration` and turn an otherwise-clean run
-        # red. The plain-format `Re-run zizmor as a gate` step below
+        # red. The `Enforce zizmor verdict` step below
         # still runs on forked PRs and surfaces findings in the run log
         # — SARIF persistence in the Security tab is a property of
         # base-repo runs (push to main / schedule) anyway.
@@ -317,24 +224,37 @@ jobs:
           && (github.event_name != 'pull_request'
               || github.event.pull_request.head.repo.full_name == github.repository)
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         with:
           sarif_file: zizmor.sarif
           category: zizmor
 
-      - name: Re-run zizmor as a gate
-        # The previous run uploaded SARIF unconditionally so the Security tab
-        # always reflects the latest state. This second invocation re-runs
-        # with the SAME ruleset but allows the exit code to bubble up so the
-        # PR is blocked when findings exist. GH_TOKEN re-supplied for the
-        # same reason as the SARIF step above.
+      - name: Enforce zizmor verdict
+        # Zizmor intentionally exits zero for findings in SARIF mode. Enforce
+        # both dimensions explicitly after the best-effort upload: the scan
+        # must have completed successfully and its SARIF must contain no
+        # results. Malformed/missing SARIF also fails closed.
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ZIZMOR_TARGETS: ${{ steps.targets.outputs.paths }}
+          SCAN_OUTCOME: ${{ steps.zizmor_scan.outcome }}
         run: |
           set -euo pipefail
-          read -r -a TARGETS <<< "$(echo "$ZIZMOR_TARGETS" | tr '\n' ' ')"
-          zizmor --persona auditor --min-severity low --config .github/zizmor.yml --format plain "${TARGETS[@]}"
+          if [[ "${SCAN_OUTCOME}" != "success" ]]; then
+            echo "::error title=zizmor gate failed::scan outcome was ${SCAN_OUTCOME:-missing}"
+            exit 1
+          fi
+          if ! jq -e '
+            .version == "2.1.0"
+            and (.runs | type == "array" and length > 0)
+            and all(.runs[];
+              type == "object"
+              and (.tool.driver.name | type == "string")
+              and (.tool.driver.name | ascii_downcase) == "zizmor"
+              and (.results | type == "array" and length == 0)
+            )
+          ' zizmor.sarif > /dev/null; then
+            echo "::error title=zizmor gate failed::SARIF must contain only empty zizmor result arrays"
+            exit 1
+          fi
 
   dependency-deny-list:
     name: Dependency deny-list (named-package blocklist)
@@ -672,7 +592,7 @@ jobs:
         run: ./actionlint -color
 
   scanner-freshness:
-    name: Scanner pin freshness check
+    name: CI tooling and controller pin freshness
     # This job is the answer to PR460-06 / P3 of the security review:
     # "Add a documented scheduled check or Dependabot-compatible
     # mechanism for scanner versions and hashes." Dependabot does not
@@ -697,18 +617,25 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install policy parser
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Compare pinned scanner versions against upstream latest
+      - name: Compare pinned CI tooling and controller policy
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           STALE=0
           {
-            echo '## Scanner pin freshness'
+            echo '## CI policy pin freshness'
             echo
-            echo '| Scanner | Pinned | Latest upstream | Status |'
-            echo '|---------|--------|-----------------|--------|'
+            echo '| Component | Pinned | Expected upstream | Status |'
+            echo '|-----------|--------|-------------------|--------|'
           } >> "$GITHUB_STEP_SUMMARY"
 
           report() {
@@ -716,7 +643,7 @@ jobs:
             echo "| ${name} | \`${pinned}\` | \`${latest}\` | ${status} |" >> "$GITHUB_STEP_SUMMARY"
             if [ "${status}" != "✓ current" ]; then
               STALE=1
-              echo "::warning title=Scanner pin stale::${name} pinned to ${pinned}, upstream latest is ${latest}"
+              echo "::warning title=CI policy pin stale::${name} pinned to ${pinned}, expected ${latest}"
             fi
           }
 
@@ -775,6 +702,14 @@ jobs:
             fi
           fi
 
+          # This protected-branch scheduled report is intentionally not a PR
+          # merge gate. Candidate-owned workflows cannot safely self-attest
+          # their own execution, and read-only tokens may hide bypass actors.
+          node scripts/ci/inspect-ci-policy.mjs \
+            --workflow .github/workflows/ci.yml \
+            --workflow .github/workflows/evm-integration.yml \
+            --summary "${GITHUB_STEP_SUMMARY}"
+
           # shellcheck disable=SC2016
           # Backticks in the markdown string below are intentional
           # (code-fence formatting in the GitHub Step Summary), not
@@ -782,8 +717,8 @@ jobs:
           {
             echo
             if [ "${STALE}" -eq 0 ]; then
-              echo '_All scanners up to date._'
+              echo '_All scanner pins are current._'
             else
-              echo '_One or more scanners are behind upstream. Open a bump PR — recompute hash pins where applicable (zizmor PyPI wheels in `supply-chain-scan.yml`, actionlint release `checksums.txt`, slither-action commit SHA in `ci.yml`)._'
+              echo '_One or more scanner pins need attention. Open a focused rotation PR and recompute integrity hashes where applicable._'
             fi
           } >> "$GITHUB_STEP_SUMMARY"

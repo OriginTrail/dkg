@@ -1,4 +1,5 @@
 import type { AsyncLiftPublisher } from './async-lift-publisher.js';
+import { assertNodeTimerDelayMs } from '@origintrail-official/dkg-core';
 
 export interface AsyncLiftRunnerConfig {
   readonly publisher: AsyncLiftPublisher;
@@ -6,6 +7,19 @@ export interface AsyncLiftRunnerConfig {
   readonly pollIntervalMs?: number;
   readonly errorBackoffMs?: number;
   readonly recoveryIntervalMs?: number;
+  /**
+   * Reconciliation cadence while the publisher reports transaction-bearing jobs awaiting chain
+   * proof. `recoveryIntervalMs` stays the idle sweep for work no wake-up can announce (crash
+   * recovery, jobs stranded by a listener that never fired). Only consulted when the publisher
+   * implements the `reconciliationScheduling` capability.
+   *
+   * When omitted, the effective active cadence is `min(recoveryIntervalMs, 5000)`: never slower
+   * than the 5s default, and never slower than an explicitly configured `recoveryIntervalMs` —
+   * a consumer that already checks pending transactions faster than 5s keeps that rate.
+   */
+  readonly activeRecoveryIntervalMs?: number;
+  /** Start recovery, but do not claim accepted jobs until an operator restarts unpaused. */
+  readonly startPaused?: boolean;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly onError?: (error: unknown) => void | Promise<void>;
   readonly hasIncludedRecoveryResolver?: boolean;
@@ -15,18 +29,47 @@ export class AsyncLiftRunner {
   private readonly pollIntervalMs: number;
   private readonly errorBackoffMs: number;
   private readonly recoveryIntervalMs: number;
+  private readonly activeRecoveryIntervalMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly onError?: (error: unknown) => void | Promise<void>;
   private started = false;
   private stopped = false;
   private running?: Promise<void>;
   private lastRecoveryAt = 0;
-  private lastRecoveryAttemptAt = 0;
+  /**
+   * Stamped only when a pass FAILS. The errorBackoffMs floor paces retries after failures —
+   * and nothing else: a wake after a successful pass runs immediately, so wake latency is
+   * independent of the operator's errorBackoffMs choice.
+   */
+  private lastFailedRecoveryAttemptAt = 0;
+  private recoveryInFlight?: Promise<void>;
+  private recoveryTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Demand latch: set by a poke, consumed at pass start, restored if that pass FAILS — so a
+   * transient error cannot spend the only wake-up. A mid-pass poke sets it after the consume
+   * and therefore survives a successful pass that may already be past its job; repeated pokes
+   * coalesce naturally. Only one pass runs at a time, so a boolean is the whole state.
+   */
+  private reconciliationDemanded = false;
+  /** Whether unresolved tx work remains, from the last pass outcome (boot-seeded); selects active vs idle cadence. */
+  private pendingReconciliation = false;
+  private unsubscribeScheduler?: () => void;
+  /** Wallet wake latch: a release poke landing while its loop is mid-processNext skips the next sleep. */
+  private readonly walletWakePending = new Set<string>();
+  /** At most one parked idle sleeper per wallet, resolvable by a release poke (or by stop()). */
+  private readonly walletSleepers = new Map<string, () => void>();
 
   constructor(private readonly config: AsyncLiftRunnerConfig) {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.errorBackoffMs = config.errorBackoffMs ?? 1000;
     this.recoveryIntervalMs = config.recoveryIntervalMs ?? 60_000;
+    assertNodeTimerDelayMs(this.recoveryIntervalMs, 'AsyncLiftRunner recoveryIntervalMs');
+    // The active cadence must never be SLOWER than an explicitly configured recoveryIntervalMs:
+    // that setting was a consumer's pending-transaction check rate before the active/idle split
+    // existed, and the new default must not override a faster explicit choice.
+    this.activeRecoveryIntervalMs = config.activeRecoveryIntervalMs
+      ?? Math.min(config.recoveryIntervalMs ?? 5_000, 5_000);
+    assertNodeTimerDelayMs(this.activeRecoveryIntervalMs, 'AsyncLiftRunner activeRecoveryIntervalMs');
     this.sleep = config.sleep ?? defaultSleep;
     this.onError = config.onError;
   }
@@ -41,7 +84,18 @@ export class AsyncLiftRunner {
 
     this.stopped = false;
     try {
-      await this.config.publisher.recover();
+      if (this.config.startPaused === true) {
+        await this.config.publisher.pause();
+      }
+      // Startup recovery IS the first pass: with the scheduling capability its outcome seeds
+      // the cadence choice directly — one inventory, no second boot-time outlook read. Without
+      // the capability the legacy numeric recover() runs and the idle cadence is the seed.
+      const scheduling = this.config.publisher.reconciliationScheduling;
+      if (scheduling) {
+        this.pendingReconciliation = (await scheduling.recover()).pendingWork;
+      } else {
+        await this.config.publisher.recover();
+      }
       this.lastRecoveryAt = Date.now();
       if (!this.config.hasIncludedRecoveryResolver) {
         const includedJobs = await this.config.publisher.list({ status: 'included' });
@@ -55,21 +109,53 @@ export class AsyncLiftRunner {
     }
 
     this.started = true;
-    this.running = this.loop();
+    // ONE atomic scheduler attachment: reconciliation demand (a tx-bearing job left executor
+    // ownership — pull the next pass forward) and wallet release (the wallet is claimable NOW —
+    // let its loop claim instead of idling out the poll) take over together, so scheduling
+    // ownership can never be split between runner incarnations. Attaching after startup
+    // recovery loses nothing: no in-process work can settle before the wallet loops start.
+    // Optional-chained on the METHOD too: a capability object built against the pre-scheduler
+    // contract degrades to cadence-and-poll scheduling instead of failing start().
+    this.unsubscribeScheduler = this.config.publisher.reconciliationScheduling
+      ?.attachScheduler?.({
+        onReconciliationDemand: () => this.demandTransactionReconciliation(),
+        onWalletRelease: (walletId) => this.wakeWallet(walletId),
+      });
+    this.scheduleTransactionReconciliation();
+    this.running = Promise.all(
+      this.config.walletIds.map((walletId) => this.walletLoop(walletId)),
+    ).then(() => undefined);
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = undefined;
+    }
+    // Dispose the scheduler subscription so the publisher does not keep (or invoke) callbacks
+    // into a stopped runner — the drain below settles detached executions, which would
+    // otherwise poke this corpse on every settle.
+    this.unsubscribeScheduler?.();
+    this.unsubscribeScheduler = undefined;
+    // Wake every parked wallet loop so shutdown does not wait out a poll interval.
+    for (const wake of this.walletSleepers.values()) wake();
+    this.walletSleepers.clear();
+    this.walletWakePending.clear();
     await this.running;
+    await this.recoveryInFlight;
+    await this.config.publisher.drainDetachedExecutions?.();
   }
 
-  private async loop(): Promise<void> {
+  private async walletLoop(walletId: string): Promise<void> {
     while (!this.stopped) {
       try {
-        await this.maybeRunRecovery();
-        const processed = await this.runCycle();
+        const processed = await this.config.publisher.processNext(walletId);
         if (!processed && !this.stopped) {
-          await this.sleep(this.pollIntervalMs);
+          // Interruptible idle wait: a wallet-release poke ends it early, and one that landed
+          // during processNext is latched and skips it entirely. The error backoff below stays
+          // deliberately un-interruptible — failure pacing must not be poked away.
+          await this.idleWalletWait(walletId);
         }
       } catch (error) {
         try {
@@ -84,37 +170,143 @@ export class AsyncLiftRunner {
     }
   }
 
-  private async maybeRunRecovery(): Promise<void> {
-    const now = Date.now();
-    if (now - this.lastRecoveryAt < this.recoveryIntervalMs) return;
-    // Throttle attempts at errorBackoffMs to avoid hammering during outages,
-    // but allow the full interval between *successful* recoveries.
-    if (now - this.lastRecoveryAttemptAt < this.errorBackoffMs) return;
-    this.lastRecoveryAttemptAt = now;
-    await this.config.publisher.recover();
-    this.lastRecoveryAt = now;
-  }
-
-  private async runCycle(): Promise<boolean> {
-    if (this.stopped) return false;
-
-    // Each configured wallet owns an independent nonce stream and is already
-    // protected by the publisher's wallet-scoped claim. Run one job per
-    // wallet concurrently so adding publisher wallets actually increases
-    // throughput. Wait for every wallet attempt to settle before propagating
-    // an error; otherwise a fast rejection could start the next cycle while a
-    // slower wallet from this cycle is still publishing.
-    const outcomes = await Promise.allSettled(
-      this.config.walletIds.map((walletId) => this.config.publisher.processNext(walletId)),
-    );
-    const failure = outcomes.find(
-      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
-    );
-    if (failure) {
-      throw failure.reason;
+  /** The publisher's poke that walletId's lock was deleted: its next claim attempt can run now. */
+  private wakeWallet(walletId: string): void {
+    if (this.stopped || !this.started) return;
+    // A release for a wallet this runner does not drive must not accumulate latch state.
+    if (!this.config.walletIds.includes(walletId)) return;
+    const sleeper = this.walletSleepers.get(walletId);
+    if (sleeper) {
+      this.walletSleepers.delete(walletId);
+      sleeper();
+      return;
     }
-    return outcomes.some((outcome) => outcome.status === 'fulfilled' && Boolean(outcome.value));
+    this.walletWakePending.add(walletId);
   }
+
+  private async idleWalletWait(walletId: string): Promise<void> {
+    // Latch consumed on entry: a poke that landed during processNext means claimable work may
+    // already exist, so skip the sleep entirely.
+    if (this.walletWakePending.delete(walletId)) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    let wake!: () => void;
+    const done = new Promise<void>((resolve, reject) => {
+      const settle = (error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        // A wake (or stop) must not abandon the losing poll delay: an uncancelled timer would
+        // accumulate per turnover and keep an otherwise-stopped process alive for the full
+        // interval.
+        if (timer !== undefined) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+        if (error === undefined) resolve();
+        else reject(error);
+      };
+      wake = () => settle();
+      if (this.config.sleep) {
+        // Injected timing seam (tests): the custom sleep cannot be cancelled, only outraced —
+        // but its rejection must settle the wait exceptionally so walletLoop's error path
+        // (onError + backoff) still owns delay failures, exactly as the pre-wake awaited sleep
+        // did (r4 3875113214). A rejection that loses the race to a wake is observed here and
+        // deliberately dropped: the wait already ended.
+        this.config.sleep(this.pollIntervalMs).then(
+          () => settle(),
+          (error) => settle(error ?? new Error('injected sleep rejected')),
+        );
+      } else {
+        timer = setTimeout(() => settle(), this.pollIntervalMs);
+      }
+    });
+    this.walletSleepers.set(walletId, wake);
+    // Re-check AFTER registering: a poke in the gap between the entry check and the
+    // registration would otherwise be latched against a sleeper that never sees it.
+    if (this.walletWakePending.delete(walletId)) {
+      this.walletSleepers.delete(walletId);
+      wake();
+      return;
+    }
+    try {
+      await done;
+    } finally {
+      if (this.walletSleepers.get(walletId) === wake) {
+        this.walletSleepers.delete(walletId);
+      }
+    }
+  }
+
+  /**
+   * The publisher's poke that reconciliation gained actionable work. Coalesced: during an
+   * in-flight pass it only marks the flag, and the pass's own rescheduling turns any number of
+   * pokes into one follow-up pass. `errorBackoffMs` since the last FAILED attempt stays the
+   * floor, so a reconciliation that keeps throwing cannot be poked into a hot loop — while a
+   * wake after a successful pass runs immediately, independent of the errorBackoffMs setting.
+   */
+  private demandTransactionReconciliation(): void {
+    if (this.stopped || !this.started) return;
+    this.reconciliationDemanded = true;
+    if (this.recoveryInFlight) return;
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = undefined;
+    }
+    this.scheduleTransactionReconciliation();
+  }
+
+  private scheduleTransactionReconciliation(): void {
+    if (this.stopped || this.recoveryTimer || this.recoveryInFlight) return;
+    const now = Date.now();
+    const cadenceMs = this.pendingReconciliation ? this.activeRecoveryIntervalMs : this.recoveryIntervalMs;
+    const nextAt = Math.max(
+      this.reconciliationDemanded ? now : this.lastRecoveryAt + cadenceMs,
+      this.lastFailedRecoveryAttemptAt + this.errorBackoffMs,
+    );
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      this.startTransactionReconciliation();
+    }, Math.max(1, nextAt - now));
+  }
+
+  private startTransactionReconciliation(): void {
+    if (this.stopped || this.recoveryInFlight) return;
+    // Consume the latch; a failed pass restores what it consumed (errorBackoffMs floor paces
+    // the retry), and a mid-pass poke re-sets the latch independently of this capture.
+    const demandConsumed = this.reconciliationDemanded;
+    this.reconciliationDemanded = false;
+    const scheduling = this.config.publisher.reconciliationScheduling;
+    // The outlook arrives IN the pass result: serving the demand and learning whether work
+    // remains are one atomic step, so no separate post-pass queue read exists to fail after a
+    // successful pass and park an unresolved transaction on the idle cadence. A publisher
+    // without the capability has no outlook to report; its passes keep the seeded cadence.
+    const pass: Promise<{ reconciled: number; pendingWork: boolean }> = scheduling
+      ? scheduling.reconcile()
+      : (this.config.publisher.reconcileTransactions?.() ?? this.config.publisher.recover())
+        .then((reconciled) => ({ reconciled, pendingWork: this.pendingReconciliation }));
+    const recovery = pass
+      .then((outcome) => {
+        this.lastRecoveryAt = Date.now();
+        this.pendingReconciliation = outcome.pendingWork;
+      })
+      .catch(async (error) => {
+        this.lastFailedRecoveryAttemptAt = Date.now();
+        this.reconciliationDemanded = this.reconciliationDemanded || demandConsumed;
+        try {
+          await this.onError?.(error);
+        } catch {
+          // Error reporting must not stop transaction reconciliation.
+        }
+      })
+      .finally(() => {
+        if (this.recoveryInFlight === recovery) {
+          this.recoveryInFlight = undefined;
+        }
+        this.scheduleTransactionReconciliation();
+      });
+    this.recoveryInFlight = recovery;
+  }
+
 }
 
 function defaultSleep(ms: number): Promise<void> {

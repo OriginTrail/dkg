@@ -76,6 +76,12 @@ operation rejected before dispatch receives `StoreSchedulerBusyError` with
 the operation closure starts, retrying it cannot duplicate a write that might
 already have reached the store.
 
+Each external adapter supplies the canonical store operation as queue-entry
+metadata, and the scheduler binds it when creating either admission rejection.
+Decorators validate that tagged operation-outcome contract rather than the
+error class alone: a rejected nested read does not imply that an enclosing
+replace failed before mutation.
+
 | Environment variable | Default | Purpose |
 |---|---:|---|
 | `DKG_STORE_MAX_CONCURRENT` | `8` | Maximum external-store operations in flight. |

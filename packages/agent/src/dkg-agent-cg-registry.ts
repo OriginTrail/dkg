@@ -123,7 +123,6 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
-import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
   DKGQueryEngine, QueryHandler,
@@ -376,6 +375,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { isCanonicalPositiveContextGraphId } from './context-graph-binding-state.js';
 
 export class ContextGraphRegistryMethods extends DKGAgentBase {
   /**
@@ -386,6 +386,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
+      { source: 'agent.contextGraph.registrationStatus' },
     );
     return result.type === 'bindings' && result.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered';
   }
@@ -416,20 +417,43 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async getContextGraphOnChainId(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; source?: string } = {},
   ): Promise<string | null> {
-    const subscribed = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
-    if (subscribed) return subscribed;
+    const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, options);
+    return binding?.onChainId ?? null;
+  }
+
+  /** Resolve an id together with the provenance required by the binding owner. */
+  async resolveContextGraphOnChainIdBinding(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal; source?: string } = {},
+  ): Promise<(
+    | { onChainId: string; provenance: 'authoritative' | 'ontology' }
+    | { onChainId: string; provenance: 'reverse-name-hash'; nameHash: string }
+  ) | null> {
+    const currentBinding = await this.resolveCurrentNameHashContextGraphBinding(
+      contextGraphId,
+      { signal: options.signal },
+    );
+    if (currentBinding !== undefined) return currentBinding;
 
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } LIMIT 1`,
-      { signal: options.signal },
+      {
+        signal: options.signal,
+        source: options.source ?? 'agent.contextGraph.onChainId',
+      },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return null;
     const value = result.bindings[0]?.['id'];
-    return typeof value === 'string' ? value.replace(/^"|"$/g, '') : null;
+    if (typeof value !== 'string') return null;
+    const onChainId = value.replace(/^"|"$/g, '');
+    return isCanonicalPositiveContextGraphId(onChainId)
+      ? { onChainId, provenance: 'ontology' }
+      : null;
   }
 
   /**
@@ -819,6 +843,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PUBLISH_POLICY}> ?pp }
         OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PUBLISH_AUTHORITY_ACCOUNT_ID}> ?paa }
       } } LIMIT 1`,
+      { source: 'agent.contextGraph.registrationOptions' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return {};
     const row = result.bindings[0] ?? {};
@@ -954,7 +979,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         },
       );
       if (!updated) {
-        await this.store.query(sparql);
+        await this.store.query(sparql, {
+          source: 'agent.cg.removeSubGraph.registrationFallback',
+        });
       }
     } catch {
       // SPARQL DELETE WHERE may not be supported — delete quads manually
@@ -1032,13 +1059,15 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       // one curator triple per node and `getContextGraphOwner`'s
       // `LIMIT 1` made ownership nondeterministic — any subscriber could
       // win the unordered query and look like the curator.
-      this.subscribeToContextGraph(opts.id);
+      this.subscribeToContextGraph(opts.id, { syncMode: 'always-on' });
+      const existing = this.subscribedContextGraphs.get(opts.id);
       this.setContextGraphSubscription(opts.id, {
+        ...existing,
         name: opts.name,
         subscribed: true,
         synced: true,
         metaSynced: true,
-        onChainId: this.subscribedContextGraphs.get(opts.id)?.onChainId,
+        syncMode: existing?.syncMode ?? 'always-on',
       });
       return;
     }
@@ -1092,7 +1121,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureNewContextGraph(opts.id);
 
-    this.subscribeToContextGraph(opts.id);
+    this.subscribeToContextGraph(opts.id, { syncMode: 'always-on' });
     this.setContextGraphSubscription(opts.id, {
       name: opts.name,
       subscribed: true,
@@ -1123,6 +1152,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     const exists = await this.store.query(
       `SELECT ?hit WHERE { ${existsPatterns.map((p) => `{ ${p} }`).join(' UNION ')} } LIMIT 1`,
+      { source: 'agent.endorsement.resolveTarget.exists' },
     );
     if (exists.type !== 'bindings' || exists.bindings.length === 0) {
       throw new Error(
@@ -1140,6 +1170,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     ]);
     const roots = await this.store.query(
       `SELECT DISTINCT ?root WHERE { ${rootPatterns.map((p) => `{ ${p} }`).join(' UNION ')} }`,
+      { source: 'agent.endorsement.resolveTarget.roots' },
     );
     const rootEntities = roots.type === 'bindings'
       ? (roots.bindings as Record<string, string>[]).map((row) => row.root).filter(Boolean)
@@ -1174,6 +1205,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       .join(' || ');
     const result = await this.store.query(
       `SELECT DISTINCT ?s WHERE { GRAPH <${safeGraph}> { ?s ?p ?o . FILTER(${filterClauses}) } }`,
+      { source: 'agent.endorsement.resolveRootSubjects' },
     );
     const subjects = new Set(rootEntities);
     if (result.type === 'bindings') {

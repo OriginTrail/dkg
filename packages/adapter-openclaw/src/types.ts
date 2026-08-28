@@ -83,11 +83,18 @@ export interface JSONSchemaObject {
    * so legacy callers passing stringified numerics can pass
    * schema-validation on hosts that actually enforce the schema.
    */
-  properties: Record<
-    string,
-    { type: string | string[]; description?: string; items?: any; enum?: string[] }
-  >;
+  properties: Record<string, JSONSchemaProperty>;
   required?: string[];
+}
+
+export interface JSONSchemaProperty {
+  type: string | string[];
+  description?: string;
+  items?: JSONSchemaProperty;
+  enum?: string[];
+  properties?: Record<string, JSONSchemaProperty>;
+  required?: string[];
+  additionalProperties?: boolean | JSONSchemaProperty;
 }
 
 export interface OpenClawToolResult {

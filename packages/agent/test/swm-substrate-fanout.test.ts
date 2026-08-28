@@ -20,8 +20,17 @@ function makeBookkeeper(): { calls: Array<{ cgId: string; record: FanOutPeerReco
   };
 }
 
-function enumeration(source: CGMemberEnumeration['source'], members: string[]): CGMemberEnumeration {
+function enumeration(
+  source: Exclude<CGMemberEnumeration['source'], 'allowlist'>,
+  members: string[],
+): CGMemberEnumeration {
+  if (source === 'none') return { source, members: [] };
+  if (source === 'agent-roster') return { source, members, complete: true };
   return { source, members };
+}
+
+function allowlist(members: string[], isPrivate = false): CGMemberEnumeration {
+  return { source: 'allowlist', isPrivate, members };
 }
 
 describe('chooseFanOutTier', () => {
@@ -45,7 +54,7 @@ describe('chooseFanOutTier', () => {
   describe('curated CG (source = allowlist)', () => {
     it('substrate + gossip for any curated CG (cross-version safety net, codex R2)', () => {
       const plan = chooseFanOutTier({
-        enumeration: enumeration('allowlist', ['peerA', 'peerB', 'peerC']),
+        enumeration: allowlist(['peerA', 'peerB', 'peerC']),
         maxSubstrateMembers: 100,
       });
 
@@ -59,7 +68,7 @@ describe('chooseFanOutTier', () => {
     it('does NOT truncate curated members above the threshold', () => {
       const members = Array.from({ length: 250 }, (_, i) => `peer${i}`);
       const plan = chooseFanOutTier({
-        enumeration: enumeration('allowlist', members),
+        enumeration: allowlist(members),
         maxSubstrateMembers: 100,
       });
 
@@ -79,7 +88,7 @@ describe('chooseFanOutTier', () => {
       // either — both legs are no-ops at the wire level. Caller's
       // local apply already happened; nothing more to do.
       const plan = chooseFanOutTier({
-        enumeration: enumeration('allowlist', []),
+        enumeration: allowlist([]),
         maxSubstrateMembers: 100,
       });
 
@@ -137,19 +146,55 @@ describe('chooseFanOutTier', () => {
     });
   });
 
+  describe('private agent-gated CG (source = agent-roster)', () => {
+    it('uses reliable substrate only for a non-empty authorized agent roster', () => {
+      const plan = chooseFanOutTier({
+        enumeration: enumeration('agent-roster', ['peerA', 'peerB']),
+        maxSubstrateMembers: 100,
+      });
+
+      expect(plan.useSubstrate).toBe(true);
+      expect(plan.useGossip).toBe(false);
+      expect(plan.substrateMembers).toEqual(['peerA', 'peerB']);
+      expect(plan.enumerationSource).toBe('agent-roster');
+      expect(plan.enumeratedCount).toBe(2);
+    });
+
+    it('keeps gossip as a last-resort path when no authorized agent advertises a peer ID', () => {
+      const plan = chooseFanOutTier({
+        enumeration: enumeration('agent-roster', []),
+        maxSubstrateMembers: 100,
+      });
+
+      expect(plan.useSubstrate).toBe(true);
+      expect(plan.useGossip).toBe(true);
+      expect(plan.substrateMembers).toEqual([]);
+    });
+
+    it('keeps gossip alongside reliable delivery for an incomplete mixed roster', () => {
+      const plan = chooseFanOutTier({
+        enumeration: { source: 'agent-roster', members: ['peerA'], complete: false },
+        maxSubstrateMembers: 100,
+      });
+
+      expect(plan.useSubstrate).toBe(true);
+      expect(plan.useGossip).toBe(true);
+      expect(plan.substrateMembers).toEqual(['peerA']);
+    });
+  });
+
   /**
-   * `none` covers two distinct semantic cases collapsed into the
-   * same wire behaviour (gossip-only): legacy/bootstrap CGs with
-   * no live subscribers yet, AND agent-gated private CGs without
-   * an enumerable peer allowlist (which fail closed in
-   * CGMemberEnumerator, see enumerate-cg-members.ts bug fix #1).
+   * `none` covers semantic cases collapsed into the same wire
+   * behaviour (gossip-only): legacy/bootstrap CGs with no live
+   * subscribers yet, and private CGs whose authorized agents do
+   * not currently advertise a peer ID.
    * Both end up here for the same reason — we have no roster to
    * substrate-fan-out to. Gossip is safe in both: receiver-side
    * auth gate (`isPrivateContextGraph`) drops payloads at the
    * apply layer for private CGs, and the SWM payload is encrypted
    * with the per-CG key anyway.
    */
-  describe('legacy / agent-gated CG (source = none)', () => {
+  describe('legacy / empty-roster CG (source = none)', () => {
     it('gossip-only with empty substrate set', () => {
       const plan = chooseFanOutTier({
         enumeration: enumeration('none', []),
@@ -176,7 +221,7 @@ describe('chooseFanOutTier', () => {
   describe('enumeratedMembers (PR-D #D3 regression)', () => {
     it('curated CG: enumeratedMembers equals substrateMembers (full allowlist)', () => {
       const plan = chooseFanOutTier({
-        enumeration: enumeration('allowlist', ['peerA', 'peerB']),
+        enumeration: allowlist(['peerA', 'peerB']),
         maxSubstrateMembers: 100,
       });
       expect(plan.substrateMembers).toEqual(['peerA', 'peerB']);

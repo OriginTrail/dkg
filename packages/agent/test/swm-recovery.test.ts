@@ -1,5 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  OxigraphStore,
+  readSwmMaterializationWitness,
+  writeSwmMaterializationWitness,
+} from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -16,7 +20,12 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { syncPublicSnapshotsForMeta } from '../src/sync/requester/shared-memory-sync.js';
+import {
+  collectPublicSnapshotMetadata,
+  orderPublicSnapshotsForBalancedRecency,
+  syncPublicSnapshotsForMeta,
+  type PublicSnapshotMetadata,
+} from '../src/sync/requester/shared-memory-sync.js';
 import {
   recoverContextGraphSwm,
   recoverContextGraphSwmWithProgressRetries,
@@ -156,6 +165,44 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
 });
 
 describe('syncPublicSnapshotsForMeta', () => {
+  it('prioritizes three recent snapshots for every historical snapshot', () => {
+    const snapshots: PublicSnapshotMetadata[] = Array.from({ length: 8 }, (_, index) => ({
+      ref: `sha256:${index.toString(16).padStart(64, '0')}`,
+      digest: `sha256:${index.toString(16).padStart(64, '0')}`,
+      count: 1,
+    }));
+    const metaQuads: Quad[] = snapshots.flatMap((snapshot, index) => {
+      const subject = `urn:dkg:share:balanced-${index}`;
+      return [
+        { subject, predicate: `${DKG}publicQuadsDigest`, object: `"${snapshot.digest}"`, graph: WS_META },
+        { subject, predicate: `${DKG}publicQuadsCount`, object: '"1"', graph: WS_META },
+        { subject, predicate: `${DKG}publishedAt`, object: `"2026-08-10T22:00:${index.toString().padStart(2, '0')}.000Z"`, graph: WS_META },
+        { subject, predicate: `${DKG}kaUal`, object: `"did:dkg:base:84532/0x0000000000000000000000000000000000000001/${100 + index}"`, graph: WS_META },
+      ];
+    });
+
+    const parsed = collectPublicSnapshotMetadata(metaQuads);
+    expect(orderPublicSnapshotsForBalancedRecency(parsed).map(({ ref }) => ref))
+      .toEqual([
+        snapshots[7]!.ref,
+        snapshots[6]!.ref,
+        snapshots[5]!.ref,
+        snapshots[0]!.ref,
+        snapshots[4]!.ref,
+        snapshots[3]!.ref,
+        snapshots[2]!.ref,
+        snapshots[1]!.ref,
+      ]);
+  });
+
+  it('preserves manifest order when no recency evidence exists', () => {
+    const snapshots: PublicSnapshotMetadata[] = [
+      { ref: 'ref-b', digest: 'digest-b', count: 1 },
+      { ref: 'ref-a', digest: 'digest-a', count: 1 },
+    ];
+    expect(orderPublicSnapshotsForBalancedRecency(snapshots)).toEqual(snapshots);
+  });
+
   it('retries a cleanly-closed short snapshot response without caching its prefix', async () => {
     const expected: Quad[] = [
       { subject: 'urn:snapshot:a', predicate: STATUS, object: '"one"', graph: '' },
@@ -192,6 +239,217 @@ describe('syncPublicSnapshotsForMeta', () => {
     });
     expect(deletedCheckpoints).toBeGreaterThan(0);
     await expect(snapshotStore.getSnapshot(digest)).resolves.toBeNull();
+  });
+
+  it('skips one short-prefix ref and still fetches the rest of the manifest', async () => {
+    // TWO declared refs, and that is the whole point of the row. The sibling
+    // test above — and every other short-prefix assertion in the repo —
+    // declares exactly ONE ref, where "skip this ref and keep walking" and
+    // "abandon the manifest at this ref" produce byte-identical results. With
+    // one ref this branch cannot be observed at all.
+    //
+    // Why the second ref matters in production: ref order is byte-identical on
+    // every pass (`collectPublicSnapshotMetadata` returns `Map` insertion
+    // order over the signed metadata), so returning/breaking here would pin
+    // every future pass at this same index. One permanently unserveable
+    // Knowledge Asset — a relay that always closes cleanly after a prefix —
+    // would stall the entire context graph at zero progress forever, and the
+    // bounded repeat-pass driver would converge on a fixed point having
+    // materialized nothing. Skipping costs that one KA and nothing else.
+    //
+    // Ordering is load-bearing: the SHORT ref is declared FIRST so that a
+    // `return`/`break` regression never reaches the second ref. If the full
+    // snapshot were declared first, the walk would resolve it before ever
+    // touching the short one and the row would pass under the bug.
+    const shortPayload: Quad[] = [
+      { subject: 'urn:snapshot:short:a', predicate: STATUS, object: '"one"', graph: '' },
+      { subject: 'urn:snapshot:short:b', predicate: STATUS, object: '"two"', graph: '' },
+    ];
+    // Deliberately a DIFFERENT payload, so the two digests (and therefore the
+    // two refs) cannot collide and `requestedRefs` can distinguish them.
+    const fullPayload: Quad[] = [
+      { subject: 'urn:snapshot:full:a', predicate: STATUS, object: '"three"', graph: '' },
+    ];
+    const shortDigest = workspacePublicQuadsDigest(shortPayload);
+    const fullDigest = workspacePublicQuadsDigest(fullPayload);
+    const shortSubject = 'urn:dkg:share:short-prefix-ka';
+    const fullSubject = 'urn:dkg:share:complete-ka';
+    const snapshotStore = new MemorySnapshotStore();
+    const requestedRefs: string[] = [];
+    const deletedCheckpoints: string[] = [];
+
+    const result = await syncPublicSnapshotsForMeta({
+      ctx,
+      remotePeerId: 'peer-source',
+      contextGraphId: CG,
+      // Not the deadline branch: this row must isolate the short-prefix skip.
+      // An expired deadline would abandon the tail for an unrelated reason and
+      // the row would pass even with the skip reverted.
+      deadline: Number.MAX_SAFE_INTEGER,
+      // Digest-only (store-backed) rows: no explicit `dkg:publicSnapshotRef`,
+      // so each ref IS its digest. Both rows carry digest AND count — a row
+      // missing either is silently dropped from the manifest, which would
+      // quietly shrink `totalSnapshots` to 1 and re-create the blind spot.
+      metaQuads: [
+        { subject: shortSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${shortDigest}"`, graph: WS_META },
+        { subject: shortSubject, predicate: `${DKG}publicQuadsCount`, object: `"${shortPayload.length}"^^<${XSD_INTEGER}>`, graph: WS_META },
+        { subject: fullSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${fullDigest}"`, graph: WS_META },
+        { subject: fullSubject, predicate: `${DKG}publicQuadsCount`, object: `"${fullPayload.length}"^^<${XSD_INTEGER}>`, graph: WS_META },
+      ],
+      publicSnapshotStore: snapshotStore,
+      fetchSyncPages: async (_c, _p, _cg, _inc, _phase, _graph, _deadline, fetchOptions): Promise<SyncPageResult> => {
+        const snapshotRef = fetchOptions?.snapshotRef;
+        requestedRefs.push(snapshotRef ?? '');
+        // `completed: true` with FEWER quads than the signed count — a relayed
+        // stream that terminated cleanly on a prefix. Not corrupt (the digest
+        // check is only reached at equal count), so it must stay a retryable
+        // skip rather than the fatal throw.
+        if (snapshotRef === shortDigest) {
+          return { ...page([shortPayload[0]!]), checkpointKey: `snapshot:${shortDigest}` };
+        }
+        return { ...page(fullPayload), checkpointKey: `snapshot:${fullDigest}` };
+      },
+      deleteCheckpoint: (key) => { deletedCheckpoints.push(key); },
+      setCheckpoint: () => {},
+    });
+
+    // The walk reached the SECOND ref. Without this the skip is unproven: a
+    // `break` leaves `requestedRefs` at `[shortDigest]`.
+    expect(requestedRefs).toEqual([shortDigest, fullDigest]);
+    expect(result).toMatchObject({
+      // Still not a clean round — the manifest is NOT satisfied. `completed` is
+      // derived from `missingCount === 0`, so continuing past a skipped ref must
+      // never be mistaken for success; the caller has to come back for it.
+      completed: false,
+      readySnapshots: 1,
+      totalSnapshots: 2,
+      missingCount: 1,
+      completedPhases: 1,
+      // A skip is OUR classification of the peer's response, not a local budget
+      // decision, so the voluntary-yield flag must stay down.
+      yieldedAtDeadline: false,
+    });
+    // The shortfall names the ref that was skipped, not the one that succeeded.
+    expect(result.missingSample).toEqual([shortDigest]);
+    // `MemorySnapshotStore.putSnapshot` genuinely persists into `this.snapshots`,
+    // so these two are real round-trips through the cache, not stub echoes: the
+    // second KA was verified and written, and the unverified prefix was not.
+    await expect(snapshotStore.getSnapshot(fullDigest)).resolves.toEqual(fullPayload);
+    await expect(snapshotStore.getSnapshot(shortDigest)).resolves.toBeNull();
+    // The skipped ref's checkpoint is dropped so its retry restarts at offset
+    // zero — resuming at nextOffset would validate only the tail against the
+    // full digest and could never succeed.
+    expect(deletedCheckpoints).toContain(`snapshot:${shortDigest}`);
+  });
+
+  it('yields at the round deadline without charging the peer a timeout', async () => {
+    // Every OTHER direct call of `syncPublicSnapshotsForMeta` in this repo —
+    // including the two rows above — passes `deadline: Number.MAX_SAFE_INTEGER`,
+    // so the voluntary-yield branch is never entered anywhere. This row is the
+    // only thing driving it.
+    //
+    // The contract being pinned is an ATTRIBUTION rule, not a counting rule:
+    // stopping on OUR OWN round budget is a local scheduling decision, so it
+    // must surface as an incomplete snapshot plane (`yieldedAtDeadline`, which
+    // the caller in `runSharedMemorySync` turns into `snapshotPlaneIncomplete`
+    // + `failedPhases`) and must NEVER touch `timedOutPhases` — that field
+    // feeds `backoffWorthyFailure` in `durable-progress.ts`, so folding a
+    // yield into it would back off a perfectly healthy responder for the
+    // crime of us running out of clock.
+    //
+    // Fake timers rather than a real short deadline: the clock has to cross the
+    // deadline BETWEEN the first and second Knowledge Asset, deterministically.
+    // A wall-clock margin would race the first `Date.now() >= deadline` check
+    // and flake on a loaded machine, and a busy-wait would burn real time.
+    const BASE_TIME = 1_700_000_000_000;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(BASE_TIME);
+      const deadline = BASE_TIME + 1_000;
+
+      const cachedPayload: Quad[] = [
+        { subject: 'urn:snapshot:before-deadline', predicate: STATUS, object: '"kept"', graph: '' },
+      ];
+      const deferredPayload: Quad[] = [
+        { subject: 'urn:snapshot:after-deadline', predicate: STATUS, object: '"deferred"', graph: '' },
+      ];
+      const cachedDigest = workspacePublicQuadsDigest(cachedPayload);
+      const deferredDigest = workspacePublicQuadsDigest(deferredPayload);
+      const cachedSubject = 'urn:dkg:share:before-deadline-ka';
+      const deferredSubject = 'urn:dkg:share:after-deadline-ka';
+      const snapshotStore = new MemorySnapshotStore();
+      // Pre-seeded so the FIRST ref resolves from the CACHE. That keeps the
+      // pre-yield progress entirely off the network: `readySnapshots: 1` below
+      // therefore cannot be confused with a fetch, and `fetches: 0` stays a
+      // clean statement about the whole round.
+      await snapshotStore.putSnapshot({ digest: cachedDigest, quads: cachedPayload });
+      let fetches = 0;
+
+      const result = await syncPublicSnapshotsForMeta({
+        ctx,
+        remotePeerId: 'peer-source',
+        contextGraphId: CG,
+        deadline,
+        // Order is load-bearing: the cached ref FIRST, the deferred ref second.
+        // The clock is only pushed past the deadline once the first one is
+        // resolved, so the walk is forced to stop mid-manifest — which is the
+        // only shape that can show a yield PRESERVING earlier progress rather
+        // than discarding the round.
+        metaQuads: [
+          { subject: cachedSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${cachedDigest}"`, graph: WS_META },
+          { subject: cachedSubject, predicate: `${DKG}publicQuadsCount`, object: `"${cachedPayload.length}"^^<${XSD_INTEGER}>`, graph: WS_META },
+          { subject: deferredSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${deferredDigest}"`, graph: WS_META },
+          { subject: deferredSubject, predicate: `${DKG}publicQuadsCount`, object: `"${deferredPayload.length}"^^<${XSD_INTEGER}>`, graph: WS_META },
+        ],
+        publicSnapshotStore: snapshotStore,
+        fetchSyncPages: async (): Promise<SyncPageResult> => {
+          fetches += 1;
+          return page([]);
+        },
+        // The hook that burns the budget. It fires for the cache hit, so by the
+        // time the loop re-checks the clock for the second ref the round is
+        // over. Nothing here touches the transport.
+        onSnapshotReady: async () => { vi.setSystemTime(deadline); },
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+      });
+
+      expect(result).toMatchObject({
+        // The local yield signal the caller maps to `snapshotPlaneIncomplete`.
+        yieldedAtDeadline: true,
+        // A yield is not a clean round: `completed` is derived from
+        // `missingCount === 0`, so the abandoned tail keeps the graph from
+        // being stamped caught-up while Knowledge Assets are still missing.
+        completed: false,
+        // Progress made BEFORE the deadline survives it.
+        readySnapshots: 1,
+        totalSnapshots: 2,
+        // `readySnapshots + missingCount === totalSnapshots` still holds across
+        // the yield — the abandoned tail is counted, not dropped.
+        missingCount: 1,
+        // The whole point. No peer fault was observed, so none is recorded:
+        // nothing here may reach `backoffWorthyFailure`.
+        timedOutPhases: 0,
+        // No network work happened at all this round.
+        completedPhases: 0,
+        resumedPhases: 0,
+        bytesReceived: 0,
+      });
+      // Names the ref we still owe, not the one we already have.
+      expect(result.missingSample).toEqual([deferredDigest]);
+      // The clock is checked BEFORE the fetch, so no `SyncPageResult` for the
+      // deferred ref ever exists — which is structurally why `timedOutPhases`
+      // cannot move on this path. If the check ever migrates below the fetch,
+      // this is the assertion that catches it.
+      expect(fetches).toBe(0);
+      // The yield left the deferred snapshot unfetched and uncached, so the
+      // next round restarts it from offset zero rather than resuming a prefix.
+      await expect(snapshotStore.getSnapshot(deferredDigest)).resolves.toBeNull();
+    } finally {
+      // Scoped to this row: the rest of the file (and the OxigraphStore-backed
+      // suite below) runs on the real clock.
+      vi.useRealTimers();
+    }
   });
 });
 const UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/7';
@@ -243,6 +501,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         })),
         droppedDataTriples: 0,
       }),
+      writeLocks: new Map<string, Promise<void>>(),
       store,
       ensureContextGraph: async () => {},
       setCheckpoint: () => {},
@@ -272,6 +531,40 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     ]));
     expect(result.insertedDataQuads).toBe(1);
     expect(await statusValues(store)).toEqual(['"v2"']);
+  });
+
+  it('keeps independent Context Graph recoveries concurrent', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const writeLocks = new Map<string, Promise<void>>();
+    let activeFetches = 0;
+    let maxActiveFetches = 0;
+    let signalBothEntered!: () => void;
+    const bothEntered = new Promise<void>((resolve) => { signalBothEntered = resolve; });
+    let releaseFetches!: () => void;
+    const fetchGate = new Promise<void>((resolve) => { releaseFetches = resolve; });
+    const base = makeDeps(store, []);
+    const recover = (contextGraphId: string) => recoverContextGraphSwm({
+      ...base,
+      contextGraphId,
+      remotePeerId: `peer-${contextGraphId}`,
+      writeLocks,
+      fetchSyncPages: async (): Promise<SyncPageResult> => {
+        activeFetches += 1;
+        maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
+        if (activeFetches === 2) signalBothEntered();
+        await fetchGate;
+        activeFetches -= 1;
+        return page([], false);
+      },
+    });
+
+    const first = recover('recovery-cg-a');
+    const second = recover('recovery-cg-b');
+    await bothEntered;
+    expect(maxActiveFetches).toBe(2);
+    releaseFetches();
+    await Promise.all([first, second]);
   });
 
   it('inserts verified meta and reports it', async () => {
@@ -351,6 +644,15 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       { subject: 'urn:rootless:a', predicate: STATUS, object: '"stale"', graph: assertionGraph },
       { subject: 'urn:rootless:old', predicate: 'urn:p', object: '"must-disappear"', graph: assertionGraph },
     ]);
+    // #2079: recovery REPLACES this graph, so a catch-up materialization
+    // witness for it would describe content that is gone — and a replace can
+    // leave the quad count unchanged, which is exactly what the count gate
+    // cannot see. This lane is lane-disjoint from the public one in automatic
+    // operation, but the ungated `recover-shared-memory` route reaches it, and
+    // that route exists to repair a corrupt local copy — the worst moment to
+    // leave a stale memo standing.
+    await writeSwmMaterializationWitness(store, assertionGraph, 'sha256:stale-witness');
+    expect(await readSwmMaterializationWitness(store, assertionGraph, 'sha256:stale-witness')).toBe(true);
     const snapshotStore = new MemorySnapshotStore();
     let snapshotFetches = 0;
     let dataFetches = 0;
@@ -377,6 +679,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         entityCreators: [],
         droppedDataTriples: 0,
       }),
+      writeLocks: new Map<string, Promise<void>>(),
       store,
       publicSnapshotStore: snapshotStore,
       ensureContextGraph: async () => {},
@@ -393,6 +696,11 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     });
     expect(snapshotFetches).toBe(1);
     expect(dataFetches).toBe(0);
+    // #2079: the replace above must have dropped the memo. The witness lives in
+    // `urn:dkg:local:*`, untouched by the graph replace itself, so only the
+    // explicit invalidate in the recovery lane can clear it — which is what
+    // makes this discriminate.
+    expect(await readSwmMaterializationWitness(store, assertionGraph, 'sha256:stale-witness')).toBe(false);
     const recovered = await store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertionGraph}> { ?s ?p ?o } }`,
     );
@@ -476,6 +784,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
         verifiedData: [], verifiedMeta: metaQuads, entityCreators: [], droppedDataTriples: 0,
       }),
+      writeLocks: new Map<string, Promise<void>>(),
       store,
       publicSnapshotStore: snapshotStore,
       ensureContextGraph: async () => {},
@@ -555,6 +864,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
         verifiedData: [], verifiedMeta: metaQuads, entityCreators: [], droppedDataTriples: 0,
       }),
+      writeLocks: new Map<string, Promise<void>>(),
       store,
       publicSnapshotStore: new MemorySnapshotStore(),
       ensureContextGraph: async () => {},

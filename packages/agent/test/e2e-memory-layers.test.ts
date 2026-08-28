@@ -30,8 +30,10 @@ import {
   ASSERTION_PUBLISH_RECEIPT_PREDICATES,
   createGraphKnowledgeAssetScope,
   createOperationContext,
+  knowledgeAssetLayerGraphUri,
   MemoryLayer,
 } from '@origintrail-official/dkg-core';
+import { makeSwmSyncHarness } from './_helpers/swm-sync-harness.js';
 
 const agents: DKGAgent[] = [];
 
@@ -164,6 +166,61 @@ describe('Memory layer isolation (single agent)', () => {
     );
     expect(data.bindings.length).toBe(0);
   }, 15_000);
+
+  it('returns a named WM to SWM promote before the RFC-64 inventory shadow settles', async () => {
+    const contextGraphId = 'shadow-promote-nonblocking';
+    const name = 'shadow-nonblocking';
+    const agent = await createAgent('ShadowPromoteNonblockingBot');
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Shadow Promote Nonblocking',
+    });
+    await agent.registerContextGraph(contextGraphId);
+    await agent.assertion.create(contextGraphId, name);
+    await agent.assertion.write(contextGraphId, name, [{
+      subject: `${ENTITY_BASE}:shadow`,
+      predicate: 'http://schema.org/name',
+      object: '"Shadow remains observational"',
+    }]);
+    let releaseShadow!: () => void;
+    const deferredShadow = new Promise<void>((resolve) => { releaseShadow = resolve; });
+    const shadow = vi
+      .spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockImplementation(async () => {
+        await deferredShadow;
+        return {
+          status: 'dormant',
+          action: 'upsert',
+          attempts: 0,
+          headObjectDigest: null,
+          error: null,
+        };
+      });
+
+    const result = await Promise.race([
+      agent.assertion.promote(contextGraphId, name),
+      sleep(2_000).then(() => { throw new Error('promote waited for shadow observer'); }),
+    ]);
+
+    expect(result.sealed).toBe(true);
+    expect(result.publishReady).toBe(true);
+    expect(result.shareOperationId).toEqual(expect.any(String));
+    expect(shadow).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId,
+      assertionCoordinate: name,
+      shareOperationId: result.shareOperationId,
+    }));
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(1);
+    releaseShadow();
+    await agent.awaitInFlightRfc64SwmInventoryObserversV1();
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(0);
+    const swm = await agent.query(
+      `SELECT ?name WHERE { <${ENTITY_BASE}:shadow> <http://schema.org/name> ?name }`,
+      { contextGraphId, graphSuffix: '_shared_memory' },
+    );
+    expect(swm.bindings).toHaveLength(1);
+    shadow.mockRestore();
+  }, 30_000);
 
   it('published data is in data graph but not SWM', async () => {
     const agent = await createAgent('PublishedBot');
@@ -533,6 +590,103 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(intent.sealMerkleRoot).toMatch(/^0x[0-9a-f]+$/);
   }, 30_000);
 
+  it('forwards onPublishConfirmed through the real queued rails on create and update [GH#2359 r2 3877540365]', async () => {
+    // The production glue this pins: the async publisher injects its receipt hook into the
+    // execution input, the REAL handler hands publishOptions to
+    // publishQueuedKnowledgeAssetVmPublish, the agent's one-object executionHooks spread
+    // forwards it, and DKGPublisher fires it at receipt time. The spies wrap (never stub) the
+    // underlying publisher entry points to prove the SAME callback arrived and fires — for the
+    // create branch and the update branch. Dropping the field at any reconstruction turns the
+    // captured hook undefined and this row red.
+    const agent = await createAgent('QueuedConfirmForwardBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Confirm Forward E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-confirm-forward';
+    const root = `${ENTITY_BASE}:queued-confirm-forward`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Confirm Forward v1"' },
+    ]);
+    await agent.assertion.promote(CG_ID, name);
+    const createIntent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+
+    const underlying = (agent as any).publisher;
+    // r5 (3877726512) - IDENTITY, not just presence: the hook captured at the real handler
+    // boundary must be the SAME reference that reaches each underlying publisher entry point,
+    // so a substitution anywhere in the agent's option reconstructions cannot pass.
+    const handlerHooks: unknown[] = [];
+    let createHookForwarded: unknown = 'unset';
+    const createFired: string[] = [];
+    const realPublish = underlying.publish.bind(underlying);
+    underlying.publish = async (options: any) => {
+      const original = options.onPublishConfirmed;
+      createHookForwarded = original;
+      return realPublish({
+        ...options,
+        onPublishConfirmed: (confirmation: { txHash: string }) => {
+          createFired.push(confirmation.txHash);
+          return original?.(confirmation);
+        },
+      });
+    };
+
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+      knowledgeAssetVmPublishHandler: {
+        preflight: ({ request }) => agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+        execute: async ({ request, publishOptions }) => {
+          handlerHooks.push(publishOptions.onPublishConfirmed);
+          return agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions);
+        },
+      },
+    });
+    const createJob = await asyncPublisher.enqueueKnowledgeAssetVmPublish(createIntent);
+    const createProcessed = await asyncPublisher.processNext('wallet-1');
+    expect(createProcessed?.jobId).toBe(createJob);
+    expect(createProcessed?.status).toBe('finalized');
+    // The async publisher's injected hook survived every option reconstruction to the
+    // underlying publisher AS THE SAME REFERENCE, and fired with the receipt hash.
+    expect(typeof handlerHooks[0]).toBe('function');
+    expect(createHookForwarded).toBe(handlerHooks[0]);
+    expect(createFired).toHaveLength(1);
+    expect(createFired[0]).toMatch(/^0x[0-9a-f]+$/i);
+
+    // UPDATE branch: reopen the published assertion, revise, promote - the second intent
+    // resolves to the update rails.
+    const reopened = await agent.assertion.pullFrom(CG_ID, name, 'vm', { onConflict: 'replace' });
+    expect(reopened.seeded).toBe(1);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Confirm Forward v2"' },
+    ]);
+    await agent.assertion.finalize(CG_ID, name);
+    await agent.assertion.promote(CG_ID, name);
+    const updateIntent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+
+    let updateHookForwarded: unknown = 'unset';
+    const updateFired: string[] = [];
+    const realUpdate = underlying.updateKnowledgeAssetFromSharedMemory.bind(underlying);
+    underlying.updateKnowledgeAssetFromSharedMemory = async (kaId: bigint, options: any) => {
+      const original = options.onPublishConfirmed;
+      updateHookForwarded = original;
+      return realUpdate(kaId, {
+        ...options,
+        onPublishConfirmed: (confirmation: { txHash: string }) => {
+          updateFired.push(confirmation.txHash);
+          return original?.(confirmation);
+        },
+      });
+    };
+
+    const updateJob = await asyncPublisher.enqueueKnowledgeAssetVmPublish(updateIntent);
+    const updateProcessed = await asyncPublisher.processNext('wallet-1');
+    expect(updateProcessed?.jobId).toBe(updateJob);
+    expect(updateProcessed?.status).toBe('finalized');
+    expect(typeof handlerHooks[1]).toBe('function');
+    expect(updateHookForwarded).toBe(handlerHooks[1]);
+    expect(updateFired).toHaveLength(1);
+    expect(updateFired[0]).toMatch(/^0x[0-9a-f]+$/i);
+  }, 90_000);
+
   it('async VM publish executes the queued share snapshot after live SWM is drained', async () => {
     const agent = await createAgent('QueuedAsyncVmPublishBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Publish E2E' });
@@ -671,6 +825,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const recoveryInput = {
       walletId: 'wallet-1',
       request: recoveryRequest,
+      // GH#2270 PR-3 r3 — the typed transaction facts the finalizer reads; `job.broadcast`
+      // stays only as the optional merkle-root cross-check carrier.
+      lookup: { txHash, walletId: 'wallet-1' },
       job: {
         jobId: 'recovery-job',
         jobSlug: 'recovery-job',
@@ -689,14 +846,18 @@ describe('rootless graph-scoped KA lifecycle', () => {
         inclusion: {
           txHash,
           blockNumber: onChain.blockNumber,
+          blockHash: `0x${'ab'.repeat(32)}`,
           blockTimestamp: onChain.blockTimestamp,
         },
         finalization: {
           mode: 'published',
           txHash,
-          // Production recovery resolver shape: contract + packed KA id. The
-          // finalizer must keep using intent.kaUal for the local exact graph.
-          ual: receiptUal,
+          // GH#1966: for graph-scoped named KAs the production CLI recovery
+          // resolver overrides finalization.ual with the graph-local queued UAL
+          // (author + low-96 KA number) — the same identity a normal publish
+          // records — NOT the contract/packed-id receipt form. Recovery must
+          // accept it; the finalizer keeps using intent.kaUal for the local graph.
+          ual: intent.kaUal,
           batchId: kaId.toString(),
           startKAId: kaId.toString(),
           endKAId: kaId.toString(),
@@ -705,6 +866,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
         publishProof: {
           merkleRoot: intent.sealMerkleRoot,
           authorAddress: intent.seal.authorAddress,
+          txIndex: 4,
         },
       },
       publisher: recoveryPublisher,
@@ -808,23 +970,122 @@ describe('rootless graph-scoped KA lifecycle', () => {
       graph: contextGraphSharedMemoryMetaUri(CG_ID),
       subject: operationSubject,
     });
-    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+
+    // r29 (🔴 3822354184 / 🔴 3822354192) — the deadline at the REAL mutation boundary, on the
+    // CURRENT-version path. The previous row stopped inside the read-only normalizer, which cannot
+    // mutate anything, so it could not see that the r28 guard sat inside the superseded branch
+    // while `handleChainReconciledKC` on this path ran unguarded. An expired pass must not begin
+    // lifecycle materialization while it still holds the claim lock.
+    //
+    // The abort is armed BEFORE the call, so the deadline is already reached by the time the reads
+    // finish and the mutation would start. The spy is the observable: the finalization handler is
+    // the mutating collaborator, and it must never be entered.
+    // r29 (🔴 3822354184 / 🔴 3822354192) — the deadline at the REAL mutation boundary. The
+    // previous row stopped inside the read-only normalizer, which cannot mutate anything, so it
+    // could not see that the r28 guard sat inside the superseded branch while the current-version
+    // materialization ran unguarded.
+    //
+    // The observable is the ERROR IDENTITY, not a spy on the finalization handler: that handler is
+    // shared with the SWM host reconcile lane, which touches this same asset, so a call count
+    // there answers a question about someone else's work (it counted 1 even when the guard was
+    // correct). Error identity is specific by construction.
+    //
+    // The argument the row rests on: the abort is fired from inside a LATE read — the context
+    // graph id lookup, which runs after the normalizer has finished all of its own deadline
+    // checks. So the deadline cannot be reached by any guard before that point. If the call then
+    // rejects with the recovery deadline error, the only guard that can have raised it is one
+    // AFTER the reads, i.e. a mutation boundary. That is exactly what must exist.
+    {
+      const expired = new AbortController();
+      const realCgId = agent.getContextGraphOnChainId.bind(agent);
+      agent.getContextGraphOnChainId = (async (...args: unknown[]) => {
+        const value = await realCgId(...(args as Parameters<typeof realCgId>));
+        expired.abort();
+        return value;
+      }) as typeof agent.getContextGraphOnChainId;
+
+      try {
+        await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+          ...recoveryInput,
+          signal: expired.signal,
+        } as any)).rejects.toMatchObject({ name: 'RecoveryDeadlineReachedError' });
+      } finally {
+        agent.getContextGraphOnChainId = realCgId;
+      }
+    }
+
+    // Confirmed publishes always remove their exact SWM operation metadata;
+    // `clearSharedMemoryAfter=false` only preserves OTHER unpublished content.
+    // Recovery must therefore accept the immutable seal envelope after strict
+    // chain proof even when the operator did not request a family-wide clear.
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
       ...recoveryInput,
       request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
-    } as any)).rejects.toMatchObject({
-      code: 'KA_OPERATION_PUBLIC_SNAPSHOT_NOT_FOUND',
-    });
-
-    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    } as any);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     expect(recoveryCleanup).not.toHaveBeenCalled();
+
+    // PR #2300 r1 (🟡 3809054841) — the record shape item 5 exists for: a persisted FAILED job
+    // held on the recovery carrier alone (`recovery.txHashChecked`, NO `broadcast`). The REAL
+    // finalizer must complete lifecycle materialization from `lookup.txHash`; a regression that
+    // reads `job.broadcast.txHash` anywhere on this path throws on this input and fails the row.
+    // PR #2300 r5 (3812275752) — reset the lifecycle to its PRE-recovery state first. Without
+    // this the assertions below describe what the earlier invocation already produced, so a
+    // carrier-only call that silently did nothing would still leave the row green.
+    for (const predicate of [
+      `${DKG}publishedUal`,
+      `${DKG}vmCurrentAssertion`,
+      `${DKG}assertionGraph`,
+      `${DKG}memoryLayer`,
+      `${DKG}state`,
+    ]) {
+      await store.deleteByPattern({ subject: lifecycleUri, predicate, graph: metaGraph });
+    }
+    await store.deleteByPattern({ subject: assertionUri, predicate: `${DKG}memoryLayer`, graph: metaGraph });
+    for (const predicate of Object.values(ASSERTION_PUBLISH_RECEIPT_PREDICATES)) {
+      await store.deleteByPattern({ subject: assertionUri, predicate, graph: metaGraph });
+    }
+    await store.insert([
+      { subject: lifecycleUri, predicate: `${DKG}state`, object: '"promoted"', graph: metaGraph },
+      { subject: lifecycleUri, predicate: `${DKG}memoryLayer`, object: `"${MemoryLayer.SharedWorkingMemory}"`, graph: metaGraph },
+      { subject: assertionUri, predicate: `${DKG}memoryLayer`, object: `"${MemoryLayer.SharedWorkingMemory}"`, graph: metaGraph },
+    ]);
+    // The premise: the lifecycle really is un-published again, so anything asserted after the
+    // carrier-only call is that call's own work.
+    expect((await agent.assertion.history(CG_ID, name))?.status).not.toBe('vm-confirmed');
+
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      job: {
+        jobId: 'carrier-only-recovery-job',
+        jobSlug: 'carrier-only-recovery-job',
+        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: recoveryRequest },
+        status: 'failed',
+        failure: {
+          failedFromState: 'claimed',
+          code: 'workspace_unavailable',
+          retryable: true,
+          resolution: 'reset_to_accepted',
+          message: 'held on the recovery carrier alone',
+          errorPayloadRef: 'urn:dkg:test:error:carrier-only',
+          occurredAt: 3,
+        },
+        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: txHash },
+        timestamps: { acceptedAt: 1, failedAt: 3, updatedAt: 3 },
+        retries: { retryCount: 0, maxRetries: 10 },
+        controlPlane: {},
+      },
+    } as any);
+    expect((await agent.assertion.history(CG_ID, name))?.status).toBe('vm-confirmed');
 
     const history = await agent.assertion.history(CG_ID, name);
     expect(history?.state).toBe('published');
     expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
     expect(history?.status).toBe('vm-confirmed');
     expect(history?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
-    expect(history?.publishedUal).toBe(receiptUal);
+    // GH#1966: recovery stamps the graph-local UAL the resolver returned, matching
+    // what a normal named-KA publish records (not the contract/packed receipt form).
+    expect(history?.publishedUal).toBe(intent.kaUal);
     expect(history?.assertionGraph).toBe(contextGraphLayerUri(
       CG_ID,
       MemoryLayer.VerifiableMemory,
@@ -999,6 +1260,114 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(processed?.failure?.code).toBe('publish_intent_stale');
     expect(preflight).toHaveBeenCalled();
     expect(executor).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it('queued async VM publish preflight survives catch-up offering an equivalent operation id (GH#2273)', async () => {
+    // GH#2273 end-to-end: a queued VM-publish intent freezes the SWM head's
+    // shareOperationId at admission; a restart-time catch-up round then offers
+    // the SAME share under a peer's deterministic storage-ACK-style id. Pre-fix
+    // the round's bulk meta union made the head two-valued and the next round's
+    // repair rotated it to the remote identity, after which THIS preflight
+    // failed the queued job terminally as publish_intent_stale for content that
+    // never changed. Post-fix the equivalent remote identity must neither
+    // rewrite nor stack onto the head, and the REAL preflight — the same call
+    // the async publisher's claim path makes — must still authorize execution.
+    const agent = await createAgent('QueuedAsyncVmCatchupIdentityBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Catch-up Identity E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-async-catchup-identity';
+    const root = `${ENTITY_BASE}:queued-async-catchup-identity`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Catch-up Identity"' },
+    ]);
+    const shared = await agent.assertion.promote(CG_ID, name);
+    expect(shared.publishReady).toBe(true);
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const localOpId = intent.shareOperationId;
+
+    // Build the peer's batch by READING this node's own durable rows back and
+    // re-labeling them under a foreign operation id — byte-equivalence with the
+    // local operation is then guaranteed by construction, not by a parallel
+    // fixture that could drift from the real share flow.
+    const store = (agent as any).store;
+    const metaGraph = contextGraphSharedMemoryMetaUri(CG_ID);
+    const scope = createGraphKnowledgeAssetScope(intent.kaUal, intent.assertionVersion);
+    const headSubject = `${scope.ual}#dkg-swm-head`;
+    const localOpSubject = `urn:dkg:share:${CG_ID}:${localOpId}`;
+    const remoteOpId = `storage-ack-${'2273'.repeat(2)}`;
+    const remoteOpSubject = `urn:dkg:share:${CG_ID}:${remoteOpId}`;
+    const DKG_NS = 'http://dkg.io/ontology/';
+    const readRows = async (subject: string) => {
+      const result = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${metaGraph}> { <${subject}> ?p ?o } }`,
+      );
+      if (result.type !== 'bindings') throw new Error('expected bindings');
+      return result.bindings.map((row: Record<string, string>) => ({
+        subject,
+        predicate: String(row['p'] ?? ''),
+        object: String(row['o'] ?? ''),
+        graph: metaGraph,
+      }));
+    };
+    const localOpRows = await readRows(localOpSubject);
+    const localHeadRows = await readRows(headSubject);
+    expect(localOpRows.length).toBeGreaterThan(0);
+    const digestRow = localOpRows.find((q: { predicate: string }) => q.predicate === `${DKG_NS}publicQuadsDigest`);
+    expect(digestRow).toBeDefined();
+    const digest = String(digestRow!.object).replace(/^"|"$/g, '');
+    // The real share flow persisted a node-local snapshot GRAPH whose IRI
+    // embeds the LOCAL operation id; carrying that row over verbatim would
+    // make the relabeled descriptor fail parsing (snapshot graph mismatch)
+    // and the whole round silently no-op — a vacuous pass. The peer shape for
+    // a snapshot-backed share is a publicSnapshotRef instead.
+    const remoteOpRows = localOpRows
+      .filter((q: { predicate: string }) => q.predicate !== `${DKG_NS}publicSnapshotGraph`
+        && q.predicate !== `${DKG_NS}publicSnapshotRef`)
+      .map((q: { predicate: string; object: string }) => ({
+        ...q,
+        subject: remoteOpSubject,
+        object: q.predicate === `${DKG_NS}shareOperationId` ? JSON.stringify(remoteOpId)
+          : q.predicate === `${DKG_NS}publishedAt` ? `"2026-08-16T23:59:59.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>`
+          : q.object,
+      }));
+    remoteOpRows.push({ subject: remoteOpSubject, predicate: `${DKG_NS}publicSnapshotRef`, object: `"${digest}"`, graph: metaGraph });
+    const remoteHeadRows = localHeadRows.map((q: { predicate: string; object: string }) => ({
+      ...q,
+      object: q.predicate === `${DKG_NS}shareOperationId` ? JSON.stringify(remoteOpId) : q.object,
+    }));
+    const peerMeta = [...remoteHeadRows, ...remoteOpRows];
+
+    const contentResult = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${knowledgeAssetLayerGraphUri(CG_ID, MemoryLayer.SharedWorkingMemory, scope)}> { ?s ?p ?o } }`,
+    );
+    if (contentResult.type !== 'bindings') throw new Error('expected content bindings');
+    const contentQuads = contentResult.bindings.map((row: Record<string, string>) => ({
+      subject: String(row['s'] ?? ''), predicate: String(row['p'] ?? ''), object: String(row['o'] ?? ''), graph: '',
+    }));
+
+    const summary = await makeSwmSyncHarness({
+      ctx: createOperationContext('sync'),
+      contextGraphId: CG_ID,
+      store,
+      served: { digest, payload: contentQuads, meta: peerMeta },
+    }).run();
+    // Anti-vacuity: the round must actually have processed the descriptor —
+    // the remote operation subject lands as immutable history. A parse-time
+    // rejection would leave zero meta writes and prove nothing.
+    expect(summary.insertedMetaTriples).toBeGreaterThan(0);
+
+    // The head still certifies the ADMISSION-TIME identity, single-valued.
+    const headIds = await store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${metaGraph}> { <${headSubject}> <${DKG_NS}shareOperationId> ?op } }`,
+    );
+    if (headIds.type !== 'bindings') throw new Error('expected bindings');
+    expect(headIds.bindings.map((row: Record<string, string>) => String(row['op']))).toEqual([`"${localOpId}"`]);
+
+    // And the REAL queued-execution preflight authorizes the same intent.
+    await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent))
+      .resolves.toMatchObject({ action: 'execute' });
   }, 60_000);
 
   it('queued async VM publish rejects chain-bound seal mismatches before publisher invocation', async () => {
@@ -1351,6 +1720,91 @@ describe('rootless graph-scoped KA lifecycle', () => {
     if (processed?.status !== 'finalized') {
       throw new Error(`Expected queued sub-graph update to finalize: ${JSON.stringify((processed as any)?.failure)}`);
     }
+    if (
+      !processed.broadcast
+      || !processed.inclusion
+      || processed.finalization.mode === 'local'
+      || !processed.finalization.txHash
+      || !processed.finalization.publisherAddress
+    ) {
+      throw new Error('Expected a chain-finalized queued sub-graph update');
+    }
+
+    const finalizationHandler = agent.getOrCreateFinalizationHandler();
+    const reconcile = vi.spyOn(finalizationHandler, 'handleChainReconciledKC');
+    const recoveryChain = (agent as any).chain;
+    const recoveryReceiptUal = buildKnowledgeAssetUal(
+      recoveryChain.chainId,
+      await recoveryChain.getDKGKnowledgeAssetsAddress(),
+      BigInt(intent.seal.reservedKaId!),
+    );
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      walletId: 'wallet-1',
+      request: intent,
+      lookup: { txHash: processed.broadcast.txHash, walletId: 'wallet-1' },
+      job: {
+        jobId: 'subgraph-recovery-job',
+        jobSlug: 'subgraph-recovery-job',
+        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: intent },
+        status: 'broadcast',
+        broadcast: processed.broadcast,
+        timestamps: { acceptedAt: 1, broadcastAt: 2, updatedAt: 2 },
+        retries: { retryCount: 0, maxRetries: 10 },
+        controlPlane: {},
+      },
+      recovery: {
+        inclusion: {
+          ...processed.inclusion,
+          blockHash: `0x${'ab'.repeat(32)}`,
+        },
+        finalization: {
+          ...processed.finalization,
+          ual: recoveryReceiptUal,
+          batchId: intent.seal.reservedKaId,
+          startKAId: intent.seal.reservedKaId,
+          endKAId: intent.seal.reservedKaId,
+        },
+        publishProof: {
+          merkleRoot: intent.sealMerkleRoot,
+          authorAddress: intent.seal.authorAddress,
+          txIndex: 4,
+        },
+      },
+      publisher: (agent as any).publisher,
+    } as any);
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      subGraphName,
+      publisherAddress: processed.finalization.publisherAddress,
+      authorAddress: intent.seal.authorAddress,
+      versionBlock: processed.inclusion.blockNumber,
+      trustedAssertionEvidence: expect.objectContaining({
+        subGraphName,
+        publisherAddress: processed.finalization.publisherAddress,
+        authorAddress: intent.seal.authorAddress,
+        blockNumber: processed.inclusion.blockNumber,
+        txIndex: 4,
+      }),
+    }), expect.anything());
+    const recoveredInput = reconcile.mock.calls.at(-1)?.[0];
+    if (!recoveredInput?.trustedAssertionEvidence || !intent.kaUal) {
+      throw new Error('Expected trusted named-recovery evidence');
+    }
+    reconcile.mockRestore();
+
+    await expect(finalizationHandler.handleChainReconciledKC({
+      ...recoveredInput,
+      trustedAssertionEvidence: {
+        ...recoveredInput.trustedAssertionEvidence,
+        transactionHash: `0x${'cd'.repeat(32)}`,
+        txIndex: 1,
+      },
+    }, createOperationContext('system'))).resolves.toBe('stale-target');
+    const recoveredVersionSurvives = await (agent as any).store.query(
+      `ASK { GRAPH <${contextGraphMetaUri(CG_ID)}> { <${intent.kaUal}> `
+        + `<http://dkg.io/ontology/materializedVersion> "${processed.inclusion.blockNumber}:4" ; `
+        + `<http://dkg.io/ontology/transactionHash> "${recoveredInput.trustedAssertionEvidence.transactionHash}" . } }`,
+    );
+    expect(recoveredVersionSurvives).toMatchObject({ type: 'boolean', value: true });
 
     const subgraphVm = await agent.query(
       `SELECT ?name WHERE { <${root}> <http://schema.org/name> ?name }`,
@@ -1494,24 +1948,25 @@ describe('rootless graph-scoped KA lifecycle', () => {
   // assertion below (the CG would already be on-chain after the share).
   it('seals a FULL share on an UNregistered CG (no seal-time registration); registers + publishes at publish time', async () => {
     const agent = await createAgent('UnregisteredCgSealBot');
+    const unregisteredCgId = `${CG_ID}-full-share-deferred-registration`;
     // LOCAL-ONLY CG: created but DELIBERATELY never registered on-chain.
-    await agent.createContextGraph({ id: CG_ID, name: 'Unregistered CG Seal E2E' });
+    await agent.createContextGraph({ id: unregisteredCgId, name: 'Unregistered CG Seal E2E' });
 
     const name = 'unregistered-cg-seal';
-    await agent.assertion.create(CG_ID, name);
-    await agent.assertion.write(CG_ID, name, [
+    await agent.assertion.create(unregisteredCgId, name);
+    await agent.assertion.write(unregisteredCgId, name, [
       { subject: `${ENTITY_BASE}:ucs`, predicate: 'http://schema.org/name', object: '"Unregistered CG Seal"' },
     ]);
 
     // Default FULL share — must SEAL despite the CG being unregistered (the seal
     // no longer depends on CG registration).
-    const fullShare = await agent.assertion.promote(CG_ID, name);
+    const fullShare = await agent.assertion.promote(unregisteredCgId, name);
     expect(fullShare.sealed).toBe(true);
     expect(fullShare.publishReady).toBe(true);
 
     // CORE ASSERTION: the CG is STILL unregistered after sealing — sealing did
     // NOT register it on-chain. Reintroducing seal-time registration breaks here.
-    const onChainIdAfterSeal = await agent.getContextGraphOnChainId(CG_ID);
+    const onChainIdAfterSeal = await agent.getContextGraphOnChainId(unregisteredCgId);
     expect(onChainIdAfterSeal == null).toBe(true);
 
     // And publishing the unregistered CG fails CLOSED for that exact reason —
@@ -1521,7 +1976,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     // .code convention for SWM_SUBSET_NOT_SEALABLE / UNSEALED_SHARE_BLOCKED).
     let notRegisteredErr: any;
     try {
-      await agent.publishFromFinalizedAssertion(CG_ID, name);
+      await agent.publishFromFinalizedAssertion(unregisteredCgId, name);
     } catch (e) {
       notRegisteredErr = e;
     }
@@ -1532,11 +1987,11 @@ describe('rootless graph-scoped KA lifecycle', () => {
     // Registration happens at PUBLISH time (the /vm/publish route's
     // ensureRegisteredForPublish step). After it, the same sealed asset publishes
     // to VM and confirms — no re-seal, no recreate.
-    await agent.ensureRegisteredForPublish(CG_ID);
-    const onChainIdAfterRegister = await agent.getContextGraphOnChainId(CG_ID);
+    await agent.ensureRegisteredForPublish(unregisteredCgId);
+    const onChainIdAfterRegister = await agent.getContextGraphOnChainId(unregisteredCgId);
     expect(onChainIdAfterRegister).toBeTruthy();
 
-    const pub = await agent.publishFromFinalizedAssertion(CG_ID, name);
+    const pub = await agent.publishFromFinalizedAssertion(unregisteredCgId, name);
     expect(pub.status).toBe('confirmed');
     expect(pub.ual).toBeDefined();
     expect(pub.seal).toBeDefined();
@@ -1551,21 +2006,25 @@ describe('rootless graph-scoped KA lifecycle', () => {
   // is still present as a deeper backstop, but the marker gate wins here.)
   it('FIX 2: unregistered CG + finalized-but-UNSHARED asset rejects BEFORE registration (no gas burned)', async () => {
     const agent = await createAgent('NoQuadsBeforeRegisterBot');
+    // Keep this chain assertion independent from the preceding test, which
+    // deliberately registers CG_ID before it completes. Reusing CG_ID made
+    // the poller race decide whether this test observed that earlier mint.
+    const unregisteredCgId = `${CG_ID}-unshared-precondition`;
     // DELIBERATELY unregistered, local-only CG.
-    await agent.createContextGraph({ id: CG_ID, name: 'No Quads Before Register E2E' });
+    await agent.createContextGraph({ id: unregisteredCgId, name: 'No Quads Before Register E2E' });
 
     const name = 'empty-swm-seal';
-    await agent.assertion.create(CG_ID, name);
-    await agent.assertion.write(CG_ID, name, [
+    await agent.assertion.create(unregisteredCgId, name);
+    await agent.assertion.write(unregisteredCgId, name, [
       { subject: `${ENTITY_BASE}:nq`, predicate: 'http://schema.org/name', object: '"No Quads"' },
     ]);
     // Finalize the WM draft (seals it) WITHOUT promoting — SWM stays empty and
     // NO full-share marker is set.
-    await agent.assertion.finalize(CG_ID, name);
+    await agent.assertion.finalize(unregisteredCgId, name);
 
     let thrown: any;
     try {
-      await agent.publishFromFinalizedAssertion(CG_ID, name);
+      await agent.publishFromFinalizedAssertion(unregisteredCgId, name);
     } catch (e) {
       thrown = e;
     }
@@ -1576,7 +2035,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(thrown.code).not.toBe('CG_NOT_REGISTERED');
 
     // And the CG was NEVER registered as a side effect (no gas burned).
-    const onChainId = await agent.getContextGraphOnChainId(CG_ID);
+    const onChainId = await agent.getContextGraphOnChainId(unregisteredCgId);
     expect(onChainId == null).toBe(true);
   }, 30_000);
 
@@ -2293,4 +2752,119 @@ describe('Query views', () => {
     expect(mergedSubjects.some((s: string) => s.includes('canonical'))).toBe(true);
     expect(mergedSubjects.some((s: string) => s.includes('shared'))).toBe(true);
   }, 15_000);
+
+  /**
+   * GH#2270 PR-3 r3 — the pre-send write-ahead must survive the REAL queued-agent handler, on
+   * BOTH of its branches.
+   *
+   * Everything else in this chain proves the signal once it reaches `publisher.publish` /
+   * `publisher.update`. Between the queue and those calls sits
+   * `publishQueuedKnowledgeAssetVmPublish`, which rebuilds its option bag field by field — and a
+   * field-by-field rebuild silently drops anything nobody thought to name. It HAD dropped it on
+   * the update branch, so every named-KA update sent its transaction with nothing on disk
+   * recording it. A stubbed handler cannot see that; this drives the real one, over a real chain,
+   * and reads the persisted job.
+   */
+  it('records the signed nonce through the real queued handler, on create AND update [GH#2270]', async () => {
+    const agent = await createAgent('WriteAheadBoundaryBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Write-Ahead Boundary' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-writeahead-both-branches';
+    const root = `${ENTITY_BASE}:queued-writeahead`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"v1"' },
+    ]);
+    await agent.assertion.promote(CG_ID, name);
+
+    const runQueued = async () => {
+      const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+      const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+        knowledgeAssetVmPublishHandler: {
+          preflight: async ({ request }) =>
+            agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+          execute: async ({ request, publishOptions }) =>
+            agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+        },
+      });
+      await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
+      return asyncPublisher.processNext('wallet-1');
+    };
+
+    // CREATE branch — no prior vmCurrentAssertion.
+    const intentForUpdate = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const created = await runQueued();
+    expect(created?.status).toBe('finalized');
+    expect(created?.broadcast?.txHash).toMatch(/^0x[0-9a-f]+$/i);
+    // The write-ahead fired with a REAL signed nonce, carried from the adapter through the agent.
+    expect(typeof created?.broadcast?.nonce).toBe('number');
+    expect(created!.broadcast!.nonce!).toBeGreaterThanOrEqual(0);
+    expect((await agent.assertion.history(CG_ID, name))?.vmCurrentAssertion).toBeDefined();
+
+    // UPDATE branch — the hop that actually dropped it. GH#2270 r4: `agent.update` stays REAL and
+    // the double sits on the underlying PUBLISHER's update entry, so this row pins the whole
+    // agent-side chain of custody — queued handler → the real `agent.update` preconditions → the
+    // publisher — receiving the IDENTICAL callback. Driving the real send would need a fresh full
+    // share/reopen lifecycle, so with the publisher doubled there is no send here to prevent;
+    // rejection-stops-the-send for the update path is proven at the publisher's own boundary in
+    // `pre-broadcast-signal-await.test.ts`, and this row pins callback identity only.
+    const realPublisher = (agent as any).publisher;
+    const publisherUpdateSpy = vi.spyOn(realPublisher, 'updateKnowledgeAssetFromSharedMemory')
+      .mockResolvedValue({ status: 'failed', kaManifest: [] } as never);
+    const recorder = () => {};
+    try {
+      await agent.publishQueuedKnowledgeAssetVmPublish(
+        {
+          ...intentForUpdate,
+          vmCurrentAssertion: intentForUpdate.sealMerkleRoot.slice(2),
+          // The real update path enforces that the queued version ADVANCES past the published
+          // lifecycle pointer; the create half above published version 1.
+          assertionVersion: '2',
+        },
+        {
+          quads: [{ subject: root, predicate: 'http://schema.org/name', object: '"v1"', graph: '' }],
+          publisherPeerId: 'queued-update-branch',
+          onBeforeBroadcast: recorder,
+        } as never,
+      ).catch(() => undefined);
+      expect(publisherUpdateSpy).toHaveBeenCalled();
+      const forwarded = (publisherUpdateSpy.mock.calls[0] as unknown[])[1] as { onBeforeBroadcast?: unknown };
+      expect(forwarded.onBeforeBroadcast).toBe(recorder);
+    } finally {
+      publisherUpdateSpy.mockRestore();
+    }
+  }, 180_000);
+
+  it('a rejecting write-ahead stops the queued publish from sending [GH#2270]', async () => {
+    // Fail-closed across the same real boundary: if the durable record cannot be written, no
+    // transaction may go out.
+    const agent = await createAgent('WriteAheadBoundaryBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Write-Ahead Boundary' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-writeahead-fail-closed';
+    const root = `${ENTITY_BASE}:queued-writeahead-fail`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"v1"' },
+    ]);
+    await agent.assertion.promote(CG_ID, name);
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+
+    let signalled = 0;
+    const result = await agent.publishQueuedKnowledgeAssetVmPublish(intent, {
+      quads: [{ subject: root, predicate: 'http://schema.org/name', object: '"v1"', graph: '' }],
+      publisherPeerId: 'queued-writeahead-fail',
+      onBeforeBroadcast: () => {
+        signalled += 1;
+        throw new Error('could not persist the write-ahead');
+      },
+    } as never).catch((err: unknown) => err);
+
+    // The handler reached the durable boundary and then refused to publish.
+    expect(signalled).toBe(1);
+    expect(result).toBeInstanceOf(Error);
+    expect((await agent.assertion.history(CG_ID, name))?.vmCurrentAssertion).toBeUndefined();
+  }, 180_000);
 });

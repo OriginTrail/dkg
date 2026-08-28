@@ -94,11 +94,19 @@ function verifySyncedDataImpl(
 }
 
 function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
-  const quads = parseNQuads(text);
+  const rawQuads = parseNQuads(text);
   const cgUriPrefix = `did:dkg:context-graph:${contextGraphId}/`;
+  const quads: Quad[] = [];
+  const sourceIndexes: number[] = [];
+  for (const [index, quad] of rawQuads.entries()) {
+    if (quad.graph !== graphUri && !quad.graph.startsWith(cgUriPrefix)) continue;
+    quads.push(quad);
+    sourceIndexes.push(index);
+  }
   return {
-    quads: quads.filter((q) => q.graph === graphUri || q.graph.startsWith(cgUriPrefix)),
-    totalQuads: quads.length,
+    quads,
+    totalQuads: rawQuads.length,
+    sourceIndexes,
   };
 }
 
@@ -307,6 +315,8 @@ function processDurableBatch(
       verifiedMetaIndexes: [],
       verifiedGraphScopedDataGraphs: [],
       droppedSyncControlTriples: 0,
+      droppedNonIriSubjectTriples: 0,
+      consumedUnpersistedMetaTriples: 0,
       verifiedPrivateOnlyResponses: 0,
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
@@ -330,6 +340,8 @@ function processDurableBatch(
       verifiedMetaIndexes: [],
       verifiedGraphScopedDataGraphs: [],
       droppedSyncControlTriples: 0,
+      droppedNonIriSubjectTriples: 0,
+      consumedUnpersistedMetaTriples: 0,
       verifiedPrivateOnlyResponses: 0,
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
@@ -384,6 +396,11 @@ function processDurableBatch(
     verifiedMetaIndexes: verifiedSelection.metaIndexes,
     verifiedGraphScopedDataGraphs: verifiedSelection.verifiedGraphScopedDataGraphs,
     droppedSyncControlTriples: verifiedSelection.droppedSyncControlTriples,
+    droppedNonIriSubjectTriples: verifiedSelection.droppedNonIriSubjectTriples,
+    // Transport the verifier-owned aggregate (#1921) — do NOT recompute the sum
+    // here. The early-return branches above (empty page / data-without-meta)
+    // bypass selection and set consumedUnpersistedMetaTriples: 0 explicitly.
+    consumedUnpersistedMetaTriples: verifiedSelection.consumedUnpersistedMetaTriples,
     verifiedPrivateOnlyResponses: verifiedFullyPrivateResponse ? 1 : 0,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
@@ -423,6 +440,8 @@ export function processDurableBatchForWire(
     verifiedMetaIndexes,
     verifiedGraphScopedDataGraphs,
     droppedSyncControlTriples,
+    droppedNonIriSubjectTriples,
+    consumedUnpersistedMetaTriples,
     verifiedPrivateOnlyResponses,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
@@ -439,6 +458,8 @@ export function processDurableBatchForWire(
     verifiedMetaIndexes,
     verifiedGraphScopedDataGraphs,
     droppedSyncControlTriples,
+    droppedNonIriSubjectTriples,
+    consumedUnpersistedMetaTriples,
     verifiedPrivateOnlyResponses,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,

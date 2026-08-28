@@ -116,7 +116,7 @@ async function seedRootlessPrivateKA(options: {
       assertionGraph,
       subGraphName: options.subGraphName,
     },
-    'tentative',
+    { status: 'tentative' },
   ));
   await store.insert([rootContextGraphRegistration()]);
   return { store, privateStore, scope, payload, privateRoot };

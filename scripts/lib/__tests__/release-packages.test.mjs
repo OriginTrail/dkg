@@ -19,6 +19,11 @@ import { cliRuntimeAssetManifest, copyCliRuntimeAssets } from '../../copy-cli-ru
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const COPY_SCRIPT = path.join(REPO_ROOT, 'scripts', 'copy-cli-runtime-assets.mjs');
 const BLAZEGRAPH_METADATA_PARSER = path.join(REPO_ROOT, 'packages', 'cli', 'blazegraph-image-metadata.cjs');
+const VALID_BLAZEGRAPH_METADATA = `${JSON.stringify({
+  image: 'example/blazegraph@sha256:test',
+  containerPort: 80,
+  dataPath: '/data',
+})}\n`;
 
 const NPM_AVAILABLE = (() => {
   try {
@@ -219,7 +224,7 @@ function writeCliPackFixture(root) {
   fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
-  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), '{"image":"example/blazegraph@sha256:test","containerPort":80}\n');
+  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), VALID_BLAZEGRAPH_METADATA);
 }
 
 test('flags a cli tarball missing required runtime assets (the 10.0.4 drop)', () => withFixture((root) => {
@@ -259,7 +264,7 @@ test('copyCliRuntimeAssets materializes package-local assets and mirrors (drops 
   fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{"a":1}\n');
   fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{"b":2}\n');
   fs.writeFileSync(path.join(root, 'project.json'), '{"name":"x"}\n');
-  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), '{"image":"example/blazegraph@sha256:test","containerPort":80}\n');
+  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), VALID_BLAZEGRAPH_METADATA);
   // A stale overlay left in the package from an earlier build/branch.
   fs.mkdirSync(path.join(root, 'packages', 'cli', 'network'), { recursive: true });
   fs.writeFileSync(path.join(root, 'packages', 'cli', 'network', 'devnet.json'), '{"stale":true}\n');
@@ -377,7 +382,7 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
   fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
-  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), '{"image":"example/blazegraph@sha256:test","containerPort":80}\n');
+  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), VALID_BLAZEGRAPH_METADATA);
   const cliDir = path.join(root, 'packages', 'cli');
   fs.mkdirSync(cliDir, { recursive: true });
   fs.copyFileSync(BLAZEGRAPH_METADATA_PARSER, path.join(cliDir, 'blazegraph-image-metadata.cjs'));

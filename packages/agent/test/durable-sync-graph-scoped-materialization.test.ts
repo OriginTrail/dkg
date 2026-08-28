@@ -1,6 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
 import type { OperationContext } from '@origintrail-official/dkg-core';
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  EVMChainAdapter,
+  type ChainAdapter,
+  type EVMAdapterConfig,
+} from '@origintrail-official/dkg-chain';
 import {
   LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
   OxigraphStore,
@@ -9,15 +14,23 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10,
+  generateGraphKnowledgeAssetMetadata,
+  readGraphKnowledgeAssetConfirmationKindV1,
   replaceLocallyTrustedKnowledgeAssetControls,
   shouldApplyMaterialization,
 } from '@origintrail-official/dkg-publisher';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { DKGAgent } from '../src/dkg-agent.js';
 import {
+  authenticateChallengePinnedGraphScopedAsset,
   authenticateVerifiedGraphScopedAsset,
   materializeVerifiedGraphScopedAsset,
+  type GraphScopedMaterializationOutcome,
+  type VerifyContextGraphBinding,
+  type VerifiedGraphScopedAsset,
 } from '../src/sync/requester/graph-scoped-materialization.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -29,6 +42,7 @@ const assertionGraph = `did:dkg:context-graph:${contextGraphId}/_verifiable_memo
 const ual = 'did:dkg:otp:2043/0x1111111111111111111111111111111111111111/1';
 const packedKaId = '7719472615821079694904732333912527190217998977704089058462887978021305712641';
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
+const TEST_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 function transactionHash(version: number): string {
   return `0x${version.toString(16).padStart(64, '0')}`;
@@ -58,6 +72,35 @@ function metadata(version: number, merkleRoot = String(version).padStart(64, '0'
     object,
     graph: metaGraph,
   }));
+}
+
+function finalizedMaterializationMetadata(
+  version: number,
+  merkleRoot: Uint8Array,
+): Quad[] {
+  return generateGraphKnowledgeAssetMetadata({
+    contextGraphId,
+    ual,
+    merkleRoot,
+    publisherPeerId: 'rfc64-finalized-catalog-v1',
+    accessPolicy: 'public',
+    allowedPeers: [],
+    timestamp: new Date('2026-07-16T08:00:00.000Z'),
+    assertionVersion: version,
+    authorAddress: '0x1111111111111111111111111111111111111111',
+    publicTripleCount: 1,
+    privateTripleCount: 0,
+    assertionGraph,
+  }, {
+    status: 'confirmed',
+    confirmation: {
+      kind: 'finalized-materialization',
+      provenance: {
+        batchId: BigInt(packedKaId),
+        materializedVersion: { blockNumber: 123, txIndex: 0 },
+      },
+    },
+  });
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -108,7 +151,209 @@ async function graphQuads(store: OxigraphStore, graph: string): Promise<Quad[]> 
   }));
 }
 
+function strictContextGraphBindingVerifier(
+  chain: ChainAdapter,
+  wireKeyedLocalIds: string[] = [],
+): VerifyContextGraphBinding {
+  const subscribedContextGraphs = new Map<string, { onChainHash: string }>();
+  const wireIdToLocalCgId = new Map<string, string>();
+  for (const localId of wireKeyedLocalIds) {
+    const lower = localId.toLowerCase();
+    subscribedContextGraphs.set(localId, { onChainHash: lower });
+    wireIdToLocalCgId.set(lower, localId);
+  }
+  const agentLike: any = {
+    chain,
+    subscribedContextGraphs,
+    wireIdToLocalCgId,
+    log: { info: () => {}, warn: () => {}, debug: () => {} },
+  };
+  agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
+  agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
+  agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
+  return (localId, onChainId, signal) => (
+    DKGAgent.prototype as any
+  ).requireLocalCgMatchesOnChainSlot.call(
+    agentLike,
+    localId,
+    onChainId.toString(),
+    ctx,
+    { signal },
+  );
+}
+
+function authenticatedV2Chain(overrides: Partial<ChainAdapter> = {}): ChainAdapter {
+  const root = new Uint8Array(32);
+  root[31] = 2;
+  return {
+    chainId: 'otp:2043',
+    getLatestMerkleRoot: async () => root,
+    getMerkleRootCount: async () => 2n,
+    getKAContextGraphId: async () => 14n,
+    getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+    verifyKAUpdate: async () => ({
+      verified: true,
+      onChainMerkleRoot: root,
+      blockNumber: 123,
+      txIndex: 4,
+      merkleRootCount: 2n,
+    }),
+    ...overrides,
+  } as ChainAdapter;
+}
+
+function runGraphScopedDurableSync(options: {
+  storeGraphScopedAsset: (
+    asset: VerifiedGraphScopedAsset,
+    deadline: number,
+  ) => Promise<GraphScopedMaterializationOutcome>;
+  authenticationDeadline?: number;
+  deleteCheckpoint?: (key: string) => void;
+  setCheckpoint?: (key: string, offset: number) => void;
+  logWarn?: (ctx: OperationContext, message: string) => void;
+}) {
+  const v2Data = dataQuad(2);
+  const v2Meta = metadata(2);
+  return runDurableSync({
+    ctx,
+    remotePeerId: 'peer-graph-scoped-authentication',
+    contextGraphIds: [contextGraphId],
+    durableSyncBudget: uniformDurableSyncBudget(
+      () => options.authenticationDeadline ?? Date.now() + 60_000,
+    ),
+    fetchSyncPages: async ({ phase }) => (
+      phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
+    ),
+    processDurableBatchInWorker: async () => ({
+      verifiedData: [v2Data],
+      verifiedMeta: v2Meta,
+      verifiedGraphScopedDataGraphs: [assertionGraph],
+      totalFetchedDataQuads: 1,
+      totalFetchedMetaQuads: v2Meta.length,
+      rejectedKcs: 0,
+      emptyResponses: 0,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    }),
+    storeInsert: async () => {},
+    storeGraphScopedAsset: ({ asset, authenticationDeadline }) => (
+      options.storeGraphScopedAsset(asset, authenticationDeadline)
+    ),
+    deleteCheckpoint: options.deleteCheckpoint ?? (() => {}),
+    setCheckpoint: options.setCheckpoint ?? (() => {}),
+    logInfo: () => {},
+    logWarn: options.logWarn ?? (() => {}),
+    logDebug: () => {},
+  });
+}
+
 describe('durable graph-scoped KA materialization', () => {
+  it('authenticates a historical challenge pin without consulting the newer live root', async () => {
+    const historicalData = dataQuad(1);
+    const historicalRoot = computeFlatKCRootV10([historicalData], []);
+    const historicalAsset: VerifiedGraphScopedAsset = {
+      contextGraphId,
+      ual,
+      assertionVersion: 1n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [historicalData],
+      metadataQuads: generateGraphKnowledgeAssetMetadata({
+        contextGraphId,
+        ual,
+        merkleRoot: historicalRoot,
+        publisherPeerId: 'historical-provider',
+        accessPolicy: 'public',
+        timestamp: new Date(0),
+        assertionVersion: 1,
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        assertionGraph,
+      }, { status: 'tentative' }),
+    };
+    const getLatestMerkleRoot = vi.fn(async () => new Uint8Array(32).fill(0x22));
+    const getMerkleRootCount = vi.fn(async () => 2n);
+    const verifyContextGraphBinding = vi.fn(async () => true);
+    const chain = authenticatedV2Chain({ getLatestMerkleRoot, getMerkleRootCount });
+
+    await expect(authenticateChallengePinnedGraphScopedAsset(
+      chain,
+      historicalAsset,
+      {
+        assetUal: ual,
+        merkleRootHex: toHex(historicalRoot),
+        merkleLeafCount: 1n,
+      },
+      verifyContextGraphBinding,
+    )).resolves.toMatchObject({ asset: historicalAsset, privateRoots: [] });
+    expect(verifyContextGraphBinding).toHaveBeenCalledWith(
+      contextGraphId,
+      14n,
+      undefined,
+    );
+    expect(getLatestMerkleRoot).not.toHaveBeenCalled();
+    expect(getMerkleRootCount).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the historical asset is not bound to the requested context graph', async () => {
+    const historicalData = dataQuad(1);
+    const historicalRoot = computeFlatKCRootV10([historicalData], []);
+    const historicalAsset: VerifiedGraphScopedAsset = {
+      contextGraphId,
+      ual,
+      assertionVersion: 1n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [historicalData],
+      metadataQuads: generateGraphKnowledgeAssetMetadata({
+        contextGraphId,
+        ual,
+        merkleRoot: historicalRoot,
+        publisherPeerId: 'historical-provider',
+        accessPolicy: 'public',
+        timestamp: new Date(0),
+        assertionVersion: 1,
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        assertionGraph,
+      }, { status: 'tentative' }),
+    };
+    const verifyContextGraphBinding = vi.fn(async () => false);
+
+    await expect(authenticateChallengePinnedGraphScopedAsset(
+      authenticatedV2Chain(),
+      historicalAsset,
+      {
+        assetUal: ual,
+        merkleRootHex: toHex(historicalRoot),
+        merkleLeafCount: 1n,
+      },
+      verifyContextGraphBinding,
+    )).rejects.toMatchObject({ code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' });
+    expect(verifyContextGraphBinding).toHaveBeenCalledWith(
+      contextGraphId,
+      14n,
+      undefined,
+    );
+  });
+
+  it('forwards the graph-scoped authentication deadline through the helper', async () => {
+    const authenticationDeadline = 1_800_000_123_456;
+    const storeGraphScopedAsset = vi.fn(async (
+      _asset: VerifiedGraphScopedAsset,
+      _deadline: number,
+    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
+
+    await runGraphScopedDurableSync({
+      authenticationDeadline,
+      storeGraphScopedAsset,
+    });
+
+    expect(storeGraphScopedAsset).toHaveBeenCalledOnce();
+    expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(authenticationDeadline);
+  });
+
   it('adds reader-visible local metadata in no-chain mode and keeps receive time stable on replay', async () => {
     const store = new OxigraphStore();
     const asset = {
@@ -129,7 +374,7 @@ describe('durable graph-scoped KA materialization', () => {
       firstReceivedAt,
     );
 
-    await expect(materializeVerifiedGraphScopedAsset({ store, asset: authenticated }))
+    await expect(materializeVerifiedGraphScopedAsset({ store, asset: authenticated.asset }))
       .resolves.toBe('applied');
     expect(await values(store, 'status')).toEqual(['"tentative"']);
     expect(await values(store, 'publishedAt')).toEqual([
@@ -147,11 +392,310 @@ describe('durable graph-scoped KA materialization', () => {
       undefined,
       new Date('2026-07-16T09:00:00.000Z'),
     );
-    await expect(materializeVerifiedGraphScopedAsset({ store, asset: replayed }))
+    await expect(materializeVerifiedGraphScopedAsset({ store, asset: replayed.asset }))
       .resolves.toBe('applied');
     expect(await values(store, 'publishedAt')).toEqual([
       `"2026-07-16T08:00:00Z"^^<${XSD_DATE_TIME}>`,
     ]);
+  });
+
+  it('authenticates a cold-join CG directly from its chain-committed name hash', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const nameHashReads: bigint[] = [];
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async (onChainId: bigint) => {
+        nameHashReads.push(onChainId);
+        return ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
+      },
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+    const authenticated = await authenticateVerifiedGraphScopedAsset(
+      chain,
+      {
+        contextGraphId,
+        ual,
+        assertionVersion: 2n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [dataQuad(2)],
+        metadataQuads: metadata(2),
+      },
+      strictContextGraphBindingVerifier(chain),
+      new Date('2026-07-16T08:30:00.000Z'),
+    );
+
+    expect(nameHashReads).toEqual([14n]);
+    expect(authenticated.onChainContextGraphId).toBe('14');
+    expect(authenticated.asset.metadataQuads).toContainEqual(expect.objectContaining({
+      predicate: `${DKG}status`,
+      object: '"confirmed"',
+    }));
+  });
+
+  it('preserves a typed receipt transport failure from the concrete EVM update verifier', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const transportError = Object.assign(
+      new Error('receipt providers unavailable'),
+      { code: 'RPC_RECEIPT_LOOKUP_FAILED' },
+    );
+    const config: EVMAdapterConfig = {
+      rpcUrl: 'http://127.0.0.1:1',
+      privateKey: TEST_PRIVATE_KEY,
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      chainId: 'otp:2043',
+      allowNoAdminSigner: true,
+    };
+    const chain: any = new EVMChainAdapter(config);
+    chain.initialized = true;
+    chain.init = async () => {};
+    chain.getLatestMerkleRoot = async () => root;
+    chain.getMerkleRootCount = async () => 2n;
+    chain.getKAContextGraphId = async () => 14n;
+    chain.getLatestMerkleRootPublisher = async () => (
+      '0x2222222222222222222222222222222222222222'
+    );
+    chain.contracts.knowledgeAssetStorage = {};
+    chain.getTransactionReceiptWithFailover = async () => { throw transportError; };
+
+    try {
+      await expect(authenticateVerifiedGraphScopedAsset(
+        chain,
+        {
+          contextGraphId,
+          ual,
+          assertionVersion: 2n,
+          assertionGraph,
+          metaGraph,
+          dataQuads: [dataQuad(2)],
+          metadataQuads: metadata(2),
+        },
+        async () => true,
+      )).rejects.toBe(transportError);
+    } finally {
+      chain.destroy();
+    }
+  });
+
+  it('authenticates finalized materialization from independent chain state without a receipt claim', async () => {
+    const v2Data = dataQuad(2);
+    const root = computeFlatKCRootV10([v2Data], []);
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      resolvePublishByTxHash: async () => {
+        throw new Error('receipt lookup must not run for finalized materialization');
+      },
+      verifyKAUpdate: async () => {
+        throw new Error('receipt lookup must not run for finalized materialization');
+      },
+    } as ChainAdapter;
+
+    const authenticated = await authenticateVerifiedGraphScopedAsset(
+      chain,
+      {
+        contextGraphId,
+        ual,
+        assertionVersion: 2n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [v2Data],
+        metadataQuads: finalizedMaterializationMetadata(2, root),
+      },
+      strictContextGraphBindingVerifier(chain),
+      new Date('2026-07-16T08:30:00.000Z'),
+    );
+
+    expect(authenticated.onChainContextGraphId).toBe('14');
+    expect(authenticated.asset.metadataQuads).not.toContainEqual(expect.objectContaining({
+      predicate: `${DKG}transactionHash`,
+    }));
+    expect(authenticated.asset.metadataQuads.filter(
+      (quad) => quad.predicate === `${DKG}materializedVersion`,
+    )).toEqual([expect.objectContaining({ object: '"0:0"' })]);
+  });
+
+  it('rejects receipt-backed graph metadata when its transaction claim is missing', async () => {
+    const v2Data = dataQuad(2);
+    const root = computeFlatKCRootV10([v2Data], []);
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+    } as ChainAdapter;
+
+    await expect(authenticateVerifiedGraphScopedAsset(
+      chain,
+      {
+        contextGraphId,
+        ual,
+        assertionVersion: 2n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [v2Data],
+        metadataQuads: metadata(2, toHex(root)).filter(
+          (quad) => quad.predicate !== `${DKG}transactionHash`,
+        ),
+      },
+      strictContextGraphBindingVerifier(chain),
+    )).rejects.toMatchObject({ code: 'VM_CHAIN_PROVENANCE_MISMATCH' });
+  });
+
+  it('fails closed when the bound CG commits a different name hash', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(
+        ethers.toUtf8Bytes('different-context-graph'),
+      ),
+    } as ChainAdapter;
+
+    await expect(authenticateVerifiedGraphScopedAsset(chain, {
+      contextGraphId,
+      ual,
+      assertionVersion: 2n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [dataQuad(2)],
+      metadataQuads: metadata(2),
+    }, strictContextGraphBindingVerifier(chain))).rejects.toMatchObject({
+      code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH',
+    });
+  });
+
+  it('fails closed when the bound CG has no committed name hash', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => null,
+    } as ChainAdapter;
+
+    await expect(authenticateVerifiedGraphScopedAsset(chain, {
+      contextGraphId,
+      ual,
+      assertionVersion: 2n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [dataQuad(2)],
+      metadataQuads: metadata(2),
+    }, strictContextGraphBindingVerifier(chain))).rejects.toMatchObject({
+      code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH',
+    });
+  });
+
+  it('does not treat a zero-padded numeric local id as a direct slot address', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(
+        ethers.toUtf8Bytes('different-context-graph'),
+      ),
+    } as ChainAdapter;
+
+    await expect(authenticateVerifiedGraphScopedAsset(chain, {
+      contextGraphId: '0014',
+      ual,
+      assertionVersion: 2n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [dataQuad(2)],
+      metadataQuads: metadata(2),
+    }, strictContextGraphBindingVerifier(chain))).rejects.toMatchObject({
+      code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH',
+    });
+  });
+
+  it('accepts a locally proven wire-id keyed subscription without double hashing it', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const wireId = `0x${'ab'.repeat(32)}`;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => wireId,
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+
+    const authenticated = await authenticateVerifiedGraphScopedAsset(chain, {
+      contextGraphId: wireId,
+      ual,
+      assertionVersion: 2n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [dataQuad(2)],
+      metadataQuads: metadata(2),
+    }, strictContextGraphBindingVerifier(chain, [wireId]));
+
+    expect(authenticated.onChainContextGraphId).toBe('14');
+  });
+
+  it('accepts only the canonical decimal spelling as a direct slot address', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+
+    const authenticated = await authenticateVerifiedGraphScopedAsset(chain, {
+      contextGraphId: '14',
+      ual,
+      assertionVersion: 2n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [dataQuad(2)],
+      metadataQuads: metadata(2),
+    }, strictContextGraphBindingVerifier(chain));
+
+    expect(authenticated.onChainContextGraphId).toBe('14');
   });
 
   it('does not mistake a lifecycle assertionGraph pointer for a second UAL owner', async () => {
@@ -191,8 +735,8 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-lifecycle-pointer',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
-      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
         phase === 'data'
           ? page(phase, [v2Data])
           : page(phase, [...v2Meta, ...lifecycleRows])
@@ -209,8 +753,8 @@ describe('durable graph-scoped KA materialization', () => {
         verifiedPrivateOnlyResponses: 0,
         dataRejectedMissingMeta: 0,
       }),
-      storeInsert: async (quads) => { inserted.push(...quads); },
-      storeGraphScopedAsset: async (asset) => {
+      storeInsert: async ({ quads }) => { inserted.push(...quads); },
+      storeGraphScopedAsset: async ({ asset }) => {
         assets.push(asset);
         return 'applied';
       },
@@ -222,10 +766,80 @@ describe('durable graph-scoped KA materialization', () => {
     });
 
     expect(assets).toHaveLength(1);
-    expect(assets[0]).toMatchObject({ ual, assertionGraph });
+    expect(assets[0]).toMatchObject({
+      ual,
+      assertionGraph,
+    });
+    expect(readGraphKnowledgeAssetConfirmationKindV1(assets[0]!.metadataQuads))
+      .toBe('transaction');
     expect(inserted.filter((quad) => quad.subject === lifecycle)).toEqual(
       lifecycleRows.filter((quad) => quad.predicate !== `${DKG}assertionVersion`),
     );
+  });
+
+  it.each([
+    ['conflicting', ['"transaction"', '"finalized-materialization"']],
+    ['unsupported', ['"unsupported"']],
+  ])('rejects %s peer confirmation metadata before durable materialization', async (_label, kinds) => {
+    const v2Data = dataQuad(2);
+    const v2Meta = metadata(2);
+    v2Meta.push(
+      {
+        subject: ual,
+        predicate: `${DKG}publicTripleCount`,
+        object: `"1"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}privateTripleCount`,
+        object: `"0"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+      ...kinds.map((object) => ({
+        subject: ual,
+        predicate: `${DKG}confirmationKind`,
+        object,
+        graph: metaGraph,
+      })),
+    );
+    const materialized: unknown[] = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-invalid-confirmation-kind',
+      contextGraphIds: [contextGraphId],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
+        phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
+      ),
+      processDurableBatchInWorker: async () => ({
+        verifiedData: [v2Data],
+        verifiedMeta: v2Meta,
+        verifiedGraphScopedDataGraphs: [assertionGraph],
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: v2Meta.length,
+        rejectedKcs: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+      }),
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async ({ asset }) => {
+        materialized.push(asset);
+        return 'applied';
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.failedPhases).toBe(1);
+    expect(summary.insertedTriples).toBe(0);
+    expect(materialized).toEqual([]);
   });
 
   it('replaces a poisoned v1 union with the verified v2 assertion and metadata', async () => {
@@ -314,6 +928,7 @@ describe('durable graph-scoped KA materialization', () => {
       getLatestMerkleRoot: async () => v2Root,
       getMerkleRootCount: async () => 2n,
       getKAContextGraphId: async () => 1n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
       getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
       verifyKAUpdate: async () => ({
         verified: true,
@@ -324,17 +939,19 @@ describe('durable graph-scoped KA materialization', () => {
       }),
     } as ChainAdapter;
     const storeHooks = {
-      storeInsert: (quads: Quad[]) => store.insert(quads),
-      storeGraphScopedAsset: async (
-        asset: Parameters<typeof materializeVerifiedGraphScopedAsset>[0]['asset'],
-      ) => materializeVerifiedGraphScopedAsset({
+      storeInsert: ({ quads }: { quads: Quad[] }) => store.insert(quads),
+      storeGraphScopedAsset: async ({
+        asset,
+      }: {
+        asset: Parameters<typeof materializeVerifiedGraphScopedAsset>[0]['asset'];
+      }) => materializeVerifiedGraphScopedAsset({
         store,
-        asset: await authenticateVerifiedGraphScopedAsset(
+        asset: (await authenticateVerifiedGraphScopedAsset(
           chain,
           asset,
-          async () => '1',
+          strictContextGraphBindingVerifier(chain),
           new Date('2026-07-16T08:30:00.000Z'),
-        ),
+        )).asset,
       }),
     };
 
@@ -342,8 +959,8 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-v2',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
-      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
         phase === 'data'
           ? page(phase, [v2Data])
           : page(phase, [
@@ -440,6 +1057,286 @@ describe('durable graph-scoped KA materialization', () => {
     )).resolves.toBe(false);
   });
 
+  it('syncs a finalized-materialized VM asset from one node store into a fresh requester', async () => {
+    const sourceNodeStore = new OxigraphStore();
+    const freshRequesterStore = new OxigraphStore();
+    const v2Data = dataQuad(2);
+    const root = computeFlatKCRootV10([v2Data], []);
+    const sourceMetadata = finalizedMaterializationMetadata(2, root);
+    await sourceNodeStore.insert([v2Data, ...sourceMetadata]);
+    const servedData = await graphQuads(sourceNodeStore, assertionGraph);
+    const servedMeta = await graphQuads(sourceNodeStore, metaGraph);
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+    } as ChainAdapter;
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'finalized-vm-source-node',
+      contextGraphIds: [contextGraphId],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
+        phase === 'data' ? page(phase, servedData) : page(phase, servedMeta)
+      ),
+      processDurableBatchInWorker: async (dataQuads, metaQuads, _ctx, acceptUnverified, mode) => {
+        const verified = processDurableBatchForWire(
+          dataQuads,
+          metaQuads,
+          acceptUnverified,
+          mode,
+        );
+        return {
+          ...verified,
+          verifiedData: verified.verifiedDataIndexes.map((index) => dataQuads[index]!),
+          verifiedMeta: verified.verifiedMetaIndexes.map((index) => metaQuads[index]!),
+        };
+      },
+      storeInsert: ({ quads }) => freshRequesterStore.insert(quads),
+      storeGraphScopedAsset: async ({ asset }) => materializeVerifiedGraphScopedAsset({
+        store: freshRequesterStore,
+        asset: (await authenticateVerifiedGraphScopedAsset(
+          chain,
+          asset,
+          strictContextGraphBindingVerifier(chain),
+          new Date('2026-07-16T09:00:00.000Z'),
+        )).asset,
+      }),
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.failedPeers).toBe(0);
+    expect(summary.failedPhases).toBe(0);
+    expect(summary.insertedDataTriples).toBe(1);
+    expect(await graphQuads(freshRequesterStore, assertionGraph)).toEqual(servedData);
+    expect(await values(freshRequesterStore, 'status')).toEqual(['"confirmed"']);
+    expect(await values(freshRequesterStore, 'transactionHash')).toEqual([]);
+    // The requester never accepts the serving node's 123:0 local ordering
+    // claim; it derives a neutral local stamp after chain authentication.
+    expect(await values(freshRequesterStore, 'materializedVersion')).toEqual(['"0:0"']);
+  });
+
+  it('recovers a field-sized exact KA across delayed byte pages and keeps an incomplete attempt atomic', async () => {
+    vi.useFakeTimers();
+    const requesterStore = new OxigraphStore();
+    const fieldSizedData = Array.from({ length: 10_000 }, (_, index): Quad => ({
+      subject: `http://example.com/field-sized/${index}`,
+      predicate: 'http://example.com/value',
+      object: `"${index}"`,
+      graph: assertionGraph,
+    }));
+    const root = computeFlatKCRootV10(fieldSizedData, []);
+    const fieldSizedMeta = [
+      ...metadata(2, toHex(root)),
+      {
+        subject: ual,
+        predicate: `${DKG}publicTripleCount`,
+        object: `"10000"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}privateTripleCount`,
+        object: `"0"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+    ];
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+    const deleteCheckpoint = vi.fn();
+    const setCheckpoint = vi.fn();
+    const materialize = vi.fn(async (asset: VerifiedGraphScopedAsset) => (
+      materializeVerifiedGraphScopedAsset({
+        store: requesterStore,
+        asset: (await authenticateVerifiedGraphScopedAsset(
+          chain,
+          asset,
+          strictContextGraphBindingVerifier(chain),
+          new Date('2026-07-16T09:00:00.000Z'),
+        )).asset,
+      })
+    ));
+    const process = async (
+      dataQuads: Quad[],
+      metaQuads: Quad[],
+      _ctx: OperationContext,
+      acceptUnverified: boolean,
+      mode: Parameters<typeof processDurableBatchForWire>[4],
+    ) => {
+      const verified = processDurableBatchForWire(
+        dataQuads,
+        metaQuads,
+        acceptUnverified,
+        mode,
+      );
+      return {
+        ...verified,
+        verifiedData: verified.verifiedDataIndexes.map((index) => dataQuads[index]!),
+        verifiedMeta: verified.verifiedMetaIndexes.map((index) => metaQuads[index]!),
+      };
+    };
+    const delayedPage = async (
+      phase: 'data' | 'meta',
+      quads: Quad[],
+      completed: boolean,
+    ): Promise<SyncPageResult> => {
+      const received: Quad[] = [];
+      for (let offset = 0; offset < quads.length; offset += 500) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        received.push(...quads.slice(offset, offset + 500));
+      }
+      return {
+        ...page(phase, received),
+        completed,
+      };
+    };
+    const run = (data: Quad[], completed: boolean) => runDurableSync({
+      ctx,
+      remotePeerId: 'field-sized-exact-recovery-peer',
+      contextGraphIds: [contextGraphId],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 600_000),
+      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [ual] }),
+      fetchSyncPages: async ({ phase }) => (
+        phase === 'data'
+          ? delayedPage(phase, data, completed)
+          : delayedPage(phase, fieldSizedMeta, true)
+      ),
+      processDurableBatchInWorker: process,
+      storeInsert: ({ quads }) => requesterStore.insert(quads),
+      storeGraphScopedAsset: ({ asset }) => materialize(asset),
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    try {
+      const incomplete = run(fieldSizedData.slice(0, -1), false);
+      await vi.runAllTimersAsync();
+      await expect(incomplete).resolves.toMatchObject({
+        insertedTriples: 0,
+        complete: false,
+      });
+      expect(materialize).not.toHaveBeenCalled();
+      expect(deleteCheckpoint).not.toHaveBeenCalled();
+      expect(setCheckpoint).not.toHaveBeenCalled();
+      expect(await graphQuads(requesterStore, assertionGraph)).toEqual([]);
+
+      const complete = run(fieldSizedData, true);
+      await vi.runAllTimersAsync();
+      await expect(complete).resolves.toMatchObject({
+        insertedDataTriples: 10_000,
+        complete: true,
+      });
+      expect(materialize).toHaveBeenCalledTimes(1);
+      expect(await graphQuads(requesterStore, assertionGraph)).toHaveLength(10_000);
+      expect(await values(requesterStore, 'status')).toEqual(['"confirmed"']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not downgrade same-version local receipt provenance during finalized durable replay', async () => {
+    const sourceNodeStore = new OxigraphStore();
+    const requesterStore = new OxigraphStore();
+    const v2Data = dataQuad(2);
+    const root = computeFlatKCRootV10([v2Data], []);
+    const sourceMetadata = finalizedMaterializationMetadata(2, root);
+    await sourceNodeStore.insert([v2Data, ...sourceMetadata]);
+    await requesterStore.insert([
+      dataQuad(1),
+      ...metadata(2, toHex(root)),
+      ...[
+        ['publicTripleCount', `"1"^^<${XSD_INTEGER}>`],
+        ['privateTripleCount', `"0"^^<${XSD_INTEGER}>`],
+        ['status', '"confirmed"'],
+        ['publishedAt', `"2026-07-16T08:00:00.000Z"^^<${XSD_DATE_TIME}>`],
+        ['materializedVersion', '"456:7"'],
+      ].map(([predicate, object]) => ({
+        subject: ual,
+        predicate: `${DKG}${predicate}`,
+        object,
+        graph: metaGraph,
+      })),
+    ]);
+    const servedData = await graphQuads(sourceNodeStore, assertionGraph);
+    const servedMeta = await graphQuads(sourceNodeStore, metaGraph);
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+    } as ChainAdapter;
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'finalized-vm-replay-source',
+      contextGraphIds: [contextGraphId],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
+        phase === 'data' ? page(phase, servedData) : page(phase, servedMeta)
+      ),
+      processDurableBatchInWorker: async (dataQuads, metaQuads, _ctx, acceptUnverified, mode) => {
+        const verified = processDurableBatchForWire(
+          dataQuads,
+          metaQuads,
+          acceptUnverified,
+          mode,
+        );
+        return {
+          ...verified,
+          verifiedData: verified.verifiedDataIndexes.map((index) => dataQuads[index]!),
+          verifiedMeta: verified.verifiedMetaIndexes.map((index) => metaQuads[index]!),
+        };
+      },
+      storeInsert: ({ quads }) => requesterStore.insert(quads),
+      storeGraphScopedAsset: async ({ asset }) => materializeVerifiedGraphScopedAsset({
+        store: requesterStore,
+        asset: (await authenticateVerifiedGraphScopedAsset(
+          chain,
+          asset,
+          strictContextGraphBindingVerifier(chain),
+        )).asset,
+      }),
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.failedPhases).toBe(0);
+    expect(await graphQuads(requesterStore, assertionGraph)).toEqual(servedData);
+    expect(await values(requesterStore, 'transactionHash')).toEqual([`"${transactionHash(2)}"`]);
+    expect(await values(requesterStore, 'confirmationKind')).toEqual(['"transaction"']);
+    expect(await values(requesterStore, 'materializedVersion')).toEqual(['"456:7"']);
+    expect(await values(requesterStore, 'publishedAt')).toEqual([
+      `"2026-07-16T08:00:00Z"^^<${XSD_DATE_TIME}>`,
+    ]);
+  });
+
   it('does not let a stale durable page replace a newer local assertion', async () => {
     const store = new OxigraphStore();
     const v1Data = dataQuad(1);
@@ -491,8 +1388,8 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-mixed',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
-      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
         phase === 'data'
           ? page(phase, [v2Data])
           : page(phase, [...v2Meta, ...legacyMeta])
@@ -509,8 +1406,8 @@ describe('durable graph-scoped KA materialization', () => {
         verifiedPrivateOnlyResponses: 0,
         dataRejectedMissingMeta: 0,
       }),
-      storeInsert: async (quads) => { inserted.push(...quads); },
-      storeGraphScopedAsset: async (asset) => {
+      storeInsert: async ({ quads }) => { inserted.push(...quads); },
+      storeGraphScopedAsset: async ({ asset }) => {
         exactAssets.push(asset);
         return 'applied';
       },
@@ -553,7 +1450,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(authenticateVerifiedGraphScopedAsset(
       chain,
       asset,
-      async () => '1',
+      strictContextGraphBindingVerifier(chain),
     )).rejects.toMatchObject({
       code: 'VM_CHAIN_ASSERTION_VERSION_MISMATCH',
     });
@@ -578,12 +1475,15 @@ describe('durable graph-scoped KA materialization', () => {
       },
       getMerkleRootCount: async () => 2n,
       getKAContextGraphId: async () => 2n,
+      getContextGraphNameHash: async () => ethers.keccak256(
+        ethers.toUtf8Bytes('different-context-graph'),
+      ),
     } as ChainAdapter;
 
     await expect(authenticateVerifiedGraphScopedAsset(
       chain,
       asset,
-      async () => '1',
+      strictContextGraphBindingVerifier(chain),
     )).rejects.toMatchObject({ code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' });
   });
 
@@ -762,6 +1662,114 @@ describe('durable graph-scoped KA materialization', () => {
     const data = await store.query(`SELECT ?s WHERE { GRAPH <${assertionGraph}> { ?s ?p ?o } }`);
     expect(data.type === 'bindings' ? data.bindings.map((row) => row.s) : []).toEqual([v1Data.subject]);
     expect(await values(store, 'assertionVersion')).toEqual(['"1"']);
+  });
+
+  it('finishes an entered atomic replacement before applying the lifecycle fence', async () => {
+    const store = new OxigraphStore();
+    const controller = new AbortController();
+    let releaseReplace!: () => void;
+    let markReplaceEntered!: () => void;
+    const replaceEntered = new Promise<void>((resolve) => { markReplaceEntered = resolve; });
+    const replaceGate = new Promise<void>((resolve) => { releaseReplace = resolve; });
+    const replaceGraphAndSubject = store.replaceGraphAndSubject!.bind(store);
+    let observedCommitSignal: AbortSignal | undefined;
+    const gatedStore = new Proxy(store, {
+      get(target, property) {
+        if (property === 'replaceGraphAndSubject') {
+          return async (...args: Parameters<NonNullable<TripleStore['replaceGraphAndSubject']>>) => {
+            observedCommitSignal = args[5]?.signal;
+            markReplaceEntered();
+            await replaceGate;
+            if (observedCommitSignal?.aborted) {
+              throw Object.assign(new Error('transport aborted'), { name: 'AbortError' });
+            }
+            return replaceGraphAndSubject(...args);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let current = true;
+    let settled = false;
+    const materialization = materializeVerifiedGraphScopedAsset({
+      store: gatedStore,
+      asset: {
+        contextGraphId,
+        ual,
+        assertionVersion: 2n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [dataQuad(2)],
+        metadataQuads: metadata(2),
+      },
+      isCurrent: () => current,
+      options: { signal: controller.signal },
+    }).finally(() => { settled = true; });
+
+    await replaceEntered;
+    current = false;
+    controller.abort();
+    await Promise.resolve();
+    expect(controller.signal.reason).toBeInstanceOf(DOMException);
+    expect((controller.signal.reason as Error).name).toBe('AbortError');
+    expect(settled).toBe(false);
+    expect(observedCommitSignal).toBeUndefined();
+
+    releaseReplace();
+    await expect(materialization).resolves.toBe('quarantined');
+    expect(await values(store, 'assertionVersion')).toEqual(['"2"']);
+  });
+
+  it('atomically removes an asset when its subscription is deleted after commit starts', async () => {
+    const store = new OxigraphStore();
+    let releaseReplace!: () => void;
+    let markReplaceCommitted!: () => void;
+    const replaceCommitted = new Promise<void>((resolve) => { markReplaceCommitted = resolve; });
+    const replaceGate = new Promise<void>((resolve) => { releaseReplace = resolve; });
+    const replaceGraphAndSubject = store.replaceGraphAndSubject!.bind(store);
+    let replaceCalls = 0;
+    const gatedStore = new Proxy(store, {
+      get(target, property) {
+        if (property === 'replaceGraphAndSubject') {
+          return async (...args: Parameters<NonNullable<TripleStore['replaceGraphAndSubject']>>) => {
+            replaceCalls += 1;
+            const result = await replaceGraphAndSubject(...args);
+            if (replaceCalls === 1) {
+              markReplaceCommitted();
+              await replaceGate;
+            }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let subscriptionPresent = true;
+    const materialization = materializeVerifiedGraphScopedAsset({
+      store: gatedStore,
+      asset: {
+        contextGraphId,
+        ual,
+        assertionVersion: 2n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [dataQuad(2)],
+        metadataQuads: metadata(2),
+      },
+      isCurrent: () => true,
+      shouldQuarantineCommitted: () => !subscriptionPresent,
+    });
+
+    await replaceCommitted;
+    subscriptionPresent = false;
+    releaseReplace();
+
+    await expect(materialization).resolves.toBe('quarantined');
+    expect(replaceCalls).toBe(2);
+    expect(await store.countQuads(assertionGraph)).toBe(0);
+    expect(await values(store, 'assertionVersion')).toEqual([]);
   });
 
   it('leaves both old partitions intact when the atomic store update fails', async () => {

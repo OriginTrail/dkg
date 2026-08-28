@@ -1,4 +1,5 @@
 import React from 'react';
+import { ThinkingOrb } from 'thinking-orbs';
 import type { LocalAgentHistoryMessage } from '../../../api.js';
 import { MarkdownMessage } from '../../chat/MarkdownMessage.js';
 import { buildAttachmentSummary } from './attachments.js';
@@ -41,6 +42,25 @@ function buildFailedTurnDisplay(
       : { content: text, synthesized: false };
   }
   return { content: '', failureNotice: failureContent, synthesized: true };
+}
+
+/**
+ * Build the terminal display for a failure observed by the live stream.
+ *
+ * A failure before the first token used to leave the assistant row dependent
+ * on the optional `failureNotice` side channel. Keeping the actionable error
+ * as the row's primary synthetic content makes the terminal state durable
+ * across re-renders, integration refreshes, and renderers that only consume
+ * `content`. Partial real output still keeps markdown and gets a separate
+ * plaintext failure notice.
+ */
+export function buildLiveFailedTurnDisplay(
+  partialText: string,
+  failureContent: string,
+): Pick<LocalAgentMessage, 'content' | 'failureNotice' | 'synthesized'> {
+  return partialText
+    ? { content: partialText, failureNotice: failureContent, synthesized: false }
+    : { content: failureContent, synthesized: true };
 }
 
 export function mapHistoryMessage(message: LocalAgentHistoryMessage, integrationId = ''): LocalAgentMessage {
@@ -160,13 +180,21 @@ export function renderMessageContent(
   // true, content: '' }`. The inline streaming caret lives inside the
   // last text node, so with no content yet there is nothing to anchor
   // it to and the row would render blank. Show an explicit animated
-  // "Thinking…" indicator until the first token arrives, at which
+  // "Connecting dots..." indicator until the first token arrives, at which
   // point this falls through to the markdown path (whose inline caret
   // then takes over). `role=status`/`aria-live` announces it to AT.
   if (role === 'assistant' && streaming && normalized.trim() === '' && !normalizedFailure) {
     return (
       <span className="v10-chat-thinking" role="status" aria-live="polite">
-        Thinking…
+        <ThinkingOrb
+          aria-hidden="true"
+          className="v10-chat-thinking-orb"
+          state="connecting"
+          size={64}
+          style={{ width: 28, height: 28 }}
+          theme="auto"
+        />
+        <span>Connecting dots...</span>
       </span>
     );
   }
@@ -205,4 +233,3 @@ export function renderMessageContent(
     </span>
   );
 }
-

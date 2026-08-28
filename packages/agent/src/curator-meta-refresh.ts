@@ -25,8 +25,14 @@ import {
 } from './context-graph-private-meta-proof.js';
 import { hasAuthoritativePublicMetaDefinition } from './context-graph-public-meta-proof.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
+import {
+  hasSyncAdmissionSource,
+} from './sync/attempt-telemetry.js';
 import { insertWithOversizeGuard, type OversizeDrop } from './sync/oversize-filter.js';
-import type { SyncPageResult } from './sync/requester/page-fetch.js';
+import type {
+  SyncPageFetchOptions,
+  SyncPageResult,
+} from './sync/requester/page-fetch.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import { stripLiteral } from './dkg-agent-utils.js';
 
@@ -94,12 +100,19 @@ interface CuratorMetaRefreshAgent {
     phase: SyncPhase,
     graphUri: string,
     deadline: number,
-    snapshotRef?: string,
-    sinceBatchId?: string,
-    signal?: AbortSignal,
-    recovery?: boolean,
-    forceFreshSession?: boolean,
+    options?: SyncPageFetchOptions,
   ): Promise<SyncPageResult>;
+  runContextGraphSyncWithBackpressure<T>(
+    ctx: OperationContext,
+    contextGraphId: string,
+    lane: 'durable',
+    label: string,
+    work: () => Promise<T>,
+    admission: {
+      operationSignal?: AbortSignal;
+      source: 'control-plane';
+    },
+  ): Promise<T>;
   bindSubscriptionOnChainId?(
     localCgId: string,
     sub: CuratorBoundSubscription,
@@ -322,7 +335,34 @@ async function fetchAuthoritativeMetaSnapshot(
     'meta',
   );
   agent.syncCheckpoints.delete(snapshotCheckpointKey);
-  const result = await agent.fetchSyncPages(
+  // W1 §5.5 — TRIGGER attribution with a base case.
+  //
+  // This is the only fetch in this file, and every route into it funnels here,
+  // so one guard covers all three enumerated callers:
+  //   1. `runImmediatePostApprovalSync` (dkg-agent-lifecycle.ts) — requester,
+  //      no enclosing operation (gossipsub handler)
+  //   2. `resolveCuratorPeerIdsForCg` (dkg-agent-lifecycle.ts) — requester,
+  //      reached from the changelog lane's `runResync`, so it DOES run inside
+  //      an admitted operation
+  //   3. `authorizeSyncRequest` (sync/auth/request-authorize.ts) — RESPONDER,
+  //      authorizing an inbound request; no requester operation exists
+  //
+  // `control-plane` therefore covers BOTH requester-side and responder-side
+  // control traffic. Anyone later reading it as "requester meta refresh" is
+  // wrong. A FOURTH caller must be checked against this list rather than
+  // assumed to fit — the guard will silently give it a plausible label.
+  //
+  // Guarded on scope PRESENCE, never on `=== 'unspecified'`: an admitted
+  // operation whose caller omitted `source` legitimately holds that sentinel,
+  // and relabelling it `control-plane` would launder "we do not know" into a
+  // confident answer. See `hasSyncAdmissionSource`'s doc comment.
+  //
+  // Case 2 keeps its ENCLOSING source on purpose. A refresh nested inside a
+  // catch-up happens *because* of that catch-up — skip the catch-up and the
+  // refresh does not happen — so those bytes are that lane's cost. Attributing
+  // them to `control-plane` would move them out of the eligible numerator and
+  // under-count the very lane §7.3 is evaluating.
+  const runFetch = () => agent.fetchSyncPages(
     ctx,
     curatorPeerId,
     contextGraphId,
@@ -334,12 +374,29 @@ async function fetchAuthoritativeMetaSnapshot(
     // pages. Use the normal bounded sync budget instead of a special 10-second
     // cap that made sufficiently populated private CGs impossible to join.
     Date.now() + SYNC_TOTAL_TIMEOUT_MS,
-    undefined,
-    undefined,
-    options.signal,
-    undefined,
-    true,
+    {
+      signal: options.signal,
+      forceFreshSession: true,
+    },
   );
+  // A standalone control-plane refresh is real outbound sync work. Admit it
+  // through the node-wide scheduler so partitioned mode can route it to fast
+  // capacity and the global cap still bounds it. Nested refreshes deliberately
+  // stay inside their enclosing admission: acquiring twice could deadlock a
+  // saturated partition, and the enclosing trigger remains the honest source.
+  const result = await (hasSyncAdmissionSource()
+    ? runFetch()
+    : agent.runContextGraphSyncWithBackpressure(
+      ctx,
+      contextGraphId,
+      'durable',
+      'durable:control-plane',
+      runFetch,
+      {
+        operationSignal: options.signal,
+        source: 'control-plane',
+      },
+    ));
   throwIfCuratorMetaRefreshAborted(options.signal);
 
   // The shared N-Quads parser admits any graph under the CG prefix. This

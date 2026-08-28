@@ -30,12 +30,26 @@ import { extractV10KCFromStore } from '@origintrail-official/dkg-random-sampling
 import { writeMaterializedVersion } from '@origintrail-official/dkg-publisher';
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
 const CONTEXT_GRAPH_ON_CHAIN_ID = 'https://dkg.network/ontology#ContextGraphOnChainId';
+
+function authoritativeTarget(onChainId: string): unknown {
+  const sub = { subscribed: true, synced: true, onChainId };
+  return {
+    sub,
+    bindingKind: 'authoritative',
+    onChainId,
+    onChainCgId: BigInt(onChainId),
+    cursor: { watermark: 0, ahead: new Map(), scanOrdinal: 1 },
+    bindingGeneration: 0,
+    watermarkBefore: 0,
+  };
+}
 
 const ESCAPE_BEARING_VALUE = 'line1\nline2\\x';
 const ROOT = 'urn:entity:strand-root';
@@ -124,9 +138,13 @@ describe('healStrandedScopedKCs — through the production store decorator stack
 
   async function runHeal(localCgId: string, onChainId: string): Promise<void> {
     await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
-      { store, log: { info: () => undefined, warn: () => undefined, error: () => undefined } } as never,
+      {
+        store,
+        contextGraphBindingState: new ContextGraphBindingState(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
       localCgId,
-      { subscribed: true, synced: true, onChainId } as never,
+      authoritativeTarget(onChainId) as never,
     );
   }
 
@@ -302,12 +320,35 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     // heal sends through the top of the production stack and assert each INSERT
     // declares its scoped target graph + source tag.
     const updateCalls: Array<{ sparql: string; options?: { source?: string; touchedGraphs?: readonly string[] } }> = [];
+    const operationOptions: Array<{ method: string; options?: QueryOptions }> = [];
     const capturing = new Proxy(store, {
       get(target, prop, receiver) {
+        if (prop === 'query') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['query'];
+          return (sparql: string, options?: QueryOptions) => {
+            operationOptions.push({ method: 'query', options });
+            return orig.call(target, sparql, options);
+          };
+        }
+        if (prop === 'insert') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['insert'];
+          return (quads: Quad[], options?: QueryOptions) => {
+            operationOptions.push({ method: 'insert', options });
+            return orig.call(target, quads, options);
+          };
+        }
+        if (prop === 'deleteByPattern') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['deleteByPattern'];
+          return (pattern: Partial<Quad>, options?: QueryOptions) => {
+            operationOptions.push({ method: 'deleteByPattern', options });
+            return orig.call(target, pattern, options);
+          };
+        }
         if (prop === 'update') {
           const orig = Reflect.get(target, prop, receiver) as NonNullable<TripleStore['update']>;
           return (sparql: string, options?: { source?: string; touchedGraphs?: readonly string[] }) => {
             updateCalls.push({ sparql, options });
+            operationOptions.push({ method: 'update', options });
             return orig.call(target, sparql, options);
           };
         }
@@ -316,17 +357,72 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     }) as TripleStore;
 
     await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
-      { store: capturing, log: { info: () => undefined, warn: () => undefined, error: () => undefined } } as never,
+      {
+        store: capturing,
+        contextGraphBindingState: new ContextGraphBindingState(),
+        rsHealCursorByCg: new Map<string, string>(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
       TEST_CG,
-      { subscribed: true, synced: true, onChainId: TEST_ONCHAIN } as never,
+      authoritativeTarget(TEST_ONCHAIN) as never,
     );
 
     const scopedData = contextGraphDataUri(TEST_CG, TEST_ONCHAIN);
     const scopedMeta = contextGraphMetaUri(TEST_CG, TEST_ONCHAIN);
     const dataInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedData));
     const metaInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedMeta));
-    expect(dataInsert?.options).toMatchObject({ source: 'agent.swm.rsHeal.materialize', touchedGraphs: [scopedData] });
-    expect(metaInsert?.options).toMatchObject({ source: 'agent.swm.rsHeal.materialize', touchedGraphs: [scopedMeta] });
+    expect(dataInsert?.options).toMatchObject({
+      priority: 'background',
+      source: 'agent.swm.rsHeal.materialize',
+      touchedGraphs: [scopedData],
+    });
+    expect(metaInsert?.options).toMatchObject({
+      priority: 'background',
+      source: 'agent.swm.rsHeal.materialize',
+      touchedGraphs: [scopedMeta],
+    });
+    expect(operationOptions.length).toBeGreaterThan(0);
+    expect(operationOptions.every(({ options }) => options?.priority === 'background')).toBe(true);
+    expect(operationOptions.every(({ options }) => options?.source?.startsWith('agent.swm.rsHeal.'))).toBe(true);
+  });
+
+  it('labels RS-heal reads by caller operation through the decorator stack', async () => {
+    const querySources: Array<string | undefined> = [];
+    const capturing = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['query'];
+          return (
+            sparql: Parameters<TripleStore['query']>[0],
+            options?: Parameters<TripleStore['query']>[1],
+          ) => {
+            querySources.push(options?.source);
+            return orig.call(target, sparql, options);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as TripleStore;
+
+    await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: capturing,
+        contextGraphBindingState: new ContextGraphBindingState(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      TEST_CG,
+      authoritativeTarget(TEST_ONCHAIN) as never,
+    );
+
+    expect(new Set(querySources.filter((source) => source?.startsWith('agent.swm.rsHeal.'))))
+      .toEqual(new Set([
+        'agent.swm.rsHeal.guard',
+        'agent.swm.rsHeal.enumerate',
+        'agent.swm.rsHeal.version.readLegacy',
+        'agent.swm.rsHeal.version.checkScoped',
+        'agent.swm.rsHeal.roots',
+        'agent.swm.rsHeal.rootPresent',
+      ]));
   });
 
   it('relocates a VM-graph-only one-shot strand through the full stack (read-both)', async () => {

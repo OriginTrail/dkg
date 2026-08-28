@@ -2,9 +2,9 @@ name: EVM Integration Tests
 
 on:
   push:
-    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary]
   pull_request:
-    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary]
     types: [opened, synchronize, reopened, labeled, unlabeled]
   merge_group:
   workflow_dispatch:
@@ -40,12 +40,14 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
+          ref: 780f14aa60c39bdca788967121085c3c0d82d85c
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
-            scripts/ci
-            scripts/lib
+            scripts/ci/plan-ci.mjs
+            scripts/ci/assert-ci-results.mjs
+            scripts/lib/ci-delta.mjs
+            scripts/lib/ci-results.mjs
           sparse-checkout-cone-mode: false
       - name: Compute fail-closed EVM plan
         id: plan
@@ -54,7 +56,7 @@ jobs:
           MERGE_SHA: ${{ github.sha }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           SAMPLE_KEY: ${{ github.event.pull_request.head.sha || github.sha }}
-          DELTA_ENABLED: ${{ vars.CI_DELTA_ENABLED == 'true' && github.base_ref == 'main' }}
+          DELTA_ENABLED: ${{ vars.CI_DELTA_ENABLED == 'true' && (github.base_ref == 'main' || github.base_ref == 'testnet-canary') }}
         run: |
           set -euo pipefail
           CHANGES_FILE="${RUNNER_TEMP}/ci-name-status.z"
@@ -147,12 +149,14 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
+          ref: 780f14aa60c39bdca788967121085c3c0d82d85c
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
-            scripts/ci
-            scripts/lib
+            scripts/ci/plan-ci.mjs
+            scripts/ci/assert-ci-results.mjs
+            scripts/lib/ci-delta.mjs
+            scripts/lib/ci-results.mjs
           sparse-checkout-cone-mode: false
       - name: Verify selected EVM scopes completed
         env:

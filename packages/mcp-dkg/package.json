@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-mcp",
-  "version": "10.0.8",
+  "version": "10.0.14",
   "description": "MCP server that exposes the local DKG daemon (projects, sub-graphs, activity, chat) to Cursor, Claude Code, and any other MCP-aware coding assistant.",
   "type": "module",
   "main": "dist/index.js",
@@ -39,9 +39,10 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
+    "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "@modelcontextprotocol/sdk": "^1",
     "zod": "^3.25",

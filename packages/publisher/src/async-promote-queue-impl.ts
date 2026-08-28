@@ -17,7 +17,10 @@
  * `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE_IMPLEMENTATION_PLAN.md` (plan).
  */
 
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { type TripleStore } from '@origintrail-official/dkg-storage';
+import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
+import { isSafeJobId } from './job-id.js';
+import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION,
@@ -26,6 +29,7 @@ import {
   PROMOTE_JOB_STATES,
   type AsyncPromoteQueue,
   type AsyncPromoteQueueConfig,
+  type PromoteTerminalJobClearer,
   type PromoteAttemptError,
   type PromoteCommitMarker,
   type PromoteCommitMarkerStep,
@@ -45,16 +49,18 @@ import {
   PROMOTE_PAYLOAD,
   PROMOTE_STATE,
   PROMOTE_UNIQUENESS_KEY,
+  classifyJobPayload,
   comparePromoteJobs,
   defaultBackoffMs,
   expectBindings,
+  isTerminalPromoteJobState,
   jobSubject,
   literal,
   normalizePromoteAgentLane,
   parseJobPayload,
   promoteLaneConflictScope,
   promoteLaneScopesConflict,
-  serializeJob,
+  serializeJobRecord,
   uniquenessKey,
   uniquenessLookupKeys,
   type PromoteUniquenessInput,
@@ -68,7 +74,7 @@ type PromoteConflictLookup = {
   laneScope: ReturnType<typeof promoteLaneConflictScope>;
 };
 
-export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
+export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteTerminalJobClearer {
   /**
    * Per-graph-URI mutex map. Serialises uniqueness-affecting mutations
    * callers can't both observe stale state and then persist conflicting
@@ -140,11 +146,14 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
   async list(filter: PromoteListFilter = {}): Promise<PromoteJob[]> {
     return this.withMutationLock(async () => {
       await this.ensureGraph();
-      return this.listUnlocked(filter);
+      return this.listUnlocked(filter, 'publisher.asyncPromote.list');
     });
   }
 
-  private async listUnlocked(filter: PromoteListFilter = {}): Promise<PromoteJob[]> {
+  private async listUnlocked(
+    filter: PromoteListFilter = {},
+    source = 'publisher.asyncPromote.list',
+  ): Promise<PromoteJob[]> {
     const filters: string[] = [];
     if (filter.state && filter.state.length > 0) {
       const literals = filter.state.map((s) => literal(s)).join(', ');
@@ -155,6 +164,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
     }
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${PROMOTE_STATE}> ?state ; <${PROMOTE_PAYLOAD}> ?payload . ${filters.join(' ')} } }`,
+      { source },
     );
     const sorted = expectBindings(result)
       .map((row) => parseJobPayload(row['payload']))
@@ -235,7 +245,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
 
       const now = this.now();
       await this.reconcileExpiredRunning(now);
-      const candidates = (await this.listUnlocked()).filter((j) => {
+      const candidates = (await this.listUnlocked(
+        {},
+        'publisher.asyncPromote.claimNext.candidates',
+      )).filter((j) => {
         if (j.state === 'queued') return true;
         if (j.state === 'failed_retrying' && (j.attempt.nextRetryAt ?? 0) <= now) return true;
         return false;
@@ -246,7 +259,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
         claimableCandidates.push(candidate);
       }
 
-      const running = await this.listUnlocked({ state: ['running'] });
+      const running = await this.listUnlocked(
+        { state: ['running'] },
+        'publisher.asyncPromote.claimNext.running',
+      );
       const eligible = claimableCandidates.filter((candidate) =>
         !running.some((active) => active.jobId !== candidate.jobId && this.jobsShareClaimLane(active, candidate)),
       );
@@ -398,7 +414,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
   }
 
   private async reconcileExpiredRunning(now: number): Promise<PromoteRecoverySummary> {
-    const running = await this.listUnlocked({ state: ['running'] });
+    const running = await this.listUnlocked(
+      { state: ['running'] },
+      'publisher.asyncPromote.recoverExpired',
+    );
 
     let reclaimed = 0;
     let abandoned = 0;
@@ -497,7 +516,12 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
     return this.withMutationLock(async () => {
       await this.ensureGraph();
       const stats = Object.fromEntries(PROMOTE_JOB_STATES.map((s) => [s, 0])) as PromoteStats;
-      for (const job of await this.listUnlocked()) stats[job.state] += 1;
+      for (const job of await this.listUnlocked(
+        {},
+        'publisher.asyncPromote.stats',
+      )) {
+        stats[job.state] += 1;
+      }
       return stats;
     });
   }
@@ -581,6 +605,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
   private async readJob(jobId: string): Promise<PromoteJob | null> {
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PROMOTE_PAYLOAD}> ?payload } }`,
+      { source: 'publisher.asyncPromote.readJob' },
     );
     const rows = expectBindings(result);
     if (rows.length === 0) return null;
@@ -594,9 +619,90 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
   }
 
   private async writeJob(job: PromoteJob): Promise<void> {
-    await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
-    await this.store.insert(serializeJob(job, this.graphUri));
+    await this.persistJobRecord(job);
     await this.store.flush?.();
+  }
+
+  /**
+   * #1933 — persist a job transition as a single-subject atomic replace so a crash between
+   * the delete and the insert can never lose the job row (delete-then-insert is two separate
+   * commits; a crash after the delete commits but before the insert commits permanently
+   * strands the subject empty). Routed through the shared writer
+   * `replaceSubjectAtomicallyOrFallback` (#1938), which uses the storage capability
+   * `tryReplaceSubjectAtomically` (one commit boundary — the storage layer owns literal
+   * externalization, graph-set-index, changelog, and reserved-plane bookkeeping structurally,
+   * rather than a raw `update()` string that ChangelogStore would scan and false-reject).
+   * Mirrors the async-lift publisher's `persistJobRecord` (#1863/#1919), adapted to the promote
+   * job's SINGLE subject: there is no immutable request subject, so the request-first ordering
+   * the lift sibling needs is N/A.
+   *
+   * A store that cannot guarantee one commit boundary (no `replaceSubject`, or a
+   * non-transactional endpoint that refuses it) takes the shared writer's BOUNDED pre-#1933
+   * delete-then-insert fallback — still safe here because every same-process transition and
+   * read serializes under `withMutationLock`, so the transient window is masked in-process.
+   * `cancel` routes through this path (it retains the row as a `failed`/`cancelled` replace,
+   * never a delete), so the atomic replace preserves its retain semantics by construction.
+   */
+  private async persistJobRecord(job: PromoteJob): Promise<void> {
+    // The serializer owns record shaping AND the fail-loud single-subject guard (it throws if
+    // the record is ever not EXACTLY the job subject, before it reaches the STRICT
+    // single-subject replace / the jobRef-only fallback delete).
+    const { jobRef, jobQuads } = serializeJobRecord(job, this.graphUri);
+    // Persist via the shared writer (#1938), which owns the atomic-capable-vs-bounded-fallback
+    // policy for both queues (fallback delete scoped to EXACTLY jobRef).
+    await replaceSubjectAtomicallyOrFallback(
+      this.store,
+      this.graphUri,
+      jobRef,
+      jobQuads,
+      'publisher.asyncPromote.writeJob',
+    );
+  }
+
+  // #1837 — subject-scoped record removal (the delete half of writeJob, no re-insert).
+  // All of a job's triples live under jobSubject(jobId) in the single control-plane
+  // graph, so this provably cannot touch another job or another graph.
+  private async deleteJob(jobId: string): Promise<void> {
+    await this.store.deleteByPattern({ subject: jobSubject(jobId), graph: this.graphUri });
+    await this.store.flush?.();
+  }
+
+  /**
+   * #1837 — atomic by-exact-jobId terminal clear. Runs INSIDE withMutationLock, which
+   * already serializes EVERY transition (incl. the only terminal→active path, recover()
+   * failed→queued), so a transitioning job cannot be swept and concurrent clears are
+   * deterministic — no new lock needed. Classifies from a SINGLE canonical payload read
+   * (matching the lift sibling): `classifyJobPayload` splits already_absent / malformed /
+   * job without the enum drop that collapses them, and the enum + terminal checks run on
+   * the parsed job. Never throws / never mutates on a reject.
+   */
+  async clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome> {
+    // Reject an empty OR SPARQL-unsafe jobId as malformed before building the jobSubject
+    // IRI (defense-in-depth; the SWM route already pre-validates via decodePromoteJobId,
+    // but a direct agent.assertion.clearPromoteAsync caller must be bounded too).
+    if (!isSafeJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
+    return this.withMutationLock(async () => {
+      await this.ensureGraph();
+      const rows = expectBindings(
+        await this.store.query(
+          `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PROMOTE_PAYLOAD}> ?payload } }`,
+          { source: 'publisher.asyncPromote.clearTerminalJob' },
+        ),
+      );
+      const parsed = classifyJobPayload(rows[0]?.['payload']);
+      if (parsed.kind === 'absent') return { outcome: 'already_absent' };
+      if (parsed.kind === 'malformed') return { outcome: 'rejected', reason: 'malformed' };
+      const { job } = parsed;
+      // Structurally-valid job whose state is a well-formed string but not a recognized enum
+      // value → unknown (a missing/non-string state was already classified `malformed`). Narrow
+      // to PromoteJobState only AFTER the membership check confirms it.
+      if (!(PROMOTE_JOB_STATES as readonly string[]).includes(job.state)) {
+        return { outcome: 'rejected', reason: 'unknown' };
+      }
+      if (!isTerminalPromoteJobState(job.state as PromoteJobState)) return { outcome: 'rejected', reason: 'nonterminal' };
+      await this.deleteJob(jobId);
+      return { outcome: 'cleared' };
+    });
   }
 
   private assertLeaseHeld(job: PromoteJob, claimToken: string): void {
@@ -636,9 +742,11 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
     const result = lookup.lookupQuery.kind === 'assertionWildcard'
       ? await this.store.query(
           `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${PROMOTE_CONTEXT_GRAPH_ID}> ${literal(lookup.request.contextGraphId)} ; <${PROMOTE_ASSERTION_NAME}> ${literal(lookup.request.assertionName)} ; <${PROMOTE_PAYLOAD}> ?payload . } }`,
+          { source: 'publisher.asyncPromote.findActiveConflict' },
         )
       : await this.store.query(
           `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${PROMOTE_UNIQUENESS_KEY}> ?key ; <${PROMOTE_PAYLOAD}> ?payload . FILTER (?key IN (${lookup.lookupQuery.keys.map((key) => literal(key)).join(', ')})) } }`,
+          { source: 'publisher.asyncPromote.findActiveConflict' },
         );
     const rows = expectBindings(result);
     for (const row of rows) {

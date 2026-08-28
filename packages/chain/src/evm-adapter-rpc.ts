@@ -8,8 +8,15 @@
  * assertions. Bodies are a 1:1 move from the original module.
  */
 import { ethers, FetchRequest } from 'ethers';
-import { enrichEvmError, errorCode, errorMessage, errorStatus } from './evm-adapter-errors.js';
+import {
+  enrichEvmError,
+  errorCode,
+  errorMessage,
+  errorName,
+  errorStatus,
+} from './evm-adapter-errors.js';
 import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import { cancellableRpcGetUrl } from './rpc-request-transport.js';
 
 /**
  * Per-request retry bound for ethers' built-in `FetchRequest`. ethers v6
@@ -95,6 +102,10 @@ export function boundedRetryFetchRequest(
   maxRetries: number = RPC_REQUEST_MAX_RETRIES,
 ): FetchRequest {
   const req = new FetchRequest(url);
+  // ethers 6.16's Node getUrl cancellation rejects the FetchRequest but does
+  // not close its underlying socket. Use the platform fetch transport so the
+  // same FetchCancelSignal also aborts the active HTTP request.
+  req.getUrlFunc = cancellableRpcGetUrl;
   req.retryFunc = async (_attemptReq, _response, attempt) => {
     if (attempt >= maxRetries) return false;
     await sleep(Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS));
@@ -118,6 +129,7 @@ export function isRetryableRpcError(err: unknown): boolean {
   const code = errorCode(err);
   const status = errorStatus(err);
   const msg = errorMessage(err).toLowerCase();
+  const name = errorName(err);
 
   if (code === 'CALL_EXCEPTION' || code === 'INSUFFICIENT_FUNDS' || code === 'NONCE_EXPIRED'
     || code === 'RPC_RECEIPT_LOOKUP_FAILED'
@@ -131,6 +143,16 @@ export function isRetryableRpcError(err: unknown): boolean {
     || msg.includes('intrinsic gas too low') || msg.includes('exceeds block gas limit')) {
     return false;
   }
+
+  // Node/undici/ethers surface an aborted fetch as DOMException
+  // `{ name: 'AbortError' }` (and some Node paths also stamp `ABORT_ERR`).
+  // At the chain-RPC boundary this is a transport interruption, not a
+  // deterministic EVM result. Treat it like the timeout/network cases below so
+  // the SAME signed transaction or point read fails over to another endpoint.
+  // This is especially important after `eth_sendRawTransaction`: an RPC can
+  // accept the tx and then abort the client response, so fail-fast would report
+  // publish failure even though the mint is already on chain.
+  if (name === 'AbortError' || code === 'ABORT_ERR') return true;
 
   if (status === 429 || (typeof status === 'number' && status >= 500)) return true;
   if (code === 'TIMEOUT' || code === 'RPC_TIMEOUT' || code === 'TIMEOUT_ERROR' || code === 'SERVER_ERROR'
@@ -174,15 +196,12 @@ export function assertSuccessfulReceipt(receipt: ethers.TransactionReceipt, labe
 }
 
 export function isKnownTransactionError(err: unknown): boolean {
-  const code = errorCode(err);
   const msg = errorMessage(err).toLowerCase();
-  return code === 'NONCE_EXPIRED'
-    || msg.includes('already known')
+  return msg.includes('already known')
     || msg.includes('known transaction')
     || msg.includes('already imported')
     || msg.includes('transaction already in mempool')
     || msg.includes('already exists')
     || msg.includes('already have transaction')
-    || msg.includes('nonce too low')
     || msg.includes('duplicate transaction');
 }

@@ -17,9 +17,8 @@ import {
   QuorumUnmetError,
   TripleStoreAsyncLiftPublisher,
   createLiftJobFailureMetadata,
-  storeKnowledgeAssetOperationPublicQuads,
   type AsyncLiftPublisherConfig,
-  type AsyncLiftPublisherRecoveryResult,
+  type AsyncLiftChainProofResolution,
   type LiftRequest,
   type Publisher,
 } from '../src/index.js';
@@ -51,6 +50,12 @@ import {
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
 import { withLegacyRawLiftTestSeeder } from './_helpers/legacy-raw-lift.js';
+import {
+  KA_VM_KA_UAL,
+  KA_VM_VALIDATION,
+  kaVmPublishRequest,
+  stageKnowledgeAssetShareSnapshot,
+} from './_helpers/ka-vm-publish.js';
 
 describe('TripleStoreAsyncLiftPublisher', () => {
   let now = 1_000;
@@ -61,7 +66,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   let _kav10Address: string;
   let _provider: ethers.JsonRpcProvider;
   const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
-  const ROOTLESS_UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
+  const ROOTLESS_UAL = KA_VM_KA_UAL;
 
   function makeTestPublisher(opts: ConstructorParameters<typeof DKGPublisher>[0]): DKGPublisher {
     // OT-RFC-43 Option-1: wire a KA-number allocator so the real EVM adapter
@@ -104,55 +109,11 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     authority: { type: 'owner', proofRef: 'proof:owner:1' },
   });
 
-  const kaVmPublishRequest = (overrides: Partial<Parameters<TripleStoreAsyncLiftPublisher['enqueueKnowledgeAssetVmPublish']>[0]> = {}) => {
-    const authorAddress = '0x1111111111111111111111111111111111111111';
-    const kaNumber = 7n;
-    const base = {
-      contextGraphId: 'music-social',
-      name: 'albums',
-      shareOperationId: 'share-op-1',
-      roots: [],
-      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      kaUal: ROOTLESS_UAL,
-      assertionVersion: '1',
-      publicTripleCount: 2,
-      privateTripleCount: 0,
-      seal: {
-        merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-        authorAddress: authorAddress as `0x${string}`,
-        signature: {
-          r: (`0x${'34'.repeat(32)}`) as `0x${string}`,
-          vs: (`0x${'56'.repeat(32)}`) as `0x${string}`,
-        },
-        schemeVersion: 1,
-        reservedKaId: ((BigInt(authorAddress) << 96n) | kaNumber).toString() as `${bigint}`,
-      },
-      sealChainId: '31337' as `${bigint}`,
-      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-      intentKey: 'sha256:' + 'ab'.repeat(32),
-      wmCurrentAssertion: '12'.repeat(32),
-      swmCurrentAssertion: '12'.repeat(32),
-      kaNumber: kaNumber.toString(),
-      reservedUal: ROOTLESS_UAL,
-    };
-    return { ...base, ...overrides };
-  };
-
   async function stageRootlessSnapshot(shareOperationId: string): Promise<void> {
-    await storeKnowledgeAssetOperationPublicQuads({
+    await stageKnowledgeAssetShareSnapshot({
       store,
-      graphManager: new GraphManager(store),
-      contextGraphId: 'music-social',
       shareOperationId,
-      kaUal: ROOTLESS_UAL,
       assertionVersion: 1,
-      quads: [
-        { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
-        { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
-      ],
-      publisherPeerId: 'peer-1',
       accessPolicy: 'public',
     });
   }
@@ -165,17 +126,20 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   function createPublisher(
     options: {
-      recoveryResult?: AsyncLiftPublisherRecoveryResult | null;
-      config?: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainRecoveryResolver'>;
+      chainProof?: AsyncLiftChainProofResolution;
+      config?: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainProofResolver'>;
     } = {},
   ) {
     const clock = () => ++now;
     const nextId = () => `job-${++ids}`;
+    // GH#2270 PR-3 — the resolver reports a VERDICT, so the fixture states one. `undefined`
+    // still means "no resolver configured at all", which is a different thing from a resolver
+    // that establishes nothing (`inconclusive`).
+    const chainProof = options.chainProof;
     const publisher = new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver:
-        options.recoveryResult === undefined ? undefined : async () => options.recoveryResult ?? null,
+      chainProofResolver: chainProof === undefined ? undefined : async () => chainProof,
       ...options.config,
     });
     return withLegacyRawLiftTestSeeder(publisher, store, {
@@ -477,7 +441,13 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
   });
 
-  it('reaccepts a compatible retryable failed knowledge asset VM publish when enqueued again', async () => {
+  // GH#2270 — this row used to pin the OPPOSITE: a re-submit blind-reaccepted a job that had
+  // recorded a transaction hash and then failed as `rpc_unavailable` — the broadcast-phase
+  // catch-all that a LANDED transaction whose local recording failed also arrives under.
+  // Re-running such a job publishes the same KA a second time. Admission now refuses,
+  // transiently, and leaves the job and its lifecycle subject exactly as they were for chain
+  // recovery to resolve.
+  it('refuses to reaccept a failed knowledge asset VM publish that may have submitted a transaction', async () => {
     const publisher = createPublisher();
     const intent = kaVmPublishRequest({ subGraphName: 'research' });
 
@@ -510,11 +480,45 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(failed.failure.retryable).toBe(true);
     expect(failed.timestamps.nextRetryAt).toBeUndefined();
 
+    await expect(publisher.enqueueKnowledgeAssetVmPublish(intent)).rejects.toMatchObject({
+      name: 'LiftJobPendingChainProofError',
+      code: 'LIFT_JOB_PENDING_CHAIN_PROOF',
+      existingJobId: jobId,
+    });
+    const untouched = await publisher.getStatus(jobId);
+    expect(untouched?.status).toBe('failed');
+    expect(untouched?.retries.retryCount).toBe(0);
+    // The refusal is not a fall-through: no replacement job was minted for the subject, and
+    // nothing became claimable.
+    expect((await publisher.getStats()).accepted).toBe(0);
+    expect(await publisher.claimNext('wallet-2')).toBeNull();
+  });
+
+  // The polarity of the row above, on the same path: a failure that persisted NO transaction
+  // hash (ACK quorum is collected before the publish tx is signed) is still reaccepted on the
+  // SAME jobId by a byte-identical re-submit.
+  it('reaccepts a compatible retryable failed knowledge asset VM publish with no transaction evidence', async () => {
+    const publisher = createPublisher();
+    const intent = kaVmPublishRequest({ subGraphName: 'research' });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(intent);
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    const failed = await publisher.recordPublishFailure(jobId, {
+      error: new QuorumUnmetError({ collected: 2, required: 3, dialled: 2 }),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:dkg:test:error:quorum-unmet',
+    });
+    expect(failed.status).toBe('failed');
+    if (failed.status !== 'failed') throw new Error('expected failed job');
+    expect(failed.failure.code).toBe('quorum_unmet');
+    expect(failed.broadcast).toBeUndefined();
+
     await expect(publisher.enqueueKnowledgeAssetVmPublish(intent)).resolves.toBe(jobId);
     const reaccepted = await publisher.getStatus(jobId);
     expect(reaccepted?.status).toBe('accepted');
     expect(reaccepted?.retries.retryCount).toBe(1);
-    expect(reaccepted?.retries.lastRetryReason).toBe('rpc_unavailable');
+    expect(reaccepted?.retries.lastRetryReason).toBe('quorum_unmet');
     expect(reaccepted?.timestamps.lastRetriedAt).toBeDefined();
 
     const claimedAgain = await publisher.claimNext('wallet-2');
@@ -527,6 +531,10 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       config: {
         retryBackoffBaseMs: 100,
         retryBackoffMaxMs: 250,
+        // GH#2270 — the backoff is jittered by default (r = 0.2). rand() = 0.5 is the exact
+        // midpoint (multiplier 1.0), so this row keeps pinning the UNJITTERED exponential
+        // sequence and its cap; the jitter itself is measured in async-lift-auto-retry-2270.
+        rand: () => 0.5,
       },
     });
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -714,6 +722,165 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(processed?.failure?.code).toBe('publish_intent_stale');
   });
 
+  it('fails a corrupt-head preflight as retryable workspace_unavailable, not a terminal code', async () => {
+    // GH#2273 — a multi-valued SWM head (catch-up union residue) is transient local
+    // corruption that sync repair heals; the queued request may still be byte-identical
+    // to what the head certified at admission. Pre-fix the corrupt-head message fell
+    // through the classification chain's keyword sniffing to terminal
+    // `canonicalization_failed`, killing a job a later retry could have finalized.
+    let executorCalls = 0;
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => {
+            throw Object.assign(
+              new Error('Corrupt graph-scoped SWM head for did:dkg:test/1: head carries 2 shareOperationId values (op-a, storage-ack-b)'),
+              { code: 'KA_WORKSPACE_HEAD_CORRUPT' },
+            );
+          },
+          execute: async () => {
+            executorCalls++;
+            throw new Error('executor should not run for corrupt-head preflight');
+          },
+        },
+      },
+    });
+    const shareOperationId = 'rootless-corrupt-head-op';
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(executorCalls).toBe(0);
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.failedFromState).toBe('claimed');
+    expect(processed?.failure?.code).toBe('workspace_unavailable');
+    expect(processed?.failure?.retryable).toBe(true);
+  });
+
+  it('classifies a corrupt head at the pre-execute preflight from validated, not broadcast', async () => {
+    // GH#2273 — the preflight runs TWICE per attempt: once on claim and once immediately
+    // before execute. The second invocation's throw lands in the broadcast-path catch,
+    // where the failed-from state is decided by `isKnowledgeAssetPublishPreconditionFailure`.
+    // Pre-fix that predicate did not recognize KA_WORKSPACE_HEAD_CORRUPT, so the job
+    // failed from 'broadcast' and the SECOND classifier defaulted the corrupt-head
+    // message to `rpc_unavailable` — this row pins the site-B path specifically, which
+    // the single-preflight row above cannot reach.
+    let preflightCalls = 0;
+    let executorCalls = 0;
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => {
+            preflightCalls += 1;
+            if (preflightCalls === 1) return undefined;
+            throw Object.assign(
+              new Error('Corrupt graph-scoped SWM head for did:dkg:test/1: head carries 2 shareOperationId values (op-a, storage-ack-b)'),
+              { code: 'KA_WORKSPACE_HEAD_CORRUPT' },
+            );
+          },
+          execute: async () => {
+            executorCalls++;
+            throw new Error('executor should not run when the pre-execute preflight rejects');
+          },
+        },
+      },
+    });
+    const shareOperationId = 'rootless-corrupt-head-presend-op';
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(preflightCalls).toBe(2);
+    expect(executorCalls).toBe(0);
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.failedFromState).toBe('validated');
+    expect(processed?.failure?.code).toBe('workspace_unavailable');
+    expect(processed?.failure?.retryable).toBe(true);
+  });
+
+  it('classifies a code-only precondition by its structured code, not its message text', async () => {
+    // Behavior-INVARIANCE pin for the consolidated precondition classifier:
+    // the code that routes a failure to the pre-send 'validated' state is the
+    // same decision that persists the failure code. The message here is
+    // deliberately keyword-free, so a regression back to message-keyed
+    // classification (which would still route the state via the code list)
+    // could not reproduce the expected pairing from the message alone.
+    let executorCalls = 0;
+    let preflightCalls = 0;
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => {
+            preflightCalls += 1;
+            if (preflightCalls === 1) return undefined;
+            throw Object.assign(
+              new Error('zzz keyword-free precondition zzz'),
+              { code: 'CG_NOT_REGISTERED' },
+            );
+          },
+          execute: async () => {
+            executorCalls++;
+            throw new Error('executor should not run for an unregistered CG precondition');
+          },
+        },
+      },
+    });
+    const shareOperationId = 'rootless-code-only-precondition-op';
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(executorCalls).toBe(0);
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.failedFromState).toBe('validated');
+    // Preserves the pre-existing effective mapping for this code (the legacy
+    // chain never matched its real messages either); re-taxonomizing is #1974.
+    expect(processed?.failure?.code).toBe('canonicalization_failed');
+  });
+
+  it('keeps a fee cap below the current base fee in the retryable pre-send lane', async () => {
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          execute: async () => {
+            throw Object.assign(
+              new Error('configured fee cap is temporarily too low'),
+              { code: 'FEE_CAP_BELOW_BASE_FEE' },
+            );
+          },
+        },
+      },
+    });
+    const shareOperationId = 'rootless-fee-cap-op';
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure).toMatchObject({
+      failedFromState: 'validated',
+      code: 'fee_cap_below_base_fee',
+      retryable: true,
+    });
+    expect(processed?.broadcast).toBeUndefined();
+  });
+
   it('exposes the SWM share operation contract', async () => {
     const publisherContract: Publisher = makeTestPublisher({
       store,
@@ -876,6 +1043,29 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(released.type).toBe('bindings');
     if (released.type !== 'bindings') return;
     expect(released.bindings).toHaveLength(0);
+  });
+
+  it('periodic reconciliation requeues a stranded validated job without a restart', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.seedLegacyRawLift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+
+    expect(await publisher.reconcileTransactions()).toBe(1);
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      jobId,
+      status: 'accepted',
+      recovery: { recoveredFromStatus: 'validated' },
+    });
+    expect(await publisher.claimNext('wallet-1')).toMatchObject({ jobId });
   });
 
   it('clears orphan wallet locks for terminal jobs during recovery', async () => {
@@ -1650,15 +1840,18 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('recovers interrupted jobs and finalizes broadcast jobs through the resolver', async () => {
     const publisher = createPublisher({
-      recoveryResult: {
-        inclusion: { txHash: '0xbbb', blockNumber: 7 },
-        finalization: {
-          txHash: '0xbbb',
-          ual: 'did:dkg:mock:31337/0xbbb/7',
-          batchId: '7',
-          startKAId: '7',
-          endKAId: '7',
-          publisherAddress: '0x1111111111111111111111111111111111111111',
+      chainProof: {
+        status: 'recovered',
+        recovery: {
+          inclusion: { txHash: '0xbbb', blockNumber: 7 },
+          finalization: {
+            txHash: '0xbbb',
+            ual: 'did:dkg:mock:31337/0xbbb/7',
+            batchId: '7',
+            startKAId: '7',
+            endKAId: '7',
+            publisherAddress: '0x1111111111111111111111111111111111111111',
+          },
         },
       },
     });
@@ -1698,8 +1891,52 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(await privateStore.getPrivateTriplesForOperation('music-social', 'op-2', 'urn:local:/rihana')).toEqual([]);
   });
 
+  it('serializes RPC acceptance with reconciliation so stale broadcast state cannot overwrite finality', async () => {
+    const txHash = '0xbbb' as `0x${string}`;
+    const publisher = createPublisher({
+      chainProof: {
+        status: 'recovered',
+        recovery: {
+          inclusion: { txHash, blockNumber: 7 },
+          finalization: {
+            txHash,
+            ual: 'did:dkg:mock:31337/0xbbb/7',
+            batchId: '7',
+            startKAId: '7',
+            endKAId: '7',
+            publisherAddress: '0x1111111111111111111111111111111111111111',
+          },
+        },
+      },
+    });
+    const jobId = await publisher.seedLegacyRawLift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash, walletId: 'wallet-1', nonce: 4 },
+    });
+
+    await expect(Promise.all([
+      (publisher as any).recordRpcAccepted(jobId, { txHash, nonce: 4 }),
+      publisher.reconcileTransactions(),
+    ])).resolves.toBeDefined();
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      jobId,
+      status: 'finalized',
+      broadcast: { txHash },
+    });
+  });
+
   it('keeps broadcast jobs in place while inconclusive recovery is still within the timeout window', async () => {
-    const publisher = createPublisher({ recoveryResult: null });
+    const publisher = createPublisher({ chainProof: { status: 'inconclusive' } });
     const broadcastId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
@@ -1726,7 +1963,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('fails broadcast jobs once inconclusive recovery exceeds the timeout window', async () => {
     const publisher = createPublisher({
-      recoveryResult: null,
+      chainProof: { status: 'inconclusive' },
       config: {
         recoveryLookupTimeoutMs: 50,
       },
@@ -1759,13 +1996,13 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   });
 
   it('finalizes retry_recovery jobs from broadcast with correct recoveredFromStatus', async () => {
-    let resolverResult: AsyncLiftPublisherRecoveryResult | null = null;
+    let resolverResult: AsyncLiftChainProofResolution = { status: 'inconclusive' };
     const clock = () => ++now;
     const nextId = () => `job-${++ids}`;
     const publisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver: async () => resolverResult,
+      chainProofResolver: async () => resolverResult,
       recoveryLookupTimeoutMs: 50,
     }), store, { now: clock, idGenerator: nextId });
 
@@ -1791,12 +2028,21 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.timestamps?.failedAt).toBeDefined();
 
     resolverResult = {
-      inclusion: { txHash: '0xbcast', blockNumber: 8 },
-      finalization: {
-        txHash: '0xfin', blockNumber: 10, blockTimestamp: now,
-        batchId: 'batch-1', batchRoot: '0xroot', batchSize: 1,
+      status: 'recovered',
+      recovery: {
+        inclusion: { txHash: '0xbcast', blockNumber: 8 },
+        finalization: {
+          txHash: '0xfin', blockNumber: 10, blockTimestamp: now,
+          batchId: 'batch-1', batchRoot: '0xroot', batchSize: 1,
+        },
       },
     };
+    // GH#2270 PR-3 r18 — the chain-proof sweep defers a job that established nothing, so the next
+    // pass is a real pass rather than an immediate re-ask. The base deferral is 30s and the
+    // runner's recovery cadence is 60s, so in a deployment a deferred job is due on the very next
+    // pass and nothing is delayed; only a test calling recover() twice at the SAME clock instant
+    // sees the deferral. Advancing by one cadence is what production does.
+    now += 60_000;
     await publisher.recover();
     job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('finalized');
@@ -1806,13 +2052,13 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   });
 
   it('finalizes retry_recovery jobs from included with correct recoveredFromStatus', async () => {
-    let resolverResult: AsyncLiftPublisherRecoveryResult | null = null;
+    let resolverResult: AsyncLiftChainProofResolution = { status: 'inconclusive' };
     const clock = () => ++now;
     const nextId = () => `job-${++ids}`;
     const publisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(store, {
       now: clock,
       idGenerator: nextId,
-      chainRecoveryResolver: async () => resolverResult,
+      chainProofResolver: async () => resolverResult,
       recoveryLookupTimeoutMs: 50,
     }), store, { now: clock, idGenerator: nextId });
 
@@ -1841,12 +2087,21 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.timestamps?.failedAt).toBeDefined();
 
     resolverResult = {
-      inclusion: { txHash: '0xincl', blockNumber: 9 },
-      finalization: {
-        txHash: '0xfin2', blockNumber: 12, blockTimestamp: now,
-        batchId: 'batch-2', batchRoot: '0xroot2', batchSize: 1,
+      status: 'recovered',
+      recovery: {
+        inclusion: { txHash: '0xincl', blockNumber: 9 },
+        finalization: {
+          txHash: '0xfin2', blockNumber: 12, blockTimestamp: now,
+          batchId: 'batch-2', batchRoot: '0xroot2', batchSize: 1,
+        },
       },
     };
+    // GH#2270 PR-3 r18 — the chain-proof sweep defers a job that established nothing, so the next
+    // pass is a real pass rather than an immediate re-ask. The base deferral is 30s and the
+    // runner's recovery cadence is 60s, so in a deployment a deferred job is due on the very next
+    // pass and nothing is delayed; only a test calling recover() twice at the SAME clock instant
+    // sees the deferral. Advancing by one cadence is what production does.
+    now += 60_000;
     await publisher.recover();
     job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('finalized');
@@ -1855,19 +2110,13 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.timestamps?.failedAt).toBeUndefined();
   });
 
-  it('keeps broadcast knowledge asset VM publish jobs pending instead of blind retrying', async () => {
+  it('keeps broadcast knowledge asset VM publish jobs and their wallet reservation pending', async () => {
     const publisher = createPublisher();
 
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
-      validation: {
-        canonicalRoots: [],
-        canonicalRootMap: {},
-        swmQuadCount: 2,
-        authorityProofRef: 'knowledge-asset-lifecycle',
-        transitionType: 'CREATE',
-      },
+      validation: KA_VM_VALIDATION,
     });
     await publisher.update(jobId, 'broadcast', {
       broadcast: { txHash: '0xkavm', walletId: 'wallet-1' },
@@ -1875,9 +2124,9 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     const recovered = await publisher.recover();
     const job = await publisher.getStatus(jobId);
-    const lock = await store.query(`SELECT ?p ?o WHERE {
+    const lock = await store.query(`SELECT ?job WHERE {
       GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
-        <${walletLockSubject('wallet-1')}> ?p ?o .
+        <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?job .
       }
     }`);
 
@@ -1887,10 +2136,15 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.recovery).toBeUndefined();
     expect(lock.type).toBe('bindings');
     if (lock.type !== 'bindings') return;
-    expect(lock.bindings.length).toBeGreaterThan(0);
+    expect(lock.bindings).toEqual([{ job: jobSubject(jobId) }]);
   });
 
-  it('fails included knowledge asset VM publish jobs as clearable lifecycle recovery failures', async () => {
+  // GH#2270 — this row used to end with bulk clear DELETING the failure. The job is terminal, but
+  // it is a job that broadcast a transaction and whose recovery could not reconcile it: deleting
+  // that record hands the KA's lifecycle subject back to admission, which then mints a second job
+  // for a transaction nobody has accounted for. Bulk clear now leaves it; an operator removes it
+  // by exact id once the transaction's fate is known.
+  it('keeps included knowledge asset VM publish jobs unknown while retaining the wallet reservation', async () => {
     const publisher = createPublisher({
       config: {
         recoveryLookupTimeoutMs: 50,
@@ -1900,13 +2154,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
-      validation: {
-        canonicalRoots: [],
-        canonicalRootMap: {},
-        swmQuadCount: 2,
-        authorityProofRef: 'knowledge-asset-lifecycle',
-        transitionType: 'CREATE',
-      },
+      validation: KA_VM_VALIDATION,
     });
     await publisher.update(jobId, 'broadcast', {
       broadcast: { txHash: '0xkavm', walletId: 'wallet-1' },
@@ -1919,13 +2167,18 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const recovered = await publisher.recover();
     const job = await publisher.getStatus(jobId);
 
-    expect(recovered).toBe(1);
-    expect(job?.status).toBe('failed');
-    expect(job?.failure?.code).toBe('recovery_state_inconsistent');
-    expect(job?.failure?.resolution).toBe('fail_job');
+    expect(recovered).toBe(0);
+    expect(job?.status).toBe('included');
+    expect(job?.failure).toBeUndefined();
 
-    expect(await publisher.clear('failed')).toBe(1);
-    expect(await publisher.getStatus(jobId)).toBeNull();
+    const lock = await store.query(`SELECT ?lockedJob WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?lockedJob .
+      }
+    }`);
+    expect(lock.type).toBe('bindings');
+    if (lock.type !== 'bindings') return;
+    expect(lock.bindings).toEqual([{ lockedJob: jobSubject(jobId) }]);
   });
 
   it('supports pause, resume, cancel, retry, and clear', async () => {

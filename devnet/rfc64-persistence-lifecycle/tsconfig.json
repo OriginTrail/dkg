@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "../..",
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": [
+    "agent-process.ts",
+    "evidence.test.ts",
+    "evidence.ts",
+    "lease-probe.ts",
+    "process-lifecycle.test.ts",
+    "process-lifecycle.ts",
+    "run.ts",
+    "verifier.test.ts",
+    "verifier.ts",
+    "verify.ts"
+  ]
+}

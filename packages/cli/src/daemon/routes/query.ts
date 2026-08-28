@@ -17,6 +17,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { isClientQueryFailure } from "./query-error.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -57,7 +58,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
 import {
   findReservedSubjectPrefix,
   isSkolemizedUri,
@@ -106,6 +107,14 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from '../../config.js';
+import {
+  type ApiQueryPriority,
+} from '../api-query-priority.js';
+export {
+  configureApiQueryPriority,
+  resolveApiQueryPriority,
+} from '../api-query-priority.js';
+export type { ApiQueryPriority } from '../api-query-priority.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
@@ -212,12 +221,12 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
   classifyClientError,
   sanitizeRevertMessage,
+  respondIfStoreUnavailable,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -323,6 +332,11 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+import {
+  API_QUERY_CALLER_DISCONNECTED,
+  createStoreQueryRequestLifecycle,
+  type StoreQueryRequestLifecycle,
+} from '../store-query-lifecycle.js';
 
 
 // Keep these in sync with VerifyCollector's hard enforcement in
@@ -330,6 +344,49 @@ import type { RequestContext } from './context.js';
 // HTTP input is rejected before the agent starts VERIFY work.
 const VERIFY_COLLECTION_TIMEOUT_MIN_MS = 1_000;
 const VERIFY_COLLECTION_TIMEOUT_MAX_MS = 30 * 60 * 1000;
+export interface ApiQueryRequestLifecycle extends StoreQueryRequestLifecycle {
+  readonly priority: ApiQueryPriority;
+  readonly source: 'api.query';
+}
+
+/**
+ * Own the HTTP-disconnect signal and the exact store-admission options passed
+ * by `/api/query`. Exported so the route boundary can be tested without
+ * replacing the real query engine with a hand-typed error stub.
+ */
+export function createApiQueryRequestLifecycle(
+  req: IncomingMessage,
+  res: ServerResponse,
+): ApiQueryRequestLifecycle {
+  return createStoreQueryRequestLifecycle(req, res, 'api.query') as ApiQueryRequestLifecycle;
+}
+
+type LegacyApiQueryResult = {
+  bindings: Array<Record<string, string>>;
+  quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+};
+
+export type PublicApiQueryResult = import('@origintrail-official/dkg-core').PublicQueryResult<
+  Record<string, string>,
+  { subject: string; predicate: string; object: string; graph: string }
+>;
+
+/** Normalize the legacy engine shape at the public daemon boundary. */
+export function normalizePublicApiQueryResult(
+  sparql: string,
+  result: LegacyApiQueryResult,
+): PublicApiQueryResult {
+  const operation = classifySparqlOperation(sparql);
+  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
+    return { type: 'quads', quads: result.quads ?? [], bindings: [] };
+  }
+  if (operation.kind === 'read' && operation.form === 'ASK') {
+    const raw = result.bindings[0]?.result;
+    const value = String(raw).toLowerCase() === 'true';
+    return { type: 'boolean', value, bindings: [{ result: String(value) }] };
+  }
+  return { type: 'bindings', bindings: result.bindings };
+}
 
 function parseVerifyTimeoutMs(
   raw: unknown,
@@ -578,66 +635,80 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           });
         }
       }
-      const result = await agent.query(sparql, {
-        contextGraphId,
-        graphSuffix,
-        includeSharedMemory,
-        includeContextGraphPartitions,
-        view,
-        agentAddress,
-        verifiedGraph,
-        assertionName,
-        subGraphName,
-        callerAgentAddress,
-        // the daemon admin
-        // token is the authorisation anchor for cross-agent WM reads
-        // (adapter-openclaw and the CLI rely on this). Pass it through
-        // so DKGAgent.query knows to skip the multi-agent signed-proof
-        // gate. Per-agent tokens still go through the regular caller-
-        // matches-target invariant inside DKGAgent.query.
-        // NOTE: `adminAuthenticated` pass-through scoped out for the same
-        // reason as `agentAuthSignature` above — DKGAgent.query on this
-        // branch doesn't accept it; it's landing via the agent-side fixes.
-        minTrust: minTrust as TrustLevel | undefined,
-        operationCtx: ctx,
-      });
+      // API reads are untrusted, potentially planner-heavy work. Keep them on
+      // the background lane so a slow dashboard/plugin query cannot occupy the
+      // normal slots needed by promotion, reconciliation, gossip validation,
+      // and SWM catch-up (issue #1989). Thread connection cancellation all the
+      // way to the SPARQL adapter: if the HTTP caller times out or disconnects,
+      // its queued/in-flight store request must not remain as orphan work.
+      const queryLifecycle = createApiQueryRequestLifecycle(req, res);
+
+      let result;
+      try {
+        result = await agent.query(sparql, {
+          contextGraphId,
+          graphSuffix,
+          includeSharedMemory,
+          includeContextGraphPartitions,
+          view,
+          agentAddress,
+          verifiedGraph,
+          assertionName,
+          subGraphName,
+          callerAgentAddress,
+          signal: queryLifecycle.signal,
+          priority: queryLifecycle.priority,
+          source: queryLifecycle.source,
+          // the daemon admin
+          // token is the authorisation anchor for cross-agent WM reads
+          // (adapter-openclaw and the CLI rely on this). Pass it through
+          // so DKGAgent.query knows to skip the multi-agent signed-proof
+          // gate. Per-agent tokens still go through the regular caller-
+          // matches-target invariant inside DKGAgent.query.
+          // NOTE: `adminAuthenticated` pass-through scoped out for the same
+          // reason as `agentAuthSignature` above — DKGAgent.query on this
+          // branch doesn't accept it; it's landing via the agent-side fixes.
+          minTrust: minTrust as TrustLevel | undefined,
+          operationCtx: ctx,
+        });
+      } finally {
+        queryLifecycle.dispose();
+      }
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
-      tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
+      const publicResult = normalizePublicApiQueryResult(sparql, result);
+      const resultCount = publicResult.type === 'bindings'
+        ? publicResult.bindings.length
+        : publicResult.type === 'quads'
+          ? publicResult.quads.length
+          : publicResult.type === 'boolean'
+            ? 1
+            : 0;
+      tracker.complete(ctx, { tripleCount: resultCount });
       return jsonResponse(res, 200, {
-        result,
+        result: publicResult,
         phases: { execute: execDur, serverTotal: Date.now() - serverT0 },
       });
     } catch (err: any) {
+      if (err?.code === API_QUERY_CALLER_DISCONNECTED) {
+        tracker.cancel(ctx, err);
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      const storeUnavailableOutcome = respondIfStoreUnavailable(res, err);
+      if (storeUnavailableOutcome !== null) {
+        // Pre-dispatch shedding is a cancellation; a store deadline may have
+        // executed and remains an operation failure even though both map to a
+        // retryable 503 for the caller.
+        if (storeUnavailableOutcome === 'not_started') tracker.cancel(ctx, err);
+        else tracker.fail(ctx, err);
+        return;
+      }
       tracker.fail(ctx, err);
       const msg = err?.message ?? "";
-      if (
-        msg.startsWith("SPARQL rejected:") ||
-        msg.startsWith("Parse error") ||
-        // #889: oxigraph surfaces SPARQL syntax errors as
-        // `error at <line>:<col>: expected one of ...` (e.g. a missing
-        // closing brace or an incomplete triple). These are client input
-        // errors, not server faults — classify them as 400 to match the
-        // existing `SPARQL rejected:` / `must start with ...` handling
-        // instead of letting them fall through to a 500.
-        /^error at \d+:\d+:/.test(msg) ||
-        /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
-        msg.includes("was removed in V10") ||
-        msg.includes("agentAddress is required") ||
-        msg.includes("requires a contextGraphId") ||
-        msg.includes("cannot be combined with") ||
-        msg.startsWith("Scoped query violation:") ||
-        // A-1 review: DKGAgent.query throws these when the caller sends
-        // a non-string `agentAddress` / `callerAgentAddress` in the
-        // body. Classify as 400 so malformed input is a clean client
-        // error instead of a 500.
-        msg.startsWith("query: 'agentAddress' must be a string") ||
-        msg.startsWith("query: 'callerAgentAddress' must be a string") ||
-        // P-13 review: `resolveViewGraphs` validates `minTrust` now,
-        // so direct callers that forward a string / out-of-range
-        // value get a 400 instead of a 500.
-        msg.startsWith("Invalid minTrust")
-      ) {
+      // #1758 — one classifier: a typed upstream status decides, otherwise
+      // legacy message families apply. See ./query-error.ts.
+      if (isClientQueryFailure(err)) {
         return jsonResponse(res, 400, { error: msg });
       }
       throw err;
@@ -709,6 +780,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       );
       if (typeT) entityRdfType = typeT.o;
     } catch (err: any) {
+      if (respondIfStoreUnavailable(res, err) !== null) return;
       return jsonResponse(res, 500, {
         error: `Failed to fetch entity triples: ${err.message}`,
       });
@@ -927,7 +999,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       });
     }
 
-    return jsonResponse(res, 200, toCatchupStatusResponse(job));
+    return jsonResponse(res, 200, toCatchupStatusResponse(
+      job,
+      agent.getRfc64SelectedSwmGraphSyncStatus(job.contextGraphId),
+    ));
   }
 
   // POST /api/verify

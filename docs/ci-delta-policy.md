@@ -50,17 +50,30 @@ file names cannot alter the decision. Its routing table lives in
   selected job was accidentally skipped, failed, or was cancelled.
 - CI controller changes use a two-phase rollout. The controller implementation
   lands first while every workflow remains pinned to an immutable SHA already
-  present on protected `main`. Only a follow-up PR may rotate that pin to the
-  landed controller. During this rollout, ABI freshness runs unconditionally,
-  so candidate code cannot suppress it by choosing its own planner.
+  present on protected `main` or `testnet-canary` history. Only a follow-up PR
+  may rotate that pin to the landed controller. During this rollout, ABI
+  freshness runs unconditionally, so candidate code cannot suppress it by
+  choosing its own planner.
 
-  Before any follow-up rotates the pin, fetch protected `main` and require this
-  command to exit zero for the proposed immutable SHA:
+  Before any follow-up rotates the pin, fetch protected `testnet-canary` and
+  require this command to exit zero for the proposed immutable SHA:
 
   ```sh
-  git fetch origin main
-  git merge-base --is-ancestor <controller-sha> origin/main
+  git fetch origin testnet-canary
+  git merge-base --is-ancestor <controller-sha> origin/testnet-canary
   ```
+- `CONTROLLER_POLICY_FILES` in `scripts/ci/trusted-controller-pins.mjs` is the
+  single manifest for the narrow controller boundary. The semantic workflow
+  validator parses every trusted checkout and rejects missing, extra, or
+  malformed sparse-checkout entries; there is no second text-rewrite model.
+  File ordering is not part of the security contract.
+- Ruleset and controller-tree inspection is a scheduled protected-branch
+  report, not a merge prerequisite. A pull-request workflow controls its own
+  execution envelope and cannot safely attest that it ran a validator; the
+  read-only token may also hide ruleset bypass actors. The report therefore
+  warns on missing or non-authoritative metadata, and no candidate-controlled
+  job is presented as a fail-closed policy gate. A future merge prerequisite
+  requires an independently protected check or attestation mechanism.
 - The merge queue tests every Node/EVM lane and the sharded Solidity suite
   against the exact combined commit before it lands. Protected-branch Solidity
   coverage remains the post-merge safety net.
@@ -83,7 +96,7 @@ The independent Solidity path gate still applies. Activate delta only after all
 safeguards below are configured:
 
 1. Create the `ci:full` label.
-2. Enable GitHub merge queue for `main`.
+2. Enable GitHub merge queue for every branch using delta selection.
 3. Require the `CI gate` and `EVM integration gate` status checks in the branch
    ruleset. Individual matrix job names should not be required because skipped
    lanes intentionally do not exist on every PR.
@@ -93,10 +106,10 @@ This ordering prevents selective CI from becoming active while GitHub can still
 merge without a full candidate run. Removing the variable (or setting it to any
 value other than `true`) is the immediate rollback switch.
 
-The initial workflow allowlist enables delta only for PRs whose base is `main`.
-Release/RC PRs continue to run full CI even when the variable is true. Add a
-release branch to that expression only after it has the same required gates and
-merge-queue protection.
+The workflow allowlist enables delta for PRs whose base is `main` or
+`testnet-canary`; both branches require the aggregate gates and have active merge
+queues. Add any future release branch to that expression only after it has the
+same protections.
 
 ## Developer workflow
 

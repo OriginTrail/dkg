@@ -39,6 +39,7 @@
  * telemetry have one owner.
  */
 
+import type { SignedTransactionEnvelope } from './chain-adapter.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { withTimeout, isRetryableRpcError, isThrottleRpcError, isKnownTransactionError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
@@ -47,6 +48,7 @@ import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServe
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
+import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
@@ -122,6 +124,10 @@ export interface ReadOpts {
   isEmptyResult?: (value: unknown) => boolean;
   /** Retry a complete endpoint pass only when every failure was a throttle. */
   endpointSetRetry?: 'all-throttled';
+  /** Cancels the active raw ethers FetchRequest for this read. */
+  signal?: AbortSignal;
+  /** Absolute operation deadline shared by every endpoint attempt. */
+  deadlineMs?: number;
 }
 
 /** Optional absolute deadline and low-cardinality label for one receipt pass. */
@@ -129,6 +135,8 @@ export interface ReceiptLookupOptions {
   deadlineMs?: number;
   /** Defaults to `receipt lookup`; direct transports use their caller label. */
   logLabel?: string;
+  /** Cancels the active raw ethers FetchRequest for this receipt lookup. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -169,7 +177,7 @@ class ProviderSetExhaustedError extends ChainRpcTransportError {
 export type SignPopulatedFn = (
   signer: Wallet,
   populated: ethers.TransactionRequest,
-) => Promise<{ signedTx: string; txHash: string }>;
+) => Promise<SignedTransactionEnvelope>;
 
 /** Optional per-endpoint transport preflight, e.g. static-network chain-id validation. */
 export type ValidateEndpointFn = (endpoint: RpcEndpoint) => Promise<void>;
@@ -343,9 +351,12 @@ export class RpcFailoverClient {
       label,
       fn,
       {
-        isRetryable: opts?.isRetryable ?? isRetryableRpcError,
+        isRetryable: error => !opts?.signal?.aborted && (
+          opts?.isRetryable ?? isRetryableRpcError
+        )(error),
         intent: skipPreferred ? 'transparentRead' : 'stickyRead',
         attemptTimeoutMs: providerCount => resolveCapMs(policy, providerCount),
+        ...(opts?.deadlineMs === undefined ? {} : { deadlineMs: opts.deadlineMs }),
         isEmptyResult: opts?.isEmptyResult as ((value: T) => boolean) | undefined,
         onServed: endpoint => noteRpcServed(label, endpoint.rpcUrl, {
           mode: 'read',
@@ -354,7 +365,12 @@ export class RpcFailoverClient {
       },
     );
     const run = () => this.runReadPasses(label, runPass, opts?.endpointSetRetry);
-    return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
+    const runWithAbort = () => opts?.signal
+      ? withRpcRequestAbortSignal(opts.signal, run)
+      : run();
+    return opts?.rpcUsageConsumer
+      ? withRpcUsageConsumer(opts.rpcUsageConsumer, runWithAbort)
+      : runWithAbort();
   }
 
   /**
@@ -391,9 +407,12 @@ export class RpcFailoverClient {
               label,
               (p) => fn(this.rebindContract(contract, p)),
               {
-                isRetryable: opts?.isRetryable ?? isContractViewRetryable,
+                isRetryable: error => !opts?.signal?.aborted && (
+                  opts?.isRetryable ?? isContractViewRetryable
+                )(error),
                 intent: skipPreferred ? 'transparentRead' : 'stickyRead',
                 attemptTimeoutMs: providerCount => resolveCapMs(policy, providerCount),
+                ...(opts?.deadlineMs === undefined ? {} : { deadlineMs: opts.deadlineMs }),
                 isEmptyResult: opts?.isEmptyResult as ((value: T) => boolean) | undefined,
                 onServed: endpoint => noteRpcServed(label, endpoint.rpcUrl, {
                   mode: 'read',
@@ -416,7 +435,12 @@ export class RpcFailoverClient {
       },
       { attributes: { 'rpc.method': 'eth_call', 'dkg.chain_id': chainId, 'dkg.read': label } },
     );
-    return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
+    const runWithAbort = () => opts?.signal
+      ? withRpcRequestAbortSignal(opts.signal, run)
+      : run();
+    return opts?.rpcUsageConsumer
+      ? withRpcUsageConsumer(opts.rpcUsageConsumer, runWithAbort)
+      : runWithAbort();
   }
 
   // --- write transport (called by the adapter's tx-orchestration; this layer
@@ -443,7 +467,7 @@ export class RpcFailoverClient {
     signer: Wallet,
     label: string,
     opts?: { gasLimitBufferBps?: number },
-  ): Promise<{ signedTx: string; txHash: string }> {
+  ): Promise<SignedTransactionEnvelope> {
     const canonical = this.getEndpoints();
     // 'nonceWrite': the state machine starts a fresh-nonce populate on a backend
     // ONLY if a prior populate proved it (else canonical primary-first = the
@@ -607,7 +631,7 @@ export class RpcFailoverClient {
           throw new ChainRpcTransportError(
             'RPC_ENDPOINTS_EXHAUSTED',
             `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${errorMessage(lastRetryable)}`,
-            { cause: lastRetryable, rpcUrls: canonical.map((e) => e.rpcUrl) },
+            { cause: lastRetryable, rpcUrls: canonical.map((e) => e.rpcUrl), txHash },
           );
         } finally {
           metrics.chainRpcDuration.record(Date.now() - startedAt, {
@@ -634,7 +658,7 @@ export class RpcFailoverClient {
   ): Promise<ethers.TransactionReceipt | null> {
     const chainId = this.chainId();
     const logLabel = options.logLabel ?? 'receipt lookup';
-    return withSpan(
+    const run = () => withSpan(
       'chain.tx_wait',
       async (span) => {
         const metrics = getMetrics();
@@ -644,8 +668,8 @@ export class RpcFailoverClient {
             logLabel,
             provider => provider.getTransactionReceipt(txHash),
             {
-              isRetryable: isRetryableRpcError,
-              intent: 'write',
+              isRetryable: error => !options.signal?.aborted && isRetryableRpcError(error),
+              intent: 'receiptRead',
               attemptTimeoutMs: () => RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
               ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
               isEmptyResult: value => value == null,
@@ -697,6 +721,9 @@ export class RpcFailoverClient {
       },
       { attributes: { 'rpc.method': 'eth_getTransactionReceipt', 'dkg.chain_id': chainId } },
     );
+    return options.signal
+      ? withRpcRequestAbortSignal(options.signal, run)
+      : run();
   }
 
   /**
