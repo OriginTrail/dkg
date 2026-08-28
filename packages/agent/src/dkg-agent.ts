@@ -434,6 +434,10 @@ import {
 import { snapshotRfc64CatalogBootstrapConfigV1 } from './rfc64/catalog-authority-config-v1.js';
 import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
+import { Rfc64SwmRecoveryCoordinatorV1 } from
+  './rfc64/swm-recovery-coordinator-v1.js';
+import { resolveRfc64PeerSwmRecoveryPlanV1 } from
+  './rfc64/swm-recovery-plan-v1.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
 import { SwmSubstrateMethods } from './dkg-agent-swm-substrate.js';
 import { QueryMethods } from './dkg-agent-query.js';
@@ -798,6 +802,50 @@ export function mergeRfc64CatalogBootstrapsV1(
 }
 
 export class DKGAgent extends DKGAgentBase {
+  private constructor(
+    config: ResolvedDKGAgentConfig,
+    wallet: DKGAgentWallet,
+    node: DKGNode,
+    store: TripleStore,
+    publisher: DKGPublisher,
+    queryEngine: DKGQueryEngine,
+    eventBus: TypedEventBus,
+    chain: ChainAdapter,
+    workspaceOwnedEntities: Map<string, Map<string, string>>,
+    writeLocks: Map<string, Promise<void>>,
+    publicSnapshotStore?: WorkspacePublicSnapshotStore,
+  ) {
+    super(
+      config,
+      wallet,
+      node,
+      store,
+      publisher,
+      queryEngine,
+      eventBus,
+      chain,
+      workspaceOwnedEntities,
+      writeLocks,
+      publicSnapshotStore,
+    );
+    this.rfc64SwmRecoveryCoordinatorV1 = new Rfc64SwmRecoveryCoordinatorV1({
+      admission: {
+        selectedPublicContextGraphIds: () => this.config.syncContextGraphs ?? [],
+        requestSelectedPublicAdmission: (peerId, contextGraphIds) =>
+          this.selectedSwmBootstrapAdmission.request(peerId, contextGraphIds),
+        selectedPublicAdmissionSnapshot: (peerId) =>
+          this.selectedSwmBootstrapAdmission.snapshot(peerId),
+        configuredRecoveryPlan: (peerId) => resolveRfc64PeerSwmRecoveryPlanV1(
+          this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
+          peerId,
+        ),
+        isPeerAccepted: (peerId) =>
+          this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
+        isStarted: () => this.started,
+      },
+    });
+  }
+
   private chainContextGraphScanFailure:
     | { signature: string; count: number }
     | undefined;

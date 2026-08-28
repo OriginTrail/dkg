@@ -8,7 +8,7 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
 import type {
-  Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
+  Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1,
   Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from './public-catalog-native-receiver-v1.js';
 import {
@@ -44,7 +44,7 @@ export interface Rfc64FinalizedVmAgentPrecommitOptionsV1 {
  */
 export function createRfc64FinalizedVmAgentPrecommitV1(
   options: Rfc64FinalizedVmAgentPrecommitOptionsV1,
-): Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
+): Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1 {
   return Object.freeze(async (
     plan,
     signal,

@@ -47,6 +47,7 @@ import {
   isPlainRecord,
   snapshotExactDataRecord,
 } from './sync-wire-objects.js';
+import { canonicalizeAuthorSealStoreXsdDateTimeValue } from './xsd-date-time.js';
 
 declare const HEX_32_V1_BRAND: unique symbol;
 declare const POSITIVE_DECIMAL_U64_V1_BRAND: unique symbol;
@@ -619,6 +620,35 @@ export function renderCanonicalAuthorSealStoreRowV1(
     object,
     graph: row.graphIri,
   };
+}
+
+/**
+ * Canonicalize the two RDF renderings that supported triple-store adapters
+ * may normalize on read: named-node UALs can be returned as bare IRIs and
+ * xsd:dateTime literals can be returned as an equivalent UTC lexical form.
+ * All other terms remain byte-exact, so this is not a general RDF-equivalence
+ * escape hatch.
+ */
+export function canonicalizeAuthorSealStoreRoundTripRowV1(
+  row: CanonicalGraphScopedAuthorSealRowV1,
+): CanonicalGraphScopedAuthorSealRowV1 {
+  let object = row.object;
+  if (
+    row.predicate === ASSERTION_SEAL_PREDICATES.KA_UAL
+    && !object.startsWith('<')
+    && isSafeIri(object)
+  ) {
+    object = `<${object}>`;
+  } else if (row.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_FINALIZED_AT) {
+    const match = /^"([^"]+)"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/.exec(object);
+    const canonicalInstant = match === null
+      ? null
+      : canonicalizeAuthorSealStoreXsdDateTimeValue(match[1]!);
+    if (canonicalInstant !== null) {
+      object = `${JSON.stringify(canonicalInstant)}^^${XSD_DATE_TIME}`;
+    }
+  }
+  return Object.freeze({ ...row, object });
 }
 
 /**

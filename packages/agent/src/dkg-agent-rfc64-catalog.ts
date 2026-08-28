@@ -83,6 +83,7 @@ import {
 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { createRfc64FinalizedPolicyAgentPrecommitV1 } from './rfc64/finalized-policy-agent-precommit-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
+import { createRfc64CatalogAppliedHeadCoordinatorV1 } from './rfc64/catalog-applied-head-coordinator-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
@@ -818,18 +819,26 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             this.chain.getKnowledgeAssetsLifecycleAddress(),
           store: this.store,
         });
-        const beforeAppliedHeadCommit = Object.freeze(async (
-          plan: Parameters<typeof finalizedPolicyPrecommit>[0],
-          signal: AbortSignal,
-        ): ReturnType<typeof finalizedVmPrecommit> => {
-          const accepted = acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
-          if (
-            accepted.policy.accessPolicy === 1
-            && accepted.policy.source.kind === 'finalized-chain'
-          ) {
-            return finalizedVmPrecommit(plan, signal);
-          }
-          return finalizedPolicyPrecommit(plan, signal);
+        const beforeAppliedHeadCommit = createRfc64CatalogAppliedHeadCoordinatorV1({
+          acceptedPolicySnapshotForCatalogScope,
+          finalizedPolicyPrecommit,
+          finalizedVmPrecommit,
+          store: this.store,
+          writeLocks: this.writeLocks,
+          retire: (retirement, ctx) => this.publisher.clearPublishedKnowledgeAssetSwm(
+            retirement.contextGraphId,
+            {
+              kind: 'named-lifecycle',
+              identity: {
+                agentAddress: retirement.agentAddress,
+                kaNumber: retirement.kaNumber,
+              },
+            },
+            retirement.subGraphName,
+            ctx,
+            retirement.kaUal,
+          ),
+          logInfo: (ctx, message) => this.log.info(ctx, message),
         });
         const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
           headTransport: clients.headTransport,

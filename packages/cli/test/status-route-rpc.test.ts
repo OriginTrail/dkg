@@ -273,6 +273,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
               payload: {
                 contextGraphId: privateContextGraph,
                 accessPolicy: 1,
+                publishPolicy: 1,
                 source: { kind: 'finalized-chain' },
               },
             },
@@ -284,6 +285,8 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     expect(response.status).toBe(200);
     expect(response.body.rfc64Catalog.privateRecovery).toEqual([{
       contextGraphId: privateContextGraph,
+      accessPolicy: 1,
+      publishPolicy: 1,
       vmRequired: true,
       targetCount: 1,
       outcomeCounts: { 'known-incomplete': 1 },
@@ -710,6 +713,8 @@ describe('/api/status RFC-64 selected-public activation', () => {
       autoPublishEnabled: true,
       completeSwmProviders: [{
         contextGraphId: 'selected-public-cg',
+        accessPolicy: 0,
+        publishPolicy: 1,
         providers: ['12D3KooCompleteSwm'],
       }],
       service,

@@ -24,11 +24,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       const summary = await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         priority: 2_000,
-        sharedMemorySyncPlan: {
-          publicContextGraphIds: [publicCg],
-          privateRecoverFromCurator: [],
-          eligibleContextGraphIds: [publicCg],
-        },
+        recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
       });
 
       expect(harness.probes.metaFetches()).toBe(0);
@@ -83,22 +79,20 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       },
     });
     const plan = {
-      publicContextGraphIds: [publicCg],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [publicCg],
+      targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }],
     };
 
     try {
       const first = callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         priority: 2_000,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
       await firstStarted;
       const second = callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         priority: 2_001,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
       await Promise.resolve();
       expect(harness.probes.metaFetches()).toBe(1);
@@ -147,27 +141,23 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       onSnapshotRead: () => { wallNow += 120_000; },
     });
     const completePlan = {
-      publicContextGraphIds: [completeCg],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [completeCg],
+      targets: [{ contextGraphId: completeCg, lane: 'selected-public' as const }],
     };
     const incompletePlan = {
-      publicContextGraphIds: [incompleteCg],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [incompleteCg],
+      targets: [{ contextGraphId: incompleteCg, lane: 'selected-public' as const }],
     };
 
     try {
       const first = callSelectedSharedMemorySummary(harness.agent, [completeCg], {
         selectedSwmPriority: true,
         priority: 2_000,
-        sharedMemorySyncPlan: completePlan,
+        recoveryTargets: completePlan.targets,
       });
       await firstStarted;
       const second = callSelectedSharedMemorySummary(harness.agent, [incompleteCg], {
         selectedSwmPriority: true,
         priority: 2_001,
-        sharedMemorySyncPlan: incompletePlan,
+        recoveryTargets: incompletePlan.targets,
       });
       await Promise.resolve();
       releaseFirst();
@@ -216,11 +206,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
         {
           selectedSwmPriority: true,
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [publicCg],
-          },
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       );
 
@@ -255,11 +241,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
         {
           selectedSwmPriority: true,
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [publicCg],
-          },
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       );
 
@@ -312,11 +294,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
           selectedSwmPriority: true,
           priority: 2_000,
           stopOnBackoffWorthyFailure: true,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [publicCg],
-          },
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       );
 
@@ -356,11 +334,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
         {
         selectedSwmPriority: true,
         priority: 2_000,
-        sharedMemorySyncPlan: {
-          publicContextGraphIds: [contextGraphId],
-          privateRecoverFromCurator: [],
-          eligibleContextGraphIds: [contextGraphId],
-        },
+        recoveryTargets: [{ contextGraphId, lane: 'selected-public' }],
         },
       );
 
@@ -402,8 +376,16 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
         getContextGraphIds: () => [contextGraphId],
         syncFromPeer: async () => ({
           kind: 'selected-shared-memory',
+          requestedScope: {
+            kind: 'selected-public',
+            targets: [{ contextGraphId, lane: 'selected-public' }],
+          },
           shared,
-          selectedScopeComplete: true,
+          scopeComplete: true,
+          targetDiagnostics: {
+            selectedPublic: { completed: 1, total: 1 },
+            ordinaryPrivate: { completed: 0, total: 0 },
+          },
         }),
       },
       syncFromPeer: async () => 0,

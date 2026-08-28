@@ -26,7 +26,11 @@ import {
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
-import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
+import {
+  assertQuadLiteralsMutf8Safe,
+  classifySparqlOperation,
+  JAVA_WRITE_UTF_MAX_BYTES,
+} from '@origintrail-official/dkg-core';
 
 // SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
 // NOT the sibling `…/_shared_memory_meta`. Kept in sync with the sync-ingest guard.
@@ -286,6 +290,13 @@ export class OxigraphStore implements TripleStore {
     }
 
     if (!Array.isArray(result) || result.length === 0) {
+      const operation = classifySparqlOperation(sparql);
+      if (
+        operation.kind === 'read'
+        && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')
+      ) {
+        return { type: 'quads', quads: [] } satisfies ConstructResult;
+      }
       return { type: 'bindings', bindings: [] } satisfies SelectResult;
     }
 

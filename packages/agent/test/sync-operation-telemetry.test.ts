@@ -539,9 +539,7 @@ describe('W1 A8/M5 — `source` is in no coalescing key, at every scope', () => 
     // A precomputed plan removes the only `await` before the single-flight map,
     // so the join is deterministic rather than a microtask-ordering race.
     const sharedMemorySyncPlan = {
-      publicContextGraphIds: [CG],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [CG],
+      targets: [{ contextGraphId: CG, lane: 'selected-public' }],
     };
 
     const first = (agent as any).syncSharedMemoryFromPeerDetailed(
