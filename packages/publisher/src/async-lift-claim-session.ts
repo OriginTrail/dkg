@@ -23,19 +23,21 @@ import {
   CONTROL_LOCK_STATUS,
   CONTROL_WALLET_ID,
   compareAcceptedJobs,
-  decodedLiftJobOrThrow,
   expectBindings,
   isFailedJob,
-  isKnownLiftJobPayload,
   liftJobCheckedSigner,
   literal,
   parseIntegerLiteral,
   parseLiteral,
   serializeWalletLock,
-  type LiftJobPayloadDecodeResult,
-  type StructurallyValidLiftJobPayload,
   walletLockSubject,
 } from './async-lift-publisher-utils.js';
+import {
+  decodedLiftJobOrThrow,
+  knownLiftJobPayload,
+  type LiftJobPayloadDecodeResult,
+  type StructurallyValidLiftJobPayload,
+} from './lift-job-payload-codec.js';
 
 export interface ActiveLiftJobClaimTransitionBoundary {
   run<T>(transition: (current: LiftJob, scope: LiftJobTransitionScope) => Promise<T>): Promise<T>;
@@ -566,13 +568,14 @@ export class AsyncLiftClaimCoordinator {
           ? { kind: 'missing' }
           : decoded);
       }
-      if (!isKnownLiftJobPayload(decoded.job)) {
+      const known = knownLiftJobPayload(decoded.job);
+      if (known === null) {
         return await operation({ kind: 'unknown', current: decoded.job });
       }
       return await operation({
         kind: 'present',
-        current: decoded.job,
-        scope: this.createTransitionScope(decoded.job),
+        current: known,
+        scope: this.createTransitionScope(known),
       });
     }));
   }
@@ -876,7 +879,7 @@ export class AsyncLiftClaimCoordinator {
 
   /** Extract proof identity only; ownership policy itself lives in the classifier above. */
   private proofBoundWalletId(job: LiftJob): string | undefined {
-    if (job.status === 'broadcast' || job.status === 'included') return job.broadcast.walletId;
+    if (job.status === 'broadcast' || job.status === 'included') return job.broadcast?.walletId;
     if (isFailedJob(job)) return liftJobCheckedSigner(job);
     return undefined;
   }

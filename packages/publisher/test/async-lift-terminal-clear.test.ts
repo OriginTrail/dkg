@@ -88,6 +88,26 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect(await p.getStatus(jobId)).toBeNull();
   });
 
+  it('keeps empty failure diagnostics readable through listing, recovery, and targeted clear', async () => {
+    const p = createPublisher();
+    const jobId = await driveToValidated(p, { name: 'empty-failure-diagnostics' });
+    await p.update(jobId, 'broadcast', { broadcast: bx });
+    await p.recordPublishFailure(jobId, {
+      error: new Error(''),
+      failedFromState: 'broadcast',
+      errorPayloadRef: '',
+    });
+
+    expect(await p.getStatus(jobId)).toMatchObject({
+      status: 'failed',
+      failure: { message: '', errorPayloadRef: '' },
+    });
+    expect((await p.list()).map((job) => job.jobId)).toContain(jobId);
+    await expect(p.recover()).resolves.toBe(0);
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
+    expect(await p.getStatus(jobId)).toBeNull();
+  });
+
   it('rejects an accepted (queued) job as nonterminal without mutation', async () => {
     const p = createPublisher();
     const accepted = await p.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -439,6 +459,22 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect(await store.query(
       `SELECT ?payload WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${CONTROL_PAYLOAD}> ?payload } }`,
     )).toEqual(before);
+  });
+
+  it('rejects forbidden cross-state fields as malformed instead of widening the LiftJob union', async () => {
+    const p = createPublisher();
+    const jobId = await p.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'cross-state' }));
+    const job = await p.getStatus(jobId);
+    if (!job || job.status !== 'accepted') throw new Error('expected accepted job');
+    const quads = serializeJob(job, DEFAULT_CONTROL_GRAPH_URI).map((entry) =>
+      entry.predicate === CONTROL_PAYLOAD
+        ? { ...entry, object: literal(JSON.stringify({ ...job, claim: { walletId: 'wallet-injected' } })) }
+        : entry);
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(quads);
+
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'malformed' });
+    await expect(p.getStatus(jobId)).rejects.toThrow('claim is forbidden for status accepted');
   });
 
   it('rejects an empty or SPARQL-unsafe jobId as malformed without querying/mutating', async () => {

@@ -118,8 +118,6 @@ import {
   createKnowledgeAssetVmPublishSnapshotRequest,
   createKnowledgeAssetVmPublishJobRequest,
   createJobSlug,
-  decodeLiftJobPayload,
-  decodedLiftJobOrThrow,
   expectBindings,
   getLiftJobTransactionEvidence,
   isKnowledgeAssetVmPublishJobRequest,
@@ -138,9 +136,13 @@ import {
   parseIntegerLiteral,
   requestSubject,
   serializeJobRecord,
-  type LiftJobPayloadDecodeResult,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
+import {
+  decodeLiftJobPayload,
+  decodedLiftJobOrThrow,
+  type LiftJobPayloadDecodeResult,
+} from './lift-job-payload-codec.js';
 
 /**
  * #1864 — outcome of the KA VM-publish pre-send write-ahead boundary
@@ -1272,6 +1274,9 @@ export class TripleStoreAsyncLiftPublisher
       if (current.status !== 'broadcast') {
         throw new Error(`Cannot record RPC acceptance for LiftJob ${jobId} in state ${current.status}`);
       }
+      if (!current.broadcast) {
+        throw new Error(`Cannot record RPC acceptance for legacy evidence-free LiftJob ${jobId}`);
+      }
       if (current.broadcast.txHash !== record.txHash) {
         throw new Error(
           `RPC-accepted tx ${record.txHash} does not match persisted broadcast tx `
@@ -1568,6 +1573,13 @@ export class TripleStoreAsyncLiftPublisher
     if (job.status !== 'broadcast' && job.status !== 'included') {
       return false;
     }
+    // A pre-write-ahead raw crash has no transaction to resolve, regardless of whether this
+    // deployment happens to have a chain resolver. Handle the honest legacy union member before
+    // entering the transaction-bearing branch, whose lookup requires broadcast metadata.
+    if (job.status === 'broadcast' && !getLiftJobTransactionEvidence(job)) {
+      await scope.commitRecoveryReset(this.resetJobToAccepted(job, 'broadcast', undefined));
+      return true;
+    }
     if (!this.chainProofResolver) {
       // PR #2300 r8 (3812585483) — a 'broadcast' raw job used to be reset here on the reasoning
       // that it had probably not sent anything. The pre-send write-ahead this PR added makes that
@@ -1578,13 +1590,6 @@ export class TripleStoreAsyncLiftPublisher
       // resolver there is nothing that can establish the first transaction's fate. It therefore
       // stays where it is, transaction-bearing and unclaimable, until a node with a chain-proof
       // resolver reconciles it or an operator clears it by id.
-      if (job.status === 'broadcast' && !getLiftJobTransactionEvidence(job)) {
-        // Reset BEFORE release: the release poke is a one-shot claim invitation, so the
-        // accepted state must already be claim-visible when it fires — the reverse order let
-        // the woken loop find nothing and park while the reset committed unannounced.
-        await scope.commitRecoveryReset(this.resetJobToAccepted(job, 'broadcast', undefined));
-        return true;
-      }
       // Evidence-bearing (or 'included'): keep the signing wallet reserved.
       // r25 (🔴 3820711322) — let the SAME timeout gate the resolver-bearing path uses
       // move it to a held failed state. Leaving it at 'broadcast' made the comment above false: a

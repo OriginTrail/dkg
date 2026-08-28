@@ -322,9 +322,10 @@ export interface LiftJobFinalizationMetadata {
   readonly mode?: 'published' | 'noop' | 'local';
   readonly txHash?: LiftJobHex;
   readonly ual?: string;
-  readonly batchId?: LiftJobBigInt;
-  readonly startKAId?: LiftJobBigInt;
-  readonly endKAId?: LiftJobBigInt;
+  /** Chain adapters and test/dev backends may use opaque identifiers rather than bigint text. */
+  readonly batchId?: string;
+  readonly startKAId?: string;
+  readonly endKAId?: string;
   readonly publisherAddress?: LiftJobHex;
 }
 
@@ -437,6 +438,22 @@ export interface LiftJobBroadcast extends LiftJobBase {
   readonly failure?: undefined;
 }
 
+/**
+ * Read-only compatibility shape for a crash written before the broadcast write-ahead existed.
+ * No current writer can produce it, but recovery must still be able to reset the persisted record
+ * without pretending that absent validation/transaction evidence exists.
+ */
+export interface LiftJobLegacyEvidenceFreeBroadcast extends LiftJobBase {
+  readonly status: 'broadcast';
+  readonly request: RawLiftJobRequest;
+  readonly claim: LiftJobClaimMetadata;
+  readonly validation?: undefined;
+  readonly broadcast?: undefined;
+  readonly inclusion?: undefined;
+  readonly finalization?: undefined;
+  readonly failure?: undefined;
+}
+
 export interface LiftJobIncluded extends LiftJobBase {
   readonly status: 'included';
   readonly claim: LiftJobClaimMetadata;
@@ -484,6 +501,20 @@ export interface LiftJobFailed extends LiftJobBase {
   readonly finalization?: undefined;
 }
 
+/**
+ * Honest read model for historical/compatibility failures. A failed record may carry progress
+ * from an earlier attempt (or lack one of those fields) while its failure discriminator describes
+ * the latest attempt. Recovery code deliberately inspects that retained evidence defensively.
+ */
+export interface LiftJobPersistedFailure extends LiftJobFailed {
+  readonly claim?: LiftJobClaimMetadata;
+  readonly validation?: LiftJobValidationMetadata;
+  readonly broadcast?: LiftJobBroadcastMetadata;
+  readonly inclusion?: LiftJobInclusionMetadata;
+  readonly failure: LiftJobFailureMetadata;
+  readonly recovery?: LiftJobRecoveryMetadata;
+}
+
 export interface LiftJobFailedFromAccepted extends LiftJobFailed {
   readonly status: 'failed';
   readonly claim?: undefined;
@@ -524,6 +555,21 @@ export interface LiftJobFailedFromBroadcast extends LiftJobFailed {
   readonly recovery?: LiftJobRecoveryResetBroadcast | LiftJobRecoveryFinalizedBroadcast;
 }
 
+/**
+ * Historical/pre-send failure recorded with a broadcast phase but without transaction evidence.
+ * The public failure writer can still produce this when signing never happened; keeping it in the
+ * persisted union makes that legitimate record readable without widening normal broadcast jobs.
+ */
+export interface LiftJobFailedFromBroadcastWithoutEvidence extends LiftJobFailed {
+  readonly status: 'failed';
+  readonly claim: LiftJobClaimMetadata;
+  readonly validation: LiftJobValidationMetadata;
+  readonly broadcast?: undefined;
+  readonly inclusion?: undefined;
+  readonly failure: LiftJobFailureMetadata & { readonly failedFromState: 'broadcast' };
+  readonly recovery?: LiftJobRecoveryResetBroadcast;
+}
+
 export interface LiftJobFailedFromIncluded extends LiftJobFailed {
   readonly status: 'failed';
   readonly claim?: LiftJobClaimMetadata;
@@ -539,12 +585,15 @@ export type LiftJob =
   | LiftJobClaimed
   | LiftJobValidated
   | LiftJobBroadcast
+  | LiftJobLegacyEvidenceFreeBroadcast
   | LiftJobIncluded
   | LiftJobFinalized
+  | LiftJobPersistedFailure
   | LiftJobFailedFromAccepted
   | LiftJobFailedFromClaimed
   | LiftJobFailedFromValidated
   | LiftJobFailedFromBroadcast
+  | LiftJobFailedFromBroadcastWithoutEvidence
   | LiftJobFailedFromIncluded;
 
 // #1829 — append-only admission & transaction journal (named-KA lift-publish only).
