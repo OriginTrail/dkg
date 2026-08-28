@@ -210,18 +210,25 @@ describe('DkgLocalLlmRuntime', () => {
   });
 
   it('aborts llama generation without retaining an invisible turn', async () => {
-    let release!: () => void;
     let started!: () => void;
-    const pending = new Promise<void>((resolve) => { release = resolve; });
     const began = new Promise<void>((resolve) => { started = resolve; });
-    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+    const fetcher = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
       if (fetcher.mock.calls.length === 1) {
+        const signal = init?.signal;
+        if (!signal) {
+          return Promise.reject(new Error('Llama request did not receive an AbortSignal'));
+        }
         started();
-        await pending;
-        init?.signal?.throwIfAborted();
-        return answerResponse('This answer must be discarded.');
+        return new Promise<Response>((_resolve, reject) => {
+          const rejectFromAbort = () => reject(signal.reason);
+          if (signal.aborted) {
+            rejectFromAbort();
+            return;
+          }
+          signal.addEventListener('abort', rejectFromAbort, { once: true });
+        });
       }
-      return answerResponse('Clean next answer.');
+      return Promise.resolve(answerResponse('Clean next answer.'));
     });
     const runtime = await DkgLocalLlmRuntime.create({
       mcp: makeMcp(),
@@ -232,7 +239,6 @@ describe('DkgLocalLlmRuntime', () => {
     const aborted = runtime.run('hello', { signal: controller.signal });
     await began;
     controller.abort(new Error('caller disconnected'));
-    release();
 
     await expect(aborted).rejects.toThrow('caller disconnected');
     expect(runtime.getSessionHistory()).toEqual([]);
@@ -243,16 +249,23 @@ describe('DkgLocalLlmRuntime', () => {
   });
 
   it('propagates cancellation into MCP tool calls without retaining evidence', async () => {
-    let release!: () => void;
     let started!: () => void;
-    const pending = new Promise<void>((resolve) => { release = resolve; });
     const began = new Promise<void>((resolve) => { started = resolve; });
     const mcp = makeMcp();
-    mcp.callTool.mockImplementationOnce(async (_input, options) => {
+    mcp.callTool.mockImplementationOnce((_input, options) => {
+      const signal = options?.signal;
+      if (!signal) {
+        return Promise.reject(new Error('MCP tool call did not receive an AbortSignal'));
+      }
       started();
-      await pending;
-      options?.signal?.throwIfAborted();
-      return { content: [{ type: 'text', text: 'discard me' }] };
+      return new Promise((_resolve, reject) => {
+        const rejectFromAbort = () => reject(signal.reason);
+        if (signal.aborted) {
+          rejectFromAbort();
+          return;
+        }
+        signal.addEventListener('abort', rejectFromAbort, { once: true });
+      });
     });
     const fetcher = vi.fn()
       .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}))
@@ -267,7 +280,6 @@ describe('DkgLocalLlmRuntime', () => {
     const aborted = runtime.run('List saved DKG queries.', { signal: controller.signal });
     await began;
     controller.abort(new Error('caller disconnected'));
-    release();
 
     await expect(aborted).rejects.toThrow('caller disconnected');
     expect(runtime.getSessionHistory()).toEqual([]);
