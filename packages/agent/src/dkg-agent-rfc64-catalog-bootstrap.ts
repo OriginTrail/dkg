@@ -310,6 +310,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           ({ completeSwmProviders: providers = [] }) => providers,
         ),
       )];
+      const connectedCompleteSwmProviders = new Set<string>();
       await mapWithConcurrency(
         completeSwmProviders,
         MAX_CONCURRENT_TARGETS_V1,
@@ -319,19 +320,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
             await this.connectToPeerId(providerPeerId, {
               timeoutMs: COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1,
             });
-            // A pre-existing connection has no new connection:open event. One
-            // immutable provider plan owns admission for every selected graph,
-            // including mixed public/private providers.
-            this.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
-              resolveRfc64PeerSwmRecoveryPlanV1(state.config, providerPeerId),
-              (_peerId, error) => {
-                this.log.warn(
-                  state.ctx,
-                  `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
-                );
-              },
-              0,
-            );
+            connectedCompleteSwmProviders.add(providerPeerId);
           } catch (error) {
             this.log.warn(
               state.ctx,
@@ -351,6 +340,28 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           );
         },
       );
+      // The VM catalog and graph-complete SWM inventory are two independently
+      // authorized recovery planes for one private Context Graph. Apply every
+      // catalog target before starting SWM recovery so a cold catalog bootstrap
+      // cannot race an SWM materialization and misclassify that valid state as
+      // an omitted catalog row. Catalog misses/failures do not suppress SWM:
+      // target synchronization contains them in its status and this phase still
+      // queues every provider that was successfully connected above.
+      for (const providerPeerId of connectedCompleteSwmProviders) {
+        // A pre-existing connection has no new connection:open event. One
+        // immutable provider plan owns admission for every selected graph,
+        // including mixed public/private providers.
+        this.queueRfc64SwmRecoveryPlanFromPeerOnConnect(
+          resolveRfc64PeerSwmRecoveryPlanV1(state.config, providerPeerId),
+          (_peerId, error) => {
+            this.log.warn(
+              state.ctx,
+              `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
+            );
+          },
+          0,
+        );
+      }
     } finally {
       if (state.abortController === abortController) state.abortController = null;
       state.running = false;

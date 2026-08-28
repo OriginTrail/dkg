@@ -1308,6 +1308,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-complete-provider-bootstrap-'));
     tempDirs.push(dataDir);
+    const providerPeerId = '12D3KooWCompleteSwmProvider';
     const receiver = await DKGAgent.create({
       name: 'complete-provider-bootstrap-receiver',
       dataDir,
@@ -1323,30 +1324,50 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       rfc64PublicCatalogBootstrap: {
         acceptedPublicPolicies: [{
           policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
-          targets: [],
-          completeSwmProviders: ['12D3KooWCompleteSwmProvider'],
+          targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+          completeSwmProviders: [providerPeerId],
         }],
       },
     });
     agents.push(receiver);
-    const connect = vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
+    const ordering: string[] = [];
+    const connect = vi.spyOn(receiver, 'connectToPeerId').mockImplementation(async () => {
+      ordering.push('connect');
+    });
+    const synchronize = vi.spyOn(receiver, 'synchronizeRfc64CatalogFromProvidersV1')
+      .mockImplementation(async () => {
+        ordering.push('catalog');
+        return null;
+      });
     const queue = vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
-      .mockReturnValue(true);
+      .mockImplementation(() => {
+        ordering.push('swm');
+        return true;
+      });
 
     await receiver.start();
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 
-    expect(connect).toHaveBeenCalledWith('12D3KooWCompleteSwmProvider', {
+    expect(connect).toHaveBeenCalledWith(providerPeerId, {
       timeoutMs: 10_000,
+    });
+    expect(synchronize).toHaveBeenCalledWith({
+      remotePeerIds: [providerPeerId],
+      scope: expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorAddress: AUTHOR,
+      }),
+      signal: expect.any(AbortSignal),
     });
     expect(queue).toHaveBeenCalledWith(
       expect.objectContaining({
-        providerPeerId: '12D3KooWCompleteSwmProvider',
+        providerPeerId,
         targets: [{ contextGraphId: CONTEXT_GRAPH_ID, lane: 'selected-public' }],
       }),
       expect.any(Function),
       0,
     );
+    expect(ordering).toEqual(['connect', 'catalog', 'swm']);
   });
 
   it('schedules a pre-connected private complete provider on the ordinary SWM lane', async () => {
