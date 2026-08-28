@@ -2113,6 +2113,24 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   /**
+   * The ONE acquisition seam for a reconciliation pass's shared state: the queue inventory and
+   * the chain-proof pass scope, taken together so the scope's ordering token reflects SNAPSHOT
+   * order (opening it later — e.g. at the dispatcher — would order by arrival, which
+   * overlapping passes can invert; PR #2380 r4 🔴 3883088105). One inventory per pass because
+   * per-lane full reads at an active cadence move the bottleneck into store/control-plane
+   * work; each lane re-reads its candidates under the transition lock before acting, so the
+   * shared snapshot only selects candidates and staleness cannot change a disposition.
+   */
+  private async takeReconciliationSnapshot(): Promise<{
+    inventory: LiftJob[];
+    chainProofPass: ChainProofSchedulePass;
+  }> {
+    const inventory = await this.list();
+    const chainProofPass = this.chainProofRetrySchedule.beginPass(this.now());
+    return { inventory, chainProofPass };
+  }
+
+  /**
    * The ONE canonical pass: reports both what it settled and whether actionable live work
    * remains, computed DURING the walk (per-job, from the under-lock re-reads the pass already
    * pays for) — never by a second queue inventory afterwards. The scheduling caller consumes
@@ -2122,15 +2140,7 @@ export class TripleStoreAsyncLiftPublisher
    */
   private async runReconciliationPass(): Promise<{ reconciled: number; pendingWork: boolean }> {
     await this.ensureGraph();
-    // ONE queue inventory per pass, partitioned in memory across the three lanes — per-lane
-    // full reads at an active cadence move the bottleneck into store/control-plane work. Each
-    // lane re-reads its candidates under the transition lock before acting, so the shared
-    // snapshot only selects candidates and staleness cannot change a disposition.
-    const inventory = await this.list();
-    // PR #2380 r4 (🔴 3883088105) — the chain-proof pass scope is opened HERE, synchronously
-    // with the inventory snapshot, so its ordering token reflects snapshot order. Opening it at
-    // the dispatcher would order by dispatcher ARRIVAL, which overlapping passes can invert.
-    const chainProofPass = this.chainProofRetrySchedule.beginPass(this.now());
+    const { inventory, chainProofPass } = await this.takeReconciliationSnapshot();
     let reconciled = await this.recoverInterruptedPreBroadcastJobs(inventory);
     // Same actionability rule the scheduling outlook answers with: executor-owned jobs are
     // skipped up front rather than each burning a transition-lock turn to be skipped deeper in.

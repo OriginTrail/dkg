@@ -159,7 +159,8 @@ describe('ChainProofRetrySchedule', () => {
 
   it('a stale echo cannot claim the slot — even from a COMPLETELY EMPTY schedule', () => {
     // Overlapping first passes observe A then B before either completes; the late A deferral
-    // is rejected, B's first backoff lands, and settlement leaves no residue.
+    // is rejected and B's first backoff lands. (The post-settlement variant — the owner settles
+    // and THEN the stale turn defers — is the next row.)
     const h = harness();
     const stalePass = h.schedule.beginPass(h.now()); // older inventory: incarnation A
     const newerPass = h.schedule.beginPass(h.now()); // newer inventory: incarnation B
@@ -174,6 +175,22 @@ describe('ChainProofRetrySchedule', () => {
     expect(h.due('job', B)).toBe(false);
     h.advance(1);
     expect(h.due('job', B)).toBe(true);
+  });
+
+  it('a stale deferral cannot resurrect a slot the owner already settled', () => {
+    // PR #2380 r5 (🔴 3883196852) — the owner resolves the job (settlement deletes the entry),
+    // then a stale turn from an older pass defers. A defer into the emptied slot must be a
+    // no-op, not an install: a resurrected entry for a done job would be retained forever.
+    const h = harness();
+    const stalePass = h.schedule.beginPass(h.now());
+    const newerPass = h.schedule.beginPass(h.now());
+    const staleTurn = stalePass.observe('job', A);
+    expect(staleTurn).not.toBeNull();
+    const newerTurn = newerPass.observe('job', B);
+    expect(newerTurn).not.toBeNull();
+    newerTurn!.settled(); // the owner resolves the job; the slot is gone
+    staleTurn!.defer('default'); // late echo into the emptied slot
+    expect(h.schedule.retainedEntryCount()).toBe(0);
   });
 
   it('a repeat observation of the current owner REFRESHES recency — a stale pass cannot slip between', () => {

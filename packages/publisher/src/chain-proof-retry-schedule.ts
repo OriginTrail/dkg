@@ -21,7 +21,8 @@
  * never admitted to: a foreign identity with an older token is refused outright, and a turn's
  * later deferral/settlement is identity-checked against the entry again at write time, making
  * a superseded echo a whole-value no-op (neither resets the successor's ladder nor is it
- * retained — the map is bounded at one entry per job, observable via `retainedEntryCount`).
+ * retained), and a deferral into a slot the owner already SETTLED cannot resurrect it — the
+ * map is bounded at one entry per LIVE job, observable via `retainedEntryCount`.
  *
  * BACKOFF — base 30s doubling per attempt, +0..25% jitter (anti-herd), capped at 10 minutes;
  * the `awaiting-confirmations` cadence caps the BASE at ceiling/(1+jitter) so two minutes is a
@@ -114,8 +115,10 @@ export class ChainProofRetrySchedule {
 
   private deferTurn(jobId: string, identity: string, cadence: ChainProofRetryCadence, token: number): void {
     const entry = this.entries.get(jobId);
-    if (entry && entry.identity !== identity) return;
-    const attempts = (entry?.kind === 'deferred' ? entry.attempts : 0) + 1;
+    // A missing entry here means the slot was SETTLED after this turn was admitted (admission
+    // always installs an entry; only settlement deletes one). Deferring must not resurrect it.
+    if (!entry || entry.identity !== identity) return;
+    const attempts = (entry.kind === 'deferred' ? entry.attempts : 0) + 1;
     const capMs = cadence === 'awaiting-confirmations'
       ? CHAIN_PROOF_AWAITING_CONFIRMATIONS_BASE_CAP_MS
       : CHAIN_PROOF_BACKOFF_MAX_MS;
@@ -123,7 +126,7 @@ export class ChainProofRetrySchedule {
     this.entries.set(jobId, {
       kind: 'deferred',
       identity,
-      observedToken: Math.max(token, entry?.observedToken ?? 0),
+      observedToken: Math.max(token, entry.observedToken),
       dueAt: this.deps.now() + backoffMs + Math.floor(this.deps.rand() * backoffMs * CHAIN_PROOF_BACKOFF_JITTER),
       attempts,
     });
