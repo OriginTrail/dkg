@@ -576,7 +576,10 @@ export class PublishMethods extends EVMChainAdapterBase {
     const { receipt, publish } = await this.readPublishReceipt(txHash, options);
     if (receipt) {
       if (!(await this.isReceiptBlockFinalAndCanonical(receipt, options))) {
-        return { status: 'pending' };
+        // Mined but not yet at the operator-selected confirmation depth. The observation is
+        // SCHEDULING-ONLY (it tightens the caller's re-ask cadence) — the verdict stays
+        // `pending`, and nothing downstream may treat the marker as evidence.
+        return { status: 'pending', observedReceipt: { blockNumber: receipt.blockNumber } };
       }
       if (receipt.status !== 1) return { status: 'reverted' };
       return publish ? { status: 'confirmed', publish } : { status: 'unrecognized' };

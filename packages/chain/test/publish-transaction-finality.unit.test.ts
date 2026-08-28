@@ -50,7 +50,8 @@ describe('resolvePublishTransaction gates every mined verdict on finality [PR#23
 
     const resolution = await chain.resolvePublishTransaction(TX_HASH);
 
-    expect(resolution).toEqual({ status: 'pending' });
+    // The observation marker reports the mined-but-not-deep receipt; the VERDICT stays pending.
+    expect(resolution).toEqual({ status: 'pending', observedReceipt: { blockNumber: 123 } });
     expect(resolution.status).not.toBe('reverted');
   });
 
@@ -77,8 +78,10 @@ describe('resolvePublishTransaction gates every mined verdict on finality [PR#23
       ...gateClosed,
     });
 
-    expect(await unrecognized.resolvePublishTransaction(TX_HASH)).toEqual({ status: 'pending' });
-    expect(await confirmed.resolvePublishTransaction(TX_HASH)).toEqual({ status: 'pending' });
+    expect(await unrecognized.resolvePublishTransaction(TX_HASH))
+      .toEqual({ status: 'pending', observedReceipt: { blockNumber: 123 } });
+    expect(await confirmed.resolvePublishTransaction(TX_HASH))
+      .toEqual({ status: 'pending', observedReceipt: { blockNumber: 123 } });
   });
 
   it('REJECTS when the finality read itself fails — a gate that cannot answer resolves nothing', async () => {
@@ -290,7 +293,10 @@ describe('MockChainAdapter finality parity [PR#2300 r1]', () => {
 
     mock.__setTransactionUnfinalized(published.txHash);
     const gated = await mock.resolvePublishTransaction(published.txHash);
-    expect(gated).toEqual({ status: 'pending' });
+    expect(gated).toEqual({
+      status: 'pending',
+      observedReceipt: { blockNumber: expect.any(Number) },
+    });
     expect(gated.status).not.toBe('confirmed');
 
     mock.__setTransactionUnfinalized(published.txHash, false);

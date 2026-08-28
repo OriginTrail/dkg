@@ -480,8 +480,11 @@ export type AsyncLiftChainProofResolution =
   | { status: 'reverted' }
   /** Mined and successful, but carrying no publish the adapter recognizes. Not absence. */
   | { status: 'unrecognized' }
-  /** The node holds the transaction and has not mined it. Never absence. */
-  | { status: 'pending' }
+  /** The node holds the transaction and has not mined it — or has observed a receipt that does
+   *  not yet carry the operator-selected confirmation depth. Never absence. When a receipt HAS
+   *  been observed, `observedReceipt` says so; that fact is SCHEDULING-ONLY (it tightens the
+   *  re-ask cadence) and never evidence — no disposition, stamp, or release may consume it. */
+  | { status: 'pending'; observedReceipt?: { readonly blockNumber: number } }
   /** The node was asked for the TRANSACTION and does not have it: the only proven absence. */
   | { status: 'not-found' }
   /** Nothing was established. Never absence, never proof. */

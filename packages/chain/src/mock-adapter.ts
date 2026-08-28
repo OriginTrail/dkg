@@ -430,10 +430,18 @@ export class MockChainAdapter implements ChainAdapter {
     // declares the not-yet-final window.
     const unfinalized = this.unfinalizedTxHashes.has(txHash);
     const publish = await this.resolvePublishByTxHash(txHash);
-    if (publish) return unfinalized ? { status: 'pending' } : { status: 'confirmed', publish };
+    if (publish) {
+      // Parity with the EVM adapter: a mined-but-not-yet-deep receipt reports its observation as
+      // the scheduling-only `observedReceipt` marker while the verdict stays `pending`.
+      return unfinalized
+        ? { status: 'pending', observedReceipt: { blockNumber: publish.blockNumber } }
+        : { status: 'confirmed', publish };
+    }
 
     switch (this.transactionStates.get(txHash)) {
       case 'pending': return { status: 'pending' };
+      // The declared-state seams carry no block fact to report, so their unfinalized answers stay
+      // bare `pending` — the marker asserts an observed receipt, never a fabricated one.
       case 'reverted': return unfinalized ? { status: 'pending' } : { status: 'reverted' };
       case 'mined': return unfinalized ? { status: 'pending' } : { status: 'unrecognized' };
       // Nothing in the event log, nothing declared: the mock genuinely does not

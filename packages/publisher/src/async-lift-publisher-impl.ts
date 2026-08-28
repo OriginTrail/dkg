@@ -157,6 +157,14 @@ import {
  */
 const CHAIN_PROOF_BACKOFF_BASE_MS = 30_000;
 const CHAIN_PROOF_BACKOFF_MAX_MS = 10 * 60_000;
+/**
+ * The tighter ceiling for a verdict that has OBSERVED the receipt (mined, awaiting the
+ * operator-selected confirmation depth). That answer changes block by block, so the anti-herd
+ * ladder above — built for questions whose answer may not change for hours — would charge up to
+ * ten minutes for a state typically moments from resolution. Scheduling-only: the observation
+ * marker never reaches a disposition.
+ */
+const CHAIN_PROOF_OBSERVED_RECEIPT_BACKOFF_MAX_MS = 2 * 60_000;
 /** Jitter as a FRACTION of the computed backoff, so spread scales with the wait it spreads. */
 const CHAIN_PROOF_BACKOFF_JITTER = 0.25;
 
@@ -2243,10 +2251,10 @@ export class TripleStoreAsyncLiftPublisher
         // A job whose turn ended in an exception simply stays held and is asked again next tick,
         // which is the same disposition as any other unestablished answer.
         try {
-          const settled = await this.dispatchOneHeldJob(job, lookup, deadline);
-          dispatched += settled;
-          if (settled > 0) this.chainProofNextDueAt.delete(job.jobId);
-          else this.deferNextChainProofAttempt(job.jobId);
+          const outcome = await this.dispatchOneHeldJob(job, lookup, deadline);
+          dispatched += outcome.settled;
+          if (outcome.settled > 0) this.chainProofNextDueAt.delete(job.jobId);
+          else this.deferNextChainProofAttempt(job.jobId, { observedReceipt: outcome.observedReceipt });
         } catch {
           // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
           // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
@@ -2270,11 +2278,17 @@ export class TripleStoreAsyncLiftPublisher
    * jittered so a population held by ONE incident — which is how they arrive — does not come due
    * in lockstep and rebuild the thundering herd the batch bound exists to prevent.
    */
-  private deferNextChainProofAttempt(jobId: string): void {
+  private deferNextChainProofAttempt(jobId: string, opts?: { observedReceipt?: boolean }): void {
     const attempts = (this.chainProofNextDueAt.get(jobId)?.attempts ?? 0) + 1;
+    // An observed receipt tightens only the CEILING: growth and jitter are unchanged, so a
+    // population held by one incident still spreads, and the attempt accounting stays honest
+    // across passes that alternate between marked and unmarked verdicts.
+    const capMs = opts?.observedReceipt
+      ? CHAIN_PROOF_OBSERVED_RECEIPT_BACKOFF_MAX_MS
+      : CHAIN_PROOF_BACKOFF_MAX_MS;
     const backoffMs = Math.min(
       CHAIN_PROOF_BACKOFF_BASE_MS * 2 ** (attempts - 1),
-      CHAIN_PROOF_BACKOFF_MAX_MS,
+      capMs,
     );
     this.chainProofNextDueAt.set(jobId, {
       dueAt: this.now() + backoffMs + Math.floor(this.rand() * backoffMs * CHAIN_PROOF_BACKOFF_JITTER),
@@ -2287,8 +2301,8 @@ export class TripleStoreAsyncLiftPublisher
     job: PersistedFailedJob,
     lookup: AsyncLiftChainProofLookup,
     deadline: AbortController,
-  ): Promise<number> {
-    if (!this.chainProofResolver) return 0;
+  ): Promise<{ settled: number; observedReceipt: boolean }> {
+    if (!this.chainProofResolver) return { settled: 0, observedReceipt: false };
     // r19 (🔴 3816490904) — the signal goes to the resolver AND the wait is bounded here. A
     // resolver that honours the signal settles promptly and releases its socket; one that ignores
     // it is abandoned rather than awaited, which is worse for that socket but leaves the ceiling
@@ -2301,7 +2315,12 @@ export class TripleStoreAsyncLiftPublisher
       (sig) => this.chainProofResolver!(lookup, sig ? { signal: sig } : undefined),
       deadline.signal,
     );
-    if (resolution === null) return 0;
+    if (resolution === null) return { settled: 0, observedReceipt: false };
+    // Scheduling-only: the observation marker is consumed exactly here, to pick the re-ask
+    // ceiling in `deferNextChainProofAttempt`. It never reaches `applyChainProofDisposition`,
+    // whose policy input remains the verdict STATUS alone.
+    const observedReceipt = resolution.status === 'pending'
+      && resolution.observedReceipt !== undefined;
 
     // GH#2270 PR-3 r4 — the verdict was earned across an RPC await, against a SNAPSHOT of the
     // job. While it was in flight, an operator's `clearTerminalJob` or a client's fresh mandate
@@ -2311,12 +2330,13 @@ export class TripleStoreAsyncLiftPublisher
     // transitions serialize on, against a RE-READ of the record, and only when it is still the
     // identical held job the chain was asked about — same failure identity, same transaction
     // evidence. Anything else drops the verdict; the next tick asks about whatever now exists.
-    return this.withClaimLock(async () => {
+    const settled = await this.withClaimLock(async () => {
       const current = await this.getStatus(job.jobId);
       if (!current || !isFailedJob(current)) return 0;
       if (!this.isSameHeldFailedJob(job, current, lookup)) return 0;
       return this.applyChainProofDisposition(current, lookup, resolution, deadline);
     });
+    return { settled, observedReceipt };
   }
 
   /**

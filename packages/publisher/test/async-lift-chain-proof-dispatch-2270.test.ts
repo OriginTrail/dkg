@@ -1673,4 +1673,65 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(asked).toEqual([`wallet-tx-${onlyJob}`, `wallet-tx-${onlyJob}`]);
     });
   });
+
+  describe('an observed receipt tightens the re-ask ceiling — scheduling only', () => {
+    // The ladder exists for questions whose answer may not change for hours. A `pending` verdict
+    // that has OBSERVED the receipt (mined, awaiting confirmation depth) is answering a question
+    // that changes block by block, so its ceiling is 2 minutes instead of 10. `rand: () => 0`
+    // removes jitter, making the ladder arithmetic exact: 30s, 60s, 120s, then min(240s, cap).
+
+    async function heldMarkedJob(observed: boolean) {
+      const asked: number[] = [];
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        chainProofResolver: async () => {
+          asked.push(1);
+          return observed
+            ? { status: 'pending', observedReceipt: { blockNumber: 77 } }
+            : { status: 'pending' };
+        },
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+      return { publisher, jobId, asked };
+    }
+
+    async function climbToAttemptFour(publisher: { recover(): Promise<number> }, asked: number[]) {
+      await publisher.recover();
+      for (const wait of [30_001, 60_001, 120_001]) {
+        h.advance(wait);
+        await publisher.recover();
+      }
+      expect(asked).toHaveLength(4);
+    }
+
+    it('a pending verdict WITH an observed receipt is re-asked within the 2-minute ceiling', async () => {
+      const { publisher, jobId, asked } = await heldMarkedJob(true);
+      await climbToAttemptFour(publisher, asked);
+
+      // Attempt 4 deferred by min(240s, observed cap 120s) = 120s. 130s later it must be due.
+      h.advance(130_000);
+      await publisher.recover();
+      expect(asked).toHaveLength(5);
+
+      // The marker is scheduling-only: five marked-pending verdicts moved NOTHING — the job is
+      // still exactly the held failure the chain was asked about.
+      expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    });
+
+    it('a bare pending verdict keeps the 10-minute ceiling — the tight cap requires the observation', async () => {
+      const { publisher, asked } = await heldMarkedJob(false);
+      await climbToAttemptFour(publisher, asked);
+
+      // Attempt 4 deferred by min(240s, 600s) = 240s: at 130s it is NOT due yet.
+      h.advance(130_000);
+      await publisher.recover();
+      expect(asked).toHaveLength(4);
+
+      // ...and the deferral is still a delay, not an eviction.
+      h.advance(110_001);
+      await publisher.recover();
+      expect(asked).toHaveLength(5);
+    });
+  });
 });
