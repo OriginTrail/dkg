@@ -3,6 +3,8 @@ import type {
   KnowledgeAssetVmPublishRequest,
   LiftJob,
   LiftJobBroadcast,
+  LiftJobClaimed,
+  LiftJobClaimMetadata,
   LiftJobFinalizationMetadata,
   LiftJobIncluded,
   LiftJobInclusionMetadata,
@@ -56,6 +58,68 @@ export class LiftJobPendingChainProofError extends Error {
   }
 }
 
+/**
+ * The worker that started an execution no longer owns the persisted claim.
+ *
+ * A fresh claim token is written on every wallet acquisition. Recovery may
+ * legitimately expire and replace that claim while an older asynchronous
+ * frame is still unwinding. That frame must stop without changing the newer
+ * job; this typed error is the ownership-boundary signal consumed by
+ * `processNext()`.
+ */
+export class StaleLiftJobClaimError extends Error {
+  override readonly name = 'StaleLiftJobClaimError';
+
+  constructor(
+    readonly jobId: string,
+    reason: string,
+  ) {
+    super(`Stale LiftJob claim for ${jobId}: ${reason}`);
+  }
+}
+
+/**
+ * A newly acquired queue claim with ownership fields required at the type boundary.
+ *
+ * The persisted job shape keeps claim tokens optional for legacy records. A live worker must
+ * never operate on that broad shape: acquisition upgrades it to this handle, and every
+ * worker-side mutation carries the same immutable wallet/token pair back to the queue.
+ */
+export type ActiveLiftJobClaim = LiftJobClaimed & {
+  readonly claim: LiftJobClaimMetadata & {
+    readonly claimToken: string;
+    readonly claimLeaseExpiresAt: number;
+  };
+};
+
+/**
+ * The mutation authority for one acquired claim.
+ *
+ * Runtime workers retain this session rather than a bare job id. Every mutation is fenced by
+ * the immutable wallet/token pair in {@link claim}; a recovered or re-claimed job therefore
+ * rejects the stale session before it can change queue truth.
+ */
+export interface ActiveLiftJobClaimSession {
+  readonly claim: ActiveLiftJobClaim;
+  update(status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
+  recordPublishResult(
+    publishResult: PublishResult,
+    options?: { publicByteSize?: number },
+  ): Promise<LiftJob>;
+  recordExecutionFailure(failedFromState: LiftJobState, error: unknown): Promise<LiftJob>;
+}
+
+/** Explicit by-id compatibility surface for control-plane callers, never runtime workers. */
+export interface AsyncLiftAdministrativeMutations {
+  updateById(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
+  recordPublishResultById(
+    jobId: string,
+    publishResult: PublishResult,
+    options?: { publicByteSize?: number },
+  ): Promise<LiftJob>;
+  recordPublishFailureById(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob>;
+}
+
 /** #1828 — the immutable facts a client retains to recover a lost VM-publish admission. */
 export interface IntentLookupInput {
   readonly contextGraphId: string;
@@ -102,13 +166,27 @@ export interface AsyncLiftPublisher {
     request: KnowledgeAssetVmPublishRequest,
     admission?: AsyncLiftAdmissionContext,
   ): Promise<string>;
+  /** Legacy acquisition shape; fenced workers narrow this on ClaimSessionAsyncLiftPublisher. */
   claimNext(walletId: string): Promise<LiftJob | null>;
+  /** Optional v10.0.15 worker-ownership capability; older structural implementations omit it. */
+  openClaimSession?(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession;
+  /** Optional v10.0.15 administrative capability; legacy by-id methods remain compatible. */
+  readonly administrative?: AsyncLiftAdministrativeMutations;
+  /**
+   * Administrative/compatibility mutation by exact job id. Runtime workers use the owned-claim
+   * session returned by {@link openClaimSession}, where the claim token is mandatory and
+   * revalidated on every write.
+   *
+   * @deprecated Prefer `administrative.updateById`; workers must use `openClaimSession`.
+   */
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<LiftJob | null>;
   list(filter?: { status?: LiftJobState }): Promise<LiftJob[]>;
   inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
   processNext(walletId: string): Promise<LiftJob | null>;
+  /** @deprecated Prefer `administrative.recordPublishResultById`; workers use a claim session. */
   recordPublishResult(jobId: string, publishResult: PublishResult, options?: { publicByteSize?: number }): Promise<LiftJob>;
+  /** @deprecated Prefer `administrative.recordPublishFailureById`; workers use a claim session. */
   recordPublishFailure(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob>;
   recover(): Promise<number>;
   /** Reconcile interrupted work without restarting the runner. Older implementations can omit it. */
@@ -175,6 +253,13 @@ export interface AsyncLiftPublisher {
    */
   retry(filter?: { status?: 'failed' }): Promise<number>;
   clear(status: 'finalized' | 'failed'): Promise<number>;
+}
+
+/** Publisher with the fenced worker-session and explicit administrative capabilities. */
+export interface ClaimSessionAsyncLiftPublisher extends AsyncLiftPublisher {
+  claimNext(walletId: string): Promise<ActiveLiftJobClaim | null>;
+  openClaimSession(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession;
+  readonly administrative: AsyncLiftAdministrativeMutations;
 }
 
 /** GH#2270 — full disposition of one `retry()` pass. The three counts partition the failed set. */
@@ -630,6 +715,8 @@ export interface AsyncLiftPublisherConfig {
   recoveryLookupTimeoutMs?: number;
   now?: () => number;
   idGenerator?: () => string;
+  /** Defaults to `crypto.randomUUID()`. Must return a fresh value for every wallet claim. */
+  claimTokenGenerator?: () => string;
   /** Jitter source, injectable for determinism exactly like `now`/`idGenerator`. Defaults to Math.random. */
   rand?: () => number;
   /**

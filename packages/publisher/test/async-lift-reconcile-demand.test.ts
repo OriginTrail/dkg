@@ -73,10 +73,15 @@ describe('async-lift reconciliation demand channel', () => {
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     expect(await reconcile()).toEqual({ reconciled: 0, pendingWork: false });
 
-    // A stranded pre-broadcast job is RESET by the pass (recover-reset lane), never pending:
-    // nothing was sent, so there is no chain question to hold a cadence for.
+    // A live pre-broadcast claim is owned until its durable lease expires. Only then may the
+    // recover-reset lane treat it as stranded; nothing was sent, so there is no chain question
+    // to hold a cadence for.
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    expect(await reconcile()).toEqual({ reconciled: 0, pendingWork: false });
+    expect((await publisher.getStatus(jobId))?.status).toBe('validated');
+
+    now += 6 * 60_000;
     expect(await reconcile()).toEqual({ reconciled: 1, pendingWork: false });
     expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
 
