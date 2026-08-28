@@ -32,9 +32,38 @@ Query-Catalog-first workflow for small models, see
 
 ## Interactive chat from a source checkout
 
-Start the DKG daemon and `llama-server` first. From the DKG repository root,
-this machine can then start an interactive Qwen session against the `testing`
-Context Graph with:
+Start the DKG daemon first. Then use two terminals for the model server and the
+interactive DKG client.
+
+### Terminal 1: start Qwen with llama.cpp
+
+```bash
+/Users/lupus/projects/llama.cpp/build/bin/llama-server \
+  -hf Qwen/Qwen3-8B-GGUF:Q4_K_M \
+  -ngl 999 \
+  -c 8192 \
+  --flash-attn on \
+  --jinja \
+  --temp 0.15 \
+  --top-p 0.9 \
+  --repeat-penalty 1.05 \
+  --host 127.0.0.1 \
+  --port 8080
+```
+
+Leave that terminal running. Wait for the model to load, then verify it from
+another terminal:
+
+```bash
+curl -sS http://127.0.0.1:8080/health
+```
+
+Continue only when the response is `{"status":"ok"}`.
+
+### Terminal 2: start interactive DKG chat
+
+From the DKG repository root, start an interactive Qwen session against the
+`testing` Context Graph with:
 
 ```bash
 DKG_HOME=/Users/lupus/dkg-local \
