@@ -216,6 +216,41 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(sends).toBe(0);
     });
 
+    it('keeps an irregular historical failure and its wallet lock unchanged on a reverted verdict', async () => {
+      // A compatibility record may retain valid transaction evidence without all metadata needed
+      // to construct a canonical broadcast-origin failure. Chain proof establishes the revert, but
+      // it cannot authorize inventing the missing validation facts or releasing ownership through
+      // a record that the canonical writer would reject.
+      const publisher = dispatcher({ status: 'reverted' });
+      const failed = await failAfterRecordedTxHash(publisher);
+      const walletId = failed.broadcast!.walletId;
+      const irregular = { ...failed } as unknown as Record<string, unknown>;
+      delete irregular.validation;
+      await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(irregular as unknown as LiftJob, DEFAULT_CONTROL_GRAPH_URI));
+
+      const jobQuadsBefore = await h.store.query(`SELECT ?p ?o WHERE {
+        GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(failed.jobId)}> ?p ?o . }
+      }`);
+      const walletQuadsBefore = await h.store.query(`SELECT ?p ?o WHERE {
+        GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> { <${walletLockSubject(walletId)}> ?p ?o . }
+      }`);
+      expect((walletQuadsBefore as { bindings: unknown[] }).bindings).not.toHaveLength(0);
+
+      expect(await publisher.recover()).toBe(0);
+
+      const stillHeld = expectFailed(await publisher.getStatus(failed.jobId));
+      expect(stillHeld.validation).toBeUndefined();
+      expect(isHeldForChainProof(stillHeld)).toBe(true);
+      expect(await h.store.query(`SELECT ?p ?o WHERE {
+        GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(failed.jobId)}> ?p ?o . }
+      }`)).toEqual(jobQuadsBefore);
+      expect(await h.store.query(`SELECT ?p ?o WHERE {
+        GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> { <${walletLockSubject(walletId)}> ?p ?o . }
+      }`)).toEqual(walletQuadsBefore);
+      expect(sends).toBe(0);
+    });
+
     it.each(UNRESOLVED_VERDICTS)('keeps holding on a %s verdict, and asks again next tick', async (status) => {
       const publisher = dispatcher({ status });
       const failed = await failAfterRecordedTxHash(publisher);
