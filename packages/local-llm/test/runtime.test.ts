@@ -1,0 +1,152 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+  DkgLocalLlmRuntime,
+  normalizeFinalAnswer,
+  type McpClientLike,
+} from '../src/runtime.js';
+import type { McpToolDefinition } from '../src/schema.js';
+
+const catalogList: McpToolDefinition = {
+  name: 'dkg_query_catalog_list',
+  description: 'List saved queries',
+  inputSchema: {
+    type: 'object',
+    properties: { projectId: { type: 'string' } },
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: true },
+};
+
+const catalogRun: McpToolDefinition = {
+  name: 'dkg_query_catalog_run',
+  description: 'Run a saved query',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      selector: { type: 'string' },
+      parameters: { type: 'object' },
+    },
+    required: ['selector'],
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: true },
+};
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function toolResponse(name: string, args: unknown, id = 'call-1'): Response {
+  return jsonResponse({
+    choices: [{
+      finish_reason: 'tool_calls',
+      message: {
+        role: 'assistant',
+        tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }],
+      },
+    }],
+  });
+}
+
+function answerResponse(content: string): Response {
+  return jsonResponse({
+    choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }],
+  });
+}
+
+function makeMcp(tools: McpToolDefinition[] = [catalogList, catalogRun]): McpClientLike & {
+  callTool: ReturnType<typeof vi.fn>;
+} {
+  return {
+    async listTools() { return { tools }; },
+    callTool: vi.fn(async () => ({
+      content: [{ type: 'text', text: 'Found lifecycle query.' }],
+      structuredContent: { entries: [{ selector: 'supply/lifecycle' }] },
+    })),
+  };
+}
+
+describe('DkgLocalLlmRuntime', () => {
+  it('executes a real catalog tool loop while exposing only the catalog profile', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}))
+      .mockResolvedValueOnce(answerResponse('One saved query: supply/lifecycle.'));
+    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+
+    const result = await runtime.run('Which DKG query catalog queries are saved?');
+
+    expect(result.profile).toBe('catalog');
+    expect(result.toolCalls).toEqual([{ name: 'dkg_query_catalog_list', arguments: {} }]);
+    expect(mcp.callTool).toHaveBeenCalledWith({ name: 'dkg_query_catalog_list', arguments: {} });
+    const firstRequest = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    expect(firstRequest.tool_choice).toBe('required');
+    expect(firstRequest.tools.map((tool: { function: { name: string } }) => tool.function.name))
+      .toEqual(['dkg_query_catalog_list', 'dkg_query_catalog_run']);
+    const secondRequest = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
+    expect(secondRequest.messages.at(-1).role).toBe('tool');
+    expect(secondRequest.messages.at(-1).content).toContain('Structured DKG evidence');
+  });
+
+  it('pins one schema repair retry to the failed tool', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_run', {}))
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_run', { selector: 'supply/lifecycle' }, 'call-2'))
+      .mockResolvedValueOnce(answerResponse('Lifecycle evidence returned.'));
+    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+
+    const result = await runtime.run('Run the saved DKG query catalog query supply/lifecycle');
+
+    expect(result.toolCalls).toEqual([{
+      name: 'dkg_query_catalog_run',
+      arguments: { selector: 'supply/lifecycle' },
+    }]);
+    const retryRequest = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
+    expect(retryRequest.tools).toHaveLength(1);
+    expect(retryRequest.tools[0].function.name).toBe('dkg_query_catalog_run');
+  });
+
+  it('blocks write intent before contacting the model', async () => {
+    const save: McpToolDefinition = {
+      name: 'dkg_query_catalog_save',
+      inputSchema: { type: 'object' },
+      annotations: { readOnlyHint: false },
+    };
+    const fetcher = vi.fn();
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp: makeMcp([...makeMcpTools(), save]),
+      fetch: fetcher as typeof fetch,
+    });
+    await expect(runtime.run('Save this query in the DKG query catalog')).rejects.toThrow('read-only');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('retains bounded conversational context but requires fresh tools for DKG follow-ups', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}))
+      .mockResolvedValueOnce(answerResponse('The selector is supply/lifecycle.'))
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}, 'call-2'))
+      .mockResolvedValueOnce(answerResponse('It still exists.'));
+    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch });
+    await runtime.run('Which DKG query catalog queries are saved?');
+    const followUp = await runtime.run('Does that DKG query still exist?');
+    expect(followUp.toolCalls).toHaveLength(1);
+    const request = JSON.parse(String(fetcher.mock.calls[2][1]?.body));
+    expect(request.messages[0].content).toContain('Prior turns below only resolve conversational references');
+  });
+});
+
+function makeMcpTools(): McpToolDefinition[] {
+  return [catalogList, catalogRun];
+}
+
+describe('final-answer hygiene', () => {
+  it('removes leaked special tokens, controls, and emoji-only padding lines', () => {
+    expect(normalizeFinalAnswer('Answer.\n😀😀😀\n<|im_end|>\u0000')).toBe('Answer.');
+  });
+});
