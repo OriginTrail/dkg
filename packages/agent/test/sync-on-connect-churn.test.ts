@@ -234,6 +234,7 @@ describe('sync-on-connect churn gates', () => {
       ],
     };
     (agent as any).rfc64SwmRecoveryCoordinatorV1 = {
+      isCatalogReady: vi.fn(() => true),
       authorize: vi.fn(() => authorized),
       revalidate: vi.fn(() => authorized),
     };
@@ -292,6 +293,32 @@ describe('sync-on-connect churn gates', () => {
     expect((agent as any).pendingRfc64SwmRecoveries.size).toBe(0);
     expect((agent as any).syncReconcilerBackoff.has(PEER_A)).toBe(false);
     expect(errors).toEqual([]);
+  });
+
+  it('blocks connection and reconciler paths until RFC-64 catalog readiness', async () => {
+    const agent = await createUnstartedAgent('Rfc64CatalogBeforeAutomaticSwm');
+    allowAllNetworkAdmission(agent);
+    (agent as any).started = true;
+    let catalogReady = false;
+    (agent as any).rfc64SwmRecoveryCoordinatorV1 = {
+      isCatalogReady: vi.fn(() => catalogReady),
+    };
+    const run = vi.spyOn(agent as any, 'runSyncFromPeerOnConnect')
+      .mockResolvedValue(undefined);
+
+    // connection:open uses the queue; peer:update and the periodic reconciler
+    // ultimately use trySyncFromPeer. Neither may cross the catalog boundary.
+    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0))
+      .toBe(false);
+    expect(await (agent as any).trySyncFromPeer(PEER_A)).toBe('not-started');
+    expect((agent as any).catchupOnConnectAt.has(PEER_A)).toBe(false);
+    expect(run).not.toHaveBeenCalled();
+
+    catalogReady = true;
+    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0))
+      .toBe(true);
+    await flushTimers();
+    expect(run).toHaveBeenCalledOnce();
   });
 
   it('retries incomplete selected SWM past generic freshness without creating a loop', async () => {

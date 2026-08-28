@@ -19,6 +19,7 @@ export interface Rfc64SwmRecoveryAdmissionPortV1 {
   }> | null;
   readonly configuredRecoveryPlan:
     (providerPeerId: string) => Readonly<Rfc64PeerSwmRecoveryPlanV1>;
+  readonly isCatalogReady: (providerPeerId: string) => boolean;
   readonly isPeerAccepted: (providerPeerId: string) => boolean;
   readonly isStarted: () => boolean;
 }
@@ -35,9 +36,14 @@ export interface Rfc64SwmRecoveryCoordinatorDependenciesV1 {
 export class Rfc64SwmRecoveryCoordinatorV1 {
   constructor(private readonly deps: Rfc64SwmRecoveryCoordinatorDependenciesV1) {}
 
+  isCatalogReady(providerPeerId: string): boolean {
+    return this.deps.admission.isCatalogReady(providerPeerId);
+  }
+
   authorize(
     recoveryPlan: Readonly<Rfc64PeerSwmRecoveryPlanV1>,
   ): Readonly<Rfc64AuthorizedSwmRecoveryPlanV1> | null {
+    if (!this.isCatalogReady(recoveryPlan.providerPeerId)) return null;
     const selectedPublic = new Set(this.deps.admission.selectedPublicContextGraphIds());
     const canonicalTargets = canonicalizeRfc64SwmRecoveryTargetsV1(recoveryPlan.targets);
     if (canonicalTargets === null) return null;
@@ -79,8 +85,9 @@ export class Rfc64SwmRecoveryCoordinatorV1 {
     if (
       !this.deps.admission.isStarted()
       || !this.deps.admission.isPeerAccepted(authorized.providerPeerId)
+      || !this.isCatalogReady(authorized.providerPeerId)
     ) {
-      throw new Error('RFC-64 SWM recovery provider is not admitted');
+      throw new Error('RFC-64 SWM recovery provider is not admitted or catalog-ready');
     }
     const configured = this.deps.admission.configuredRecoveryPlan(
       authorized.providerPeerId,

@@ -839,6 +839,8 @@ export class DKGAgent extends DKGAgentBase {
           this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
           peerId,
         ),
+        isCatalogReady: (peerId) =>
+          this.isRfc64CatalogBootstrapSwmRecoveryReadyV1(peerId),
         isPeerAccepted: (peerId) =>
           this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
         isStarted: () => this.started,

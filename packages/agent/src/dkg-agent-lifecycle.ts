@@ -4620,6 +4620,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return false;
     }
+    // Every automatic entry point shares this scheduler. A graph-complete
+    // RFC-64 provider may not stamp cooldown or dispatch generic selected-SWM
+    // work until its catalog phase has settled; the bootstrap's exact recovery
+    // request will re-enter here once readiness is published.
+    if (!this.rfc64SwmRecoveryCoordinatorV1.isCatalogReady(remotePeer)) {
+      return false;
+    }
     const now = Date.now();
     const disconnectBoundary = this.syncOnConnectDisconnectBoundary(remotePeer, now);
     const lastSuccessfulSync = this.lastSuccessfulSyncAt.get(remotePeer);
@@ -4835,6 +4842,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
     if (!this.started || !syncOnConnectEnabled(this.config)) return 'not-started';
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
+      return 'not-started';
+    }
+    // peer:update and the periodic reconciler can bypass the on-connect timer,
+    // so enforce the same catalog prerequisite at the execution boundary.
+    if (!this.rfc64SwmRecoveryCoordinatorV1.isCatalogReady(remotePeer)) {
       return 'not-started';
     }
     const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();

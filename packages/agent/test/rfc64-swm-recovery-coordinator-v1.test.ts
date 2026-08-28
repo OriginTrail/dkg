@@ -35,6 +35,7 @@ function dependencies(
       configuredRecoveryPlan: (providerPeerId) => providerPeerId === PROVIDER
         ? mixedPlan()
         : { providerPeerId, targets: [] },
+      isCatalogReady: () => true,
       isPeerAccepted: () => true,
       isStarted: () => true,
       ...overrides,
@@ -60,6 +61,19 @@ describe('RFC-64 SWM recovery authorization', () => {
       PROVIDER,
       [PUBLIC],
     );
+  });
+
+  it('blocks every recovery authorization until the catalog phase is ready', () => {
+    let catalogReady = false;
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
+      isCatalogReady: () => catalogReady,
+    }));
+
+    expect(coordinator.isCatalogReady(PROVIDER)).toBe(false);
+    expect(coordinator.authorize(mixedPlan())).toBeNull();
+    catalogReady = true;
+    expect(coordinator.isCatalogReady(PROVIDER)).toBe(true);
+    expect(coordinator.authorize(mixedPlan())).not.toBeNull();
   });
 
   it('drops a terminal public scope while retaining the same provider private lane', () => {
@@ -154,7 +168,21 @@ describe('RFC-64 SWM recovery authorization', () => {
     accepted = false;
 
     expect(() => coordinator.revalidate(authorized!)).toThrow(
-      'RFC-64 SWM recovery provider is not admitted',
+      'RFC-64 SWM recovery provider is not admitted or catalog-ready',
+    );
+  });
+
+  it('fails closed when catalog readiness is revoked before execution', () => {
+    let catalogReady = true;
+    const coordinator = new Rfc64SwmRecoveryCoordinatorV1(dependencies({
+      isCatalogReady: () => catalogReady,
+    }));
+    const authorized = coordinator.authorize(mixedPlan());
+    expect(authorized).not.toBeNull();
+    catalogReady = false;
+
+    expect(() => coordinator.revalidate(authorized!)).toThrow(
+      'RFC-64 SWM recovery provider is not admitted or catalog-ready',
     );
   });
 

@@ -1331,12 +1331,19 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     agents.push(receiver);
     const ordering: string[] = [];
+    let markCatalogStarted!: () => void;
+    let releaseCatalog!: () => void;
+    const catalogStarted = new Promise<void>((resolve) => { markCatalogStarted = resolve; });
+    const catalogRelease = new Promise<void>((resolve) => { releaseCatalog = resolve; });
     const connect = vi.spyOn(receiver, 'connectToPeerId').mockImplementation(async () => {
       ordering.push('connect');
     });
     const synchronize = vi.spyOn(receiver, 'synchronizeRfc64CatalogFromProvidersV1')
       .mockImplementation(async () => {
-        ordering.push('catalog');
+        ordering.push('catalog-start');
+        markCatalogStarted();
+        await catalogRelease;
+        ordering.push('catalog-complete');
         return null;
       });
     const queue = vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
@@ -1346,6 +1353,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       });
 
     await receiver.start();
+    await catalogStarted;
+    expect(queue).not.toHaveBeenCalled();
+    expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
+    releaseCatalog();
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 
     expect(connect).toHaveBeenCalledWith(providerPeerId, {
@@ -1367,7 +1378,61 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       expect.any(Function),
       0,
     );
-    expect(ordering).toEqual(['connect', 'catalog', 'swm']);
+    expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(true);
+    expect(ordering).toEqual(['connect', 'catalog-start', 'catalog-complete', 'swm']);
+  });
+
+  it('does not admit SWM recovery when shutdown aborts the catalog phase', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-bootstrap-abort-'));
+    tempDirs.push(dataDir);
+    const providerPeerId = '12D3KooWBootstrapAbortProvider';
+    const receiver = await DKGAgent.create({
+      name: 'bootstrap-abort-receiver',
+      dataDir,
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      store: new OxigraphStore(),
+      syncOnConnectEnabled: true,
+      syncReconcilerEnabled: false,
+      syncContextGraphs: [CONTEXT_GRAPH_ID],
+      agentProfileHeartbeatMs: 0,
+      rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
+      rfc64PublicCatalogBootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [{ authorAddress: AUTHOR, providers: [providerPeerId] }],
+          completeSwmProviders: [providerPeerId],
+        }],
+      },
+    });
+    agents.push(receiver);
+    vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
+    let markCatalogStarted!: () => void;
+    const catalogStarted = new Promise<void>((resolve) => { markCatalogStarted = resolve; });
+    vi.spyOn(receiver, 'synchronizeRfc64CatalogFromProvidersV1')
+      .mockImplementation(async ({ signal }) => {
+        markCatalogStarted();
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return null;
+      });
+    const queue = vi.spyOn(receiver, 'queueRfc64SwmRecoveryPlanFromPeerOnConnect')
+      .mockReturnValue(true);
+
+    await receiver.start();
+    await catalogStarted;
+    expect(receiver.isRfc64CatalogBootstrapSwmRecoveryReadyV1(providerPeerId)).toBe(false);
+    await receiver.stop();
+
+    expect(queue).not.toHaveBeenCalled();
   });
 
   it('schedules a pre-connected private complete provider on the ordinary SWM lane', async () => {

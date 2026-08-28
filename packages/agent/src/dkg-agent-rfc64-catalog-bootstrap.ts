@@ -134,6 +134,7 @@ interface BootstrapStateV1 {
   pass: number;
   lastPassStartedAtMs: number | null;
   lastPassCompletedAtMs: number | null;
+  catalogPhaseReady: boolean;
   timer: ReturnType<typeof setTimeout> | null;
   abortController: AbortController | null;
   run: Promise<void> | null;
@@ -220,6 +221,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
       pass: 0,
       lastPassStartedAtMs: null,
       lastPassCompletedAtMs: null,
+      catalogPhaseReady: false,
       timer: null,
       abortController: null,
       run: null,
@@ -267,6 +269,25 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     state.abortController?.abort(new Error('RFC-64 public catalog bootstrap closing'));
     await state.run?.catch(() => undefined);
     STATES.delete(this);
+  }
+
+  /**
+   * Canonical recovery prerequisite for graph-complete RFC-64 providers.
+   * Non-provider peers are unaffected. Configured providers remain blocked
+   * until the first complete catalog phase settles, including contained
+   * not-found/failure outcomes; shutdown closes the boundary again.
+   */
+  isRfc64CatalogBootstrapSwmRecoveryReadyV1(
+    this: DKGAgent,
+    providerPeerId: string,
+  ): boolean {
+    const state = STATES.get(this);
+    if (state === undefined) return true;
+    const configuredProvider = state.config.acceptedPolicies.some(
+      ({ completeSwmProviders = [] }) => completeSwmProviders.includes(providerPeerId),
+    );
+    if (!configuredProvider) return true;
+    return !state.closed && state.catalogPhaseReady;
   }
 
   private launchRfc64PublicCatalogBootstrapPassV1(
@@ -340,6 +361,10 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
           );
         },
       );
+      // Closing aborts target synchronization by design. It must not turn the
+      // incomplete phase into readiness or admit new SWM work during teardown.
+      if (state.closed || abortController.signal.aborted) return;
+      state.catalogPhaseReady = true;
       // The VM catalog and graph-complete SWM inventory are two independently
       // authorized recovery planes for one private Context Graph. Apply every
       // catalog target before starting SWM recovery so a cold catalog bootstrap
