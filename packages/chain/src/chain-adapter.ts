@@ -294,6 +294,17 @@ export type PublishTransactionResolution =
   /** The node has neither the receipt nor the transaction: the only proven absence. */
   | { status: 'not-found' };
 
+/**
+ * THE semantic category "still pending" in one place (r4 3881840996): consumers that care only
+ * that no mined verdict exists yet — not which pending shape it is — use this predicate instead
+ * of repeating the two-status disjunction. Deliberately a plain string predicate so publisher-
+ * side unions that embed these members can use it too. Only cadence-selecting code reads the
+ * specific status.
+ */
+export function isPendingPublishTransactionStatus(status: string): boolean {
+  return status === 'pending-mempool' || status === 'pending-awaiting-confirmation';
+}
+
 export interface CanonicalFinalizationReceiptReadOptions extends ChainReadOptions {
   /** Persisted block identity supplied during replay canonicality checks. */
   expectedBlockHash?: string;

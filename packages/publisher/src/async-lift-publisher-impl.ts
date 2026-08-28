@@ -1,7 +1,8 @@
 import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { resolveWithinAbort } from './abort-boundary.js';
-import { ChainProofRetrySchedule, chainProofScheduleIdentity } from './chain-proof-retry-schedule.js';
+import { isPendingPublishTransactionStatus } from '@origintrail-official/dkg-chain';
+import { ChainProofRetrySchedule } from './chain-proof-retry-schedule.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -1282,8 +1283,7 @@ export class TripleStoreAsyncLiftPublisher
           const resolution = await this.resolveChainProofWithinSignal(origin.lookup, signal);
           if (resolution === null) { unresolved += 1; return; }
           if (resolution.status !== 'recovered') {
-            if (resolution.status === 'pending-mempool'
-              || resolution.status === 'pending-awaiting-confirmation'
+            if (isPendingPublishTransactionStatus(resolution.status)
               || resolution.status === 'inconclusive') {
               // Receipt not yet final at the operator's confirmation depth (or the read could
               // not settle): keep the hint and let the active cadence retry before settle does.
@@ -2202,8 +2202,12 @@ export class TripleStoreAsyncLiftPublisher
     // Bound 1 — only jobs whose backoff has elapsed. Jobs asked recently that established nothing
     // are deferred, so the population ROTATES through the batch rather than the head of the list
     // being re-asked every pass. No cursor is needed: the due times are the rotation.
-    const dueJobs = heldJobs.filter((job) =>
-      this.chainProofRetrySchedule.isDue(job.jobId, chainProofScheduleIdentity(job), startedAt));
+    const withEvidence = heldJobs
+      .map((job) => ({ job, lookup: this.chainProofLookupFor(job) }))
+      .filter((candidate): candidate is { job: PersistedFailedJob; lookup: AsyncLiftChainProofLookup } => candidate.lookup !== null)
+      .map(({ job, lookup }) => ({ job, lookup, identity: this.heldChainProofIncarnationKey(job, lookup) }));
+    const dueJobs = withEvidence.filter(({ job, identity }) =>
+      this.chainProofRetrySchedule.isDue(job.jobId, identity, startedAt));
 
     // r19 (🔴 3816490915) — the lookup is derived BEFORE the batch is taken, because a job that
     // cannot form one costs no round trip and must therefore cost no batch slot either. Deriving
@@ -2212,9 +2216,7 @@ export class TripleStoreAsyncLiftPublisher
     // actionable job behind them, permanently. That is strictly worse than the unbounded sweep it
     // replaced, which at least reached them. The derivation is pure and local, so paying it for
     // the whole due population buys the fix for nothing.
-    const dispatchable = dueJobs
-      .map((job) => ({ job, lookup: this.chainProofLookupFor(job) }))
-      .filter((candidate): candidate is { job: PersistedFailedJob; lookup: AsyncLiftChainProofLookup } => candidate.lookup !== null);
+    const dispatchable = dueJobs;
 
     // r19 (🔴 3816490904) — one controller for the whole pass. Bound 3 as r18 shipped it only
     // gated whether the NEXT lookup started, which is not a ceiling: a resolver that never settles
@@ -2227,7 +2229,7 @@ export class TripleStoreAsyncLiftPublisher
     let dispatched = 0;
     try {
       // Bound 2 — at most one batch of RPCs per pass.
-      for (const { job, lookup } of dispatchable.slice(0, Math.max(0, this.chainProofDispatchBatchSize))) {
+      for (const { job, lookup, identity } of dispatchable.slice(0, Math.max(0, this.chainProofDispatchBatchSize))) {
         // Bound 3 — the wall-clock ceiling. Batch size bounds the CALL COUNT; when each call is slow
         // it is time that startup readiness actually depends on. Checked before each turn so a pass
         // cannot start a new round trip once the budget is spent; the rest are asked next cadence.
@@ -2241,9 +2243,12 @@ export class TripleStoreAsyncLiftPublisher
           const outcome = await this.dispatchOneHeldJob(job, lookup, deadline);
           if (outcome.kind === 'settled') {
             dispatched += outcome.jobs;
-            this.chainProofRetrySchedule.settled(job.jobId);
+            this.chainProofRetrySchedule.settled(job.jobId, identity);
           } else if (outcome.kind === 'defer') {
-            this.chainProofRetrySchedule.defer(job.jobId, chainProofScheduleIdentity(job), outcome.cadence);
+            // Verified: the claim-lock re-read inside dispatchOneHeldJob agreed this is still
+            // the incarnation the chain was asked about, so this deferral may supersede a
+            // predecessor's leftover entry.
+            this.chainProofRetrySchedule.defer(job.jobId, identity, outcome.cadence);
           }
           // 'stale': the verdict was about a record that no longer exists, so it may not touch
           // the successor's schedule — not even the attempt count. The schedule's identity
@@ -2253,7 +2258,10 @@ export class TripleStoreAsyncLiftPublisher
           // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
           // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
           // every pass and crowd out jobs that could actually settle.
-          this.chainProofRetrySchedule.defer(job.jobId, chainProofScheduleIdentity(job), 'default');
+          // UNVERIFIED (r4 3881841010): the exception path never re-read the record, so this
+          // deferral may be from a superseded incarnation. It must not touch a schedule the
+          // successor has earned — it lands only on an absent entry or this incarnation's own.
+          this.chainProofRetrySchedule.deferUnverified(job.jobId, identity, 'default');
           continue;
         }
       }
@@ -2332,12 +2340,26 @@ export class TripleStoreAsyncLiftPublisher
     current: PersistedFailedJob,
     lookup: AsyncLiftChainProofLookup,
   ): boolean {
-    if (current.failure.failedFromState !== before.failure.failedFromState) return false;
-    if (current.failure.code !== before.failure.code) return false;
-    if (current.timestamps.failedAt !== before.timestamps.failedAt) return false;
     const currentLookup = this.chainProofLookupFor(current);
     return currentLookup !== null
-      && chainProofLookupFingerprint(currentLookup) === chainProofLookupFingerprint(lookup);
+      && this.heldChainProofIncarnationKey(current, currentLookup)
+        === this.heldChainProofIncarnationKey(before, lookup);
+  }
+
+  /**
+   * THE one held-incarnation identity (r4 3881841027): the same four facts
+   * {@link isSameHeldFailedJob} has always compared — origin state, failure code, `failedAt`,
+   * and the derived transaction-evidence fingerprint — joined into one key and shared by the
+   * stale-verdict guard above AND the retry schedule, so the two boundaries cannot drift. A
+   * `failedAt`-less carrier record contributes a literal, mirroring the predicate's
+   * undefined === undefined behavior.
+   */
+  private heldChainProofIncarnationKey(
+    job: PersistedFailedJob,
+    lookup: AsyncLiftChainProofLookup,
+  ): string {
+    return `${job.failure.failedFromState}|${job.failure.code}|${job.timestamps.failedAt ?? 'u'}`
+      + `|${chainProofLookupFingerprint(lookup)}`;
   }
 
   /** Execute the disposition the policy module decides for a (re-verified) held job. */

@@ -233,6 +233,59 @@ describe('GH#2270 chain-proof cadence', () => {
       expect(asks).toBe(5);
     });
 
+    it("a stale predecessor's late EXCEPTION cannot reset the successor's earned backoff", async () => {
+      // r4 (3881841010) — the mutation-side twin of the stale guarantees: pass A's resolver call
+      // stalls, the record is re-failed, the successor earns its 30s deferral on its own pass,
+      // and THEN A's call rejects. The catch-path deferral is unverified, so it must land on
+      // nothing: the successor stays quiet until ITS due time, and is asked exactly then.
+      let failFirst!: (err: Error) => void;
+      const parked = new Promise<never>((_resolve, reject) => { failFirst = reject; });
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        chainProofResolver: async () => {
+          asks += 1;
+          if (asks === 1) await parked;
+          return { status: 'pending-mempool' };
+        },
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      const firstPass = publisher.recover();
+      while (asks === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+
+      const current = await publisher.getStatus(jobId);
+      const successor = {
+        ...current!,
+        timestamps: { ...current!.timestamps, failedAt: (current!.timestamps as { failedAt: number }).failedAt + 1 },
+      };
+      const { jobRef, jobQuads } = serializeJobRecord(successor as never, DEFAULT_CONTROL_GRAPH_URI);
+      await (h.store as unknown as {
+        replaceSubject(graph: string, subject: string, quads: unknown): Promise<void>;
+      }).replaceSubject(DEFAULT_CONTROL_GRAPH_URI, jobRef, jobQuads);
+
+      // The successor earns its own schedule: asked immediately (stale pass wrote nothing yet),
+      // deferred 30s at attempt 1.
+      await publisher.recover();
+      expect(asks).toBe(2);
+
+      // NOW the predecessor's resolver call rejects; its catch-path deferral is unverified.
+      failFirst(new Error('predecessor resolver died late'));
+      await firstPass;
+
+      // The successor's backoff is intact: quiet before its own due time...
+      h.advance(29_000);
+      await publisher.recover();
+      expect(asks).toBe(2);
+      // ...asked exactly past it. A leaked predecessor deferral would either have reset the
+      // ladder (foreign identity -> immediately due, asked at 29s) or restarted attempts.
+      h.advance(2_000);
+      await publisher.recover();
+      expect(asks).toBe(3);
+      expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    });
+
     it('a verdict rejected as STALE leaves the successor record unscheduled', async () => {
       // 3879708110 — the held job is replaced while its resolver is in flight (fresh failedAt =
       // a re-failed successor). The identity boundary drops the verdict; the successor must not

@@ -35,23 +35,6 @@ const CHAIN_PROOF_AWAITING_CONFIRMATIONS_BASE_CAP_MS = Math.floor(
 
 export type ChainProofRetryCadence = 'awaiting-confirmations' | 'default';
 
-/** The facts one held-job incarnation is identified by for scheduling purposes. */
-export interface ChainProofScheduleIdentityInput {
-  readonly failure: { readonly failedFromState: string; readonly code: string };
-  readonly timestamps: { readonly failedAt?: number; readonly updatedAt: number };
-}
-
-/**
- * One schedule identity string per held-job incarnation; a re-fail always changes it. A
- * `failedAt`-less variant (failed-from-accepted carrier records) falls back to `updatedAt`,
- * which every write refreshes — a coarser discriminator that can only err toward MORE resets,
- * never toward inheriting a foreign ladder.
- */
-export function chainProofScheduleIdentity(job: ChainProofScheduleIdentityInput): string {
-  const stamp = job.timestamps.failedAt ?? `u${job.timestamps.updatedAt}`;
-  return `${job.failure.failedFromState}|${job.failure.code}|${stamp}`;
-}
-
 export class ChainProofRetrySchedule {
   private readonly entries = new Map<string, { dueAt: number; attempts: number; identity: string }>();
 
@@ -72,13 +55,31 @@ export class ChainProofRetrySchedule {
   }
 
   /**
-   * A turn that established nothing defers the next one. The attempt ladder continues only for
-   * the SAME incarnation; a different identity starts at the base — the predecessor's exponent
-   * is its own history, not the successor's.
+   * A VERIFIED turn that established nothing defers the next one — verified meaning the caller
+   * re-read the record under the claim lock and confirmed it is still this incarnation, so a
+   * predecessor's leftover entry may be superseded: a different prior identity starts the
+   * ladder at the base (the predecessor's exponent is its own history, not the successor's).
    */
   defer(jobId: string, identity: string, cadence: ChainProofRetryCadence): void {
     const prior = this.entries.get(jobId);
-    const attempts = (prior && prior.identity === identity ? prior.attempts : 0) + 1;
+    this.write(jobId, identity, cadence,
+      (prior && prior.identity === identity ? prior.attempts : 0) + 1);
+  }
+
+  /**
+   * An UNVERIFIED deferral (r4 3881841010) — the caller could not re-establish which
+   * incarnation the jobId currently names (the exception path has no re-read). It lands only on
+   * an absent entry or this incarnation's own; a FOREIGN entry is schedule the successor
+   * earned, and a late echo from a superseded pass may not touch it — not the due time, not the
+   * attempt count.
+   */
+  deferUnverified(jobId: string, identity: string, cadence: ChainProofRetryCadence): void {
+    const prior = this.entries.get(jobId);
+    if (prior && prior.identity !== identity) return;
+    this.write(jobId, identity, cadence, (prior ? prior.attempts : 0) + 1);
+  }
+
+  private write(jobId: string, identity: string, cadence: ChainProofRetryCadence, attempts: number): void {
     const capMs = cadence === 'awaiting-confirmations'
       ? CHAIN_PROOF_AWAITING_CONFIRMATIONS_BASE_CAP_MS
       : CHAIN_PROOF_BACKOFF_MAX_MS;
@@ -90,8 +91,14 @@ export class ChainProofRetrySchedule {
     });
   }
 
-  /** A settled job's schedule is history. */
-  settled(jobId: string): void {
+  /**
+   * A settled job's schedule is history. Identity-guarded as a belt (r4 3881841010): settlement
+   * follows a verified disposition so a foreign entry should be unreachable here, but a late
+   * echo must still not delete what a successor earned.
+   */
+  settled(jobId: string, identity: string): void {
+    const entry = this.entries.get(jobId);
+    if (entry && entry.identity !== identity) return;
     this.entries.delete(jobId);
   }
 }

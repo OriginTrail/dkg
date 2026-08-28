@@ -5,10 +5,7 @@
  * async-lift-chain-proof-dispatch-2270.test.ts keep proving the wiring.
  */
 import { describe, expect, it } from 'vitest';
-import {
-  ChainProofRetrySchedule,
-  chainProofScheduleIdentity,
-} from '../src/chain-proof-retry-schedule.js';
+import { ChainProofRetrySchedule } from '../src/chain-proof-retry-schedule.js';
 
 function harness(rand: () => number = () => 0) {
   let now = 1_000_000;
@@ -24,13 +21,6 @@ const A = 'broadcast|recovery_lookup_timeout|500';
 const B = 'broadcast|recovery_lookup_timeout|900';
 
 describe('ChainProofRetrySchedule', () => {
-  it('derives one identity per held-job incarnation from failure facts', () => {
-    expect(chainProofScheduleIdentity({
-      failure: { failedFromState: 'broadcast', code: 'recovery_lookup_timeout' },
-      timestamps: { failedAt: 500 },
-    })).toBe(A);
-  });
-
   it('grows the default ladder 30s → 60s → 120s → 240s and caps at 10 minutes', () => {
     const h = harness();
     for (const [attempt, delay] of [[1, 30_000], [2, 60_000], [3, 120_000], [4, 240_000], [5, 480_000], [6, 600_000], [7, 600_000]] as const) {
@@ -108,7 +98,45 @@ describe('ChainProofRetrySchedule', () => {
   it('a settled job leaves no schedule behind', () => {
     const h = harness();
     h.schedule.defer('job', A, 'default');
-    h.schedule.settled('job');
+    h.schedule.settled('job', A);
     expect(h.schedule.isDue('job', A, h.now())).toBe(true);
+  });
+
+  it('an UNVERIFIED deferral from a superseded incarnation cannot touch what the successor earned', () => {
+    // r4 (3881841010) — the exception path has no re-read, so its deferral may be a late echo
+    // from a stale pass. The successor's entry (due time AND attempt count) must survive it.
+    const h = harness();
+    h.schedule.defer('job', B, 'default'); // successor earned attempt 1: due in 30s
+    h.schedule.deferUnverified('job', A, 'default'); // predecessor's late exception echo
+    h.advance(29_999);
+    expect(h.schedule.isDue('job', B, h.now())).toBe(false); // B's 30s intact, not reset
+    h.advance(1);
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true);
+    // ...and B's ladder continues at ITS attempt 2, not a foreign restart.
+    h.schedule.defer('job', B, 'default');
+    h.advance(59_999);
+    expect(h.schedule.isDue('job', B, h.now())).toBe(false);
+    h.advance(1);
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true);
+  });
+
+  it('an UNVERIFIED deferral lands normally on an absent entry or its own', () => {
+    const h = harness();
+    h.schedule.deferUnverified('job', A, 'default'); // absent: attempt 1
+    h.advance(29_999);
+    expect(h.schedule.isDue('job', A, h.now())).toBe(false);
+    h.advance(1);
+    h.schedule.deferUnverified('job', A, 'default'); // own entry: attempt 2
+    h.advance(59_999);
+    expect(h.schedule.isDue('job', A, h.now())).toBe(false);
+    h.advance(1);
+    expect(h.schedule.isDue('job', A, h.now())).toBe(true);
+  });
+
+  it('a late settlement echo cannot delete a schedule the successor earned', () => {
+    const h = harness();
+    h.schedule.defer('job', B, 'default');
+    h.schedule.settled('job', A); // foreign identity: no-op
+    expect(h.schedule.isDue('job', B, h.now())).toBe(false); // B still deferred
   });
 });

@@ -16,7 +16,8 @@ import {
   decodeKnowledgeAssetMerkleRootCount,
 } from './evm-knowledge-asset-update-context.js';
 import { confirmedStateBlockAtHead } from './evm-adapter-constants.js';
-import { isContractViewRetryable, readAllProvidersWithTransientRetry } from './rpc-failover-client.js';
+import { isContractViewRetryable } from './rpc-failover-client.js';
+import { readAllProvidersWithTransientRetry } from './rpc-provider-poll.js';
 
 /** One in-place retry per endpoint for transient transport blips in the unanimity poll. */
 const VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS = 250;
