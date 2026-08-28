@@ -25,8 +25,8 @@ import {
   snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from '../src/rfc64/catalog-authority-config-v1.js';
 import {
+  resolveRfc64PrivateRecoveryContextGraphIdsV1,
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
-  resolveRfc64SelectedRecoveryContextGraphIdsV1,
 } from '../src/rfc64/swm-recovery-plan-v1.js';
 import { DKGAgent, mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
 
@@ -174,7 +174,7 @@ describe('RFC-64 private catalog activation', () => {
       config: { rfc64CatalogBootstrap: bootstrap },
     } as unknown as DKGAgent;
 
-    expect(resolveRfc64SelectedRecoveryContextGraphIdsV1(bootstrap))
+    expect(resolveRfc64PrivateRecoveryContextGraphIdsV1(bootstrap))
       .toEqual([PRIVATE_CG]);
     expect(resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
       bootstrap,

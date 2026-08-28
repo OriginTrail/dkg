@@ -259,17 +259,13 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
 
   it('keeps the reserved selected-provider lane public-only and leaves private recovery ordinary', async () => {
     const publicCg = 'selected-public-cg';
+    const unselectedPublicCg = 'unselected-public-cg';
     const privateCg = 'did:dkg:agent:0x1111111111111111111111111111111111111111/private-cg';
     const syncCalls: Array<{
       contextGraphIds: readonly string[];
       selected: boolean;
     }> = [];
     const plannedScopes: Array<readonly string[]> = [];
-    const mixedPlan = {
-      publicContextGraphIds: [publicCg],
-      privateRecoverFromCurator: [privateCg],
-      eligibleContextGraphIds: [publicCg, privateCg],
-    };
     const agent: SelectedProviderSelectionAgent = {
       started: true,
       config: {
@@ -277,8 +273,12 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         syncSharedMemoryOnConnect: true,
         syncContextGraphs: [publicCg],
         rfc64CatalogBootstrap: {
-          acceptedPolicies: [publicCg, privateCg].map((contextGraphId) => ({
-            policyEnvelope: { payload: { contextGraphId } },
+          acceptedPolicies: [
+            { contextGraphId: publicCg, accessPolicy: 0 as const },
+            { contextGraphId: unselectedPublicCg, accessPolicy: 0 as const },
+            { contextGraphId: privateCg, accessPolicy: 1 as const },
+          ].map(({ contextGraphId, accessPolicy }) => ({
+            policyEnvelope: { payload: { contextGraphId, accessPolicy } },
             completeSwmProviders: [PEER],
           })),
         },
@@ -295,10 +295,19 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       planSharedMemorySyncContextGraphs: async (_peerId, contextGraphIds = []) => {
         plannedScopes.push([...contextGraphIds]);
-        return mixedPlan;
+        const eligibleContextGraphIds = [...contextGraphIds];
+        return {
+          publicContextGraphIds: eligibleContextGraphIds.filter(
+            (contextGraphId) => contextGraphId !== privateCg,
+          ),
+          privateRecoverFromCurator: eligibleContextGraphIds.filter(
+            (contextGraphId) => contextGraphId === privateCg,
+          ),
+          eligibleContextGraphIds,
+        };
       },
       resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId: string) => (
-        contextGraphId === publicCg || contextGraphId === privateCg ? [PEER] : []
+        [publicCg, unselectedPublicCg, privateCg].includes(contextGraphId) ? [PEER] : []
       ),
       syncFromPeerDetailed: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
@@ -338,7 +347,9 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     ]);
     expect(plannedScopes.length).toBeGreaterThan(0);
     expect(plannedScopes.every((scope) => (
-      scope.includes(publicCg) && scope.includes(privateCg)
+      scope.includes(publicCg)
+      && scope.includes(privateCg)
+      && !scope.includes(unselectedPublicCg)
     ))).toBe(true);
   });
 

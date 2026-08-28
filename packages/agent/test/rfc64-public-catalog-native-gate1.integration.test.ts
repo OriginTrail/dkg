@@ -1549,6 +1549,41 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
   }, 30_000);
 
+  it('normalizes legacy void and transaction precommits alongside the lifecycle result', async () => {
+    for (const resultShape of ['void', 'transaction', 'lifecycle'] as const) {
+      const fixture = await setupLiveReceiver();
+      await fixture.bootstrap();
+      const commit = vi.fn();
+      const rollback = vi.fn();
+      const afterAppliedHead = vi.fn();
+      const beforeAppliedHeadCommit: Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 =
+        async () => {
+          if (resultShape === 'void') return;
+          const transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 = {
+            commit,
+            rollback: async (cause) => { rollback(cause); },
+          };
+          return resultShape === 'transaction'
+            ? transaction
+            : appliedHeadLifecycleV1(transaction, afterAppliedHead);
+        };
+      const receiver = fixture.createReceiver(
+        fixture.receiverPersistence.inventory,
+        undefined,
+        undefined,
+        fixture.receiverStore,
+        beforeAppliedHeadCommit,
+      );
+
+      await expect(fixture.synchronize(fixture.announcement, receiver)).resolves.toMatchObject({
+        appliedHeadStatus: 'applied',
+      });
+      expect(commit).toHaveBeenCalledTimes(resultShape === 'void' ? 0 : 1);
+      expect(rollback).not.toHaveBeenCalled();
+      expect(afterAppliedHead).toHaveBeenCalledTimes(resultShape === 'lifecycle' ? 1 : 0);
+    }
+  }, 60_000);
+
   it('restores SWM and VM together when the applied-head CAS rejects the target', async () => {
     const fixture = await setupLiveReceiver();
     await fixture.bootstrap();

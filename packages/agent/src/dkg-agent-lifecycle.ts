@@ -636,8 +636,8 @@ import type { DKGAgent } from './dkg-agent.js';
 
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import {
+  resolveRfc64PrivateRecoveryContextGraphIdsV1,
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
-  resolveRfc64SelectedRecoveryContextGraphIdsV1,
   resolveRfc64SwmRecoveryLaneV1,
   type Rfc64PeerSwmRecoveryPlanV1,
 } from './rfc64/swm-recovery-plan-v1.js';
@@ -661,7 +661,7 @@ function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   return resolveSyncGlobalBackpressure({
     ...config,
     selectedRecoveryContextGraphIds: [...new Set([
-      ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
+      ...resolveRfc64PrivateRecoveryContextGraphIdsV1(
         config.rfc64CatalogBootstrap ?? config.rfc64PublicCatalogBootstrap,
       ),
       ...edgeSelectedContextGraphIds,
@@ -4493,7 +4493,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // so the ordinary private curator-replacement lane can run.
     const sharedMemoryRecoveryContextGraphIds = [...new Set([
       ...(this.config.syncContextGraphs ?? []),
-      ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
+      ...resolveRfc64PrivateRecoveryContextGraphIdsV1(
         this.config.rfc64CatalogBootstrap ?? this.config.rfc64PublicCatalogBootstrap,
       ),
     ])];

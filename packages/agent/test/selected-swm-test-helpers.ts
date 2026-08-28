@@ -261,13 +261,13 @@ export interface SelectedProviderSelectionAgent {
     syncContextGraphs: string[];
     rfc64PublicCatalogBootstrap?: {
       acceptedPublicPolicies: Array<{
-        policyEnvelope: { payload: { contextGraphId: string } };
+        policyEnvelope: { payload: { contextGraphId: string; accessPolicy?: 0 | 1 } };
         completeSwmProviders: string[];
       }>;
     };
     rfc64CatalogBootstrap?: {
       acceptedPolicies: Array<{
-        policyEnvelope: { payload: { contextGraphId: string } };
+        policyEnvelope: { payload: { contextGraphId: string; accessPolicy?: 0 | 1 } };
         completeSwmProviders: string[];
       }>;
     };
