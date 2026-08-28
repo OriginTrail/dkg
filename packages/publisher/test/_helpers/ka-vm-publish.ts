@@ -143,10 +143,10 @@ export const KA_VM_INCLUSION = {
 export const KA_VM_EXECUTOR_TX_HASH = (`0x${'cd'.repeat(32)}`) as `0x${string}`;
 
 /**
- * r14 (3878067113) — typed recovery fixtures. `satisfies` pins these against the exported
- * contracts wherever a typecheck lane covers this file (NOTE: the package build's tsc covers
- * src only, so until test helpers join a typecheck lane the primary win is the single point of
- * change; the annotations become load-bearing the moment they are compiled).
+ * r14 (3878067113) + r16 (3878126518) — typed recovery fixtures, genuinely checked: the
+ * `satisfies` annotations compile under the package's test-helper typecheck lane
+ * (`tsconfig.test-helpers.json`, run as part of the package build), so a contract change
+ * fails HERE at build time rather than drifting silently.
  */
 import type {
   AsyncKnowledgeAssetVmPublishRecoveryEvidence,
@@ -185,6 +185,6 @@ export function kaVmRecoveryEvidence(
       authorAddress: KA_VM_AUTHOR_ADDRESS as `0x${string}`,
       txIndex: 4,
     },
-  } as AsyncKnowledgeAssetVmPublishRecoveryEvidence;
+  } satisfies AsyncKnowledgeAssetVmPublishRecoveryEvidence;
 }
 
