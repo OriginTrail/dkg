@@ -284,6 +284,32 @@ describe('paginateAgentRows (GH#310)', () => {
     for (const r of second.rows as any[]) expect(firstUris.has(r.agentUri)).toBe(false);
     expect(first.rows.length - 1 + second.rows.length).toBe(remaining.length);
   });
+
+  it('continues within a conflicted identity after the cursor row is deleted', () => {
+    const conflicts = Array.from({ length: 3 }, (_, index) => row({
+      name: `binding-${index}`,
+      peerId: `peer-conflict-${index}`,
+    }));
+    const first = paginateAgentRows(conflicts, { limit: 1 });
+    expect(first.rows).toHaveLength(1);
+    expect(first.nextCursor).toBeDefined();
+
+    const cursorPeerId = first.rows[0]!.peerId;
+    const remaining = conflicts.filter((agent) => agent.peerId !== cursorPeerId);
+    const collected: string[] = [];
+    let cursor = first.nextCursor;
+    let guard = 0;
+    while (cursor) {
+      const page = paginateAgentRows(remaining, { limit: 1, cursor });
+      expect(page.rows.length).toBeLessThanOrEqual(1);
+      collected.push(...page.rows.map((agent) => agent.peerId));
+      cursor = page.nextCursor;
+      expect(++guard).toBeLessThan(remaining.length + 1);
+    }
+
+    expect(collected).toHaveLength(remaining.length);
+    expect(new Set(collected)).toEqual(new Set(remaining.map((agent) => agent.peerId)));
+  });
 });
 
 // ── Route level: the wiring is what GH#310 actually ships ────────────────────
