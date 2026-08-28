@@ -4,17 +4,24 @@
  * publisher loop consumes dispatch outcomes and delegates scheduling without carrying backoff
  * arithmetic or phase branches. INTERNAL — deliberately not exported from the package barrel.
  *
- * ONE map, keyed by jobId, each entry remembering the INCARNATION that earned it (PR #2373 r8
- * 3882533273 — the follow-up that replaced the dual-map protocol): ownership has a single
- * source of truth, so every operation answers locally. A due check for a different incarnation
- * than the entry's is a successor observation — the predecessor's entry is REPLACED by
- * immediate dueness, never waited out. A deferral whose incarnation disagrees with the stored
- * entry is a superseded echo and is dropped whole — it can neither reset the successor's ladder
- * nor leave an unreachable entry behind (the leak the split-map version retained: a late echo
- * re-creating its dead entry after pruning, PR #2373 r8 🔴 3882533655). A deferral with no
- * entry present starts its own ladder — first contact for that incarnation. `settled` clears
- * only its own incarnation's entry. The map is bounded by live job count BY CONSTRUCTION:
- * every write lands on the jobId slot.
+ * ONE map, keyed by jobId, ONE entry per job in one of two EXPLICIT states (PR #2380 r2
+ * 3882793685 — the states replace the earlier attempts-zero sentinel):
+ *
+ *   - `ready`    — an incarnation OWNS the slot and is due immediately (a successor observed
+ *                  by an inventory pass, before its first deferral).
+ *   - `deferred` — the owning incarnation earned a backoff; only this state carries
+ *                  `attempts`/`dueAt`.
+ *
+ * Ownership changes are RECENCY-GUARDED: every entry records `observedAt` (the pass snapshot
+ * that installed it, or the deferral instant), and a due check for a different identity may
+ * replace the entry only when its own pass snapshot is not older — an overlapping STALE pass,
+ * still filtering against a superseded inventory, cannot reclaim the slot from the newer
+ * incarnation (the r2 red: the marker alone guarded stale defers, not stale due checks). The
+ * refusal answers "not due" for the superseded identity; a rare inverse race (an own-identity
+ * deferral stamping a newer observedAt between a fresh pass's snapshot and its filter) can
+ * delay the successor's takeover by one pass, never lose state — strictly the safe direction.
+ * Stale deferrals and settlements are identity-rejected as before; the map stays bounded at
+ * one entry per job BY CONSTRUCTION.
  *
  * The ladder (r18 🔴 3816322914 anti-herd design, unchanged): base 30s doubling per attempt,
  * jittered by +0..25% of the computed delay so a population held by ONE incident does not come
@@ -37,53 +44,61 @@ const CHAIN_PROOF_AWAITING_CONFIRMATIONS_BASE_CAP_MS = Math.floor(
 
 export type ChainProofRetryCadence = 'awaiting-confirmations' | 'default';
 
+type ScheduleEntry =
+  | { readonly kind: 'ready'; readonly identity: string; readonly observedAt: number }
+  | {
+      readonly kind: 'deferred';
+      readonly identity: string;
+      readonly observedAt: number;
+      readonly dueAt: number;
+      readonly attempts: number;
+    };
+
 export class ChainProofRetrySchedule {
-  /** ONE entry per jobId; the incarnation field is the ownership check every mutation makes. */
-  private readonly entries = new Map<string, { identity: string; dueAt: number; attempts: number }>();
+  /** ONE entry per jobId; identity + recency are the ownership checks every operation makes. */
+  private readonly entries = new Map<string, ScheduleEntry>();
 
   constructor(
     private readonly deps: { now(): number; rand(): number },
   ) {}
 
   /**
-   * Due when nothing is scheduled for this jobId, when the entry belongs to a DIFFERENT
-   * incarnation (the inventory's word that the record moved on — the successor never waits out
-   * the predecessor's due time), or when the deferral has elapsed. `atMs` is the caller's pass
-   * snapshot so one pass judges the whole population at one instant.
+   * Due when nothing is scheduled, when this identity owns a `ready` slot, or when its
+   * deferral elapsed. A DIFFERENT identity takes ownership (installing `ready`) only when this
+   * pass's snapshot is not older than the entry's observation — a stale pass cannot reclaim
+   * the slot and is answered "not due" for its superseded identity.
    */
   isDue(jobId: string, identity: string, atMs: number): boolean {
     const entry = this.entries.get(jobId);
     if (!entry) return true;
     if (entry.identity !== identity) {
-      // Successor observation installs an immediately-due OWNERSHIP MARKER (PR #2380 r1
-      // 3882686189/3882686193): deleting the slot instead would open an unowned window a stale
-      // echo could claim, silently discarding the successor's first earned deferral. The marker
-      // keeps exactly one entry per job, keeps the successor immediately due until it defers,
-      // starts its ladder at zero, and makes a stale write unrepresentable across the WHOLE
-      // dispatch interval — ownership is never vacant.
-      this.entries.set(jobId, { identity, attempts: 0, dueAt: atMs });
+      if (atMs < entry.observedAt) return false;
+      this.entries.set(jobId, { kind: 'ready', identity, observedAt: atMs });
       return true;
     }
+    if (entry.kind === 'ready') return true;
     return entry.dueAt <= atMs;
   }
 
   /**
-   * A turn that established nothing defers the next one. An existing entry owned by a DIFFERENT
-   * incarnation means this deferral is a superseded echo — dropped whole (r8 🔴 3882533655: the
-   * echo may neither reset the successor's ladder nor be retained as unreachable state). An
-   * absent entry or this incarnation's own continues/starts the ladder.
+   * A turn that established nothing defers the next one. A foreign entry means this deferral
+   * is a superseded echo — dropped whole (r8 🔴 3882533655: neither reset nor retained). An
+   * own `ready` slot or absent entry starts the ladder; an own `deferred` entry continues it.
    */
   defer(jobId: string, identity: string, cadence: ChainProofRetryCadence): void {
     const entry = this.entries.get(jobId);
     if (entry && entry.identity !== identity) return;
-    const attempts = (entry ? entry.attempts : 0) + 1;
+    const attempts = (entry?.kind === 'deferred' ? entry.attempts : 0) + 1;
     const capMs = cadence === 'awaiting-confirmations'
       ? CHAIN_PROOF_AWAITING_CONFIRMATIONS_BASE_CAP_MS
       : CHAIN_PROOF_BACKOFF_MAX_MS;
     const backoffMs = Math.min(CHAIN_PROOF_BACKOFF_BASE_MS * 2 ** (attempts - 1), capMs);
+    const now = this.deps.now();
     this.entries.set(jobId, {
+      kind: 'deferred',
       identity,
-      dueAt: this.deps.now() + backoffMs + Math.floor(this.deps.rand() * backoffMs * CHAIN_PROOF_BACKOFF_JITTER),
+      observedAt: now,
+      dueAt: now + backoffMs + Math.floor(this.deps.rand() * backoffMs * CHAIN_PROOF_BACKOFF_JITTER),
       attempts,
     });
   }

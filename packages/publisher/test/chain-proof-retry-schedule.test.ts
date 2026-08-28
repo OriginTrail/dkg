@@ -161,6 +161,25 @@ describe('ChainProofRetrySchedule', () => {
     expect(h.schedule.retainedEntryCount()).toBe(1);
   });
 
+  it('a STALE due check cannot reclaim ownership from a newer incarnation', () => {
+    // PR #2380 r2 (🔴 3882793685) — an overlapping older pass, still filtering its superseded
+    // inventory snapshot, reaches isDue AFTER the newer pass installed the successor's marker.
+    // Its snapshot timestamp is older than the marker's observation, so the reclaim is refused
+    // (answered "not due" for the superseded identity) and the successor's next deferral lands.
+    const h = harness();
+    h.schedule.defer('job', A, 'default'); // the slot is A's (the r2 scenario's premise)
+    const stalePassSnapshot = h.now();
+    h.advance(10);
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true); // newer pass: B's marker installed
+    expect(h.schedule.isDue('job', A, stalePassSnapshot)).toBe(false); // stale pass refused
+    h.schedule.defer('job', B, 'default'); // B's deferral is NOT foreign-dropped
+    h.advance(29_999);
+    expect(h.schedule.isDue('job', B, h.now())).toBe(false); // B's 30s backoff intact
+    h.advance(1);
+    expect(h.schedule.isDue('job', B, h.now())).toBe(true);
+    expect(h.schedule.retainedEntryCount()).toBe(1);
+  });
+
   it('a stale echo cannot claim the slot between successor observation and its first deferral', () => {
     // PR #2380 r1 (🔴 3882686189 / 3882686193) — the exact interleaving: defer(A); isDue(B);
     // late defer(A) echo; defer(B). The ownership marker rejects the echo, so B's first earned
