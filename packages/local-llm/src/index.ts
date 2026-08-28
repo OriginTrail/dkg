@@ -1,4 +1,8 @@
 export {
+  parseDomainProfile,
+  type DkgLocalLlmDomainProfile,
+} from './domain-profile.js';
+export {
   DkgLocalLlmRuntime,
   normalizeFinalAnswer,
   type DkgChatEvidence,

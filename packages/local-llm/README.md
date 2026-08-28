@@ -18,5 +18,10 @@ It also provides:
 - plain-text interaction traces with secret redaction and `0600` permissions;
 - system context v4.2, without benchmark fixtures or domain-specific IDs.
 
+Partner integrations can supply a validated JSON domain profile containing
+literal routing keywords, explicit read/write adapter tool names, and a domain
+context addendum. Profiles extend routing as data; they do not patch the core
+router or weaken the runtime's read-only default.
+
 The package is a library. The umbrella `dkg llm` CLI owns MCP stdio lifecycle,
 configuration, and operator-facing write opt-in.

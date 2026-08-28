@@ -12,6 +12,7 @@ import {
 import {
   DkgLocalLlmRuntime,
   TextInteractionTrace,
+  parseDomainProfile,
   type McpClientLike,
   type ToolProfile,
 } from '@origintrail-official/dkg-local-llm';
@@ -27,6 +28,7 @@ export interface LlmCommandOptions {
   adapter?: string[];
   tool?: string[];
   systemContextFile?: string;
+  domainProfile?: string;
   logDir?: string;
   logFile?: string;
   maxToolCalls?: string;
@@ -52,6 +54,7 @@ export interface ResolvedLlmCommandOptions {
   adapterPaths: string[];
   additionalToolNames: string[];
   systemContextFile?: string;
+  domainProfileFile?: string;
   logDir: string;
   logFile?: string;
   maxToolCalls: number;
@@ -115,6 +118,7 @@ export function resolveLlmCommandOptions(
     adapterPaths,
     additionalToolNames: [...new Set(options.tool ?? [])],
     systemContextFile: options.systemContextFile ? path.resolve(options.systemContextFile) : undefined,
+    domainProfileFile: options.domainProfile ? path.resolve(options.domainProfile) : undefined,
     logDir: path.resolve(options.logDir ?? path.join(dkgHome, 'logs/local-llm')),
     logFile: options.logFile ? path.resolve(options.logFile) : undefined,
     maxToolCalls: positiveInteger('--max-tool-calls', options.maxToolCalls, 4),
@@ -221,6 +225,9 @@ export async function runLlmCommand(options: ResolvedLlmCommandOptions): Promise
     const systemContextAddendum = options.systemContextFile
       ? await readFile(options.systemContextFile, 'utf8')
       : undefined;
+    const domainProfile = options.domainProfileFile
+      ? parseDomainProfile(JSON.parse(await readFile(options.domainProfileFile, 'utf8')))
+      : undefined;
     const runtime = await DkgLocalLlmRuntime.create({
       mcp: mcp as unknown as McpClientLike,
       llamaUrl: options.llamaUrl,
@@ -229,6 +236,7 @@ export async function runLlmCommand(options: ResolvedLlmCommandOptions): Promise
       profile: options.profile,
       allowWrite: options.allowWrite,
       additionalToolNames: options.additionalToolNames,
+      domainProfile,
       systemContextAddendum,
       temperature: options.temperature,
       topP: options.topP,
@@ -295,6 +303,7 @@ export function registerLlmCommand(program: Command): void {
     .option('--adapter <path...>', 'extra MCP adapter module path(s)')
     .option('--tool <name...>', 'additional adapter tool name(s) eligible for routing')
     .option('--system-context-file <path>', 'domain addendum appended to the generic v4.2 context')
+    .option('--domain-profile <path>', 'JSON routing/tool/context profile for an MCP adapter domain')
     .option('--log-dir <path>', 'text trace directory (default: <DKG_HOME>/logs/local-llm)')
     .option('--log-file <path>', 'exact text trace file path')
     .option('--max-tool-calls <n>', 'successful tool-call limit per turn', '4')

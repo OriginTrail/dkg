@@ -322,9 +322,11 @@ bounds chat history, and writes a redacted owner-only text trace under
 
 Mutation tools are unavailable unless the operator passes `--allow-write`;
 even then, the prompt must explicitly request the mutation. Extra MCP adapters
-can be loaded with `--adapter`, while `--tool` and `--system-context-file`
-provide a generic domain-profile seam without adding domain IDs or benchmark
-answers to the built-in system context.
+can be loaded with `--adapter`. `--domain-profile profile.json` supplies its
+literal routing keywords, read/write tool allowlists, and system-context
+addendum without adding domain IDs or benchmark answers to the built-in core.
+For small experiments, `--tool` and `--system-context-file` expose the same
+seams separately.
 
 NPM/dist-tag auto-update is the recommended production path. Advanced Core nodes
 can opt into daemon-polled git updates with `autoUpdate.source: "git"`,

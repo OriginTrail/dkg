@@ -13,6 +13,7 @@ import {
   type ToolProfile,
 } from './tool-router.js';
 import { NOOP_TRACE, type InteractionTrace } from './text-trace.js';
+import type { DkgLocalLlmDomainProfile } from './domain-profile.js';
 
 export interface McpClientLike {
   listTools(): Promise<{ tools: McpToolDefinition[] }>;
@@ -63,6 +64,7 @@ export interface DkgLocalLlmOptions {
   profile?: ToolProfile;
   allowWrite?: boolean;
   additionalToolNames?: string[];
+  domainProfile?: DkgLocalLlmDomainProfile;
   systemContextAddendum?: string;
   temperature?: number;
   topP?: number;
@@ -209,6 +211,7 @@ export class DkgLocalLlmRuntime {
   private readonly profile: ToolProfile;
   private readonly allowWrite: boolean;
   private readonly additionalToolNames: string[];
+  private readonly domainProfile?: DkgLocalLlmDomainProfile;
   private readonly systemContextAddendum?: string;
   private readonly temperature: number;
   private readonly topP: number;
@@ -233,6 +236,7 @@ export class DkgLocalLlmRuntime {
     this.profile = options.profile ?? 'auto';
     this.allowWrite = options.allowWrite ?? false;
     this.additionalToolNames = [...new Set(options.additionalToolNames ?? [])];
+    this.domainProfile = options.domainProfile;
     this.systemContextAddendum = options.systemContextAddendum?.trim() || undefined;
     this.temperature = options.temperature ?? 0.15;
     this.topP = options.topP ?? 0.9;
@@ -399,9 +403,13 @@ export class DkgLocalLlmRuntime {
       allowWrite: this.allowWrite,
       maxTools: this.maxToolsPerTurn,
       additionalToolNames: this.additionalToolNames,
+      additionalReadToolNames: this.domainProfile?.readTools,
+      additionalWriteToolNames: this.domainProfile?.writeTools,
+      domainKeywords: this.domainProfile?.routingKeywords,
       hasPriorEvidence: this.sessionTurns.some((turn) => turn.evidence.length > 0),
     });
     await this.trace.write('TOOL ROUTER', {
+      domainProfile: this.domainProfile?.name,
       profile: route.profile,
       reason: route.reason,
       writeBlocked: route.writeBlocked,
@@ -421,7 +429,9 @@ export class DkgLocalLlmRuntime {
         profile: route.profile,
         toolNames: route.tools.map((tool) => tool.name),
         allowWrite: this.allowWrite,
-        addendum: this.systemContextAddendum,
+        addendum: [this.domainProfile?.systemContext, this.systemContextAddendum]
+          .filter(Boolean)
+          .join('\n\n'),
       }),
       ...(priorSession ? [SESSION_CONTEXT, priorSession] : []),
     ].join('\n\n');

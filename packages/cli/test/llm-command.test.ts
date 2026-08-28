@@ -49,12 +49,14 @@ describe('dkg llm options', () => {
   it('accepts adapters from DKG_ADAPTERS and explicit extra tool names', () => {
     const options = resolveLlmCommandOptions([], {
       tool: ['partner_lookup', 'partner_lookup'],
+      domainProfile: './profiles/partner.json',
     }, {
       DKG_HOME: '/tmp/dkg-llm-test',
       DKG_ADAPTERS: '/tmp/one.js, /tmp/two.js',
     });
     expect(options.adapterPaths).toEqual(['/tmp/one.js', '/tmp/two.js']);
     expect(options.additionalToolNames).toEqual(['partner_lookup']);
+    expect(options.domainProfileFile).toMatch(/profiles\/partner\.json$/);
   });
 
   it('registers the command and its read/write controls in help', () => {
@@ -65,6 +67,7 @@ describe('dkg llm options', () => {
     expect(help).toContain('--allow-write');
     expect(help).toContain('--profile');
     expect(help).toContain('--system-context-file');
+    expect(help).toContain('--domain-profile');
   });
 });
 

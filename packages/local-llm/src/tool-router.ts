@@ -77,10 +77,19 @@ export function isMutatingTool(tool: McpToolDefinition): boolean {
   return /_(?:create|discard|finalize|import|publish|register|save|send|share|subscribe|write)(?:_|$)/.test(tool.name);
 }
 
-function hasWriteIntent(prompt: string, tools: McpToolDefinition[]): boolean {
+function hasWriteIntent(
+  prompt: string,
+  tools: McpToolDefinition[],
+  hasDomainIntent: boolean,
+): boolean {
   const namedMutation = tools.some((tool) =>
     isMutatingTool(tool) && prompt.toLowerCase().includes(tool.name.toLowerCase()));
-  return namedMutation || (DKG_SIGNAL.test(prompt) && WRITE_SIGNAL.test(prompt));
+  return namedMutation || ((DKG_SIGNAL.test(prompt) || hasDomainIntent) && WRITE_SIGNAL.test(prompt));
+}
+
+function includesKeyword(prompt: string, keywords: readonly string[]): boolean {
+  const lower = prompt.toLocaleLowerCase();
+  return keywords.some((keyword) => lower.includes(keyword.toLocaleLowerCase()));
 }
 
 function namedTools(prompt: string, tools: McpToolDefinition[]): string[] {
@@ -149,6 +158,9 @@ export function routeTools(options: {
   allowWrite?: boolean;
   maxTools?: number;
   additionalToolNames?: readonly string[];
+  additionalReadToolNames?: readonly string[];
+  additionalWriteToolNames?: readonly string[];
+  domainKeywords?: readonly string[];
   hasPriorEvidence?: boolean;
 }): ToolRoute {
   const prompt = options.prompt.trim();
@@ -156,7 +168,8 @@ export function routeTools(options: {
   const allowWrite = options.allowWrite ?? false;
   const maxTools = options.maxTools ?? 8;
   const explicitNames = namedTools(prompt, options.tools);
-  const writeIntent = hasWriteIntent(prompt, options.tools) || profile === 'write';
+  const domainIntent = includesKeyword(prompt, options.domainKeywords ?? []);
+  const writeIntent = hasWriteIntent(prompt, options.tools, domainIntent) || profile === 'write';
   if (writeIntent && !allowWrite) {
     return {
       profile: 'chat',
@@ -175,7 +188,8 @@ export function routeTools(options: {
     resolved = 'catalog';
   } else if (DKG_SIGNAL.test(prompt) && STATUS_SIGNAL.test(prompt)) {
     resolved = 'status';
-  } else if (DKG_SIGNAL.test(prompt) || (options.hasPriorEvidence && FOLLOW_UP_SIGNAL.test(prompt))) {
+  } else if (DKG_SIGNAL.test(prompt) || domainIntent || explicitNames.length > 0
+    || (options.hasPriorEvidence && FOLLOW_UP_SIGNAL.test(prompt))) {
     resolved = 'read';
   } else {
     resolved = 'chat';
@@ -189,8 +203,24 @@ export function routeTools(options: {
   let desired: string[];
   if (resolved === 'status') desired = [...STATUS_TOOL_NAMES];
   else if (resolved === 'catalog') desired = [...CATALOG_TOOL_NAMES];
-  else if (resolved === 'read') desired = [...explicitNames, ...namesForReadPrompt(prompt), ...additional];
-  else desired = [...explicitNames, ...namesForWritePrompt(prompt), ...additional];
+  else if (resolved === 'read') {
+    desired = [
+      ...explicitNames,
+      ...(domainIntent ? options.additionalReadToolNames ?? [] : []),
+      ...namesForReadPrompt(prompt),
+      ...additional,
+      ...(!domainIntent ? options.additionalReadToolNames ?? [] : []),
+    ];
+  } else {
+    desired = [
+      ...explicitNames,
+      ...(domainIntent ? options.additionalWriteToolNames ?? [] : []),
+      ...namesForWritePrompt(prompt),
+      ...additional,
+      ...(options.additionalReadToolNames ?? []),
+      ...(!domainIntent ? options.additionalWriteToolNames ?? [] : []),
+    ];
+  }
 
   const unique = [...new Set(desired)];
   let tools = selectByNames(options.tools, unique, maxTools);

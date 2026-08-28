@@ -81,4 +81,34 @@ describe('tool router', () => {
       annotations: { readOnlyHint: false },
     })).toBe(true);
   });
+
+  it('routes a partner-domain prompt to profile tools without hard-coded domain words', () => {
+    const partnerTools: McpToolDefinition[] = [{
+      name: 'partner_trace_configuration',
+      inputSchema: { type: 'object' },
+      annotations: { readOnlyHint: true },
+    }];
+    const route = routeTools({
+      prompt: 'Trace configuration 748387 through its lifecycle',
+      tools: [...surface, ...partnerTools],
+      domainKeywords: ['configuration', 'lifecycle'],
+      additionalReadToolNames: ['partner_trace_configuration'],
+    });
+    expect(route.profile).toBe('read');
+    expect(route.tools[0].name).toBe('partner_trace_configuration');
+  });
+
+  it('applies the read-only gate to partner-domain mutation intent', () => {
+    const route = routeTools({
+      prompt: 'Insert a new supplier record',
+      tools: [{
+        name: 'partner_insert_supplier',
+        inputSchema: { type: 'object' },
+        annotations: { readOnlyHint: false },
+      }],
+      domainKeywords: ['supplier'],
+      additionalWriteToolNames: ['partner_insert_supplier'],
+    });
+    expect(route.writeBlocked).toBe(true);
+  });
 });
