@@ -75,6 +75,21 @@ const dkgStatus: McpToolDefinition = {
   annotations: { readOnlyHint: true },
 };
 
+const memorySearch: McpToolDefinition = {
+  name: 'dkg_memory_search',
+  description: 'Search agent-context and optional project memory',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string' },
+      projectId: { type: 'string' },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: true },
+};
+
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -162,7 +177,7 @@ describe('DkgLocalLlmRuntime', () => {
         additionalProperties: false,
       },
     };
-    const mcp = makeMcp([strictCatalogList, listProjects, dkgStatus]);
+    const mcp = makeMcp([strictCatalogList, memorySearch, listProjects, dkgStatus]);
     const fetcher = vi.fn()
       .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {
         projectId: 'graph-b',
@@ -174,6 +189,7 @@ describe('DkgLocalLlmRuntime', () => {
       fetch: fetcher as typeof fetch,
       projectId: 'graph-a',
       strictProjectScope: true,
+      strictProjectScopeTools: ['dkg_query_catalog_list'],
       strictProjectScopeUnscopedTools: ['dkg_status'],
     });
 

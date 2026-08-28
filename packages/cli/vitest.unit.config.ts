@@ -42,6 +42,8 @@ export default defineConfig({
           // Local-LLM command parsing/session controls are pure and never spawn
           // MCP or llama.cpp in this fast lane.
           'test/llm-command.test.ts',
+          'test/daemon-local-llm-route.test.ts',
+          'test/daemon-local-llm-service.test.ts',
           'test/memory-graph-events.test.ts',
           'test/memory-turn-route.test.ts',
           'test/trust-endpoint-validation.test.ts',

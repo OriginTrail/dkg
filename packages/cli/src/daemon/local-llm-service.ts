@@ -8,6 +8,25 @@ import {
 
 export const DKG_LOCAL_LLM_UI_SESSION_ID = 'local-llm:dkg-ui';
 
+// Security allowlist for the daemon-owned, single-Context-Graph UI session.
+// Each entry is backed by a tool implementation that scopes every read to its
+// project argument. Do not infer this property from JSON Schema: some tools
+// accept projectId while intentionally fanning out to other graphs.
+const DKG_LOCAL_LLM_STRICT_PROJECT_TOOLS = [
+  'dkg_sub_graph_list',
+  'dkg_query',
+  'dkg_get_entity',
+  'dkg_get_entity_sources',
+  'dkg_list_activity',
+  'dkg_get_agent',
+  'dkg_knowledge_asset_query',
+  'dkg_knowledge_asset_history',
+  'dkg_knowledge_asset_import_artifact_resolve',
+  'dkg_knowledge_asset_import_artifact_read_markdown',
+  'dkg_query_catalog_list',
+  'dkg_query_catalog_run',
+] as const;
+
 export type LocalLlmErrorCode =
   | 'LOCAL_LLM_OFFLINE'
   | 'LOCAL_LLM_BUSY'
@@ -118,6 +137,9 @@ export function createDaemonLocalLlmService(
   let hasProjectLock = false;
   let busy = false;
   let closed = false;
+  let activeTurnController: AbortController | undefined;
+  let activeTurnSettlement: Promise<void> | undefined;
+  let closePromise: Promise<void> | undefined;
   let initFailure: string | undefined;
 
   const probe = async (): Promise<{ reachable: boolean; error?: string }> => {
@@ -196,10 +218,18 @@ export function createDaemonLocalLlmService(
         );
       }
 
+      const turnController = new AbortController();
+      const signal = input.signal
+        ? AbortSignal.any([input.signal, turnController.signal])
+        : turnController.signal;
+      let settleTurn!: () => void;
+      const turnSettlement = new Promise<void>((resolve) => { settleTurn = resolve; });
+      activeTurnController = turnController;
+      activeTurnSettlement = turnSettlement;
       busy = true;
       try {
         const availability = await probe();
-        input.signal?.throwIfAborted();
+        signal.throwIfAborted();
         if (!availability.reachable) {
           throw new DaemonLocalLlmError(
             'LOCAL_LLM_OFFLINE',
@@ -215,6 +245,7 @@ export function createDaemonLocalLlmService(
               model: settings.model,
               projectId: requestedProjectId,
               strictProjectScope: true,
+              strictProjectScopeTools: DKG_LOCAL_LLM_STRICT_PROJECT_TOOLS,
               strictProjectScopeUnscopedTools: ['dkg_status'],
               profile: 'auto',
               allowWrite: false,
@@ -232,9 +263,9 @@ export function createDaemonLocalLlmService(
               cwd: options.cwd,
               stderr: options.stderr,
             });
-            if (input.signal?.aborted) {
+            if (signal.aborted) {
               await created.close();
-              input.signal.throwIfAborted();
+              signal.throwIfAborted();
             }
             if (closed) {
               await created.close();
@@ -250,7 +281,7 @@ export function createDaemonLocalLlmService(
             initFailure = undefined;
           } catch (error) {
             if (error instanceof DaemonLocalLlmError) throw error;
-            if (input.signal?.aborted) input.signal.throwIfAborted();
+            if (signal.aborted) signal.throwIfAborted();
             initFailure = errorMessage(error);
             throw new DaemonLocalLlmError(
               'LOCAL_LLM_RUNTIME_ERROR',
@@ -261,8 +292,8 @@ export function createDaemonLocalLlmService(
         }
 
         try {
-          const result = await session.runtime.run(message, { signal: input.signal });
-          input.signal?.throwIfAborted();
+          const result = await session.runtime.run(message, { signal });
+          signal.throwIfAborted();
           return {
             text: result.answer,
             sessionId: DKG_LOCAL_LLM_UI_SESSION_ID,
@@ -274,7 +305,7 @@ export function createDaemonLocalLlmService(
           };
         } catch (error) {
           if (error instanceof DaemonLocalLlmError) throw error;
-          if (input.signal?.aborted) input.signal.throwIfAborted();
+          if (signal.aborted) signal.throwIfAborted();
           const availabilityAfterFailure = await probe();
           if (!availabilityAfterFailure.reachable) {
             throw new DaemonLocalLlmError(
@@ -291,6 +322,11 @@ export function createDaemonLocalLlmService(
         }
       } finally {
         busy = false;
+        settleTurn();
+        if (activeTurnSettlement === turnSettlement) {
+          activeTurnSettlement = undefined;
+          activeTurnController = undefined;
+        }
       }
     },
 
@@ -310,9 +346,16 @@ export function createDaemonLocalLlmService(
     },
 
     async close() {
-      if (closed) return;
-      closed = true;
-      await closeSession(false);
+      if (!closePromise) {
+        closed = true;
+        const pendingTurn = activeTurnSettlement;
+        activeTurnController?.abort(new Error('The local LLM service is shutting down.'));
+        closePromise = (async () => {
+          await pendingTurn;
+          await closeSession(false);
+        })();
+      }
+      await closePromise;
     },
   };
 }

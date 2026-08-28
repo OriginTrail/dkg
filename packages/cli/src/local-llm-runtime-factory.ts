@@ -19,6 +19,7 @@ export interface DkgLocalLlmRuntimeSessionOptions {
   model: string;
   projectId?: string;
   strictProjectScope?: boolean;
+  strictProjectScopeTools?: readonly string[];
   strictProjectScopeUnscopedTools?: readonly string[];
   profile?: ToolProfile;
   allowWrite?: boolean;
@@ -107,6 +108,7 @@ export async function createDkgLocalLlmRuntimeSession(
       model: options.model,
       projectId,
       strictProjectScope: options.strictProjectScope,
+      strictProjectScopeTools: [...(options.strictProjectScopeTools ?? [])],
       strictProjectScopeUnscopedTools: [...(options.strictProjectScopeUnscopedTools ?? [])],
       profile: options.profile,
       allowWrite: options.allowWrite,

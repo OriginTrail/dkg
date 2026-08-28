@@ -76,6 +76,12 @@ export interface DkgLocalLlmOptions {
    * evidence-driven cross-graph behavior unless this is explicitly enabled.
    */
   strictProjectScope?: boolean;
+  /**
+   * Explicitly trusted tools whose implementations are known to read only the
+   * requested project. A schema field alone is not proof of single-graph
+   * behavior (for example, dkg_memory_search also fans out to agent-context).
+   */
+  strictProjectScopeTools?: string[];
   /** Unscoped node-level reads that remain visible in strict project mode. */
   strictProjectScopeUnscopedTools?: string[];
   profile?: ToolProfile;
@@ -324,6 +330,7 @@ export class DkgLocalLlmRuntime {
   private readonly model: string;
   private readonly projectId?: string;
   private readonly strictProjectScope: boolean;
+  private readonly strictProjectScopeTools: Set<string>;
   private readonly strictProjectScopeUnscopedTools: Set<string>;
   private readonly profile: ToolProfile;
   private readonly allowWrite: boolean;
@@ -353,6 +360,9 @@ export class DkgLocalLlmRuntime {
     this.model = options.model ?? 'local-model';
     this.projectId = options.projectId?.trim() || undefined;
     this.strictProjectScope = options.strictProjectScope ?? false;
+    this.strictProjectScopeTools = new Set(
+      options.strictProjectScopeTools?.map((name) => name.trim()).filter(Boolean) ?? [],
+    );
     this.strictProjectScopeUnscopedTools = new Set(
       options.strictProjectScopeUnscopedTools?.map((name) => name.trim()).filter(Boolean) ?? [],
     );
@@ -375,8 +385,11 @@ export class DkgLocalLlmRuntime {
     this.tools = this.strictProjectScope
       ? tools.filter((tool) => {
           const graphArguments = toolContextGraphArguments(tool);
-          if (graphArguments.length) return Boolean(this.projectId);
-          return this.strictProjectScopeUnscopedTools.has(tool.name);
+          if (this.strictProjectScopeTools.has(tool.name)) {
+            return Boolean(this.projectId) && graphArguments.length > 0;
+          }
+          return graphArguments.length === 0
+            && this.strictProjectScopeUnscopedTools.has(tool.name);
         })
       : tools;
     if (!this.tools.length) {

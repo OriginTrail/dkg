@@ -99,6 +99,9 @@ describe('daemon local LLM service', () => {
     expect(createSession).toHaveBeenCalledWith(expect.objectContaining({
       projectId: 'testing', allowWrite: false, profile: 'auto', temperature: 0.15, topP: 0.9,
     }));
+    const runtimeOptions = createSession.mock.calls[0][0];
+    expect(runtimeOptions.strictProjectScopeTools).toContain('dkg_query_catalog_run');
+    expect(runtimeOptions.strictProjectScopeTools).not.toContain('dkg_memory_search');
     expect(result).toEqual(expect.objectContaining({
       text: 'DKG evidence answer',
       sessionId: 'local-llm:dkg-ui',
@@ -134,7 +137,7 @@ describe('daemon local LLM service', () => {
     await first;
   });
 
-  it('does not clear or close a session while its turn is active', async () => {
+  it('does not clear a session while its turn is active', async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => { release = resolve; });
     const session = fakeSession({
@@ -158,6 +161,78 @@ describe('daemon local LLM service', () => {
     expect(session.close).not.toHaveBeenCalled();
     release();
     await turn;
+  });
+
+  it('aborts and drains an active turn before closing its MCP session', async () => {
+    let started!: () => void;
+    const began = new Promise<void>((resolve) => { started = resolve; });
+    let release!: () => void;
+    let runSignal: AbortSignal | undefined;
+    const session = fakeSession({
+      run: async (_message, runOptions) => {
+        runSignal = runOptions?.signal;
+        started();
+        await new Promise<void>((resolve, reject) => {
+          release = resolve;
+          runSignal?.addEventListener('abort', () => reject(runSignal?.reason), { once: true });
+        });
+        return { answer: 'late answer', profile: 'read', toolCalls: [] };
+      },
+    });
+    const service = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg', fetch: onlineFetch(), createSession: vi.fn(async () => session),
+    });
+
+    const turn = service.chat({ message: 'slow', contextGraphId: 'graph-a' });
+    const turnOutcome = turn.then(
+      () => ({ status: 'fulfilled' as const }),
+      (error: unknown) => ({ status: 'rejected' as const, error }),
+    );
+    await began;
+    await service.close();
+    const abortedBeforeCloseResolved = runSignal?.aborted;
+    release();
+
+    expect(abortedBeforeCloseResolved).toBe(true);
+    await expect(turnOutcome).resolves.toMatchObject({
+      status: 'rejected',
+      error: expect.objectContaining({ message: 'The local LLM service is shutting down.' }),
+    });
+    expect(session.close).toHaveBeenCalledOnce();
+    expect((await service.health()).busy).toBe(false);
+  });
+
+  it('waits for active session initialization before shutdown resolves', async () => {
+    let releaseInitialization!: (session: ReturnType<typeof fakeSession>) => void;
+    const initialization = new Promise<ReturnType<typeof fakeSession>>((resolve) => {
+      releaseInitialization = resolve;
+    });
+    const session = fakeSession();
+    const service = createDaemonLocalLlmService({
+      dkgHome: '/tmp/dkg', fetch: onlineFetch(), createSession: vi.fn(async () => initialization),
+    });
+
+    const turn = service.chat({ message: 'slow init', contextGraphId: 'graph-a' });
+    const turnOutcome = turn.then(
+      () => ({ status: 'fulfilled' as const }),
+      (error: unknown) => ({ status: 'rejected' as const, error }),
+    );
+    await vi.waitFor(async () => expect((await service.health()).busy).toBe(true));
+    let closeSettled = false;
+    const closing = service.close().then(() => { closeSettled = true; });
+    await Promise.resolve();
+    const resolvedBeforeInitialization = closeSettled;
+
+    releaseInitialization(session);
+    await closing;
+
+    expect(resolvedBeforeInitialization).toBe(false);
+    await expect(turnOutcome).resolves.toMatchObject({
+      status: 'rejected',
+      error: expect.objectContaining({ message: 'The local LLM service is shutting down.' }),
+    });
+    expect(session.close).toHaveBeenCalledOnce();
+    expect((await service.health()).busy).toBe(false);
   });
 
   it('forwards caller cancellation, releases busy state, and reuses the clean session', async () => {

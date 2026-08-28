@@ -478,8 +478,13 @@ The selected Context Graph is sent with the first chat turn and becomes the
 session lock. Selecting another graph does not silently retarget the active
 conversation. Use the integration menu to clear the session first, then select
 the new graph and send the next message. In this UI mode the lock is enforced at
-the tool-execution boundary: model-supplied graph arguments are pinned to the
-selected graph, and unscoped cross-graph discovery tools are not exposed.
+the tool-execution boundary: only an explicit allowlist of implementations
+known to be single-graph scoped is exposed, and their model-supplied graph
+arguments are pinned to the selected graph. Unscoped cross-graph discovery and
+multi-graph tools such as `dkg_memory_search` are not exposed. Browser
+disconnect and daemon shutdown abort and drain the active model/MCP turn before
+the private MCP session is closed, so cancelled work cannot outlive teardown or
+enter hidden conversation history.
 
 ### Startup and readiness
 
