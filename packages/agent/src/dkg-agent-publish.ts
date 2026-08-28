@@ -174,6 +174,7 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
+import { pickPublishLifecycleHooks, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
@@ -2267,9 +2268,9 @@ export class PublishMethods extends DKGAgentBase {
       publishContextGraphId: updateOnChainId ?? undefined,
       operationCtx: ctx,
       onPhase,
-      onBeforeBroadcast: opts?.onBeforeBroadcast,
-      onBroadcastAccepted: opts?.onBroadcastAccepted,
-      onPublishConfirmed: opts?.onPublishConfirmed,
+      // r10 (3877910013) — same one-unit hook forwarding at the update boundary (the spread's
+      // onPhase equals the local shorthand above; the hooks travel as one unit regardless).
+      ...pickPublishLifecycleHooks(opts ?? {}),
       subGraphName: opts?.subGraphName,
       precomputedUpdateAttestation: opts.precomputedUpdateAttestation,
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -5213,18 +5214,12 @@ export class PublishMethods extends DKGAgentBase {
     // write-ahead. One object, spread into both branches, makes "the branch dropped a hook" a
     // structural impossibility rather than a review item; computed per-branch fields stay
     // explicit where they are.
-    const executionHooks: {
-      readonly onPhase?: PhaseCallback;
-      readonly onBeforeBroadcast?: PublishOptions['onBeforeBroadcast'];
-      readonly onBroadcastAccepted?: PublishOptions['onBroadcastAccepted'];
-      readonly onPublishConfirmed?: PublishOptions['onPublishConfirmed'];
-    } = {
+    // r10 (3877910013) — ONE typed extraction of the lifecycle hooks (adding a hook happens
+    // in the shared type + picker, never in per-boundary field lists); only the queued
+    // onPhase override precedence is applied on top.
+    const executionHooks: PublishLifecycleHooks = {
+      ...pickPublishLifecycleHooks(publishOptions),
       onPhase: opts?.onPhase ?? publishOptions.onPhase,
-      onBeforeBroadcast: publishOptions.onBeforeBroadcast,
-      onBroadcastAccepted: publishOptions.onBroadcastAccepted,
-      // GH#2359 item 2 — the receipt-confirmed scheduling hint rides the same one-object
-      // spread as the other hooks, so neither branch can drop it.
-      onPublishConfirmed: publishOptions.onPublishConfirmed,
     };
     if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();

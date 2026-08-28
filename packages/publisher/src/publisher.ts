@@ -217,6 +217,17 @@ export type ParticipantSignatureProvider = (
 ) => Promise<ReceiverSignature[]>;
 
 
+/**
+ * r10 (3877910013) — the canonical transaction-lifecycle hook contract: the subset of
+ * {@link PublishOptions} that must travel UNCHANGED through every publish boundary (agent
+ * queued execution, update forwarding, publisher entry points). Boundaries carry this as one
+ * unit via the internal `pickPublishLifecycleHooks` helper instead of naming fields by hand.
+ */
+export type PublishLifecycleHooks = Pick<
+  PublishOptions,
+  'onPhase' | 'onBeforeBroadcast' | 'onBroadcastAccepted' | 'onPublishConfirmed'
+>;
+
 export interface PublishOptions {
   contextGraphId: string;
   quads: Quad[];
