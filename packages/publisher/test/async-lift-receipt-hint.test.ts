@@ -22,6 +22,8 @@ import {
 import {
   KA_VM_EXECUTOR_TX_HASH,
   kaVmPublishRequest,
+  kaVmRecoveryEvidence,
+  recoveredResolution,
   stageKnowledgeAssetShareSnapshot,
 } from './_helpers/ka-vm-publish.js';
 
@@ -72,11 +74,8 @@ describe('async-lift receipt-hint lane', () => {
     const publisher = createPublisher({
       detachReceiptReconciliation: true,
       chainProofResolver: async () => (
-        { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
-      knowledgeAssetVmPublishRecoveryResolver: async () => ({
-        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
-        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
-      } as never),
+        recoveredResolution()),
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
       ...options.config,
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
@@ -158,11 +157,8 @@ describe('async-lift receipt-hint lane', () => {
     const publisher = createPublisher({
       detachReceiptReconciliation: true,
       chainProofResolver: async () => (
-        { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
-      knowledgeAssetVmPublishRecoveryResolver: async () => ({
-        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
-        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
-      } as never),
+        recoveredResolution()),
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           executions += 1;
@@ -249,7 +245,7 @@ describe('async-lift receipt-hint lane', () => {
       config: {
         chainProofResolver: async () => (verdict === 'pending'
           ? { status: 'pending' }
-          : { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
+          : recoveredResolution()),
       },
     });
 
@@ -279,14 +275,11 @@ describe('async-lift receipt-hint lane', () => {
       config: {
         chainProofResolver: async () => {
           proofAsks += 1;
-          return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
+          return recoveredResolution();
         },
         knowledgeAssetVmPublishRecoveryResolver: async () => {
           recoveryAsks += 1;
-          return {
-            inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
-            finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
-          } as never;
+          return kaVmRecoveryEvidence();
         },
       },
     });
@@ -402,11 +395,8 @@ describe('async-lift receipt-hint lane', () => {
       detachReceiptReconciliation: true,
       chainProofResolver: (lookup: { walletId: string }) => (lookup.walletId === 'wallet-1'
         ? new Promise(() => {})
-        : Promise.resolve({ status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never)),
-      knowledgeAssetVmPublishRecoveryResolver: async () => ({
-        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
-        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
-      } as never),
+        : Promise.resolve(recoveredResolution())),
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           await input.publishOptions.onBeforeBroadcast?.({
@@ -462,11 +452,8 @@ describe('async-lift receipt-hint lane', () => {
       chainProofDispatchTimeBudgetMs: 150,
       detachReceiptReconciliation: true,
       chainProofResolver: async () => (
-        { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
-      knowledgeAssetVmPublishRecoveryResolver: async () => ({
-        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
-        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
-      } as never),
+        recoveredResolution()),
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           await input.publishOptions.onBeforeBroadcast?.({
@@ -536,11 +523,8 @@ describe('async-lift receipt-hint lane', () => {
       detachReceiptReconciliation: true,
       chainProofResolver: (lookup: { walletId: string }) => (lookup.walletId === 'wallet-1'
         ? new Promise(() => {})
-        : Promise.resolve({ status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never)),
-      knowledgeAssetVmPublishRecoveryResolver: async () => ({
-        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
-        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
-      } as never),
+        : Promise.resolve(recoveredResolution())),
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           executions += 1;
@@ -607,14 +591,11 @@ describe('async-lift receipt-hint lane', () => {
       config: {
         chainProofResolver: async () => {
           proofAsks += 1;
-          return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
+          return recoveredResolution();
         },
         knowledgeAssetVmPublishRecoveryResolver: async () => {
           recoveryAsks += 1;
-          return {
-            inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
-            finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
-          } as never;
+          return kaVmRecoveryEvidence();
         },
       },
     });
@@ -703,14 +684,11 @@ describe('async-lift receipt-hint lane', () => {
       config: {
         chainProofResolver: async () => {
           proofAsks += 1;
-          return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
+          return recoveredResolution();
         },
         knowledgeAssetVmPublishRecoveryResolver: async () => {
           recoveryAsks += 1;
-          return {
-            inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
-            finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
-          } as never;
+          return kaVmRecoveryEvidence();
         },
       },
     });
@@ -749,11 +727,8 @@ describe('async-lift receipt-hint lane', () => {
     const publisher = createPublisher({
       detachReceiptReconciliation: true,
       chainProofResolver: async () => (
-        { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
-      knowledgeAssetVmPublishRecoveryResolver: async () => ({
-        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
-        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
-      } as never),
+        recoveredResolution()),
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
       knowledgeAssetVmPublishHandler: {
         // Deliberately NO finalizeRecovered - valid under the public type.
         execute: async (input) => {
@@ -800,14 +775,11 @@ describe('async-lift receipt-hint lane', () => {
         chainProofResolver: async (lookup: { operationKind?: string; intendedUpdateRoot?: string }) => {
           proofAsks += 1;
           lookups.push({ operationKind: lookup.operationKind, intendedUpdateRoot: lookup.intendedUpdateRoot });
-          return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
+          return recoveredResolution();
         },
         knowledgeAssetVmPublishRecoveryResolver: async () => {
           recoveryAsks += 1;
-          return {
-            inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
-            finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
-          } as never;
+          return kaVmRecoveryEvidence();
         },
       },
     });
@@ -845,12 +817,9 @@ describe('async-lift receipt-hint lane', () => {
         // resolver would win even a zero-budget abort race on microtasks alone and mask a
         // remaining-budget-only regression (the round-2 lesson, applied here deliberately).
         if (lookup.walletId === 'wallet-2') await new Promise((resolve) => setTimeout(resolve, 5));
-        return { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never;
+        return recoveredResolution();
       },
-      knowledgeAssetVmPublishRecoveryResolver: async () => ({
-        inclusion: { blockNumber: 1, txHash: KA_VM_EXECUTOR_TX_HASH },
-        finalization: { merkleRoot: `0x${'12'.repeat(32)}` },
-      } as never),
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           executions += 1;
@@ -906,5 +875,63 @@ describe('async-lift receipt-hint lane', () => {
     } finally {
       for (const release of tails) release();
     }
+  });
+
+  it('a reverted verdict in the hint lane releases nothing and hands the job to settle-time policy', async () => {
+    // r14 (3878067032) - terminal verdicts are the settle path's to interpret. The early lane
+    // must not stamp inclusion or free the wallet on 'reverted', must drop the hint (observable:
+    // the second early pass performs no further proof ask - the job is executor-owned, so only
+    // the hint lane could have asked), and settle-time reconciliation applies the established
+    // policy: held failure, wallet released.
+    let proofAsks = 0;
+    const { publisher, jobId, releaseTail } = await parkedHintScenario({
+      config: {
+        chainProofResolver: async () => {
+          proofAsks += 1;
+          return { status: 'reverted' };
+        },
+      },
+    });
+
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+    await expectWalletLock('wallet-1', 'held');
+    expect(proofAsks).toBe(1);
+    await publisher.reconcileTransactions();
+    expect(proofAsks).toBe(1);
+
+    releaseTail();
+    await publisher.drainDetachedExecutions();
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    await expectWalletLock('wallet-1', 'released');
+  });
+
+  it('a not-found verdict in the hint lane defers the create reset to settle-time policy', async () => {
+    // r14 (3878067032) - same discipline for proven absence: no early stamp or release, hint
+    // dropped after one ask, and settle applies the create-only reset (write-before-release)
+    // that frees the wallet with the job back on the queue.
+    let proofAsks = 0;
+    const { publisher, jobId, releaseTail } = await parkedHintScenario({
+      config: {
+        chainProofResolver: async () => {
+          proofAsks += 1;
+          return { status: 'not-found' };
+        },
+      },
+    });
+
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+    await expectWalletLock('wallet-1', 'held');
+    expect(proofAsks).toBe(1);
+    await publisher.reconcileTransactions();
+    expect(proofAsks).toBe(1);
+
+    releaseTail();
+    await publisher.drainDetachedExecutions();
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
+    await expectWalletLock('wallet-1', 'released');
   });
 });
