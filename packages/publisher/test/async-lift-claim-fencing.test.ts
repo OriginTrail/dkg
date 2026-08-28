@@ -7,7 +7,7 @@ import {
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
-import type { LiftJob, RawLiftRequest } from '../src/lift-job.js';
+import type { LiftJob, LiftJobBroadcast, RawLiftRequest } from '../src/lift-job.js';
 import {
   AsyncLiftClaimCoordinator,
   classifyLiftJobOwnershipMode,
@@ -127,13 +127,79 @@ describe('async-lift claim fencing', () => {
     }).claimCoordinator;
 
     await expect(coordinator.runJobTransaction(firstId, async (transaction) => {
-      if (transaction.kind === 'missing') throw new Error('expected first job');
+      if (transaction.kind !== 'present') throw new Error('expected first job');
       // The scope is bound to job-a even though job-b has the same broad LiftJob type.
       return await transaction.scope.commit(secondBefore, 'reaccept');
     })).rejects.toThrow('cannot replace LiftJob job-a with job-b');
 
     expect(await publisher.getStatus(firstId)).toEqual(firstBefore);
     expect(await publisher.getStatus(secondId)).toEqual(secondBefore);
+  });
+
+  it('rejects an illegal same-job transition at the coordinator persistence boundary', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-illegal-transition',
+      now: () => now,
+    });
+    const before = await publisher.getStatus(jobId);
+    if (!before || before.status !== 'accepted') throw new Error('expected accepted job');
+    const illegal: LiftJobBroadcast = {
+      ...before,
+      status: 'broadcast',
+      claim: {
+        walletId: 'wallet-a',
+        claimToken: 'claim-illegal',
+        claimLeaseExpiresAt: now + 60_000,
+      },
+      validation: KA_VM_VALIDATION,
+      broadcast: {
+        txHash: KA_VM_EXECUTOR_TX_HASH,
+        walletId: 'wallet-a',
+        nonce: 4,
+      },
+      timestamps: {
+        ...before.timestamps,
+        claimedAt: now,
+        validatedAt: now,
+        broadcastAt: now,
+        updatedAt: now,
+      },
+    };
+    const coordinator = (publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator;
+    }).claimCoordinator;
+
+    await expect(coordinator.runJobTransaction(jobId, async (transaction) => {
+      if (transaction.kind !== 'present') throw new Error('expected job');
+      return await transaction.scope.commit(illegal, 'broadcast');
+    })).rejects.toThrow(
+      'Invalid LiftJob transition: accepted -> broadcast. Allowed: claimed, failed',
+    );
+
+    expect(await publisher.getStatus(jobId)).toEqual(before);
+  });
+
+  it('closes a transaction scope after removing its job', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-removed-scope',
+      now: () => now,
+    });
+    const coordinator = (publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator;
+    }).claimCoordinator;
+
+    await coordinator.runJobTransaction(jobId, async (transaction) => {
+      if (transaction.kind !== 'present') throw new Error('expected job');
+      const { current, scope } = transaction;
+      await scope.commitRemoval();
+      await expect(scope.commit(current, 'reaccept')).rejects.toThrow(
+        `LiftJob transition scope for ${jobId} is closed`,
+      );
+    });
+
+    expect(await publisher.getStatus(jobId)).toBeNull();
   });
 
   it('classifies every lift-job state through one ownership policy', async () => {

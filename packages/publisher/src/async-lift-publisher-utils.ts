@@ -17,6 +17,7 @@ import type {
   RawLiftJobRequest,
   RawLiftRequest,
 } from './lift-job.js';
+import { parseLiteral } from './async-lift-control-plane.js';
 export {
   CONTROL_CLAIM_TOKEN,
   CONTROL_LOCKED_JOB,
@@ -43,10 +44,10 @@ export {
   serializeJobRecord,
   serializeWalletLock,
   literal,
-  parseLiteral,
   requestSubject,
   walletLockSubject,
 } from './async-lift-control-plane.js';
+export { parseLiteral };
 
 // STRUCTURAL helpers for a persisted lift job: what it is, what it carries, how it is rebuilt.
 // GH#2270 — the POLICY predicates that used to sit here (evidence, the chain-proof hold, retry
@@ -61,6 +62,47 @@ export function expectBindings(result: QueryResult): Array<Record<string, string
     throw new Error(`Expected SPARQL bindings result, got ${result.type}`);
   }
   return result.bindings;
+}
+
+export type LiftJobPayloadDecodeResult =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'malformed'; readonly reason: string }
+  | { readonly kind: 'job'; readonly job: LiftJob };
+
+/** Classify one persisted job payload without hiding malformed state behind null or an exception. */
+export function decodeLiftJobPayload(binding?: string): LiftJobPayloadDecodeResult {
+  if (binding === undefined) return { kind: 'absent' };
+  try {
+    const payload = parseLiteral(binding);
+    if (typeof payload !== 'string') {
+      return { kind: 'malformed', reason: 'payload is not an RDF literal' };
+    }
+    const parsed = JSON.parse(payload) as LiftJob & { request: unknown };
+    return {
+      kind: 'job',
+      job: {
+        ...parsed,
+        request: normalizePersistedLiftJobRequest(parsed.request),
+      } as LiftJob,
+    };
+  } catch (error) {
+    return {
+      kind: 'malformed',
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/** Ordinary read policy: absence is nullable, but corrupt durable state always fails closed. */
+export function decodedLiftJobOrThrow(decoded: LiftJobPayloadDecodeResult): LiftJob | null {
+  switch (decoded.kind) {
+    case 'absent':
+      return null;
+    case 'job':
+      return decoded.job;
+    case 'malformed':
+      throw new Error(`Malformed persisted LiftJob payload: ${decoded.reason}`);
+  }
 }
 
 export function compareAcceptedJobs(a: LiftJob, b: LiftJob): number {

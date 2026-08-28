@@ -60,6 +60,7 @@ import type {
 } from './async-lift-publisher-types.js';
 import {
   AsyncLiftClaimCoordinator,
+  failClosedLiftJobTransaction,
   type AsyncLiftClaimProcessingRelease,
   type LiftJobTransitionScope,
 } from './async-lift-claim-session.js';
@@ -118,6 +119,8 @@ import {
   createKnowledgeAssetVmPublishSnapshotRequest,
   createKnowledgeAssetVmPublishJobRequest,
   createJobSlug,
+  decodeLiftJobPayload,
+  decodedLiftJobOrThrow,
   expectBindings,
   getLiftJobTransactionEvidence,
   isKnowledgeAssetVmPublishJobRequest,
@@ -126,7 +129,6 @@ import {
   liftJobCheckedSigner,
   liftJobOperationKindMarker,
   assertNoImmutableLiftJobFieldChange,
-  normalizePersistedLiftJobRequest,
   buildLiftJobAcceptedReset,
   pinnedPublishIdentityKaId,
   queuedLiftOperationKind,
@@ -135,9 +137,9 @@ import {
   jobSubject,
   literal,
   parseIntegerLiteral,
-  parseLiteral,
   requestSubject,
   serializeJobRecord,
+  type LiftJobPayloadDecodeResult,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
 
@@ -174,11 +176,6 @@ type BusinessOperationResult<T> =
 /** A publish result is business-invalid; persistence and ownership failures remain unwrapped. */
 class InvalidLiftPublishResultError extends Error {
   override readonly name = 'InvalidLiftPublishResultError';
-}
-
-/** Corrupt durable state is distinct from an absent job so ownership always fails closed. */
-class MalformedLiftJobPayloadError extends Error {
-  override readonly name = 'MalformedLiftJobPayloadError';
 }
 
 /**
@@ -640,7 +637,7 @@ export class TripleStoreAsyncLiftPublisher
       {
         ensureGraph: async () => await this.ensureGraph(),
         isPaused: () => this.paused,
-        getStatus: async (jobId) => await this.getStatus(jobId),
+        readStatus: async (jobId) => await this.readJobPayload(jobId),
         listAccepted: async () =>
           (await this.list({ status: 'accepted' })).filter(
             (job): job is LiftJobAccepted => job.status === 'accepted',
@@ -771,13 +768,16 @@ export class TripleStoreAsyncLiftPublisher
 
   async getStatus(jobId: string): Promise<LiftJob | null> {
     await this.ensureGraph();
+    return decodedLiftJobOrThrow(await this.readJobPayload(jobId));
+  }
+
+  private async readJobPayload(jobId: string): Promise<LiftJobPayloadDecodeResult> {
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PAYLOAD_PREDICATE}> ?payload } }`,
       { source: 'publisher.asyncLift.getStatus' },
     );
     const rows = expectBindings(result);
-    if (rows.length === 0) return null;
-    return this.parseJobPayload(rows[0]?.['payload']);
+    return decodeLiftJobPayload(rows[0]?.['payload']);
   }
 
   async lookupKnowledgeAssetVmPublishJobByIntent(facts: IntentLookupInput): Promise<IntentLookupResult> {
@@ -1399,8 +1399,9 @@ export class TripleStoreAsyncLiftPublisher
         continue;
       }
       await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (transaction) => {
-          if (transaction.kind === 'missing') return;
-          const { current, scope } = transaction;
+          const readable = failClosedLiftJobTransaction(transaction);
+          if (readable.kind === 'missing') return;
+          const { current, scope } = readable;
           // 'included' is accepted deliberately (r2 3877540018): a prior attempt may have
           // persisted the included stamp and then failed the wallet-lock deletion. Restricting
           // the lane to 'broadcast' would strand that wallet until the executor tail settles.
@@ -2202,8 +2203,9 @@ export class TripleStoreAsyncLiftPublisher
           }
           const snapshot = rotatedTxBearing[i];
           await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (transaction) => {
-            if (transaction.kind === 'missing') return;
-            const { current, scope } = transaction;
+            const readable = failClosedLiftJobTransaction(transaction);
+            if (readable.kind === 'missing') return;
+            const { current, scope } = readable;
             // Settled or re-owned since the pre-filter: no longer this pass's remaining work.
             if (current.status !== 'broadcast' && current.status !== 'included') return;
             if (this.claimCoordinator.isProcessing(current.jobId)) return;
@@ -2286,8 +2288,9 @@ export class TripleStoreAsyncLiftPublisher
     let recovered = 0;
     for (const snapshot of interrupted) {
       await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (transaction) => {
-        if (transaction.kind === 'missing') return;
-        const { current, scope } = transaction;
+        const readable = failClosedLiftJobTransaction(transaction);
+        if (readable.kind === 'missing') return;
+        const { current, scope } = readable;
         if (current.status !== 'claimed' && current.status !== 'validated') return;
         if (this.claimCoordinator.isProcessing(current.jobId)) return;
         // Cross-instance ownership cannot rely on the in-memory processing marker: production has
@@ -2480,8 +2483,9 @@ export class TripleStoreAsyncLiftPublisher
     // identical held job the chain was asked about — same failure identity, same transaction
     // evidence. Anything else drops the verdict; the next tick asks about whatever now exists.
     return this.claimCoordinator.runClaimJobTransaction(job.jobId, async (transaction) => {
-      if (transaction.kind === 'missing') return 0;
-      const { current, scope } = transaction;
+      const readable = failClosedLiftJobTransaction(transaction);
+      if (readable.kind === 'missing') return 0;
+      const { current, scope } = readable;
       if (!isFailedJob(current)) return 0;
       if (!this.isSameHeldFailedJob(job, current, lookup)) return 0;
       return this.applyChainProofDisposition(current, scope, lookup, resolution, deadline);
@@ -2601,13 +2605,14 @@ export class TripleStoreAsyncLiftPublisher
   async cancel(jobId: string): Promise<void> {
     await this.ensureGraph();
     await this.claimCoordinator.runJobTransaction(jobId, async (transaction) => {
-      if (transaction.kind === 'missing') throw new Error(`LiftJob not found: ${jobId}`);
-      if (transaction.current.status !== 'accepted') {
+      const readable = failClosedLiftJobTransaction(transaction);
+      if (readable.kind === 'missing') throw new Error(`LiftJob not found: ${jobId}`);
+      if (readable.current.status !== 'accepted') {
         throw new Error(
-          `Only accepted LiftJobs can be cancelled. Current status: ${transaction.current.status}`,
+          `Only accepted LiftJobs can be cancelled. Current status: ${readable.current.status}`,
         );
       }
-      await transaction.scope.commitRemoval();
+      await readable.scope.commitRemoval();
     });
   }
 
@@ -2667,8 +2672,9 @@ export class TripleStoreAsyncLiftPublisher
     let cleared = 0;
     for (const snapshot of jobs) {
       await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (transaction) => {
-        if (transaction.kind === 'missing') return;
-        const { current: job, scope } = transaction;
+        const readable = failClosedLiftJobTransaction(transaction);
+        if (readable.kind === 'missing') return;
+        const { current: job, scope } = readable;
         // #1837 — the shared terminal-clear authority (skips retry_recovery-failed jobs, whose
         // pending tx recovery may still finalize), narrowed for the bulk lane by GH#2270's
         // evidence guard. `clearTerminalJob` keeps the unnarrowed predicate on purpose.
@@ -2701,48 +2707,31 @@ export class TripleStoreAsyncLiftPublisher
     // first lock; worker/recovery state changes use the second. Keeping this order
     // lets claim persist its job+wallet-lock ownership as one critical section
     // without deadlocking a concurrent targeted clear.
-    try {
-      return await this.claimCoordinator.runClaimJobTransaction(jobId, async (transaction) => {
-        await this.ensureGraph();
-        if (transaction.kind === 'missing') {
-          // Distinguish an absent subject from a present but malformed payload while still under
-          // the bound job lock. The coordinator's normal parsed read intentionally maps both to
-          // null; this endpoint's wire contract has separate outcomes.
-          const rows = expectBindings(
-            await this.store.query(
-              `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PAYLOAD_PREDICATE}> ?payload } }`,
-              { source: 'publisher.asyncLift.clearTerminalJob.missingCheck' },
-            ),
-          );
-          return rows.length === 0
-            ? { outcome: 'already_absent' }
-            : { outcome: 'rejected', reason: 'malformed' };
-        }
-        const { current: job, scope } = transaction;
-        if (!LIFT_JOB_STATES.includes(job.status)) return { outcome: 'rejected', reason: 'unknown' };
-        // GH#2270 follow-up (🔴 3824098476, 🟡 3824098494) — ownership is resolved HERE, not at
-        // the route. Doing it at the route meant an unsafe jobId reached a `getStatus` query before
-        // this method's `isSafeJobId` guard ran, and the ownership read happened outside the claim
-        // lock the clear itself takes — a TOCTOU on the record the decision is about.
-        //
-        // Inside, the job has already been validated and read under that lock, so the check is on
-        // the same record that is about to be deleted. A caller that cannot be matched to the job's
-        // admission lane simply does not get the override; the ordinary terminal clear is untouched.
-        // 3825162663 — ONE decision: the policy takes the override as the caller made it and
-        // settles authority and state eligibility together, so a call site cannot read the
-        // canonical predicate while forgetting the ownership half.
-        if (!isTargetedClearableLiftJob(job, options)) {
-          return { outcome: 'rejected', reason: 'nonterminal' };
-        }
-        await scope.commitRemoval();
-        return { outcome: 'cleared' };
-      });
-    } catch (error) {
-      if (error instanceof MalformedLiftJobPayloadError) {
+    return await this.claimCoordinator.runClaimJobTransaction(jobId, async (transaction) => {
+      await this.ensureGraph();
+      if (transaction.kind === 'missing') return { outcome: 'already_absent' };
+      if (transaction.kind === 'malformed') {
         return { outcome: 'rejected', reason: 'malformed' };
       }
-      throw error;
-    }
+      const { current: job, scope } = transaction;
+      if (!LIFT_JOB_STATES.includes(job.status)) return { outcome: 'rejected', reason: 'unknown' };
+      // GH#2270 follow-up (🔴 3824098476, 🟡 3824098494) — ownership is resolved HERE, not at
+      // the route. Doing it at the route meant an unsafe jobId reached a `getStatus` query before
+      // this method's `isSafeJobId` guard ran, and the ownership read happened outside the claim
+      // lock the clear itself takes — a TOCTOU on the record the decision is about.
+      //
+      // Inside, the job has already been validated and read under that lock, so the check is on
+      // the same record that is about to be deleted. A caller that cannot be matched to the job's
+      // admission lane simply does not get the override; the ordinary terminal clear is untouched.
+      // 3825162663 — ONE decision: the policy takes the override as the caller made it and
+      // settles authority and state eligibility together, so a call site cannot read the
+      // canonical predicate while forgetting the ownership half.
+      if (!isTargetedClearableLiftJob(job, options)) {
+        return { outcome: 'rejected', reason: 'nonterminal' };
+      }
+      await scope.commitRemoval();
+      return { outcome: 'cleared' };
+    });
   }
 
   private async ensureGraph(): Promise<void> {
@@ -3191,21 +3180,7 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private parseJobPayload(binding?: string): LiftJob | null {
-    if (!binding) return null;
-    try {
-      const payload = parseLiteral(binding);
-      if (typeof payload !== 'string') {
-        throw new Error('payload is not an RDF literal');
-      }
-      const parsed = JSON.parse(payload) as LiftJob & { request: unknown };
-      return {
-        ...parsed,
-        request: normalizePersistedLiftJobRequest(parsed.request),
-      } as LiftJob;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new MalformedLiftJobPayloadError(`Malformed persisted LiftJob payload: ${detail}`);
-    }
+    return decodedLiftJobOrThrow(decodeLiftJobPayload(binding));
   }
 
   // r4 (3877669534) — the canonical transition API expresses the one union-member-specific
@@ -3382,8 +3357,9 @@ export class TripleStoreAsyncLiftPublisher
     intent: ReacceptIntent,
   ): Promise<LiftJobAccepted> {
     return await this.claimCoordinator.runJobTransaction(job.jobId, async (transaction) => {
-      if (transaction.kind === 'missing') throw new Error(`LiftJob not found: ${job.jobId}`);
-      const { current, scope } = transaction;
+      const readable = failClosedLiftJobTransaction(transaction);
+      if (readable.kind === 'missing') throw new Error(`LiftJob not found: ${job.jobId}`);
+      const { current, scope } = readable;
       if (!isFailedJob(current)) {
         throw new Error(`Only failed LiftJobs can be reaccepted. Current status: ${current.status}`);
       }

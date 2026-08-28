@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher, type AsyncLiftPublisherConfig } from '../src/index.js';
-import { DEFAULT_CONTROL_GRAPH_URI, jobSubject, serializeJob } from '../src/async-lift-control-plane.js';
+import {
+  CONTROL_PAYLOAD,
+  DEFAULT_CONTROL_GRAPH_URI,
+  jobSubject,
+  literal,
+  serializeJob,
+} from '../src/async-lift-control-plane.js';
 import {
   KA_VM_BROADCAST_TX,
   KA_VM_INCLUSION,
@@ -409,6 +415,22 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     const jobId = await driveToFinalized(p);
     expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
     expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'already_absent' });
+  });
+
+  it('rejects a readable future state as unknown without deleting it', async () => {
+    const p = createPublisher();
+    const jobId = await driveToFinalized(p);
+    const job = await p.getStatus(jobId);
+    if (!job) throw new Error('expected finalized job');
+    const quads = serializeJob(job, DEFAULT_CONTROL_GRAPH_URI).map((entry) =>
+      entry.predicate === CONTROL_PAYLOAD
+        ? { ...entry, object: literal(JSON.stringify({ ...job, status: 'future-state' })) }
+        : entry);
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(quads);
+
+    expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'unknown' });
+    expect((await p.getStatus(jobId))?.status).toBe('future-state');
   });
 
   it('rejects an empty or SPARQL-unsafe jobId as malformed without querying/mutating', async () => {
