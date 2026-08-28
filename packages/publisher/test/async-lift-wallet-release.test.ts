@@ -707,4 +707,95 @@ describe('async-lift wallet release channel', () => {
     expect(proofAsks).toBe(1);
     expect(recoveryAsks).toBe(1);
   });
+
+  it('a non-cooperating recovery resolver cannot hang the pass past its budget', async () => {
+    // r1 (3877430460) - the early lane races its canonical-evidence read against the pass
+    // deadline exactly as the settle-time finalize does: a resolver that never settles and
+    // ignores the abort signal costs the budget, not the process. No release, no transition,
+    // pending work reported so the cadence retries.
+    let releaseTail!: () => void;
+    const tailParked = new Promise<void>((resolve) => { releaseTail = resolve; });
+    let hinted = false;
+    const publisher = createPublisher({
+      chainProofDispatchTimeBudgetMs: 50,
+      detachReceiptReconciliation: true,
+      chainProofResolver: async () => (
+        { status: 'recovered', recovery: { txHash: KA_VM_EXECUTOR_TX_HASH } } as never),
+      // Never settles and ignores the signal - the hostile case the deadline exists for.
+      knowledgeAssetVmPublishRecoveryResolver: () => new Promise(() => {}),
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            operationKind: 'create',
+          });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          hinted = true;
+          await tailParked;
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.processNext('wallet-1');
+    const hintDeadline = Date.now() + 5_000;
+    while (!hinted) {
+      if (Date.now() > hintDeadline) throw new Error('the executor never fired the hint');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    try {
+      // The pass must RETURN despite the hung resolver (vitest's own row timeout is the
+      // discriminator against a hang), report the hinted job as pending, and mutate nothing.
+      expect(await publisher.reconciliationScheduling.reconcile())
+        .toEqual({ reconciled: 0, pendingWork: true });
+      expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+      const lock = await store.query(`SELECT ?job WHERE {
+        GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+          <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?job .
+        }
+      }`);
+      expect(lock.type).toBe('bindings');
+      if (lock.type === 'bindings') expect(lock.bindings).toHaveLength(1);
+    } finally {
+      releaseTail();
+    }
+  });
+
+  it('records no hint for a publish that cannot detach receipt reconciliation', async () => {
+    // r1 (3877430478) - with no chain-proof resolver this publish can never detach, so a
+    // recorded hint would be a dead entry that only occupies the bounded map (and could evict
+    // a still-useful proof). The gate keeps ineligible publishes out entirely. The map is
+    // private state, peeked deliberately: the invariant IS about internal hygiene.
+    let hinted = false;
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onBeforeBroadcast?.({
+            txHash: KA_VM_EXECUTOR_TX_HASH,
+            operationKind: 'create',
+          });
+          input.publishOptions.onBroadcastAccepted?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          input.publishOptions.onPublishConfirmed?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+          hinted = true;
+          throw new Error('post-write-ahead failure: recovery owns the record from here');
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    await stageShareSnapshot();
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.processNext('wallet-1');
+    const hintDeadline = Date.now() + 5_000;
+    while (!hinted) {
+      if (Date.now() > hintDeadline) throw new Error('the executor never fired the hint');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await publisher.drainDetachedExecutions();
+    const hints = (publisher as unknown as { executorProofHints: Map<string, unknown> }).executorProofHints;
+    expect(hints.size).toBe(0);
+  });
 });

@@ -488,6 +488,7 @@ export class TripleStoreAsyncLiftPublisher
     };
   }>();
   private static readonly EXECUTOR_PROOF_HINT_CAP = 512;
+  private executorHintPassOffset = 0;
   /** Poked when a tx-bearing job stops being executor-owned; see setReconciliationDemandListener. */
   /** The one atomically-attached scheduling owner; see attachScheduler. */
   private schedulerListener?: {
@@ -1004,6 +1005,17 @@ export class TripleStoreAsyncLiftPublisher
       });
       const inheritedBroadcastAccepted = prepared.publishOptions.onBroadcastAccepted;
       const inheritedPublishConfirmed = prepared.publishOptions.onPublishConfirmed;
+      // Detachment eligibility is knowable BEFORE execution (wallet + queued operation kind),
+      // and the internal receipt hint only means anything to detached-receipt reconciliation:
+      // gating the recording here keeps non-detachable publishes from accreting dead hint
+      // entries that could evict a still-useful proof (r1 3877430478).
+      const canDetachReceiptReconciliation = this.detachReceiptReconciliation
+        && this.chainProofResolver !== undefined
+        && this.knowledgeAssetVmPublishRecoveryResolver !== undefined
+        && (this.chainProofCapableForWallet?.(
+          walletId,
+          queuedLiftOperationKind(claimed),
+        ) ?? true);
       const executionInput = {
         walletId,
         request,
@@ -1031,11 +1043,15 @@ export class TripleStoreAsyncLiftPublisher
           // reads while the executor finishes its local post-receipt tail. Never trusted as
           // evidence.
           onPublishConfirmed: (confirmation: { txHash: string }) => {
-            this.recordExecutorProofHint(claimed.jobId, confirmation);
+            if (canDetachReceiptReconciliation) {
+              this.recordExecutorProofHint(claimed.jobId, confirmation);
+            }
+            // Scheduling-only: an inherited listener failure — synchronous or an async
+            // rejection — must not touch the execution (r1 3877430465).
             try {
-              inheritedPublishConfirmed?.(confirmation);
+              void Promise.resolve(inheritedPublishConfirmed?.(confirmation)).catch(() => {});
             } catch {
-              // Scheduling-only: an inherited listener failure must not touch the execution.
+              // Synchronous listener throw: swallowed for the same reason.
             }
           },
         },
@@ -1045,13 +1061,6 @@ export class TripleStoreAsyncLiftPublisher
         execution.then((result) => ({ kind: 'settled' as const, result })),
         broadcastAccepted.then(() => ({ kind: 'accepted' as const })),
       ]);
-      const canDetachReceiptReconciliation = this.detachReceiptReconciliation
-        && this.chainProofResolver !== undefined
-        && this.knowledgeAssetVmPublishRecoveryResolver !== undefined
-        && (this.chainProofCapableForWallet?.(
-          walletId,
-          queuedLiftOperationKind(claimed),
-        ) ?? true);
       if (outcome.kind === 'accepted' && canDetachReceiptReconciliation) {
         // Receipt success, revert, timeout, or temporary lookup failure is now
         // owned solely by chain-proof recovery. The execution continues so the
@@ -1062,6 +1071,9 @@ export class TripleStoreAsyncLiftPublisher
         return await this.getRequiredJob(claimed.jobId);
       }
       publishResult = outcome.kind === 'settled' ? outcome.result : await execution;
+      // Inline completion: the normal result path owns this record from here, so a recorded
+      // receipt hint has no consumer left (the early lane requires a DETACHED execution).
+      this.executorProofHints.delete(claimed.jobId);
     } catch (error) {
       // #1864 — switch on the typed pre-send boundary outcome (no `executorReturned` flag,
       // no `getStatus` re-read). The tx send happens strictly AFTER the write-ahead durably
@@ -1213,13 +1225,23 @@ export class TripleStoreAsyncLiftPublisher
     signal?: AbortSignal,
   ): Promise<number> {
     if (this.executorProofHints.size === 0) return 0;
+    // Rotated like the main tx-bearing walk (r1 3877430474): without this, a hinted job whose
+    // chain lookup eats the pass budget would be re-asked first every pass and starve later
+    // hints. Settle remains every hint's fallback, so starvation would cost latency, not
+    // correctness — but the rotation removes even that.
+    const candidates = inventory.filter((snapshot) => {
+      const hint = this.executorProofHints.get(snapshot.jobId);
+      return hint !== undefined && hint.proof === undefined
+        && this.detachedExecutions.has(snapshot.jobId);
+    });
+    if (candidates.length === 0) return 0;
+    const hintOffset = this.executorHintPassOffset++ % candidates.length;
+    const rotatedCandidates = candidates.slice(hintOffset).concat(candidates.slice(0, hintOffset));
     let unresolved = 0;
-    for (const snapshot of inventory) {
+    for (const snapshot of rotatedCandidates) {
       if (signal?.aborted) return unresolved;
       const hint = this.executorProofHints.get(snapshot.jobId);
       if (!hint || hint.proof) continue;
-      // Settle-path territory: once the executor no longer owns the job, the normal
-      // interrupted lane consumes the hint (or the chain) itself.
       if (!this.detachedExecutions.has(snapshot.jobId)) continue;
       if (!isKnowledgeAssetVmPublishJobRequest(snapshot.request)) {
         this.executorProofHints.delete(snapshot.jobId);
@@ -1252,12 +1274,22 @@ export class TripleStoreAsyncLiftPublisher
           return;
         }
         if (!this.knowledgeAssetVmPublishRecoveryResolver) return;
-        const resolved = await this.knowledgeAssetVmPublishRecoveryResolver(
-          current,
-          origin.lookup,
-          resolution.recovery,
-          signal ? { signal } : undefined,
-        );
+        // r1 (3877430460) — the same read-only deadline race the settle-time finalize uses: a
+        // resolver that ignores the abort signal must not hold the whole pass (and every other
+        // wallet) hostage. Timeout resolves to null — no transition, pending work, retry later.
+        const resolved = await Promise.race([
+          this.knowledgeAssetVmPublishRecoveryResolver(
+            current,
+            origin.lookup,
+            resolution.recovery,
+            signal ? { signal } : undefined,
+          ),
+          new Promise<null>((resolve) => {
+            if (!signal) return;
+            if (signal.aborted) { resolve(null); return; }
+            signal.addEventListener('abort', () => resolve(null), { once: true });
+          }),
+        ]);
         if (!resolved) { unresolved += 1; return; }
         // The node has observed inclusion through its OWN canonical proof: stamp it truthfully,
         // then free the wallet (write-before-release — the poke must find claim-visible state).

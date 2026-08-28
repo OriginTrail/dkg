@@ -68,6 +68,7 @@ async function publisherOver(chain: SignalRecordingChain): Promise<{
   publisher: DKGPublisher;
   quads: Quad[];
   precomputedUpdateAttestation: Awaited<ReturnType<typeof buildUpdateSeal>>;
+  store: OxigraphStore;
 }> {
   const store = new OxigraphStore();
   const publisher = new DKGPublisher({
@@ -87,7 +88,7 @@ async function publisherOver(chain: SignalRecordingChain): Promise<{
     author: PRODUCER,
     ctx: mockSealCtx(),
   });
-  return { publisher, quads, precomputedUpdateAttestation };
+  return { publisher, quads, precomputedUpdateAttestation, store };
 }
 
 describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
@@ -104,6 +105,33 @@ describe('DKGPublisher awaits the pre-broadcast signal [GH#2270]', () => {
     });
 
     expect(received).toEqual([{ txHash: TX_HASH, nonce: NONCE, operationKind: 'update' }]);
+  });
+
+  it('fires onPublishConfirmed once for an update, before its post-receipt store writes [GH#2359 r1]', async () => {
+    // Same contract as the publish path: one firing, the receipt hash the chain returned, and
+    // fired before the update writes its quads locally — the sync-query capture inside the
+    // listener is the timing oracle.
+    const chain = new SignalRecordingChain();
+    const { publisher, quads, precomputedUpdateAttestation, store } = await publisherOver(chain);
+    const QUAD_QUERY = 'SELECT ?o WHERE { GRAPH ?g { ?s <http://schema.org/name> ?o } }';
+    const confirmations: Array<{ txHash: string; at: ReturnType<typeof store.query> }> = [];
+
+    await publisher.update(KA_ID, {
+      contextGraphId: CG_ID,
+      quads,
+      precomputedUpdateAttestation,
+      onPublishConfirmed: (confirmation) => {
+        confirmations.push({ txHash: confirmation.txHash, at: store.query(QUAD_QUERY) });
+      },
+    });
+
+    expect(confirmations.map((c) => c.txHash)).toEqual([TX_HASH]);
+    const before = await confirmations[0].at;
+    expect(before.type).toBe('bindings');
+    if (before.type === 'bindings') expect(before.bindings).toEqual([]);
+    const after = await store.query(QUAD_QUERY);
+    expect(after.type).toBe('bindings');
+    if (after.type === 'bindings') expect(after.bindings.length).toBeGreaterThanOrEqual(1);
   });
 
   it('delivers the adapter signal verbatim, before the send', async () => {
@@ -226,8 +254,10 @@ class PublishSignalRecordingChain extends MockChainAdapter {
   }
 }
 
-async function publishOver(chain: PublishSignalRecordingChain): Promise<DKGPublisher> {
-  const store = new OxigraphStore();
+async function publishOver(
+  chain: PublishSignalRecordingChain,
+  store: OxigraphStore = new OxigraphStore(),
+): Promise<DKGPublisher> {
   chain.minimumRequiredSignatures = 0;
   return new DKGPublisher({
     store,
@@ -287,6 +317,49 @@ describe('DKGPublisher.publish awaits the pre-broadcast signal [GH#2270]', () =>
 
     expect(result.status).not.toBe('failed');
     expect(confirmations).toEqual([{ txHash: result.onChainResult?.txHash }]);
+  });
+
+  it('fires onPublishConfirmed BEFORE the local post-receipt store writes [GH#2359 r1]', async () => {
+    // The hook's whole value is timing: it must fire at the receipt, not after the local tail.
+    // OxigraphStore.query executes the native query synchronously before its first await, so a
+    // query promise captured INSIDE the listener reads the store as it stood at fire time —
+    // the published quad must not be there yet, and must be there once publish() returns.
+    const chain = new PublishSignalRecordingChain();
+    const store = new OxigraphStore();
+    const publisher = await publishOver(chain, store);
+    const QUAD_QUERY = 'SELECT ?o WHERE { GRAPH ?g { ?s <http://schema.org/name> ?o } }';
+    const atFire: Array<ReturnType<typeof store.query>> = [];
+
+    await publisher.publish({
+      ...(await publishArgs()),
+      onPublishConfirmed: () => { atFire.push(store.query(QUAD_QUERY)); },
+    });
+
+    expect(atFire).toHaveLength(1);
+    const before = await atFire[0];
+    expect(before.type).toBe('bindings');
+    if (before.type === 'bindings') expect(before.bindings).toEqual([]);
+    const after = await store.query(QUAD_QUERY);
+    expect(after.type).toBe('bindings');
+    if (after.type === 'bindings') expect(after.bindings.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('an ASYNC-rejecting onPublishConfirmed listener does not fail the publish or leak a rejection [GH#2359 r1]', async () => {
+    // An async listener is assignable to the hook; its rejection settles after the sync
+    // try/catch has exited, so the dispatch must consume it (r1 3877430465) — vitest turns any
+    // escaped unhandled rejection into a failure of this file.
+    const chain = new PublishSignalRecordingChain();
+    const publisher = await publishOver(chain);
+
+    const result = await publisher.publish({
+      ...(await publishArgs()),
+      onPublishConfirmed: async () => { throw new Error('async listener exploded'); },
+    });
+
+    expect(result.status).not.toBe('failed');
+    expect(chain.sent).toBe(true);
+    // Give a detached rejection a macrotask to surface if it was going to.
+    await new Promise((resolve) => setTimeout(resolve, 10));
   });
 
   it('a throwing onPublishConfirmed listener does not fail the publish [GH#2359]', async () => {

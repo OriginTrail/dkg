@@ -3996,9 +3996,12 @@ export class DKGPublisher implements Publisher {
         // start its own canonical proof instead of waiting out this tail. Non-fail-closed.
         if (onChainResult?.txHash) {
           try {
-            onPublishConfirmed?.({ txHash: onChainResult.txHash });
+            // Detached dispatch: an ASYNC listener's rejection must be consumed here too, or
+            // it escapes the catch as an unhandled rejection (r1 3877430465).
+            void Promise.resolve(onPublishConfirmed?.({ txHash: onChainResult.txHash }))
+              .catch(() => {});
           } catch {
-            // Scheduling-only: a listener failure must never affect the publish.
+            // Scheduling-only: a synchronous listener failure must never affect the publish.
           }
         }
 
@@ -5436,9 +5439,11 @@ export class DKGPublisher implements Publisher {
     // everything below is local post-receipt work.
     if (txResult.hash) {
       try {
-        onPublishConfirmed?.({ txHash: txResult.hash });
+        // Detached dispatch — see the publish path: async rejections are consumed here.
+        void Promise.resolve(onPublishConfirmed?.({ txHash: txResult.hash }))
+          .catch(() => {});
       } catch {
-        // Scheduling-only: a listener failure must never affect the update.
+        // Scheduling-only: a synchronous listener failure must never affect the update.
       }
     }
     let effectivePublisherAddress = coercePublisherAddress(txResult.publisherAddress);

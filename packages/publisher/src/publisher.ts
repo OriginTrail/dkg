@@ -284,7 +284,7 @@ export interface PublishOptions {
    * for the executor's local tail. It authorizes nothing by itself. Post-receipt and
    * non-fail-closed: listener failure can never affect the publish.
    */
-  onPublishConfirmed?: (confirmation: { readonly txHash: string }) => void;
+  onPublishConfirmed?: (confirmation: { readonly txHash: string }) => void | Promise<void>;
   /**
    * Skip the publisher-level context-graph graph creation/ensure step.
    * Only callers that already validated the target context graph should set
