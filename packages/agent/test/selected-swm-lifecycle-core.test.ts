@@ -42,19 +42,23 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           selectedSwmPriority: true,
           requestedScope: { kind: 'rfc64-recovery-plan' },
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [],
-            privateRecoverFromCurator: [privateCg],
-            eligibleContextGraphIds: [privateCg],
-          },
+          recoveryTargets: [{ contextGraphId: privateCg, lane: 'ordinary-private' }],
         },
       );
       expect(recovery.shared.insertedTriples).toBe(0);
       expect(recovery.shared.completedPhases).toBe(1);
-      expect(recovery.requestedScope).toEqual({ kind: 'rfc64-recovery-plan' });
+      expect(recovery.requestedScope).toMatchObject({
+        kind: 'rfc64-recovery-plan',
+        plan: {
+          providerPeerId: PEER,
+          targets: [{ contextGraphId: privateCg, lane: 'ordinary-private' }],
+        },
+      });
       expect(recovery.scopeComplete).toBe(true);
-      expect(recovery.completion.selectedPublicScopeComplete).toBe(false);
-      expect(recovery.completion.recoveryPlanComplete).toBe(true);
+      expect(recovery.targetDiagnostics).toEqual({
+        selectedPublic: { completed: 0, total: 0 },
+        ordinaryPrivate: { completed: 1, total: 1 },
+      });
 
       const backoff = new Map<string, unknown>();
       const accountingAgent = {
@@ -135,9 +139,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     });
 
     const plan = {
-      publicContextGraphIds: [publicCg],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [publicCg],
+      targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }],
     };
     try {
       await callSelectedSharedMemoryFromPeerDetailed(
@@ -146,7 +148,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         {
           selectedSwmPriority: true,
           priority: 2_000,
-          sharedMemorySyncPlan: plan,
+          recoveryTargets: plan.targets,
         },
       );
       await callSyncSharedMemoryFromPeerDetailed(
@@ -182,11 +184,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         {
           selectedSwmPriority: true,
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [publicCg],
-          },
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       );
       const summary = selected.shared;
@@ -203,7 +201,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         materializationFailures: 0,
       });
       expect(selected.scopeComplete).toBe(true);
-      expect(selected.completion.selectedPublicScopeComplete).toBe(true);
+      expect(selected.targetDiagnostics.selectedPublic).toEqual({ completed: 1, total: 1 });
       expect(summary.continuationPasses).toBe(0);
       expect(harness.probes.publicAdmissions()).toBe(1);
       expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(false);
@@ -227,11 +225,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         {
           selectedSwmPriority: true,
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [publicCg],
-          },
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       );
 
@@ -240,7 +234,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(selected.shared.failedPhases).toBeGreaterThan(0);
       expect(selected.shared.swmCoverage).toBeUndefined();
       expect(selected.scopeComplete).toBe(false);
-      expect(selected.completion.selectedPublicScopeComplete).toBe(false);
+      expect(selected.targetDiagnostics.selectedPublic).toEqual({ completed: 0, total: 1 });
       expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     } finally {
       await harness.close();
@@ -267,11 +261,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         {
           selectedSwmPriority: true,
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [publicCg],
-          },
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       );
 
@@ -284,7 +274,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(selected.shared.insertedMetaTriples).toBe(0);
       expect(selected.shared.failedPhases).toBeGreaterThan(0);
       expect(selected.scopeComplete).toBe(false);
-      expect(selected.completion.selectedPublicScopeComplete).toBe(false);
+      expect(selected.targetDiagnostics.selectedPublic).toEqual({ completed: 0, total: 1 });
       expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     } finally {
       await harness.close();
@@ -312,18 +302,14 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         {
           selectedSwmPriority: true,
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [publicCg],
-          },
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       );
 
       expect(selected.shared.swmCoverage).toBeUndefined();
       expect(selected.shared.timedOutPhases).toBeGreaterThan(0);
       expect(selected.scopeComplete).toBe(false);
-      expect(selected.completion.selectedPublicScopeComplete).toBe(false);
+      expect(selected.targetDiagnostics.selectedPublic).toEqual({ completed: 0, total: 1 });
       expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     } finally {
       await harness.close();
@@ -368,15 +354,13 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       planSharedMemorySyncContextGraphs: async (_peerId, contextGraphIds = []) => {
         plannedScopes.push([...contextGraphIds]);
-        const eligibleContextGraphIds = [...contextGraphIds];
         return {
-          publicContextGraphIds: eligibleContextGraphIds.filter(
-            (contextGraphId) => contextGraphId !== privateCg,
-          ),
-          privateRecoverFromCurator: eligibleContextGraphIds.filter(
-            (contextGraphId) => contextGraphId === privateCg,
-          ),
-          eligibleContextGraphIds,
+          targets: contextGraphIds.map((contextGraphId) => ({
+            contextGraphId,
+            lane: contextGraphId === privateCg
+              ? 'ordinary-private' as const
+              : 'selected-public' as const,
+          })),
         };
       },
       resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId: string) => (
@@ -398,6 +382,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       syncSelectedSharedMemoryFromPeerDetailed: async (
         _peerId: string,
         contextGraphIds: readonly string[],
+        options,
       ) => {
         syncCalls.push({
           contextGraphIds: [...contextGraphIds],
@@ -405,12 +390,12 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         });
         return {
           kind: 'selected-shared-memory',
-          requestedScope: { kind: 'selected-public' },
+          requestedScope: options.requestedScope,
           shared: cleanDurableResult(),
           scopeComplete: true,
-          completion: {
-            selectedPublicScopeComplete: true,
-            recoveryPlanComplete: true,
+          targetDiagnostics: {
+            selectedPublic: { completed: 1, total: 1 },
+            ordinaryPrivate: { completed: 0, total: 0 },
           },
         };
       },
@@ -458,9 +443,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       planSharedMemorySyncContextGraphs: async () => ({
-        publicContextGraphIds: [publicCg],
-        privateRecoverFromCurator: [],
-        eligibleContextGraphIds: [publicCg],
+        targets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
       }),
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [PEER],
       syncFromPeerDetailed: async () => 0,
@@ -470,16 +453,17 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       syncSelectedSharedMemoryFromPeerDetailed: async (
         _peerId: string,
         _contextGraphIds: readonly string[],
+        options,
       ) => ({
         kind: 'selected-shared-memory',
-        requestedScope: { kind: 'selected-public' },
+        requestedScope: options.requestedScope,
         shared: cleanDurableResult(),
         // The producer carries whole-selected-scope completeness explicitly;
         // freshness accounting must not depend on ambient peer state.
         scopeComplete: false,
-        completion: {
-          selectedPublicScopeComplete: false,
-          recoveryPlanComplete: false,
+        targetDiagnostics: {
+          selectedPublic: { completed: 0, total: 1 },
+          ordinaryPrivate: { completed: 0, total: 0 },
         },
       }),
       log: { info: () => {}, warn: () => {}, debug: () => {} },
@@ -520,11 +504,10 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           selectedSwmPriority: true,
           requestedScope: { kind: 'rfc64-recovery-plan' },
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [privateCg],
-            eligibleContextGraphIds: [publicCg, privateCg],
-          },
+          recoveryTargets: [
+            { contextGraphId: publicCg, lane: 'selected-public' },
+            { contextGraphId: privateCg, lane: 'ordinary-private' },
+          ],
         },
       );
       const summary = selected.shared;
@@ -535,10 +518,21 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         snapshotsTotal: 905,
         missingCount: 0,
       });
-      expect(selected.requestedScope).toEqual({ kind: 'rfc64-recovery-plan' });
+      expect(selected.requestedScope).toMatchObject({
+        kind: 'rfc64-recovery-plan',
+        plan: {
+          providerPeerId: PEER,
+          targets: [
+            { contextGraphId: publicCg, lane: 'selected-public' },
+            { contextGraphId: privateCg, lane: 'ordinary-private' },
+          ],
+        },
+      });
       expect(selected.scopeComplete).toBe(true);
-      expect(selected.completion.selectedPublicScopeComplete).toBe(true);
-      expect(selected.completion.recoveryPlanComplete).toBe(true);
+      expect(selected.targetDiagnostics).toEqual({
+        selectedPublic: { completed: 1, total: 1 },
+        ordinaryPrivate: { completed: 1, total: 1 },
+      });
       expect(summary.continuationPasses).toBe(1);
       expect(summary.snapshotPlaneIncomplete).toBe(1);
       expect(summary.failedPhases).toBe(1);
@@ -605,15 +599,14 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         {
           selectedSwmPriority: true,
           priority: 2_000,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [completeCg, incompleteCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [completeCg, incompleteCg],
-          },
+          recoveryTargets: [completeCg, incompleteCg].map((contextGraphId) => ({
+            contextGraphId,
+            lane: 'selected-public' as const,
+          })),
         },
       );
       expect(selected.scopeComplete).toBe(false);
-      expect(selected.completion.selectedPublicScopeComplete).toBe(false);
+      expect(selected.targetDiagnostics.selectedPublic).toEqual({ completed: 1, total: 2 });
       expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     } finally {
       await harness.close();
@@ -655,11 +648,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           selectedSwmPriority: true,
           priority: 2_000,
           stopOnBackoffWorthyFailure: true,
-          sharedMemorySyncPlan: {
-            publicContextGraphIds: [publicCg],
-            privateRecoverFromCurator: [],
-            eligibleContextGraphIds: [publicCg],
-          },
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       );
 
@@ -718,22 +707,20 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       ],
     });
     const plan = {
-      publicContextGraphIds: [publicCg],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [publicCg],
+      targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }],
     };
 
     try {
       const firstSelected = await callSelectedSharedMemoryFromPeerDetailed(
         harness.agent,
         [publicCg],
-        { selectedSwmPriority: true, priority: 2_000, sharedMemorySyncPlan: plan },
+        { selectedSwmPriority: true, priority: 2_000, recoveryTargets: plan.targets },
       );
       const first = firstSelected.shared;
 
       expect(first.metadataContinuationYields).toBe(1);
       expect(firstSelected.scopeComplete).toBe(false);
-      expect(firstSelected.completion.selectedPublicScopeComplete).toBe(false);
+      expect(firstSelected.targetDiagnostics.selectedPublic).toEqual({ completed: 0, total: 1 });
       expect(harness.probes.processedMetaBatches).toEqual([]);
       expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
 
@@ -764,13 +751,13 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       const secondSelected = await callSelectedSharedMemoryFromPeerDetailed(
         harness.agent,
         [publicCg],
-        { selectedSwmPriority: true, priority: 2_000, sharedMemorySyncPlan: plan },
+        { selectedSwmPriority: true, priority: 2_000, recoveryTargets: plan.targets },
       );
       const second = secondSelected.shared;
 
       expect(second.failedPhases).toBe(0);
       expect(secondSelected.scopeComplete).toBe(true);
-      expect(secondSelected.completion.selectedPublicScopeComplete).toBe(true);
+      expect(secondSelected.targetDiagnostics.selectedPublic).toEqual({ completed: 1, total: 1 });
       expect(harness.probes.metaRequesterScopes).toHaveLength(2);
       expect(harness.probes.metaRequesterScopes[1]).toBe(
         harness.probes.metaRequesterScopes[0],
@@ -806,19 +793,17 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       },
     });
     const plan = {
-      publicContextGraphIds: [publicCg],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [publicCg],
+      targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }],
     };
 
     try {
       const first = await callSelectedSharedMemoryFromPeerDetailed(
         harness.agent,
         [publicCg],
-        { selectedSwmPriority: true, priority: 2_000, sharedMemorySyncPlan: plan },
+        { selectedSwmPriority: true, priority: 2_000, recoveryTargets: plan.targets },
       );
       expect(first.scopeComplete).toBe(false);
-      expect(first.completion.selectedPublicScopeComplete).toBe(false);
+      expect(first.targetDiagnostics.selectedPublic).toEqual({ completed: 0, total: 1 });
       expect(first.shared.swmCoverage).toMatchObject({
         contextGraphId: publicCg,
         snapshotsResolved: 8,
@@ -832,10 +817,10 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       const second = await callSelectedSharedMemoryFromPeerDetailed(
         harness.agent,
         [publicCg],
-        { selectedSwmPriority: true, priority: 2_000, sharedMemorySyncPlan: plan },
+        { selectedSwmPriority: true, priority: 2_000, recoveryTargets: plan.targets },
       );
       expect(second.scopeComplete).toBe(true);
-      expect(second.completion.selectedPublicScopeComplete).toBe(true);
+      expect(second.targetDiagnostics.selectedPublic).toEqual({ completed: 1, total: 1 });
       expect(second.shared.swmCoverage).toMatchObject({
         contextGraphId: publicCg,
         snapshotsResolved: 10,
@@ -880,20 +865,18 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       ],
     });
     const plan = {
-      publicContextGraphIds: [publicCg],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [publicCg],
+      targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }],
     };
 
     try {
       await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
       wallNow += DURABLE_DATA_SYNC_SESSION_TTL_MS + 1;
       await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
 
       expect(harness.probes.metaRequesterScopes).toHaveLength(2);
@@ -938,19 +921,17 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       ],
     });
     const plan = {
-      publicContextGraphIds: [publicCg],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [publicCg],
+      targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }],
     };
 
     try {
       await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
       await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
 
       expect(harness.probes.metaRequesterScopes[1]).toBe(
@@ -1010,24 +991,22 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       },
     });
     const plan = {
-      publicContextGraphIds: [publicCg],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: [publicCg],
+      targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }],
     };
 
     try {
       await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
       const failed = await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
       expect(failed.failedPhases + failed.failedPeers).toBeGreaterThan(0);
       await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
-        sharedMemorySyncPlan: plan,
+        recoveryTargets: plan.targets,
       });
 
       expect(harness.probes.metaRequesterScopes).toHaveLength(3);

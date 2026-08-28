@@ -2,7 +2,43 @@
 
 import { deriveCuratorDidFromCgId } from '@origintrail-official/dkg-core';
 
-export type PrivateRecoveryAuthority = 'structural' | 'legacy';
+export type PrivateRecoverySkipDecision = Readonly<
+  | {
+    kind: 'skip';
+    reason: 'local-curator';
+    authority: 'structural';
+    structuralAgent: string;
+  }
+  | {
+    kind: 'skip';
+    reason: 'local-curator';
+    authority: 'legacy';
+  }
+  | {
+    kind: 'skip';
+    reason: 'curator-unresolved';
+    authority: 'structural';
+    structuralAgent: string;
+  }
+  | {
+    kind: 'skip';
+    reason: 'curator-unresolved';
+    authority: 'legacy';
+  }
+  | {
+    kind: 'skip';
+    reason: 'peer-not-curator';
+    authority: 'structural';
+    structuralAgent: string;
+    curatorPeerIds: readonly string[];
+  }
+  | {
+    kind: 'skip';
+    reason: 'peer-not-curator';
+    authority: 'legacy';
+    curatorPeerId: string;
+  }
+>;
 
 export type PrivateRecoverySourceDecision = Readonly<
   | {
@@ -10,14 +46,7 @@ export type PrivateRecoverySourceDecision = Readonly<
     source: 'rfc64-complete-provider' | 'structural-curator' | 'legacy-curator';
     curatorPeerId: string;
   }
-  | {
-    kind: 'skip';
-    reason: 'local-curator' | 'curator-unresolved' | 'peer-not-curator';
-    authority: PrivateRecoveryAuthority;
-    structuralAgent?: string;
-    curatorPeerIds?: readonly string[];
-    curatorPeerId?: string;
-  }
+  | PrivateRecoverySkipDecision
 >;
 
 export interface PrivateRecoverySourcePlanInput {
@@ -31,6 +60,46 @@ export interface PrivateRecoverySourcePlanInput {
   resolveLegacyCuratorPeer: () => Promise<string | null | undefined>;
 }
 
+export interface PrivateRecoverySkipLog {
+  readonly level: 'debug' | 'info';
+  readonly message: string;
+}
+
+/** Format every rejection variant without leaking payload invariants to callers. */
+export function formatPrivateRecoverySkip(
+  decision: PrivateRecoverySkipDecision,
+  contextGraphId: string,
+  remotePeerId: string,
+): PrivateRecoverySkipLog {
+  switch (decision.reason) {
+    case 'local-curator':
+      return {
+        level: 'debug',
+        message: `SWM sync: skipping "${contextGraphId}" — local node is the curator (never reverse-syncs a CG it owns)`,
+      };
+    case 'curator-unresolved':
+      return {
+        level: 'info',
+        message: decision.authority === 'structural'
+          ? `SWM recovery skipped for private CG "${contextGraphId.slice(0, 28)}": curator (${decision.structuralAgent.slice(0, 10)}) peer not resolved yet`
+          : `SWM recovery skipped for private CG "${contextGraphId.slice(0, 28)}": curator peerId not resolved`,
+      };
+    case 'peer-not-curator':
+      return {
+        level: 'info',
+        message: decision.authority === 'structural'
+          ? `SWM recovery deferred for private CG "${contextGraphId.slice(0, 28)}": connecting peer ${remotePeerId.slice(0, 12)} is not among the curator's ${decision.curatorPeerIds.length} registered peer(s)`
+          : `SWM recovery deferred for private CG "${contextGraphId.slice(0, 28)}": connecting peer is not the curator`,
+      };
+    default:
+      return unreachableDecision(decision);
+  }
+}
+
+function unreachableDecision(value: never): never {
+  throw new TypeError(`Unexpected private recovery decision: ${JSON.stringify(value)}`);
+}
+
 /**
  * Selects the one authoritative source for a private recovery attempt.
  *
@@ -42,7 +111,6 @@ export async function planPrivateRecoverySource(
   input: PrivateRecoverySourcePlanInput,
 ): Promise<PrivateRecoverySourceDecision> {
   const structuralCuratorDid = deriveCuratorDidFromCgId(input.contextGraphId);
-  const authority: PrivateRecoveryAuthority = structuralCuratorDid ? 'structural' : 'legacy';
   const structuralAgent = structuralCuratorDid
     ?.slice('did:dkg:agent:'.length)
     .toLowerCase();
@@ -53,7 +121,14 @@ export async function planPrivateRecoverySource(
     )
     : await input.isLegacyLocalCurator();
   if (localCurator) {
-    return { kind: 'skip', reason: 'local-curator', authority, structuralAgent };
+    return structuralAgent === undefined
+      ? { kind: 'skip', reason: 'local-curator', authority: 'legacy' }
+      : {
+        kind: 'skip',
+        reason: 'local-curator',
+        authority: 'structural',
+        structuralAgent,
+      };
   }
 
   if (input.completeProviderSelected) {
@@ -70,7 +145,7 @@ export async function planPrivateRecoverySource(
       return {
         kind: 'skip',
         reason: 'curator-unresolved',
-        authority,
+        authority: 'structural',
         structuralAgent,
       };
     }
@@ -78,7 +153,7 @@ export async function planPrivateRecoverySource(
       return {
         kind: 'skip',
         reason: 'peer-not-curator',
-        authority,
+        authority: 'structural',
         structuralAgent,
         curatorPeerIds,
       };
@@ -92,13 +167,18 @@ export async function planPrivateRecoverySource(
 
   const curatorPeerId = await input.resolveLegacyCuratorPeer();
   if (!curatorPeerId) {
-    return { kind: 'skip', reason: 'curator-unresolved', authority };
+    return { kind: 'skip', reason: 'curator-unresolved', authority: 'legacy' };
   }
   if (input.localPeerId && curatorPeerId === input.localPeerId) {
-    return { kind: 'skip', reason: 'local-curator', authority, curatorPeerId };
+    return { kind: 'skip', reason: 'local-curator', authority: 'legacy' };
   }
   if (curatorPeerId !== input.remotePeerId) {
-    return { kind: 'skip', reason: 'peer-not-curator', authority, curatorPeerId };
+    return {
+      kind: 'skip',
+      reason: 'peer-not-curator',
+      authority: 'legacy',
+      curatorPeerId,
+    };
   }
   return { kind: 'recover', source: 'legacy-curator', curatorPeerId };
 }

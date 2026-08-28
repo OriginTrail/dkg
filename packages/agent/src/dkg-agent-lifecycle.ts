@@ -347,7 +347,10 @@ import type {
   SelectedSharedMemoryRequestedScope,
   SelectedSharedMemorySyncResult,
 } from './sync/shared-memory-freshness.js';
-import { planPrivateRecoverySource } from './sync/private-recovery-source-planner.js';
+import {
+  formatPrivateRecoverySkip,
+  planPrivateRecoverySource,
+} from './sync/private-recovery-source-planner.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
@@ -646,6 +649,7 @@ import {
   resolveRfc64SwmRecoveryLaneV1,
   type Rfc64AuthorizedSwmRecoveryPlanV1,
   type Rfc64PeerSwmRecoveryPlanV1,
+  type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
@@ -689,7 +693,10 @@ interface OrdinarySharedMemorySyncFromPeerOptions extends SharedMemorySyncFromPe
   selectedSwmPriority?: false;
 }
 
-interface SelectedSharedMemorySyncFromPeerOptions extends SharedMemorySyncFromPeerOptions {
+interface SelectedSharedMemorySyncFromPeerOptions extends Omit<
+SharedMemorySyncFromPeerOptions,
+'sharedMemorySyncPlan'
+> {
   /** Selects the graph-complete RFC-64 SWM lane and its terminal verdict. */
   selectedSwmPriority: true;
   /** Exact scope whose terminal verdict generic retry accounting consumes. */
@@ -704,6 +711,57 @@ interface OrdinarySharedMemorySyncExecution {
 type SharedMemorySyncExecution =
   | OrdinarySharedMemorySyncExecution
   | SelectedSharedMemorySyncResult;
+
+function sharedMemoryRecoveryTargetKey(
+  target: Readonly<Rfc64SwmRecoveryTargetV1>,
+): string {
+  return `${target.lane}\n${target.contextGraphId}`;
+}
+
+function selectedSharedMemoryExecutionResult(
+  requestedScope: SelectedSharedMemoryRequestedScope,
+  shared: SharedMemorySyncResult,
+  completedTargetKeys: ReadonlySet<string>,
+): SelectedSharedMemorySyncResult {
+  const targets = requestedScope.kind === 'rfc64-recovery-plan'
+    ? requestedScope.plan.targets
+    : requestedScope.targets;
+  let selectedPublicCompleted = 0;
+  let selectedPublicTotal = 0;
+  let ordinaryPrivateCompleted = 0;
+  let ordinaryPrivateTotal = 0;
+  for (const target of targets) {
+    const completed = completedTargetKeys.has(sharedMemoryRecoveryTargetKey(target));
+    if (target.lane === 'selected-public') {
+      selectedPublicTotal += 1;
+      if (completed) selectedPublicCompleted += 1;
+    } else {
+      ordinaryPrivateTotal += 1;
+      if (completed) ordinaryPrivateCompleted += 1;
+    }
+  }
+  const scopeComplete = selectedPublicCompleted === selectedPublicTotal
+    && ordinaryPrivateCompleted === ordinaryPrivateTotal;
+  const base = {
+    kind: 'selected-shared-memory' as const,
+    shared,
+    scopeComplete,
+    targetDiagnostics: Object.freeze({
+      selectedPublic: Object.freeze({
+        completed: selectedPublicCompleted,
+        total: selectedPublicTotal,
+      }),
+      ordinaryPrivate: Object.freeze({
+        completed: ordinaryPrivateCompleted,
+        total: ordinaryPrivateTotal,
+      }),
+    }),
+  };
+  if (requestedScope.kind === 'rfc64-recovery-plan') {
+    return { ...base, requestedScope };
+  }
+  return { ...base, requestedScope };
+}
 
 type InFlightSyncPageFetch = {
   promise: Promise<SyncPageResult>;
@@ -1035,8 +1093,7 @@ function sharedMemorySyncSingleFlightKey(params: {
   remotePeerId: string;
   contextGraphIds: readonly string[];
   stopOnBackoffWorthyFailure?: boolean;
-  publicContextGraphIds: readonly string[];
-  privateRecoverFromCurator: readonly string[];
+  targets: readonly Readonly<Rfc64SwmRecoveryTargetV1>[];
   priority?: number;
   selectedSwm: boolean;
   requestedScope: SelectedSharedMemoryRequestedScope | null;
@@ -1045,8 +1102,7 @@ function sharedMemorySyncSingleFlightKey(params: {
     remotePeerId: params.remotePeerId,
     contextGraphIds: params.contextGraphIds,
     stopOnBackoffWorthyFailure: params.stopOnBackoffWorthyFailure === true,
-    publicContextGraphIds: params.publicContextGraphIds,
-    privateRecoverFromCurator: params.privateRecoverFromCurator,
+    targets: params.targets,
     priority: params.priority ?? null,
     selectedSwm: params.selectedSwm,
     requestedScope: params.requestedScope?.kind ?? null,
@@ -1256,10 +1312,25 @@ function jitteredIntervalMs(intervalMs: number, ratio: number | undefined): numb
 }
 
 type SharedMemorySyncContextGraphPlan = {
-  publicContextGraphIds: string[];
-  privateRecoverFromCurator: string[];
-  eligibleContextGraphIds: string[];
+  readonly targets: readonly Readonly<Rfc64SwmRecoveryTargetV1>[];
 };
+
+function sharedMemoryPlanContextGraphIds(
+  plan: SharedMemorySyncContextGraphPlan,
+): string[] {
+  return plan.targets.map(({ contextGraphId }) => contextGraphId);
+}
+
+function sharedMemoryPlanTargets<Lane extends Rfc64SwmRecoveryTargetV1['lane']>(
+  plan: SharedMemorySyncContextGraphPlan,
+  lane: Lane,
+): readonly Readonly<Rfc64SwmRecoveryTargetV1 & { readonly lane: Lane }>[] {
+  return plan.targets.filter(
+    (target): target is Rfc64SwmRecoveryTargetV1 & { readonly lane: Lane } => (
+      target.lane === lane
+    ),
+  );
+}
 
 function enforceRfc64CompleteProviderAuthority(
   plan: SharedMemorySyncContextGraphPlan,
@@ -1269,23 +1340,19 @@ function enforceRfc64CompleteProviderAuthority(
 ): SharedMemorySyncContextGraphPlan {
   if (remotePeerId === undefined) return plan;
   const rejectedPublicContextGraphIds = new Set(
-    plan.publicContextGraphIds.filter((contextGraphId) => {
+    plan.targets.filter(({ lane }) => lane === 'selected-public').filter(({ contextGraphId }) => {
       const completeSwmProviders = resolveCompleteProviders(contextGraphId);
       return completeSwmProviders.length > 0
         && !completeSwmProviders.includes(remotePeerId);
-    }),
+    }).map(({ contextGraphId }) => contextGraphId),
   );
   if (rejectedPublicContextGraphIds.size === 0) return plan;
   for (const contextGraphId of rejectedPublicContextGraphIds) {
     onRejected(contextGraphId, remotePeerId);
   }
   return {
-    publicContextGraphIds: plan.publicContextGraphIds.filter(
-      (contextGraphId) => !rejectedPublicContextGraphIds.has(contextGraphId),
-    ),
-    privateRecoverFromCurator: plan.privateRecoverFromCurator,
-    eligibleContextGraphIds: plan.eligibleContextGraphIds.filter(
-      (contextGraphId) => !rejectedPublicContextGraphIds.has(contextGraphId),
+    targets: plan.targets.filter(
+      ({ contextGraphId }) => !rejectedPublicContextGraphIds.has(contextGraphId),
     ),
   };
 }
@@ -4609,28 +4676,34 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return completeSwmProviders.length === 0 || this.knownCorePeerIds.has(remotePeer);
       }),
       getSharedMemorySyncContextGraphs: async (peerId) => (
-        await getSharedMemorySyncPlan(peerId)
-      ).eligibleContextGraphIds,
+        sharedMemoryPlanContextGraphIds(await getSharedMemorySyncPlan(peerId))
+      ),
       ...(automaticPeerSweep && remotePeerIsCompleteSwmProvider
         ? {
           selectedSharedMemoryLane: {
             getContextGraphIds: async (peerId: string) => (
-              await getPrioritySharedMemorySyncPlan(peerId)
-            ).publicContextGraphIds,
-            syncFromPeer: async (peerId: string, contextGraphIds: string[]) => (
-              this.syncSelectedSharedMemoryFromPeerDetailed(
+              sharedMemoryPlanTargets(
+                await getPrioritySharedMemorySyncPlan(peerId),
+                'selected-public',
+              ).map(({ contextGraphId }) => contextGraphId)
+            ),
+            syncFromPeer: async (peerId: string, contextGraphIds: string[]) => {
+              const targets = sharedMemoryPlanTargets(
+                await getPrioritySharedMemorySyncPlan(peerId),
+                'selected-public',
+              );
+              return this.syncSelectedSharedMemoryFromPeerDetailed(
                 peerId,
                 contextGraphIds,
                 {
                   stopOnBackoffWorthyFailure: true,
                   source,
-                  sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
                   priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
                   selectedSwmPriority: true,
-                  requestedScope: { kind: 'selected-public' },
+                  requestedScope: { kind: 'selected-public', targets },
                 },
-              )
-            ),
+              );
+            },
           },
         }
         : {}),
@@ -4739,38 +4812,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const validatedRecoveryPlan = recoveryPlan === undefined
       ? null
       : this.rfc64SwmRecoveryCoordinatorV1.revalidate(recoveryPlan);
-    const requestedContextGraphIds = validatedRecoveryPlan?.targets.map(
-      ({ contextGraphId }) => contextGraphId,
-    )
-      ?? this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer);
+    const requestedScope: SelectedSharedMemoryRequestedScope = validatedRecoveryPlan === null
+      ? {
+        kind: 'selected-public',
+        targets: sharedMemoryPlanTargets(
+          await this.planSharedMemorySyncContextGraphs(
+            remotePeer,
+            this.config.syncContextGraphs ?? [],
+            createOperationContext('sync'),
+            { requireCompleteProviderMatch: true },
+          ),
+          'selected-public',
+        ),
+      }
+      : {
+        kind: 'rfc64-recovery-plan',
+        plan: validatedRecoveryPlan,
+      };
+    const requestedTargets = requestedScope.kind === 'rfc64-recovery-plan'
+      ? requestedScope.plan.targets
+      : requestedScope.targets;
+    const requestedContextGraphIds = requestedTargets.map(({ contextGraphId }) => contextGraphId);
     if (requestedContextGraphIds.length === 0) {
       this.selectedSwmBootstrapAdmission.request(remotePeer, requestedContextGraphIds);
-      return 'not-started';
-    }
-    const sharedMemorySyncPlan = validatedRecoveryPlan === null
-      ? await this.planSharedMemorySyncContextGraphs(
-        remotePeer,
-        this.config.syncContextGraphs ?? [],
-        createOperationContext('sync'),
-        { requireCompleteProviderMatch: true },
-      )
-      : {
-        publicContextGraphIds: validatedRecoveryPlan.targets
-          .filter(({ lane }) => lane === 'selected-public')
-          .map(({ contextGraphId }) => contextGraphId),
-        privateRecoverFromCurator: validatedRecoveryPlan.targets
-          .filter(({ lane }) => lane === 'ordinary-private')
-          .map(({ contextGraphId }) => contextGraphId),
-        eligibleContextGraphIds: validatedRecoveryPlan.targets
-          .map(({ contextGraphId }) => contextGraphId),
-      };
-    if (
-      validatedRecoveryPlan === null
-      && sharedMemorySyncPlan.publicContextGraphIds.length === 0
-    ) {
-      // A configured scope that cannot yet be planned remains retryable. RPC,
-      // binding, or policy evidence may become available on a later bounded
-      // bootstrap pass; only an actually empty operator scope is terminal.
       return 'not-started';
     }
     return runSelectedSharedMemoryRetry({
@@ -4786,12 +4850,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             {
               stopOnBackoffWorthyFailure: true,
               source,
-              sharedMemorySyncPlan,
               priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
               selectedSwmPriority: true,
-              requestedScope: validatedRecoveryPlan === null
-                ? { kind: 'selected-public' }
-                : { kind: 'rfc64-recovery-plan' },
+              requestedScope,
             },
           )
         ),
@@ -4828,9 +4889,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // bidirectional mesh union-sync — which corrupts a reconnecting member into {old,new}
     // AND pollutes the curator back (proven on devnet). PUBLIC CGs keep the union path
     // (correct for cold-start / empty target).
-    const publicContextGraphIds: string[] = [];
-    const privateRecoverFromCurator: string[] = [];
-    const eligibleContextGraphIds: string[] = [];
+    const targets: Rfc64SwmRecoveryTargetV1[] = [];
     // Memoized agent-registry lookup: resolve a curator WALLET -> its libp2p peer
     // via the AGENTS registry (the authoritative agent->peer map), bypassing the
     // dkg:curator/dkg:creator `_meta` triples — a member that pre-created the CG
@@ -4882,7 +4941,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         || await this.isPrivateContextGraph(contextGraphId)
       ) {
         if (!remotePeerId) {
-          eligibleContextGraphIds.push(contextGraphId);
+          targets.push({ contextGraphId, lane: 'ordinary-private' });
           continue;
         }
         const completeProviderSelected = completeSwmProviders.includes(remotePeerId);
@@ -4919,19 +4978,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               ? 'curator peer'
               : 'curator';
           this.log.info(ctx, `SWM recovery ENQUEUED for private CG "${contextGraphId.slice(0, 28)}" from ${source} ${recoverySource.curatorPeerId.slice(0, 12)}`);
-          privateRecoverFromCurator.push(contextGraphId);
-          eligibleContextGraphIds.push(contextGraphId);
-        } else if (recoverySource.reason === 'local-curator') {
-          this.log.debug(ctx, `SWM sync: skipping "${contextGraphId}" — local node is the curator (never reverse-syncs a CG it owns)`);
-        } else if (recoverySource.reason === 'curator-unresolved') {
-          const unresolved = recoverySource.authority === 'structural'
-            ? `curator (${recoverySource.structuralAgent!.slice(0, 10)}) peer not resolved yet`
-            : 'curator peerId not resolved';
-          this.log.info(ctx, `SWM recovery skipped for private CG "${contextGraphId.slice(0, 28)}": ${unresolved}`);
-        } else if (recoverySource.authority === 'structural') {
-          this.log.info(ctx, `SWM recovery deferred for private CG "${contextGraphId.slice(0, 28)}": connecting peer ${remotePeerId.slice(0, 12)} is not among the curator's ${recoverySource.curatorPeerIds!.length} registered peer(s)`);
+          targets.push({ contextGraphId, lane: 'ordinary-private' });
         } else {
-          this.log.info(ctx, `SWM recovery deferred for private CG "${contextGraphId.slice(0, 28)}": connecting peer is not the curator`);
+          const skipLog = formatPrivateRecoverySkip(
+            recoverySource,
+            contextGraphId,
+            remotePeerId,
+          );
+          this.log[skipLog.level](ctx, skipLog.message);
         }
         continue;
       }
@@ -4944,11 +4998,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ) {
         continue;
       }
-      publicContextGraphIds.push(contextGraphId);
-      eligibleContextGraphIds.push(contextGraphId);
+      targets.push({ contextGraphId, lane: 'selected-public' });
     }
     return enforceRfc64CompleteProviderAuthority(
-      { publicContextGraphIds, privateRecoverFromCurator, eligibleContextGraphIds },
+      { targets },
       remotePeerId,
       (contextGraphId) => this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId),
       (contextGraphId, peerId) => this.log.debug(
@@ -4964,7 +5017,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.config.syncContextGraphs ?? [],
       createOperationContext('sync'),
     );
-    return plan.eligibleContextGraphIds;
+    return sharedMemoryPlanContextGraphIds(plan);
   }
 
   async ensurePeerAdmittedForRecovery(
@@ -6896,24 +6949,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const requestedScope = options?.selectedSwmPriority === true
       ? options.requestedScope
       : null;
-    const selectedRequest = requestedScope !== null;
+    const requestedTargets = requestedScope === null
+      ? null
+      : requestedScope.kind === 'rfc64-recovery-plan'
+        ? requestedScope.plan.targets
+        : requestedScope.targets;
     const execution = (
       shared: SharedMemorySyncResult,
-      selectedScopeComplete = false,
-      recoveryPlanComplete = false,
+      completedTargetKeys: ReadonlySet<string> = new Set(),
     ): SharedMemorySyncExecution => requestedScope !== null
-      ? {
-        kind: 'selected-shared-memory',
+      ? selectedSharedMemoryExecutionResult(
         requestedScope,
         shared,
-        scopeComplete: requestedScope.kind === 'rfc64-recovery-plan'
-          ? recoveryPlanComplete
-          : selectedScopeComplete,
-        completion: Object.freeze({
-          selectedPublicScopeComplete: selectedScopeComplete,
-          recoveryPlanComplete,
-        }),
-      }
+        completedTargetKeys,
+      )
       : { kind: 'ordinary-shared-memory', shared };
     if (!durableSyncEnabled(this.config)) {
       this.log.warn(ctx, `Skipping shared-memory sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
@@ -6957,10 +7006,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       remotePeerId,
       contextGraphId,
     );
-    const planned = options?.sharedMemorySyncPlan;
-    const initialPlan = planned && sameStringArray(planned.eligibleContextGraphIds, contextGraphIds)
-      ? planned
-      : await this.planSharedMemorySyncContextGraphs(remotePeerId, contextGraphIds, ctx);
+    if (
+      requestedTargets !== null
+      && !sameStringArray(
+        requestedTargets.map(({ contextGraphId }) => contextGraphId),
+        contextGraphIds,
+      )
+    ) {
+      throw new TypeError('Selected shared-memory request targets do not match its execution scope');
+    }
+    const planned = options?.selectedSwmPriority === true
+      ? undefined
+      : options?.sharedMemorySyncPlan;
+    const initialPlan = requestedTargets !== null
+      ? { targets: requestedTargets }
+      : planned && sameStringArray(sharedMemoryPlanContextGraphIds(planned), contextGraphIds)
+        ? planned
+        : await this.planSharedMemorySyncContextGraphs(remotePeerId, contextGraphIds, ctx);
     // Every plan, including a dedicated RFC-64 execution, passes the ordinary
     // source-authority guard. The RFC-64 boundary adds current-config proof;
     // it does not create a parallel bypass mode inside generic synchronization.
@@ -6973,22 +7035,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         `SWM sync: rejecting preplanned "${contextGraphId}" from ${peerId.slice(-8)} — RFC-64 complete provider selected`,
       ),
     );
-    const publicContextGraphIds = orderContextGraphIdsByPriority(
-      plan.publicContextGraphIds,
-      this.config.syncContextGraphPriorities,
+    const targetByContextGraph = new Map(
+      plan.targets.map((target) => [target.contextGraphId, target] as const),
     );
-    const privateRecoverFromCurator = orderContextGraphIdsByPriority(
-      plan.privateRecoverFromCurator,
+    const orderedTargets = orderContextGraphIdsByPriority(
+      sharedMemoryPlanContextGraphIds(plan),
       this.config.syncContextGraphPriorities,
-    );
+    ).map((contextGraphId) => {
+      const target = targetByContextGraph.get(contextGraphId);
+      if (target === undefined) {
+        throw new TypeError(`Missing shared-memory target for "${contextGraphId}"`);
+      }
+      return target;
+    });
+    const selectedPublicTargets = sharedMemoryPlanTargets(plan, 'selected-public');
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
     const selectedSwmEnabled = Boolean(
-      options?.selectedSwmPriority && publicContextGraphIds.length > 0,
+      options?.selectedSwmPriority && selectedPublicTargets.length > 0,
     );
     const selectedBootstrapOwner = selectedSwmEnabled
       ? this.selectedSwmBootstrapAdmission.beginTransfer(
         remotePeerId,
-        publicContextGraphIds,
+        selectedPublicTargets.map(({ contextGraphId }) => contextGraphId),
       )
       : null;
     const selectedMetaRetentionBudget = selectedSwmEnabled
@@ -7034,8 +7102,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       remotePeerId,
       contextGraphIds,
       stopOnBackoffWorthyFailure,
-      publicContextGraphIds,
-      privateRecoverFromCurator,
+      targets: orderedTargets,
       priority: options?.priority,
       selectedSwm: selectedSwmEnabled,
       requestedScope,
@@ -7187,13 +7254,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return result;
       };
 
-      const publicSet = new Set(publicContextGraphIds);
-      const privateRecoverySet = new Set(privateRecoverFromCurator);
-      const completedPrivateRecovery = new Set<string>();
+      const completedTargetKeys = new Set<string>();
       const selectedContinuationUnits: SelectedSwmContinuationUnit[] = [];
       const work: ContextGraphSyncWork<SharedMemorySyncResult>[] = [];
-      for (const contextGraphId of plan.eligibleContextGraphIds) {
-        if (publicSet.has(contextGraphId)) {
+      for (const target of orderedTargets) {
+        const { contextGraphId } = target;
+        if (target.lane === 'selected-public') {
           work.push({
             contextGraphId,
             lane: 'shared_memory',
@@ -7205,7 +7271,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           });
           continue;
         }
-        if (!privateRecoverySet.has(contextGraphId)) continue;
         work.push({
           contextGraphId,
           lane: 'swm_recovery',
@@ -7232,7 +7297,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               // so every requester lane shares the same orchestration loop.
               if (recovered.completed) {
                 result.completedPhases = 1;
-                completedPrivateRecovery.add(contextGraphId);
+                completedTargetKeys.add(sharedMemoryRecoveryTargetKey(target));
               } else {
                 result.failedPhases = 1;
                 result.backoffWorthyFailures = 1;
@@ -7257,8 +7322,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         emptyResult: emptySharedMemorySyncResult,
         runWithAdmission: (item, run) => {
           const selectedPublicWork = selectedSwmEnabled
-            && item.lane === 'shared_memory'
-            && publicSet.has(item.contextGraphId);
+            && item.lane === 'shared_memory';
           return this.runContextGraphSyncWithBackpressure(
             ctx,
             item.contextGraphId,
@@ -7277,7 +7341,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           if (
             selectedSwmEnabled
             && item.lane === 'shared_memory'
-            && publicSet.has(item.contextGraphId)
           ) {
             const metadataContinuation = selectedMetaFetcher!.continuation(
               item.contextGraphId,
@@ -7329,14 +7392,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             `Selected RFC-64 SWM continuation from ${remotePeerId.slice(-8)} stopped on local backpressure`,
           );
         }
-        const privateScopeComplete = completedPrivateRecovery.size
-          === privateRecoverySet.size;
-        const recoveryPlanComplete = selectedRequest
-          && publicContextGraphIds.length === 0
-          && privateScopeComplete
-          && sameStringArray(plan.eligibleContextGraphIds, contextGraphIds)
-          && (initialSummary.deferredBackpressure ?? 0) === 0;
-        return execution(initialSummary, false, recoveryPlanComplete);
+        return execution(initialSummary, completedTargetKeys);
       }
 
       const continuationExecution = await runSelectedSwmContinuations({
@@ -7402,15 +7458,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         initialSummary,
         continuationSummary,
       );
-      const expectedSelectedContextGraphs = new Set(publicContextGraphIds);
-      const selectedScopeComplete = selectedContinuationUnits.length
-        === expectedSelectedContextGraphs.size
-        && continuationExecution.incompleteContextGraphIds.length === 0;
-      const recoveryPlanComplete = selectedScopeComplete
-        && completedPrivateRecovery.size === privateRecoverySet.size
-        && sameStringArray(plan.eligibleContextGraphIds, contextGraphIds);
-      if (selectedScopeComplete) {
-        this.selectedSwmBootstrapAdmission.markTransferTerminal(selectedBootstrapOwner!);
+      const incompleteSelectedContextGraphs = new Set(
+        continuationExecution.incompleteContextGraphIds,
+      );
+      const continuedSelectedContextGraphs = new Set(
+        selectedContinuationUnits.map(({ work: unitWork }) => unitWork.contextGraphId),
+      );
+      for (const target of selectedPublicTargets) {
+        if (
+          continuedSelectedContextGraphs.has(target.contextGraphId)
+          && !incompleteSelectedContextGraphs.has(target.contextGraphId)
+        ) {
+          completedTargetKeys.add(sharedMemoryRecoveryTargetKey(target));
+        }
+      }
+      const selectedPublicScopeComplete = selectedPublicTargets.every(
+        (target) => completedTargetKeys.has(sharedMemoryRecoveryTargetKey(target)),
+      );
+      if (selectedBootstrapOwner !== null && selectedPublicScopeComplete) {
+        this.selectedSwmBootstrapAdmission.markTransferTerminal(selectedBootstrapOwner);
       }
       // Preserve the raw historical yield/failure counters for diagnostics;
       // the canonical freshness helper bounds the selected continuation's
@@ -7420,8 +7486,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           finalSummary,
           continuationExecution.freshnessResolution,
         ),
-        selectedScopeComplete,
-        recoveryPlanComplete,
+        completedTargetKeys,
       );
     };
 

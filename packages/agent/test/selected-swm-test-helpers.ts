@@ -19,6 +19,7 @@ import type {
   SelectedSharedMemoryRequestedScope,
   SelectedSharedMemorySyncResult,
 } from '../src/sync/shared-memory-freshness.js';
+import type { Rfc64SwmRecoveryTargetV1 } from '../src/rfc64/swm-recovery-plan-v1.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   type SelectedSwmMetaContinuation,
@@ -290,9 +291,7 @@ export interface SelectedProviderSelectionAgent {
     peerId?: string,
     contextGraphIds?: readonly string[],
   ) => Promise<{
-    publicContextGraphIds: string[];
-    privateRecoverFromCurator: string[];
-    eligibleContextGraphIds: string[];
+    targets: readonly Rfc64SwmRecoveryTargetV1[];
   }>;
   resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId: string) => string[];
   syncFromPeerDetailed: () => Promise<number>;
@@ -475,16 +474,37 @@ type ProductionSelectedSyncSharedMemoryOptions = Parameters<
   typeof LifecycleSyncMethods.prototype.syncSelectedSharedMemoryFromPeerDetailed
 >[2];
 
+type TestSelectedSharedMemoryRequestedScope = Pick<
+  SelectedSharedMemoryRequestedScope,
+  'kind'
+>;
+
 export type SelectedSyncSharedMemoryOptions = Omit<
 ProductionSelectedSyncSharedMemoryOptions,
 'requestedScope'
 > & {
-  requestedScope?: SelectedSharedMemoryRequestedScope;
+  requestedScope?: TestSelectedSharedMemoryRequestedScope;
+  recoveryTargets?: readonly Rfc64SwmRecoveryTargetV1[];
 };
 
-export type SyncSharedMemoryOptions = Parameters<
+type ProductionSyncSharedMemoryOptions = Parameters<
   typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed
 >[2];
+
+export type SyncSharedMemoryOptions = NonNullable<ProductionSyncSharedMemoryOptions>;
+
+function testRecoveryTargets(
+  contextGraphIds: readonly string[],
+  targets: readonly Rfc64SwmRecoveryTargetV1[] | undefined,
+): readonly Rfc64SwmRecoveryTargetV1[] {
+  if (targets === undefined) {
+    return contextGraphIds.map((contextGraphId) => ({
+      contextGraphId,
+      lane: 'selected-public',
+    }));
+  }
+  return targets;
+}
 
 export const callSelectedSharedMemoryFromPeerDetailed = (
   agent: SelectedSwmLifecycleAgentFixture,
@@ -497,9 +517,29 @@ export const callSelectedSharedMemoryFromPeerDetailed = (
     ids: string[],
     syncOptions: ProductionSelectedSyncSharedMemoryOptions,
   ) => Promise<SelectedSharedMemorySyncResult>;
+  const { requestedScope, recoveryTargets, ...productionOptions } = options;
+  const targets = testRecoveryTargets(contextGraphIds, recoveryTargets);
+  const exactRequestedScope: SelectedSharedMemoryRequestedScope = requestedScope?.kind
+    === 'rfc64-recovery-plan'
+    ? {
+      kind: 'rfc64-recovery-plan',
+      plan: {
+        kind: 'rfc64-authorized-swm-recovery-v1',
+        providerPeerId: PEER,
+        targets,
+      },
+    }
+    : {
+      kind: 'selected-public',
+      targets: targets.filter(
+        (target): target is Rfc64SwmRecoveryTargetV1 & { lane: 'selected-public' } => (
+          target.lane === 'selected-public'
+        ),
+      ),
+    };
   return method.call(agent, PEER, contextGraphIds, {
-    ...options,
-    requestedScope: options.requestedScope ?? { kind: 'selected-public' },
+    ...productionOptions,
+    requestedScope: exactRequestedScope,
   });
 };
 
@@ -520,7 +560,7 @@ export const callSyncSharedMemoryFromPeerDetailed = async (
     this: SelectedSwmLifecycleAgentFixture,
     remotePeerId: string,
     ids: string[],
-    syncOptions: SyncSharedMemoryOptions,
+    syncOptions: NonNullable<ProductionSyncSharedMemoryOptions>,
   ) => Promise<SharedMemorySyncResult>;
   return method.call(agent, PEER, contextGraphIds, options);
 };

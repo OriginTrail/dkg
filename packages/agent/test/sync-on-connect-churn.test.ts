@@ -169,7 +169,7 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).refreshMetaSyncedFlags = async () => undefined;
     (agent as any).discoverContextGraphsFromStore = async () => 0;
     (agent as any).planSharedMemorySyncContextGraphs = async () => ({
-      eligibleContextGraphIds: [],
+      targets: [],
     });
 
     expect(await (agent as any).trySyncFromPeer(PEER_A)).toBe('synced');
@@ -237,14 +237,18 @@ describe('sync-on-connect churn gates', () => {
       authorize: vi.fn(() => authorized),
       revalidate: vi.fn(() => authorized),
     };
-    const selectedSync = vi.fn(async () => ({
+    const selectedSync = vi.fn(async (
+      _peerId: string,
+      _contextGraphIds: readonly string[],
+      options: { requestedScope: { kind: 'rfc64-recovery-plan'; plan: typeof authorized } },
+    ) => ({
       kind: 'selected-shared-memory' as const,
-      requestedScope: { kind: 'rfc64-recovery-plan' as const },
+      requestedScope: options.requestedScope,
       shared: emptyDetailedSync({ completedPhases: 2 }),
       scopeComplete: true,
-      completion: {
-        selectedPublicScopeComplete: false,
-        recoveryPlanComplete: true,
+      targetDiagnostics: {
+        selectedPublic: { completed: 1, total: 1 },
+        ordinaryPrivate: { completed: 1, total: 1 },
       },
     }));
     (agent as any).syncSelectedSharedMemoryFromPeerDetailed = selectedSync;
@@ -276,15 +280,14 @@ describe('sync-on-connect churn gates', () => {
       PEER_A,
       ['private-cg', 'public-cg'],
       expect.objectContaining({
-        sharedMemorySyncPlan: {
-          publicContextGraphIds: ['public-cg'],
-          privateRecoverFromCurator: ['private-cg'],
-          eligibleContextGraphIds: ['private-cg', 'public-cg'],
-        },
         selectedSwmPriority: true,
-        requestedScope: { kind: 'rfc64-recovery-plan' },
+        requestedScope: {
+          kind: 'rfc64-recovery-plan',
+          plan: authorized,
+        },
       }),
     );
+    expect(selectedSync.mock.calls[0]![2].requestedScope.plan).toBe(authorized);
     expect((agent as any).queuedSyncOnConnectPeers.size).toBe(0);
     expect((agent as any).pendingRfc64SwmRecoveries.size).toBe(0);
     expect((agent as any).syncReconcilerBackoff.has(PEER_A)).toBe(false);
@@ -378,21 +381,23 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-cg'];
     (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
     (agent as any).planSharedMemorySyncContextGraphs = async () => ({
-      publicContextGraphIds: ['selected-cg'],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: ['selected-cg'],
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
     });
-    const selectedSync = recorder(async () => ({
+    const selectedSync = recorder(async (
+      _peerId: string,
+      _contextGraphIds: readonly string[],
+      options: { requestedScope: any },
+    ) => ({
       kind: 'selected-shared-memory' as const,
-      requestedScope: { kind: 'selected-public' as const },
+      requestedScope: options.requestedScope,
       shared: emptyDetailedSync({
         insertedTriples: 4,
         insertedDataTriples: 4,
       }),
       scopeComplete: true,
-      completion: {
-        selectedPublicScopeComplete: true,
-        recoveryPlanComplete: true,
+      targetDiagnostics: {
+        selectedPublic: { completed: 1, total: 1 },
+        ordinaryPrivate: { completed: 0, total: 0 },
       },
     }));
     const durableSync = recorder(async () => emptyDetailedSync({ completedPhases: 1 }));
@@ -600,12 +605,15 @@ describe('sync-on-connect churn gates', () => {
         getContextGraphIds: () => ['selected-cg'],
         syncFromPeer: async () => ({
           kind: 'selected-shared-memory',
-          requestedScope: { kind: 'selected-public' },
+          requestedScope: {
+            kind: 'selected-public',
+            targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
+          },
           shared: emptyDetailedSync(),
           scopeComplete: false,
-          completion: {
-            selectedPublicScopeComplete: false,
-            recoveryPlanComplete: false,
+          targetDiagnostics: {
+            selectedPublic: { completed: 0, total: 1 },
+            ordinaryPrivate: { completed: 0, total: 0 },
           },
         }),
       },
@@ -640,24 +648,26 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
     (agent as any).resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [PEER_A];
     (agent as any).planSharedMemorySyncContextGraphs = async () => ({
-      publicContextGraphIds: ['selected-cg'],
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: ['selected-cg'],
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
     });
     (agent as any).syncFromPeerDetailed = async () => emptyDetailedSync({ complete: true });
     (agent as any).refreshMetaSyncedFlags = async () => undefined;
     (agent as any).discoverContextGraphsFromStore = async () => 0;
-    (agent as any).syncSelectedSharedMemoryFromPeerDetailed = async () => ({
+    (agent as any).syncSelectedSharedMemoryFromPeerDetailed = async (
+      _peerId: string,
+      _contextGraphIds: readonly string[],
+      options: { requestedScope: any },
+    ) => ({
       kind: 'selected-shared-memory',
-      requestedScope: { kind: 'selected-public' },
+      requestedScope: options.requestedScope,
       shared: emptyDetailedSync({
         insertedTriples: 4,
         insertedDataTriples: 4,
       }),
       scopeComplete: false,
-      completion: {
-        selectedPublicScopeComplete: false,
-        recoveryPlanComplete: false,
+      targetDiagnostics: {
+        selectedPublic: { completed: 0, total: 1 },
+        ordinaryPrivate: { completed: 0, total: 0 },
       },
     });
     (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);

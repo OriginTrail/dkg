@@ -1216,9 +1216,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       createOperationContext('sync'),
       { requireCompleteProviderMatch: true },
     )).resolves.toEqual({
-      publicContextGraphIds: [],
-      privateRecoverFromCurator: [policy.contextGraphId],
-      eligibleContextGraphIds: [policy.contextGraphId],
+      targets: [{ contextGraphId: policy.contextGraphId, lane: 'ordinary-private' }],
     });
   });
 

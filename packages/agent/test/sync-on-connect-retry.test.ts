@@ -115,16 +115,19 @@ describe('runSyncOnConnect callbacks', () => {
           order.push(`shared:${contextGraphIds.join(',')}:selected`);
           return {
             kind: 'selected-shared-memory',
-            requestedScope: { kind: 'selected-public' },
+            requestedScope: {
+              kind: 'selected-public',
+              targets: [{ contextGraphId: 'selected', lane: 'selected-public' }],
+            },
             shared: {
               insertedTriples: 0,
               completedPhases: 1,
               checkpointAdvances: 0,
             },
             scopeComplete: true,
-            completion: {
-              selectedPublicScopeComplete: true,
-              recoveryPlanComplete: true,
+            targetDiagnostics: {
+              selectedPublic: { completed: 1, total: 1 },
+              ordinaryPrivate: { completed: 0, total: 0 },
             },
           };
         },
@@ -1680,9 +1683,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       });
       (agent as any).discoverContextGraphsFromStore = recorder(async () => 0);
       (agent as any).planSharedMemorySyncContextGraphs = recorder(async () => ({
-        publicContextGraphIds: [],
-        privateRecoverFromCurator: ['private-cg'],
-        eligibleContextGraphIds: ['private-cg'],
+        targets: [{ contextGraphId: 'private-cg', lane: 'ordinary-private' }],
       }));
       const recoverContextGraphSwmFromPeer = recorder(async () => ({
         insertedDataQuads: 0,

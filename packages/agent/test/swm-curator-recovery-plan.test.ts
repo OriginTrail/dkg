@@ -43,9 +43,10 @@ describe('private SWM curator recovery planning', () => {
       createOperationContext('sync'),
     );
 
-    expect(plan.publicContextGraphIds).toEqual([]);
-    expect(plan.privateRecoverFromCurator).toEqual([contextGraphId]);
-    expect(plan.eligibleContextGraphIds).toEqual([contextGraphId]);
+    expect(plan.targets).toEqual([{
+      contextGraphId,
+      lane: 'ordinary-private',
+    }]);
   });
 
   it('skips private SWM recovery when the local node owns the structural curator agent', async () => {
@@ -67,9 +68,7 @@ describe('private SWM curator recovery planning', () => {
       createOperationContext('sync'),
     );
 
-    expect(plan.publicContextGraphIds).toEqual([]);
-    expect(plan.privateRecoverFromCurator).toEqual([]);
-    expect(plan.eligibleContextGraphIds).toEqual([]);
+    expect(plan.targets).toEqual([]);
   });
 
   it('recovers a selected private CG from its exact complete provider without registry discovery', async () => {
@@ -98,9 +97,7 @@ describe('private SWM curator recovery planning', () => {
       createOperationContext('sync'),
       { requireCompleteProviderMatch: true },
     )).resolves.toEqual({
-      publicContextGraphIds: [],
-      privateRecoverFromCurator: [contextGraphId],
-      eligibleContextGraphIds: [contextGraphId],
+      targets: [{ contextGraphId, lane: 'ordinary-private' }],
     });
   });
 
@@ -117,18 +114,14 @@ describe('private SWM curator recovery planning', () => {
       '12D3KooWUnrelatedEdge',
       [contextGraphId],
       createOperationContext('sync'),
-    )).resolves.toMatchObject({
-      publicContextGraphIds: [],
-      eligibleContextGraphIds: [],
-    });
+    )).resolves.toEqual({ targets: [] });
 
     await expect(agent.planSharedMemorySyncContextGraphs(
       completeProvider,
       [contextGraphId],
       createOperationContext('sync'),
-    )).resolves.toMatchObject({
-      publicContextGraphIds: [contextGraphId],
-      eligibleContextGraphIds: [contextGraphId],
+    )).resolves.toEqual({
+      targets: [{ contextGraphId, lane: 'selected-public' }],
     });
   });
 
@@ -149,9 +142,8 @@ describe('private SWM curator recovery planning', () => {
       [ordinaryContextGraphId, contextGraphId],
       createOperationContext('sync'),
       { requireCompleteProviderMatch: true },
-    )).resolves.toMatchObject({
-      publicContextGraphIds: [contextGraphId],
-      eligibleContextGraphIds: [contextGraphId],
+    )).resolves.toEqual({
+      targets: [{ contextGraphId, lane: 'selected-public' }],
     });
   });
 
@@ -167,10 +159,7 @@ describe('private SWM curator recovery planning', () => {
       '12D3KooWFallbackPeer',
       [contextGraphId],
       createOperationContext('sync'),
-    )).resolves.toMatchObject({
-      publicContextGraphIds: [],
-      eligibleContextGraphIds: [],
-    });
+    )).resolves.toEqual({ targets: [] });
   });
 
   it('retains ordinary public union sync when no RFC-64 complete provider is configured', async () => {
@@ -185,9 +174,8 @@ describe('private SWM curator recovery planning', () => {
       '12D3KooWOrdinaryPeer',
       [contextGraphId],
       createOperationContext('sync'),
-    )).resolves.toMatchObject({
-      publicContextGraphIds: [contextGraphId],
-      eligibleContextGraphIds: [contextGraphId],
+    )).resolves.toEqual({
+      targets: [{ contextGraphId, lane: 'selected-public' }],
     });
   });
 

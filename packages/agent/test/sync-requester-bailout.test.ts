@@ -550,9 +550,10 @@ describe('lifecycle shared-memory fanout isolation', () => {
 
   function swmPlan(contextGraphIds: string[]) {
     return {
-      publicContextGraphIds: contextGraphIds,
-      privateRecoverFromCurator: [],
-      eligibleContextGraphIds: contextGraphIds,
+      targets: contextGraphIds.map((contextGraphId) => ({
+        contextGraphId,
+        lane: 'selected-public' as const,
+      })),
     };
   }
 

@@ -2,6 +2,10 @@ import type {
   SharedMemorySyncDiagnostics,
   SharedMemorySyncResult,
 } from '../dkg-agent-types.js';
+import type {
+  Rfc64AuthorizedSwmRecoveryPlanV1,
+  Rfc64SwmRecoveryTargetV1,
+} from '../rfc64/swm-recovery-plan-v1.js';
 import {
   classifyDurableProgress,
   type DurableProgressClassification,
@@ -23,25 +27,48 @@ export interface SharedMemoryFreshnessSummary extends DurableProgressSummary {
  * orchestration consumer so every producer and consumer shares the same
  * fail-closed, discriminated result shape.
  */
-export type SelectedSharedMemoryRequestedScope = Readonly<
-  | { readonly kind: 'selected-public' }
-  | { readonly kind: 'rfc64-recovery-plan' }
+export type SelectedPublicSharedMemoryTarget = Readonly<
+  Rfc64SwmRecoveryTargetV1 & { readonly lane: 'selected-public' }
 >;
 
-export interface SelectedSharedMemorySyncResult {
+export type SelectedSharedMemoryRequestedScope = Readonly<
+  | {
+    readonly kind: 'selected-public';
+    readonly targets: readonly SelectedPublicSharedMemoryTarget[];
+  }
+  | {
+    readonly kind: 'rfc64-recovery-plan';
+    readonly plan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
+  }
+>;
+
+interface SelectedSharedMemorySyncResultBase {
   readonly kind: 'selected-shared-memory';
-  /** The producer-selected accounting scope; consumers never reinterpret it. */
-  readonly requestedScope: SelectedSharedMemoryRequestedScope;
   /** Full diagnostics stay available even though completion is lane-specific. */
   readonly shared: SharedMemorySyncResult;
   /** The sole terminal verdict consumed by generic orchestration. */
   readonly scopeComplete: boolean;
-  /** RFC-64 producer diagnostics retained without competing accounting fields. */
-  readonly completion: Readonly<{
-    selectedPublicScopeComplete: boolean;
-    recoveryPlanComplete: boolean;
+  /** Per-lane counts are diagnostic evidence, never competing verdicts. */
+  readonly targetDiagnostics: Readonly<{
+    selectedPublic: Readonly<{ completed: number; total: number }>;
+    ordinaryPrivate: Readonly<{ completed: number; total: number }>;
   }>;
 }
+
+export type SelectedSharedMemorySyncResult = Readonly<
+  | (SelectedSharedMemorySyncResultBase & {
+    readonly requestedScope: Extract<
+      SelectedSharedMemoryRequestedScope,
+      { readonly kind: 'selected-public' }
+    >;
+  })
+  | (SelectedSharedMemorySyncResultBase & {
+    readonly requestedScope: Extract<
+      SelectedSharedMemoryRequestedScope,
+      { readonly kind: 'rfc64-recovery-plan' }
+    >;
+  })
+>;
 
 /**
  * Producer-side evidence that a later selected-provider continuation resolved

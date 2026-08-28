@@ -1047,9 +1047,7 @@ describe('durable sync lifecycle chain binding', () => {
       [contextGraphId],
       {
         sharedMemorySyncPlan: {
-          eligibleContextGraphIds: [contextGraphId],
-          publicContextGraphIds: [contextGraphId],
-          privateRecoverFromCurator: [],
+          targets: [{ contextGraphId, lane: 'selected-public' }],
         },
       },
     );
@@ -1137,9 +1135,7 @@ describe('durable sync lifecycle chain binding', () => {
       [contextGraphId],
       {
         sharedMemorySyncPlan: {
-          eligibleContextGraphIds: [contextGraphId],
-          publicContextGraphIds: [contextGraphId],
-          privateRecoverFromCurator: [],
+          targets: [{ contextGraphId, lane: 'selected-public' }],
         },
       },
     );

@@ -70,4 +70,52 @@ describe('private recovery source planner', () => {
     });
     expect(resolveLegacyCuratorPeer).toHaveBeenCalledOnce();
   });
+
+  it('rejects an unrelated peer after structural curator discovery', async () => {
+    await expect(planPrivateRecoverySource(input({
+      remotePeerId: '12D3KooWUnrelatedPeer',
+      resolveStructuralCuratorPeers: vi.fn(async () => [REMOTE_PEER]),
+    }))).resolves.toEqual({
+      kind: 'skip',
+      reason: 'peer-not-curator',
+      authority: 'structural',
+      structuralAgent: CURATOR,
+      curatorPeerIds: [REMOTE_PEER],
+    });
+  });
+
+  it('rejects an unrelated peer after legacy curator discovery', async () => {
+    await expect(planPrivateRecoverySource(input({
+      contextGraphId: 'legacy-private-cg',
+      remotePeerId: '12D3KooWUnrelatedPeer',
+      resolveLegacyCuratorPeer: vi.fn(async () => REMOTE_PEER),
+    }))).resolves.toEqual({
+      kind: 'skip',
+      reason: 'peer-not-curator',
+      authority: 'legacy',
+      curatorPeerId: REMOTE_PEER,
+    });
+  });
+
+  it('distinguishes unresolved structural curator authority', async () => {
+    await expect(planPrivateRecoverySource(input({
+      resolveStructuralCuratorPeers: vi.fn(async () => []),
+    }))).resolves.toEqual({
+      kind: 'skip',
+      reason: 'curator-unresolved',
+      authority: 'structural',
+      structuralAgent: CURATOR,
+    });
+  });
+
+  it('distinguishes unresolved legacy curator authority', async () => {
+    await expect(planPrivateRecoverySource(input({
+      contextGraphId: 'legacy-private-cg',
+      resolveLegacyCuratorPeer: vi.fn(async () => null),
+    }))).resolves.toEqual({
+      kind: 'skip',
+      reason: 'curator-unresolved',
+      authority: 'legacy',
+    });
+  });
 });
