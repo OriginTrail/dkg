@@ -34,13 +34,6 @@ import {
 const QUERY_CATALOG_RESULT_LIMIT = 5_000;
 const QUERY_CATALOG_RESPONSE_BYTES = 1024 * 1024;
 
-function listenerBoiLegacyQueryCatalogView(queryIri: string, catalogIri: string) {
-  return queryIri.startsWith('urn:listenerboi:query:')
-    || catalogIri.startsWith('urn:listenerboi:catalog:')
-    ? 'working-memory' as const
-    : undefined;
-}
-
 /**
  * Semantic query-catalog HTTP boundary. Persistence belongs to the Context
  * Graph `meta` subgraph; this module deliberately exposes no generic storage
@@ -229,7 +222,6 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     try {
       items = decodeQueryCatalogBindings(rawBindings, {
         contextGraphId,
-        legacyView: listenerBoiLegacyQueryCatalogView,
       });
     } catch (err: any) {
       jsonResponse(res, 422, {

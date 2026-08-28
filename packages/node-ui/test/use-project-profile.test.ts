@@ -227,15 +227,16 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
 
   it('loads saved queries through the dedicated profile catalog endpoint', async () => {
     vi.mocked(readProfileQueryCatalog).mockResolvedValueOnce(queryCatalogResponse([{
-          q: 'urn:listenerboi:query:open-incidents',
+          q: 'urn:dkg:profile:cg-test:query:open-incidents',
           subGraph: 'incidents',
-          catalog: 'urn:listenerboi:catalog:investigations',
+          catalog: 'urn:dkg:profile:cg-test:catalog:investigations',
           name: 'Open incidents',
           description: 'Find incidents that still need attention.',
           sparql: 'SELECT ?incident WHERE { ?incident ?p ?o }',
           resultColumn: 'incident',
+          executionView: 'working-memory',
           rank: '1',
-          catalogName: 'ListenerBoi investigations',
+          catalogName: 'Incident investigations',
           catalogDescription: 'Reusable incident investigation queries.',
           catalogRank: '2',
     }]));
@@ -249,7 +250,7 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     expect(captured!.error).toBeUndefined();
     expect(captured!.queryCatalogs).toEqual([expect.objectContaining({
       slug: 'investigations',
-      name: 'ListenerBoi investigations',
+      name: 'Incident investigations',
       description: 'Reusable incident investigation queries.',
       rank: 2,
       queries: [expect.objectContaining({

@@ -24,16 +24,6 @@ import {
 import { executeQuery, readProfileQueryCatalog, type QueryExecutionView } from '../api.js';
 import { ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 
-function listenerBoiLegacyQueryCatalogView(
-  queryIri: string,
-  catalogIri: string,
-): QueryExecutionView | undefined {
-  return queryIri.startsWith('urn:listenerboi:query:')
-    || catalogIri.startsWith('urn:listenerboi:catalog:')
-    ? 'working-memory'
-    : undefined;
-}
-
 async function runProjectQuery(
   sparql: string,
   contextGraphId: string,
@@ -50,10 +40,7 @@ async function readProjectQueryCatalog(
   contextGraphId: string,
 ): Promise<QueryCatalogItem[]> {
   const response = await readProfileQueryCatalog(contextGraphId);
-  return decodeQueryCatalogReadResponse(response).map((item) => item.view ? item : {
-    ...item,
-    view: listenerBoiLegacyQueryCatalogView(item.queryIri, item.catalogIri),
-  });
+  return decodeQueryCatalogReadResponse(response);
 }
 
 export interface SubGraphBinding {
@@ -335,9 +322,7 @@ export function buildQueryCatalogState(
       catalogRank: row.catalogRank ?? catalog?.rank,
     };
   });
-  const decoded = decodeQueryCatalogBindings(enrichedRows, {
-    legacyView: listenerBoiLegacyQueryCatalogView,
-  }).map((query) => query.catalogIri ? query : {
+  const decoded = decodeQueryCatalogBindings(enrichedRows).map((query) => query.catalogIri ? query : {
     ...query,
     catalogSlug: `default:${query.subGraph}`,
   });

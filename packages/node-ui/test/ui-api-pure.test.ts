@@ -323,7 +323,7 @@ describe('UI API tests', () => {
     it('executeQuery sends the daemon working-memory view', async () => {
       await executeQuery(
         'SELECT ?incident WHERE { ?incident ?p ?o }',
-        { contextGraphId: 'cg-listenerboi', view: 'working-memory' },
+        { contextGraphId: 'cg-query-catalog', view: 'working-memory' },
       );
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
       expect(JSON.parse(call?.body ?? '{}').view).toBe('working-memory');
@@ -349,21 +349,21 @@ describe('UI API tests', () => {
     });
 
     it('readProfileQueryCatalog uses the dedicated profile endpoint', async () => {
-      await readProfileQueryCatalog('cg-listenerboi');
+      await readProfileQueryCatalog('cg-query-catalog');
       const call = requestLog.find(
         r => r.method === 'POST' && r.url.includes('/api/profile/query-catalog/read'),
       );
-      expect(JSON.parse(call?.body ?? '{}')).toEqual({ contextGraphId: 'cg-listenerboi' });
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({ contextGraphId: 'cg-query-catalog' });
     });
 
     it('writeProfileQueryCatalog sends catalog quads to the dedicated endpoint', async () => {
       const quads = [{ subject: 'urn:q', predicate: 'urn:p', object: '"value"', graph: '' }];
-      await writeProfileQueryCatalog('cg-listenerboi', quads);
+      await writeProfileQueryCatalog('cg-query-catalog', quads);
       const call = requestLog.find(
         r => r.method === 'POST' && r.url.includes('/api/profile/query-catalog/write'),
       );
       expect(JSON.parse(call?.body ?? '{}')).toEqual({
-        contextGraphId: 'cg-listenerboi',
+        contextGraphId: 'cg-query-catalog',
         quads,
       });
     });

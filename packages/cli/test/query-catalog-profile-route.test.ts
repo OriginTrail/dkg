@@ -320,11 +320,11 @@ describe('/api/profile/query-catalog/read', () => {
     expect(JSON.parse(response.body)).toMatchObject({ code: 'QUERY_CATALOG_INVALID_DATA' });
   });
 
-  it('normalizes legacy ListenerBoi execution views only in canonical items', async () => {
+  it('does not infer execution views from legacy query identifiers', async () => {
     const bindings = [{
-      q: 'urn:listenerboi:query:open-incidents',
-      catalog: 'urn:listenerboi:catalog:investigations',
-      sparql: 'SELECT ?incident WHERE { ?incident ?p ?o }',
+      q: 'urn:consumer:query:open-records',
+      catalog: 'urn:consumer:catalog:operations',
+      sparql: 'SELECT ?record WHERE { ?record ?p ?o }',
       subGraph: 'orders',
     }];
     const agent = fakeCatalogAgent({ legacyBindings: bindings });
@@ -333,10 +333,10 @@ describe('/api/profile/query-catalog/read', () => {
     await handleMemoryRoutes(context);
 
     expect(response.statusCode).toBe(200);
-    expect(JSON.parse(response.body)).toMatchObject({
-      items: [expect.objectContaining({ view: 'working-memory' })],
-      result: { bindings },
-    });
+    const payload = JSON.parse(response.body);
+    expect(payload.result).toEqual({ type: 'bindings', bindings });
+    expect(payload.items).toHaveLength(1);
+    expect(payload.items[0]).not.toHaveProperty('view');
   });
 
   it('maps store admission pressure to a retryable 503', async () => {

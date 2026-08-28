@@ -85,7 +85,6 @@ export interface QueryCatalogWriteQuad {
 }
 
 export interface DecodeQueryCatalogOptions {
-  legacyView?: (queryIri: string, catalogIri: string) => GetView | undefined;
   /** Required to validate and decode canonical prof:scopeGraph IRIs. */
   contextGraphId?: string;
 }
@@ -279,7 +278,7 @@ export function decodeQueryCatalogBindings(
       parameters: parseQueryCatalogParameters(
         oneValue(rows, 'queryParameters', queryIri) || undefined,
       ),
-      view: explicitView ?? options.legacyView?.(queryIri, catalogIri),
+      view: explicitView,
     });
   }
 

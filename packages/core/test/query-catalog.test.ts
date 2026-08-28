@@ -56,17 +56,14 @@ describe('query catalog codec', () => {
     ])).toThrow(/conflicting sparql values/);
   });
 
-  it('keeps product-specific legacy view migration opt-in', () => {
+  it('does not infer an execution view from query or catalog identifiers', () => {
     const row = {
-      q: 'urn:listenerboi:query:open-incidents',
-      catalog: 'urn:listenerboi:catalog:investigations',
+      q: 'urn:consumer:query:open-records',
+      catalog: 'urn:consumer:catalog:operations',
       sparql: 'SELECT * WHERE {}',
-      subGraph: 'incidents',
+      subGraph: 'records',
     };
     expect(decodeQueryCatalogBindings([row])[0]?.view).toBeUndefined();
-    expect(decodeQueryCatalogBindings([row], {
-      legacyView: () => 'working-memory',
-    })[0]?.view).toBe('working-memory');
   });
 
   it('rejects invalid and conflicting persisted execution views', () => {
