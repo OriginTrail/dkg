@@ -176,6 +176,11 @@ class InvalidLiftPublishResultError extends Error {
   override readonly name = 'InvalidLiftPublishResultError';
 }
 
+/** Corrupt durable state is distinct from an absent job so ownership always fails closed. */
+class MalformedLiftJobPayloadError extends Error {
+  override readonly name = 'MalformedLiftJobPayloadError';
+}
+
 /**
  * GH#2270 — why a failed job is being reaccepted, stated by the caller rather than inferred.
  *  - `retry` CONSUMES one attempt of the shared budget: the automatic sweep and the operator's
@@ -2733,7 +2738,9 @@ export class TripleStoreAsyncLiftPublisher
         return { outcome: 'cleared' };
       });
     } catch (error) {
-      if (error instanceof SyntaxError) return { outcome: 'rejected', reason: 'malformed' };
+      if (error instanceof MalformedLiftJobPayloadError) {
+        return { outcome: 'rejected', reason: 'malformed' };
+      }
       throw error;
     }
   }
@@ -3187,14 +3194,17 @@ export class TripleStoreAsyncLiftPublisher
     if (!binding) return null;
     try {
       const payload = parseLiteral(binding);
-      if (typeof payload !== 'string') return null;
+      if (typeof payload !== 'string') {
+        throw new Error('payload is not an RDF literal');
+      }
       const parsed = JSON.parse(payload) as LiftJob & { request: unknown };
       return {
         ...parsed,
         request: normalizePersistedLiftJobRequest(parsed.request),
       } as LiftJob;
-    } catch {
-      return null;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new MalformedLiftJobPayloadError(`Malformed persisted LiftJob payload: ${detail}`);
     }
   }
 

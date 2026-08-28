@@ -21,7 +21,12 @@ import {
   stageKnowledgeAssetShareSnapshot,
 } from './_helpers/ka-vm-publish.js';
 import {
+  CONTROL_PAYLOAD,
+  DEFAULT_CONTROL_GRAPH_URI,
   DEFAULT_WALLET_LOCK_GRAPH_URI,
+  jobSubject,
+  literal,
+  serializeJob,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
@@ -180,6 +185,21 @@ describe('async-lift claim fencing', () => {
         errorPayloadRef: 'urn:error:tx-reverted',
       }),
     } satisfies LiftJob;
+    const signerlessHeldFailure = {
+      ...validated,
+      status: 'failed',
+      failure: createLiftJobFailureMetadata({
+        failedFromState: 'broadcast',
+        code: 'rpc_unavailable',
+        message: 'Legacy transaction signer was not persisted',
+        errorPayloadRef: 'urn:error:legacy-signer-unknown',
+      }),
+      recovery: {
+        action: 'reset_to_accepted',
+        recoveredFromStatus: 'broadcast',
+        txHashChecked: `0x${'ab'.repeat(32)}`,
+      },
+    } as LiftJob;
     const cases = [
       ['accepted', accepted, 'released'],
       ['claimed', claimed, 'lease-bound'],
@@ -188,6 +208,7 @@ describe('async-lift claim fencing', () => {
       ['included', included, 'proof-bound'],
       ['finalized', finalized, 'released'],
       ['failed-held', heldFailure, 'proof-bound'],
+      ['failed-held-without-signer', signerlessHeldFailure, 'lease-bound'],
       ['failed-proven-ineffective', releasedFailure, 'released'],
     ] satisfies ReadonlyArray<readonly [string, LiftJob, LiftJobOwnershipMode]>;
 
@@ -196,6 +217,100 @@ describe('async-lift claim fencing', () => {
     )).toEqual(Object.fromEntries(
       cases.map(([name, , expected]) => [name, expected]),
     ));
+  });
+
+  it('leases a signer-less legacy proof hold only until its claim expires', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-signerless-proof-hold',
+      now: () => now,
+    });
+    await publisher.claimNext('wallet-a');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    const validated = await publisher.getStatus(jobId);
+    if (!validated || validated.status !== 'validated') throw new Error('expected validated job');
+    const held = {
+      ...validated,
+      status: 'failed',
+      failure: createLiftJobFailureMetadata({
+        failedFromState: 'broadcast',
+        code: 'rpc_unavailable',
+        message: 'Legacy transaction signer was not persisted',
+        errorPayloadRef: 'urn:error:legacy-signer-unknown',
+      }),
+      recovery: {
+        action: 'reset_to_accepted',
+        recoveredFromStatus: 'broadcast',
+        txHashChecked: `0x${'cd'.repeat(32)}`,
+      },
+    } as LiftJob;
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(held, DEFAULT_CONTROL_GRAPH_URI));
+    const coordinator = (publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator;
+    }).claimCoordinator;
+
+    expect(classifyLiftJobOwnershipMode(held)).toBe('lease-bound');
+    await expect(coordinator.sweepStaleOwnership()).resolves.toEqual([]);
+
+    now += 5 * 60_000 + 1;
+    await expect(coordinator.sweepStaleOwnership()).resolves.toEqual(['wallet-a']);
+    const persisted = await publisher.getStatus(jobId);
+    expect(persisted).toMatchObject({
+      status: 'failed',
+      recovery: {
+        txHashChecked: `0x${'cd'.repeat(32)}`,
+      },
+    });
+    expect(persisted?.recovery && 'walletIdChecked' in persisted.recovery).toBe(false);
+  });
+
+  it('fails closed when an active wallet lock points to a malformed job payload', async () => {
+    const publisher = createPublisher();
+    const jobId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), {
+      idGenerator: () => 'job-corrupt-active',
+      now: () => now,
+    });
+    await publisher.claimNext('wallet-a');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-a', nonce: 4 },
+    });
+    const valid = await publisher.getStatus(jobId);
+    if (!valid || valid.status !== 'broadcast') throw new Error('expected broadcast job');
+    await seedLegacyRawLiftTestJob(store, {
+      ...rawLiftRequest(),
+      shareOperationId: 'share-op-waiting',
+    }, {
+      idGenerator: () => 'job-waiting',
+      now: () => now,
+    });
+
+    const corrupt = serializeJob(valid, DEFAULT_CONTROL_GRAPH_URI).map((entry) =>
+      entry.predicate === CONTROL_PAYLOAD
+        ? { ...entry, object: literal('{not-json') }
+        : entry,
+    );
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(corrupt);
+
+    await expect(publisher.getStatus(jobId)).rejects.toThrow('Malformed persisted LiftJob payload');
+    await expect(publisher.recover()).rejects.toThrow('Malformed persisted LiftJob payload');
+    await expect(publisher.clearTerminalJob(jobId)).resolves.toEqual({
+      outcome: 'rejected',
+      reason: 'malformed',
+    });
+    await expect(publisher.claimNext('wallet-a')).rejects.toThrow(
+      'Malformed persisted LiftJob payload',
+    );
+
+    await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob(valid, DEFAULT_CONTROL_GRAPH_URI));
+    await expect(publisher.claimNext('wallet-a')).resolves.toBeNull();
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      status: 'broadcast',
+      broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-a' },
+    });
   });
 
   it('does not recover a live pre-broadcast claim owned by another publisher instance', async () => {

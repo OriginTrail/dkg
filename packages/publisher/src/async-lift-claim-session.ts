@@ -13,6 +13,7 @@ import type {
 } from './async-lift-publisher-types.js';
 import { StaleLiftJobClaimError } from './async-lift-publisher-types.js';
 import { isHeldForChainProof } from './async-lift-retry-disposition.js';
+import { assertLiftJobTransition } from './lift-job-states.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import {
@@ -378,6 +379,9 @@ export class AsyncLiftClaimCoordinator {
     kind: JournalKind,
   ): Promise<LiftJob> {
     this.assertSameJob(current, candidate);
+    if (current.status !== candidate.status) {
+      assertLiftJobTransition(current.status, candidate.status);
+    }
     const next = this.renewActiveOwnership(candidate);
     this.dependencies.assertJobMatchesStatus(next);
     await this.dependencies.writeJob(next, kind);
@@ -587,14 +591,20 @@ export class AsyncLiftClaimCoordinator {
     });
   }
 
-  private createTransitionScope(current: LiftJob): LiftJobTransitionScope {
+  private createTransitionScope(initial: LiftJob): LiftJobTransitionScope {
+    let current = initial;
     return {
-      commit: async (next, kind) => await this.commitTransition(current, next, kind),
+      commit: async (next, kind) => {
+        const committed = await this.commitTransition(current, next, kind);
+        current = committed;
+        return committed;
+      },
       commitRecoveryReset: async (reset) => {
         this.assertLifecycleTransition(current, reset, 'accepted');
         // Reset must be claim-visible before the one-shot wallet-release notification fires.
         await this.dependencies.writeJob(reset, 'recover-reset');
         await this.releaseJobOwnership(current);
+        current = reset;
         return reset;
       },
       commitProofInclusion: async (included) => {
@@ -605,6 +615,7 @@ export class AsyncLiftClaimCoordinator {
           await this.dependencies.writeJob(included, 'included');
         }
         await this.releaseJobOwnership(current);
+        current = included;
         return included;
       },
       commitProofFailure: async (failed) => {
@@ -612,6 +623,7 @@ export class AsyncLiftClaimCoordinator {
         // Canonical chain proof ends nonce ownership even if the local failure write must retry.
         await this.releaseJobOwnership(current);
         await this.dependencies.writeJob(failed, 'failed');
+        current = failed;
         return failed;
       },
       commitProofFinalization: async (finalize) => {
@@ -622,12 +634,14 @@ export class AsyncLiftClaimCoordinator {
         if (finalized === null) return null;
         this.assertLifecycleTransition(current, finalized, 'finalized');
         await this.dependencies.writeJob(finalized, 'recovered-finalize');
+        current = finalized;
         return finalized;
       },
       commitReaccept: async (accepted) => {
         this.assertLifecycleTransition(current, accepted, 'accepted');
         await this.releaseJobOwnership(current);
         await this.dependencies.writeJob(accepted, 'reaccept');
+        current = accepted;
         return accepted;
       },
       commitRemoval: async () => {

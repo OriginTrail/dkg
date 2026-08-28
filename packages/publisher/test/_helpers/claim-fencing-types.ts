@@ -5,13 +5,16 @@ import type {
   LiftJob,
   LiftJobAccepted,
   LiftJobClaimed,
+  TripleStoreAsyncLiftPublisher,
 } from '../../src/index.js';
 
-declare const publisher: ClaimSessionAsyncLiftPublisher;
+declare const publisher: TripleStoreAsyncLiftPublisher;
 declare const accepted: LiftJobAccepted;
 declare const legacyClaimedWithoutFence: LiftJobClaimed;
 declare const activeClaim: ActiveLiftJobClaim;
 
+const concreteCapability: ClaimSessionAsyncLiftPublisher = publisher;
+void concreteCapability;
 publisher.openClaimSession(activeClaim);
 const narrowedClaim: Promise<ActiveLiftJobClaim | null> = publisher.claimNext('wallet-1');
 void narrowedClaim;

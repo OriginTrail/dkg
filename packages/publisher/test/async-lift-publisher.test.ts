@@ -1309,6 +1309,38 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(finalized.finalization?.batchId).toBe('7');
   });
 
+  it('advances one transition scope through each multi-step publish-result state', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.seedLegacyRawLift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+    const writtenStatuses: string[] = [];
+    const originalReplaceSubject = store.replaceSubject.bind(store);
+    store.replaceSubject = async (...args) => {
+      if (args[0] === DEFAULT_CONTROL_GRAPH_URI && args[1] === jobSubject(jobId)) {
+        const status = args[2].find((entry) => entry.predicate === CONTROL_STATUS)?.object;
+        if (status) writtenStatuses.push(status);
+      }
+      await originalReplaceSubject(...args);
+    };
+
+    await expect(publisher.recordPublishResult(jobId, confirmedPublishResult()))
+      .resolves.toMatchObject({ status: 'finalized' });
+    expect(writtenStatuses).toEqual([
+      literal('broadcast'),
+      literal('included'),
+      literal('finalized'),
+    ]);
+  });
+
   it('rejects publish results whose tx differs from persisted broadcast tx', async () => {
     const publisher = createPublisher();
     const jobId = await publisher.seedLegacyRawLift(request());
