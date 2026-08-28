@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "rootDir": "."
+  },
+  "include": ["src", "test/_helpers/ka-vm-publish.ts", "test/_helpers/legacy-raw-lift.ts"],
+  "references": [
+    { "path": "../core" },
+    { "path": "../storage" },
+    { "path": "../chain" }
+  ]
+}
