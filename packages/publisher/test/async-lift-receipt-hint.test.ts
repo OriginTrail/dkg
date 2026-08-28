@@ -734,16 +734,27 @@ describe('async-lift receipt-hint lane', () => {
     const lookups: Array<{ operationKind?: string; intendedUpdateRoot?: string }> = [];
     let proofAsks = 0;
     let recoveryAsks = 0;
+    // r19 (3878327545) - the UPDATE verdict's canonical evidence must reach the recovery
+    // resolver AS THE SAME OBJECT the proof verdict carried (production consumes it there to
+    // avoid re-verifying the update). Reference identity is the discriminator: dropping or
+    // substituting the third argument fails this row.
+    const updateVerdictRecovery = kaVmRecoveryEvidence();
+    const receivedVerdicts: unknown[] = [];
     const { publisher, jobId, releaseTail } = await parkedHintScenario({
       operationKind: 'update',
       config: {
         chainProofResolver: async (lookup: { operationKind?: string; intendedUpdateRoot?: string }) => {
           proofAsks += 1;
           lookups.push({ operationKind: lookup.operationKind, intendedUpdateRoot: lookup.intendedUpdateRoot });
-          return recoveredResolution();
+          return { status: 'recovered', recovery: updateVerdictRecovery } as never;
         },
-        knowledgeAssetVmPublishRecoveryResolver: async () => {
+        knowledgeAssetVmPublishRecoveryResolver: async (
+          _job: unknown,
+          _lookup: unknown,
+          verdictRecovery: unknown,
+        ) => {
           recoveryAsks += 1;
+          receivedVerdicts.push(verdictRecovery);
           return kaVmRecoveryEvidence();
         },
       },
@@ -756,6 +767,8 @@ describe('async-lift receipt-hint lane', () => {
     expect(lookups[0].operationKind).toBe('update');
     // The intended root rides the update lookup: the request's seal root, exactly.
     expect(lookups[0].intendedUpdateRoot?.toLowerCase()).toBe(`0x${'12'.repeat(32)}`);
+    expect(receivedVerdicts).toHaveLength(1);
+    expect(receivedVerdicts[0]).toBe(updateVerdictRecovery);
 
     releaseTail();
     await publisher.drainDetachedExecutions();
