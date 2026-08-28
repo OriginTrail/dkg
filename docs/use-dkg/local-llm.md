@@ -16,6 +16,11 @@ trace.
 The runtime is read-only by default. Write tools are exposed only with
 `--allow-write`, and the user must still explicitly request the mutation.
 
+If you are delegating setup to a coding agent, give it the dedicated
+[`Local LLM Agent Runbook`](local-llm-agent-runbook.md). It contains a
+copy-paste instruction, model decision table, Query Catalog gate, exact launch
+commands, and completion checks.
+
 ## Recommended model
 
 Use **Qwen3-8B Q4_K_M** as the default local model. It provided the strongest

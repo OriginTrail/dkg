@@ -16,6 +16,7 @@ Use these routes when you want a node running, an agent connected, memory operat
 | Install DKG, connect an agent, or run a standalone node | [Quickstart](../getting-started/quickstart.md) |
 | Start, stop, and inspect the daemon | [Daemon Lifecycle](run-node.md) |
 | Run a local LLM through the DKG MCP tools | [Local LLM with DKG](local-llm.md) |
+| Give a coding agent an exact local-LLM startup procedure | [Local LLM agent runbook](local-llm-agent-runbook.md) |
 | Write, publish, and query knowledge | [Publish and Query](publish-and-query.md) |
 | Drive named Knowledge Asset lifecycle commands | [Knowledge Asset Lifecycle CLI](knowledge-asset-lifecycle.md) |
 | Configure async publisher wallets | [Async Publisher Wallets](async-publisher-wallets.md) |
