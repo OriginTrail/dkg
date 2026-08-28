@@ -266,7 +266,9 @@ export function registerQueryCatalogTools(
       description:
         'Save or atomically update a parameterized SPARQL query in the Context ' +
         'Graph profile catalog. This mutates local DKG state. Never call it ' +
-        'unless the user explicitly asks to save or update a catalog query.',
+        'unless the user explicitly asks to save or update a catalog query. ' +
+        'Use raw SPARQL and wrap absolute or compact quad IRIs in angle brackets ' +
+        '(for example `<urn:item:1>`, `<rdf:type>`, and `<schema:category>`).',
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -277,7 +279,10 @@ export function registerQueryCatalogTools(
         projectId: projectSchema,
         name: z.string().trim().min(1).max(160),
         description: z.string().trim().min(1).max(2_000).optional(),
-        sparql: z.string().trim().min(1).max(100_000),
+        sparql: z.string().trim().min(1).max(100_000).describe(
+          'Parameterized raw SPARQL. Wrap absolute IRIs in <...>. Match predicates written through ' +
+          'the quad API exactly, e.g. `<rdf:type>` and `<schema:category>`. Parameter placeholders use {{name}}.',
+        ),
         subGraph: z.string().trim().min(1).optional().default(CONTEXT_GRAPH_QUERY_SUBGRAPH),
         catalogSlug: z.string().trim().min(1).optional().default(USER_QUERY_CATALOG_SLUG),
         catalogName: z.string().trim().min(1).max(160).optional().default(USER_QUERY_CATALOG_NAME),
