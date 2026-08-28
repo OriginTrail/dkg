@@ -14,12 +14,12 @@
  * boundary means pagination and every other discovery consumer see the same
  * typed rows instead of each repairing query-engine artifacts independently.
  *
- * CURSOR STABILITY. Pages are ordered by a digest of the canonical agent URI,
- * and the cursor names the digest of the last identity returned. Every mutable
- * profile and live-connection field is excluded, so routine profile updates
- * cannot move a row across an in-progress walk. Keyset (strictly-after)
- * semantics mean an identity inserted or removed between pages shifts nothing
- * else.
+ * CURSOR STABILITY. Pages are ordered first by a digest of the canonical agent
+ * URI, then by a digest of the exhaustive row projection. The cursor names the
+ * last row returned. Mutable profile fields cannot move an identity across the
+ * walk; their row digest only disambiguates conflicting bindings within that
+ * identity. Keyset (strictly-after) semantics mean deleting a row cannot wedge
+ * the walk.
  *
  * The cursor is a DIGEST, not the row itself, for two reasons. Size: row
  * fields are other agents' self-published profile literals, so a row-embedding
@@ -31,6 +31,7 @@
  */
 import {
   discoveredAgentIdentityKey,
+  discoveredAgentRowKey,
   groupDiscoveredAgentIdentityRows,
   type DiscoveredAgent,
 } from '@origintrail-official/dkg-agent';
@@ -178,10 +179,10 @@ export class AgentsCursorError extends Error {
  *
  * No `limit` and no `cursor` returns the rows untouched, in their original
  * order — the compatibility contract for parameterless callers. Paginated
- * requests keep every exact-distinct binding for one identity in the same page
- * and order identity groups by a digest of the canonical agent URI. `limit`
- * counts identities, so a conflicted identity can contribute multiple rows.
- * Mutable profile fields never affect page position.
+ * requests retain every exact-distinct binding and order rows by canonical
+ * identity digest, then exact-row digest. `limit` is a hard bound on the flat
+ * response, so a large conflict group continues across pages instead of
+ * producing an oversized response.
  */
 export function paginateAgentRows(
   rows: DiscoveredAgent[],
@@ -204,49 +205,97 @@ export function paginateAgentRows(
   }
 
   const keyed = groupDiscoveredAgentIdentityRows(rows)
-    .map((group) => ({
-      group,
-      digest: createHash('sha256')
+    .flatMap((group) => {
+      const identityDigest = createHash('sha256')
         .update(group.identity, 'utf8')
-        .digest('hex'),
-    }))
-    .sort((a, b) => (a.digest < b.digest ? -1 : a.digest > b.digest ? 1 : 0));
+        .digest('hex');
+      return group.rows.map((row) => ({
+        row,
+        identityDigest,
+        rowDigest: createHash('sha256')
+          .update(discoveredAgentRowKey(row), 'utf8')
+          .digest('hex'),
+      }));
+    })
+    .sort((left, right) => (
+      left.identityDigest < right.identityDigest
+        ? -1
+        : left.identityDigest > right.identityDigest
+          ? 1
+          : left.rowDigest < right.rowDigest
+            ? -1
+            : left.rowDigest > right.rowDigest
+              ? 1
+              : 0
+    ));
   // Strictly-after: the cursor names a position, not a row, so a row deleted
   // between requests cannot wedge the walk.
   const after = decodedCursor === undefined
     ? keyed
-    : keyed.filter((k) => k.digest > decodedCursor.digest);
+    : keyed.filter((entry) => (
+      entry.identityDigest > decodedCursor.identityDigest
+      || (
+        decodedCursor.rowDigest !== undefined
+        && entry.identityDigest === decodedCursor.identityDigest
+        && entry.rowDigest > decodedCursor.rowDigest
+      )
+    ));
   if (query.limit === undefined || after.length <= query.limit) {
-    return { rows: after.flatMap((k) => k.group.rows) };
+    return { rows: after.map((entry) => entry.row) };
   }
   const page = after.slice(0, query.limit);
+  const last = page[page.length - 1]!;
+  const identityComplete = !keyed.some((entry) => (
+    entry.identityDigest === last.identityDigest
+    && entry.rowDigest > last.rowDigest
+  ));
   return {
-    rows: page.flatMap((k) => k.group.rows),
-    nextCursor: encodeCursor(fingerprint, page[page.length - 1]!.digest),
+    rows: page.map((entry) => entry.row),
+    nextCursor: encodeCursor(
+      fingerprint,
+      last.identityDigest,
+      identityComplete ? undefined : last.rowDigest,
+    ),
   };
 }
 
 /**
  * Cursors are opaque to callers but versioned here, so a future layout change
  * can reject old cursors with a clear 400 instead of returning wrong pages.
- * Layout: `v1:<16-hex filter fingerprint>:<64-hex identity digest>` — fixed size
- * by construction, whatever the registry rows contain.
+ * Layout: `v2:<16-hex filter fingerprint>:<64-hex identity digest>:<row digest|end>` —
+ * fixed size by construction, whatever the registry rows contain. `end` records that the page
+ * exhausted its final identity, so later profile mutations cannot make that identity reappear.
  */
-const CURSOR_PREFIX = 'v1:';
-const CURSOR_BODY_RE = /^([0-9a-f]{16}):([0-9a-f]{64})$/;
+const CURSOR_PREFIX = 'v2:';
+const CURSOR_BODY_RE = /^([0-9a-f]{16}):([0-9a-f]{64}):(end|[0-9a-f]{64})$/;
 
-function encodeCursor(fingerprint: string, digest: string): string {
-  return Buffer.from(`${CURSOR_PREFIX}${fingerprint}:${digest}`, 'utf8').toString('base64url');
+function encodeCursor(
+  fingerprint: string,
+  identityDigest: string,
+  rowDigest: string | undefined,
+): string {
+  return Buffer.from(
+    `${CURSOR_PREFIX}${fingerprint}:${identityDigest}:${rowDigest ?? 'end'}`,
+    'utf8',
+  ).toString('base64url');
 }
 
-function decodeCursor(cursor: string): { fingerprint: string; digest: string } | undefined {
+function decodeCursor(cursor: string): {
+  fingerprint: string;
+  identityDigest: string;
+  rowDigest?: string;
+} | undefined {
   // Buffer.from() does not throw on malformed base64url — it decodes what it
   // can. The prefix + shape check is the validation: garbage will not fit it.
   const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
   if (!decoded.startsWith(CURSOR_PREFIX)) return undefined;
   const m = CURSOR_BODY_RE.exec(decoded.slice(CURSOR_PREFIX.length));
   if (!m) return undefined;
-  return { fingerprint: m[1]!, digest: m[2]! };
+  return {
+    fingerprint: m[1]!,
+    identityDigest: m[2]!,
+    ...(m[3] === 'end' ? {} : { rowDigest: m[3]! }),
+  };
 }
 
 /**
@@ -268,10 +317,12 @@ export async function handleAgentsListRoute(ctx: RequestContext): Promise<void> 
     connectionStatus,
     local,
   } = parsedQuery.query;
-  const agents = await agent.findAgents(framework ? { framework } : undefined);
+  const [agents, offerings] = await Promise.all([
+    agent.findAgents(framework ? { framework } : undefined),
+    skillType ? agent.findSkills({ skillType }) : Promise.resolve(undefined),
+  ]);
   let filteredAgents = agents;
-  if (skillType) {
-    const offerings = await agent.findSkills({ skillType });
+  if (offerings) {
     const agentUris = new Set(offerings.map((offering) => offering.agentUri));
     filteredAgents = agents.filter((candidate) => agentUris.has(candidate.agentUri));
   }

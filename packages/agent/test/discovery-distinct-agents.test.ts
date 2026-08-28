@@ -19,6 +19,39 @@ describe('DiscoveryClient.findAgents distinct-row boundary', () => {
     expect(groupDiscoveredAgentIdentityRows([conflict, canonical])).toEqual(expected);
   });
 
+  it('uses the exhaustive projection for newly modeled optional fields', () => {
+    const first = {
+      agentUri: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
+      name: 'same',
+      peerId: 'peer-same',
+      multiaddrs: ['/ip4/2.2.2.2/tcp/2', '/ip4/1.1.1.1/tcp/1'],
+      lastSeen: '2026-08-28T12:00:00.000Z',
+    };
+    const reorderedDuplicate = {
+      ...first,
+      multiaddrs: [...first.multiaddrs].reverse(),
+    };
+    const later = {
+      ...first,
+      lastSeen: '2026-08-28T12:00:01.000Z',
+    };
+
+    const [group] = groupDiscoveredAgentIdentityRows([
+      later,
+      reorderedDuplicate,
+      first,
+    ]);
+    expect(group!.rows).toHaveLength(2);
+    expect(group!.rows.map((agent) => agent.lastSeen)).toEqual([
+      first.lastSeen,
+      later.lastSeen,
+    ]);
+    expect(group!.rows[0]!.multiaddrs).toEqual([
+      '/ip4/1.1.1.1/tcp/1',
+      '/ip4/2.2.2.2/tcp/2',
+    ]);
+  });
+
   it('requests DISTINCT rows and collapses bindings that normalize identically', async () => {
     let issuedQuery = '';
     const duplicate = {

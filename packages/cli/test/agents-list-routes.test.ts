@@ -193,18 +193,26 @@ describe('paginateAgentRows (GH#310)', () => {
     expect(new Set(collected)).toEqual(new Set(many.map((agent) => agent.agentUri)));
   });
 
-  it('keeps conflicting rows for one stable identity together during pagination', () => {
-    const canonical = row();
-    const conflict = row({ name: 'zeta', peerId: 'peer-conflict' });
-    const forward = paginateAgentRows([canonical, conflict, many[2]!], { limit: 2 });
-    const reverse = paginateAgentRows([conflict, canonical, many[2]!], { limit: 2 });
-    for (const page of [forward, reverse]) {
-      expect(page.rows).toHaveLength(3);
-      expect(new Set(page.rows.map((agent) => agent.agentUri)).size).toBe(2);
-      expect(page.rows.filter((agent) => agent.agentUri === canonical.agentUri))
-        .toEqual([canonical, conflict]);
-    }
-    expect(reverse).toEqual(forward);
+  it('hard-bounds every page while walking a large conflict group exactly once', () => {
+    const conflicts = Array.from({ length: 5 }, (_, index) => row({
+      name: `binding-${index}`,
+      peerId: `peer-conflict-${index}`,
+    }));
+    const input = [many[2]!, ...conflicts].reverse();
+    const collected: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = paginateAgentRows(input, {
+        limit: 2,
+        ...(cursor ? { cursor } : {}),
+      });
+      expect(page.rows.length).toBeLessThanOrEqual(2);
+      collected.push(...page.rows.map((agent) => agent.peerId));
+      cursor = page.nextCursor;
+    } while (cursor);
+
+    expect(collected).toHaveLength(input.length);
+    expect(new Set(collected)).toEqual(new Set(input.map((agent) => agent.peerId)));
   });
 
   it('does not discard or repeat stale/current peer bindings for one DID across pages', () => {
@@ -229,11 +237,11 @@ describe('paginateAgentRows (GH#310)', () => {
       cursor = page.nextCursor;
     } while (cursor);
 
-    const identityPages = pages.filter((page) =>
-      page.rows.some((agent) => agent.agentUri === current.agentUri));
-    expect(identityPages).toHaveLength(1);
-    expect(identityPages[0]!.rows.map((agent) => agent.peerId).sort())
-      .toEqual(['peer-new', 'peer-old']);
+    expect(pages.every((page) => page.rows.length <= 1)).toBe(true);
+    const identityRows = pages
+      .flatMap((page) => page.rows)
+      .filter((agent) => agent.agentUri === current.agentUri);
+    expect(identityRows.map((agent) => agent.peerId).sort()).toEqual(['peer-new', 'peer-old']);
   });
 
   it('collapses mixed-case EVM DIDs without changing peer-ID case', () => {
@@ -248,9 +256,10 @@ describe('paginateAgentRows (GH#310)', () => {
     const page = paginateAgentRows([
       row({ agentUri: mixedDid, name: 'zeta', peerId: 'peer-mixed' }),
       row({ agentUri: lowerDid, name: 'alpha', peerId: 'peer-lower' }),
-      many[2]!,
     ], { limit: 2 });
-    expect(page.rows.filter((agent) => discoveredAgentIdentityKey(agent) === lowerDid))
+    expect(page.rows
+      .filter((agent) => discoveredAgentIdentityKey(agent) === lowerDid)
+      .sort((left, right) => left.name.localeCompare(right.name)))
       .toEqual([
         expect.objectContaining({ agentUri: lowerDid, name: 'alpha', peerId: 'peer-lower' }),
         expect.objectContaining({ agentUri: lowerDid, name: 'zeta', peerId: 'peer-mixed' }),
@@ -488,6 +497,47 @@ describe('GET /api/agents (GH#310)', () => {
     expect(body.agents.map((agent: any) => agent.agentUri)).toEqual([
       'did:dkg:agent/oc-image',
     ]);
+  });
+
+  it('starts independent framework and skill discovery concurrently', async () => {
+    let resolveAgents!: (rows: ReturnType<typeof row>[]) => void;
+    let resolveSkills!: (rows: Array<{
+      agentUri: string;
+      agentName: string;
+      offeringUri: string;
+      skillType: string;
+    }>) => void;
+    const agentsPromise = new Promise<ReturnType<typeof row>[]>((resolve) => {
+      resolveAgents = resolve;
+    });
+    const skillsPromise = new Promise<Array<{
+      agentUri: string;
+      agentName: string;
+      offeringUri: string;
+      skillType: string;
+    }>>((resolve) => {
+      resolveSkills = resolve;
+    });
+    const findAgents = vi.fn(() => agentsPromise);
+    const findSkills = vi.fn(() => skillsPromise);
+
+    const responsePromise = getAgents(
+      fakeAgent({ findAgents, findSkills }),
+      '?framework=OpenClaw&skill_type=ImageAnalysis',
+    );
+    expect(findAgents).toHaveBeenCalledOnce();
+    expect(findSkills).toHaveBeenCalledOnce();
+
+    resolveAgents([row({ agentUri: 'did:dkg:agent/oc-image', peerId: 'peer-image' })]);
+    resolveSkills([{
+      agentUri: 'did:dkg:agent/oc-image',
+      agentName: 'image',
+      offeringUri: 'did:dkg:offering/image',
+      skillType: 'ImageAnalysis',
+    }]);
+    const { status, body } = await responsePromise;
+    expect(status).toBe(200);
+    expect(body.agents).toHaveLength(1);
   });
 
   it('pages the registry with limit/cursor and terminates', async () => {

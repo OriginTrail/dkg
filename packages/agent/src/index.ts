@@ -27,6 +27,7 @@ export { ProfileManager } from './profile-manager.js';
 export {
   DiscoveryClient,
   discoveredAgentIdentityKey,
+  discoveredAgentRowKey,
   groupDiscoveredAgentIdentityRows,
   type DiscoveredAgent,
   type DiscoveredAgentIdentityRows,

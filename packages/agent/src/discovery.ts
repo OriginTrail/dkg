@@ -50,32 +50,47 @@ export function discoveredAgentIdentityKey(
   return normalizeAgentDid(agent.agentUri);
 }
 
-/** Explicit exact-row key for the current public DiscoveredAgent model. */
-const DISCOVERED_AGENT_ROW_FIELDS = {
-  agentUri: true,
-  name: true,
-  peerId: true,
-  framework: true,
-  nodeRole: true,
-  relayAddress: true,
-  agentAddress: true,
-  multiaddrs: true,
-  lastSeen: true,
-} satisfies Record<keyof DiscoveredAgent, true>;
+function defineDiscoveredAgentRowFields<
+  const Fields extends readonly (keyof DiscoveredAgent)[],
+>(
+  fields: Fields,
+  ..._missing: [Exclude<keyof DiscoveredAgent, Fields[number]>] extends [never]
+    ? []
+    : ['Missing DiscoveredAgent row fields', Exclude<keyof DiscoveredAgent, Fields[number]>]
+): Fields {
+  return fields;
+}
 
-function discoveredAgentRowKey(agent: DiscoveredAgent): string {
-  void DISCOVERED_AGENT_ROW_FIELDS;
-  return JSON.stringify([
-    discoveredAgentIdentityKey(agent),
-    agent.name,
-    agent.peerId,
-    agent.framework ?? null,
-    agent.nodeRole ?? null,
-    agent.relayAddress ?? null,
-    agent.agentAddress ?? null,
-    agent.multiaddrs ? [...agent.multiaddrs].sort() : null,
-    agent.lastSeen ?? null,
-  ]);
+/**
+ * The one ordered projection used by exact-row deduplication and pagination.
+ * Adding a public DiscoveredAgent field makes this declaration fail to compile until the field is
+ * included, so the serialized key cannot silently lag behind the model.
+ */
+const DISCOVERED_AGENT_ROW_FIELDS = defineDiscoveredAgentRowFields([
+  'agentUri',
+  'name',
+  'peerId',
+  'framework',
+  'nodeRole',
+  'relayAddress',
+  'agentAddress',
+  'multiaddrs',
+  'lastSeen',
+] as const);
+
+function normalizeDiscoveredAgentRow(agent: DiscoveredAgent): DiscoveredAgent {
+  return {
+    ...agent,
+    agentUri: discoveredAgentIdentityKey(agent),
+    ...(agent.multiaddrs ? { multiaddrs: [...agent.multiaddrs].sort() } : {}),
+  };
+}
+
+export function discoveredAgentRowKey(agent: DiscoveredAgent): string {
+  const normalized = normalizeDiscoveredAgentRow(agent);
+  return JSON.stringify(
+    DISCOVERED_AGENT_ROW_FIELDS.map((field) => normalized[field] ?? null),
+  );
 }
 
 export interface DiscoveredAgentIdentityRows {
@@ -88,7 +103,8 @@ export interface DiscoveredAgentIdentityRows {
  *
  * The registry does not currently expose provenance that can prove which of two peer bindings is
  * authoritative. Discarding either binding would therefore invent a winner. Keep every distinct
- * binding together; consumers can page identities without splitting or repeating the group.
+ * binding together in one deterministic group; consumers can retain every conflicting row instead
+ * of inventing an authoritative winner.
  */
 export function groupDiscoveredAgentIdentityRows(
   agents: readonly DiscoveredAgent[],
@@ -96,11 +112,7 @@ export function groupDiscoveredAgentIdentityRows(
   const rowsByIdentity = new Map<string, Map<string, DiscoveredAgent>>();
   for (const agent of agents) {
     const identity = discoveredAgentIdentityKey(agent);
-    const normalized: DiscoveredAgent = {
-      ...agent,
-      agentUri: identity,
-      ...(agent.multiaddrs ? { multiaddrs: [...agent.multiaddrs].sort() } : {}),
-    };
+    const normalized = normalizeDiscoveredAgentRow(agent);
     let rows = rowsByIdentity.get(identity);
     if (!rows) {
       rows = new Map<string, DiscoveredAgent>();
