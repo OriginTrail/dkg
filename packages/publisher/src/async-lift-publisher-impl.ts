@@ -1,5 +1,6 @@
 import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
+import { resolveWithinAbort } from './abort-boundary.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -405,27 +406,6 @@ function resolveKnowledgeAssetVmPublishHandler(
     preflight: config.knowledgeAssetVmPublishPreflight,
     finalizeRecovered: config.knowledgeAssetVmPublishRecoveryFinalizer,
   };
-}
-
-/**
- * r2 (3877540358) — one abort-bounded wait for read-only resolution work: resolves `null` on
- * abort (a deadline can never authorize anything), tolerates an absent or already-aborted
- * signal, and removes its abort listener when the work wins, so candidates resolved before the
- * shared pass deadline do not accumulate listeners on the controller.
- */
-async function resolveWithinAbort<T>(work: Promise<T>, signal?: AbortSignal): Promise<T | null> {
-  if (!signal) return await work;
-  if (signal.aborted) return null;
-  let onAbort!: () => void;
-  const aborted = new Promise<null>((resolve) => {
-    onAbort = () => resolve(null);
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-  try {
-    return await Promise.race([work, aborted]);
-  } finally {
-    signal.removeEventListener('abort', onAbort);
-  }
 }
 
 export class TripleStoreAsyncLiftPublisher
@@ -1314,11 +1294,11 @@ export class TripleStoreAsyncLiftPublisher
           // a resolver that ignores the abort signal must not hold the whole pass (and every
           // other wallet) hostage. Timeout resolves null — no transition, pending, retry later.
           const resolved = await resolveWithinAbort(
-            this.knowledgeAssetVmPublishRecoveryResolver(
+            (sig) => this.knowledgeAssetVmPublishRecoveryResolver!(
               current,
               origin.lookup,
               resolution.recovery,
-              signal ? { signal } : undefined,
+              sig ? { signal: sig } : undefined,
             ),
             signal,
           );
@@ -1638,22 +1618,15 @@ export class TripleStoreAsyncLiftPublisher
     // never returns holds the pass open. That is deliberate. Blocking is strictly safer than a
     // repair racing the queue it was supposed to reconcile, and it is a handler defect we would
     // rather surface than paper over.
-    const deadlineReached = Symbol('deadline');
-    const awaitDeadline = () => new Promise<typeof deadlineReached>((resolve) => {
-      const signal = options?.signal;
-      if (!signal) return;
-      if (signal.aborted) { resolve(deadlineReached); return; }
-      signal.addEventListener('abort', () => resolve(deadlineReached), { once: true });
-    });
-
-    // --- read-only phase: raced, safe to abandon (skipped when the early release already
-    // resolved the canonical evidence) ---
-    const resolvedOrTimeout = preResolved ?? await Promise.race([
-      this.knowledgeAssetVmPublishRecoveryResolver(job, origin.lookup, verdictRecovery, options),
-      awaitDeadline(),
-    ]);
-    if (resolvedOrTimeout === deadlineReached) return 'unresolved';
-    const resolved = resolvedOrTimeout;
+    // --- read-only phase: raced through the ONE lazy abort boundary, safe to abandon
+    // (skipped when the early release already resolved the canonical evidence). A deadline
+    // win and a resolver that answered null both mean the same thing here: unresolved, no
+    // transition (r4 3877695872 — the former symbol sentinel distinguished two paths that
+    // returned identically).
+    const resolved = preResolved ?? await resolveWithinAbort(
+      () => this.knowledgeAssetVmPublishRecoveryResolver!(job, origin.lookup, verdictRecovery, options),
+      options?.signal,
+    );
     if (!resolved) return 'unresolved';
     if (
       !this.knowledgeAssetVmPublishHandler?.finalizeRecovered
@@ -2036,21 +2009,13 @@ export class TripleStoreAsyncLiftPublisher
     signal?: AbortSignal,
   ): Promise<AsyncLiftChainProofResolution | null> {
     if (!this.chainProofResolver) return null;
-    if (!signal) return await this.chainProofResolver(lookup);
-    if (signal.aborted) return null;
-    let onAbort!: () => void;
-    const aborted = new Promise<null>((resolve) => {
-      onAbort = () => resolve(null);
-      signal.addEventListener('abort', onAbort, { once: true });
-    });
-    try {
-      return await Promise.race([
-        this.chainProofResolver(lookup, { signal }),
-        aborted,
-      ]);
-    } finally {
-      signal.removeEventListener('abort', onAbort);
-    }
+    // r4 (3877695872) — delegated to the ONE lazy abort boundary; the result semantics
+    // (unbounded without a signal, null when pre-aborted or when the deadline wins) are the
+    // helper's contract, no longer a local copy that can drift.
+    return await resolveWithinAbort(
+      (sig) => this.chainProofResolver!(lookup, sig ? { signal: sig } : undefined),
+      signal,
+    );
   }
 
   private async recoverInterruptedPreBroadcastJobs(inventory: readonly LiftJob[]): Promise<number> {
