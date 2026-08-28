@@ -153,7 +153,8 @@ export class AsyncLiftClaimCoordinator {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   private static readonly jobTransitionQueues = new Map<string, Promise<void>>();
 
-  private readonly activeProcessJobIds = new Set<string>();
+  /** Latest in-process claim epoch for each job; stale epochs may overlap while unwinding. */
+  private readonly activeProcessClaimTokens = new Map<string, string>();
   private readonly lockLeaseMs: number;
 
   constructor(
@@ -215,7 +216,9 @@ export class AsyncLiftClaimCoordinator {
         return owned;
       });
       if (!claimedJob) return null;
-      if (markProcessing) this.activeProcessJobIds.add(claimedJob.jobId);
+      if (markProcessing) {
+        this.activeProcessClaimTokens.set(claimedJob.jobId, claimedJob.claim.claimToken);
+      }
       return claimedJob;
     });
   }
@@ -249,7 +252,9 @@ export class AsyncLiftClaimCoordinator {
         }
       }
     } finally {
-      this.activeProcessJobIds.delete(claim.jobId);
+      if (this.activeProcessClaimTokens.get(claim.jobId) === claim.claim.claimToken) {
+        this.activeProcessClaimTokens.delete(claim.jobId);
+      }
       try {
         onProcessingReleased?.(release);
       } catch {
@@ -280,7 +285,7 @@ export class AsyncLiftClaimCoordinator {
   }
 
   isProcessing(jobId: string): boolean {
-    return this.activeProcessJobIds.has(jobId);
+    return this.activeProcessClaimTokens.has(jobId);
   }
 
   private claimFenceMatches(job: LiftJob, expected: ActiveLiftJobClaim): boolean {

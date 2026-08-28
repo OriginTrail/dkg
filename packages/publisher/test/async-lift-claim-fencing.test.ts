@@ -104,7 +104,7 @@ describe('async-lift claim fencing', () => {
     const claimed = await executor.claimNext('wallet-a');
     expect(claimed?.status).toBe('claimed');
 
-    // The recovery/control instance has no in-memory activeProcessJobIds entry for the executor.
+    // The recovery/control instance has no in-memory processing epoch for the executor.
     // The durable, unexpired claim lock is therefore the cross-instance ownership authority.
     expect(await recovery.recover()).toBe(0);
     expect(await recovery.getStatus(jobId)).toMatchObject({
@@ -200,6 +200,68 @@ describe('async-lift claim fencing', () => {
       status: 'claimed',
       claim: { walletId: 'wallet-a', claimToken: replacement?.claim?.claimToken },
     });
+  });
+
+  it('does not let a stale epoch clear a replacement worker processing marker', async () => {
+    const firstEntered = deferred();
+    const secondEntered = deferred();
+    const releaseFirst = deferred();
+    const releaseSecond = deferred();
+    let preflightCalls = 0;
+    const executor = createPublisher({
+      knowledgeAssetVmPublishHandler: {
+        preflight: async () => {
+          preflightCalls += 1;
+          if (preflightCalls === 1) {
+            firstEntered.resolve();
+            await releaseFirst.promise;
+          } else {
+            secondEntered.resolve();
+            await releaseSecond.promise;
+          }
+          return { action: 'noop' };
+        },
+        execute: async () => {
+          throw new Error('execute must not run for a no-op');
+        },
+        finalizeRecovered: async () => {},
+      },
+    });
+    const recovery = createPublisher();
+    await stageSnapshot();
+
+    const jobId = await executor.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const firstRun = executor.processNext('wallet-a');
+    await firstEntered.promise;
+
+    now += 5 * 60_000 + 1;
+    expect(await recovery.recover()).toBe(1);
+    const secondRun = executor.processNext('wallet-b');
+    await secondEntered.promise;
+    const replacement = await executor.getStatus(jobId);
+    expect(replacement).toMatchObject({
+      status: 'claimed',
+      claim: { walletId: 'wallet-b' },
+    });
+
+    // Let the stale frame unwind after the replacement has installed its own processing epoch.
+    releaseFirst.resolve();
+    await expect(firstRun).resolves.toMatchObject({
+      jobId,
+      claim: { claimToken: replacement?.claim?.claimToken },
+    });
+
+    // Expire the replacement's durable lease. Local recovery must still skip it while its process
+    // frame is active; if the stale finally deleted by job ID, this would reset the job now.
+    now += 5 * 60_000 + 1;
+    expect(await executor.recover()).toBe(0);
+    expect(await executor.getStatus(jobId)).toMatchObject({
+      status: 'claimed',
+      claim: { claimToken: replacement?.claim?.claimToken },
+    });
+
+    releaseSecond.resolve();
+    await expect(secondRun).resolves.toMatchObject({ jobId, status: 'accepted' });
   });
 
   it('recovers an expired unchanged worker claim without requiring an independent recovery pass', async () => {
