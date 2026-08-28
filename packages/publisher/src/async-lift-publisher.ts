@@ -14,6 +14,7 @@ export type {
   AsyncKnowledgeAssetVmPublishRecoveryInput,
   AsyncKnowledgeAssetVmPublishRecoveryResolver,
   AsyncLiftPublisher,
+  ClaimSessionAsyncLiftPublisher,
   AsyncLiftPublisherConfig,
   AsyncLiftPublishExecutionInput,
   AsyncLiftChainProofLookup,

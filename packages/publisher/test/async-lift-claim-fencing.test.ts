@@ -125,6 +125,8 @@ describe('async-lift claim fencing', () => {
     if (!firstClaim) throw new Error('expected first claim');
     const staleSession = publisher.openClaimSession(firstClaim);
     await staleSession.recordExecutionFailure('claimed', new Error('workspace unavailable'));
+    await expect(staleSession.recordExecutionFailure('claimed', new Error('overwrite attempt')))
+      .rejects.toBeInstanceOf(StaleLiftJobClaimError);
 
     expect(await publisher.retry({ status: 'failed' })).toBe(1);
     const replacement = await publisher.claimNext('wallet-a');
@@ -137,6 +139,24 @@ describe('async-lift claim fencing', () => {
     expect(await publisher.getStatus(jobId)).toMatchObject({
       status: 'claimed',
       claim: { claimToken: replacement?.claim.claimToken },
+    });
+  });
+
+  it('ends claim-session authority after finalization releases the wallet', async () => {
+    const publisher = createPublisher();
+    await stageSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const claim = await publisher.claimNext('wallet-a');
+    if (!claim) throw new Error('expected claim');
+    const session = publisher.openClaimSession(claim);
+
+    await session.update('validated', { validation: KA_VM_VALIDATION });
+    await session.update('finalized', { finalization: { mode: 'noop' } });
+    await expect(session.update('finalized', { finalization: { mode: 'local' } }))
+      .rejects.toBeInstanceOf(StaleLiftJobClaimError);
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      status: 'finalized',
+      finalization: { mode: 'noop' },
     });
   });
 

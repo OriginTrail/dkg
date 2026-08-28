@@ -296,6 +296,7 @@ export {
   type AsyncLiftAdministrativeMutations,
   type AsyncLiftDetailedRetrier,
   type AsyncLiftPublisher,
+  type ClaimSessionAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
   type AsyncLiftRetryOutcome,
   type AsyncLiftRetryStateReader,

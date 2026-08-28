@@ -167,8 +167,10 @@ export interface AsyncLiftPublisher {
     admission?: AsyncLiftAdmissionContext,
   ): Promise<string>;
   claimNext(walletId: string): Promise<ActiveLiftJobClaim | null>;
-  openClaimSession(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession;
-  readonly administrative: AsyncLiftAdministrativeMutations;
+  /** Optional v10.0.15 worker-ownership capability; older structural implementations omit it. */
+  openClaimSession?(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession;
+  /** Optional v10.0.15 administrative capability; legacy by-id methods remain compatible. */
+  readonly administrative?: AsyncLiftAdministrativeMutations;
   /**
    * Administrative/compatibility mutation by exact job id. Runtime workers use the owned-claim
    * session returned by {@link openClaimSession}, where the claim token is mandatory and
@@ -250,6 +252,12 @@ export interface AsyncLiftPublisher {
    */
   retry(filter?: { status?: 'failed' }): Promise<number>;
   clear(status: 'finalized' | 'failed'): Promise<number>;
+}
+
+/** Publisher with the fenced worker-session and explicit administrative capabilities. */
+export interface ClaimSessionAsyncLiftPublisher extends AsyncLiftPublisher {
+  openClaimSession(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession;
+  readonly administrative: AsyncLiftAdministrativeMutations;
 }
 
 /** GH#2270 — full disposition of one `retry()` pass. The three counts partition the failed set. */

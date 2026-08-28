@@ -654,7 +654,7 @@ export class TripleStoreAsyncLiftPublisher
     request: KnowledgeAssetVmPublishRequest,
     admission?: AsyncLiftAdmissionContext,
   ): Promise<string> {
-    return this.claimCoordinator.withClaimLock(async () => {
+    return this.claimCoordinator.runClaimTransaction(async () => {
       await this.ensureGraph();
       if (!request.shareOperationId.trim()) {
         throw new Error('Knowledge asset VM publish requires a shareOperationId');
@@ -720,13 +720,12 @@ export class TripleStoreAsyncLiftPublisher
     status: LiftJobState,
     data: Partial<LiftJob> = {},
   ): Promise<void> {
-    const next = this.claimCoordinator.refreshActiveLease(this.mergeJob(current, status, data));
+    const next = this.mergeJob(current, status, data);
     this.assertJobMatchesStatus(next);
     if (next.status === 'finalized') {
       await this.promoteFinalizedPrivateStaging(next);
     }
-    await this.writeJob(next, statusToKind(next.status));
-    await this.claimCoordinator.syncWalletLockForJob(next);
+    await this.claimCoordinator.commitTransition(next, statusToKind(next.status));
   }
 
   private async transitionJob(
@@ -735,16 +734,13 @@ export class TripleStoreAsyncLiftPublisher
     data: Partial<LiftJob>,
   ): Promise<void> {
     await this.ensureGraph();
-    await this.claimCoordinator.withJobTransitionLock(jobId, async () => {
-      const current = await this.getRequiredJob(jobId);
-      await this.claimCoordinator.assertActiveClaimLock(current);
-      const next = this.claimCoordinator.refreshActiveLease(this.mergeJob(current, status, data));
+    await this.claimCoordinator.runAdministrativeTransition(jobId, async (current) => {
+      const next = this.mergeJob(current, status, data);
       this.assertJobMatchesStatus(next);
       if (next.status === 'finalized') {
         await this.promoteFinalizedPrivateStaging(next);
       }
-      await this.writeJob(next, statusToKind(next.status));
-      await this.claimCoordinator.syncWalletLockForJob(next);
+      await this.claimCoordinator.commitTransition(next, statusToKind(next.status));
     });
   }
 
@@ -1255,7 +1251,7 @@ export class TripleStoreAsyncLiftPublisher
     claim: ActiveLiftJobClaim,
     record: PreBroadcastRecord,
   ): Promise<void> {
-    await this.claimCoordinator.withOwnedJobTransition(claim, async (current) => {
+    await this.claimCoordinator.runOwnedTransition(claim, async (current) => {
       const jobId = claim.jobId;
       if (current.status !== 'broadcast') {
         // Independent reconciliation may have already advanced the exact job.
@@ -1292,8 +1288,7 @@ export class TripleStoreAsyncLiftPublisher
         },
       } as LiftJobBroadcast;
       this.assertJobMatchesStatus(next);
-      await this.writeJob(next, 'rpc-accepted');
-      await this.claimCoordinator.syncWalletLockForJob(next);
+      await this.claimCoordinator.commitTransition(next, 'rpc-accepted');
     });
   }
 
@@ -1391,7 +1386,7 @@ export class TripleStoreAsyncLiftPublisher
         this.executorProofHints.delete(snapshot.jobId);
         continue;
       }
-      await this.claimCoordinator.withJobTransitionLock(snapshot.jobId, async () => {
+      await this.claimCoordinator.runJobTransaction(snapshot.jobId, async () => {
           const current = await this.getStatus(snapshot.jobId);
           // 'included' is accepted deliberately (r2 3877540018): a prior attempt may have
           // persisted the included stamp and then failed the wallet-lock deletion. Restricting
@@ -1460,7 +1455,7 @@ export class TripleStoreAsyncLiftPublisher
                 'included',
               );
             }
-            await this.claimCoordinator.releaseWalletLockForJob(current);
+            await this.claimCoordinator.releaseJobOwnership(current);
           } catch (error) {
             // r8 (3877817604) — transient is a HYPOTHESIS with a budget, not a verdict: the
             // first few failures are contained (the r2 retry case), but a persistently
@@ -1578,7 +1573,7 @@ export class TripleStoreAsyncLiftPublisher
         // accepted state must already be claim-visible when it fires — the reverse order let
         // the woken loop find nothing and park while the reset committed unannounced.
         await this.writeJob(this.resetJobToAccepted(job, 'broadcast', undefined), 'recover-reset');
-        await this.claimCoordinator.releaseWalletLockForJob(job);
+        await this.claimCoordinator.releaseJobOwnership(job);
         return true;
       }
       // Evidence-bearing (or 'included'): keep the signing wallet reserved.
@@ -1594,8 +1589,7 @@ export class TripleStoreAsyncLiftPublisher
       const timedOut = job as LiftJobBroadcast | LiftJobIncluded;
       if (!this.hasInconclusiveRecoveryTimedOut(timedOut)) return false;
       const failed = this.failKnowledgeAssetInconclusiveRecovery(timedOut);
-      await this.writeJob(failed, 'failed');
-      await this.claimCoordinator.syncWalletLockForJob(failed);
+      await this.claimCoordinator.commitTransition(failed, 'failed');
       return true;
     }
 
@@ -1611,7 +1605,7 @@ export class TripleStoreAsyncLiftPublisher
     const resolution = await this.resolveChainProofWithinSignal(origin.lookup, options?.signal);
     if (resolution === null) return false;
     if (resolution.status === 'recovered') {
-      await this.claimCoordinator.releaseWalletLockForJob(job);
+      await this.claimCoordinator.releaseJobOwnership(job);
       const finalized = this.finalizeRecoveredJob(
         recoverable,
         origin,
@@ -1624,8 +1618,7 @@ export class TripleStoreAsyncLiftPublisher
     }
     if (this.hasInconclusiveRecoveryTimedOut(recoverable)) {
       const failed = this.failInconclusiveRecovery(recoverable);
-      await this.writeJob(failed, 'failed');
-      await this.claimCoordinator.syncWalletLockForJob(failed);
+      await this.claimCoordinator.commitTransition(failed, 'failed');
       return true;
     }
     return false;
@@ -1683,7 +1676,7 @@ export class TripleStoreAsyncLiftPublisher
             + `${recoverable.broadcast.txHash} was proven reverted and published nothing.`,
           errorPayloadRef: `urn:dkg:publisher:error:${recoverable.jobId}:chain-proof-reverted`,
         });
-        await this.claimCoordinator.releaseWalletLockForJob(recoverable);
+        await this.claimCoordinator.releaseJobOwnership(recoverable);
         await this.writeJob(this.mergeJob(recoverable, 'failed', { failure: failure as any }), 'failed');
         return true;
       }
@@ -1701,7 +1694,7 @@ export class TripleStoreAsyncLiftPublisher
             ? { nonceChecked: recoverable.broadcast.nonce }
             : {}),
         }), 'recover-reset');
-        await this.claimCoordinator.releaseWalletLockForJob(recoverable);
+        await this.claimCoordinator.releaseJobOwnership(recoverable);
         return true;
       }
       // Pending, unrecognized, inconclusive, and update absence establish no
@@ -1723,8 +1716,7 @@ export class TripleStoreAsyncLiftPublisher
       // A chain resolver without the named-lifecycle finalizer cannot safely claim local recovery.
       // Preserve the explicit terminal diagnosis rather than silently marking the job finalized.
       const failed = this.failKnowledgeAssetInconclusiveRecovery(recoverable);
-      await this.writeJob(failed, 'failed');
-      await this.claimCoordinator.syncWalletLockForJob(failed);
+      await this.claimCoordinator.commitTransition(failed, 'failed');
       return true;
     }
 
@@ -1797,7 +1789,7 @@ export class TripleStoreAsyncLiftPublisher
 
     // Chain proof is sufficient to reuse the signing wallet. Local lifecycle repair can retry
     // independently; it must not serialize later transactions behind an already-confirmed nonce.
-    await this.claimCoordinator.releaseWalletLockForJob(job);
+    await this.claimCoordinator.releaseJobOwnership(job);
 
     // --- mutating phase: never raced, never abandoned ---
     // Nothing STARTS past the deadline; that is what bounds the pass in the common case.
@@ -1963,9 +1955,7 @@ export class TripleStoreAsyncLiftPublisher
     options: { publicByteSize?: number } = {},
   ): Promise<LiftJob> {
     await this.ensureGraph();
-    return await this.claimCoordinator.withJobTransitionLock(jobId, async () => {
-      const current = await this.getRequiredJob(jobId);
-      await this.claimCoordinator.assertActiveClaimLock(current);
+    return await this.claimCoordinator.runAdministrativeTransition(jobId, async (current) => {
       return await this.applyPublishResultTransition(current, publishResult, options);
     });
   }
@@ -2016,9 +2006,7 @@ export class TripleStoreAsyncLiftPublisher
       });
       this.assertJobMatchesStatus(next);
       await this.promoteFinalizedPrivateStaging(next);
-      await this.writeJob(next, 'finalized');
-      await this.claimCoordinator.syncWalletLockForJob(next);
-      return next;
+      return await this.claimCoordinator.commitTransition(next, 'finalized');
     }
 
     if (!mapped.broadcast || !mapped.inclusion) {
@@ -2040,8 +2028,7 @@ export class TripleStoreAsyncLiftPublisher
     if (current.status === 'validated') {
       next = this.mergeJob(next, 'broadcast', { broadcast: mapped.broadcast });
       this.assertJobMatchesStatus(next);
-      await this.writeJob(next, 'broadcast');
-      await this.claimCoordinator.syncWalletLockForJob(next);
+      next = await this.claimCoordinator.commitTransition(next, 'broadcast');
     }
 
     if (mapped.status === 'included') {
@@ -2050,9 +2037,7 @@ export class TripleStoreAsyncLiftPublisher
         inclusion: mapped.inclusion,
       });
       this.assertJobMatchesStatus(next);
-      await this.writeJob(next, 'included');
-      await this.claimCoordinator.syncWalletLockForJob(next);
-      return next;
+      return await this.claimCoordinator.commitTransition(next, 'included');
     }
 
     if (next.status === 'broadcast') {
@@ -2061,8 +2046,7 @@ export class TripleStoreAsyncLiftPublisher
         inclusion: mapped.inclusion,
       });
       this.assertJobMatchesStatus(next);
-      await this.writeJob(next, 'included');
-      await this.claimCoordinator.syncWalletLockForJob(next);
+      next = await this.claimCoordinator.commitTransition(next, 'included');
     }
 
     next = this.mergeJob(next, 'finalized', {
@@ -2072,9 +2056,7 @@ export class TripleStoreAsyncLiftPublisher
     });
     this.assertJobMatchesStatus(next);
     await this.promoteFinalizedPrivateStaging(next);
-    await this.writeJob(next, 'finalized');
-    await this.claimCoordinator.syncWalletLockForJob(next);
-    return next;
+    return await this.claimCoordinator.commitTransition(next, 'finalized');
   }
 
   async recordPublishFailure(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob> {
@@ -2086,9 +2068,7 @@ export class TripleStoreAsyncLiftPublisher
     failure: AsyncLiftPublishFailureInput,
   ): Promise<LiftJob> {
     await this.ensureGraph();
-    return await this.claimCoordinator.withJobTransitionLock(jobId, async () => {
-      const current = await this.getRequiredJob(jobId);
-      await this.claimCoordinator.assertActiveClaimLock(current);
+    return await this.claimCoordinator.runAdministrativeTransition(jobId, async (current) => {
       return await this.applyPublishFailureTransition(current, failure);
     });
   }
@@ -2101,9 +2081,7 @@ export class TripleStoreAsyncLiftPublisher
       failure: mapPublishExceptionToLiftJobFailure(failure) as any,
     }));
     this.assertJobMatchesStatus(next);
-    await this.writeJob(next, 'failed');
-    await this.claimCoordinator.syncWalletLockForJob(next);
-    return next;
+    return await this.claimCoordinator.commitTransition(next, 'failed');
   }
 
   async recover(): Promise<number> {
@@ -2115,7 +2093,7 @@ export class TripleStoreAsyncLiftPublisher
     // Inventory is intentionally outside the global claim mutex. Each candidate takes the
     // global-claim -> job-transition locks only for its own re-read/delete turn, so a slow scan
     // cannot stop unrelated queue admission while replacement ownership stays protected.
-    await this.claimCoordinator.sweepStaleWalletLocks();
+    await this.claimCoordinator.sweepStaleOwnership();
     return await this.runReconciliationPass();
   }
 
@@ -2205,7 +2183,7 @@ export class TripleStoreAsyncLiftPublisher
             break;
           }
           const snapshot = rotatedTxBearing[i];
-          await this.claimCoordinator.withJobTransitionLock(snapshot.jobId, async () => {
+          await this.claimCoordinator.runJobTransaction(snapshot.jobId, async () => {
             const current = await this.getStatus(snapshot.jobId);
             // Settled or re-owned since the pre-filter: no longer this pass's remaining work.
             if (!current || (current.status !== 'broadcast' && current.status !== 'included')) return;
@@ -2286,7 +2264,7 @@ export class TripleStoreAsyncLiftPublisher
     );
     let recovered = 0;
     for (const snapshot of interrupted) {
-      await this.claimCoordinator.withJobTransitionLock(snapshot.jobId, async () => {
+      await this.claimCoordinator.runJobTransaction(snapshot.jobId, async () => {
         const current = await this.getStatus(snapshot.jobId);
         if (!current || (current.status !== 'claimed' && current.status !== 'validated')) return;
         if (this.claimCoordinator.isProcessing(current.jobId)) return;
@@ -2295,13 +2273,13 @@ export class TripleStoreAsyncLiftPublisher
         // executor/control publisher instances over the same durable queue. An unexpired,
         // token-matching wallet lock proves another instance still owns this pre-broadcast job.
         // Only a missing/expired/mismatched lock authorizes recovery to reset and reassign it.
-        if (await this.claimCoordinator.hasUsableActiveClaimLock(current)) return;
+        if (await this.claimCoordinator.isJobOwnershipActive(current)) return;
         // Reset BEFORE release — the release poke must find the accepted state claim-visible.
         await this.writeJob(
           this.resetJobToAccepted(current, current.status, getLiftJobTransactionEvidence(current)),
           'recover-reset',
         );
-        await this.claimCoordinator.releaseWalletLockForJob(current);
+        await this.claimCoordinator.releaseJobOwnership(current);
         recovered += 1;
       });
     }
@@ -2481,7 +2459,7 @@ export class TripleStoreAsyncLiftPublisher
     // transitions serialize on, against a RE-READ of the record, and only when it is still the
     // identical held job the chain was asked about — same failure identity, same transaction
     // evidence. Anything else drops the verdict; the next tick asks about whatever now exists.
-    return this.claimCoordinator.withClaimLock(async () => {
+    return this.claimCoordinator.runClaimTransaction(async () => {
       const current = await this.getStatus(job.jobId);
       if (!current || !isFailedJob(current)) return 0;
       if (!this.isSameHeldFailedJob(job, current, lookup)) return 0;
@@ -2553,11 +2531,11 @@ export class TripleStoreAsyncLiftPublisher
         if (deadline.signal.aborted) return 0;
         const finalized = await this.jobHandlerFor(job.request)
           .finalizeProvenPublish(job, origin, resolution.recovery, { signal: deadline.signal });
-        if (finalized) await this.claimCoordinator.releaseWalletLockForJob(job);
+        if (finalized) await this.claimCoordinator.releaseJobOwnership(job);
         return finalized ? 1 : 0;
       }
       case 'refail_reverted': {
-        await this.claimCoordinator.releaseWalletLockForJob(job);
+        await this.claimCoordinator.releaseJobOwnership(job);
         await this.writeJob(this.failProvenRevertedJob(job, disposition.failedFromState), 'failed');
         return 1;
       }
@@ -2573,7 +2551,7 @@ export class TripleStoreAsyncLiftPublisher
           resetFailedLiftJobToAccepted(job, this.now(), { txHashAccounted: true }),
           'recover-reset',
         );
-        await this.claimCoordinator.releaseWalletLockForJob(job);
+        await this.claimCoordinator.releaseJobOwnership(job);
         return 1;
       }
       case 'hold':
@@ -2606,7 +2584,7 @@ export class TripleStoreAsyncLiftPublisher
     if (job.status !== 'accepted') {
       throw new Error(`Only accepted LiftJobs can be cancelled. Current status: ${job.status}`);
     }
-    await this.claimCoordinator.releaseWalletLockForJob(job);
+    await this.claimCoordinator.releaseJobOwnership(job);
     await this.deleteJob(jobId);
   }
 
@@ -2638,7 +2616,7 @@ export class TripleStoreAsyncLiftPublisher
     // withClaimLock) so a by-id clear that read a job as clearable-failed cannot be swept
     // after retry() flips it active. Without this lock the "a transitioning job cannot be
     // swept" guarantee does not hold.
-    return this.claimCoordinator.withClaimLock(async () => {
+    return this.claimCoordinator.runClaimTransaction(async () => {
       const counts = { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
       for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
         // The WRITE decision, taken over the job alone — the operator's kill-switch is not an
@@ -2669,7 +2647,7 @@ export class TripleStoreAsyncLiftPublisher
       // pending tx recovery may still finalize), narrowed for the bulk lane by GH#2270's
       // evidence guard. `clearTerminalJob` keeps the unnarrowed predicate on purpose.
       if (!isBulkClearableTerminalLiftJob(job)) continue;
-      await this.claimCoordinator.releaseWalletLockForJob(job);
+      await this.claimCoordinator.releaseJobOwnership(job);
       await this.deleteJob(job.jobId);
       cleared += 1;
     }
@@ -2697,8 +2675,8 @@ export class TripleStoreAsyncLiftPublisher
     // first lock; worker/recovery state changes use the second. Keeping this order
     // lets claim persist its job+wallet-lock ownership as one critical section
     // without deadlocking a concurrent targeted clear.
-    return this.claimCoordinator.withClaimLock(() =>
-      this.claimCoordinator.withJobTransitionLock(jobId, async () => {
+    return this.claimCoordinator.runClaimTransaction(() =>
+      this.claimCoordinator.runJobTransaction(jobId, async () => {
         await this.ensureGraph();
         const rows = expectBindings(
           await this.store.query(
@@ -2731,7 +2709,7 @@ export class TripleStoreAsyncLiftPublisher
         if (!isTargetedClearableLiftJob(job, options)) {
           return { outcome: 'rejected', reason: 'nonterminal' };
         }
-        await this.claimCoordinator.releaseWalletLockForJob(job);
+        await this.claimCoordinator.releaseJobOwnership(job);
         await this.deleteJob(jobId);
         return { outcome: 'cleared' };
       }),
@@ -3030,9 +3008,7 @@ export class TripleStoreAsyncLiftPublisher
         this.mergeJob(current, 'failed', { failure: failure as any }),
       );
       this.assertJobMatchesStatus(failed);
-      await this.writeJob(failed, 'failed');
-      await this.claimCoordinator.syncWalletLockForJob(failed);
-      return failed;
+      return await this.claimCoordinator.commitTransition(failed, 'failed');
     }
 
     const message = error instanceof Error ? error.message : String(error);
@@ -3124,7 +3100,7 @@ export class TripleStoreAsyncLiftPublisher
     merkleRoot?: LiftJobHex;
     publicByteSize?: number;
   }): Promise<void> {
-    await this.claimCoordinator.withOwnedJobTransition(params.claim, async (current) => {
+    await this.claimCoordinator.runOwnedTransition(params.claim, async (current) => {
       const jobId = params.claim.jobId;
       if (current.status === 'broadcast') return;
       if (current.status !== 'validated') {
@@ -3169,12 +3145,9 @@ export class TripleStoreAsyncLiftPublisher
     broadcast: LiftJobBroadcastMetadata,
   ): Promise<void> {
     try {
-      const next = this.claimCoordinator.refreshActiveLease(
-        this.mergeJob(current, 'broadcast', { broadcast }),
-      );
+      const next = this.mergeJob(current, 'broadcast', { broadcast });
       this.assertJobMatchesStatus(next);
-      await this.writeJob(next, 'broadcast');
-      await this.claimCoordinator.syncWalletLockForJob(next);
+      await this.claimCoordinator.commitTransition(next, 'broadcast');
       await this.store.flush?.();
     } catch (error) {
       // #1829 — 'rollback-noop': restoring the prior 'validated' job must NOT append a
@@ -3398,7 +3371,7 @@ export class TripleStoreAsyncLiftPublisher
         updatedAt: retriedAt,
       },
     };
-    await this.claimCoordinator.releaseWalletLockForJob(job);
+    await this.claimCoordinator.releaseJobOwnership(job);
     await this.writeJob(reaccepted, 'reaccept');
     return reaccepted;
   }
@@ -3555,7 +3528,7 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async finalizeNoopPublish(claim: ActiveLiftJobClaim): Promise<LiftJob> {
-    return await this.claimCoordinator.withOwnedJobTransition(claim, async (current) => {
+    return await this.claimCoordinator.runOwnedTransition(claim, async (current) => {
       const finalized = this.mergeJob(current, 'finalized', {
         finalization: {
           mode: 'noop',
@@ -3563,9 +3536,7 @@ export class TripleStoreAsyncLiftPublisher
       });
       this.assertJobMatchesStatus(finalized);
       await this.promoteFinalizedPrivateStaging(finalized);
-      await this.writeJob(finalized, 'noop-finalized');
-      await this.claimCoordinator.syncWalletLockForJob(finalized);
-      return finalized;
+      return await this.claimCoordinator.commitTransition(finalized, 'noop-finalized');
     });
   }
 
@@ -3574,10 +3545,10 @@ export class TripleStoreAsyncLiftPublisher
     request: LiftPublishSnapshotRequest,
     metadata: LiftPublishRequestMetadata,
   ): Promise<LiftJob> {
-    return await this.claimCoordinator.withOwnedJobTransition(claim, async (current) => {
+    return await this.claimCoordinator.runOwnedTransition(claim, async (current) => {
       let next = current;
       if (!next.validation) {
-        next = this.claimCoordinator.refreshActiveLease(this.mergeJob(next, 'validated', {
+        next = this.mergeJob(next, 'validated', {
           validation: {
             canonicalRoots: [...request.roots],
             canonicalRootMap: Object.fromEntries(request.roots.map((root) => [root, root])),
@@ -3586,10 +3557,9 @@ export class TripleStoreAsyncLiftPublisher
             transitionType: metadata.transitionType,
             ...(request.priorVersion ? { priorVersion: request.priorVersion } : {}),
           },
-        }));
+        });
         this.assertJobMatchesStatus(next);
-        await this.writeJob(next, 'validated');
-        await this.claimCoordinator.syncWalletLockForJob(next);
+        next = await this.claimCoordinator.commitTransition(next, 'validated');
       }
 
       const finalized = this.mergeJob(next, 'finalized', {
@@ -3597,9 +3567,7 @@ export class TripleStoreAsyncLiftPublisher
       });
       this.assertJobMatchesStatus(finalized);
       await this.promoteFinalizedPrivateStaging(finalized);
-      await this.writeJob(finalized, 'noop-finalized');
-      await this.claimCoordinator.syncWalletLockForJob(finalized);
-      return finalized;
+      return await this.claimCoordinator.commitTransition(finalized, 'noop-finalized');
     });
   }
 
