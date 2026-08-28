@@ -536,12 +536,21 @@ export class DkgLocalLlmRuntime {
           truncationRetryUsed = true;
           finalOnly = true;
           pinnedToolName = undefined;
-          messages.push({ role: 'assistant', content: String(assistant.content ?? '') });
+          const retryTargetTokens = Math.max(64, Math.floor(this.maxTokens * 0.75));
           messages.push({
             role: 'user',
-            content: 'The answer was truncated. Return one compact complete answer from existing evidence, without another tool call.',
+            content:
+              'The previous final draft exceeded the output budget and was discarded. '
+              + 'Answer again from existing tool evidence only, without another tool call. '
+              + `The complete replacement must target fewer than ${retryTargetTokens} tokens. `
+              + 'Preserve every distinct item the user requested. For lists, output only the minimum identifying fields; '
+              + 'omit descriptions, commentary, repeated headings, and other optional detail.',
           });
-          await this.trace.write('FINAL ANSWER TRUNCATION RETRY', { finishReason: choice.finish_reason });
+          await this.trace.write('FINAL ANSWER TRUNCATION RETRY', {
+            finishReason: choice.finish_reason,
+            discardedDraftChars: String(assistant.content ?? '').length,
+            retryTargetTokens,
+          });
           continue;
         }
         const answer = normalizeFinalAnswer(String(assistant.content ?? ''));

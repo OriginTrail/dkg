@@ -84,6 +84,12 @@ function answerResponse(content: string): Response {
   });
 }
 
+function truncatedAnswerResponse(content: string): Response {
+  return jsonResponse({
+    choices: [{ finish_reason: 'length', message: { role: 'assistant', content } }],
+  });
+}
+
 function makeMcp(tools: McpToolDefinition[] = [catalogList, catalogRun]): McpClientLike & {
   callTool: ReturnType<typeof vi.fn>;
 } {
@@ -116,6 +122,30 @@ describe('DkgLocalLlmRuntime', () => {
     const secondRequest = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
     expect(secondRequest.messages.at(-1).role).toBe('tool');
     expect(secondRequest.messages.at(-1).content).toContain('Structured DKG evidence');
+  });
+
+  it('discards a truncated draft and retries with a generic bounded answer instruction', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(toolResponse('dkg_query_catalog_list', {}))
+      .mockResolvedValueOnce(truncatedAnswerResponse('A verbose partial answer that must not anchor the retry.'))
+      .mockResolvedValueOnce(answerResponse('supply/lifecycle'));
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp,
+      fetch: fetcher as typeof fetch,
+      maxTokens: 1_024,
+    });
+
+    const result = await runtime.run('List every saved DKG query.');
+
+    expect(result.answer).toBe('supply/lifecycle');
+    const retryRequest = JSON.parse(String(fetcher.mock.calls[2][1]?.body));
+    expect(retryRequest.tools).toBeUndefined();
+    expect(retryRequest.messages.at(-1).content).toContain('target fewer than 768 tokens');
+    expect(retryRequest.messages.at(-1).content).toContain('For lists, output only the minimum identifying fields');
+    expect(retryRequest.messages).not.toContainEqual(expect.objectContaining({
+      content: 'A verbose partial answer that must not anchor the retry.',
+    }));
   });
 
   it('pins one schema repair retry to the failed tool', async () => {
