@@ -132,6 +132,10 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import {
+  resolveActivePublicContextGraphChainProof as resolveStrictActivePublicChainProof,
+  type ActivePublicContextGraphChainProof,
+} from './active-public-context-graph-chain-proof.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -424,15 +428,23 @@ type ContextGraphSlotBindingOutcome =
   | { kind: 'unprovable' }
   | { kind: 'transportFailure'; error: unknown };
 
-type ContextGraphSlotBindingPolicy = 'legacy' | 'compatibilityStrict' | 'retryableStrict';
+export type ContextGraphSlotBindingMode =
+  | 'legacy-policy'
+  | 'chain-attested-repair'
+  | 'retryable-durable';
+
+type PublicPolicySlotBindingMode = Exclude<
+  ContextGraphSlotBindingMode,
+  'retryable-durable'
+>;
 
 function mapContextGraphSlotBindingOutcome(
   outcome: ContextGraphSlotBindingOutcome,
-  policy: ContextGraphSlotBindingPolicy,
+  mode: ContextGraphSlotBindingMode,
 ): boolean {
   if (outcome.kind === 'match') return true;
-  if (outcome.kind === 'unprovable') return policy === 'legacy';
-  if (outcome.kind === 'transportFailure' && policy === 'retryableStrict') {
+  if (outcome.kind === 'unprovable') return mode === 'legacy-policy';
+  if (outcome.kind === 'transportFailure' && mode !== 'legacy-policy') {
     throw outcome.error;
   }
   return false;
@@ -444,6 +456,7 @@ async function evaluateContextGraphSlotBinding(
   onChainId: string,
   opCtx: OperationContext | undefined,
   signal: AbortSignal | undefined,
+  allowNumericSelfAddress: boolean,
   isWireIdKeyedSubscription: (localId: string) => boolean,
   warn: (ctx: OperationContext, message: string) => void,
   raceRead: <T>(read: Promise<T>) => Promise<T | typeof TIMEOUT_SENTINEL>,
@@ -457,7 +470,11 @@ async function evaluateContextGraphSlotBinding(
   if (numericId <= 0n) return { kind: 'unprovable' };
 
   const trimmed = contextGraphId.trim();
-  if (/^\d+$/.test(trimmed) && trimmed === numericId.toString()) {
+  if (
+    allowNumericSelfAddress
+    && /^\d+$/.test(trimmed)
+    && trimmed === numericId.toString()
+  ) {
     return { kind: 'match' };
   }
   const getNameHash = chain.getContextGraphNameHash;
@@ -868,6 +885,22 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     return null;
   }
 
+  async resolveActivePublicContextGraphChainProof(
+    this: DKGAgent,
+    contextGraphId: string,
+    operationContext: OperationContext,
+  ): Promise<ActivePublicContextGraphChainProof> {
+    return resolveStrictActivePublicChainProof(
+      (id, resolverOperationContext, options) => this.resolveOnChainAccessPolicyState(
+        id,
+        resolverOperationContext,
+        options,
+      ),
+      contextGraphId,
+      operationContext,
+    );
+  }
+
   /**
    * True iff `contextGraphId` is DEFINITIVELY public per its on-chain
    * access policy (policy enum `0`). Gates SWM encryption: an on-chain
@@ -912,6 +945,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async isContextGraphPublicOnChain(this: DKGAgent,
     contextGraphId: string,
     opCtx?: OperationContext,
+    options: { slotBindingMode?: PublicPolicySlotBindingMode } = {},
   ): Promise<boolean> {
     try {
       // DEFINITIVELY public iff the live-proven on-chain policy is `0`. Every
@@ -922,7 +956,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // resolver collapses unknown↔not-public ONLY for this boolean predicate;
       // the publish-inline probe consumes the tri-state directly so it can
       // REFUSE (rather than choose plaintext) on a genuine UNKNOWN.
-      return (await this.resolveOnChainAccessPolicyState(contextGraphId, opCtx)) === 0;
+      return (await this.resolveOnChainAccessPolicyState(
+        contextGraphId,
+        opCtx,
+        options,
+      )) === 0;
     } catch (err) {
       // Fail closed (curated/encrypted) on any lookup failure, but not
       // silently — surface WHY the public override was skipped so operators
@@ -972,6 +1010,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveOnChainAccessPolicyState(this: DKGAgent,
     contextGraphId: string,
     opCtx?: OperationContext,
+    options: { slotBindingMode?: PublicPolicySlotBindingMode } = {},
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
     const trimmed = contextGraphId.trim();
 
@@ -1030,7 +1069,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // to re-bind.) An affirmative name-hash mismatch is a STALE mapping → treat
     // as 'unknown' (fail closed), not 'unregistered' (which would re-enable the
     // plaintext default for a graph we just proved we can't trust).
-    if (resolvedFromLocalCg && !(await this.localCgMatchesOnChainSlot(contextGraphId, onChainId, opCtx))) {
+    if (resolvedFromLocalCg && !(await this.localCgMatchesOnChainSlot(
+      contextGraphId,
+      onChainId,
+      opCtx,
+      { bindingMode: options.slotBindingMode },
+    ))) {
       return 'unknown';
     }
 
@@ -1065,34 +1109,55 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    *     hash-shaped cleartext id can't borrow a reused slot's commitment.
    * A genuinely reused slot commits a DIFFERENT name that matches neither.
    *
-   * The default legacy policy probe maps malformed/unprovable identifiers to
-   * `true`, but maps mismatches and transport failures to `false`. Its preserved
-   * `requireCommittedNameHash` option maps every non-match to `false`, including
-   * malformed ids and adapters without the getter. Durable sync uses the strict
-   * wrapper below, which additionally propagates transport failures so a bounded
-   * retry can perform a fresh read. All modes accept a canonical direct numeric
-   * self-address because it names the slot rather than a cleartext remapping.
+   * The explicit binding mode owns both numeric self-address handling and
+   * outcome mapping. `legacy-policy` preserves compatibility,
+   * `chain-attested-repair` requires a committed mapping proof.
+   * `retryable-durable` preserves the established raw numeric self-address
+   * while propagating transport failures for every other identity read so
+   * bounded durable verification can retry a fresh read.
    */
   async localCgMatchesOnChainSlot(this: DKGAgent,
     contextGraphId: string,
     onChainId: string,
     opCtx?: OperationContext,
-    options?: { requireCommittedNameHash?: boolean; signal?: AbortSignal },
+    options: {
+      bindingMode?: ContextGraphSlotBindingMode;
+      /** @deprecated Use `bindingMode: 'chain-attested-repair'`. */
+      requireCommittedNameHash?: boolean;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<boolean> {
+    const compatibilityBindingMode = options.requireCommittedNameHash === undefined
+      ? undefined
+      : options.requireCommittedNameHash
+        ? 'chain-attested-repair'
+        : 'legacy-policy';
+    if (
+      compatibilityBindingMode !== undefined
+      && options.bindingMode !== undefined
+      && options.bindingMode !== compatibilityBindingMode
+    ) {
+      throw new TypeError(
+        'requireCommittedNameHash contradicts the explicit Context Graph binding mode',
+      );
+    }
+    const bindingMode = options.bindingMode ?? compatibilityBindingMode ?? 'legacy-policy';
     const outcome = await evaluateContextGraphSlotBinding(
       this.chain,
       contextGraphId,
       onChainId,
       opCtx,
-      options?.signal,
+      options.signal,
+      // The deprecated strict option accepted a direct numeric self-address;
+      // preserve that exact compatibility while the new repair mode remains
+      // stricter for callers that opt into it directly.
+      options.requireCommittedNameHash === true
+        || bindingMode !== 'chain-attested-repair',
       (localId) => this.isWireIdKeyedSubscription(localId),
       (ctx, message) => this.log.warn(ctx, message),
       (read) => this.raceChainPolicyRead(read),
     );
-    return mapContextGraphSlotBindingOutcome(
-      outcome,
-      options?.requireCommittedNameHash === true ? 'compatibilityStrict' : 'legacy',
-    );
+    return mapContextGraphSlotBindingOutcome(outcome, bindingMode);
   }
 
   /**
@@ -1106,17 +1171,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     opCtx?: OperationContext,
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
-    const outcome = await evaluateContextGraphSlotBinding(
-      this.chain,
+    return this.localCgMatchesOnChainSlot(
       contextGraphId,
       onChainId,
       opCtx,
-      options.signal,
-      (localId) => this.isWireIdKeyedSubscription(localId),
-      (ctx, message) => this.log.warn(ctx, message),
-      (read) => this.raceChainPolicyRead(read),
+      { bindingMode: 'retryable-durable', signal: options.signal },
     );
-    return mapContextGraphSlotBindingOutcome(outcome, 'retryableStrict');
   }
 
   /**
@@ -1185,14 +1245,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       throw new Error(`Cannot create SWM Sender Key epoch: no local custodial signing key for agent ${input.senderAgentAddress}`);
     }
 
-    const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId: input.contextGraphId });
-    if (!resolution.requiresEncryption) {
-      return input.plaintext;
-    }
-    if (resolution.recipients.length === 0) {
-      throw new Error(`Context graph "${input.contextGraphId}" requires Sender Key SWM but has no DKG agent recipients`);
-    }
-
+    const resolution = input.resolution;
     const senderAddress = ethers.getAddress(sender.agentAddress);
     const recipientSet = new Set(resolution.recipients.map((recipient) => recipient.agentAddress.toLowerCase()));
     if (!recipientSet.has(senderAddress.toLowerCase())) {

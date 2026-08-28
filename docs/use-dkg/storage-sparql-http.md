@@ -71,9 +71,8 @@ Managed Oxigraph accepts optional launch settings under `store.options`:
       "port": 7878,
       "location": "/var/lib/dkg/oxigraph-data",
       "cacheDir": "/var/lib/dkg/oxigraph-bin",
-      "readyTimeoutMs": 180000,
       "clientTimeoutMs": 180000,
-      "queryTimeoutS": 35,
+      "queryTimeoutS": 175,
       "memoryHighMiB": 2048,
       "memoryMaxMiB": 3072
     }
@@ -81,11 +80,15 @@ Managed Oxigraph accepts optional launch settings under `store.options`:
 }
 ```
 
-`readyTimeoutMs` is the maximum startup readiness wait in milliseconds. It must be a positive integer; invalid values are ignored and the default 30-second timeout is used. Increase it when a large or recovering RocksDB database needs longer to open.
+The daemon sizes the startup readiness wait automatically from the RocksDB write-ahead log retained in `location`. Oxigraph is not closed cleanly on shutdown (it installs no SIGTERM handler), so every start replays the previous session's log, and that replay is what a fixed deadline used to cut short. The derived wait assumes a pessimistic 4 MB/s replay floor and is not truncated below that work allowance; when a replay is pending the daemon logs the size and the allowance, then reports progress every 10 seconds.
 
-`clientTimeoutMs` is the SPARQL HTTP client deadline in milliseconds. It can be raised independently when a valid store mutation needs longer than the default 30 seconds, without enabling a native Oxigraph query timeout. When set, it takes precedence over the client deadline derived from `queryTimeoutS`.
+`readyTimeoutMs` **overrides** that automatic sizing with an explicit maximum, used verbatim and never extended. It must be a positive integer; invalid values are ignored. You normally should not set it — if you configured it as a workaround for a node that would not start, remove it. When an explicit value is lower than the automatic estimate the daemon logs a warning naming both numbers, because that combination is what keeps a recovering node down.
 
-`queryTimeoutS` is the native Oxigraph query timeout in seconds and is passed to `oxigraph serve --timeout-s`. When `clientTimeoutMs` is omitted, the rewritten HTTP store timeout includes an additional five-second grace period so Oxigraph can return its timeout response before the client aborts the request.
+`clientTimeoutMs` is the SPARQL HTTP client deadline in milliseconds. Managed Oxigraph defaults to 30 seconds. When you configure a longer client deadline, the daemon automatically derives a native query deadline five seconds earlier (for example, `180000` derives `175` seconds). If an Oxigraph evaluator path does not honor native cancellation before the client deadline, the daemon terminates and supervises a fresh managed Oxigraph process so the store cannot remain stalled indefinitely.
+
+`queryTimeoutS` is the native Oxigraph query timeout in seconds and is passed to `oxigraph serve --timeout-s`. The default is 25 seconds. An explicit value overrides the derived native deadline; when necessary, the daemon extends `clientTimeoutMs` so the native timeout still fires at least five seconds before the HTTP deadline. The native deadline applies to query evaluation, while the client deadline also bounds updates and response decoding. Upgraded nodes must restart once so the managed Oxigraph child is relaunched with `--timeout-s`.
+
+Blazegraph uses the same bounded/retryable DKG contract with backend-specific cancellation semantics. Its 30-second client deadline sends a wider 120-second `X-BIGDATA-MAX-QUERY-MILLIS` server bound: the wider server limit caps abandoned work without allowing Blazegraph's mid-stream timeout behavior to be mistaken for a complete CONSTRUCT result. Store admission pressure returns `503 STORE_SCHEDULER_BUSY` with `outcome: "not_started"`; an adapter deadline returns `503 STORE_OPERATION_TIMEOUT`, `retryable: true`, and `outcome: "indeterminate"`. For an indeterminate write, retry the same Knowledge Asset name/idempotency key rather than creating a new asset.
 
 On Linux hosts using systemd, `memoryMaxMiB` runs managed Oxigraph in a dedicated transient user scope with a finite hard limit and disables swap for that scope, so database pressure cannot spill into host swap and stall the node. Optional `memoryHighMiB` sets its soft reclaim threshold and must not exceed `memoryMaxMiB`. This keeps Oxigraph outside the DKG daemon service's cgroup, so a finite `MemoryMax` on the daemon cannot kill the store or throttle the Node.js control plane as one combined process group. Enable lingering once for the node service account (`sudo loginctl enable-linger <dkg-user>`) so its user manager and bus exist before the system service starts at boot; verify with `systemctl --user is-system-running` as that account. The daemon supplies the required user-bus environment automatically. Startup fails rather than silently dropping configured limits when the scope cannot be created.
 
@@ -96,6 +99,12 @@ Size the daemon service and Oxigraph scope independently, while keeping their co
 - **Blazegraph:** One URL for both query and update. Set only `queryEndpoint` or set both options to the same URL (e.g. `http://127.0.0.1:9999/blazegraph/namespace/kb/sparql`).
 - **Apache Jena Fuseki:** Typically `http://host:3030/dataset/query` and `http://host:3030/dataset/update`.
 - **GraphDB, Neptune, Stardog:** Use the vendor’s SPARQL query and update URLs; add `auth` if required.
+
+### Blazegraph provisioned by `dkg init` (Docker)
+
+When you pick the `blazegraph` backend in `dkg init` and leave the URL blank, the CLI offers to provision a container itself. For new containers, the provisioner uses the pinned multi-architecture image and data path declared in `blazegraph-image.json`, stores the journal in a named Docker volume, and uses `--restart unless-stopped`. Blazegraph output uses Docker's compressed `local` log driver with a 4 GB rotation budget (`200m` × 20 files), so an unattended container cannot fill the host disk. The provisioner auto-bumps the host port if 9999 is taken and is idempotent — re-running `dkg init` against an already-provisioned namespace reuses the running container.
+
+A reused legacy container is never recreated automatically, because doing so could discard its journal. If its volume or log policy does not match the current configuration, the CLI prints explicit backup/migration and unbounded-log warnings instead.
 
 ## Programmatic (DKGAgent)
 

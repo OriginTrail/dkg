@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, expectTypeOf } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  GraphSetIndexStore,
+  OxigraphStore,
+  type Quad,
+  type QueryOptions as StoreQueryOptions,
+} from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -112,6 +117,197 @@ describe('DKGQueryEngine', () => {
     );
     expect(result.bindings).toHaveLength(1);
     expect(result.bindings[0]['name']).toBe('"ImageBot"');
+  });
+
+  it('keeps caller cancellation on execution reads but out of shareable graph discovery', async () => {
+    class OptionsRecordingStore extends OxigraphStore {
+      queryOptions: Array<Parameters<OxigraphStore['query']>[1]> = [];
+      discoveryOptions: StoreQueryOptions[] = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.queryOptions.push(options);
+        return super.query(sparql, options);
+      }
+      async listGraphsByPrefix(
+        prefix: string,
+        options?: StoreQueryOptions,
+      ) {
+        this.discoveryOptions.push(options ?? {});
+        return (await super.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
+      }
+    }
+
+    const recordingStore = new OptionsRecordingStore();
+    const recordingEngine = new DKGQueryEngine(recordingStore);
+    await recordingStore.insert([
+      q('urn:options:s', 'http://schema.org/name', '"Options"', GRAPH),
+    ]);
+    const controller = new AbortController();
+
+    await recordingEngine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      {
+        contextGraphId: CONTEXT_GRAPH,
+        includeSharedMemory: true,
+        signal: controller.signal,
+        priority: 'background',
+        source: 'api.query',
+      },
+    );
+
+    expect(recordingStore.queryOptions).not.toHaveLength(0);
+    expect(recordingStore.queryOptions).toContainEqual(expect.objectContaining({
+      signal: controller.signal,
+      priority: 'background',
+      source: 'api.query',
+    }));
+    expect(recordingStore.discoveryOptions).not.toHaveLength(0);
+    for (const options of recordingStore.discoveryOptions) {
+      expect(options).toMatchObject({
+        priority: 'background',
+        source: 'api.query',
+      });
+      expect(options.signal).toBeUndefined();
+    }
+  });
+
+  it('keeps caller cancellation out of shared graph-discovery flights', async () => {
+    let releaseDiscovery!: () => void;
+    const discoveryGate = new Promise<void>((resolve) => {
+      releaseDiscovery = resolve;
+    });
+    let discoveryStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      discoveryStarted = resolve;
+    });
+
+    class SharedFlightRecordingStore extends OxigraphStore {
+      sharedOptions: Array<Parameters<OxigraphStore['query']>[1]> = [];
+      private held = false;
+
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        if (sparql.includes('ontology/SubGraph')) {
+          this.sharedOptions.push(options);
+          if (!this.held) {
+            this.held = true;
+            discoveryStarted();
+            await discoveryGate;
+          }
+        }
+        return super.query(sparql, options);
+      }
+    }
+
+    const sharedStore = new SharedFlightRecordingStore();
+    const sharedEngine = new DKGQueryEngine(sharedStore);
+    await sharedStore.insert([
+      q('urn:shared:s', 'http://schema.org/name', '"Shared"', GRAPH),
+    ]);
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const scopedQuery =
+      'SELECT ?sourceGraph ?name WHERE { GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name } }';
+    const common = {
+      contextGraphId: CONTEXT_GRAPH,
+      includeContextGraphPartitions: true,
+      priority: 'background' as const,
+      source: 'api.query',
+    };
+
+    const first = sharedEngine.query(scopedQuery, {
+      ...common,
+      signal: firstController.signal,
+    });
+    const firstRejected = expect(first).rejects.toThrow('first caller disconnected');
+    await started;
+    const second = sharedEngine.query(scopedQuery, {
+      ...common,
+      signal: secondController.signal,
+    });
+    await Promise.resolve();
+
+    firstController.abort(new Error('first caller disconnected'));
+    await firstRejected;
+    releaseDiscovery();
+
+    await expect(second).resolves.toBeDefined();
+    expect(sharedStore.sharedOptions).toHaveLength(1);
+    expect(sharedStore.sharedOptions[0]).toMatchObject({
+      priority: 'background',
+      source: 'api.query',
+    });
+    expect(sharedStore.sharedOptions[0]?.signal).toBeUndefined();
+    expect(secondController.signal.aborted).toBe(false);
+  });
+
+  it('keeps caller cancellation out of GraphSetIndexStore refresh flights', async () => {
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let refreshStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      refreshStarted = resolve;
+    });
+
+    class AbortAwareGraphListStore extends OxigraphStore {
+      readonly listGraphOptions: StoreQueryOptions[] = [];
+      private held = false;
+
+      override async listGraphs(options?: StoreQueryOptions): Promise<string[]> {
+        this.listGraphOptions.push(options ?? {});
+        if (!this.held) {
+          this.held = true;
+          refreshStarted();
+          await new Promise<void>((resolve, reject) => {
+            const onAbort = () => reject(options?.signal?.reason);
+            options?.signal?.addEventListener('abort', onAbort, { once: true });
+            void refreshGate.then(() => {
+              options?.signal?.removeEventListener('abort', onAbort);
+              resolve();
+            }, reject);
+          });
+        }
+        return super.listGraphs(options);
+      }
+    }
+
+    const inner = new AbortAwareGraphListStore();
+    await inner.insert([
+      q('urn:indexed:s', 'http://schema.org/name', '"Indexed"', GRAPH),
+    ]);
+    const indexedEngine = new DKGQueryEngine(new GraphSetIndexStore(inner));
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const common = {
+      contextGraphId: CONTEXT_GRAPH,
+      includeSharedMemory: true,
+      priority: 'background' as const,
+      source: 'api.query',
+    };
+
+    const first = indexedEngine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { ...common, signal: firstController.signal },
+    );
+    const firstRejected = expect(first).rejects.toThrow('first caller disconnected');
+    await started;
+    const second = indexedEngine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { ...common, signal: secondController.signal },
+    );
+
+    firstController.abort(new Error('first caller disconnected'));
+    await firstRejected;
+    releaseRefresh();
+
+    await expect(second).resolves.toBeDefined();
+    expect(inner.listGraphOptions).toHaveLength(1);
+    expect(inner.listGraphOptions[0]).toMatchObject({
+      priority: 'background',
+      source: 'api.query',
+    });
+    expect(inner.listGraphOptions[0].signal).toBeUndefined();
+    expect(secondController.signal.aborted).toBe(false);
   });
 
   it('returns all triples for entity', async () => {
@@ -1495,6 +1691,121 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings).toHaveLength(1);
     expect(result.bindings[0]['g']).toBe(GRAPH);
     expect(result.bindings[0]['name']).toBe('"ImageBot"');
+  });
+
+  it('does not re-inject the full graph allow-list when top-level VALUES already narrows GRAPH ?g', async () => {
+    class RecordingStore extends OxigraphStore {
+      queries: string[] = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.queries.push(sparql);
+        return super.query(sparql, options);
+      }
+    }
+
+    const recordingStore = new RecordingStore();
+    const recordingEngine = new DKGQueryEngine(recordingStore);
+    // Mirror issue #1989's cardinality: the Blackbox metadata query returned
+    // 249 rows, of which 125 confirmed VM graphs were materialized locally.
+    // The caller selected only five of those graphs.
+    const vmGraphs = Array.from(
+      { length: 125 },
+      (_, index) => `${GRAPH}/_verifiable_memory/0xagent/${index + 128}`,
+    );
+    await recordingStore.insert(vmGraphs.map((graph, index) => (
+      q(`urn:vm:${index}`, 'http://schema.org/name', `"${index}"`, graph)
+    )));
+    recordingStore.queries.length = 0;
+
+    const sparql = `SELECT ?sourceGraph ?name WHERE {
+      VALUES ?sourceGraph { ${vmGraphs.slice(0, 5).map((graph) => `<${graph}>`).join(' ')} }
+      GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+    } ORDER BY ?sourceGraph`;
+    const result = await recordingEngine.query(
+      sparql,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings.map((row) => row['name'])).toEqual([
+      '"0"',
+      '"1"',
+      '"2"',
+      '"3"',
+      '"4"',
+    ]);
+    const executed = recordingStore.queries.at(-1) ?? '';
+    expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(1);
+    expect(executed).toBe(sparql);
+    expect(executed).not.toContain(vmGraphs[5]);
+  });
+
+  it('retains the allow-list intersection when caller VALUES contains an out-of-scope graph', async () => {
+    class RecordingStore extends OxigraphStore {
+      queries: string[] = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.queries.push(sparql);
+        return super.query(sparql, options);
+      }
+    }
+
+    const recordingStore = new RecordingStore();
+    const recordingEngine = new DKGQueryEngine(recordingStore);
+    const vm = `${GRAPH}/_verifiable_memory/0xagent/1`;
+    const foreign = 'did:dkg:context-graph:foreign/_verifiable_memory/0xagent/1';
+    await recordingStore.insert([
+      q('urn:vm:allowed', 'http://schema.org/name', '"allowed"', vm),
+      q('urn:vm:foreign', 'http://schema.org/name', '"foreign"', foreign),
+    ]);
+    recordingStore.queries.length = 0;
+
+    const result = await recordingEngine.query(
+      `SELECT ?sourceGraph ?name WHERE {
+        VALUES ?sourceGraph { <${vm}> <${foreign}> }
+        GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings).toEqual([{ sourceGraph: vm, name: '"allowed"' }]);
+    const executed = recordingStore.queries.at(-1) ?? '';
+    expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(2);
+  });
+
+  it('rejects a default-graph pattern even when authorized VALUES makes graph injection redundant', async () => {
+    const vm = `${GRAPH}/_verifiable_memory/0xagent/guard-order-default`;
+    await store.insert([
+      q('urn:guard:default', 'http://schema.org/name', '"guard"', vm),
+    ]);
+
+    await expect(engine.query(
+      `SELECT ?sourceGraph ?name ?description WHERE {
+        VALUES ?sourceGraph { <${vm}> }
+        GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+        ?s <http://schema.org/description> ?description
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    )).rejects.toThrow(
+      /Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i,
+    );
+  });
+
+  it('rejects nested GRAPH use even when authorized VALUES makes graph injection redundant', async () => {
+    const vm = `${GRAPH}/_verifiable_memory/0xagent/guard-order-optional`;
+    await store.insert([
+      q('urn:guard:optional', 'http://schema.org/name', '"guard"', vm),
+    ]);
+
+    await expect(engine.query(
+      `SELECT ?sourceGraph ?name ?description WHERE {
+        VALUES ?sourceGraph { <${vm}> }
+        GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+        OPTIONAL {
+          GRAPH ?sourceGraph { ?s <http://schema.org/description> ?description }
+        }
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    )).rejects.toThrow(
+      /Scoped query violation: GRAPH variables must appear at the top level/i,
+    );
   });
 
   it('rejects mixed GRAPH-variable and default-graph triple patterns', async () => {

@@ -19,6 +19,10 @@ import type {
   Rfc64PublicCatalogCurrentHeadScopeV1,
 } from './rfc64/public-catalog-current-head-discovery-v1.js';
 
+/** @deprecated Retained for compatibility; terminal errors extend this class. */
+export {
+  Rfc64CatalogSynchronizationErrorV1,
+} from './rfc64/catalog-synchronization-error-v1.js';
 /** Explicit provider + independently accepted public-root scope for a cold pull. */
 export interface SynchronizeRfc64PublicCatalogFromProviderParamsV1 {
   readonly remotePeerId: string;
@@ -30,6 +34,20 @@ export interface SynchronizeRfc64PublicCatalogFromProviderParamsV1 {
 export interface SynchronizeRfc64PublicCatalogFromProviderResultV1
   extends AppliedCatalogHeadSnapshotV1 {
   readonly providerPeerId: string;
+  readonly signatureVariantDigest: Digest32V1;
+}
+
+export interface SynchronizeRfc64CatalogFromProvidersParamsV1 {
+  readonly remotePeerIds: readonly string[];
+  readonly scope: Rfc64PublicCatalogCurrentHeadScopeV1;
+  readonly signal?: AbortSignal;
+}
+
+export interface SynchronizeRfc64CatalogFromProvidersResultV1
+  extends AppliedCatalogHeadSnapshotV1 {
+  readonly providerPeerIds: readonly string[];
+  readonly appliedProviderPeerId: string | null;
+  readonly providerAttempts: number;
   readonly signatureVariantDigest: Digest32V1;
 }
 
@@ -45,16 +63,17 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
     params: SynchronizeRfc64PublicCatalogFromProviderParamsV1,
   ): Promise<SynchronizeRfc64PublicCatalogFromProviderResultV1 | null> {
     const providerPeerId = params.remotePeerId;
-    const scope = params.scope;
-    const signal = params.signal;
     const service = this.rfc64PublicCatalogServiceV1;
     if (service === undefined) {
       throw new Error('RFC-64 public catalog service is not started');
     }
+    // Discovery failures propagate unchanged. Reconciliation failures arrive
+    // directly as the package-root Rfc64CatalogReconciliationTerminalErrorV1;
+    // the process-local observer registry remains diagnostics only.
     const synchronized = await service.synchronizeCurrentCatalogHead({
       remotePeerId: providerPeerId,
-      scope,
-      ...(signal === undefined ? {} : { signal }),
+      scope: params.scope,
+      ...(params.signal === undefined ? {} : { signal: params.signal }),
     });
     if (synchronized === null) return null;
     const catalogScope = deriveAuthorCatalogScopeFromHeadV1(
@@ -71,19 +90,67 @@ export class Rfc64CatalogSyncMethods extends DKGAgentBase {
         !== synchronized.announcement.catalogHeadObjectDigest
       || applied.catalogVersion !== synchronized.announcement.catalogVersion
     ) {
-      const failure = this.readRfc64PublicCatalogReconciliationFailureV1(
-        synchronized.announcement.catalogHeadObjectDigest,
-      );
       throw new Error(
-        failure === null
-          ? 'RFC-64 current public catalog head did not reach its durable applied postcondition'
-          : `RFC-64 current public catalog head reconciliation failed (${failure.errorCode ?? failure.errorName})`,
+        'RFC-64 current public catalog head did not reach its durable applied postcondition',
       );
     }
     return Object.freeze({
       ...applied,
       providerPeerId,
       signatureVariantDigest: synchronized.announcement.signatureVariantDigest,
+    });
+  }
+
+  /** Bounded multi-provider discovery and exact-head failover. */
+  async synchronizeRfc64CatalogFromProvidersV1(
+    this: DKGAgent,
+    params: SynchronizeRfc64CatalogFromProvidersParamsV1,
+  ): Promise<SynchronizeRfc64CatalogFromProvidersResultV1 | null> {
+    const scope = params.scope;
+    const signal = params.signal;
+    const service = this.rfc64PublicCatalogServiceV1;
+    if (service === undefined) {
+      throw new Error('RFC-64 public catalog service is not started');
+    }
+    const synchronized = await service.synchronizeCurrentCatalogHeadFromProviders({
+      remotePeerIds: params.remotePeerIds,
+      scope,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (synchronized === null) return null;
+    if (
+      synchronized.completionOutcome !== 'applied'
+      && synchronized.completionOutcome !== 'already-applied'
+    ) {
+      throw new Error(
+        'RFC-64 current catalog head synchronization did not complete successfully'
+        + ` (${synchronized.completionOutcome})`,
+      );
+    }
+    const catalogScope = deriveAuthorCatalogScopeFromHeadV1(
+      synchronized.current.head.envelope.payload,
+    );
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(catalogScope);
+    const applied = this.rfc64PersistenceV1?.inventory.readAppliedCatalogHeadV1(
+      catalogScopeDigest,
+      synchronized.current.announcement.authorAddress,
+    ) ?? null;
+    if (
+      applied === null
+      || applied.currentCatalogHeadDigest
+        !== synchronized.current.announcement.catalogHeadObjectDigest
+      || applied.catalogVersion !== synchronized.current.announcement.catalogVersion
+    ) {
+      throw new Error(
+        'RFC-64 current public catalog head did not reach its durable applied postcondition',
+      );
+    }
+    return Object.freeze({
+      ...applied,
+      providerPeerIds: synchronized.providerPeerIds,
+      appliedProviderPeerId: synchronized.appliedProviderPeerId,
+      providerAttempts: synchronized.providerAttempts,
+      signatureVariantDigest: synchronized.current.announcement.signatureVariantDigest,
     });
   }
 }

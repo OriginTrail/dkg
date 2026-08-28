@@ -97,6 +97,19 @@ const readSeam = (fh: FinalizationHandler) =>
 const recomputeSeam = (fh: FinalizationHandler) =>
   vi.spyOn(fh as unknown as FhSeams, 'computeOpMerkleRoot');
 
+function withWriteRevision(
+  store: OxigraphStore,
+  getWriteRevision: (prefix: string) => { generation: number; stable: boolean },
+): OxigraphStore {
+  return new Proxy(store, {
+    get(target, property) {
+      if (property === 'getWriteRevision') return getWriteRevision;
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 afterEach(() => {
   delete process.env.DKG_VM_RECONCILE_NEGATIVE_TTL_MS;
   vi.restoreAllMocks();
@@ -142,6 +155,44 @@ describe('#1609 — write-gen-gated negative memo (chain-reconcile backstop)', (
     expect(first).toBeNull();
     expect(second).toBeNull();
     expect(reads).toHaveBeenCalledTimes(1);
+  });
+
+  it('neither replays nor records a negative memo during one unchanged unstable revision', async () => {
+    const backingStore = new OxigraphStore();
+    let revision = { generation: 1, stable: true };
+    const store = withWriteRevision(backingStore, () => revision);
+    const fh = new FinalizationHandler(store, new MockChainAdapter());
+    await seedSwmSnapshot(backingStore, 'urn:fact:unstable-existing', 'local content');
+    const reads = readSeam(fh);
+    const entity = 'urn:fact:unstable-late';
+    const value = 'arrived during mutation';
+    const expectedRoot = rootFor(entity, value);
+
+    // Warm and prove the stable negative memo at generation 1.
+    await expect((fh as any).findSwmSnapshotForMerkleRoot(LOCAL_CG, expectedRoot))
+      .resolves.toBeNull();
+    expect(reads.mock.calls.length).toBeGreaterThan(0);
+    reads.mockClear();
+    await expect((fh as any).findSwmSnapshotForMerkleRoot(LOCAL_CG, expectedRoot))
+      .resolves.toBeNull();
+    expect(reads).not.toHaveBeenCalled();
+
+    // The same generation becomes unstable while a remote mutation is in
+    // flight. The warm stable verdict must not replay, and the first unstable
+    // scan must not create another reusable negative.
+    revision = { generation: 1, stable: false };
+    await expect((fh as any).findSwmSnapshotForMerkleRoot(LOCAL_CG, expectedRoot))
+      .resolves.toBeNull();
+    const firstUnstableScanReads = reads.mock.calls.length;
+    expect(firstUnstableScanReads).toBeGreaterThan(0);
+    await expect((fh as any).findSwmSnapshotForMerkleRoot(LOCAL_CG, expectedRoot))
+      .resolves.toBeNull();
+    expect(reads.mock.calls.length).toBeGreaterThan(firstUnstableScanReads);
+
+    await seedSwmSnapshot(backingStore, entity, value);
+    revision = { generation: 2, stable: true };
+    await expect((fh as any).findSwmSnapshotForMerkleRoot(LOCAL_CG, expectedRoot))
+      .resolves.toMatchObject({ rootEntities: [entity] });
   });
 
   it('replays a warm never-match verdict with ZERO slice reads until a local write lands', async () => {

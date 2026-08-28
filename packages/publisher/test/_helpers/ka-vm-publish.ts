@@ -141,3 +141,50 @@ export const KA_VM_INCLUSION = {
 
 /** Executor-signed on-chain tx hash (`0xcd…`) driven through the pre-send write-ahead. */
 export const KA_VM_EXECUTOR_TX_HASH = (`0x${'cd'.repeat(32)}`) as `0x${string}`;
+
+/**
+ * r14 (3878067113) + r16 (3878126518) — typed recovery fixtures, genuinely checked: the
+ * `satisfies` annotations compile under the package's test-helper typecheck lane
+ * (`tsconfig.test-helpers.json`, run as part of the package build), so a contract change
+ * fails HERE at build time rather than drifting silently.
+ */
+import type {
+  AsyncKnowledgeAssetVmPublishRecoveryEvidence,
+  AsyncLiftChainProofResolution,
+} from '../../src/index.js';
+
+export function recoveredResolution(
+  txHash: `0x${string}` = KA_VM_EXECUTOR_TX_HASH,
+): AsyncLiftChainProofResolution {
+  return {
+    status: 'recovered',
+    recovery: kaVmRecoveryEvidence(txHash),
+  } satisfies AsyncLiftChainProofResolution;
+}
+
+export function kaVmRecoveryEvidence(
+  txHash: `0x${string}` = KA_VM_EXECUTOR_TX_HASH,
+): AsyncKnowledgeAssetVmPublishRecoveryEvidence {
+  return {
+    inclusion: {
+      txHash,
+      blockNumber: 1,
+      blockHash: (`0x${'aa'.repeat(32)}`) as `0x${string}`,
+    },
+    finalization: {
+      mode: 'published',
+      txHash,
+      ual: KA_VM_KA_UAL,
+      batchId: '7',
+      startKAId: '7',
+      endKAId: '7',
+      publisherAddress: KA_VM_AUTHOR_ADDRESS as `0x${string}`,
+    },
+    publishProof: {
+      merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
+      authorAddress: KA_VM_AUTHOR_ADDRESS as `0x${string}`,
+      txIndex: 4,
+    },
+  } satisfies AsyncKnowledgeAssetVmPublishRecoveryEvidence;
+}
+

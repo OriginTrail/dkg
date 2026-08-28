@@ -98,6 +98,62 @@ function allowAllNetworkAdmission(agent: DKGAgent): void {
 }
 
 describe('runSyncOnConnect callbacks', () => {
+  it('runs selected-provider shared memory before unrelated durable and ordinary SWM history', async () => {
+    const remotePeer = freshPeerIdString();
+    const order: string[] = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['selected', 'ordinary'],
+      getDurableSyncContextGraphs: () => ['ordinary'],
+      selectedSharedMemoryLane: {
+        getContextGraphIds: async () => ['selected'],
+        syncFromPeer: async (_peerId, contextGraphIds) => {
+          order.push(`shared:${contextGraphIds.join(',')}:selected`);
+          return {
+            kind: 'selected-shared-memory',
+            requestedScope: {
+              kind: 'selected-public',
+              targets: [{ contextGraphId: 'selected', lane: 'selected-public' }],
+            },
+            shared: {
+              insertedTriples: 0,
+              completedPhases: 1,
+              checkpointAdvances: 0,
+            },
+            scopeComplete: true,
+            targetDiagnostics: {
+              selectedPublic: { completed: 1, total: 1 },
+              ordinaryPrivate: { completed: 0, total: 0 },
+            },
+          };
+        },
+      },
+      getSharedMemorySyncContextGraphs: async () => ['selected', 'ordinary'],
+      syncFromPeer: async (_peerId, contextGraphIds) => {
+        order.push(`durable:${contextGraphIds?.join(',') ?? 'all'}`);
+        return 0;
+      },
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async (_peerId, contextGraphIds) => {
+        order.push(`shared:${contextGraphIds.join(',')}:ordinary`);
+        return 0;
+      },
+      logInfo: noopLog,
+    });
+
+    expect(outcome).toBe('synced');
+    expect(order).toEqual([
+      'shared:selected:selected',
+      'durable:ordinary',
+      'shared:ordinary:ordinary',
+    ]);
+  });
+
   it('returns deferred-backpressure without marking a zero-progress peer successful', async () => {
     const remotePeer = freshPeerIdString();
     const synced: SyncOnConnectPeerOutcome[] = [];
@@ -1528,6 +1584,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     const agent = await DKGAgent.create({
       name: 'ReconcilerLocalBackpressureRetry',
       listenHost: '127.0.0.1',
+      nodeRole: 'core',
       chainAdapter: new MockChainAdapter(),
       syncGlobalMaxInflight: 1,
       syncGlobalQueueLimit: 0,
@@ -1626,9 +1683,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       });
       (agent as any).discoverContextGraphsFromStore = recorder(async () => 0);
       (agent as any).planSharedMemorySyncContextGraphs = recorder(async () => ({
-        publicContextGraphIds: [],
-        privateRecoverFromCurator: ['private-cg'],
-        eligibleContextGraphIds: ['private-cg'],
+        targets: [{ contextGraphId: 'private-cg', lane: 'ordinary-private' }],
       }));
       const recoverContextGraphSwmFromPeer = recorder(async () => ({
         insertedDataQuads: 0,
@@ -1899,6 +1954,7 @@ describe('DKGAgent sync state lifecycle', () => {
     const agent = await DKGAgent.create({
       name: 'DenialOnlyNoProgressCooldown',
       listenHost: '127.0.0.1',
+      nodeRole: 'core',
       chainAdapter: new MockChainAdapter(),
     });
     try {

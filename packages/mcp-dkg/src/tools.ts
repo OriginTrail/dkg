@@ -226,7 +226,24 @@ export function registerReadTools(
           view,
           includeSharedMemory,
         });
-        const all = result.bindings ?? [];
+        if (result.type === 'boolean') {
+          return ok(String(result.value));
+        }
+        if (result.type === 'quads') {
+          const allQuads = result.quads;
+          const cappedQuads = typeof limit === 'number' ? allQuads.slice(0, limit) : allQuads;
+          const rows = cappedQuads.map((quad) => ({
+            subject: quad.subject,
+            predicate: quad.predicate,
+            object: quad.object,
+            graph: quad.graph ?? '',
+          }));
+          const tail = cappedQuads.length < allQuads.length
+            ? `\n\n_(showing ${cappedQuads.length} of ${allQuads.length} — raise limit to see more)_`
+            : '';
+          return ok(`${bindingsToTable(rows)}${tail}`);
+        }
+        const all = result.bindings;
         const capped = typeof limit === 'number' ? all.slice(0, limit) : all;
         const tail = capped.length < all.length ? `\n\n_(showing ${capped.length} of ${all.length} — raise limit to see more)_` : '';
         return ok(`${bindingsToTable(capped)}${tail}`);
@@ -706,22 +723,24 @@ SELECT ?t (COUNT(DISTINCT ?s) AS ?n) WHERE {
           contextGraphId: pid,
           includeSharedMemory: true,
         });
+        const profileBindings = profile.type === 'bindings' ? profile.bindings : [];
+        const statsBindings = stats.type === 'bindings' ? stats.bindings : [];
 
         const parts: string[] = [`# ${prettyTerm(resolved)}`, `\`${resolved}\``, ''];
-        if (profile.bindings.length) {
+        if (profileBindings.length) {
           parts.push('## Profile');
           parts.push(
-            profile.bindings
+            profileBindings
               .map((b) => `- **${prettyTerm(bindingValue(b.p))}**: ${prettyTerm(bindingValue(b.o))}`)
               .join('\n'),
           );
         } else {
           parts.push('_(no profile triples found in the `meta` sub-graph; this agent may not be registered yet.)_');
         }
-        if (stats.bindings.length) {
+        if (statsBindings.length) {
           parts.push('', '## Authored activity');
           parts.push(
-            stats.bindings
+            statsBindings
               .map(
                 (b) =>
                   `- ${bindingValue(b.n)} × ${prettyTerm(bindingValue(b.t))}`,

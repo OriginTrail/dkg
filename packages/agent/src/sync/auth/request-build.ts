@@ -4,7 +4,8 @@ import {
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
-import { encodeExactAssetUals, requireExactAssetUals } from '../exact-assets.js';
+import { requireExactAssetUals } from '../exact-assets.js';
+import { encodePipeSyncRequestTail } from './pipe-request-tail.js';
 
 // 'catalog' (§7) — the public facet open-serve: served to ANYONE
 // without the allowlist gate, bounded to exactly the `_catalog` named graph.
@@ -61,7 +62,8 @@ export interface SyncRequestEnvelope {
    * Additive, UNSIGNED exact-KA response filter. It can only narrow an already
    * authorized Context Graph read. Upgraded responders serve metadata and data
    * for these UALs only; old responders ignore it, while the upgraded requester
-   * still filters their full response before verification/storage.
+   * accepts and filters only a bounded legacy prefix that covers every requested
+   * descriptor. An over-limit or incomplete legacy response remains fail-closed.
    */
   assetUals?: string[];
   /**
@@ -182,6 +184,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   const requestedLimit = Number.isSafeInteger(limit)
     ? Math.max(1, Math.min(limit, SYNC_BYTE_BUDGET_MAX_ROWS))
     : SYNC_PAGE_SIZE;
+  const assetUals = rawAssetUals === undefined ? undefined : requireExactAssetUals(rawAssetUals);
   // Advertise byte-budget page mode for durable DATA and META (#1916/#1923).
   // Additive/rolling-upgrade safe both directions: an OLD responder ignores the
   // meta pageMode (its meta path is not byte-budget-gated → serves legacy meta),
@@ -190,8 +193,12 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   // cap below, so digests stay wire-compatible.
   const useByteBudgetPage = !includeSharedMemory
     && (phase === 'data' || phase === 'meta')
-    && requestedLimit > SYNC_PAGE_SIZE;
-  const assetUals = rawAssetUals === undefined ? undefined : requireExactAssetUals(rawAssetUals);
+    && (
+      requestedLimit > SYNC_PAGE_SIZE
+      // Exact DATA must remain on the responder's bounded page-only path after
+      // adaptive transport fallback reduces the row hint below the legacy cap.
+      || (phase === 'data' && assetUals !== undefined)
+    );
 
   if (!needsAuth) {
     const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
@@ -206,12 +213,21 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
           // wire and the responder routes to readCatalogPage instead of falling
           // back to the DEFAULT data phase (which is gated and serves nothing).
           ? '|catalog'
-          : '';
-    // Trailing keyed tokens are additive; old responders ignore the extra parts.
-    const sessionSuffix = syncSessionId ? `|session|${syncSessionId}` : '';
-    const sinceSuffix = sinceBatchId ? `|since|${sinceBatchId}` : '';
-    const assetsSuffix = assetUals ? `|assets|${encodeExactAssetUals(assetUals)}` : '';
-    return new TextEncoder().encode(`${prefix}|${offset}|${requestedLimit}${phaseSuffix}${sessionSuffix}${sinceSuffix}${assetsSuffix}`);
+          // Byte-budget tokens make the otherwise implicit DATA phase explicit,
+          // so upgraded parsers have an unambiguous start for the keyed tail.
+          : useByteBudgetPage
+            ? '|data'
+            : '';
+    const tail = encodePipeSyncRequestTail({
+      pageMode: useByteBudgetPage ? SYNC_BYTE_BUDGET_PAGE_MODE : undefined,
+      pageRowsHint: useByteBudgetPage ? requestedLimit : undefined,
+      syncSessionId,
+      sinceBatchId,
+      assetUals,
+    });
+    return new TextEncoder().encode(
+      `${prefix}|${offset}|${requestedLimit}${phaseSuffix}${tail}`,
+    );
   }
 
   const request: SyncRequestEnvelope = {

@@ -82,7 +82,7 @@ describe('direct rootless agent publish entrypoint', () => {
     internals.getContextGraphOnChainId = vi.fn(async () => '42');
     internals.isPrivateContextGraph = vi.fn(async () => true);
     internals.createV10ACKProvider = vi.fn(() => undefined);
-    internals._resolveEncryptInlinePayload = vi.fn(async () => undefined);
+    internals._resolveEncryptInlinePayload = vi.fn(async () => async (plaintext: Uint8Array) => plaintext);
     internals._resolveEncryptInlineChunked = vi.fn(async () => undefined);
     internals.emitPublicProjectionAfterPublish = vi.fn(async () => undefined);
     let capturedOptions: PublishOptions | undefined;

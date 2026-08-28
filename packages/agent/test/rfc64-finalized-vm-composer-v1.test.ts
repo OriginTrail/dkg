@@ -47,6 +47,7 @@ import {
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'11'.repeat(32)}`);
 const CATALOG_WALLET = new ethers.Wallet(`0x${'22'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
+const OTHER_AUTHOR = `0x${'aa'.repeat(20)}` as EvmAddressV1;
 const CATALOG_ISSUER = CATALOG_WALLET.address.toLowerCase() as EvmAddressV1;
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
 const CHAIN_ID = '20430' as const;
@@ -199,6 +200,14 @@ describe('RFC-64 finalized VM placement composition', () => {
     } as never), 'finalized-vm-composition-mismatch');
   });
 
+  it('rejects a valid placement when the selected catalog author is different', async () => {
+    const placement = await createPlacement(KA_2, ROOT_2);
+    expectCode(() => composeFinalizedVmSetV1({
+      ...requestFor([placement]),
+      catalogAuthorAddress: OTHER_AUTHOR,
+    }), 'finalized-vm-composition-mismatch');
+  });
+
   it('rejects placements absent from the finalized inventory and malformed unplaced rows', async () => {
     const placement = await createPlacement(KA_2, ROOT_2);
     const base = requestFor([placement]);
@@ -244,6 +253,40 @@ describe('RFC-64 finalized VM placement composition', () => {
       highestFinalizedOrdinal: null,
     });
   });
+
+  it('requires every finalized private author asset to be present in the catalog', async () => {
+    const placement = await createPlacement(KA_1, ROOT_1);
+    const request = requestFor([placement]);
+
+    expect(() => composeFinalizedVmSetV1({
+      ...request,
+      finalizedContextGraph: {
+        ...request.finalizedContextGraph,
+        accessPolicy: 1,
+      },
+    })).toThrow(/known-incomplete: no-authorized-provider/u);
+  });
+
+  it('accepts the legacy completeness option without allowing it to weaken private policy', async () => {
+    const placement = await createPlacement(KA_1, ROOT_1);
+    const publicRequest = {
+      ...requestFor([placement]),
+      requireCompleteAuthorSet: false,
+    } satisfies ComposeFinalizedVmSetRequestV1;
+
+    expect(composeFinalizedVmSetV1(publicRequest).rows).toHaveLength(1);
+    expect(composeFinalizedVmSetV1({
+      ...publicRequest,
+      requireCompleteAuthorSet: true,
+    }).rows).toHaveLength(1);
+    expect(() => composeFinalizedVmSetV1({
+      ...publicRequest,
+      finalizedContextGraph: {
+        ...publicRequest.finalizedContextGraph,
+        accessPolicy: 1,
+      },
+    })).toThrow(/known-incomplete: no-authorized-provider/u);
+  });
 });
 
 function requestFor(
@@ -251,6 +294,7 @@ function requestFor(
 ): ComposeFinalizedVmSetRequestV1 {
   return {
     assertedAtKav10Address: KAV10,
+    catalogAuthorAddress: AUTHOR,
     catalogLane: {
       contextGraphId: CONTEXT_GRAPH_NAME,
       subGraphName: null,

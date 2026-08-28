@@ -4,6 +4,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { snapshotStrictCurrentFinalizedEvmConfigV1 } from '../src/strict-current-finalized-evm-config.js';
+
 import {
   CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
   CONTROL_EIP1271_CALL_FROM_V1,
@@ -244,8 +246,12 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
       'eth_getCode',
       'eth_getCode',
     ]);
-    expect(server.calls[2]!.params[0]).toBe(TO);
-    expect(server.calls[3]!.params[0]).toBe(OTHER_TO);
+    // Distinct target probes run in parallel, so their server arrival order is
+    // intentionally unspecified. The contract is that every target is checked
+    // before the eth_call phase begins.
+    expect(server.calls.slice(2)).toHaveLength(2);
+    expect(new Set(server.calls.slice(2).map(({ params }) => params[0])))
+      .toEqual(new Set([TO, OTHER_TO]));
   });
 
   it('rejects an oversized generic return only after a stable fallback sandwich', async () => {
@@ -530,6 +536,30 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
 
     await expect(adapter(fixedRequest())).rejects.toMatchObject({ code: 'rpc-unavailable' });
     expect(server.calls).toHaveLength(1);
+  });
+
+  it('fails over after an oversized non-2xx body instead of treating it as a resource limit', async () => {
+    const unavailable = await startRpcServer((_call, response) => {
+      response.writeHead(503, { 'content-type': 'text/plain' });
+      response.end('x'.repeat(CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1 + 1));
+    });
+    const backup = await startRpcServer(successfulHandler());
+    const adapter = createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [unavailable.url, backup.url],
+    });
+
+    await expect(adapter(fixedRequest())).resolves.toMatchObject({
+      chainId: CHAIN_ID,
+      blockHash: BLOCK_HASH,
+    });
+    expect(unavailable.calls.map(({ method }) => method)).toEqual(['eth_chainId']);
+    expect(backup.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+    ]);
   });
 
   it('applies the two-endpoint ceiling after normalized endpoint deduplication', async () => {
@@ -869,24 +899,52 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     expect(second.calls).toHaveLength(4);
   }, 12_000);
 
-  it('rejects unsafe configuration and more than two distinct normalized endpoints', () => {
+  it('rejects unsafe configuration', () => {
     const third = 'http://127.0.0.1:3';
     for (const config of [
       { chainId: '020430', endpoints: ['http://127.0.0.1:1'] },
       { chainId: CHAIN_ID, endpoints: [] },
       { chainId: CHAIN_ID, endpoints: ['ftp://127.0.0.1/a'] },
       { chainId: CHAIN_ID, endpoints: ['http://127.0.0.1/a#fragment'] },
-      { chainId: CHAIN_ID, endpoints: [
-        'http://127.0.0.1:1',
-        'http://127.0.0.1:2',
-        third,
-      ] },
+      { chainId: CHAIN_ID, endpoints: ['https://user:pass@rpc.example.com'] },
       { chainId: CHAIN_ID, endpoints: ['http://127.0.0.1:1'], peerEndpoint: third },
     ]) {
       expect(() => createStrictCurrentFinalizedEvmChainAdapterV1(
         config as StrictCurrentFinalizedEvmRpcConfigV1,
       )).toThrow(TypeError);
     }
+  });
+
+  it('SELECTS the first two origins from a larger pool instead of rejecting it', () => {
+    // Behaviour change, and the point of the change. This case previously sat in
+    // the rejection list above — which is precisely why RFC64's finalized-VM
+    // precommit could not construct a scope on any shipped EVM network, where
+    // `resolveRpcUrls(rpcUrl, rpcUrls)` yields three URLs.
+    //
+    // The two-endpoint ATTEMPT ceiling is unchanged; selection just makes sure
+    // no more than two ever reach it. The dedup-then-ceiling test above still
+    // pins that ceiling.
+    // Assert WHICH two, not merely that it constructed — "returns a function"
+    // would pass just as green if selection kept the last two, or one, or all.
+    // Driven through the CONFIG boundary rather than the selector directly: the
+    // config is what derives provider identity, so this exercises the real
+    // pipeline instead of hand-built records.
+    const selection = snapshotStrictCurrentFinalizedEvmConfigV1({
+      chainId: CHAIN_ID,
+      endpoints: ['http://127.0.0.1:1', 'http://127.0.0.1:2', 'http://127.0.0.1:3'],
+    } as never).endpoints;
+    // Distinct ports are distinct origins, so this session really does carry two
+    // providers — and the third is dropped, not merged.
+    expect(selection).toEqual(['http://127.0.0.1:1/', 'http://127.0.0.1:2/']);
+
+    expect(() => createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [
+        'http://127.0.0.1:1',
+        'http://127.0.0.1:2',
+        'http://127.0.0.1:3',
+      ],
+    } as StrictCurrentFinalizedEvmRpcConfigV1)).not.toThrow();
   });
 });
 

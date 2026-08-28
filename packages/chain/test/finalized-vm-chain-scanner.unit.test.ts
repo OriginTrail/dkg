@@ -118,13 +118,13 @@ describe('RFC-64 finalized VM chain scanner', () => {
       if (calls.length === 1) return [boolResult(true), uintResult(2n)];
       if (calls.length === 2) return [uintResult(KA_A), uintResult(KA_B)];
       if (calls.length === 3) return [
-        updateContextResult(2n),
+        updateContextResult(2n, 100n, 3n),
         bytes32Result(ROOT_A),
         addressResult(AUTHOR_A),
         addressResult(PUBLISHER_A),
       ];
       return [
-        updateContextResult(3n),
+        updateContextResult(3n, 250n, 7n),
         bytes32Result(ROOT_B),
         addressResult(AUTHOR_B),
         addressResult(PUBLISHER_B),
@@ -157,7 +157,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
       ...structuredClone(inventory),
       unexpected: true,
     })).toThrow(/not canonical/);
-    expect(inventory).toEqual({
+    const expectedInventory = {
       networkId: NETWORK_ID,
       contextGraphId: CG_ID,
       chainId: CHAIN_ID,
@@ -198,7 +198,30 @@ describe('RFC-64 finalized VM chain scanner', () => {
           finalizedBlockHash: BLOCK_HASH,
         },
       ],
-    });
+    };
+    expect(inventory).toEqual(expectedInventory);
+    expect(JSON.stringify(inventory)).toBe(JSON.stringify(expectedInventory));
+    expect(Object.keys(inventory.rows[0]!)).toEqual([
+      'chainId',
+      'contractAddress',
+      'knowledgeAssetStorageAddress',
+      'ordinal',
+      'kaId',
+      'ual',
+      'authorAddress',
+      'attestedAuthorAddress',
+      'publisherAddress',
+      'assertionVersion',
+      'assertionRoot',
+      'finalizedBlockNumber',
+      'finalizedBlockHash',
+    ]);
+    const versionBreakingRow = structuredClone(inventory) as unknown as {
+      rows: Array<Record<string, unknown>>;
+    };
+    versionBreakingRow.rows[0]!.onChainByteSize = '100';
+    expect(() => snapshotFinalizedVmChainInventoryV1(versionBreakingRow))
+      .toThrow(FinalizedVmChainInventoryValidationErrorV1);
     expect(calls.map((batch) => batch.length)).toEqual([2, 2, 4, 4]);
     expect(calls[0]![0]!.to).toBe(CG_STORAGE);
     expect(calls[1]!.every(({ to }) => to === CG_STORAGE)).toBe(true);
@@ -449,7 +472,13 @@ describe('RFC-64 finalized VM chain scanner', () => {
             sendResult(response, call, uintResult(BigInt(ordinal) === 0n ? KA_A : KA_B));
           } else if (selector === KA_ABI.getFunction('getKnowledgeAssetUpdateContext')!.selector) {
             const [kaId] = KA_ABI.decodeFunctionData('getKnowledgeAssetUpdateContext', data);
-            sendResult(response, call, updateContextResult(BigInt(kaId) === KA_A ? 2n : 3n));
+            sendResult(
+              response,
+              call,
+              BigInt(kaId) === KA_A
+                ? updateContextResult(2n, 100n, 3n)
+                : updateContextResult(3n, 250n, 7n),
+            );
           } else if (selector === KA_ABI.getFunction('getLatestMerkleRoot')!.selector) {
             const [kaId] = KA_ABI.decodeFunctionData('getLatestMerkleRoot', data);
             sendResult(response, call, bytes32Result(BigInt(kaId) === KA_A ? ROOT_A : ROOT_B));
@@ -469,6 +498,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
       }
     });
     const snapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [rpc.url],
     });
@@ -484,8 +514,16 @@ describe('RFC-64 finalized VM chain scanner', () => {
       assertionVersion,
       assertionRoot,
     }))).toEqual([
-      { ual: `did:dkg:${NETWORK_ID}/${AUTHOR_A}/7`, assertionVersion: '2', assertionRoot: ROOT_A },
-      { ual: `did:dkg:${NETWORK_ID}/${AUTHOR_B}/9`, assertionVersion: '3', assertionRoot: ROOT_B },
+      {
+        ual: `did:dkg:${NETWORK_ID}/${AUTHOR_A}/7`,
+        assertionVersion: '2',
+        assertionRoot: ROOT_A,
+      },
+      {
+        ual: `did:dkg:${NETWORK_ID}/${AUTHOR_B}/9`,
+        assertionVersion: '3',
+        assertionRoot: ROOT_B,
+      },
     ]);
     const ethCalls = rpc.calls.filter(({ method }) => method === 'eth_call');
     expect(ethCalls).toHaveLength(13);
@@ -584,9 +622,13 @@ function assertionResults(
   ];
 }
 
-function updateContextResult(version: bigint): string {
+function updateContextResult(
+  version: bigint,
+  byteSize = 100n,
+  merkleLeafCount = 3n,
+): string {
   return ABI.encode(
     ['uint256', 'uint256', 'uint88', 'uint40', 'uint96', 'bool', 'uint32'],
-    [version, 1n, 100n, 999n, 1n, false, 3n],
+    [version, 1n, byteSize, 999n, 1n, false, merkleLeafCount],
   );
 }

@@ -22,6 +22,8 @@ import {
   type NodeChallenge,
 } from '@origintrail-official/dkg-chain';
 import {
+  keccak256,
+  structuredKARootV10,
   tripleContentV10,
   V10ProofChunkOutOfRangeError,
   V10ProofLeafCountMismatchError,
@@ -83,6 +85,36 @@ export interface RandomSamplingProverDeps {
   wal?: ProverWal;
   /** Hook for observability / structured logs. Default = no-op. */
   log?: ProverLogger;
+  /**
+   * Optional foreground repair invoked when the sampled public KA is absent
+   * or its live local version does not match the immutable challenge. The
+   * result is explicit challenge-scoped proof input; durable storage mutation
+   * is not a second implicit success channel.
+   */
+  repairMissingKnowledgeAsset?: (input: {
+    kaId: bigint;
+    cgId: bigint;
+    /** Immutable content identity captured by the active challenge. */
+    expectedRoot: Uint8Array;
+    expectedLeafCount: bigint;
+  }) => RandomSamplingRepairOperation;
+}
+
+/** Challenge-scoped proof input returned without mutating the live KA view. */
+export interface RandomSamplingRepairMaterial {
+  readonly contents: readonly Uint8Array[];
+  readonly privateRoots: readonly Uint8Array[];
+}
+
+/**
+ * One explicitly owned repair task. `result` is the prompt logical outcome
+ * consumed by the tick, while `settled` is the physical completion boundary
+ * that handle shutdown must drain even when a dependency ignores abort.
+ */
+export interface RandomSamplingRepairOperation {
+  readonly result: Promise<RandomSamplingRepairMaterial>;
+  readonly settled: Promise<void>;
+  cancel(reason?: unknown): void;
 }
 
 export interface ProverLogger {
@@ -96,6 +128,67 @@ const noopLog: ProverLogger = {
   warn: () => undefined,
   error: () => undefined,
 };
+
+function lifecycleAbortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException(
+    'Random Sampling prover handle stopped',
+    'AbortError',
+  );
+}
+
+function raceWithLifecycleAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(lifecycleAbortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(lifecycleAbortReason(signal));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
+/**
+ * Build a repair operation around one physical execution. Consumers cancel a
+ * single task and drain a single completion boundary; dependency promises do
+ * not leak through the public ownership protocol.
+ */
+export function createRandomSamplingRepairOperation(
+  execute: (signal: AbortSignal) => Promise<RandomSamplingRepairMaterial>,
+  externalSignals: readonly AbortSignal[] = [],
+): RandomSamplingRepairOperation {
+  const controller = new AbortController();
+  const signals = [controller.signal, ...externalSignals];
+  const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
+  const physicalResult = Promise.resolve().then(() => {
+    if (signal.aborted) throw lifecycleAbortReason(signal);
+    return execute(signal);
+  });
+  return {
+    result: raceWithLifecycleAbort(physicalResult, signal),
+    settled: physicalResult.then(
+      () => undefined,
+      () => undefined,
+    ),
+    cancel: (reason = new DOMException(
+      'Random Sampling repair cancelled',
+      'AbortError',
+    )) => {
+      if (!controller.signal.aborted) controller.abort(reason);
+    },
+  };
+}
 
 /**
  * Single-period prover orchestrator. One instance per node — it owns
@@ -113,7 +206,10 @@ export class RandomSamplingProver {
   private readonly builder: ProofBuilder;
   private readonly wal: ProverWal;
   private readonly log: ProverLogger;
+  private readonly repairMissingKnowledgeAsset?: RandomSamplingProverDeps['repairMissingKnowledgeAsset'];
+  private readonly lifecycleController = new AbortController();
   private inflight: Promise<TickOutcome> | null = null;
+  private readonly repairOperations = new Set<RandomSamplingRepairOperation>();
 
   /**
    * Proof material pinned for the active proof period. The prover already pins
@@ -143,6 +239,7 @@ export class RandomSamplingProver {
     this.builder = deps.builder ?? new InProcessProofBuilder();
     this.wal = deps.wal ?? new InMemoryProverWal();
     this.log = deps.log ?? noopLog;
+    this.repairMissingKnowledgeAsset = deps.repairMissingKnowledgeAsset;
   }
 
   /** Single-flight tick. Concurrent callers await the same result. */
@@ -154,8 +251,35 @@ export class RandomSamplingProver {
     return this.inflight;
   }
 
-  /** Release builder + WAL handles. Idempotent. */
+  /** Abort handle-owned foreground work before the loop drains its active tick. */
+  cancel(reason: unknown = new DOMException(
+    'Random Sampling prover handle stopped',
+    'AbortError',
+  )): void {
+    if (!this.lifecycleController.signal.aborted) {
+      this.lifecycleController.abort(reason);
+    }
+    for (const operation of this.repairOperations) operation.cancel(reason);
+  }
+
+  private trackRepairOperation(operation: RandomSamplingRepairOperation): void {
+    this.repairOperations.add(operation);
+    void operation.settled.then(
+      () => this.repairOperations.delete(operation),
+      () => this.repairOperations.delete(operation),
+    );
+  }
+
+  /** Release builder + WAL handles after all logical and physical work settles. */
   async close(): Promise<void> {
+    this.cancel();
+    const running = this.inflight;
+    if (running) await running.catch(() => undefined);
+    while (this.repairOperations.size > 0) {
+      await Promise.allSettled(
+        [...this.repairOperations].map((operation) => operation.settled),
+      );
+    }
     await this.builder.close();
     await this.wal.close();
   }
@@ -244,6 +368,99 @@ export class RandomSamplingProver {
       expectedRoot,
       material,
     };
+  }
+
+  private async extractPublicKnowledgeAssetWithRepair(input: {
+    kaId: bigint;
+    cgId: bigint;
+    expectedRoot: Uint8Array;
+    expectedLeafCount: bigint;
+    periodStartBlock: bigint;
+  }): Promise<RandomSamplingRepairMaterial> {
+    const extractLocal = async (): Promise<RandomSamplingRepairMaterial> => {
+      const extracted = await extractV10KCFromStore(this.store, input.cgId, input.kaId);
+      return {
+        contents: extracted.triples.map((triple) => tripleContentV10(
+          triple.subject,
+          triple.predicate,
+          triple.object,
+        )),
+        privateRoots: extracted.privateRoots,
+      };
+    };
+    type LocalOutcome =
+      | { kind: 'ready'; material: RandomSamplingRepairMaterial }
+      | { kind: 'challenge-mismatch'; material: RandomSamplingRepairMaterial }
+      | { kind: 'missing'; error: KCNotFoundError | KCDataMissingError };
+    const readLocalOutcome = async (): Promise<LocalOutcome> => {
+      try {
+        const material = await extractLocal();
+        return repairMaterialMatchesChallenge(
+          material,
+          input.expectedRoot,
+          input.expectedLeafCount,
+        )
+          ? { kind: 'ready', material }
+          : { kind: 'challenge-mismatch', material };
+      } catch (error) {
+        if (!(error instanceof KCNotFoundError) && !(error instanceof KCDataMissingError)) {
+          throw error;
+        }
+        return { kind: 'missing', error };
+      }
+    };
+
+    const local = await readLocalOutcome();
+    if (local.kind === 'ready') return local.material;
+    if (!this.repairMissingKnowledgeAsset) {
+      if (local.kind === 'missing') throw local.error;
+      return local.material;
+    }
+
+    this.log.info('rs.tick.kc-repair-started', {
+      kaId: input.kaId.toString(),
+      cgId: input.cgId.toString(),
+      periodStart: input.periodStartBlock.toString(),
+      err: local.kind === 'challenge-mismatch'
+        ? 'ChallengeCommitmentMismatch'
+        : local.error.name,
+    });
+    try {
+      const signal = this.lifecycleController.signal;
+      if (signal.aborted) throw lifecycleAbortReason(signal);
+      const repairOperation = this.repairMissingKnowledgeAsset({
+        kaId: input.kaId,
+        cgId: input.cgId,
+        expectedRoot: input.expectedRoot,
+        expectedLeafCount: input.expectedLeafCount,
+      });
+      this.trackRepairOperation(repairOperation);
+      const repaired = await repairOperation.result;
+      if (signal.aborted) throw lifecycleAbortReason(signal);
+      this.log.info('rs.tick.kc-repaired', {
+        kaId: input.kaId.toString(),
+        cgId: input.cgId.toString(),
+        periodStart: input.periodStartBlock.toString(),
+        challengeScoped: true,
+      });
+      return repaired;
+    } catch (repairError) {
+      if (this.lifecycleController.signal.aborted) throw repairError;
+      this.log.warn('rs.tick.kc-repair-failed', {
+        kaId: input.kaId.toString(),
+        cgId: input.cgId.toString(),
+        periodStart: input.periodStartBlock.toString(),
+        err: repairError instanceof Error
+          ? repairError.message.slice(0, 200)
+          : String(repairError).slice(0, 200),
+      });
+      // Preserve the local semantic outcome: a missing asset remains a normal
+      // kc-not-synced result, while a local mismatch continues to the existing
+      // root/count classifier. A rejected hook is never treated as success via
+      // an undocumented storage side effect.
+      if (local.kind === 'missing') throw local.error;
+      return local.material;
+    }
   }
 
   private async tickImpl(): Promise<TickOutcome> {
@@ -448,10 +665,16 @@ export class RandomSamplingProver {
     } else {
       proofKind = 'public';
       try {
-        const extracted = await extractV10KCFromStore(this.store, cgId, kaId);
+        const extracted = await this.extractPublicKnowledgeAssetWithRepair({
+          kaId,
+          cgId,
+          expectedRoot,
+          expectedLeafCount: challenge.challengeLeafCount,
+          periodStartBlock: periodKey.periodStartBlock,
+        });
         // public structured path: contents = N-Triple bytes; private sub-roots -> sibling.
-        contents = extracted.triples.map((t) => tripleContentV10(t.subject, t.predicate, t.object));
-        privateRoots = extracted.privateRoots;
+        contents = [...extracted.contents];
+        privateRoots = [...extracted.privateRoots];
       } catch (err) {
         if (err instanceof KCNotFoundError || err instanceof KCDataMissingError) {
           this.log.warn('rs.tick.kc-not-synced', {
@@ -648,4 +871,17 @@ function uint8ArrayEquals(a: Uint8Array, b: Uint8Array): boolean {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+function repairMaterialMatchesChallenge(
+  material: RandomSamplingRepairMaterial,
+  expectedRoot: Uint8Array,
+  expectedLeafCount: bigint,
+): boolean {
+  const computed = structuredKARootV10(
+    material.contents.map((content) => keccak256(content)),
+    material.privateRoots,
+  );
+  return BigInt(computed.leafCount) === expectedLeafCount
+    && uint8ArrayEquals(computed.root, expectedRoot);
 }

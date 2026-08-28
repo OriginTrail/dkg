@@ -27,7 +27,18 @@ import {
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
-import { resolveReceiptTimeoutMs, RPC_READ_STALL_TIMEOUT_MS, RPC_RECEIPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import {
+  DEFAULT_FINALITY_CONFIRMATIONS,
+  confirmedStateBlockAtHead,
+  requiredHeadBlockForReceipt,
+  resolveFinalityConfirmations,
+  resolveReceiptTimeoutMs,
+  resolveTxSerializerStallAfterMs,
+  RPC_READ_STALL_TIMEOUT_MS,
+  RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS,
+  RPC_RECEIPT_POLL_INTERVAL_MS,
+  RPC_RECEIPT_TIMEOUT_MS,
+} from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
@@ -48,17 +59,195 @@ it('rejects an explicitly invalid receipt deadline at the adapter boundary', () 
     .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
 });
 
+it('derives the signer-lane no-progress threshold from the receipt deadline', () => {
+  const a = new EVMChainAdapter(minimalConfig({
+    receiptTimeoutMs: 1_000,
+    rpcUrls: ['http://127.0.0.1:59997'],
+  }));
+  expect((a as any).signerTxSerializer.options.stallAfterMs).toBe(
+    resolveTxSerializerStallAfterMs(1_000),
+  );
+});
+
+it('defaults mined-receipt finality to one confirmation', () => {
+  expect(resolveFinalityConfirmations(undefined)).toBe(1);
+  expect(DEFAULT_FINALITY_CONFIRMATIONS).toBe(1);
+  expect((new EVMChainAdapter(minimalConfig()) as any).finalityConfirmations).toBe(1);
+});
+
+it('accepts an explicit confirmation depth and rejects invalid values', () => {
+  expect(resolveFinalityConfirmations(7)).toBe(7);
+  expect((new EVMChainAdapter(minimalConfig({ finalityConfirmations: 7 })) as any)
+    .finalityConfirmations).toBe(7);
+  for (const value of [null, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    expect(() => resolveFinalityConfirmations(value)).toThrow(
+      /finalityConfirmations must be an integer >= 1/,
+    );
+  }
+});
+
+it('uses one confirmation-depth calculation for receipts and pinned state', () => {
+  expect(requiredHeadBlockForReceipt(100, 1)).toBe(100);
+  expect(requiredHeadBlockForReceipt(100, 7)).toBe(106);
+  expect(confirmedStateBlockAtHead(106, 7)).toBe(100);
+  expect(confirmedStateBlockAtHead(5, 7)).toBeNull();
+});
+
+it('retries a transient finality read inside the receipt deadline', async () => {
+  vi.useFakeTimers({ now: 0 });
+  const blockHash = `0x${'44'.repeat(32)}`;
+  const receipt = { hash: `0x${'11'.repeat(32)}`, blockNumber: 10, blockHash, status: 1, index: 0, logs: [] };
+  let finalityAttempt = 0;
+  const adapter: any = new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 5_000 }));
+  try {
+    adapter.providers = [{
+      getNetwork: async () => ({ chainId: 31337n }),
+      getTransactionReceipt: async () => receipt,
+      getBlockNumber: async () => {
+        finalityAttempt += 1;
+        if (finalityAttempt === 1) {
+          const error = new Error('temporary finality RPC failure') as Error & { code: string };
+          error.code = 'NETWORK_ERROR';
+          throw error;
+        }
+        return 10;
+      },
+      getBlock: async () => ({ number: 10, hash: blockHash }),
+    }];
+    const outcome = adapter.waitForReceiptWithFailover(receipt.hash, 'publish');
+    await vi.advanceTimersByTimeAsync(RPC_RECEIPT_POLL_INTERVAL_MS + 1);
+    await expect(outcome).resolves.toMatchObject({ hash: receipt.hash });
+    expect(finalityAttempt).toBe(2);
+  } finally {
+    try { adapter.destroy(); } catch { /* test provider has no destroy */ }
+    vi.useRealTimers();
+  }
+});
+
+it('bounds a stalled finality read by the receipt deadline', async () => {
+  vi.useFakeTimers({ now: 0 });
+  const blockHash = `0x${'55'.repeat(32)}`;
+  const receipt = { hash: `0x${'22'.repeat(32)}`, blockNumber: 10, blockHash, status: 1, index: 0, logs: [] };
+  const adapter: any = new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 1_000 }));
+  try {
+    adapter.providers = [{
+      getNetwork: async () => ({ chainId: 31337n }),
+      getTransactionReceipt: async () => receipt,
+      getBlockNumber: async () => new Promise<number>(() => {}),
+      getBlock: async () => ({ number: 10, hash: blockHash }),
+    }];
+    const outcome = adapter.waitForReceiptWithFailover(receipt.hash, 'publish').then(
+      (value: unknown) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    await vi.advanceTimersByTimeAsync(1_001);
+    await expect(outcome).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'RPC_TIMEOUT' },
+    });
+  } finally {
+    try { adapter.destroy(); } catch { /* test provider has no destroy */ }
+    vi.useRealTimers();
+  }
+});
+
+it('caps populated transaction fee fields when the operator sets maxFeePerGasWei', async () => {
+  const cap = 100_000_000n;
+  const adapter: any = new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: cap }));
+  const wallet = new ethers.Wallet(DEPLOYER_PK).connect({
+    getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
+    estimateGas: async () => 21_000n,
+    getTransactionCount: async () => 3,
+    getFeeData: async () => ({ maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1_000_000_000n }),
+    getBlock: async () => ({ baseFeePerGas: 1n }),
+    resolveName: async (name: string) => name,
+    _isProvider: true,
+  } as never);
+  const { signedTx } = await adapter.signPopulatedTransaction(wallet, {
+    to: '0x0000000000000000000000000000000000000002',
+    value: 0n,
+    nonce: 3,
+    gasLimit: 21_000n,
+    chainId: 31337,
+    type: 2,
+    maxFeePerGas: 1_000_000_000n,
+    maxPriorityFeePerGas: 1_000_000_000n,
+  });
+  const decoded = ethers.Transaction.from(signedTx);
+  expect(decoded.maxFeePerGas).toBe(cap);
+  expect(decoded.maxPriorityFeePerGas).toBe(cap);
+  expect(() => new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: 0n })))
+    .toThrow(/maxFeePerGasWei must be greater than zero/);
+});
+
+it('rejects an EIP-1559 fee cap below the current base fee before signing', async () => {
+  const adapter: any = new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: 100n }));
+  const wallet = new ethers.Wallet(DEPLOYER_PK).connect({
+    getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
+    estimateGas: async () => 21_000n,
+    getTransactionCount: async () => 3,
+    getFeeData: async () => ({ maxFeePerGas: 1_000n, maxPriorityFeePerGas: 100n }),
+    getBlock: async () => ({ baseFeePerGas: 101n }),
+    resolveName: async (name: string) => name,
+    _isProvider: true,
+  } as never);
+
+  await expect(adapter.signPopulatedTransaction(wallet, {
+    to: '0x0000000000000000000000000000000000000002',
+    value: 0n,
+    nonce: 3,
+    gasLimit: 21_000n,
+    chainId: 31337,
+    type: 2,
+    maxFeePerGas: 1_000n,
+    maxPriorityFeePerGas: 100n,
+  })).rejects.toMatchObject({ code: 'FEE_CAP_BELOW_BASE_FEE' });
+});
+
+it('caps a legacy gas price without applying the EIP-1559 base-fee rule', async () => {
+  const cap = 100n;
+  const adapter: any = new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: cap }));
+  const wallet = new ethers.Wallet(DEPLOYER_PK).connect({
+    getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
+    estimateGas: async () => 21_000n,
+    getTransactionCount: async () => 3,
+    getFeeData: async () => ({ gasPrice: 1_000n }),
+    resolveName: async (name: string) => name,
+    _isProvider: true,
+  } as never);
+  const { signedTx } = await adapter.signPopulatedTransaction(wallet, {
+    to: '0x0000000000000000000000000000000000000002',
+    value: 0n,
+    nonce: 3,
+    gasLimit: 21_000n,
+    chainId: 31337,
+    type: 0,
+    gasPrice: 1_000n,
+  });
+
+  expect(ethers.Transaction.from(signedTx).gasPrice).toBe(cap);
+});
+
 describe('EVMChainAdapter historical KA update verification', () => {
   const kaId = 42n;
   const publisher = '0x1111111111111111111111111111111111111111';
+  const other = '0x3333333333333333333333333333333333333333';
   const storageAddress = '0x2222222222222222222222222222222222222222';
   const root = ethers.keccak256(ethers.toUtf8Bytes('historical-update'));
+  const blockHash = `0x${'34'.repeat(32)}`;
   const iface = new Interface([
     'event KnowledgeAssetUpdated(uint256 indexed id, address indexed author, string updateOperationId, bytes32 merkleRoot, uint256 byteSize, uint96 tokenAmount)',
   ]);
 
+  /**
+   * r28 (🔴 3821721213) — the register read is now BLOCK-SENSITIVE: the position is derived
+   * from this receipt's block only, so the harness must answer differently for `blockNumber` and
+   * `blockNumber - 1`. `priorRoots` is the asset's history BEFORE the receipt's block; anything
+   * beyond it in `roots` is what that block wrote.
+   */
   function adapterWithHistoricalRead(
     roots: unknown[] | Error,
+    priorRoots: unknown[] = [],
   ): { adapter: EVMChainAdapter; latestRead: ReturnType<typeof recorder> } {
     const adapter: any = new EVMChainAdapter(minimalConfig());
     adapter.initialized = true;
@@ -70,6 +259,7 @@ describe('EVMChainAdapter historical KA update verification', () => {
     adapter.getTransactionReceiptWithFailover = async () => ({
       status: 1,
       blockNumber: 77,
+      blockHash,
       index: 2,
       logs: [{ address: storageAddress, topics: encoded.topics, data: encoded.data }],
     });
@@ -78,12 +268,102 @@ describe('EVMChainAdapter historical KA update verification', () => {
       interface: iface,
     };
     const latestRead = recorder(async () => publisher);
-    adapter.readContractWithOptions = async () => {
+    adapter.readContractWithOptions = async (
+      _contract: unknown, label: string, _method: string, args: readonly unknown[],
+    ) => {
       if (roots instanceof Error) throw roots;
+      const blockTag = (args[1] as { blockTag?: number } | undefined)?.blockTag;
+      // The pre-block read: everything written before the receipt's block.
+      if (label === 'kas.getMerkleRootsBeforeUpdateBlock' || blockTag === 76) return priorRoots;
       return roots;
     };
     return { adapter, latestRead };
   }
+
+  it('returns canonical block placement for a verified update receipt', async () => {
+    const { adapter } = adapterWithHistoricalRead([{ publisher, merkleRoot: root }]);
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher)).resolves.toMatchObject({
+      verified: true,
+      blockNumber: 77,
+      blockHash,
+      txIndex: 2,
+      merkleRootCount: 1n,
+    });
+  });
+
+  it('an A -> B -> A history across SEPARATE blocks still yields the third position [r28]', async () => {
+    // 🔴 3821721213 — r17 counted matches across the WHOLE register, which at this blockTag is
+    // the asset's entire history, not this block's writes. One publisher writing A, then B, then A
+    // again in three separate blocks therefore produced two matches for A, dropped the position,
+    // and left the third update permanently held — the exact case this PR exists to settle, made
+    // unrecoverable by its own ambiguity guard. Ambiguity belongs to the RECEIPT'S BLOCK.
+    const { adapter } = adapterWithHistoricalRead(
+      // Full history as of the receipt's block: A(1), B(2), A(3) — the third is this receipt's.
+      [
+        { publisher, merkleRoot: root },
+        { publisher, merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('B')) },
+        { publisher, merkleRoot: root },
+      ],
+      // Everything written BEFORE this block: the first two.
+      [
+        { publisher, merkleRoot: root },
+        { publisher, merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('B')) },
+      ],
+    );
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher)).resolves.toMatchObject({
+      verified: true,
+      merkleRootCount: 3n,
+    });
+  });
+
+  it('two identical writes in the SAME block are still ambiguous [r28]', async () => {
+    // The discriminating half: the guard must keep working for genuine same-block ambiguity, which
+    // is what it was added for. Same history, but both A entries land in the receipt's block.
+    const { adapter } = adapterWithHistoricalRead(
+      [
+        { publisher, merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('B')) },
+        { publisher, merkleRoot: root },
+        { publisher, merkleRoot: root },
+      ],
+      [{ publisher, merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('B')) }],
+    );
+
+    const verdict = await adapter.verifyKAUpdate('0xreceipt', kaId, publisher);
+    expect(verdict).toMatchObject({ verified: true });
+    expect(verdict.merkleRootCount).toBeUndefined();
+  });
+
+  it('drops the position — but keeps the verification — when the register match is AMBIGUOUS', async () => {
+    // r17 (3814893084) — the register entries carry no transaction hash, so a (publisher, root)
+    // match is this receipt's only link to a position, and that link holds only while the match is
+    // unique. Two identical writes by the same publisher in this one block make the position a
+    // guess. The root is still provably ours at this block, so the verdict stays verified and
+    // simply omits the position; downstream an update with no position defers.
+    const { adapter } = adapterWithHistoricalRead([
+      { publisher, merkleRoot: root },
+      { publisher: other, merkleRoot: ethers.ZeroHash },
+      { publisher, merkleRoot: root },
+    ]);
+
+    const verdict = await adapter.verifyKAUpdate('0xreceipt', kaId, publisher);
+
+    expect(verdict).toMatchObject({ verified: true, blockNumber: 77, blockHash });
+    expect(verdict.merkleRootCount).toBeUndefined();
+  });
+
+  it('still reports the position when exactly one register entry matches', async () => {
+    // The discriminating pair for the row above: same register, one matching entry, and the
+    // position is reported. Without this, dropping the position unconditionally would pass.
+    const { adapter } = adapterWithHistoricalRead([
+      { publisher: other, merkleRoot: ethers.ZeroHash },
+      { publisher, merkleRoot: root },
+    ]);
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher))
+      .resolves.toMatchObject({ verified: true, merkleRootCount: 2n });
+  });
 
   it.each([
     ['receipt-block history has no matching publisher/root', [{ publisher, merkleRoot: ethers.ZeroHash }]],
@@ -1370,7 +1650,8 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const signedTx = '0x02f86c0180843b9aca0084773594008252089400000000000000000000000000000000000000018080c001a0' +
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     const txHash = '0x' + '11'.repeat(32);
-    const receipt = { hash: txHash, blockNumber: 45, status: 1, logs: [] };
+    const blockHash = '0x' + '45'.repeat(32);
+    const receipt = { hash: txHash, blockNumber: 45, blockHash, status: 1, logs: [] };
     const primary = {
       broadcastTransaction: recorder(async (_raw: string) => {
         const err = new Error('429 too many requests');
@@ -1378,10 +1659,14 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
         throw err;
       }),
       getTransactionReceipt: recorder(async () => null),
+      getBlockNumber: recorder(async () => 45),
+      getBlock: recorder(async () => ({ number: 45, hash: blockHash })),
     };
     const backup = {
       broadcastTransaction: recorder(async (_raw: string) => ({ hash: txHash })),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 45),
+      getBlock: recorder(async () => ({ number: 45, hash: blockHash })),
     };
     (a as any).providers = [primary, backup];
 
@@ -1603,16 +1888,21 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }));
     const signedTx = '0xdeadbeef';
     const txHash = '0x' + '22'.repeat(32);
-    const receipt = { hash: txHash, blockNumber: 46, status: 1, logs: [] };
+    const blockHash = '0x' + '46'.repeat(32);
+    const receipt = { hash: txHash, blockNumber: 46, blockHash, status: 1, logs: [] };
     const primary = {
       broadcastTransaction: recorder(async () => {
         throw new Error('already known');
       }),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 46),
+      getBlock: recorder(async () => ({ number: 46, hash: blockHash })),
     };
     const backup = {
       broadcastTransaction: recorder(async () => ({ hash: txHash })),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 46),
+      getBlock: recorder(async () => ({ number: 46, hash: blockHash })),
     };
     (a as any).providers = [primary, backup];
 
@@ -1622,32 +1912,33 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(primary.getTransactionReceipt.calls).toContainEqual([txHash]);
   });
 
-  it('treats nonce-too-low transaction responses as accepted and polls receipts', async () => {
+  it('does not treat a generic nonce-too-low response as proof that the exact transaction was accepted', async () => {
     const a = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',
       rpcUrls: ['https://backup.example'],
     }));
     const signedTx = '0xdeadbeef';
     const txHash = '0x' + '44'.repeat(32);
-    const receipt = { hash: txHash, blockNumber: 48, status: 1, logs: [] };
     const primary = {
       broadcastTransaction: recorder(async () => {
         const err = new Error('nonce too low');
         (err as any).code = 'NONCE_EXPIRED';
         throw err;
       }),
-      getTransactionReceipt: recorder(async () => receipt),
+      getTransactionReceipt: recorder(async () => null),
     };
     const backup = {
       broadcastTransaction: recorder(async () => ({ hash: txHash })),
-      getTransactionReceipt: recorder(async () => receipt),
+      getTransactionReceipt: recorder(async () => null),
     };
     (a as any).providers = [primary, backup];
 
-    await expect((a as any).sendSignedTransactionAndWait(signedTx, txHash, 'unit write')).resolves.toBe(receipt);
+    await expect((a as any).sendSignedTransactionAndWait(signedTx, txHash, 'unit write'))
+      .rejects.toMatchObject({ code: 'NONCE_EXPIRED' });
     expect(primary.broadcastTransaction.calls).toHaveLength(1);
     expect(backup.broadcastTransaction.calls).toEqual([]);
-    expect(primary.getTransactionReceipt.calls).toContainEqual([txHash]);
+    expect(primary.getTransactionReceipt.calls).toEqual([]);
+    expect(backup.getTransactionReceipt.calls).toEqual([]);
   });
 
   it('throws CALL_EXCEPTION when a mined write receipt reverted', async () => {
@@ -1657,14 +1948,19 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }));
     const signedTx = '0xdeadbeef';
     const txHash = '0x' + '33'.repeat(32);
-    const receipt = { hash: txHash, blockNumber: 47, status: 0, logs: [] };
+    const blockHash = '0x' + '47'.repeat(32);
+    const receipt = { hash: txHash, blockNumber: 47, blockHash, status: 0, logs: [] };
     const primary = {
       broadcastTransaction: recorder(async () => ({ hash: txHash })),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 47),
+      getBlock: recorder(async () => ({ number: 47, hash: blockHash })),
     };
     const backup = {
       broadcastTransaction: recorder(async () => ({ hash: txHash })),
       getTransactionReceipt: recorder(async () => receipt),
+      getBlockNumber: recorder(async () => 47),
+      getBlock: recorder(async () => ({ number: 47, hash: blockHash })),
     };
     (a as any).providers = [primary, backup];
 
@@ -4422,7 +4718,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
-      void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+      void (a as any).signerTxSerializer.run(walletA.address, () => gate, 'test hold');
       try {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletA.address); // registered pool[0], despite gas-poor + busy
@@ -4436,7 +4732,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       // Both funded (helper default). Hold walletA (the round-robin head) busy.
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
-      void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+      void (a as any).signerTxSerializer.run(walletA.address, () => gate, 'test hold');
       try {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletB.address); // idle wallet preferred over the busy head
@@ -4449,11 +4745,60 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       let releaseA!: () => void; let releaseB!: () => void;
       const gA = new Promise<void>((r) => { releaseA = r; });
       const gB = new Promise<void>((r) => { releaseB = r; });
-      void (a as any).signerTxSerializer.run(walletA.address, () => gA);
-      void (a as any).signerTxSerializer.run(walletB.address, () => gB);
+      void (a as any).signerTxSerializer.run(walletA.address, () => gA, 'test hold A');
+      void (a as any).signerTxSerializer.run(walletB.address, () => gB, 'test hold B');
       try {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletA.address); // both busy → first funded (head), not excluded
+      } finally { releaseA(); releaseB(); }
+    });
+
+    // GH#1574 — when EVERY funded wallet is busy, the old rule fell through to
+    // the round-robin head. If that head's lane is WEDGED, the new write
+    // inherits the wedge invisibly — the exact failure the issue reports.
+    // A stalled lane is now ranked below a merely-busy one.
+    it('prefers a busy wallet over one whose lane has stalled', async () => {
+      const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      // Drive the serializer's own clock so one lane can be aged past the
+      // canonical no-progress threshold while the other is not.
+      let clock = 0;
+      const stallAfterMs = resolveTxSerializerStallAfterMs(
+        (a as any).receiptTimeoutMs,
+        (a as any).rpcUrls.length,
+      );
+      const Ctor = (a as any).signerTxSerializer.constructor;
+      (a as any).signerTxSerializer = new Ctor({
+        observeAfterMs: 30_000,
+        observeIntervalMs: 60_000,
+        stallAfterMs,
+        now: () => clock,
+        onObserve: () => {},
+      });
+
+      let releaseA!: () => void; let releaseB!: () => void;
+      const gA = new Promise<void>((r) => { releaseA = r; });
+      const gB = new Promise<void>((r) => { releaseB = r; });
+
+      // A is the round-robin head, and it wedges FIRST.
+      void (a as any).signerTxSerializer.run(walletA.address, () => gA, 'wedged publish');
+      await Promise.resolve(); await Promise.resolve();
+
+      try {
+        // Age A past the threshold BEFORE B ever starts, so only A is stalled.
+        clock += stallAfterMs;
+        void (a as any).signerTxSerializer.run(walletB.address, () => gB, 'healthy publish');
+        await Promise.resolve(); await Promise.resolve();
+
+        expect((a as any).signerTxSerializer.state(walletA.address)).toBe('stalled');
+        expect((a as any).signerTxSerializer.state(walletB.address)).toBe('busy');
+
+        // Neither is idle, so the old rule would return the head (A) and
+        // queue the new write behind the wedge. It must pick B.
+        const chosen = await (a as any).selectSigner({
+          txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true,
+        });
+        expect(chosen.address).toBe(walletB.address);
       } finally { releaseA(); releaseB(); }
     });
 
@@ -4549,7 +4894,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
         registerPool(a);
         let release!: () => void;
         const gate = new Promise<void>((r) => { release = r; });
-        void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+        void (a as any).signerTxSerializer.run(walletA.address, () => gate, 'test hold');
         try {
           const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
           expect(chosen.address).toBe(walletA.address); // idle bias disabled → busy head still chosen
@@ -4625,6 +4970,36 @@ function makeV10AdapterWithAllowanceSequence(values: bigint[]) {
 }
 
 describe('ensureV10ApproveTrac — forced re-approve + visibility poll (#888)', () => {
+
+  it('allows a healthy single-RPC allowance read to finish after the failover stall interval', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = new EVMChainAdapter(minimalConfig());
+      const signer = new ethers.Wallet(DEPLOYER_PK);
+      const tokenWithSigner = connectable({
+        allowance: recorder(() => new Promise<bigint>((resolve) => {
+          setTimeout(() => resolve(1n), RPC_READ_STALL_TIMEOUT_MS + 100);
+        })),
+        approve: recorder(() => undefined),
+      });
+      (a as any).contracts.token = { connect: () => tokenWithSigner };
+
+      const approval = (a as any).ensureV10ApproveTrac(
+        signer,
+        V10_KA_ADDRESS,
+        0n,
+        'approve V10 publish TRAC',
+      );
+      await flushAsyncWork();
+      await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 100);
+
+      await expect(approval).resolves.toBeUndefined();
+      expect(tokenWithSigner.allowance.calls).toHaveLength(1);
+      expect(tokenWithSigner.approve.calls).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('force=true re-approves even when the gating read says the allowance is already sufficient (stale-high skip)', async () => {
     // The "stale-high" sub-race: the per-publish 1-wei floor consumed by
@@ -4937,6 +5312,42 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     expect(ensureSpy.calls).toEqual([]);    // no TooLowAllowance → no forced approve
   });
 
+  it('waits and retries the full provider set when V10 preparation is temporarily rate limited', async () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    let adapter: EVMChainAdapter | undefined;
+    try {
+      const { a, ensureSpy, signer } = makeRecoveryAdapter();
+      adapter = a;
+      const r429 = () => {
+        const error = new Error('all configured RPC endpoints returned 429');
+        (error as any).status = 429;
+        return error;
+      };
+      let call = 0;
+      const populateAndSign = recorder(async () => {
+        call += 1;
+        if (call <= 2) throw r429();
+        return { signedTx: '0xsigned', txHash: '0xhash' };
+      });
+      (a as any).populateAndSignAcrossProviders = populateAndSign;
+
+      const pending = (a as any).populateAndSignV10WithAllowanceRecovery(
+        signer, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label',
+      );
+      await vi.advanceTimersByTimeAsync(RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS);
+      await vi.advanceTimersByTimeAsync(RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS * 2);
+
+      await expect(pending).resolves.toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
+      expect(populateAndSign.calls).toHaveLength(3);
+      expect(ensureSpy.calls).toEqual([]);
+    } finally {
+      try { adapter?.destroy(); } catch { /* test providers may already be closed */ }
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('enriches the SECOND raw TooLowAllowance before throwing the one-shot failure', async () => {
     const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
     const populate = recorder(async () => { throw rawTooLowAllowanceRevert(); });
@@ -4976,3 +5387,119 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     expect(signSpy.calls).toEqual([]);
   });
 });
+
+// PR #2300 r1 — the granular `getFinalizedAccountNonce` was deleted; the finalized-tag pinning
+// its rows proved now lives in `readFinalizedChainProofSnapshot`, whose rows
+// (finalized-chain-proof-snapshot.unit.test.ts) pin both reads to the finalized block NUMBER.
+
+/**
+ * GH#2270 PR-3 r2 — the pre-broadcast signal must come from the REAL signing path.
+ *
+ * The recovery lane releases a held job for a re-run when its recorded nonce is proven consumed,
+ * so a nonce that was never the one actually signed is worse than no nonce at all. Every other row
+ * in this chain hands the recorder a signal it made up; these two sign a real transaction with a
+ * known nonce and assert that production code extracts that exact `{txHash, nonce}` and hands it
+ * to `onBeforeBroadcast` before anything is sent.
+ */
+describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () => {
+  const SIGNER_PK = '0x' + '7'.repeat(63) + '1';
+  const KNOWN_NONCE = 27;
+
+  it('delivers the signed tx hash AND its nonce, extracted by production code', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.initialized = true;
+    a.init = async () => {};
+    const wallet = new ethers.Wallet(SIGNER_PK);
+
+    // Drive the PRODUCTION signer. `signPopulatedTransaction` is where the one decode of the
+    // signed bytes happens, so the hash and the nonce this row asserts on are both produced by
+    // the code under test — nothing is handed in. A stub provider is enough because every field
+    // is prefilled; ethers only needs it to exist.
+    const signed = await a.signPopulatedTransaction(wallet.connect({
+      getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
+      estimateGas: async () => 21_000n,
+      getTransactionCount: async () => KNOWN_NONCE,
+      getFeeData: async () => ({ maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 1_000_000_000n }),
+      resolveName: async (n: string) => n,
+      _isProvider: true,
+    } as never), {
+      to: '0x0000000000000000000000000000000000000002',
+      value: 0n,
+      nonce: KNOWN_NONCE,
+      gasLimit: 21_000n,
+      chainId: 31337,
+      type: 2,
+      maxFeePerGas: 1_000_000_000n,
+      maxPriorityFeePerGas: 1_000_000_000n,
+    });
+    const { signedTx, txHash } = signed;
+    // Independent decode of the same bytes, so the row cannot pass on values the adapter merely
+    // echoed back to itself.
+    const decoded = ethers.Transaction.from(signedTx);
+    expect(decoded.nonce).toBe(KNOWN_NONCE);
+    expect(txHash).toBe(decoded.hash);
+    expect(signed.nonce).toBe(KNOWN_NONCE);
+
+    const received: any[] = [];
+    let sentAfterSignal = false;
+    a.broadcastSignedTransactionWithRetries = async () => {
+      sentAfterSignal = received.length === 1;
+    };
+    a.waitForReceiptWithFailover = async () => ({
+      hash: txHash, blockNumber: 1, status: 1, logs: [],
+    });
+
+    await a.dispatchSerializedV10Write(
+      wallet,
+      'publish',
+      async (signal: any) => { received.push(signal); },
+      async () => signed,
+      () => { throw new Error('unreachable'); },
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({ txHash, nonce: KNOWN_NONCE });
+    // ...and it arrived BEFORE the send, which is what makes it a write-ahead.
+    expect(sentAfterSignal).toBe(true);
+  });
+
+  it('aborts the send when the signal handler throws', async () => {
+    // Fail-closed: a caller that could not persist the signal must not end up with a transaction
+    // on the wire it does not know about.
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.initialized = true;
+    a.init = async () => {};
+    const wallet = new ethers.Wallet(SIGNER_PK);
+    const signedTx = await wallet.signTransaction({
+      to: '0x0000000000000000000000000000000000000002',
+      value: 0n,
+      nonce: KNOWN_NONCE,
+      gasLimit: 21_000n,
+      chainId: 31337,
+      type: 2,
+      maxFeePerGas: 1_000_000_000n,
+      maxPriorityFeePerGas: 1_000_000_000n,
+    });
+    const txHash = ethers.Transaction.from(signedTx).hash!;
+
+    let sent = false;
+    a.broadcastSignedTransactionWithRetries = async () => { sent = true; };
+    a.waitForReceiptWithFailover = async () => ({ hash: txHash });
+
+    await expect(a.dispatchSerializedV10Write(
+      wallet,
+      'publish',
+      async () => { throw new Error('could not persist the write-ahead'); },
+      async () => ({ signedTx, txHash }),
+      () => { throw new Error('unreachable'); },
+    )).rejects.toThrow(/chain:writeahead hook failed before publish broadcast/);
+
+    expect(sent).toBe(false);
+  });
+});
+
+// PR #2300 r1 — the public `isKnowledgeAssetMinted` was deleted; its classifier matrix (the one
+// place allowed to answer `false`, with every ambiguity shape pinned to `null`) moved to
+// finalized-chain-proof-snapshot.unit.test.ts, where it now classifies the snapshot's `kaMinted`
+// half at the pinned block — with the one deliberate change that TRANSPORT shapes no longer
+// classify at all: they fail the whole pinned snapshot over to the next endpoint.

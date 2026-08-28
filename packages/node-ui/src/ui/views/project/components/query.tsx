@@ -1,7 +1,19 @@
 import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import type { ReactNode } from 'react';
+import {
+  isQueryCatalogParameterRequired,
+  type QueryCatalogParameterDefinition,
+} from '@origintrail-official/dkg-core/query-catalog-parameters';
+import {
+  CONTEXT_GRAPH_QUERY_SUBGRAPH,
+  USER_QUERY_CATALOG_NAME,
+  USER_QUERY_CATALOG_SLUG,
+  buildQueryCatalogWrite,
+  prepareQueryCatalogExecution,
+  queryCatalogSlug,
+} from '@origintrail-official/dkg-core/query-catalog';
 import { useFetch } from '../../../hooks.js';
-import { executeQuery, writeProfileQueryCatalog } from '../../../api.js';
+import { executeQuery, writeProfileQueryCatalog, type QueryExecutionView } from '../../../api.js';
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
 
@@ -13,15 +25,23 @@ function contextGraphQueryTemplate(contextGraphId: string): string {
 LIMIT 1000`;
 }
 
-const CONTEXT_GRAPH_QUERY_SUBGRAPH = '__context_graph';
-const USER_QUERY_CATALOG_SLUG = 'ui-saved-queries';
-const USER_QUERY_CATALOG_NAME = 'Saved queries';
 const USER_QUERY_CATALOG_DESCRIPTION = 'User-created SPARQL saved in this node profile for this Context Graph.';
-const PROFILE_NS = 'http://dkg.io/ontology/profile/';
-const SCHEMA_NS = 'http://schema.org/';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 type SavedCatalogQuery = QueryCatalog['queries'][number];
+type QueryEditorSession =
+  | { kind: 'ad-hoc'; draft: string }
+  | {
+      kind: 'catalog';
+      key: string;
+      query: SavedCatalogQuery;
+      values: Record<string, string>;
+      draft: string;
+    };
+type ActiveQueryExecution = {
+  sparql: string;
+  view?: QueryExecutionView;
+  subGraphName?: string;
+  sourceKey?: string;
+};
 
 function sparqlString(value: string): string {
   return JSON.stringify(value);
@@ -58,6 +78,7 @@ function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
     catalogDescription: 'Ready-made SPARQL included with the Node UI for common Context Graph checks.',
     catalogRank,
     resultColumn: '',
+    parameters: [],
     ...query,
   });
 
@@ -108,41 +129,40 @@ LIMIT 100`,
   };
 }
 
-function querySlug(value: string): string {
-  const slug = value
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48);
-  return slug || 'saved-query';
-}
-
-function profileUri(contextGraphId: string, kind: 'catalog' | 'query', slug: string): string {
-  return `urn:dkg:profile:${encodeURIComponent(contextGraphId)}:${kind}:${encodeURIComponent(slug)}`;
-}
-
-function literal(value: string): string {
-  return JSON.stringify(value);
-}
-
-function intLiteral(value: number): string {
-  return `"${value}"^^<${XSD_INTEGER}>`;
-}
-
-function buildSavedQueryWrite(contextGraphId: string, name: string, description: string, sparql: string): {
+function buildSavedQueryWrite(
+  contextGraphId: string,
+  name: string,
+  description: string,
+  sparql: string,
+  parameters: readonly QueryCatalogParameterDefinition[] = [],
+  view?: QueryExecutionView,
+  subGraph: string = CONTEXT_GRAPH_QUERY_SUBGRAPH,
+): {
   query: SavedCatalogQuery;
   quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
 } {
   const rank = Date.now();
-  const slug = `${querySlug(name)}-${rank.toString(36)}`;
-  const catalogUri = profileUri(contextGraphId, 'catalog', USER_QUERY_CATALOG_SLUG);
-  const queryUri = profileUri(contextGraphId, 'query', slug);
+  const catalogSlug = subGraph === CONTEXT_GRAPH_QUERY_SUBGRAPH
+    ? USER_QUERY_CATALOG_SLUG
+    : `${USER_QUERY_CATALOG_SLUG}-${queryCatalogSlug(subGraph)}`;
+  const write = buildQueryCatalogWrite({
+    contextGraphId,
+    name,
+    description: description || undefined,
+    sparql,
+    subGraph,
+    catalogSlug,
+    catalogName: USER_QUERY_CATALOG_NAME,
+    catalogDescription: USER_QUERY_CATALOG_DESCRIPTION,
+    rank,
+    catalogRank: 50,
+    parameters,
+    view,
+  });
   const query: SavedCatalogQuery = {
-    slug,
-    subGraph: CONTEXT_GRAPH_QUERY_SUBGRAPH,
-    catalogSlug: USER_QUERY_CATALOG_SLUG,
+    slug: write.savedQuery.slug,
+    subGraph,
+    catalogSlug,
     catalogName: USER_QUERY_CATALOG_NAME,
     catalogDescription: USER_QUERY_CATALOG_DESCRIPTION,
     catalogRank: 50,
@@ -151,28 +171,14 @@ function buildSavedQueryWrite(contextGraphId: string, name: string, description:
     sparql,
     resultColumn: '',
     rank,
+    parameters: [...parameters],
+    view,
   };
-  const quads = [
-    { subject: catalogUri, predicate: RDF_TYPE, object: `${PROFILE_NS}QueryCatalog`, graph: '' },
-    { subject: catalogUri, predicate: `${PROFILE_NS}forSubGraph`, object: literal(CONTEXT_GRAPH_QUERY_SUBGRAPH), graph: '' },
-    { subject: catalogUri, predicate: `${PROFILE_NS}displayName`, object: literal(USER_QUERY_CATALOG_NAME), graph: '' },
-    { subject: catalogUri, predicate: `${SCHEMA_NS}description`, object: literal(USER_QUERY_CATALOG_DESCRIPTION), graph: '' },
-    { subject: catalogUri, predicate: `${PROFILE_NS}rank`, object: intLiteral(50), graph: '' },
-    { subject: queryUri, predicate: RDF_TYPE, object: `${PROFILE_NS}SavedQuery`, graph: '' },
-    { subject: queryUri, predicate: `${PROFILE_NS}forSubGraph`, object: literal(CONTEXT_GRAPH_QUERY_SUBGRAPH), graph: '' },
-    { subject: queryUri, predicate: `${PROFILE_NS}inCatalog`, object: catalogUri, graph: '' },
-    { subject: queryUri, predicate: `${PROFILE_NS}displayName`, object: literal(name), graph: '' },
-    { subject: queryUri, predicate: `${PROFILE_NS}sparqlQuery`, object: literal(sparql), graph: '' },
-    { subject: queryUri, predicate: `${PROFILE_NS}rank`, object: intLiteral(rank), graph: '' },
-  ];
-  if (description) {
-    quads.push({ subject: queryUri, predicate: `${SCHEMA_NS}description`, object: literal(description), graph: '' });
-  }
-  return { query, quads };
+  return { query, quads: write.quads };
 }
 
 function appendSavedQueryCatalog(catalogs: QueryCatalog[], query: SavedCatalogQuery): QueryCatalog[] {
-  const key = `${CONTEXT_GRAPH_QUERY_SUBGRAPH}|${USER_QUERY_CATALOG_SLUG}`;
+  const key = `${query.subGraph}|${query.catalogSlug}`;
   const next = catalogs.map(catalog => ({
     ...catalog,
     queries: [...catalog.queries],
@@ -185,8 +191,8 @@ function appendSavedQueryCatalog(catalogs: QueryCatalog[], query: SavedCatalogQu
   return [
     ...next,
     {
-      slug: USER_QUERY_CATALOG_SLUG,
-      subGraph: CONTEXT_GRAPH_QUERY_SUBGRAPH,
+      slug: query.catalogSlug,
+      subGraph: query.subGraph,
       name: USER_QUERY_CATALOG_NAME,
       description: USER_QUERY_CATALOG_DESCRIPTION,
       rank: 50,
@@ -285,9 +291,8 @@ function queryErrorMessage(error: string | null): ReactNode {
 export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: string }) {
   const profile = useProjectProfileContext();
   const defaultQuery = useMemo(() => contextGraphQueryTemplate(contextGraphId), [contextGraphId]);
-  const [draftQuery, setDraftQuery] = useState(defaultQuery);
-  const [activeQuery, setActiveQuery] = useState(defaultQuery);
-  const [activeCatalogQueryKey, setActiveCatalogQueryKey] = useState<string | null>(null);
+  const [session, setSession] = useState<QueryEditorSession>({ kind: 'ad-hoc', draft: defaultQuery });
+  const [activeExecution, setActiveExecution] = useState<ActiveQueryExecution>({ sparql: defaultQuery });
   const [localSavedCatalogs, setLocalSavedCatalogs] = useState<QueryCatalog[]>([]);
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState('');
@@ -295,6 +300,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [parameterError, setParameterError] = useState<string | null>(null);
   const builtInCatalog = useMemo(() => contextGraphBuiltInCatalog(contextGraphId), [contextGraphId]);
   const queryCatalogs = useMemo(
     () => mergeQueryCatalogs([builtInCatalog, ...localSavedCatalogs, ...(profile?.queryCatalogs ?? [])]),
@@ -304,29 +310,60 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     () => (profile?.loading || profile?.error ? mergeQueryCatalogs([builtInCatalog, ...localSavedCatalogs]) : queryCatalogs),
     [builtInCatalog, localSavedCatalogs, profile?.error, profile?.loading, queryCatalogs],
   );
+  const selectedCatalogQuery = useMemo(() => {
+    return session.kind === 'catalog' ? session.query : undefined;
+  }, [session]);
+  const activeCatalogQueryKey = session.kind === 'catalog' ? session.key : null;
+  const draftQuery = session.draft;
+  const catalogParameterValues = session.kind === 'catalog' ? session.values : {};
 
   useEffect(() => {
-    setDraftQuery(defaultQuery);
-    setActiveQuery(defaultQuery);
-    setActiveCatalogQueryKey(null);
+    setSession({ kind: 'ad-hoc', draft: defaultQuery });
+    setActiveExecution({ sparql: defaultQuery });
     setLocalSavedCatalogs([]);
     setSaveOpen(false);
     setSaveName('');
     setSaveDescription('');
     setSaveError(null);
     setSaveMessage(null);
+    setParameterError(null);
   }, [defaultQuery]);
 
   const { data, loading, error, refresh } = useFetch(
-    () => executeQuery(activeQuery, contextGraphId),
-    [activeQuery, contextGraphId],
+    () => executeQuery(activeExecution.sparql, {
+      contextGraphId,
+      view: activeExecution.view,
+      subGraphName: activeExecution.subGraphName,
+    }),
+    [activeExecution.sparql, activeExecution.subGraphName, activeExecution.view, contextGraphId],
     0,
   );
 
+  const executionMatchesSession = useMemo(() => {
+    if (session.kind !== 'catalog') return true;
+    if (activeExecution.sourceKey !== session.key) return false;
+    try {
+      const expected = prepareQueryCatalogExecution(session.query, session.values);
+      return expected.sparql === activeExecution.sparql
+        && expected.view === activeExecution.view
+        && expected.subGraphName === activeExecution.subGraphName;
+    } catch {
+      return false;
+    }
+  }, [activeExecution, session]);
+  const queryResult = executionMatchesSession ? data?.result : undefined;
+  const resultType = queryResult?.type;
   const rows = useMemo(
-    () => (data as any)?.result?.bindings ?? (data as any)?.results?.bindings ?? [],
-    [data],
+    () => resultType === 'quads'
+      ? queryResult.quads
+      : resultType === 'bindings'
+        ? queryResult.bindings
+        : [],
+    [queryResult, resultType],
   );
+  const booleanResult = resultType === 'boolean'
+    ? queryResult.value
+    : undefined;
 
   const hasSavedProfileQueries = useMemo(
     () => queryCatalogs.some(catalog => !isBuiltInQueryCatalog(catalog) && catalog.queries.length > 0),
@@ -344,40 +381,82 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   }, [rows]);
 
   const runQuery = useCallback(() => {
-    const next = draftQuery.trim();
-    if (!next) return;
-    setActiveCatalogQueryKey(null);
+    const draft = session.draft.trim();
+    if (!draft) return;
+    let execution: ActiveQueryExecution;
+    if (session.kind === 'catalog' && draft === session.query.sparql.trim()) {
+      try {
+        execution = {
+          ...prepareQueryCatalogExecution(session.query, session.values),
+          sourceKey: session.key,
+        };
+        setParameterError(null);
+      } catch (err: any) {
+        setParameterError(err?.message ?? String(err));
+        return;
+      }
+    } else {
+      execution = { sparql: draft };
+      if (session.kind === 'catalog') setSession({ kind: 'ad-hoc', draft });
+      setParameterError(null);
+    }
     setSaveMessage(null);
     setSaveError(null);
-    if (next === activeQuery) {
+    if (
+      execution.sparql === activeExecution.sparql
+      && execution.view === activeExecution.view
+      && execution.subGraphName === activeExecution.subGraphName
+    ) {
+      setActiveExecution(execution);
       refresh();
       return;
     }
-    setActiveQuery(next);
-  }, [activeQuery, draftQuery, refresh]);
+    setActiveExecution(execution);
+  }, [activeExecution, refresh, session]);
 
   const resetQuery = useCallback(() => {
-    setDraftQuery(defaultQuery);
-    setActiveCatalogQueryKey(null);
+    setSession({ kind: 'ad-hoc', draft: defaultQuery });
     setSaveMessage(null);
     setSaveError(null);
-    if (activeQuery === defaultQuery) refresh();
-    else setActiveQuery(defaultQuery);
-  }, [activeQuery, defaultQuery, refresh]);
-
-  const runCatalogQuery = useCallback((key: string, sparql: string) => {
-    const next = sparql.trim();
-    if (!next) return;
-    setActiveCatalogQueryKey(key);
-    setDraftQuery(next);
-    setSaveMessage(null);
-    setSaveError(null);
-    if (activeQuery === next) {
+    setParameterError(null);
+    if (
+      activeExecution.sparql === defaultQuery
+      && activeExecution.view === undefined
+      && activeExecution.subGraphName === undefined
+    ) {
       refresh();
       return;
     }
-    setActiveQuery(next);
-  }, [activeQuery, refresh]);
+    setActiveExecution({ sparql: defaultQuery });
+  }, [activeExecution, defaultQuery, refresh]);
+
+  const runCatalogQuery = useCallback((key: string, query: SavedCatalogQuery) => {
+    const next = query.sparql.trim();
+    if (!next) return;
+    setSaveMessage(null);
+    setSaveError(null);
+    setParameterError(null);
+    const parameters = query.parameters ?? [];
+    const values = Object.fromEntries(parameters
+      .filter(parameter => parameter.defaultValue !== undefined)
+      .map(parameter => [parameter.name, String(parameter.defaultValue)]));
+    setSession({ kind: 'catalog', key, query, values, draft: next });
+    if (parameters.length > 0) return;
+    const execution: ActiveQueryExecution = {
+      ...prepareQueryCatalogExecution(query, values),
+      sourceKey: key,
+    };
+    if (
+      activeExecution.sparql === execution.sparql
+      && activeExecution.view === execution.view
+      && activeExecution.subGraphName === execution.subGraphName
+    ) {
+      setActiveExecution(execution);
+      refresh();
+      return;
+    }
+    setActiveExecution(execution);
+  }, [activeExecution, refresh]);
 
   const openSaveForm = useCallback(() => {
     const firstLine = draftQuery.trim().split('\n').find(line => line.trim());
@@ -406,14 +485,36 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     setSaveError(null);
     setSaveMessage(null);
     try {
-      const { query, quads } = buildSavedQueryWrite(contextGraphId, name, description, sparql);
+      const selectedTemplate = selectedCatalogQuery && selectedCatalogQuery.sparql.trim() === sparql
+        ? selectedCatalogQuery
+        : undefined;
+      const { query, quads } = buildSavedQueryWrite(
+        contextGraphId,
+        name,
+        description,
+        sparql,
+        selectedTemplate?.parameters ?? [],
+        selectedTemplate?.view,
+        selectedTemplate?.subGraph ?? CONTEXT_GRAPH_QUERY_SUBGRAPH,
+      );
       await writeProfileQueryCatalog(contextGraphId, quads);
       setLocalSavedCatalogs(prev => appendSavedQueryCatalog(prev, query));
       const key = `${query.subGraph}|${query.catalogSlug}|${query.slug}`;
-      setActiveCatalogQueryKey(key);
-      setDraftQuery(query.sparql);
-      if (activeQuery === query.sparql) refresh();
-      else setActiveQuery(query.sparql);
+      const values = session.kind === 'catalog' ? session.values : {};
+      setSession({ kind: 'catalog', key, query, values, draft: query.sparql });
+      try {
+        const savedExecution = prepareQueryCatalogExecution(query, values);
+        setActiveExecution(previous =>
+          previous.sparql === savedExecution.sparql
+          && previous.view === savedExecution.view
+          && previous.subGraphName === savedExecution.subGraphName
+            ? { ...previous, sourceKey: key }
+            : previous,
+        );
+      } catch {
+        // The write already validated the template. Missing runtime values only
+        // mean there is no executed result to associate with this saved entry.
+      }
       setSaveName('');
       setSaveDescription('');
       setSaveOpen(false);
@@ -423,7 +524,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     } finally {
       setSaving(false);
     }
-  }, [activeQuery, contextGraphId, draftQuery, refresh, saveDescription, saveName]);
+  }, [contextGraphId, draftQuery, saveDescription, saveName, selectedCatalogQuery, session]);
 
   return (
     <div className="v10-memory-layer-view v10-cg-query-view">
@@ -495,7 +596,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                   <div className="v10-cg-query-list">
                     {catalog.queries.map((q) => {
                       const key = `${q.subGraph}|${q.catalogSlug}|${q.slug}`;
-                      const isActive = activeCatalogQueryKey === key && activeQuery === q.sparql;
+                      const isActive = activeCatalogQueryKey === key;
                       const chipLabel = q.description ? `${q.name}. ${q.description}` : q.name;
                       return (
                         <button
@@ -504,7 +605,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                           className={`v10-cg-query-chip${isActive ? ' active' : ''}`}
                           title={chipLabel}
                           aria-label={`Load query: ${chipLabel}`}
-                          onClick={() => runCatalogQuery(key, q.sparql)}
+                          onClick={() => runCatalogQuery(key, q)}
                         >
                           <span className="v10-cg-query-chip-title">{q.name}</span>
                           {q.description && <span className="v10-cg-query-chip-desc">{q.description}</span>}
@@ -540,13 +641,57 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         </div>
 
       <div className="v10-cg-query-editor">
+        {selectedCatalogQuery && (selectedCatalogQuery.parameters?.length ?? 0) > 0 && (
+          <div className="v10-cg-query-parameters" aria-label="Query parameters">
+            {(selectedCatalogQuery.parameters ?? []).map(parameter => (
+              <label key={parameter.name} className="v10-cg-query-parameter">
+                <span>{parameter.label ?? parameter.name}</span>
+                {parameter.type === 'boolean' ? (
+                  <select
+                    className="v10-form-input"
+                    aria-label={parameter.label ?? parameter.name}
+                    value={catalogParameterValues[parameter.name] ?? ''}
+                    onChange={event => setSession(previous => previous.kind === 'catalog'
+                      ? {
+                          ...previous,
+                          values: { ...previous.values, [parameter.name]: event.target.value },
+                        }
+                      : previous)}
+                  >
+                    <option value="">Choose...</option>
+                    <option value="true">True</option>
+                    <option value="false">False</option>
+                  </select>
+                ) : (
+                  <input
+                    className="v10-form-input"
+                    aria-label={parameter.label ?? parameter.name}
+                    type={parameter.type === 'integer' || parameter.type === 'number' ? 'number' : 'text'}
+                    step={parameter.type === 'integer' ? '1' : parameter.type === 'number' ? 'any' : undefined}
+                    required={isQueryCatalogParameterRequired(parameter)}
+                    value={catalogParameterValues[parameter.name] ?? ''}
+                    placeholder={parameter.description}
+                    onChange={event => setSession(previous => previous.kind === 'catalog'
+                      ? {
+                          ...previous,
+                          values: { ...previous.values, [parameter.name]: event.target.value },
+                        }
+                      : previous)}
+                  />
+                )}
+                {parameter.description && <small>{parameter.description}</small>}
+              </label>
+            ))}
+          </div>
+        )}
+        {parameterError && <span className="v10-cg-query-error-detail">{parameterError}</span>}
         <textarea
           className="v10-cg-query-textarea"
           aria-label="SPARQL editor"
           value={draftQuery}
           onChange={(e) => {
-            setDraftQuery(e.target.value);
-            setActiveCatalogQueryKey(null);
+            setSession({ kind: 'ad-hoc', draft: e.target.value });
+            setParameterError(null);
           }}
           spellCheck={false}
         />
@@ -590,7 +735,16 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       {saveError && <p className="v10-mlv-status" style={{ color: 'var(--text-danger)' }}>{saveError}</p>}
 
       <div className="v10-cg-query-results">
-        {loading && (
+        {!executionMatchesSession && (
+          <EmptyState
+            compact
+            tone="query"
+            icon="?"
+            title="Enter parameters, then run this query."
+            description="Previous query results are hidden so they are not presented as results for the newly selected template."
+          />
+        )}
+        {executionMatchesSession && loading && (
           <EmptyState
             compact
             tone="query"
@@ -598,7 +752,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             title="Loading query results..."
           />
         )}
-        {error && (
+        {executionMatchesSession && error && (
           <EmptyState
             compact
             tone="danger"
@@ -608,7 +762,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           />
         )}
 
-        {!loading && !error && rows.length === 0 && (
+        {executionMatchesSession && !loading && !error && booleanResult === undefined && rows.length === 0 && (
           <EmptyState
             compact
             tone="query"
@@ -618,9 +772,18 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           />
         )}
 
-        {!loading && !error && rows.length > 0 && (
+        {executionMatchesSession && !loading && !error && booleanResult !== undefined && (
+          <div className="v10-mlv-table-wrap" aria-label="ASK result">
+            <div className="v10-mlv-result-count">ASK result</div>
+            <strong>{String(booleanResult)}</strong>
+          </div>
+        )}
+
+        {executionMatchesSession && !loading && !error && booleanResult === undefined && rows.length > 0 && (
           <div className="v10-mlv-table-wrap">
-            <div className="v10-mlv-result-count">{rows.length} result{rows.length === 1 ? '' : 's'}</div>
+            <div className="v10-mlv-result-count">
+              {rows.length} {resultType === 'quads' ? `quad${rows.length === 1 ? '' : 's'}` : `result${rows.length === 1 ? '' : 's'}`}
+            </div>
             <table className="v10-mlv-table">
               <thead>
                 <tr>
@@ -651,4 +814,3 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     </div>
   );
 }
-

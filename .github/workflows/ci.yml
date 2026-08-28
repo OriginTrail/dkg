@@ -11,9 +11,9 @@ name: CI
 #     or trigger the workflow manually via `workflow_dispatch`.
 on:
   push:
-    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary]
   pull_request:
-    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary]
     types: [opened, synchronize, reopened, labeled, unlabeled]
   # When merge queue is enabled, this is the pre-merge full-CI safety net.
   # It validates the exact candidate that will land, without introducing a
@@ -66,6 +66,7 @@ jobs:
       kosava_supporting: ${{ steps.plan.outputs.kosava_supporting }}
       kosava_hardhat_plugins: ${{ steps.plan.outputs.kosava_hardhat_plugins }}
       contracts: ${{ steps.plan.outputs.contracts }}
+      abi_freshness: ${{ steps.plan.outputs.abi_freshness }}
       evm_matrix: ${{ steps.plan.outputs.evm_matrix }}
       plan_json: ${{ steps.plan.outputs.plan_json }}
     steps:
@@ -86,12 +87,14 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
+          ref: 780f14aa60c39bdca788967121085c3c0d82d85c
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
-            scripts/ci
-            scripts/lib
+            scripts/ci/plan-ci.mjs
+            scripts/ci/assert-ci-results.mjs
+            scripts/lib/ci-delta.mjs
+            scripts/lib/ci-results.mjs
           sparse-checkout-cone-mode: false
       - name: Compute fail-closed CI plan
         id: plan
@@ -100,9 +103,9 @@ jobs:
           MERGE_SHA: ${{ github.sha }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           SAMPLE_KEY: ${{ github.event.pull_request.head.sha || github.sha }}
-          # Initial rollout is main-only. Release/RC PRs stay full until they
-          # have equivalent required-gate + merge-queue protection.
-          DELTA_ENABLED: ${{ vars.CI_DELTA_ENABLED == 'true' && github.base_ref == 'main' }}
+          # Both active protected branches require the aggregate gates and use
+          # merge queues, so they can share the same fail-closed delta policy.
+          DELTA_ENABLED: ${{ vars.CI_DELTA_ENABLED == 'true' && (github.base_ref == 'main' || github.base_ref == 'testnet-canary') }}
         run: |
           set -euo pipefail
           CHANGES_FILE="${RUNNER_TEMP}/ci-name-status.z"
@@ -219,6 +222,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Lint source and repository tooling
+        run: pnpm lint
+
       - name: Validate npm metadata points to v10
         run: pnpm check:npm-metadata
 
@@ -231,7 +237,7 @@ jobs:
           key: turbo-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
           restore-keys: |
             turbo-${{ runner.os }}-${{ github.ref }}-
-            turbo-${{ runner.os }}-refs/heads/v10-rc-
+            turbo-${{ runner.os }}-refs/heads/main-
             turbo-${{ runner.os }}-
 
       - name: Build all Node packages (evm-module hardhat compile short-circuits)
@@ -270,8 +276,40 @@ jobs:
           TURBO_TOKEN: ${{ github.event_name == 'push' && secrets.TURBO_TOKEN || '' }}
           TURBO_TEAM: ${{ github.event_name == 'push' && secrets.TURBO_TEAM || '' }}
 
+      - name: Verify the publishable CLI tarball
+        run: |
+          pnpm release:build-info --dist-tag ci --commit "${GITHUB_SHA}" --ci-run "${GITHUB_RUN_ID}"
+          pnpm release:verify-pack
+
       - name: Test repository scripts
         run: pnpm run test:scripts
+
+      # W1 §8.3 packet reachability. This job is the right home because it is
+      # the one lane that installs the full workspace without sharding, and the
+      # gate asks the REAL Vitest resolver (`vitest list --filesOnly`) which
+      # files each pinned config would run.
+      #
+      # It exists because a packet file can be present on disk, tracked, and
+      # still contribute nothing: Vitest treats positionals as FILTERS against
+      # `include`, never as additions, so a suite missing from the include array
+      # is silently skipped and the command still exits 0. Leaving the gate
+      # uninvoked would have reproduced that exact failure one level up — a
+      # check that cannot fire is not a check.
+      - name: Verify the W1 §8.3 test packet is reachable
+        run: pnpm run verify:w1-packet
+
+      # A18's benchmark was previously only syntax-checked, which proves nothing
+      # about the thing it exists to measure: it loads the REAL record helpers
+      # out of `packages/agent/dist`, so a missing build output, a renamed
+      # export or a changed OTel constructor shape would leave A18 with no
+      # usable benchmark and `node --check` would still pass.
+      #
+      # `--ci` records the verdict WITHOUT gating on it, deliberately: a shared
+      # runner's timing variance must never fail a build. What is gated here is
+      # the mechanism — real seam loads, both arms run, JSON report is produced.
+      # Tiny page/round counts keep it a smoke test, not a measurement.
+      - name: Smoke the W1 A18 benchmark (real seam, non-gating budget)
+        run: pnpm run bench:w1-sync-telemetry:smoke
 
       - name: Package build outputs
         run: |
@@ -413,9 +451,12 @@ jobs:
       - name: Core, RDF utilities, and storage tests
         if: matrix.suite == 'core'
         run: |
-          pnpm --filter @origintrail-official/dkg-core test
-          pnpm --filter @origintrail-official/dkg-rdf-utils test
-          pnpm --filter @origintrail-official/dkg-storage test
+          node scripts/ci/run-vitest-junit.mjs \
+            --lane core
+          node scripts/ci/run-vitest-junit.mjs \
+            --lane rdf-utils
+          node scripts/ci/run-vitest-junit.mjs \
+            --lane storage
       - name: "Chain tests (shard ${{ matrix.shard }}/3)"
         if: matrix.suite == 'chain'
         env:
@@ -424,7 +465,15 @@ jobs:
           set -euo pipefail
           mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs chain "$SHARD_ID")
           test "${#SHARD_FILES[@]}" -gt 0
-          pnpm --filter @origintrail-official/dkg-chain exec vitest run "${SHARD_FILES[@]}"
+          node scripts/ci/run-vitest-junit.mjs \
+            --lane chain --shard "${SHARD_ID}" \
+            -- "${SHARD_FILES[@]}"
+
+      - name: Upload Vitest JUnit report
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-tornado-core-${{ matrix.suite }}-${{ matrix.shard }}
 
   # ------------------------------------------------------------------
   # Tornado Blazegraph integration lane — runs the storage adapter's
@@ -501,7 +550,12 @@ jobs:
         # leaf for the same typed literal (else RandomSampling forks). dateTime/time
         # are fixed here; date/gregorian/double/escaping remain it.fails pending
         # the rest of the backend-independent canon.
-        run: pnpm --filter @origintrail-official/dkg-storage exec vitest run test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts
+        # Both files share Blazegraph's single `kb` namespace. Unique graph IRIs
+        # isolate assertions, but the 2.1.5 bulk-load stream is namespace-global:
+        # concurrent inserts intermittently fail with `IllegalStateException:
+        # STREAM` and leave later requests timing out. Keep the unit lanes
+        # parallel; serialize only these two live-server files.
+        run: pnpm --filter @origintrail-official/dkg-storage exec vitest run --no-file-parallelism test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts
 
   # ------------------------------------------------------------------
   # Tornado publisher lane — sharded across 4 parallel runners.
@@ -545,7 +599,15 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "Publisher tests (shard ${{ matrix.shard }}/4)"
-        run: pnpm --filter @origintrail-official/dkg-publisher exec vitest run --shard=${{ matrix.shard }}/4
+        run: |
+          node scripts/ci/run-vitest-junit.mjs \
+            --lane publisher --shard ${{ matrix.shard }} \
+            -- --shard=${{ matrix.shard }}/4
+      - name: Upload Vitest JUnit report
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-publisher-${{ matrix.shard }}-of-4
 
   # ------------------------------------------------------------------
   # Tornado agent lane — the slowest Node suite, sharded across 10 runners.
@@ -607,7 +669,14 @@ jobs:
           echo "::group::Agent shard ${{ matrix.shard }}/10 — ${#SHARD_FILES[@]} files"
           printf '  %s\n' "${SHARD_FILES[@]}"
           echo "::endgroup::"
-          pnpm exec vitest run "${SHARD_FILES[@]}"
+          node ../../scripts/ci/run-vitest-junit.mjs \
+            --lane agent --shard ${{ matrix.shard }} \
+            -- "${SHARD_FILES[@]}"
+      - name: Upload Vitest JUnit report
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-agent-${{ matrix.shard }}-of-10
 
   # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
@@ -663,7 +732,14 @@ jobs:
           set -euo pipefail
           mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs cli "$SHARD_ID")
           test "${#SHARD_FILES[@]}" -gt 0
-          pnpm --filter @origintrail-official/dkg exec vitest run "${SHARD_FILES[@]}"
+          node scripts/ci/run-vitest-junit.mjs \
+            --lane cli --shard "${SHARD_ID}" \
+            -- "${SHARD_FILES[@]}"
+      - name: Upload Vitest JUnit report
+        if: always()
+        uses: ./.github/actions/upload-vitest-junit
+        with:
+          artifact-name: vitest-cli-${{ matrix.shard }}-of-4
 
   bura-blazegraph-arm64:
     name: "Bura: Blazegraph arm64 image (native)"
@@ -882,6 +958,7 @@ jobs:
             --filter @origintrail-official/dkg-adapter-elizaos \
             --filter @origintrail-official/dkg-adapter-hermes \
             --filter @origintrail-official/dkg-adapter-openclaw \
+            --filter @origintrail-official/dkg-adapter-prime-agent \
             --filter @origintrail-official/dkg-demo \
             run test
 
@@ -941,16 +1018,15 @@ jobs:
   #
   # This job catches the only way that contract can break: a contributor
   # changes a `.sol` file and forgets to commit the regenerated ABIs.
-  # The controller changes in this PR are not trusted until they land on the
-  # protected default branch. During that first rollout phase, run this cheap
-  # gate unconditionally instead of pinning workflows to candidate history.
-  # A follow-up may rotate the immutable controller and restore path selection.
+  # The condition is emitted by the immutable trusted controller, so candidate
+  # workflow changes cannot suppress this gate for ABI-relevant changes.
   # On failure prints an explicit remediation command so the fix is one
   # copy-paste away.
   # ------------------------------------------------------------------
   abi-freshness:
     name: "Tornado: ABI freshness (committed abi/ vs hardhat compile)"
     needs: changes
+    if: needs.changes.outputs.abi_freshness == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -1022,7 +1098,7 @@ jobs:
   #                                parallel; previously ~20 min single).
   #   - merge queue candidate    : same sharded suite against the exact
   #                                combined commit that is about to land.
-  #   - push (main / v10-rc / …) : full coverage + ratchet safety net,
+  #   - push (trigger branches)  : full coverage + ratchet safety net,
   #                                single job (coverage reports don't
   #                                compose across shards, so we keep
   #                                the safety-net job unsharded).
@@ -1203,7 +1279,7 @@ jobs:
   #   * pull_request : runs only when the `changes` filter detects
   #                    contract-touching paths (mirrors the existing
   #                    Tornado: Solidity lane).
-  #   * push (main / v10-rc / …) : ALWAYS runs so the Security tab
+  #   * push (trigger branches) : ALWAYS runs so the Security tab
   #                    baseline refreshes after every merge. Without
   #                    this, post-merge findings would never bubble
   #                    up to Code Scanning even though they apply to
@@ -1398,12 +1474,14 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
+          ref: 780f14aa60c39bdca788967121085c3c0d82d85c
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
-            scripts/ci
-            scripts/lib
+            scripts/ci/plan-ci.mjs
+            scripts/ci/assert-ci-results.mjs
+            scripts/lib/ci-delta.mjs
+            scripts/lib/ci-results.mjs
           sparse-checkout-cone-mode: false
       - name: Verify selected lanes completed
         env:

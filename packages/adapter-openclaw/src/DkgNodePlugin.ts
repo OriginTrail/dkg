@@ -73,6 +73,7 @@ import {
   queryCatalogSlug,
   readOnlySparqlOperation,
 } from './dkg-node-plugin-query-catalog.js';
+import { prepareQueryCatalogExecution } from '@origintrail-official/dkg-core/query-catalog';
 import {
   channelConfigFingerprint,
   extractUserTextFromContent,
@@ -2876,60 +2877,9 @@ export class DkgNodePlugin {
       // cross-agent WM read with a malformed value would otherwise get the
       // node's own WM back — wrong namespace, wrong data, no error.
       // `undefined` (field genuinely absent) still takes the default.
-      if (args.agent_address !== undefined) {
-        if (typeof args.agent_address !== 'string') {
-          return this.error('"agent_address" must be a string.');
-        }
-        if (args.agent_address.trim() === '') {
-          return this.error('"agent_address" must be a non-empty string.');
-        }
-      }
-      let agentAddress = typeof args.agent_address === 'string'
-        ? args.agent_address.trim()
-        : undefined;
-      if (view === 'working-memory' && agentAddress === undefined) {
-        // Mirror the daemon's writer-side `defaultAgentAddress ?? peerId`
-        // priority. First try the identity endpoint; if it has not resolved
-        // yet, ensure the peerId fallback has had a chance to populate.
-        if (this.nodeAgentAddress === undefined) {
-          await this.ensureNodeAgentAddress().catch(() => {});
-        }
-        agentAddress = this.resolveDefaultAgentAddress();
-        if (agentAddress === undefined) {
-          await this.ensureNodePeerId().catch(() => {});
-          agentAddress = this.resolveDefaultAgentAddress();
-        }
-        if (agentAddress === undefined) {
-          return this.error(
-            '"view: working-memory" requires an agent identity. Supply `agent_address` explicitly, ' +
-              "or retry once the node's agent address or peer ID is available.",
-          );
-        }
-      }
-      if (view === 'working-memory' && agentAddress !== undefined) {
-        // T48/T53 — `toAgentPeerId` strips the legacy `did:dkg:agent:`
-        // prefix (raw eth and raw peerId are pass-through). The daemon's
-        // own contract (`packages/agent/src/dkg-agent.ts:2647-2696`)
-        // accepts BOTH self-aliases for the default agent: when the
-        // keystore is present, writes go to `defaultAgentAddress` (eth)
-        // and reads must use eth; on fresh/auth-disabled/no-keystore
-        // nodes, the daemon's writer-side resolves to `peerId` and reads
-        // must use peerId. Don't hard-reject non-eth values — that
-        // would break legitimate WM reads on no-keystore nodes.
-        const stripped = toAgentPeerId(agentAddress);
-        // T65 — If the post-strip value is eth-shaped, normalize to
-        // EIP-55 checksum form. The daemon stores chat-turn graph URIs
-        // under `agent.defaultAgentAddress` which ethers `verifyWallet
-        // .address` produces in EIP-55 form, and SPARQL graph URIs are
-        // case-sensitive. A caller-supplied lowercase wallet address
-        // would otherwise miss the daemon's checksum-case URI prefix
-        // and silently return zero bindings even when data exists.
-        // Non-eth-shaped values (peerIds, anything else) pass through
-        // verbatim — daemon contract still accepts them as self-aliases.
-        agentAddress = isValidEthAddressString(stripped)
-          ? toEip55Checksum(stripped)
-          : stripped;
-      }
+      const resolvedAgentAddress = await this.resolveQueryAgentAddress(args.agent_address, view);
+      if (resolvedAgentAddress.error) return resolvedAgentAddress.error;
+      const agentAddress = resolvedAgentAddress.value;
       const result = await this.client.query(sparql, {
         contextGraphId,
         view,
@@ -2939,6 +2889,47 @@ export class DkgNodePlugin {
     } catch (err: any) {
       return this.daemonError(err);
     }
+  }
+
+  private async resolveQueryAgentAddress(
+    rawAgentAddress: unknown,
+    view: GetView | undefined,
+  ): Promise<{ value?: string; error?: OpenClawToolResult }> {
+    if (rawAgentAddress !== undefined && typeof rawAgentAddress !== 'string') {
+      return { error: this.error('"agent_address" must be a string.') };
+    }
+    if (typeof rawAgentAddress === 'string' && rawAgentAddress.trim() === '') {
+      return { error: this.error('"agent_address" must be a non-empty string.') };
+    }
+
+    let agentAddress = typeof rawAgentAddress === 'string'
+      ? rawAgentAddress.trim()
+      : undefined;
+    if (view === 'working-memory' && agentAddress === undefined) {
+      if (this.nodeAgentAddress === undefined) {
+        await this.ensureNodeAgentAddress().catch(() => {});
+      }
+      agentAddress = this.resolveDefaultAgentAddress();
+      if (agentAddress === undefined) {
+        await this.ensureNodePeerId().catch(() => {});
+        agentAddress = this.resolveDefaultAgentAddress();
+      }
+      if (agentAddress === undefined) {
+        return {
+          error: this.error(
+            '"view: working-memory" requires an agent identity. Supply `agent_address` explicitly, ' +
+              "or retry once the node's agent address or peer ID is available.",
+          ),
+        };
+      }
+    }
+    if (view === 'working-memory' && agentAddress !== undefined) {
+      const stripped = toAgentPeerId(agentAddress);
+      agentAddress = isValidEthAddressString(stripped)
+        ? toEip55Checksum(stripped)
+        : stripped;
+    }
+    return { value: agentAddress };
   }
 
   private async handleQueryCatalogList(args: Record<string, unknown>): Promise<OpenClawToolResult> {
@@ -2987,10 +2978,26 @@ export class DkgNodePlugin {
       }
 
       const savedQuery = matches[0];
-      const queryOpts = savedQuery.subGraph && savedQuery.subGraph !== CONTEXT_GRAPH_QUERY_SUBGRAPH
-        ? { contextGraphId, subGraphName: savedQuery.subGraph }
-        : { contextGraphId };
-      const result = await this.client.query(savedQuery.sparql, queryOpts);
+      const rawParameters = args.parameters;
+      if (rawParameters !== undefined && (!rawParameters || typeof rawParameters !== 'object' || Array.isArray(rawParameters))) {
+        return this.error('"parameters" must be an object keyed by saved-query parameter name.');
+      }
+      const execution = prepareQueryCatalogExecution(
+        savedQuery,
+        (rawParameters ?? {}) as Record<string, unknown>,
+      );
+      const resolvedAgentAddress = await this.resolveQueryAgentAddress(
+        args.agent_address,
+        execution.view,
+      );
+      if (resolvedAgentAddress.error) return resolvedAgentAddress.error;
+      const queryOpts = {
+        contextGraphId,
+        ...(execution.subGraphName ? { subGraphName: execution.subGraphName } : {}),
+        ...(execution.view ? { view: execution.view } : {}),
+        ...(resolvedAgentAddress.value ? { agentAddress: resolvedAgentAddress.value } : {}),
+      };
+      const result = await this.client.query(execution.sparql, queryOpts);
       return this.json({
         contextGraphId,
         savedQuery,
@@ -3024,6 +3031,17 @@ export class DkgNodePlugin {
       const catalogName = optionalString(args.catalog_name) ?? USER_QUERY_CATALOG_NAME;
       const catalogDescription = optionalString(args.catalog_description) ?? USER_QUERY_CATALOG_DESCRIPTION;
       const resultColumn = optionalString(args.result_column)?.replace(/^\?/, '');
+      let requestedView: GetView | undefined;
+      if (args.execution_view !== undefined) {
+        if (typeof args.execution_view !== 'string') {
+          return this.error('"execution_view" must be working-memory, shared-working-memory, or verifiable-memory.');
+        }
+        const normalizedView = args.execution_view.trim();
+        if (!GET_VIEWS.includes(normalizedView as GetView)) {
+          return this.error('"execution_view" must be working-memory, shared-working-memory, or verifiable-memory.');
+        }
+        requestedView = normalizedView as GetView;
+      }
       const rank = Date.now();
       const { savedQuery, quads } = buildQueryCatalogSaveWrite({
         contextGraphId,
@@ -3037,6 +3055,8 @@ export class DkgNodePlugin {
         resultColumn,
         rank,
         catalogRank: 50,
+        parameters: args.parameters,
+        view: requestedView,
       });
       const write = await this.client.writeQueryCatalog(contextGraphId, quads);
       return this.json({

@@ -62,8 +62,22 @@ import {
   createSwmCatchupPeerSelector,
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC, getMetrics } from '@origintrail-official/dkg-core';
+import {
+  decodeQueryCatalogBindings,
+  QUERY_CATALOG_READ_CAPABILITIES,
+  QUERY_CATALOG_SCHEMA_VERSION,
+} from '@origintrail-official/dkg-core/query-catalog';
+
+function listenerBoiLegacyQueryCatalogView(
+  queryIri: string,
+  catalogIri: string,
+): import('@origintrail-official/dkg-core').GetView | undefined {
+  return queryIri.startsWith('urn:listenerboi:query:')
+    || catalogIri.startsWith('urn:listenerboi:catalog:')
+    ? 'working-memory'
+    : undefined;
+}
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
   DashboardDB,
@@ -116,8 +130,10 @@ import {
   createCatchupRunner,
   formatDurableCatchupFailure,
   runDurableCatchupLeg,
+  summarizeDurableLeg,
   type CatchupJobResult,
   type CatchupRunner,
+  type DurableCatchupAttempt,
   type DurableCatchupFailureReason,
   type DurableCatchupLegState,
   type DurableLegDiagnostics,
@@ -232,12 +248,16 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
+  respondIfStoreUnavailable,
   respondIfChainRpcTransportError,
 } from '../http-utils.js';
+import {
+  createStoreQueryRequestLifecycle,
+  isApiQueryCallerDisconnected,
+} from '../store-query-lifecycle.js';
 import {
   normalizeRepo,
   isValidRepoSpec,
@@ -585,7 +605,9 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
 
       const literalSize = validateWritableQuadLiteralSizes("quads", normalized);
       if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
-      await agent.store.insert(normalized);
+      await agent.store.insert(normalized, {
+        source: 'daemon.profile.queryCatalog.insert',
+      });
       return jsonResponse(res, 200, {
         ok: true,
         contextGraphId: resolvedContextGraphId,
@@ -608,10 +630,27 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const contextGraphId = parsed.contextGraphId;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
 
+    const catalogReadCallerAgentAddress = requestToken
+      ? agent.resolveAgentByToken(requestToken)
+      : undefined;
+    const catalogReadIsNodeAdmin = !!requestToken
+      && validTokens.has(requestToken)
+      && catalogReadCallerAgentAddress === undefined;
+    if (
+      !catalogReadIsNodeAdmin
+      && !(await agent.canReadContextGraph(contextGraphId, {
+        callerAgentAddress: catalogReadCallerAgentAddress,
+      }))
+    ) {
+      return jsonResponse(res, 403, {
+        error: `Not authorized to read query catalog for context graph "${contextGraphId}".`,
+      });
+    }
+
     const graph = `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
     const query = `PREFIX prof: <http://dkg.io/ontology/profile/>
 PREFIX schema: <http://schema.org/>
-SELECT ?q ?subGraph ?catalog ?name ?description ?sparql ?resultColumn ?rank ?catalogName ?catalogDescription ?catalogRank
+SELECT ?q ?subGraph ?catalog ?name ?description ?sparql ?resultColumn ?queryParameters ?executionView ?view ?rank ?catalogName ?catalogDescription ?catalogRank
 WHERE {
   GRAPH <${graph}> {
     ?q a prof:SavedQuery ;
@@ -621,29 +660,103 @@ WHERE {
     OPTIONAL { ?q prof:displayName ?name }
     OPTIONAL { ?q schema:description ?description }
     OPTIONAL { ?q prof:resultColumn ?resultColumn }
+    OPTIONAL { ?q prof:queryParameters ?queryParameters }
+    OPTIONAL { ?q prof:executionView ?executionView }
+    OPTIONAL { ?q prof:view ?view }
     OPTIONAL { ?q prof:rank ?rank }
     OPTIONAL { ?catalog prof:displayName ?catalogName }
     OPTIONAL { ?catalog schema:description ?catalogDescription }
     OPTIONAL { ?catalog prof:rank ?catalogRank }
   }
-}`;
+}
+ORDER BY ?q
+LIMIT 5001`;
 
+    const queryLifecycle = createStoreQueryRequestLifecycle(
+      req,
+      res,
+      'api.profile.query_catalog.read',
+    );
+    let result;
     try {
-      const result = await agent.store.query(query);
-      const bindings = result.type === "bindings" ? result.bindings : [];
-      return jsonResponse(res, 200, {
-        contextGraphId,
-        graph,
-        result: {
-          type: "bindings",
-          bindings,
-        },
+      result = await agent.store.query(query, {
+        signal: queryLifecycle.signal,
+        priority: queryLifecycle.priority,
+        source: queryLifecycle.source,
+        maxResponseBytes: 1024 * 1024,
       });
     } catch (err: any) {
-      return jsonResponse(res, 400, {
+      if (isApiQueryCallerDisconnected(err) || queryLifecycle.signal.aborted) {
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      if (respondIfStoreUnavailable(res, err) !== null) return;
+      if (err?.code === 'STORE_RESPONSE_TOO_LARGE') {
+        return jsonResponse(res, 413, {
+          error: err?.message ?? 'Query catalog response exceeded the byte limit',
+          code: 'QUERY_CATALOG_RESULT_TOO_LARGE',
+          limitBytes: 1024 * 1024,
+          ...(typeof err?.actualBytes === 'number' ? { actualBytes: err.actualBytes } : {}),
+        });
+      }
+      return jsonResponse(res, 500, {
         error: err?.message ?? "Query catalog read failed",
       });
+    } finally {
+      queryLifecycle.dispose();
     }
+
+    if (result.type !== 'bindings') {
+      return jsonResponse(res, 500, {
+        error: `Query catalog SELECT returned unexpected result type: ${result.type}`,
+        code: 'QUERY_CATALOG_INVALID_RESULT_TYPE',
+      });
+    }
+    const rawBindings = result.bindings;
+    if (rawBindings.length > 5000) {
+      return jsonResponse(res, 413, {
+        error: 'Query catalog result exceeds the 5000-row limit.',
+        code: 'QUERY_CATALOG_RESULT_TOO_LARGE',
+        limitRows: 5000,
+      });
+    }
+    let items;
+    try {
+      items = decodeQueryCatalogBindings(rawBindings, {
+        legacyView: listenerBoiLegacyQueryCatalogView,
+      });
+    } catch (err: any) {
+      return jsonResponse(res, 422, {
+        error: err?.message ?? 'Stored query catalog data is invalid',
+        code: 'QUERY_CATALOG_INVALID_DATA',
+      });
+    }
+    const payload = {
+      schemaVersion: QUERY_CATALOG_SCHEMA_VERSION,
+      capabilities: QUERY_CATALOG_READ_CAPABILITIES,
+      contextGraphId,
+      graph,
+      items,
+      result: {
+        type: "bindings" as const,
+        // Additive compatibility field: preserve the exact SELECT rows older
+        // clients received, including RDF lexical forms and duplicates. The
+        // decoded/deduplicated contract lives exclusively in `items`.
+        bindings: rawBindings,
+      },
+    };
+    const responseBytes = Buffer.byteLength(JSON.stringify(payload));
+    getMetrics().storeQueryResultRows.record(rawBindings.length, { source: 'api.profile.query_catalog.read' });
+    getMetrics().storeQueryResultBytesEstimate.record(responseBytes, { source: 'api.profile.query_catalog.read' });
+    if (responseBytes > 1024 * 1024) {
+      return jsonResponse(res, 413, {
+        error: 'Query catalog response exceeds the 1 MiB serialized-response limit.',
+        code: 'QUERY_CATALOG_RESULT_TOO_LARGE',
+        limitBytes: 1024 * 1024,
+        actualBytes: responseBytes,
+      });
+    }
+    return jsonResponse(res, 200, payload);
   }
 
   // POST /api/shared-memory/catchup
@@ -705,9 +818,11 @@ WHERE {
     const includeSharedMemory = parsed.includeSharedMemory !== false;
     const includeDurable = parsed.includeDurable === true;
 
-    // Per-peer hard cap on the catchup duration. Keeps the endpoint
-    // response within a single HTTP-level timeout even if the underlying
-    // sync internals retry their way to completion. SWM-only path:
+    // Per-peer operation deadline. Signal-aware work stops accepting new
+    // fetch/authentication/materialization work at this bound. If an atomic
+    // store commit already crossed its non-cancellable dispatch boundary, the
+    // route awaits settlement so its response reports the real commit outcome
+    // instead of returning a false zero-insert failure. SWM-only path:
     // ~45s/page * a couple of pages worst-case; under heavy gossip
     // load (the integration suite) backed-off retries can stretch this
     // out further. Underlying SYNC_TOTAL_TIMEOUT_MS in dkg-agent is
@@ -729,15 +844,6 @@ WHERE {
     };
     const PER_PEER_SWM_BUDGET_MS = boundedBudget(parsed.perPeerBudgetMs, DEFAULT_PER_PEER_SWM_BUDGET_MS);
     const PER_PEER_DURABLE_BUDGET_MS = boundedBudget(parsed.perPeerDurableBudgetMs, DEFAULT_PER_PEER_DURABLE_BUDGET_MS);
-    // Finish the agent's internal durable deadline just before the HTTP wrapper
-    // expires. Previously this route could request a five-minute operation while
-    // the agent silently stopped useful work after its fixed two-minute default.
-    const DURABLE_BUDGET_HEADROOM_MS = 1_000;
-    const INTERNAL_DURABLE_BUDGET_MS = Math.max(
-      MIN_BUDGET_MS,
-      PER_PEER_DURABLE_BUDGET_MS - DURABLE_BUDGET_HEADROOM_MS,
-    );
-
     const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
       new Promise<T>((resolve, reject) => {
         const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
@@ -847,6 +953,8 @@ WHERE {
     type PerCgLeg = {
       contextGraphId: string;
       perPeer: PerPeerLeg[];
+      /** Graph-owner outcome used for terminal request classification. */
+      durableAttempts?: DurableCatchupAttempt[];
       insertedTriples: number;
       durableInsertedTriples: number;
     };
@@ -887,8 +995,25 @@ WHERE {
       const swmSelected = new Set(swmSelectedPeers);
       const durableSelected = new Set(durableSelectedPeers);
       const selectedPeers = uniquePeerIds([...swmSelectedPeers, ...durableSelectedPeers]);
+
+      // A modern agent owns durable recovery once per Context Graph. Every
+      // explicit/on-connect/reconciler trigger joins this same owner, which
+      // prevents this route from competing for a second slow-lane slot as
+      // `durable:unspecified`. Keep the direct per-peer leg only as a
+      // compatibility path for older agents.
+      const coordinatedDurablePromise = durableSelectedPeers.length > 0
+        && typeof (agent as any).syncDurableRecoveryContextGraph === 'function'
+        ? (agent as any).syncDurableRecoveryContextGraph(cgId, {
+            candidatePeerIds: durableSelectedPeers,
+            restrictToCandidatePeerIds: true,
+            candidatesAreSyncCapable: true,
+          })
+        : undefined;
+      const directSelectedPeers = coordinatedDurablePromise
+        ? swmSelectedPeers
+        : selectedPeers;
       const settled = await Promise.allSettled(
-        selectedPeers.map(async (candidate) => {
+        directSelectedPeers.map(async (candidate) => {
           let swm = 0;
           let durable = 0;
           let durableState: DurableCatchupLegState | undefined;
@@ -921,16 +1046,17 @@ WHERE {
               );
             }
           }
-          if (durableSelected.has(candidate)) {
-            // The agent deadline bounds network fetching, but exact graph
-            // verification and atomic store materialization must settle
-            // afterward. The helper owns capability probing, typed invocation,
-            // completion classification, and legacy-agent adaptation.
+          if (durableSelected.has(candidate) && !coordinatedDurablePromise) {
+            // The helper owns one outer deadline for fetch, verification, and
+            // authentication. Its AbortSignal prevents entry into later commit
+            // boundaries; an already-started atomic commit gets a bounded
+            // settlement grace, after which the response is explicitly
+            // indeterminate instead of hanging or claiming a false outcome.
             const durableLeg = await runDurableCatchupLeg(
               agent,
               candidate,
               cgId,
-              INTERNAL_DURABLE_BUDGET_MS,
+              PER_PEER_DURABLE_BUDGET_MS,
             );
             durable = durableLeg.insertedTriples;
             durableState = durableLeg.state;
@@ -954,7 +1080,7 @@ WHERE {
       const perPeer: PerPeerLeg[] = settled.map((s, idx) => {
         if (s.status === 'fulfilled') {
           return {
-            peerId: selectedPeers[idx],
+            peerId: directSelectedPeers[idx],
             insertedTriples: s.value.insertedTriples,
             durableInsertedTriples: s.value.durableInsertedTriples,
             ...(s.value.durableState ? { durableState: s.value.durableState } : {}),
@@ -965,17 +1091,84 @@ WHERE {
           };
         }
         return {
-          peerId: selectedPeers[idx],
+          peerId: directSelectedPeers[idx],
           insertedTriples: 0,
           durableInsertedTriples: 0,
           error: s.reason?.message ?? String(s.reason),
         };
       });
+      let durableAttempts: DurableCatchupAttempt[] | undefined;
+      let coordinatedDurableInsertedTriples: number | undefined;
+      if (coordinatedDurablePromise) {
+        try {
+          const recovery = await coordinatedDurablePromise;
+          const aggregate = summarizeDurableLeg(recovery.result);
+          const aggregateError = formatDurableCatchupFailure(aggregate.failureReasons);
+          durableAttempts = [{
+            durableState: aggregate.state,
+            durableComplete: aggregate.complete,
+            ...(aggregateError ? { durableError: aggregateError } : {}),
+          }];
+          coordinatedDurableInsertedTriples = aggregate.insertedTriples;
+
+          // Keep peer attribution for operators, but classify completion and
+          // count totals from the graph-level aggregate exactly once.
+          const attributableResults = recovery.peerResults.length > 0
+            ? recovery.peerResults
+            : [{
+                peerId: recovery.peerId ?? durableSelectedPeers[0],
+                result: recovery.result,
+              }];
+          for (const peerResult of attributableResults) {
+            const summary = summarizeDurableLeg(peerResult.result);
+            const durableError = formatDurableCatchupFailure(summary.failureReasons);
+            const existing = perPeer.find((entry) => entry.peerId === peerResult.peerId);
+            const durableFields = {
+              durableInsertedTriples: summary.insertedTriples,
+              durableState: summary.state,
+              durableComplete: summary.complete,
+              durableDiagnostics: summary.diagnostics,
+              ...(durableError ? { durableError } : {}),
+            };
+            if (existing) {
+              Object.assign(existing, durableFields);
+            } else {
+              perPeer.push({
+                peerId: peerResult.peerId,
+                insertedTriples: 0,
+                ...durableFields,
+              });
+            }
+          }
+        } catch (err: any) {
+          const error = err?.message ?? String(err);
+          durableAttempts = [{ durableState: 'failed', durableComplete: false, durableError: error }];
+          coordinatedDurableInsertedTriples = 0;
+          const peerId = durableSelectedPeers[0];
+          const existing = perPeer.find((entry) => entry.peerId === peerId);
+          if (existing) {
+            existing.durableState = 'failed';
+            existing.durableComplete = false;
+            existing.durableError = error;
+          } else {
+            perPeer.push({
+              peerId,
+              insertedTriples: 0,
+              durableInsertedTriples: 0,
+              durableState: 'failed',
+              durableComplete: false,
+              durableError: error,
+            });
+          }
+        }
+      }
       perCgLegs.push({
         contextGraphId: cgId,
         perPeer,
+        ...(durableAttempts ? { durableAttempts } : {}),
         insertedTriples: perPeer.reduce((sum, p) => sum + p.insertedTriples, 0),
-        durableInsertedTriples: perPeer.reduce((sum, p) => sum + (p.durableInsertedTriples ?? 0), 0),
+        durableInsertedTriples: coordinatedDurableInsertedTriples
+          ?? perPeer.reduce((sum, p) => sum + (p.durableInsertedTriples ?? 0), 0),
       });
     }
 
@@ -1103,7 +1296,7 @@ WHERE {
     // responses backward-compatible, and reserve 503 for the unambiguous case
     // where every durable-only attempt failed without a usable result.
     const durableOutcome = classifyDurableCatchupRequest(
-      perCgLegs.map((cg) => cg.perPeer),
+      perCgLegs.map((cg) => cg.durableAttempts ?? cg.perPeer),
       includeDurable,
       includeSharedMemory,
     );

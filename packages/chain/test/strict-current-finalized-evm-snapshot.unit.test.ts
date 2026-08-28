@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   type ChainIdV1,
@@ -22,6 +22,7 @@ import {
   type StrictCurrentFinalizedEvmReadCallV1,
 } from '../src/strict-current-finalized-evm-rpc.js';
 import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from '../src/index.js';
+import { resetFinalizedChainReadRegistryForTests } from '../src/finalized-chain-read-admission.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError,
@@ -45,10 +46,17 @@ afterEach(async () => {
   await rpcHarness.stopAll();
 });
 
+// The snapshot permit now lives in a PROCESS-WIDE registry, so a test that
+// leaves one held would fail the next test for a reason it never caused.
+beforeEach(() => {
+  resetFinalizedChainReadRegistryForTests();
+});
+
 describe('RFC-64 scoped current-finalized EVM snapshot', () => {
   it('pins dynamic batches to one endpoint and EIP-1898 anchor with one code check', async () => {
     const server = await rpcHarness.start(successfulHandler());
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
     });
@@ -97,6 +105,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     });
     const second = await rpcHarness.start(successfulHandler());
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [first.url, second.url],
     });
@@ -130,6 +139,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     });
     const second = await rpcHarness.start(successfulHandler());
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [first.url, second.url],
     });
@@ -168,6 +178,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     });
     const backup = await rpcHarness.start(successfulHandler());
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [malformed.url, backup.url],
     });
@@ -204,6 +215,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       return baseHandler(rpcCall, response, rawRequest);
     });
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
     });
@@ -231,6 +243,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     });
     const second = await rpcHarness.start(successfulHandler());
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [first.url, second.url],
     });
@@ -276,6 +289,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       }
     });
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
       blockReferenceProfile: 'trusted-block-number-hash-sandwich',
@@ -322,6 +336,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       }
     });
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
       blockReferenceProfile: 'trusted-block-number-hash-sandwich',
@@ -389,6 +404,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
           }
         });
         const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+          owner: 'rfc64',
           chainId: CHAIN_ID,
           endpoints: [server.url],
           blockReferenceProfile: 'trusted-block-number-hash-sandwich',
@@ -437,6 +453,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       }
     });
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
       blockReferenceProfile: 'trusted-block-number-hash-sandwich',
@@ -453,10 +470,12 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     const first = await rpcHarness.start(successfulHandler());
     const second = await rpcHarness.start(successfulHandler());
     const firstScope = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [first.url],
     });
     const secondScope = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [second.url],
     });
@@ -494,6 +513,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       await baseHandler(rpcCall, response, rawRequest);
     });
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
     });
@@ -526,6 +546,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       sendJsonRpcError(response, rpcCall, -32000, 'forced rejection');
     });
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
     });
@@ -562,6 +583,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       await baseHandler(rpcCall, response, rawRequest);
     });
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
     });
@@ -595,6 +617,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       started.resolve(undefined);
     });
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
     });
@@ -627,6 +650,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       started.resolve(undefined);
     });
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
     });
@@ -671,6 +695,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       started.resolve(undefined);
     });
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
     });
@@ -732,6 +757,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       });
     });
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: ['https://snapshot-rpc.test'],
     });
@@ -772,6 +798,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       siblingStarted.resolve(undefined);
     });
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
     });
@@ -796,6 +823,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
   it('rejects forged block selectors, hostile batches, and non-callable consumers pre-I/O', async () => {
     const server = await rpcHarness.start(successfulHandler());
     const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [server.url],
     });
@@ -856,6 +884,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
   it('enforces aggregate budgets through the public snapshot session before extra I/O', async () => {
     const batchServer = await rpcHarness.start(successfulHandler());
     const batchScope = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [batchServer.url],
     });
@@ -871,6 +900,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
 
     const returnServer = await rpcHarness.start(successfulHandler());
     const returnScope = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [returnServer.url],
     });

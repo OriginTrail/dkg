@@ -328,11 +328,15 @@ describe('private CG membership bootstrap recovery', () => {
       synced: false,
       metaSynced: false,
     });
-    const publicOnChainProof = vi.fn(async () => true);
-    (agent as any).isContextGraphPublicOnChain = publicOnChainProof;
+    const publicOnChainProof = vi.fn(async () => 0 as const);
+    (agent as any).resolveOnChainAccessPolicyState = publicOnChainProof;
 
     expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
-    expect(publicOnChainProof).toHaveBeenCalledWith(contextGraphId, expect.any(Object));
+    expect(publicOnChainProof).toHaveBeenCalledWith(
+      contextGraphId,
+      expect.any(Object),
+      { slotBindingMode: 'chain-attested-repair' },
+    );
   });
 
   it('accepts an unregistered public replica only with active public on-chain proof', async () => {
@@ -346,14 +350,20 @@ describe('private CG membership bootstrap recovery', () => {
       onChainId: '7',
       pendingMeta: true,
     });
-    const publicOnChainProof = vi.fn(async () => true);
-    (agent as any).isContextGraphPublicOnChain = publicOnChainProof;
+    const strictPublicOnChainProof = vi.fn(async () => 0 as const);
+    const legacyPublicOnChainProof = vi.fn(async () => true);
+    (agent as any).resolveOnChainAccessPolicyState = strictPublicOnChainProof;
+    (agent as any).isContextGraphPublicOnChain = legacyPublicOnChainProof;
 
     expect(await (agent as any).hasConfirmedMetaState(
       contextGraphId,
       { rejectUnregisteredPlaceholder: true },
     )).toBe(true);
-    expect(publicOnChainProof).toHaveBeenCalledWith(contextGraphId, expect.any(Object));
+    expect(strictPublicOnChainProof).toHaveBeenCalledWith(
+      contextGraphId,
+      expect.any(Object),
+      { slotBindingMode: 'chain-attested-repair' },
+    );
   });
 
   it('keeps requester decisions local, preserves queued generations, and drops stale decisions', async () => {
@@ -1581,5 +1591,67 @@ describe('private CG membership bootstrap recovery', () => {
       .get(member.address.toLowerCase())).toEqual([newPeerId]);
     expect((await agent.getContextGraphAllowedDelegateeKeys(contextGraphId))
       .get(member.address.toLowerCase())).toEqual([newOpKey.toLowerCase()]);
+    });
+  it('keeps join-approval snapshot and compensation inside the per-CG write lanes', async () => {
+    ({ agent } = await createAgent('PrivateBootstrapSerializedCompensation'));
+    const contextGraphId = 'private-bootstrap-serialized-compensation';
+    const approvedAddress = agent.getDefaultAgentAddress()!;
+    const subscriptionRows = new Map<string, any>();
+    const membershipRows = new Map<string, any>();
+    let signalFirstSave!: () => void;
+    let releaseFirstSave!: () => void;
+    const firstSaveStarted = new Promise<void>((resolve) => { signalFirstSave = resolve; });
+    const firstSaveGate = new Promise<void>((resolve) => { releaseFirstSave = resolve; });
+    let saveCount = 0;
+    (agent as any).config.contextGraphSubscriptionStore = {
+      load: async (id: string) => subscriptionRows.get(id) ?? null,
+      loadAll: async () => [...subscriptionRows.values()],
+      save: async (record: any) => {
+        saveCount += 1;
+        if (saveCount === 1) {
+          signalFirstSave();
+          await firstSaveGate;
+        }
+        subscriptionRows.set(record.id, { ...record });
+        if (record.name === 'approval-B') throw new Error('approval B save failed after write');
+      },
+      delete: async (id: string) => { subscriptionRows.delete(id); },
+    };
+    const membershipKey = (record: any) =>
+      `${record.contextGraphId}:${record.principalType}:${record.principalId.toLowerCase()}`;
+    (agent as any).config.contextGraphMembershipStore = {
+      loadAll: async () => [...membershipRows.values()],
+      upsert: async (record: any) => { membershipRows.set(membershipKey(record), { ...record }); },
+      delete: async (cgId: string, principalType: string, principalId: string) => {
+        membershipRows.delete(`${cgId}:${principalType}:${principalId.toLowerCase()}`);
+      },
+    };
+
+    const subscriptionA = { subscribed: true, name: 'ordinary-A' };
+    (agent as any).subscribedContextGraphs.set(contextGraphId, subscriptionA);
+    const saveA = (agent as any).persistContextGraphSubscription(contextGraphId);
+    await firstSaveStarted;
+
+    const subscriptionC = { subscribed: true, name: 'ordinary-C' };
+    (agent as any).subscribedContextGraphs.set(contextGraphId, subscriptionC);
+    const saveC = (agent as any).persistContextGraphSubscription(contextGraphId);
+    const approvalB = (agent as any).persistJoinApprovalStateStrict(
+      contextGraphId,
+      {
+        contextGraphId,
+        principalType: 'agent',
+        principalId: approvedAddress,
+        role: 'participant',
+        status: 'active',
+        source: 'join-approved',
+      },
+      { subscribed: true, name: 'approval-B' },
+    );
+    releaseFirstSave();
+
+    await expect(Promise.all([saveA, saveC])).resolves.toEqual([undefined, undefined]);
+    await expect(approvalB).rejects.toThrow('approval B save failed after write');
+    expect(subscriptionRows.get(contextGraphId)).toMatchObject({ name: 'ordinary-C' });
+    expect(membershipRows.size).toBe(0);
   });
 });

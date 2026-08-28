@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import type { NetworkIdV1 } from '../src/index.js';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -6,6 +6,7 @@ import {
   LegacyKnowledgeAssetReadOnlyError,
   MAX_KNOWLEDGE_ASSET_NUMBER,
   MemoryLayer,
+  assertCanonicalDeterministicUalV1,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   parseDeterministicKnowledgeAssetUal,
@@ -34,12 +35,34 @@ describe('KA content scope', () => {
     });
   });
 
+  it('asserts one canonical deterministic UAL and returns every identity part', () => {
+    const parts = assertCanonicalDeterministicUalV1(CANONICAL_UAL);
+    expect(parts).toEqual({
+      ual: CANONICAL_UAL,
+      chainId: 'base:8453',
+      agentAddress: '0x70997970c51812dc3a010c7d01b50e0d17dc79c8',
+      kaNumber: '7',
+    });
+    expectTypeOf(parts.chainId).toEqualTypeOf<NetworkIdV1>();
+    expect(() => assertCanonicalDeterministicUalV1(UAL)).toThrow(/canonical form/);
+    expect(() => assertCanonicalDeterministicUalV1(
+      'did:dkg:base%2F8453/0x70997970c51812dc3a010c7d01b50e0d17dc79c8/7',
+    )).toThrow(/networkId grammar/);
+  });
+
   it('rejects KA numbers outside the uint96 on-chain identity domain', () => {
     const tooLarge = 1n << 96n;
     const ual = `did:dkg:base:8453/0x70997970c51812dc3a010C7d01b50e0d17dc79C8/${tooLarge}`;
 
     expect(() => parseDeterministicKnowledgeAssetUal(ual))
       .toThrow(/packed uint96 identity domain/);
+  });
+
+  it('rejects oversized deterministic UAL components before numeric parsing', () => {
+    const oversizedNumber = '9'.repeat(1_000_000);
+    const ual = `did:dkg:base:8453/0x70997970c51812dc3a010c7d01b50e0d17dc79c8/${oversizedNumber}`;
+
+    expect(() => assertCanonicalDeterministicUalV1(ual)).toThrow(/UAL exceeds/);
   });
 
   it('canonically unpacks rootless ids and rejects legacy or out-of-range ids', () => {

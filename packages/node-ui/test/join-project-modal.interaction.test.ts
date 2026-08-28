@@ -83,6 +83,7 @@ describe('JoinProjectModal public subscription interaction', () => {
 
     subscribeToContextGraphMock.mockResolvedValue({
       subscribed: 'open-project',
+      syncMode: 'on-demand',
       catchup: { status: 'queued', jobId: 'catchup-1' },
     });
     fetchContextGraphsMock.mockResolvedValue({
@@ -148,7 +149,9 @@ describe('JoinProjectModal public subscription interaction', () => {
     await act(async () => { primary.click(); });
     await flush();
 
-    expect(subscribeToContextGraphMock).toHaveBeenCalledWith('open-project');
+    expect(subscribeToContextGraphMock).toHaveBeenCalledWith('open-project', {
+      syncMode: 'on-demand',
+    });
     expect(fetchContextGraphsMock).toHaveBeenCalled();
     expect(signJoinRequestMock).not.toHaveBeenCalled();
     expect(submitJoinRequestMock).not.toHaveBeenCalled();
@@ -167,11 +170,30 @@ describe('JoinProjectModal public subscription interaction', () => {
     await flush();
 
     expect(connectToPeerIdWithTimeoutMock).toHaveBeenCalledWith(curatorPeerId);
-    expect(subscribeToContextGraphMock).toHaveBeenCalledWith('open-project');
+    expect(subscribeToContextGraphMock).toHaveBeenCalledWith('open-project', {
+      syncMode: 'on-demand',
+    });
     expect(connectToPeerIdWithTimeoutMock.mock.invocationCallOrder[0]).toBeLessThan(
       subscribeToContextGraphMock.mock.invocationCallOrder[0],
     );
     expect(signJoinRequestMock).not.toHaveBeenCalled();
     expect(submitJoinRequestMock).not.toHaveBeenCalled();
+  });
+
+  it('makes restart-durable synchronization an explicit public-graph choice', async () => {
+    const { container } = await renderModal('open-project');
+    const keepSynced = container.querySelector(
+      'input[aria-label="Keep this Context Graph synchronized after restart"]',
+    ) as HTMLInputElement;
+    expect(keepSynced.checked).toBe(false);
+
+    await act(async () => { keepSynced.click(); });
+    const primary = container.querySelector('.v10-modal-btn.primary') as HTMLButtonElement;
+    await act(async () => { primary.click(); });
+    await flush();
+
+    expect(subscribeToContextGraphMock).toHaveBeenCalledWith('open-project', {
+      syncMode: 'always-on',
+    });
   });
 });

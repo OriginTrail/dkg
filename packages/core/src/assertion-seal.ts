@@ -28,6 +28,7 @@ import {
   parseDeterministicKnowledgeAssetUal,
 } from './ka-content-scope.js';
 import { parseContextGraphAssertionUri } from './constants.js';
+import { canonicalizeAssertionSealXsdDateTimeValue } from './xsd-date-time.js';
 
 const ONT = 'http://dkg.io/ontology/';
 
@@ -713,7 +714,21 @@ function dateTimeLiteralToValue(literal: string): string {
     literal.match(/^"([^"]+)"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/) ??
     literal.match(/^"([^"]+)"$/);
   if (!m) throw new Error(`Invalid xsd:dateTime literal: ${literal}`);
-  return m[1];
+  return canonicalizeAssertionSealDateTimeValue(m[1]);
+}
+
+/**
+ * RDF stores may canonicalize an xsd:dateTime lexical value while preserving
+ * its value (for example, `.000Z` becomes `Z`). Normalize the bounded UTC
+ * subset accepted for assertion seals at the RDF parse boundary so every
+ * AssertionSeal consumer sees exact millisecond bytes.
+ */
+function canonicalizeAssertionSealDateTimeValue(value: string): string {
+  const canonical = canonicalizeAssertionSealXsdDateTimeValue(value);
+  if (canonical === null) {
+    throw new Error(`Invalid assertion seal xsd:dateTime value: ${value}`);
+  }
+  return canonical;
 }
 
 function stringLiteralToValue(literal: string): string {

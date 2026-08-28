@@ -1,6 +1,7 @@
 export {
   type Quad,
   type TripleStore,
+  type TripleStoreDecorator,
   type QueryResult,
   type QueryOptions,
   type StoreWorkPriority,
@@ -14,6 +15,7 @@ export {
   type UpdateOptions,
   type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
+  findTripleStoreCapability,
   createTripleStore,
   tryUpdateWithTouchedGraphs,
   tryReplaceGraphAtomically,
@@ -51,7 +53,26 @@ export {
   type StorePrioritySchedulerOptions,
   type StorePriorityQueueLimits,
   type StoreSchedulerBusyReason,
+  type StoreSchedulerOperationMetadata,
+  type StoreSchedulerBusyErrorOptions,
 } from './store-priority-scheduler.js';
+export {
+  STORE_OPERATION_TIMEOUT_CODE,
+  StoreOperationTimeoutError,
+  isStoreOperationTimeoutError,
+  type StoreOperationTimeoutErrorOptions,
+  type StoreOperationTimeoutErrorLike,
+} from './store-operation-timeout.js';
+export {
+  STORE_OPERATION_OUTCOME_TAG,
+  STORE_OPERATIONS,
+  hasStoreOperationOutcome,
+  isStoreOperation,
+  type StoreOperation,
+  type StoreOperationOutcome,
+  type StoreOperationOutcomeTagged,
+  type StoreOperationOutcomeErrorLike,
+} from './store-operation-outcome.js';
 export {
   EXTERNAL_LITERAL_REF_DATATYPE,
   SHARED_MEMORY_GRAPH_SUFFIX,
@@ -83,7 +104,12 @@ export {
 export {
   GraphWriteGenTracker,
   asGraphWriteGenSource,
+  asGraphWriteRevisionSource,
   type GraphWriteGenSource,
+  type GraphWriteLifecycle,
+  type GraphWriteRevision,
+  type GraphWriteRevisionSource,
+  type GraphWriteScope,
 } from './graph-write-gen.js';
 export {
   ExactGraphReadError,
@@ -110,9 +136,14 @@ export {
 } from './adapters/blazegraph.js';
 export {
   SparqlHttpStore,
+  DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
   type SparqlHttpStoreOptions,
   type SparqlHttpQueryOptions,
   type SparqlHttpSlowQueryEvent,
+  SparqlHttpResponseError,
+  isSparqlHttpResponseError,
+  SPARQL_HTTP_RESPONSE_ERROR_CODE,
+  type SparqlHttpResponseErrorLike,
 } from './adapters/sparql-http.js';
 export {
   ContextGraphManager,
@@ -143,6 +174,16 @@ export {
   type KnowledgeAssetPrivateReadOptions,
 } from './private-store.js';
 export { LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from './local-trusted-controls.js';
+// #2079 — node-local memo of an already-verified SWM assertion graph. Read only
+// AFTER a count gate has matched; see the module doc for why the count cannot
+// be dropped.
+export {
+  SWM_MATERIALIZATION_WITNESS_GRAPH,
+  swmMaterializationWitnessSubject,
+  readSwmMaterializationWitness,
+  writeSwmMaterializationWitness,
+  invalidateSwmMaterializationWitness,
+} from './swm-materialization-witness.js';
 
 // Side-effect: register built-in adapters
 import './adapters/oxigraph.js';

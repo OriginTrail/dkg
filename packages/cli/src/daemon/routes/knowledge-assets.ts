@@ -39,6 +39,8 @@ import {
   isWritableQuad,
   validateQuadObjectTerms,
   respondIfReconcileUnavailable,
+  respondIfStoreUnavailable,
+  classifyStoreUnavailable,
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
   validateWritableQuadLiteralSizes,
@@ -73,9 +75,15 @@ import {
   isSameAgentAddress,
   scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
-import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
+import { AsyncLiftJobConflictError, LiftJobPendingChainProofError, PromoteJobConflictError, isKnowledgeAssetWorkspaceHeadCorruptError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
-import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
+import {
+  validateAssertionName,
+  contextGraphAssertionUri,
+  AMBIGUOUS_ASSERTION_AUTHOR_CODE,
+  ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+} from "@origintrail-official/dkg-core";
 import {
   formatFinalizedPublishOptionError,
   parseHttpFinalizedPublishOptions,
@@ -165,11 +173,39 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
  * the response) when it handled the error, `false` otherwise.
  */
 function respondAmbiguousAssertionAuthor(res: RequestContext["res"], e: any): boolean {
-  if (e?.code !== "AMBIGUOUS_ASSERTION_AUTHOR") return false;
+  if (e?.code !== AMBIGUOUS_ASSERTION_AUTHOR_CODE) return false;
   jsonResponse(res, 409, {
-    code: "AMBIGUOUS_ASSERTION_AUTHOR",
+    code: AMBIGUOUS_ASSERTION_AUTHOR_CODE,
     error: e.message ?? String(e),
     candidates: e.candidates ?? [],
+  });
+  return true;
+}
+
+/**
+ * GH#1786 — author-selection outcomes that are permanent, caller-actionable
+ * state rather than server faults. Unmapped they would fall through to a generic
+ * 500 on both publish lanes; they are answered here, and are matched BEFORE the
+ * precondition / message-keyed branches so a future reword of either message
+ * cannot be captured by those looser predicates.
+ *
+ *  - `ASSERTION_AUTHOR_NOT_RESIDENT`: the selected author has no finalized
+ *    assertion at this coordinate. Echoes the resident `candidates` so the client
+ *    can retry without a second round-trip.
+ *  - `PUBLISH_AUTHOR_NOT_CUSTODIAL`: the selected author's KA needs an UPDATE,
+ *    which the node cannot re-sign without that author's custodial key.
+ */
+function respondAuthorSelectionError(res: RequestContext["res"], e: any): boolean {
+  if (
+    e?.code !== ASSERTION_AUTHOR_NOT_RESIDENT_CODE
+    && e?.code !== PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
+  ) {
+    return false;
+  }
+  jsonResponse(res, 409, {
+    code: e.code,
+    error: e.message ?? String(e),
+    ...(e.candidates ? { candidates: e.candidates } : {}),
   });
   return true;
 }
@@ -192,6 +228,7 @@ function respondAssertionError(res: RequestContext["res"], e: any): void {
     jsonResponse(res, 413, payloadTooLargeResponseBody(e));
     return;
   }
+  if (respondIfStoreUnavailable(res, e)) return;
   if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
     jsonResponse(res, 409, {
       error: e.message,
@@ -221,6 +258,19 @@ function respondAssertionError(res: RequestContext["res"], e: any): void {
       code: "CURATOR_REJECTED",
       curatorDelivery: "rejected",
       contextGraphId: e.contextGraphId,
+    });
+    return;
+  }
+  // GH#1759 — the draft has no sealable content (no quads at all, or only
+  // reserved-namespace subjects that are filtered out before SWM). That is a
+  // client precondition the caller can fix by writing a quad, not a server
+  // fault, so it gets the same actionable 409 the rest of this route family
+  // uses rather than an opaque 500. Code-keyed, so the mapping does not drift
+  // when the engine's wording changes.
+  if (e?.code === "ASSERTION_EMPTY") {
+    jsonResponse(res, 409, {
+      error: e.message,
+      code: "ASSERTION_EMPTY",
     });
     return;
   }
@@ -605,6 +655,7 @@ function resolveInlineVmPublishOptions(
   source: Record<string, unknown>,
 ): NormalizedFinalizedPublishOptions | null {
   if (!validateFinalizedAssertionPublishShape(source, ctx.res)) return null;
+  if (!rejectSelectedAuthorOnCreate(ctx, source)) return null;
   return resolveFinalizedPublishOptions(ctx, source);
 }
 
@@ -616,8 +667,67 @@ function resolveStandaloneVmPublishOptions(
   const raw = source.options;
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     if (!validateFinalizedAssertionPublishShape(raw as Record<string, unknown>, ctx.res)) return null;
+    // GH#1786 — the author selector is a TOP-LEVEL field. `parseHttpFinalizedPublishOptions`
+    // ignores unknown keys, so a nested one would be silently dropped and the publish would
+    // resolve the author as if nothing was selected — spending real TRAC/gas on the wrong
+    // author. Fail closed instead of no-op, matching this file's both-positions convention.
+    if ((raw as Record<string, unknown>)[SELECTED_AUTHOR_FIELD] !== undefined) {
+      jsonResponse(ctx.res, 400, {
+        error:
+          `"${SELECTED_AUTHOR_FIELD}" must be supplied at the top level of the request body, not inside "options".`,
+      });
+      return null;
+    }
   }
   return resolveFinalizedPublishOptions(ctx, raw);
+}
+
+const SELECTED_AUTHOR_FIELD = "selectedAuthorAgentAddress";
+
+/**
+ * GH#1786 — read + validate the resident-author selector. Distinct from the
+ * rejected `authorAgentAddress` (which would OVERRIDE authorship — the seal
+ * already encodes the author): this only SELECTS among authors who already have
+ * a finalized assertion at this coordinate, so a client can act on a
+ * 409 `AMBIGUOUS_ASSERTION_AUTHOR`. Returns `{ ok: false }` after having written
+ * a 400 (caller must return).
+ */
+function resolveSelectedAuthorAgentAddress(
+  ctx: RequestContext,
+  source: Record<string, unknown>,
+): { ok: true; value?: string } | { ok: false } {
+  const raw = source[SELECTED_AUTHOR_FIELD];
+  // Only `undefined` counts as absent. A PRESENT `null` (a common client
+  // serialization of "nothing selected") must fail closed like any other malformed
+  // value — treating it as absent would fall back to normal author resolution and
+  // could publish a different author with 200 instead of a request-shape error.
+  if (raw === undefined) return { ok: true };
+  if (typeof raw !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(raw)) {
+    jsonResponse(ctx.res, 400, {
+      error: `"${SELECTED_AUTHOR_FIELD}" must be a 0x-prefixed 20-byte EVM address`,
+    });
+    return { ok: false };
+  }
+  return { ok: true, value: raw };
+}
+
+/**
+ * GH#1786 — the create route publishes the KA it just created, whose author is
+ * fixed by the create itself, so selecting a foreign resident author there is
+ * contradictory rather than merely a no-op. Rejected in BOTH positions because
+ * the create handler reads only named top-level keys and would otherwise never
+ * see it.
+ */
+function rejectSelectedAuthorOnCreate(
+  ctx: RequestContext,
+  source: Record<string, unknown>,
+): boolean {
+  if (source[SELECTED_AUTHOR_FIELD] === undefined) return true;
+  jsonResponse(ctx.res, 400, {
+    error:
+      `"${SELECTED_AUTHOR_FIELD}" is not accepted when creating a knowledge asset — the created assertion's author is the publish author. Use POST /api/knowledge-assets/:name/vm/publish to select among resident authors.`,
+  });
+  return false;
 }
 
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
@@ -886,6 +996,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         error: '"authorAgentAddress", "preSignedAuthorAttestation", and "schemeVersion" require non-empty "quads" with finalize !== false',
       });
     }
+    // GH#1786 — the create body's top level is not otherwise inspected for this field
+    // (only named keys are destructured), so without this a top-level selector here
+    // would be silently ignored while the KA published under the created author.
+    if (!rejectSelectedAuthorOnCreate(ctx, parsed)) return;
     const finalizeOptions = shouldFinalize
       ? resolveFinalizeOptions(
           { subGraphName, authorAgentAddress, preSignedAuthorAttestation, schemeVersion },
@@ -952,6 +1066,28 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       }
 
       const errors: Array<{ phase: string; error: string }> = [];
+      const respondWithPartialStoreFailure = (
+        error: unknown,
+        phase: 'swm-share' | 'vm-publish',
+      ): boolean => {
+        const classified = classifyStoreUnavailable(error);
+        if (!classified) return false;
+        jsonResponse(
+          res,
+          503,
+          {
+            created: true,
+            ...result,
+            phase,
+            ...classified.body,
+            retryAction: 'retry_same_knowledge_asset',
+            retryKnowledgeAssetName: name,
+          },
+          undefined,
+          { 'Retry-After': '1' },
+        );
+        return true;
+      };
       if (alsoShareSwm === true) {
         try {
           // Carry the same resolved author into the share. The asset is already
@@ -977,6 +1113,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             recordActivityAndNotify(ctx, { contextGraphId: resolvedContextGraphId, kind: "promoted", actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
           }
         } catch (e: any) {
+          if (respondWithPartialStoreFailure(e, 'swm-share')) return;
           errors.push({ phase: "swm-share", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
       }
@@ -1009,6 +1146,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           }
           recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
         } catch (e: any) {
+          if (respondWithPartialStoreFailure(e, 'vm-publish')) return;
           errors.push({ phase: "vm-publish", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
       }
@@ -1021,6 +1159,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (e?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
       }
+      if (respondIfStoreUnavailable(res, e)) return;
       // Transient KA-number-floor reconcile failure (rate-limited RPC) -> 503.
       if (respondIfReconcileUnavailable(res, e)) return;
       return jsonResponse(res, 500, { error: e?.message ?? String(e) });
@@ -1434,10 +1573,15 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
         const opts = resolveStandaloneVmPublishOptions(ctx, parsed);
         if (opts === null) return;
+        const asyncSelectedAuthor = resolveSelectedAuthorAgentAddress(ctx, parsed);
+        if (!asyncSelectedAuthor.ok) return;
         const publishOptions = opts;
         const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
           ...(subGraphName ? { subGraphName } : {}),
           ...publishCallerHintLane(writePreflightCallerAgentAddress),
+          ...(asyncSelectedAuthor.value !== undefined
+            ? { selectedAuthorAgentAddress: asyncSelectedAuthor.value }
+            : {}),
           ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
           ...(publishOptions.clearSharedMemoryAfter !== undefined
             ? { clearSharedMemoryAfter: publishOptions.clearSharedMemoryAfter }
@@ -1447,7 +1591,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             : {}),
         });
         await agent.preflightKnowledgeAssetVmPublishSnapshot(intent);
-        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent);
+        // 🔴 3824484639 — record WHO admitted this job, for authorization only. `requestAgentAddress`
+        // is always resolvable (a node-level token maps to the default owner agent), unlike the
+        // author-resolution hint, which is deliberately absent for node tokens — authorizing on
+        // that left every node-token job unable to use the force-clear the daemon advertises to it.
+        // Kept separate from `callerAgentAddress` so author selection is untouched.
+        // Admission travels BESIDE the request (🟡 3824743779), never inside it: the operation
+        // payload that execution and recovery act on carries no authorization principal.
+        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent, {
+          admittedByAgentAddress: requestAgentAddress,
+        });
         return jsonResponse(res, 202, {
           jobId,
           status: "accepted",
@@ -1461,6 +1614,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           privateTripleCount: intent.privateTripleCount,
           sealMerkleRoot: intent.sealMerkleRoot,
           intentKey: intent.intentKey,
+          // GH#1786 — echo the RESOLVED author so a client can verify which author
+          // will be published before the job runs, and can detect a daemon that
+          // ignored a supplied selector (the sync 200 body already echoes it).
+          ...(intent.agentAddress ? { agentAddress: intent.agentAddress } : {}),
           ...(subGraphName ? { subGraphName } : {}),
         });
       } catch (err: any) {
@@ -1470,12 +1627,56 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             existingJobId: err.existingJobId,
           });
         }
+        // GH#2270 — admission refused to republish a job that may already have sent a
+        // transaction. Deliberately NOT the 409 below: nothing is wrong with the client's
+        // request, and the job KEEPS its lifecycle subject (`existingJobId`).
+        //
+        // PR #2300 r1 (🟡 3809054821) — `retryable` is JOB-SPECIFIC, carried on the error from
+        // the policy module's hasAutomaticRecoveryExit: `true` means an automatic lane exists
+        // that can move THIS job (the proof-first dispatcher re-checks it every recover() tick —
+        // canonical recognition, or the create-only absence release), so re-submitting converges
+        // without an operator; it is still not a deadline — while the chain stays silent the 503
+        // keeps coming. `false` means the record has no automatic exit (a legacy no-nonce create,
+        // an update with no formable recognition question): retrying will 503 forever, and the
+        // by-id clear is the only move.
+        if (err instanceof LiftJobPendingChainProofError) {
+          return jsonResponse(res, 503, {
+            code: err.code,
+            error: `${err.message}. ${err.retryable
+              ? 'Chain recovery re-checks this job every tick and releases it once the chain can '
+                + 'account for the transaction: if it mined, recovery finalizes this job; if it is '
+                + 'provably absent and this job may safely re-run, recovery puts it back on the '
+                + 'queue. A dropped transaction on a job recovery may not re-run blind stays held '
+                + 'until you check it yourself and clear the job with '
+              : 'This job\'s record gives chain recovery no automatic exit (no provable absence '
+                + 'and no formable recognition), so retrying will not release it. Check the '
+                + 'transaction yourself, then clear the job with '
+            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true} — which the agent that ENQUEUED that job must run, since the override is scoped to its admission lane.`,
+            retryable: err.retryable,
+            existingJobId: err.existingJobId,
+          });
+        }
         if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {
           return jsonResponse(res, 409, { code: err.code, error: err.message ?? String(err) });
+        }
+        // GH#2273 — a multi-valued SWM head now fails closed in the resolver. That is
+        // transient SERVER-side corruption the sync repair heals, not a stale client
+        // intent, so it must not read as the 409 above (the client would re-share for
+        // nothing) or fall through to a generic 500: 503 + retryable tells the caller to
+        // retry the same enqueue after catch-up converges the head.
+        if (isKnowledgeAssetWorkspaceHeadCorruptError(err)) {
+          return jsonResponse(res, 503, {
+            code: err.code,
+            error: err.message ?? String(err),
+            retryable: true,
+          });
         }
         // GH#1778 — several authors share this KA name; the caller must
         // disambiguate. Surface the candidate authors so the UI/CLI can pick.
         if (respondAmbiguousAssertionAuthor(res, err)) return;
+        // GH#1786 — must precede the message-keyed 400 below, which would otherwise
+        // capture any author-selection message containing "Invalid"/"must be".
+        if (respondAuthorSelectionError(res, err)) return;
         if (
           err.message?.includes("required") ||
           err.message?.includes("Invalid") ||
@@ -1508,7 +1709,18 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // transparently register and retry (idempotent). All other errors
         // propagate to the precondition/500 mapping below unchanged.
         let pub: FinalizedPublishResult;
-        const publishStorageLane = publishCallerHintLane(writePreflightCallerAgentAddress);
+        const selectedAuthor = resolveSelectedAuthorAgentAddress(ctx, parsed);
+        if (!selectedAuthor.ok) return;
+        // GH#1786 — the selector MUST live in this shared lane object, not at a call
+        // site: it is spread into BOTH the first publish and the CG-registration
+        // retry below, and the retry re-runs author resolution from scratch. A
+        // per-call-site key would be dropped on the retry and publish the wrong
+        // author with HTTP 200 and real spend (the unregistered-CG first publish is
+        // exactly the curator's first publish of a member KA).
+        const publishStorageLane = {
+          ...publishCallerHintLane(writePreflightCallerAgentAddress),
+          ...(selectedAuthor.value !== undefined ? { selectedAuthorAgentAddress: selectedAuthor.value } : {}),
+        };
         try {
           pub = await agent.publishFromFinalizedAssertion(contextGraphId, name, { subGraphName, ...opts, ...publishStorageLane });
         } catch (firstErr: any) {
@@ -1569,6 +1781,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // #1116 (round 9): PUBLISH_NOT_FULL_SHARE — the marker gate (a publish
         // requires a complete full share resident in SWM) is also a pre-chain
         // caller precondition; map it to the same 409 (code-first).
+        // GH#1786 — must precede the precondition branch below, which would otherwise
+        // relabel an author-selection failure whose message happens to contain
+        // "is not finalized" as a generic VM_PUBLISH_PRECONDITION.
+        if (respondAuthorSelectionError(res, e)) return;
+        if (respondIfStoreUnavailable(res, e)) return;
         if (e?.code === "PUBLISH_NOT_FULL_SHARE" || /is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {
           return jsonResponse(res, 409, { code: e?.code === "PUBLISH_NOT_FULL_SHARE" ? "PUBLISH_NOT_FULL_SHARE" : "VM_PUBLISH_PRECONDITION", error: msg });
         }

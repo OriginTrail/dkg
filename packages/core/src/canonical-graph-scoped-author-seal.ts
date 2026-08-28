@@ -26,7 +26,8 @@ import {
 } from './canonical-json.js';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
-  parseDeterministicKnowledgeAssetUal,
+  assertCanonicalDeterministicUalV1 as assertSharedCanonicalDeterministicUalV1,
+  type CanonicalDeterministicUalV1,
 } from './ka-content-scope.js';
 import { isSafeIri } from './sparql-safe.js';
 import {
@@ -41,13 +42,17 @@ import {
   type EvmAddressV1,
   type KaIdV1,
 } from './sync-wire-scalars.js';
-import { assertExactKeys, isPlainRecord } from './sync-wire-objects.js';
+import {
+  assertExactKeys,
+  isPlainRecord,
+  snapshotExactDataRecord,
+} from './sync-wire-objects.js';
+import { canonicalizeAuthorSealStoreXsdDateTimeValue } from './xsd-date-time.js';
 
 declare const HEX_32_V1_BRAND: unique symbol;
 declare const POSITIVE_DECIMAL_U64_V1_BRAND: unique symbol;
 declare const SEAL_TRIPLE_COUNT_V1_BRAND: unique symbol;
 declare const CANONICAL_ISO_UTC_MILLIS_V1_BRAND: unique symbol;
-declare const CANONICAL_DETERMINISTIC_UAL_V1_BRAND: unique symbol;
 
 export type Hex32V1 = string & { readonly [HEX_32_V1_BRAND]: true };
 export type PositiveDecimalU64V1 = DecimalU64V1 & {
@@ -59,9 +64,7 @@ export type SealTripleCountV1 = DecimalU64V1 & {
 export type CanonicalIsoUtcMillisV1 = string & {
   readonly [CANONICAL_ISO_UTC_MILLIS_V1_BRAND]: true;
 };
-export type CanonicalDeterministicUalV1 = string & {
-  readonly [CANONICAL_DETERMINISTIC_UAL_V1_BRAND]: true;
-};
+export type { CanonicalDeterministicUalV1 } from './ka-content-scope.js';
 
 export const CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_DIGEST_DOMAIN_V1 =
   'dkg-ka-author-seal-v1\n' as const;
@@ -102,6 +105,17 @@ const PRIVATE_ROOT_PREDICATE = ASSERTION_SEAL_PREDICATES.PRIVATE_MERKLE_ROOT;
 const ALLOWED_PREDICATES = new Set<string>([
   ...REQUIRED_PREDICATES,
   PRIVATE_ROOT_PREDICATE,
+]);
+
+/**
+ * Store-row predicates whose object is a bare EVM address string literal. The
+ * deployed finalizer (`buildAssertionSealQuads`) persists `ethers.getAddress`
+ * output verbatim, so honest seal rows can carry EIP-55 checksummed addresses;
+ * these are canonicalized to the lowercase wire form at the store boundary.
+ */
+const ADDRESS_PREDICATES = new Set<string>([
+  ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS,
+  ASSERTION_SEAL_PREDICATES.ASSERTED_AT_KAV10_ADDRESS,
 ]);
 
 export interface CanonicalGraphScopedAuthorSealV1 {
@@ -251,7 +265,7 @@ export function assertCanonicalGraphScopedAuthorSealV1(
   if (!isPlainRecord(payload)) {
     fail('canonical-seal-schema', 'canonical author seal must be a plain JSON object');
   }
-  assertClosedKeys(payload, [
+  const sealedPayload = snapshotClosedKeys(payload, [
     'assertedAtChainId',
     'assertedAtKav10Address',
     'assertionFinalizedAt',
@@ -269,37 +283,51 @@ export function assertCanonicalGraphScopedAuthorSealV1(
     'reservedKaId',
   ], 'canonical graph-scoped author seal');
 
+  // Preserve the outer wire-envelope limit as the first failure for hostile
+  // oversized scalar input. The snapshot above guarantees this scan cannot
+  // invoke accessors or observe a field twice.
+  rejectOversizedPayloadScalars(sealedPayload);
+
   assertSealScalar(() => assertCanonicalDigest(
-    payload.assertionMerkleRoot,
+    sealedPayload.assertionMerkleRoot,
     'assertionMerkleRoot',
   ));
-  assertSealScalar(() => assertCanonicalEvmAddress(payload.authorAddress, 'authorAddress'));
-  assertHex32V1(payload.authorAttestationR, 'authorAttestationR');
-  assertHex32V1(payload.authorAttestationVS, 'authorAttestationVS');
-  if (payload.authorSchemeVersion !== '1') {
+  assertSealScalar(() => assertCanonicalEvmAddress(sealedPayload.authorAddress, 'authorAddress'));
+  assertHex32V1(sealedPayload.authorAttestationR, 'authorAttestationR');
+  assertHex32V1(sealedPayload.authorAttestationVS, 'authorAttestationVS');
+  if (sealedPayload.authorSchemeVersion !== '1') {
     fail('canonical-seal-schema', 'authorSchemeVersion must be the exact string "1"');
   }
-  assertSealScalar(() => assertCanonicalChainId(payload.assertedAtChainId, 'assertedAtChainId'));
+  assertSealScalar(() => assertCanonicalChainId(
+    sealedPayload.assertedAtChainId,
+    'assertedAtChainId',
+  ));
   assertSealScalar(() => assertCanonicalEvmAddress(
-    payload.assertedAtKav10Address,
+    sealedPayload.assertedAtKav10Address,
     'assertedAtKav10Address',
   ));
-  const reservedKaId = assertSealU256(payload.reservedKaId, 'reservedKaId');
-  assertCanonicalIsoUtcMillisV1(payload.assertionFinalizedAt);
-  if (payload.contentScopeVersion !== '2') {
+  const reservedKaId = assertSealU256(sealedPayload.reservedKaId, 'reservedKaId');
+  assertCanonicalIsoUtcMillisV1(sealedPayload.assertionFinalizedAt);
+  if (sealedPayload.contentScopeVersion !== '2') {
     fail('canonical-seal-schema', 'contentScopeVersion must be the exact string "2"');
   }
-  const ual = assertCanonicalDeterministicUalV1(payload.kaUal);
-  const assertionVersion = assertSealU64(payload.assertionVersion, 'assertionVersion');
+  const ual = assertCanonicalSealDeterministicUalV1(sealedPayload.kaUal);
+  const assertionVersion = assertSealU64(sealedPayload.assertionVersion, 'assertionVersion');
   if (assertionVersion < 1n) {
     fail('canonical-seal-scalar', 'assertionVersion must be in 1..2^64-1');
   }
-  const publicCount = assertSealTripleCountV1(payload.publicTripleCount, 'publicTripleCount');
-  const privateCount = assertSealTripleCountV1(payload.privateTripleCount, 'privateTripleCount');
+  const publicCount = assertSealTripleCountV1(
+    sealedPayload.publicTripleCount,
+    'publicTripleCount',
+  );
+  const privateCount = assertSealTripleCountV1(
+    sealedPayload.privateTripleCount,
+    'privateTripleCount',
+  );
   if (publicCount + privateCount < 1n) {
     fail('canonical-seal-count', 'publicTripleCount + privateTripleCount must be positive');
   }
-  if (payload.privateMerkleRoot === null) {
+  if (sealedPayload.privateMerkleRoot === null) {
     if (privateCount !== 0n) {
       fail(
         'canonical-seal-private-root',
@@ -307,7 +335,10 @@ export function assertCanonicalGraphScopedAuthorSealV1(
       );
     }
   } else {
-    assertSealScalar(() => assertCanonicalDigest(payload.privateMerkleRoot, 'privateMerkleRoot'));
+    assertSealScalar(() => assertCanonicalDigest(
+      sealedPayload.privateMerkleRoot,
+      'privateMerkleRoot',
+    ));
     if (privateCount === 0n) {
       fail(
         'canonical-seal-private-root',
@@ -316,7 +347,7 @@ export function assertCanonicalGraphScopedAuthorSealV1(
     }
   }
 
-  if (ual.agentAddress !== payload.authorAddress) {
+  if (ual.agentAddress !== sealedPayload.authorAddress) {
     fail('canonical-seal-binding', 'kaUal author must equal authorAddress');
   }
   const packedKaId = (BigInt(ual.agentAddress) << 96n) | BigInt(ual.kaNumber);
@@ -326,7 +357,9 @@ export function assertCanonicalGraphScopedAuthorSealV1(
 
   // The structural domain is intentionally capped even though the frozen field
   // widths currently keep every valid payload well below it.
-  canonicalizePayloadAfterValidation(payload as unknown as CanonicalGraphScopedAuthorSealV1);
+  canonicalizePayloadAfterValidation(
+    sealedPayload as unknown as CanonicalGraphScopedAuthorSealV1,
+  );
 }
 
 export function canonicalizeCanonicalGraphScopedAuthorSealV1(
@@ -590,6 +623,35 @@ export function renderCanonicalAuthorSealStoreRowV1(
 }
 
 /**
+ * Canonicalize the two RDF renderings that supported triple-store adapters
+ * may normalize on read: named-node UALs can be returned as bare IRIs and
+ * xsd:dateTime literals can be returned as an equivalent UTC lexical form.
+ * All other terms remain byte-exact, so this is not a general RDF-equivalence
+ * escape hatch.
+ */
+export function canonicalizeAuthorSealStoreRoundTripRowV1(
+  row: CanonicalGraphScopedAuthorSealRowV1,
+): CanonicalGraphScopedAuthorSealRowV1 {
+  let object = row.object;
+  if (
+    row.predicate === ASSERTION_SEAL_PREDICATES.KA_UAL
+    && !object.startsWith('<')
+    && isSafeIri(object)
+  ) {
+    object = `<${object}>`;
+  } else if (row.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_FINALIZED_AT) {
+    const match = /^"([^"]+)"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/.exec(object);
+    const canonicalInstant = match === null
+      ? null
+      : canonicalizeAuthorSealStoreXsdDateTimeValue(match[1]!);
+    if (canonicalInstant !== null) {
+      object = `${JSON.stringify(canonicalInstant)}^^${XSD_DATE_TIME}`;
+    }
+  }
+  return Object.freeze({ ...row, object });
+}
+
+/**
  * Strict order-independent inverse over one fixed subject and graph. Every
  * predicate is cardinality-checked before the typed payload is materialized.
  * The store adapter must enforce RFC-64's 64 KiB query-response cap before it
@@ -608,7 +670,13 @@ export function decodeCanonicalGraphScopedAuthorSealRowsV1(
     if (!Object.prototype.hasOwnProperty.call(rows, index)) {
       fail('canonical-seal-row-schema', 'canonical author-seal row array must be dense');
     }
-    const current = renderCanonicalAuthorSealStoreRowV1(rows[index]);
+    const rendered = renderCanonicalAuthorSealStoreRowV1(rows[index]);
+    // Canonicalize EVM address literals (the only field the deployed producer
+    // writes non-canonically) to lowercase before parsing and the byte-exact
+    // round-trip; every other RDF term is compared unchanged.
+    const current = ADDRESS_PREDICATES.has(rendered.predicate)
+      ? { ...rendered, object: canonicalizeStoreAddressLiteral(rendered.object) }
+      : rendered;
     if (current.subject !== placement.subject || current.graph !== placement.metaGraph) {
       fail('canonical-seal-row-term', 'author-seal row has the wrong subject or graph');
     }
@@ -769,23 +837,16 @@ function assertCanonicalIsoUtcMillisV1(
   }
 }
 
-function assertCanonicalDeterministicUalV1(value: unknown): {
+function assertCanonicalSealDeterministicUalV1(value: unknown): {
   ual: CanonicalDeterministicUalV1;
   agentAddress: EvmAddressV1;
   kaNumber: string;
 } {
-  if (typeof value !== 'string') {
-    fail('canonical-seal-ual', 'kaUal must be a string');
-  }
   try {
-    const parsed = parseDeterministicKnowledgeAssetUal(value);
-    assertCanonicalEvmAddress(parsed.agentAddress, 'kaUal author');
-    if (parsed.ual !== value) {
-      fail('canonical-seal-ual', 'kaUal must already be in canonical form');
-    }
+    const parsed = assertSharedCanonicalDeterministicUalV1(value);
     return {
-      ual: parsed.ual as CanonicalDeterministicUalV1,
-      agentAddress: parsed.agentAddress as EvmAddressV1,
+      ual: parsed.ual,
+      agentAddress: parsed.agentAddress,
       kaNumber: parsed.kaNumber,
     };
   } catch (cause) {
@@ -830,15 +891,26 @@ function assertSealScalar(operation: () => void): void {
   }
 }
 
-function assertClosedKeys(
+function snapshotClosedKeys<const Keys extends readonly string[]>(
   record: Record<string, unknown>,
-  keys: readonly string[],
+  keys: Keys,
   label: string,
-): void {
+): Readonly<Record<Keys[number], unknown>> {
   try {
-    assertExactKeys(record, keys, label);
+    return snapshotExactDataRecord(record, keys, label);
   } catch (cause) {
     fail('canonical-seal-schema', `${label} has an invalid field set`, cause);
+  }
+}
+
+function rejectOversizedPayloadScalars(record: Readonly<Record<string, unknown>>): void {
+  let scalarBytes = 0;
+  for (const value of Object.values(record)) {
+    if (typeof value !== 'string') continue;
+    scalarBytes += UTF8.encode(value).byteLength;
+    if (scalarBytes > MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1) {
+      fail('canonical-seal-too-large', 'canonical author-seal payload exceeds its v1 bounds');
+    }
   }
 }
 
@@ -966,6 +1038,22 @@ function parsePlainAddressObject(object: string, label: string): string {
   const match = /^"(0x[0-9a-f]{40})"$/.exec(object);
   if (!match) fail('canonical-seal-row-term', `${label} is not the exact plain address term`);
   return match[1];
+}
+
+/**
+ * Fold a store-row EVM address string literal to the canonical lowercase form.
+ *
+ * Honest finalized seals can store EIP-55 checksummed `authorAddress` /
+ * `assertedAtKav10Address` literals because the deployed `buildAssertionSealQuads`
+ * persists `ethers.getAddress` output verbatim. Lowercasing here lets those
+ * existing rows decode to the same canonical payload and seal digest as a
+ * lowercase-stored row, without touching the deployed producer or the canonical
+ * wire schema (which remains lowercase-only). A literal that is not a 20-byte
+ * `0x` address is returned unchanged so the strict term parser still rejects it.
+ */
+function canonicalizeStoreAddressLiteral(object: string): string {
+  const match = /^"0x([0-9a-fA-F]{40})"$/.exec(object);
+  return match ? `"0x${match[1].toLowerCase()}"` : object;
 }
 
 function parseIntegerObject(object: string, label: string): string {

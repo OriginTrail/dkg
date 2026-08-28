@@ -7,6 +7,7 @@ export {
   SqliteChangelogCursorStore,
   SqliteChangelogEraGuard,
   SqliteKaNumberStore,
+  SCHEMA_VERSION,
   // Notifications-pane redesign (V16): activity-digest primitives shared
   // with the daemon's `assertion_activity` emitters + scoped read path.
   ACTIVITY_DIGEST_WINDOW_MS,
@@ -64,7 +65,7 @@ export { LogPushWorker } from './gelf-push-worker.js';
 export type { LogPushWorkerOptions } from './gelf-push-worker.js';
 export { OtlpLogWorker } from './otlp-log-worker.js';
 export type { OtlpLogWorkerOptions } from './otlp-log-worker.js';
-export { ChatMemoryManager } from './chat-memory.js';
+export { ChatMemoryManager, AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION } from './chat-memory.js';
 export type {
   MemoryToolContext,
   MemoryStats,
@@ -79,6 +80,9 @@ export { resolveCapabilities } from './llm/capability-resolver.js';
 export type { LlmConfig, LlmChatRequest, LlmChatMessage, LlmStreamEvent, LlmCompletionResult, LlmCapabilities } from './llm/types.js';
 export {
   initTelemetry, shutdownTelemetry, isTelemetryConfigured,
+  // Flush-only hook for the daemon's terminal shutdown point: exports what has
+  // been recorded while leaving the provider live (shutdownTelemetry does not).
+  flushTelemetry, TERMINAL_FLUSH_BUDGET_MS,
   // Back-compat shims for the pre-#1317 telemetry API (no-ops / legacy config).
   recordGauge, setOperationSpan,
 } from './telemetry.js';

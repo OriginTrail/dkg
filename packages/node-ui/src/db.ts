@@ -10,14 +10,23 @@ import {
   type ProtocolOutboxStore,
   type ContextGraphJoinPolicyRecord,
   parseContextGraphJoinPolicyRecord,
+  DEFAULT_SYNC_CHECKPOINT_TTL_MS,
+  isValidSyncCheckpointEntry,
+  transitionSyncCheckpointManifestOffset,
+  transitionSyncCheckpointOffset,
+  transitionSyncCheckpointResponderSession,
+  withoutSyncCheckpointResponderSession,
+  type DurableManifestDigest,
+  type DurableManifestPrefixDigest,
+  type SyncCheckpointEntry,
 } from '@origintrail-official/dkg-core';
-
+import { RoutineLogRetention } from './routine-log-retention.js';
 export {
   SqliteChainEventCursorStore,
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 31;
+export const SCHEMA_VERSION = 34;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -27,9 +36,9 @@ const SCHEMA_VERSION = 31;
 // operator-driven post-mortem, but the mainnet sync storm proved that time
 // retention alone cannot bound worst-case growth. Operators who want longer
 // retention can override via `setRetentionDays()`; the setting is persisted
-// in the `settings` table and re-read on next boot. Time alone is not a hard
-// size bound during a log storm, so routine info/debug rows also have a count
-// ceiling. Warning/error rows keep the full operator-selected time window.
+// in the `settings` table and re-read on next boot. The daemon no longer writes
+// routine logs to SQLite; the established count cap still bounds compatibility
+// writers while warning/error rows keep the operator-selected time window.
 const DEFAULT_RETENTION_DAYS = 14;
 const LEGACY_IMPLICIT_RETENTION_DAYS = 90;
 const DEFAULT_ROUTINE_LOG_ROW_CAP = 1_000_000;
@@ -221,24 +230,28 @@ export class DashboardDB {
   readonly dataDir: string;
   private retentionDays: number;
   private readonly explicitRetentionDays: boolean;
-  private readonly routineLogRowCap: number;
-  private readonly logVolumePruneBatchRows: number;
+  private readonly routineLogRetention: RoutineLogRetention;
 
   constructor(opts: DashboardDBOptions) {
     this.dataDir = opts.dataDir;
     this.explicitRetentionDays = opts.retentionDays !== undefined;
     this.retentionDays = opts.retentionDays ?? DEFAULT_RETENTION_DAYS;
-    this.routineLogRowCap = Math.max(
+    const routineLogRowCap = Math.max(
       0,
       Math.floor(opts.routineLogRowCap ?? DEFAULT_ROUTINE_LOG_ROW_CAP),
     );
-    this.logVolumePruneBatchRows = Math.max(
+    const logVolumePruneBatchRows = Math.max(
       1,
       Math.floor(opts.logVolumePruneBatchRows ?? DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS),
     );
     this._memoTtlMs = resolveCacheTtlMs(opts.cacheTtlMs);
     const dbPath = join(opts.dataDir, 'node-ui.db');
     this.db = new Database(dbPath);
+    this.routineLogRetention = new RoutineLogRetention(
+      this.db,
+      routineLogRowCap,
+      logVolumePruneBatchRows,
+    );
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     // Cap the persisted WAL file. A PASSIVE autocheckpoint resets WAL
@@ -299,7 +312,7 @@ export class DashboardDB {
           );
       `);
     };
-    const ensureSyncCheckpointResponderSessionColumns = () => {
+    const ensureSyncCheckpointResumeColumns = () => {
       const table = this.db.prepare(`
         SELECT 1 AS found FROM sqlite_master
         WHERE type = 'table' AND name = 'sync_checkpoints'
@@ -315,13 +328,25 @@ export class DashboardDB {
       if (!columns.has('responder_session_expires_at')) {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN responder_session_expires_at INTEGER;`);
       }
+      if (!columns.has('responder_session_offset')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN responder_session_offset INTEGER;`);
+      }
+      if (!columns.has('manifest_digest')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN manifest_digest TEXT;`);
+      }
+      if (!columns.has('manifest_prefix_digest')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN manifest_prefix_digest TEXT;`);
+      }
+      if (!columns.has('terminal')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1));`);
+      }
     };
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
       // but lost an idempotent schema adjunct.
       ensureJoinApprovalRepairMarker();
-      ensureSyncCheckpointResponderSessionColumns();
+      ensureSyncCheckpointResumeColumns();
       ensureJoinPolicyAuditCapTrigger();
       return;
     }
@@ -946,7 +971,13 @@ export class DashboardDB {
           key TEXT PRIMARY KEY,
           offset INTEGER NOT NULL CHECK (offset >= 0),
           updated_at INTEGER NOT NULL,
-          expires_at INTEGER NOT NULL
+          expires_at INTEGER NOT NULL,
+          responder_session_id TEXT,
+          responder_session_expires_at INTEGER,
+          responder_session_offset INTEGER CHECK (responder_session_offset >= 0),
+          manifest_digest TEXT,
+          manifest_prefix_digest TEXT,
+          terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1))
         );
         CREATE INDEX IF NOT EXISTS idx_sync_checkpoints_expires_at
           ON sync_checkpoints(expires_at);
@@ -1191,7 +1222,7 @@ export class DashboardDB {
       // OFFSET pagination is scoped to an immutable responder row list. Keep
       // the opaque responder token beside the verified offset so a requester
       // restart can resume that same list instead of discarding durable work.
-      ensureSyncCheckpointResponderSessionColumns();
+      ensureSyncCheckpointResumeColumns();
     }
     if (version < 31) {
       this.db.exec(`
@@ -1211,6 +1242,41 @@ export class DashboardDB {
         );
       `);
     }
+    if (version < 32) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS selected_vm_reconcile_cursors (
+          deployment_id TEXT NOT NULL CHECK (length(trim(deployment_id)) > 0),
+          context_graph_id TEXT NOT NULL,
+          on_chain_context_graph_id TEXT NOT NULL,
+          name_hash TEXT NOT NULL,
+          watermark INTEGER NOT NULL CHECK (watermark >= 0),
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (deployment_id, context_graph_id, on_chain_context_graph_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_selected_vm_reconcile_cursor_cg
+          ON selected_vm_reconcile_cursors(deployment_id, context_graph_id);
+      `);
+    }
+    if (version < 33) {
+      // A durable DATA offset is reusable only with cryptographic proof of the
+      // canonical META generation and verified descriptor prefix that gave it
+      // meaning. Persist both digests beside the offset/session so production
+      // SQLite checkpoints have the same safety contract as the in-memory
+      // requester store and survive daemon restarts.
+      ensureSyncCheckpointResumeColumns();
+    }
+    if (version < 34) {
+      // The V33 manifest-bound continuation must not share a key with V32,
+      // which interpreted OFFSET as an unverified raw responder coordinate.
+      // Drop every pre-versioned durable DATA row before new code starts using
+      // the `|checkpoint:v2` namespace, so a later rollback also fails closed.
+      ensureSyncCheckpointResumeColumns();
+      this.db.prepare(`
+        DELETE FROM sync_checkpoints
+         WHERE key LIKE '%|durable|data%'
+           AND key NOT LIKE '%|durable|data|checkpoint:v2%'
+      `).run();
+    }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
       this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;
@@ -1229,16 +1295,9 @@ export class DashboardDB {
 
   prune(): void {
     const cutoff = Date.now() - this.retentionDays * 86_400_000;
-    // Count total rows actually deleted across all DELETE statements.
-    // SQLite's per-statement change count is exposed via better-sqlite3's
-    // `Database.run().changes`, but `exec()` returns nothing — for a
-    // proper accounting we'd switch each statement to `prepare/run`. For
-    // the VACUUM gating decision below we only need to know whether
-    // *something* substantial was deleted, so we sample the only table
-    // that actually grows fast in practice: `logs`.
-    const logsDeleted = this.db.prepare(
+    this.db.prepare(
       `DELETE FROM logs WHERE ts < ?`,
-    ).run(cutoff).changes;
+    ).run(cutoff);
     this.db.exec(`DELETE FROM metric_snapshots WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM operation_phases WHERE started_at < ${cutoff}`);
     this.db.exec(`DELETE FROM operations WHERE started_at < ${cutoff}`);
@@ -1271,34 +1330,34 @@ export class DashboardDB {
     this.db.exec(`DELETE FROM message_idempotency WHERE ts < ${messengerCutoff}`);
 
     // Avoid rebuilding an oversized DB at startup while millions of routine
-    // rows are still live. The daemon trims that backlog in bounded batches;
-    // the final batch performs one compacting VACUUM. Databases already under
-    // the cap retain the established time-prune reclamation behaviour.
+    // rows are still live. The independent volume pruner trims only rows above
+    // the published count cap, in bounded batches, and performs the final
+    // compaction. Ambiguous rows below the cap remain untouched.
     if (!this.hasRoutineLogOverflow()) {
-      this.reclaimFreePagesIfNeeded(logsDeleted > LOGS_VACUUM_DELETE_THRESHOLD);
+      this.reclaimFreePagesIfNeeded(false);
     }
 
     // Return the WAL file itself to the OS. journal_size_limit bounds it
     // in steady state, but a TRUNCATE checkpoint here shrinks it promptly
-    // on the prune cadence (~6h) and immediately after the VACUUM above,
-    // which rewrites the whole DB through the WAL and momentarily grows
-    // it. Runs unconditionally — independent of the VACUUM gate — because
-    // an idle node still wants its -wal reclaimed.
+    // on the prune cadence (~6h) and after a cleanup VACUUM, which rewrites
+    // the whole DB through the WAL and momentarily grows it. Runs
+    // unconditionally because an idle node still wants its -wal reclaimed.
     this.truncateWal('prune');
   }
 
   /**
-   * Remove one bounded batch of the oldest routine (non-warning/error) logs.
-   * A count cap complements time retention: a high-rate sync storm can create
-   * millions of rows inside a single day, long before a 14-day cutoff applies.
+   * Remove one bounded batch of the oldest routine (non-warning/error) logs
+   * above the public count cap. The cap is the only ownership-neutral rule we
+   * can safely apply to pre-upgrade rows: historical daemon sink records and
+   * published compatibility API records have identical schemas.
    *
    * Deletion is deliberately incremental so an upgrade does not block node
    * startup on a multi-GB transaction. Once the backlog reaches the cap, one
    * VACUUM returns the accumulated free pages to the OS and the file shrinks.
    */
   pruneLogVolumeBatch(): LogVolumePruneResult {
-    const overflowCutoff = this.routineLogOverflowCutoff();
-    if (overflowCutoff === null) {
+    const batch = this.routineLogRetention.pruneOverflowBatch();
+    if (!batch.hadOverflow) {
       const reclaim = this.reclaimFreePagesIfNeeded(false);
       if (!reclaim.reclaimPending) this.truncateWal('log-volume prune');
       return {
@@ -1311,25 +1370,10 @@ export class DashboardDB {
       };
     }
 
-    const deleted = this.db.prepare(`
-      DELETE FROM logs
-      WHERE id IN (
-        SELECT id
-        FROM logs
-        WHERE id <= @cutoff
-          AND level NOT IN ('warn', 'error')
-        ORDER BY id ASC
-        LIMIT @batchRows
-      )
-    `).run({
-      cutoff: overflowCutoff,
-      batchRows: this.logVolumePruneBatchRows,
-    }).changes;
-
     // If the batch filled, conservatively schedule another tick. An exact-size
     // final batch costs one extra cheap probe before compaction, which is safer
     // than running a second million-row count after every deletion.
-    const hasMore = deleted === this.logVolumePruneBatchRows;
+    const { deleted, filledBatch: hasMore } = batch;
     const reclaim = hasMore
       ? { compacted: false, reclaimPending: false }
       : this.reclaimFreePagesIfNeeded(deleted > LOGS_VACUUM_DELETE_THRESHOLD);
@@ -1346,19 +1390,8 @@ export class DashboardDB {
     };
   }
 
-  private routineLogOverflowCutoff(): number | null {
-    const row = this.db.prepare(`
-      SELECT id
-      FROM logs
-      WHERE level NOT IN ('warn', 'error')
-      ORDER BY id DESC
-      LIMIT 1 OFFSET ?
-    `).get(this.routineLogRowCap) as { id: number } | undefined;
-    return row?.id ?? null;
-  }
-
   private hasRoutineLogOverflow(): boolean {
-    return this.routineLogOverflowCutoff() !== null;
+    return this.routineLogRetention.hasOverflow();
   }
 
   private reclaimFreePagesIfNeeded(force: boolean): {
@@ -1947,6 +1980,39 @@ export class DashboardDB {
     ).run(contextGraphId);
   }
 
+  upsertSelectedVmReconcileCursor(record: SelectedVmReconcileCursorRow): void {
+    this.stmt('upsertSelectedVmReconcileCursor', `
+      INSERT INTO selected_vm_reconcile_cursors (
+        deployment_id, context_graph_id, on_chain_context_graph_id,
+        name_hash, watermark, updated_at
+      ) VALUES (
+        @deployment_id, @context_graph_id, @on_chain_context_graph_id,
+        @name_hash, @watermark, @updated_at
+      )
+      ON CONFLICT(deployment_id, context_graph_id, on_chain_context_graph_id) DO UPDATE SET
+        name_hash = excluded.name_hash,
+        watermark = excluded.watermark,
+        updated_at = excluded.updated_at
+    `).run(record);
+  }
+
+  getSelectedVmReconcileCursor(
+    deploymentId: string,
+    contextGraphId: string,
+    onChainContextGraphId: string,
+  ): SelectedVmReconcileCursorRow | undefined {
+    return this.stmt('getSelectedVmReconcileCursor', `
+      SELECT * FROM selected_vm_reconcile_cursors
+      WHERE deployment_id = ?
+        AND context_graph_id = ?
+        AND on_chain_context_graph_id = ?
+    `).get(
+      deploymentId,
+      contextGraphId,
+      onChainContextGraphId,
+    ) as SelectedVmReconcileCursorRow | undefined;
+  }
+
   // --- Phase F: chain-driven VM reconciliation telemetry ---
 
   /**
@@ -2278,8 +2344,25 @@ export class DashboardDB {
     duration_ms: number;
     error_message: string;
   }): void {
-    this.stmt('failOp', `
-      UPDATE operations SET status = 'error', duration_ms = @duration_ms,
+    this.finishOperation({ ...op, status: 'error' });
+  }
+
+  cancelOperation(op: {
+    operation_id: string;
+    duration_ms: number;
+    error_message: string;
+  }): void {
+    this.finishOperation({ ...op, status: 'cancelled' });
+  }
+
+  finishOperation(op: {
+    operation_id: string;
+    duration_ms: number;
+    error_message: string;
+    status: 'error' | 'cancelled';
+  }): void {
+    this.stmt('finishOperation', `
+      UPDATE operations SET status = @status, duration_ms = @duration_ms,
         error_message = @error_message
       WHERE operation_id = @operation_id AND status = 'in_progress'
     `).run(op);
@@ -2455,8 +2538,22 @@ export class DashboardDB {
   }
 
   failPhase(op: { operation_id: string; phase: string; duration_ms: number; error_message: string }): void {
-    this.stmt('failPhase', `
-      UPDATE operation_phases SET status = 'error', duration_ms = @duration_ms,
+    this.finishPhase({ ...op, status: 'error' });
+  }
+
+  cancelPhase(op: { operation_id: string; phase: string; duration_ms: number; error_message: string }): void {
+    this.finishPhase({ ...op, status: 'cancelled' });
+  }
+
+  finishPhase(op: {
+    operation_id: string;
+    phase: string;
+    duration_ms: number;
+    error_message: string;
+    status: 'error' | 'cancelled';
+  }): void {
+    this.stmt('finishPhase', `
+      UPDATE operation_phases SET status = @status, duration_ms = @duration_ms,
         details = @error_message
       WHERE operation_id = @operation_id AND phase = @phase AND status = 'in_progress'
     `).run(op);
@@ -2518,6 +2615,7 @@ export class DashboardDB {
         COUNT(*) as totalCount,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
         SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errorCount,
+        SUM(CASE WHEN status IN ('success', 'error') THEN 1 ELSE 0 END) as healthCount,
         AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgDurationMs,
         AVG(gas_cost_eth) as avgGasCostEth,
         SUM(gas_cost_eth) as totalGasCostEth,
@@ -2530,7 +2628,9 @@ export class DashboardDB {
       totalCount: summaryRow.totalCount ?? 0,
       successCount: summaryRow.successCount ?? 0,
       errorCount: summaryRow.errorCount ?? 0,
-      successRate: summaryRow.totalCount > 0 ? (summaryRow.successCount ?? 0) / summaryRow.totalCount : 0,
+      successRate: summaryRow.healthCount > 0
+        ? (summaryRow.successCount ?? 0) / summaryRow.healthCount
+        : 0,
       avgDurationMs: summaryRow.avgDurationMs ?? 0,
       avgGasCostEth: summaryRow.avgGasCostEth ?? 0,
       totalGasCostEth: summaryRow.totalGasCostEth ?? 0,
@@ -2547,6 +2647,7 @@ export class DashboardDB {
         (CAST(started_at / ? AS INTEGER) * ?) as bucket,
         COUNT(*) as count,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+        SUM(CASE WHEN status IN ('success', 'error') THEN 1 ELSE 0 END) as healthCount,
         AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgDurationMs,
         AVG(gas_cost_eth) as avgGasCostEth,
         SUM(gas_cost_eth) as totalGasCostEth
@@ -2560,7 +2661,7 @@ export class DashboardDB {
       timeSeries: timeSeries.map((r: any) => ({
         bucket: r.bucket,
         count: r.count,
-        successRate: r.count > 0 ? r.successCount / r.count : 0,
+        successRate: r.healthCount > 0 ? r.successCount / r.healthCount : 0,
         avgDurationMs: r.avgDurationMs ?? 0,
         avgGasCostEth: r.avgGasCostEth ?? 0,
         totalGasCostEth: r.totalGasCostEth ?? 0,
@@ -2583,6 +2684,7 @@ export class DashboardDB {
         COUNT(*) as count,
         AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgMs,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+        SUM(CASE WHEN status IN ('success', 'error') THEN 1 ELSE 0 END) as healthCount,
         SUM(gas_cost_eth) as gasCostEth
       FROM operations WHERE started_at >= ?
       GROUP BY bucket, operation_name ORDER BY bucket
@@ -2605,7 +2707,7 @@ export class DashboardDB {
         return {
           count: r?.count ?? 0,
           avgMs: r?.avgMs ?? 0,
-          successRate: r ? (r.count > 0 ? r.successCount / r.count : 0) : 0,
+          successRate: r ? (r.healthCount > 0 ? r.successCount / r.healthCount : 0) : 0,
           gasCostEth: r?.gasCostEth ?? 0,
         };
       });
@@ -2629,7 +2731,7 @@ export class DashboardDB {
       GROUP BY operation_name ORDER BY total DESC
     `).all(cutoff) as any[]).map(r => ({
       ...r,
-      rate: r.total > 0 ? r.success / r.total : 0,
+      rate: r.success + r.error > 0 ? r.success / (r.success + r.error) : 0,
       avgMs: r.avgMs ?? 0,
     }));
   }
@@ -2962,6 +3064,7 @@ export class DashboardDB {
       module: entry.module,
       message: entry.message,
     });
+    this.routineLogRetention.noteCommittedInsert(entry.level);
   }
 
   /**
@@ -3244,13 +3347,12 @@ export class DashboardDB {
   }
 
   close(): void {
+    if (!this.db.open) return;
     this.db.close();
   }
 }
 
 // --- Sync requester checkpoints (issue #1138 A3) ---
-
-const DEFAULT_SYNC_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class SqliteSyncCheckpointStore {
   private readonly db: Database.Database;
@@ -3266,17 +3368,11 @@ export class SqliteSyncCheckpointStore {
     this.ttlMs = options.ttlMs ?? DEFAULT_SYNC_CHECKPOINT_TTL_MS;
   }
 
-  get(key: string): {
-    offset: number;
-    updatedAtMs: number;
-    expiresAtMs: number;
-    responderSessionId?: string;
-    responderSessionExpiresAtMs?: number;
-  } | undefined {
-    const now = this.clock();
+  private readRow(key: string): SyncCheckpointEntry | undefined {
     const row = this.db.prepare(
       `SELECT offset, updated_at, expires_at,
-              responder_session_id, responder_session_expires_at
+              responder_session_id, responder_session_expires_at, responder_session_offset,
+              manifest_digest, manifest_prefix_digest, terminal
          FROM sync_checkpoints WHERE key = ?`,
     ).get(key) as {
       offset: number;
@@ -3284,43 +3380,128 @@ export class SqliteSyncCheckpointStore {
       expires_at: number;
       responder_session_id: string | null;
       responder_session_expires_at: number | null;
+      responder_session_offset: number | null;
+      manifest_digest: DurableManifestDigest | null;
+      manifest_prefix_digest: DurableManifestPrefixDigest | null;
+      terminal: number;
     } | undefined;
     if (!row) return undefined;
-    if (row.expires_at < now) {
-      this.delete(key);
-      return undefined;
-    }
-    const hasFreshResponderSession = Boolean(row.responder_session_id)
-      && Number.isSafeInteger(row.responder_session_expires_at)
-      && (row.responder_session_expires_at ?? 0) > now;
-    if (row.responder_session_id && !hasFreshResponderSession) {
-      this.clearResponderSession(key);
-    }
     return {
       offset: row.offset,
       updatedAtMs: row.updated_at,
       expiresAtMs: row.expires_at,
-      ...(hasFreshResponderSession
-        ? {
-            responderSessionId: row.responder_session_id!,
-            responderSessionExpiresAtMs: row.responder_session_expires_at!,
-          }
+      ...(row.terminal === 1 ? { terminal: true } : {}),
+      ...(row.manifest_digest ? { manifestDigest: row.manifest_digest } : {}),
+      ...(row.manifest_prefix_digest
+        ? { manifestPrefixDigest: row.manifest_prefix_digest }
+        : {}),
+      // Preserve each nullable session column independently so the shared
+      // validator can distinguish an absent session from a torn/malformed
+      // persisted session. Collapsing a partial row to no session fields would
+      // turn corrupt durable state into an apparently valid ordinary offset.
+      ...(row.responder_session_id !== null
+        ? { responderSessionId: row.responder_session_id }
+        : {}),
+      ...(row.responder_session_expires_at !== null
+        ? { responderSessionExpiresAtMs: row.responder_session_expires_at }
+        : {}),
+      ...(row.responder_session_offset !== null
+        ? { responderSessionOffset: row.responder_session_offset }
         : {}),
     };
   }
 
-  set(key: string, value: number, nowMs = this.clock()): void {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
+  get(key: string, now = this.clock()): SyncCheckpointEntry | undefined {
+    const entry = this.readRow(key);
+    if (!entry) return undefined;
+    if (!isValidSyncCheckpointEntry(entry) || entry.expiresAtMs < now) {
+      this.delete(key);
+      return undefined;
     }
+    if (
+      entry.responderSessionId
+      && (entry.responderSessionExpiresAtMs ?? 0) <= now
+    ) {
+      const withoutExpiredSession = withoutSyncCheckpointResponderSession(entry);
+      this.writeEntry(key, withoutExpiredSession);
+      return withoutExpiredSession;
+    }
+    return entry;
+  }
+
+  private writeEntry(key: string, entry: SyncCheckpointEntry): void {
     this.db.prepare(`
-      INSERT INTO sync_checkpoints (key, offset, updated_at, expires_at)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO sync_checkpoints (
+        key, offset, updated_at, expires_at,
+        responder_session_id, responder_session_expires_at, responder_session_offset,
+        manifest_digest, manifest_prefix_digest, terminal
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET
         offset = excluded.offset,
         updated_at = excluded.updated_at,
-        expires_at = excluded.expires_at
-    `).run(key, value, nowMs, nowMs + this.ttlMs);
+        expires_at = excluded.expires_at,
+        responder_session_id = excluded.responder_session_id,
+        responder_session_expires_at = excluded.responder_session_expires_at,
+        responder_session_offset = excluded.responder_session_offset,
+        manifest_digest = excluded.manifest_digest,
+        manifest_prefix_digest = excluded.manifest_prefix_digest,
+        terminal = excluded.terminal
+    `).run(
+      key,
+      entry.offset,
+      entry.updatedAtMs,
+      entry.expiresAtMs,
+      entry.responderSessionId ?? null,
+      entry.responderSessionExpiresAtMs ?? null,
+      entry.responderSessionOffset ?? null,
+      entry.manifestDigest ?? null,
+      entry.manifestPrefixDigest ?? null,
+      entry.terminal ? 1 : 0,
+    );
+  }
+
+  set(
+    key: string,
+    value: number,
+    nowMs = this.clock(),
+    responderSessionOffset?: number,
+  ): void {
+    const transition = this.db.transaction(() => {
+      this.writeEntry(key, transitionSyncCheckpointOffset({
+        key,
+        existing: this.get(key, nowMs),
+        value,
+        nowMs,
+        ttlMs: this.ttlMs,
+        responderSessionOffset,
+      }));
+    });
+    transition();
+  }
+
+  setManifestBoundOffset(
+    key: string,
+    value: number,
+    manifestDigest: DurableManifestDigest,
+    nowMs = this.clock(),
+    manifestPrefixDigest?: DurableManifestPrefixDigest,
+    terminal = false,
+    responderSessionOffset?: number,
+  ): void {
+    const transition = this.db.transaction(() => {
+      this.writeEntry(key, transitionSyncCheckpointManifestOffset({
+        key,
+        existing: this.get(key, nowMs),
+        value,
+        manifestDigest,
+        nowMs,
+        ttlMs: this.ttlMs,
+        manifestPrefixDigest,
+        terminal,
+        responderSessionOffset,
+      }));
+    });
+    transition();
   }
 
   setResponderSession(
@@ -3328,32 +3509,36 @@ export class SqliteSyncCheckpointStore {
     sessionId: string,
     expiresAtMs: number,
     nowMs = this.clock(),
+    manifestDigest?: DurableManifestDigest,
+    manifestPrefixDigest?: DurableManifestPrefixDigest,
+    responderSessionOffset?: number,
   ): void {
-    if (!sessionId || !Number.isSafeInteger(expiresAtMs)) {
-      throw new Error(`Invalid sync responder session for ${key}`);
-    }
     if (expiresAtMs <= nowMs) {
       this.clearResponderSession(key);
       return;
     }
-    this.db.prepare(`
-      INSERT INTO sync_checkpoints (
-        key, offset, updated_at, expires_at,
-        responder_session_id, responder_session_expires_at
-      ) VALUES (?, 0, ?, ?, ?, ?)
-      ON CONFLICT(key) DO UPDATE SET
-        responder_session_id = excluded.responder_session_id,
-        responder_session_expires_at = excluded.responder_session_expires_at
-    `).run(key, nowMs, nowMs + this.ttlMs, sessionId, expiresAtMs);
+    const transition = this.db.transaction(() => {
+      this.writeEntry(key, transitionSyncCheckpointResponderSession({
+        key,
+        existing: this.get(key, nowMs),
+        sessionId,
+        expiresAtMs,
+        nowMs,
+        ttlMs: this.ttlMs,
+        manifestDigest,
+        manifestPrefixDigest,
+        responderSessionOffset,
+      }));
+    });
+    transition();
   }
 
   clearResponderSession(key: string): void {
-    this.db.prepare(`
-      UPDATE sync_checkpoints
-         SET responder_session_id = NULL,
-             responder_session_expires_at = NULL
-       WHERE key = ?
-    `).run(key);
+    const transition = this.db.transaction(() => {
+      const existing = this.readRow(key);
+      if (existing) this.writeEntry(key, withoutSyncCheckpointResponderSession(existing));
+    });
+    transition();
   }
 
   delete(key: string): void {
@@ -4155,6 +4340,15 @@ export interface VmReconcileNegativeRow {
   swm_gen: string;
   candidate_namespaces: string;
   peer_topology_key: string;
+  updated_at: number;
+}
+
+export interface SelectedVmReconcileCursorRow {
+  deployment_id: string;
+  context_graph_id: string;
+  on_chain_context_graph_id: string;
+  name_hash: string;
+  watermark: number;
   updated_at: number;
 }
 

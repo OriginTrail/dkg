@@ -43,9 +43,10 @@ describe('private SWM curator recovery planning', () => {
       createOperationContext('sync'),
     );
 
-    expect(plan.publicContextGraphIds).toEqual([]);
-    expect(plan.privateRecoverFromCurator).toEqual([contextGraphId]);
-    expect(plan.eligibleContextGraphIds).toEqual([contextGraphId]);
+    expect(plan.targets).toEqual([{
+      contextGraphId,
+      lane: 'ordinary-private',
+    }]);
   });
 
   it('skips private SWM recovery when the local node owns the structural curator agent', async () => {
@@ -67,9 +68,276 @@ describe('private SWM curator recovery planning', () => {
       createOperationContext('sync'),
     );
 
-    expect(plan.publicContextGraphIds).toEqual([]);
-    expect(plan.privateRecoverFromCurator).toEqual([]);
-    expect(plan.eligibleContextGraphIds).toEqual([]);
+    expect(plan.targets).toEqual([]);
+  });
+
+  it('recovers a selected private CG from its exact complete provider without registry discovery', async () => {
+    const curator = ethers.Wallet.createRandom().address.toLowerCase();
+    const member = ethers.Wallet.createRandom().address.toLowerCase();
+    const completeProvider = '12D3KooWPrivateCompleteProvider';
+    const contextGraphId = `${curator}/selected-private-cold`;
+    const agent = await createAgent('CompletePrivateSwmColdStartPlan');
+
+    installPlanningStubs(agent, {
+      localAgent: member,
+      curator,
+      curatorPeers: [],
+      isPrivate: true,
+    });
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [completeProvider];
+    internals.refreshMetaFromCurator = async () => {
+      throw new Error('pinned private recovery must not wait for registry discovery');
+    };
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      completeProvider,
+      [contextGraphId],
+      createOperationContext('sync'),
+      { requireCompleteProviderMatch: true },
+    )).resolves.toEqual({
+      targets: [{ contextGraphId, lane: 'ordinary-private' }],
+    });
+  });
+
+  it('prevents a later stale complete provider from replacing the elected private snapshot', async () => {
+    const curator = ethers.Wallet.createRandom().address.toLowerCase();
+    const member = ethers.Wallet.createRandom().address.toLowerCase();
+    const electedProvider = '12D3KooWPrivateRecoveryOwner';
+    const staleProvider = '12D3KooWPrivateRecoveryStale';
+    const contextGraphId = `${curator}/selected-private-single-owner`;
+    const agent = await createAgent('CompletePrivateSwmSingleOwnerPlan');
+
+    installPlanningStubs(agent, {
+      localAgent: member,
+      curator,
+      // Even if the stale provider is also discoverable as a curator, the
+      // pinned private replacement owner remains the only destructive writer.
+      curatorPeers: [staleProvider],
+      isPrivate: true,
+    });
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [
+      electedProvider,
+      staleProvider,
+    ];
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      electedProvider,
+      [contextGraphId],
+      createOperationContext('sync'),
+      { requireCompleteProviderMatch: true },
+    )).resolves.toEqual({
+      targets: [{ contextGraphId, lane: 'ordinary-private' }],
+    });
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      staleProvider,
+      [contextGraphId],
+      createOperationContext('sync'),
+      { requireCompleteProviderMatch: true },
+    )).resolves.toEqual({ targets: [] });
+  });
+
+  it('limits automatic public SWM sweeps to an RFC-64 graph-complete provider', async () => {
+    const contextGraphId = `${ethers.Wallet.createRandom().address}/selected-public`;
+    const completeProvider = '12D3KooWCompleteSwmProvider';
+    const agent = await createAgent('CompletePublicSwmProviderPlan');
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => true;
+    internals.isPrivateContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [completeProvider];
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      '12D3KooWUnrelatedEdge',
+      [contextGraphId],
+      createOperationContext('sync'),
+    )).resolves.toEqual({ targets: [] });
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      completeProvider,
+      [contextGraphId],
+      createOperationContext('sync'),
+    )).resolves.toEqual({
+      targets: [{ contextGraphId, lane: 'selected-public' }],
+    });
+  });
+
+  it('uses an accepted public policy as cold-start authorization for its exact complete provider', async () => {
+    const contextGraphId = `${ethers.Wallet.createRandom().address}/selected-public-cold`;
+    const ordinaryContextGraphId = `${ethers.Wallet.createRandom().address}/ordinary-public-cold`;
+    const completeProvider = '12D3KooWCompleteSwmProvider';
+    const agent = await createAgent('CompletePublicSwmColdStartPlan');
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => false;
+    internals.isPrivateContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = (candidate: string) => (
+      candidate === contextGraphId ? [completeProvider] : []
+    );
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      completeProvider,
+      [ordinaryContextGraphId, contextGraphId],
+      createOperationContext('sync'),
+      { requireCompleteProviderMatch: true },
+    )).resolves.toEqual({
+      targets: [{ contextGraphId, lane: 'selected-public' }],
+    });
+  });
+
+  it('rejects explicit catch-up from a non-authoritative peer when RFC-64 providers are configured', async () => {
+    const contextGraphId = `${ethers.Wallet.createRandom().address}/selected-public-fallback`;
+    const agent = await createAgent('ExplicitPublicSwmFallbackPlan');
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => true;
+    internals.isPrivateContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => ['12D3KooWCompleteSwmProvider'];
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      '12D3KooWFallbackPeer',
+      [contextGraphId],
+      createOperationContext('sync'),
+    )).resolves.toEqual({ targets: [] });
+  });
+
+  it('retains ordinary public union sync when no RFC-64 complete provider is configured', async () => {
+    const contextGraphId = `${ethers.Wallet.createRandom().address}/ordinary-public-fallback`;
+    const agent = await createAgent('OrdinaryPublicSwmFallbackPlan');
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => true;
+    internals.isPrivateContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [];
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      '12D3KooWOrdinaryPeer',
+      [contextGraphId],
+      createOperationContext('sync'),
+    )).resolves.toEqual({
+      targets: [{ contextGraphId, lane: 'selected-public' }],
+    });
+  });
+
+  it('does not treat an empty registry after a failed metadata refresh as authoritative', async () => {
+    const curator = ethers.Wallet.createRandom().address.toLowerCase();
+    const contextGraphId = `${curator}/refresh-failed-plan`;
+    const agent = await createAgent('CuratorRecoveryRefreshFailure');
+    const internals = agent as unknown as {
+      localAgents: Map<string, unknown>;
+      discovery: { findAgents: () => Promise<Array<{ agentAddress?: string; peerId: string }>> };
+      refreshMetaFromCurator: (contextGraphId: string) => Promise<boolean>;
+      resolveCuratorPeerIdsForCg: (contextGraphId: string) => Promise<{
+        peerIds: string[];
+        curatorIsLocal: boolean;
+        legacyTripleResolved: boolean;
+        lookupFailed?: boolean;
+      }>;
+    };
+    internals.localAgents.clear();
+    let lookups = 0;
+    internals.discovery = {
+      findAgents: async () => {
+        lookups += 1;
+        return [];
+      },
+    };
+    internals.refreshMetaFromCurator = async () => false;
+
+    const result = await internals.resolveCuratorPeerIdsForCg(contextGraphId);
+
+    expect(lookups).toBe(2);
+    expect(result).toEqual({
+      peerIds: [],
+      curatorIsLocal: false,
+      legacyTripleResolved: false,
+      lookupFailed: true,
+    });
+  });
+
+  it('stops structural curator discovery when its recovery target becomes stale', async () => {
+    const curator = ethers.Wallet.createRandom().address.toLowerCase();
+    const contextGraphId = `${curator}/stale-curator-plan`;
+    const agent = await createAgent('CuratorRecoveryStaleTarget');
+    const internals = agent as any;
+    internals.localAgents.clear();
+    let releaseLookup!: () => void;
+    let markLookupStarted!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => { markLookupStarted = resolve; });
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    let lookups = 0;
+    let refreshes = 0;
+    internals.discovery = {
+      findAgents: async () => {
+        lookups += 1;
+        markLookupStarted();
+        await lookupGate;
+        return [];
+      },
+    };
+    internals.refreshMetaFromCurator = async () => {
+      refreshes += 1;
+      return false;
+    };
+    let current = true;
+    const resolution = internals.resolveCuratorPeerIdsForCg(contextGraphId, {
+      isCurrent: () => current,
+    });
+
+    await lookupStarted;
+    current = false;
+    releaseLookup();
+
+    await expect(resolution).rejects.toMatchObject({ name: 'AbortError' });
+    expect(lookups).toBe(1);
+    expect(refreshes).toBe(0);
+  });
+
+  it('walks an oversized structural-curator roster with an exclusive peer cursor', async () => {
+    const curator = ethers.Wallet.createRandom().address.toLowerCase();
+    const contextGraphId = `${curator}/paged-curator-plan`;
+    const agent = await createAgent('CuratorRecoveryPagination');
+    const pages = [
+      ['peer-001', 'peer-002', 'peer-003'],
+      ['peer-002', 'peer-003', 'peer-004'],
+    ];
+    const calls: Array<{ afterPeerId?: string; limit?: number }> = [];
+    const internals = agent as any;
+    internals.localAgents.clear();
+    internals.discovery = {
+      findAgentPeerIdsByAddress: async (
+        _address: string,
+        options: { afterPeerId?: string; limit?: number },
+      ) => {
+        calls.push(options);
+        return pages[calls.length - 1] ?? [];
+      },
+      findAgents: async () => [],
+    };
+
+    const first = await internals.resolveCuratorPeerIdsForCg(contextGraphId, {
+      maxPeerIds: 2,
+      pagePeerIds: 1,
+    });
+    const second = await internals.resolveCuratorPeerIdsForCg(contextGraphId, {
+      maxPeerIds: 2,
+      pagePeerIds: 1,
+      afterPeerId: first.nextPageAfterPeerId,
+    });
+
+    expect(first).toMatchObject({
+      peerIds: ['peer-001'],
+      overflowed: true,
+      nextPageAfterPeerId: 'peer-001',
+    });
+    expect(second).toMatchObject({
+      peerIds: ['peer-002'],
+      overflowed: true,
+      nextPageAfterPeerId: 'peer-002',
+    });
+    expect(calls).toEqual([
+      { limit: 3, signal: undefined },
+      { afterPeerId: 'peer-001', limit: 2, signal: undefined },
+    ]);
   });
 
   async function createAgent(name: string): Promise<DKGAgent> {

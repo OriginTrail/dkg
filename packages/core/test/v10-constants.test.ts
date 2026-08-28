@@ -42,16 +42,11 @@ import {
   // Deprecated aliases
   contextGraphPublishTopic,
   contextGraphWorkspaceTopic,
-  contextGraphFinalizationTopic,
-  contextGraphUpdateTopic,
-  contextGraphAppTopic,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
   contextGraphPrivateGraphUri,
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
-  contextGraphSessionsTopic,
-  contextGraphSessionTopic,
 } from '../src/constants.js';
 import { MemoryLayer } from '../src/memory-model.js';
 import { STORAGE_ACK_MAX_STAGING_BYTES } from '../src/protocol-limits.js';

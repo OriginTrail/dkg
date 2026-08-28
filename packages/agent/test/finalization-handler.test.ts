@@ -6,17 +6,24 @@ import {
   type QueryOptions,
 } from '@origintrail-official/dkg-storage';
 import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   encodeFinalizationMessage, type FinalizationMessageMsg, encodePublishRequest, createOperationContext,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
+  type EventBus,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10,
   generatedPrivateCatalogFloorQuads,
 } from '@origintrail-official/dkg-publisher';
-import { FinalizationHandler } from '../src/finalization-handler.js';
+import {
+  FinalizationHandler,
+  type MarkContextGraphMetaDirtyFromQuads,
+  type ResolveContextGraphOnChainId,
+} from '../src/finalization-handler.js';
+import type { FinalizationLifecycleLogOptions } from '../src/finalization-lifecycle-logger.js';
 import { ethers } from 'ethers';
 
 const CONTEXT_GRAPH = 'test-contextGraph';
@@ -47,6 +54,77 @@ describe('FinalizationHandler', () => {
   beforeEach(async () => {
     store = new OxigraphStore();
     handler = new FinalizationHandler(store, undefined);
+  });
+
+  it('wires named optional dependencies through the explicit options contract', async () => {
+    const eventBus = { emit: () => undefined } as unknown as EventBus;
+    const resolvedContextGraphs: string[] = [];
+    const resolver: ResolveContextGraphOnChainId = async (contextGraphId) => {
+      resolvedContextGraphs.push(contextGraphId);
+      return '42';
+    };
+    const markDirty: MarkContextGraphMetaDirtyFromQuads = () => {};
+    const lifecycleOptions: FinalizationLifecycleLogOptions = {
+      localPeerId: 'legacy-peer',
+      localNodeIdentityId: '99',
+    };
+    const configured = new FinalizationHandler(store, undefined, {
+      eventBus,
+      resolveContextGraphOnChainId: resolver,
+      markContextGraphMetaDirtyFromQuads: markDirty,
+      lifecycleLogOptions: lifecycleOptions,
+    });
+    const author = '0x1111111111111111111111111111111111111111';
+    const packedKaId = (BigInt(author) << 96n) | 7n;
+    await configured.handleFinalizationMessage(encodeFinalizationMessage({
+      ual: `did:dkg:otp:20430/${author}/7`,
+      contextGraphId: CONTEXT_GRAPH,
+      kcMerkleRoot: new Uint8Array(32),
+      txHash: `0x${'ab'.repeat(32)}`,
+      blockNumber: 100,
+      batchId: 42n,
+      startKAId: packedKaId,
+      endKAId: packedKaId,
+      publisherAddress: '0x2222222222222222222222222222222222222222',
+      rootEntities: [],
+      timestampMs: Date.now(),
+      operationId: 'options-constructor-wiring',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+    }), CONTEXT_GRAPH);
+
+    expect(resolvedContextGraphs).toEqual([CONTEXT_GRAPH]);
+  });
+
+  it('preserves the exported positional constructor contract', async () => {
+    const eventBus = { emit: () => undefined } as unknown as EventBus;
+    const resolver: ResolveContextGraphOnChainId = async () => '42';
+    const markDirty: MarkContextGraphMetaDirtyFromQuads = () => {};
+    const lifecycleOptions: FinalizationLifecycleLogOptions = {
+      localPeerId: 'legacy-peer',
+      localNodeIdentityId: '99',
+    };
+    const legacy = new FinalizationHandler(
+      store,
+      undefined,
+      eventBus,
+      resolver,
+      markDirty,
+      lifecycleOptions,
+    );
+    const wired = legacy as unknown as {
+      eventBus: EventBus;
+      resolveContextGraphOnChainId: ResolveContextGraphOnChainId;
+      markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads;
+      lifecycle: { options: FinalizationLifecycleLogOptions };
+    };
+
+    expect(wired.eventBus).toBe(eventBus);
+    expect(wired.resolveContextGraphOnChainId).toBe(resolver);
+    expect(wired.markContextGraphMetaDirtyFromQuads).toBe(markDirty);
+    expect(wired.lifecycle.options).toEqual(lifecycleOptions);
   });
 
   it('deduplicates messages with same UAL and txHash', async () => {
@@ -257,13 +335,9 @@ describe('FinalizationHandler', () => {
     const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     const subGraphUri = `did:dkg:context-graph:${CONTEXT_GRAPH}/${subGraphName}`;
     const dirtyQuads: Quad[] = [];
-    const localHandler = new FinalizationHandler(
-      store,
-      undefined,
-      undefined,
-      undefined,
-      (quads) => { dirtyQuads.push(...quads); },
-    );
+    const localHandler = new FinalizationHandler(store, undefined, {
+      markContextGraphMetaDirtyFromQuads: (quads) => { dirtyQuads.push(...quads); },
+    });
 
     await (localHandler as any).promoteSharedMemoryToCanonical(
       CONTEXT_GRAPH,
@@ -338,8 +412,7 @@ describe('FinalizationHandler', () => {
     const localHandler = new FinalizationHandler(
       localStore,
       undefined,
-      undefined,
-      resolveCtxId,
+      { resolveContextGraphOnChainId: resolveCtxId },
     );
     const entity = 'urn:remap-to-self:entity';
     const publisher = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
@@ -458,6 +531,82 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
       `ASK { GRAPH <${perCgGraph}> { <${ENTITY}> <http://schema.org/name> "Reconciled" } }`,
     );
     expect(promoted.type === 'boolean' && promoted.value).toBe(true);
+  });
+
+  it('does not enter the legacy workspace scan during an exact RFC64 check', async () => {
+    const store = new OxigraphStore();
+    const sharedMemoryReads: QueryOptions[] = [];
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: QueryOptions) => {
+      if (options?.source === 'agent.finalization.sharedMemorySlice') {
+        sharedMemoryReads.push(options);
+      }
+      return originalQuery(sparql, options);
+    }) as typeof store.query;
+    const handler = new FinalizationHandler(store, makeBindingChain(42n));
+
+    const outcome = await handler.handleExactChainReconciledKC(
+      input(new Uint8Array(32).fill(9)),
+      createOperationContext('system'),
+    );
+
+    expect(outcome).toBe('no-swm');
+    expect(sharedMemoryReads).toHaveLength(0);
+  });
+
+  it('does not accept a stale legacy VM v1 marker for the current chain v2 root', async () => {
+    const store = new OxigraphStore();
+    const handler = new FinalizationHandler(store, makeBindingChain(42n));
+    const vmGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${ON_CHAIN_CG}`;
+    const metaGraph = `${vmGraph}/_meta`;
+    const staleRoot = computeFlatKCRootV10([{
+      subject: ENTITY,
+      predicate: 'http://schema.org/name',
+      object: '"Version one"',
+      graph: '',
+    }], []);
+    const currentRoot = computeFlatKCRootV10([{
+      subject: ENTITY,
+      predicate: 'http://schema.org/name',
+      object: '"Version two"',
+      graph: '',
+    }], []);
+    await store.insert([
+      {
+        subject: ENTITY,
+        predicate: 'http://schema.org/name',
+        object: '"Version one"',
+        graph: vmGraph,
+      },
+      {
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/status',
+        object: '"confirmed"',
+        graph: metaGraph,
+      },
+      {
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/assertionVersion',
+        object: '"1"',
+        graph: metaGraph,
+      },
+      {
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/merkleRoot',
+        object: `"${ethers.hexlify(staleRoot)}"`,
+        graph: metaGraph,
+      },
+    ]);
+
+    await expect(handler.handleExactChainReconciledKC(
+      input(currentRoot),
+      createOperationContext('system'),
+    )).resolves.toBe('no-swm');
+
+    const staleVmStillPresent = await store.query(
+      `ASK { GRAPH <${vmGraph}> { <${ENTITY}> <http://schema.org/name> "Version one" } }`,
+    );
+    expect(staleVmStillPresent.type === 'boolean' && staleVmStillPresent.value).toBe(true);
   });
 
   it('chain-reconcile regenerates generated private-CG catalog floor for merkle match without adding it as a root', async () => {

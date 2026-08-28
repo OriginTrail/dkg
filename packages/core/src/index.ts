@@ -10,10 +10,12 @@ export * from './ka-content-scope.js';
 export * from './graph-knowledge-asset-metadata.js';
 export * from './trust.js';
 export * from './sparql-operation.js';
+export * from './query-result.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
 export * from './sync-control-object.js';
+export * from './sync-checkpoint-state.js';
 export * from './cg-policy-objects.js';
 export * from './administrative-authority-objects.js';
 export * from './author-catalog-authority-objects.js';
@@ -67,14 +69,22 @@ export {
 export * from './author-catalog-codec.js';
 export * from './author-catalog-objects.js';
 export * from './author-catalog-directory.js';
+export * from './swm-author-inventory-v1.js';
 export * from './event-bus.js';
+export * from './backpressure-observability.js';
 export {
   Logger,
   createOperationContext,
+  formatLogRecord,
   type OperationContext,
   type OperationName,
   type LogSink,
   type LogRecord,
+  type LogRecordFormatOptions,
+  type CanonicalLogRecord,
+  type LogLevel,
+  LOG_LEVELS,
+  normalizeLogLevel,
 } from './logger.js';
 export {
   KA_LIFECYCLE_ROLES,
@@ -91,6 +101,7 @@ export {
   type KaLifecycleStage,
 } from './ka-lifecycle-logger.js';
 export { createLogRedactor, redactLogEntry, redactMessage, DEFAULT_SENSITIVE_KEYS, REDACTED } from './log-redaction.js';
+export type { LogRedactor } from './log-redaction.js';
 export {
   getTracer, withSpan, linkedSpan, currentTraceIds, activeSpanContext,
   getMetrics, rebuildMetrics, type WithSpanOpts, type DkgMetrics,
@@ -153,6 +164,9 @@ export {
   type DialOpts,
   type ProtocolHandler,
   LibP2PNetwork,
+  canonicalPeerIdString,
+  tryCanonicalPeerIdString,
+  type CanonicalPeerId,
   type NetworkStateRegistry,
   StubNetworkStateRegistry,
   type AgentDirectoryLookup,
@@ -319,7 +333,14 @@ export {
   hasErrorCode,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER,
+  AMBIGUOUS_ASSERTION_AUTHOR_CODE,
+  ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
+  PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
   messageIndicatesNoFundedPublisherWallet,
+  messageIndicatesPublishAuthorNotCustodial,
+  formatPublishAuthorNotCustodialMessage,
 } from './errors.js';
 export {
   dkgHomeDir,
@@ -371,13 +392,13 @@ export {
   projectCanonicalGraphScopedAuthorSealRowsV1,
   projectCanonicalGraphScopedAuthorSealStoreRowsV1,
   renderCanonicalAuthorSealStoreRowV1,
+  canonicalizeAuthorSealStoreRoundTripRowV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
   classifyCanonicalGraphScopedAuthorSealRowsV1,
   type Hex32V1,
   type PositiveDecimalU64V1,
   type SealTripleCountV1,
   type CanonicalIsoUtcMillisV1,
-  type CanonicalDeterministicUalV1,
   type CanonicalGraphScopedAuthorSealV1,
   type CanonicalGraphScopedAuthorSealCoordinateV1,
   type CanonicalGraphScopedAuthorSealRowV1,
@@ -390,3 +411,12 @@ export {
 } from './canonical-graph-scoped-author-seal.js';
 export * from './catalog-seal-binding.js';
 export * from './transferred-catalog-bundle.js';
+export * from './vm-update-convergence.js';
+export * from './ka-ual-identity.js';
+export {
+  MAX_NODE_TIMER_DELAY_MS,
+  assertNodeTimerDelayMs,
+  resolveNodeTimerDelayMs,
+} from './node-timer.js';
+export * from './query-catalog-parameters.js';
+export * from './query-catalog.js';

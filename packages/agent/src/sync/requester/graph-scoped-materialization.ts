@@ -19,6 +19,11 @@ import {
   filterOversizedSyncQuads,
   type OversizeGuardHooks,
 } from '../oversize-filter.js';
+import { parseGraphScopedDescriptor } from '../durable-integrity.js';
+import {
+  exactAssetCommitmentMatchesDescriptor,
+  type ExactAssetCommitment,
+} from '../exact-assets.js';
 
 const ASSERTION_VERSION = 'http://dkg.io/ontology/assertionVersion';
 const MERKLE_ROOT = 'http://dkg.io/ontology/merkleRoot';
@@ -50,7 +55,71 @@ export type VerifyContextGraphBinding = (
   signal?: AbortSignal,
 ) => Promise<boolean>;
 
-export type GraphScopedMaterializationOutcome = 'applied' | 'stale' | 'quarantined';
+export type GraphScopedMaterializationOutcome =
+  | 'applied'
+  | 'stale'
+  | 'quarantined';
+
+export interface ChallengePinnedGraphScopedAsset {
+  readonly asset: VerifiedGraphScopedAsset;
+  readonly privateRoots: readonly Uint8Array[];
+}
+
+/**
+ * Authenticate historical proof material against the on-chain challenge pin
+ * and the KA's current CG binding without treating it as the live assertion.
+ * The caller consumes it ephemerally and never downgrades durable VM state.
+ */
+export async function authenticateChallengePinnedGraphScopedAsset(
+  chain: ChainAdapter,
+  asset: VerifiedGraphScopedAsset,
+  commitment: ExactAssetCommitment,
+  verifyContextGraphBinding?: VerifyContextGraphBinding,
+  options: { signal?: AbortSignal } = {},
+): Promise<ChallengePinnedGraphScopedAsset> {
+  const descriptor = parseGraphScopedDescriptor(asset.ual, asset.metadataQuads);
+  if (!exactAssetCommitmentMatchesDescriptor(commitment, descriptor)) {
+    throw Object.assign(
+      new Error(`Graph-scoped durable sync ${asset.ual} does not match the challenge pin`),
+      { code: 'VM_CHALLENGE_COMMITMENT_MISMATCH' },
+    );
+  }
+  if (chain.chainId === 'none' || !chain.getKAContextGraphId || !verifyContextGraphBinding) {
+    throw Object.assign(
+      new Error('Challenge-pinned durable sync requires chain context-graph verification'),
+      { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
+    );
+  }
+  const identity = parseDeterministicKnowledgeAssetUal(asset.ual);
+  if (identity.chainId !== chain.chainId) {
+    throw new Error(
+      `Graph-scoped durable sync UAL chain ${identity.chainId} does not match local chain ${chain.chainId}`,
+    );
+  }
+  const kaId = (BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber);
+  const boundContextGraphId = await chain.getKAContextGraphId(kaId, {
+    signal: options.signal,
+  });
+  if (
+    boundContextGraphId <= 0n
+    || !(await verifyContextGraphBinding(
+      asset.contextGraphId,
+      boundContextGraphId,
+      options.signal,
+    ))
+  ) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} challenge material has a different context graph`,
+      ),
+      { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
+    );
+  }
+  return Object.freeze({
+    asset,
+    privateRoots: Object.freeze(descriptor.privateRoot ? [descriptor.privateRoot] : []),
+  });
+}
 
 /**
  * Bind the peer-verified payload to current chain truth before its structural
@@ -310,10 +379,30 @@ export async function authenticateVerifiedGraphScopedAsset(
 export async function materializeVerifiedGraphScopedAsset(params: {
   store: TripleStore;
   asset: VerifiedGraphScopedAsset;
+  isCurrent?: () => boolean;
+  shouldQuarantineCommitted?: () => boolean;
+  /** Internal composition seam for callers that already hold this asset's shared lock. */
+  lockAlreadyHeldByCaller?: boolean;
   options?: QueryOptions;
   oversizeHooks?: OversizeGuardHooks;
 }): Promise<GraphScopedMaterializationOutcome> {
-  const { store, asset, options = {}, oversizeHooks } = params;
+  const {
+    store,
+    asset,
+    isCurrent,
+    shouldQuarantineCommitted,
+    lockAlreadyHeldByCaller = false,
+    options = {},
+    oversizeHooks,
+  } = params;
+  const assertCurrent = () => {
+    if (isCurrent?.() === false) {
+      const error = new Error(`Graph-scoped materialization lifecycle for ${asset.ual} is no longer current`);
+      error.name = 'AbortError';
+      throw error;
+    }
+  };
+  assertCurrent();
   const filtered = filterOversizedSyncQuads([
     ...asset.dataQuads,
     ...asset.metadataQuads,
@@ -323,13 +412,15 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     return 'quarantined';
   }
 
-  return withMaterializationLock(asset.metaGraph, asset.ual, async () => {
+  const materializeUnderLock = async (): Promise<GraphScopedMaterializationOutcome> => {
+    assertCurrent();
     const currentVersion = await readCurrentAssertionVersion(
       store,
       asset.metaGraph,
       asset.ual,
       options,
     );
+    assertCurrent();
     if (currentVersion !== undefined && currentVersion > asset.assertionVersion) {
       return 'stale';
     }
@@ -347,6 +438,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
           currentMetadata,
         );
       }
+      assertCurrent();
     }
     const locallyTrustedMetadata = await readLocallyTrustedKnowledgeAssetControls(
       store,
@@ -355,6 +447,11 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       replacementMetadata,
       options,
     );
+    // This is the last interruptible boundary. Once the atomic replacement is
+    // dispatched, its real completion owns the materialization lock and stop()
+    // must drain it rather than detaching the writer.
+    assertCurrent();
+    const { signal: _lifecycleSignal, ...commitOptions } = options;
 
     const replaced = await tryReplaceGraphAndSubjectAtomically(
       store,
@@ -363,7 +460,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       asset.metaGraph,
       asset.ual,
       [...replacementMetadata, ...locallyTrustedMetadata],
-      options,
+      commitOptions,
     );
     if (!replaced) {
       throw Object.assign(
@@ -371,8 +468,32 @@ export async function materializeVerifiedGraphScopedAsset(params: {
         { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
       );
     }
+    if (shouldQuarantineCommitted?.() === true) {
+      const quarantined = await tryReplaceGraphAndSubjectAtomically(
+        store,
+        asset.assertionGraph,
+        [],
+        asset.metaGraph,
+        asset.ual,
+        [],
+        commitOptions,
+      );
+      if (!quarantined) {
+        throw Object.assign(
+          new Error('Graph-scoped durable sync requires atomic stale-binding quarantine support'),
+          { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
+        );
+      }
+      return 'quarantined';
+    }
+    if (isCurrent?.() === false) return 'quarantined';
     return 'applied';
-  });
+  };
+  return lockAlreadyHeldByCaller
+    ? materializeUnderLock()
+    : withMaterializationLock(asset.metaGraph, asset.ual, materializeUnderLock, {
+        signal: options.signal,
+      });
 }
 
 /** Read the current subject once; publisher metadata helpers own typed merging. */

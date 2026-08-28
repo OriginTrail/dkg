@@ -10,11 +10,13 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
+  asGraphWriteRevisionSource,
   StoreResponseTooLargeError,
   type QueryOptions,
   type TripleStore,
   type ChangelogReader,
   type ChangeOp,
+  type GraphWriteRevision,
 } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
@@ -35,6 +37,7 @@ import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/w
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
 import { isIriTerm } from '../iri-term.js';
+import type { ExactGraphReadMode } from './durable-data-request-policy.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -233,14 +236,40 @@ export function createResponderGraphListMemo(
   store: TripleStore,
   ttlMs = 10_000,
 ): GraphListMemo {
+  const writeRevisionSource = asGraphWriteRevisionSource(store);
+  type Revision = GraphWriteRevision | string | undefined;
+  const currentRevision = (refreshGeneration: string | undefined): Revision =>
+    writeRevisionSource?.getWriteRevision('') ?? refreshGeneration;
+  const isWriteRevision = (revision: Revision): revision is GraphWriteRevision =>
+    typeof revision === 'object' && revision !== null;
+  const supersedesCompleted = (stored: Revision, current: Revision): boolean => {
+    if (writeRevisionSource) {
+      return !isWriteRevision(stored)
+        || !isWriteRevision(current)
+        || !stored.stable
+        || !current.stable
+        || stored.generation !== current.generation;
+    }
+    // A deep-page read without a session generation joins/uses the current
+    // snapshot; only an explicitly newer responder session supersedes it.
+    return current !== undefined && stored !== current;
+  };
+  const supersedesInflight = (stored: Revision, current: Revision): boolean => {
+    if (writeRevisionSource) {
+      return !isWriteRevision(stored)
+        || !isWriteRevision(current)
+        || stored.generation !== current.generation;
+    }
+    return current !== undefined && stored !== current;
+  };
   let cached: {
     value: readonly string[];
     cachedAt: number;
-    refreshGeneration?: string;
+    revision: Revision;
   } | null = null;
   let inflight: {
     promise: Promise<readonly string[]>;
-    refreshGeneration?: string;
+    revision: Revision;
   } | null = null;
   return {
     async get(options?: {
@@ -251,9 +280,11 @@ export function createResponderGraphListMemo(
       throwIfAborted(options?.signal);
       while (inflight) {
         const pending = inflight;
-        const supersedesPending = options?.refreshGeneration !== undefined &&
-          options.refreshGeneration !== pending.refreshGeneration;
-        if (!supersedesPending) {
+        const revision = currentRevision(options?.refreshGeneration);
+        // Stability controls completed-cache reuse, not single-flight
+        // identity. Concurrent reads at the same unstable generation share
+        // one enumeration; the result is simply discarded for later callers.
+        if (!supersedesInflight(pending.revision, revision)) {
           return [...(await raceAgainstAbort(pending.promise, options?.signal))];
         }
         try {
@@ -263,12 +294,13 @@ export function createResponderGraphListMemo(
         }
       }
       const now = Date.now();
+      const revision = currentRevision(options?.refreshGeneration);
+      if (cached && supersedesCompleted(cached.revision, revision)) cached = null;
       if (
         cached &&
-        options?.refreshGeneration !== undefined &&
-        cached.refreshGeneration !== options.refreshGeneration
-      ) cached = null;
-      if (!options?.refresh && cached && now - cached.cachedAt < ttlMs) return [...cached.value];
+        now - cached.cachedAt < ttlMs &&
+        (!options?.refresh || (writeRevisionSource !== null && isWriteRevision(revision) && revision.stable))
+      ) return [...cached.value];
       // This load is shared by concurrent responders. Do not bind it to the
       // first stream's abort signal; waiters race their own abort locally via
       // raceAgainstAbort/throwIfAborted below.
@@ -278,7 +310,7 @@ export function createResponderGraphListMemo(
           cached = {
             value: sorted,
             cachedAt: Date.now(),
-            refreshGeneration: options?.refreshGeneration,
+            revision,
           };
           return sorted;
         })
@@ -287,7 +319,7 @@ export function createResponderGraphListMemo(
         });
       inflight = {
         promise: load,
-        refreshGeneration: options?.refreshGeneration,
+        revision,
       };
       const graphs = await load;
       throwIfAborted(options?.signal);
@@ -949,7 +981,6 @@ export async function readSwmDataPage(params: {
       params.store,
       dataGraphs,
       graphSet,
-      candidateGraphsFor,
       params.cutoffIso!,
       signal,
     );
@@ -1574,6 +1605,12 @@ export async function readDurableDataPage(params: {
   /** Keep the immutable row snapshot until an explicit empty-page EOF. */
   releaseCacheOnShortPage?: boolean;
   assetUals?: readonly string[];
+  /**
+   * Select whether exact-graph payloads may use a bounded graph snapshot or
+   * must use OFFSET/LIMIT reads. Resource policy is resolved by the handler;
+   * this planner only consumes the neutral read strategy.
+   */
+  exactGraphReadMode?: ExactGraphReadMode;
 }): Promise<SyncRow[]> {
   const cache = params.rowListMemo
     ? {
@@ -1613,6 +1650,7 @@ export async function readDurableDataPage(params: {
           () => Promise.resolve(true),
           planSignal,
           new Map(entries.map((entry) => [entry.graph, entry.rowCount])),
+          params.exactGraphReadMode,
         );
       },
     );
@@ -1666,6 +1704,7 @@ export async function readDurableDataPage(params: {
           isAdmitted(params.rowListMemo ? undefined : planSignal),
           planSignal,
           knownRowCounts,
+          params.exactGraphReadMode,
         );
       },
     );
@@ -1824,6 +1863,7 @@ async function buildExactGraphPagePlan(
   isAdmitted: (graph: string) => Promise<boolean>,
   signal?: AbortSignal,
   knownRowCounts?: ReadonlyMap<string, number>,
+  exactGraphReadMode: ExactGraphReadMode = 'snapshot-or-page',
 ): Promise<ExactGraphPagePlan> {
   const entries: ExactGraphPagePlanEntry[] = [];
   for (const graph of dedupeStrings(graphs).sort(compareCodePoint)) {
@@ -1838,7 +1878,11 @@ async function buildExactGraphPagePlan(
   return {
     entries,
     totalRows: entries.reduce((sum, entry) => sum + entry.rowCount, 0),
-    pagedGraphs: new Set<string>(),
+    pagedGraphs: new Set(
+      exactGraphReadMode === 'page-only'
+        ? entries.map((entry) => entry.graph)
+        : [],
+    ),
   };
 }
 
@@ -2006,6 +2050,8 @@ async function readRowsPageFromExactGraphPlan(
       skip -= entry.rowCount;
       continue;
     }
+    const entryOffset = skip;
+    const expectedRows = Math.min(entry.rowCount - entryOffset, remaining);
     let added = 0;
     const graphRows = await loadExactGraphRowsSnapshot(
       store,
@@ -2015,17 +2061,18 @@ async function readRowsPageFromExactGraphPlan(
       signal,
     );
     if (graphRows) {
-      const page = graphRows.slice(skip, skip + remaining);
+      const page = graphRows.slice(entryOffset, entryOffset + expectedRows);
       rows.push(...page);
       added = page.length;
     } else {
+      const isFinalGraphPage = entryOffset + expectedRows === entry.rowCount;
       const result = await store.query(`
         SELECT ?s ?p ?o WHERE {
           GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
         }
         ORDER BY ?s ?p ?o
-        OFFSET ${skip}
-        LIMIT ${remaining}
+        OFFSET ${entryOffset}
+        LIMIT ${expectedRows + (isFinalGraphPage ? 1 : 0)}
       `, {
         ...syncResponderStoreOptions(signal, 'sync.responder.readExactGraphRowsPage'),
         maxResponseBytes: snapshotResponseByteLimit(snapshotLimits.maxBytesEstimate),
@@ -2041,6 +2088,22 @@ async function readRowsPageFromExactGraphPlan(
           }
         }
       }
+      if (isFinalGraphPage && added > expectedRows) {
+        throw new Error(
+          `Sync exact-graph plan changed while paging ${entry.graph}: `
+          + `expected ${entry.rowCount} total rows but found a surplus row`,
+        );
+      }
+    }
+    // Exact-asset metadata is a commitment to the number of rows in each
+    // assertion graph. Do not let a short graph borrow rows from the next
+    // graph in the plan: that produces a full-looking response whose graph
+    // boundaries no longer match the manifest and hides the damaged source.
+    if (added !== expectedRows) {
+      throw new Error(
+        `Sync exact-graph plan changed while paging ${entry.graph}: ` +
+        `expected ${expectedRows} rows at offset ${entryOffset}, found ${added}`,
+      );
     }
     remaining -= added;
     if (remaining <= 0) break;
@@ -2300,6 +2363,9 @@ async function readCachedRowsPage(
   const rows = await cache.memo.get(cache.key, loadRows, {
     refresh: cache.refresh,
     refreshGeneration: cache.refreshGeneration,
+    // No prefix has been consumed at offset zero, so an entry evicted under
+    // responder memory pressure can be rebuilt without mixing snapshots.
+    refreshExpired: safeOffset === 0,
     requireExisting: safeOffset > 0,
     signal,
   });
@@ -2741,23 +2807,42 @@ async function readSwmMetaRowsPage(
 const FRESH_SWM_META_PLAN_SUBJECT_CHUNK = 100;
 
 /**
+ * Ceiling for one subject row-group in the fresh-SWM plan lane. Whole-subject
+ * windows are its consistency unit (#1788), so an oversized subject cannot be
+ * served atomically and receives a bounded refusal. This limit is intentionally
+ * independent of snapshot materialization limits.
+ */
+export const FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS = 64_000;
+
+/**
+ * Retained-heap ceiling for fresh-SWM plan scalars (subject IRIs + row counts).
+ * A plan is control-plane state and must remain much smaller than the rows it
+ * describes, independently of snapshot materialization limits.
+ */
+export const FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE = 32 * 1024 * 1024;
+
+function freshSwmMetaPlanResponseByteLimit(): number {
+  return snapshotResponseByteLimit(FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE);
+}
+
+/**
  * Hard cardinality cap for a TTL meta session plan's admitted subjects, across
  * all candidate graphs of the phase. The discovery queries are LIMIT-bounded to
  * this cap (plus one sentinel row), so plan construction can never materialize
  * an unbounded subject set no matter how large the fresh window is: a fresh set
  * beyond the cap is a typed bounded refusal, never an unbounded control-plane
  * plan. Sizing: every admitted subject serves at least one row, so this cap
- * alone admits sessions far past the point where they run plan-paged, while
- * the retained plan stays a few megabytes at worst (also capped by the fixed
- * build byte estimate below, which bounds pathological IRI lengths).
+ * alone admits sessions far past the point where they run plan-paged. The
+ * 64,000-subject ceiling covers the 33k-41k subjects observed on mainnet while
+ * the independent 32 MiB plan estimate still bounds pathological IRI lengths.
  */
-export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 32_000;
+export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 64_000;
 
 /**
  * Discover the TTL-admitted subjects of one SWM meta graph with two
  * small-result queries (no payload rows, no sort, no OFFSET), each bounded by
  * construction: LIMIT (remaining subject allowance + 1 sentinel) and the fixed
- * snapshot-build response byte cap. Crossing either bound is a typed
+ * plan response byte cap. Crossing either bound is a typed
  * per-snapshot budget refusal — the plan lane's one remaining bounded refusal
  * besides the single-oversized-subject case.
  *
@@ -2791,9 +2876,7 @@ async function readFreshSwmMetaSubjects(
     try {
       res = await store.query(sparql, {
         ...syncResponderStoreOptions(signal, operation),
-        maxResponseBytes: snapshotResponseByteLimit(
-          SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
-        ),
+        maxResponseBytes: freshSwmMetaPlanResponseByteLimit(),
       });
     } catch (error) {
       if (!(error instanceof StoreResponseTooLargeError)) throw error;
@@ -2802,7 +2885,7 @@ async function readFreshSwmMetaSubjects(
         reason: 'snapshot_bytes',
         rows: subjects.size,
         bytesEstimate: storeResponseActualBytes(error),
-        limit: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+        limit: FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE,
       });
     }
     if (res.type !== 'bindings') return;
@@ -2873,9 +2956,7 @@ async function countFreshSwmMetaSubjectRows(
         GROUP BY ?s
       `, {
         ...syncResponderStoreOptions(signal, 'sync.responder.countFreshSwmMetaSubjectRows'),
-        maxResponseBytes: snapshotResponseByteLimit(
-          SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
-        ),
+        maxResponseBytes: freshSwmMetaPlanResponseByteLimit(),
       });
     } catch (error) {
       if (!(error instanceof StoreResponseTooLargeError)) throw error;
@@ -2884,7 +2965,7 @@ async function countFreshSwmMetaSubjectRows(
         reason: 'snapshot_bytes',
         rows: chunk.length,
         bytesEstimate: storeResponseActualBytes(error),
-        limit: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+        limit: FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE,
       });
     }
     if (res.type !== 'bindings') continue;
@@ -2898,6 +2979,20 @@ async function countFreshSwmMetaSubjectRows(
     .filter((entry) => entry.rowCount > 0);
 }
 
+function assertFreshSwmMetaSubjectWindowRows(
+  subject: FreshSwmMetaSubjectEntry,
+  budgetKey: string,
+): void {
+  if (subject.rowCount <= FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS) return;
+  throw snapshotBudgetError({
+    key: budgetKey,
+    reason: 'snapshot_rows',
+    rows: subject.rowCount,
+    bytesEstimate: 0,
+    limit: FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS,
+  });
+}
+
 /**
  * Build the tiny, stable pagination plan for a TTL-filtered SWM meta phase.
  * Only graph/subject/count scalars are computed and cached; the payload rows
@@ -2908,10 +3003,11 @@ async function countFreshSwmMetaSubjectRows(
  *
  * The plan itself is bounded by construction: subject cardinality by
  * {@link FRESH_SWM_META_PLAN_MAX_SUBJECTS} (enforced inside the LIMIT-bounded
- * discovery), and the retained scalar estimate by the FIXED snapshot build
- * byte cap — deliberately the constant, not the test/operator-shrinkable
- * session budget, so shrinking the session budget forces plan-paged mode
- * without ever refusing the plan that paged mode needs (#1847 class).
+ * discovery), and the retained scalar estimate and construction-query response
+ * caps by the FIXED plan byte cap — deliberately the constant, not the
+ * test/operator-shrinkable session budget, so shrinking the session budget
+ * forces plan-paged mode without ever refusing the plan that paged mode needs
+ * (#1847 class).
  */
 async function buildFreshSwmMetaPlan(
   store: TripleStore,
@@ -2944,15 +3040,22 @@ async function buildFreshSwmMetaPlan(
     );
     if (subjects.length === 0) continue;
     for (const entry of subjects) {
+      // This is a plan invariant, not just a plan-paged reader guard: the
+      // ordinary snapshot lane also consumes this plan and must refuse the
+      // same pathological row-group under default budgets.
+      assertFreshSwmMetaSubjectWindowRows(entry, budgetKey);
       bytesEstimate += estimateStringRowHeapBytes(entry.subject, '', '', graph);
     }
-    if (bytesEstimate > SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE) {
+    // Pinned to FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE: a plan holds scalars
+    // (subject IRI + row count), so its ceiling is independent of how large a
+    // materialized snapshot may be.
+    if (bytesEstimate > FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE) {
       throw snapshotBudgetError({
         key: budgetKey,
         reason: 'snapshot_bytes',
         rows: subjects.length,
         bytesEstimate,
-        limit: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+        limit: FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE,
       });
     }
     entries.push({
@@ -3101,15 +3204,10 @@ async function readFreshSwmMetaRowsPageFromPlan(
         continue;
       }
       if (window.length === 0) windowStart = beforeWindow;
-      if (subject.rowCount > SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS) {
-        throw snapshotBudgetError({
-          key: budgetKey,
-          reason: 'snapshot_rows',
-          rows: subject.rowCount,
-          bytesEstimate: 0,
-          limit: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
-        });
-      }
+      // Pinned to FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS, NOT the snapshot
+      // build cap: this guards row-group atomicity (#1788), not materialization
+      // size, so it must not drift when the snapshot caps move.
+      assertFreshSwmMetaSubjectWindowRows(subject, budgetKey);
       window.push(subject);
       windowRows += subject.rowCount;
       if (windowStart + windowRows >= skip + remaining) break;
@@ -3244,11 +3342,6 @@ async function readFreshSwmDataRows(
   return rows.sort(compareRows);
 }
 
-interface FreshSwmCandidateGraph {
-  graph: string;
-  metaGraph: string;
-}
-
 const FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK = 100;
 
 function chunkValues<T>(values: readonly T[], size: number): T[][] {
@@ -3273,68 +3366,68 @@ function parseSparqlInteger(value: string | undefined): number {
  * graph; on a 1 GiB workspace that exceeded the 30s HTTP query timeout on every
  * page. This planner inverts the work with backend-neutral SPARQL 1.1:
  *
- *  1. Join each concrete graph to its fresh metadata roots by the root subject
- *     (an indexed lookup and a DKG workspace invariant: `rootEntity` names an
- *     entity present in the shared payload).
+ *  1. Discover fresh metadata roots ONCE per SWM bucket, then locate those few
+ *     roots through an indexed subject lookup across the bucket graph family.
  *  2. Count the exact root closures per concrete graph without returning their
  *     large literal values.
  *  3. Cache only graph/root/count scalars for the responder session.
  *
- * Paging then touches one or two concrete graphs at a time with `VALUES ?root`,
- * preserving the exact root/skolem filter used by {@link readFreshSwmDataRows}
- * while avoiding a database-specific optimizer hint or graph-family scan.
+ * The discovery/lookup split is important on long-lived context graphs. The
+ * previous planner emitted one UNION branch per historical data graph, and
+ * every branch repeated the same fresh-metadata join. A bucket with no fresh
+ * legacy roots could therefore spend its complete deadline proving the same
+ * empty result tens of thousands of times. Work here is proportional to the
+ * fresh root set instead of the historical graph count. Paging then touches
+ * one or two concrete graphs at a time with `VALUES ?root`, preserving the
+ * exact root/skolem filter used by {@link readFreshSwmDataRows}.
  */
 async function buildFreshSwmDataGraphPlan(
   store: TripleStore,
   dataGraphs: readonly string[],
   graphSet: ReadonlySet<string>,
-  candidateGraphsFor: (graph: string) => string[],
   cutoffIso: string,
   signal?: AbortSignal,
 ): Promise<FreshSwmDataGraphPlan> {
-  const cutoffFilter =
-    `FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`;
-  const candidates: FreshSwmCandidateGraph[] = [];
-  for (const graph of dataGraphs) {
-    const metaGraph = `${graph}_meta`;
-    if (!graphSet.has(metaGraph)) continue;
-    for (const candidate of candidateGraphsFor(graph)) {
-      candidates.push({ graph: candidate, metaGraph });
-    }
-  }
-  const uniqueCandidates = [...new Map(
-    candidates.map((candidate) => [candidate.graph, candidate]),
-  ).values()].sort((a, b) => compareCodePoint(a.graph, b.graph));
-  if (uniqueCandidates.length === 0) return { entries: [], totalRows: 0 };
-
   const rootsByGraph = new Map<string, Set<string>>();
-  for (const chunk of chunkValues(uniqueCandidates, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
-    const unions = chunk.map(({ graph, metaGraph }) => `
-      {
-        SELECT (<${assertSafeIri(graph)}> AS ?g) ?root WHERE {
-          GRAPH <${assertSafeIri(metaGraph)}> {
-            ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
-                <${DKG_PUBLISHED_AT}> ?ts ;
-                <${DKG_ROOT_ENTITY}> ?root .
-            ${cutoffFilter}
-          }
-          GRAPH <${assertSafeIri(graph)}> { ?root ?rootPredicate ?rootObject }
+  for (const bucketGraph of dedupeStrings(dataGraphs).sort(compareCodePoint)) {
+    throwIfAborted(signal);
+    const metaGraph = `${bucketGraph}_meta`;
+    if (!graphSet.has(metaGraph)) continue;
+    const roots = [...await readFreshSwmRoots(store, metaGraph, cutoffIso, signal)]
+      .sort(compareCodePoint);
+    for (const chunk of chunkValues(roots, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
+      const chunkSet = new Set(chunk);
+      // sparql-scan-allow: R2 -- ?root is VALUES-bound to at most 100 fresh metadata roots and every result graph is admitted against the finite current graph snapshot
+      const rootResult = await store.query(`
+        SELECT DISTINCT ?g ?root WHERE {
+          VALUES ?root { ${graphValues(chunk)} }
+          GRAPH ?g { ?root ?rootPredicate ?rootObject }
+          FILTER(
+            ?g = <${assertSafeIri(bucketGraph)}>
+            || STRSTARTS(STR(?g), CONCAT(STR(<${assertSafeIri(bucketGraph)}>), "/"))
+          )
         }
-      }`);
-    const rootResult = await store.query(`
-      SELECT DISTINCT ?g ?root WHERE {
-        ${unions.join('\n        UNION')}
+      `, syncResponderStoreOptions(signal, 'sync.responder.planFreshSwmGraphRoots'));
+      if (rootResult.type !== 'bindings') continue;
+      for (const row of rootResult.bindings) {
+        const graph = row['g'];
+        const root = row['root'];
+        // The broad prefix filter keeps the store lookup optimizer-friendly;
+        // enforce the exact read-both graph shape and current graph snapshot in
+        // process before admitting a result. This excludes staging, malformed
+        // descendants and unrelated/nested graph families.
+        if (
+          !graph
+          || !root
+          || !graphSet.has(graph)
+          || !chunkSet.has(root)
+          || (graph !== bucketGraph
+            && !isSharedMemoryBucketDescendantDataGraph(graph, bucketGraph))
+        ) continue;
+        const graphRoots = rootsByGraph.get(graph) ?? new Set<string>();
+        graphRoots.add(root);
+        rootsByGraph.set(graph, graphRoots);
       }
-      ORDER BY ?g ?root
-    `, syncResponderStoreOptions(signal, 'sync.responder.planFreshSwmGraphRoots'));
-    if (rootResult.type !== 'bindings') continue;
-    for (const row of rootResult.bindings) {
-      const graph = row['g'];
-      const root = row['root'];
-      if (!graph || !root) continue;
-      const roots = rootsByGraph.get(graph) ?? new Set<string>();
-      roots.add(root);
-      rootsByGraph.set(graph, roots);
     }
   }
 

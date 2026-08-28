@@ -31,7 +31,13 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
-import type { ContextGraphDiscoveryMetadata, ContextGraphSub } from './dkg-agent-types.js';
+import type {
+  ContextGraphDiscoveryMetadata,
+  ContextGraphSub,
+  ContextGraphSubInput,
+} from './dkg-agent-types.js';
+import { normalizeContextGraphSubscriptionTransition } from './context-graph-subscription-policy.js';
+import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
 
@@ -84,8 +90,8 @@ function resolveGraphScopedPublishRequest(
     throw new Error('Graph-scoped gossip KA number exceeds the 96-bit author namespace');
   }
   const packedKaId = (BigInt(scope.agentAddress) << 96n) | kaNumber;
-  const startKAId = protoToBigInt(request.startKAId ?? 0);
-  const endKAId = protoToBigInt(request.endKAId ?? 0);
+  const startKAId = protobufScalarToBigInt(request.startKAId ?? 0);
+  const endKAId = protobufScalarToBigInt(request.endKAId ?? 0);
   if (startKAId !== packedKaId || endKAId !== packedKaId) {
     throw new Error(
       `Graph-scoped gossip UAL-derived kaId ${packedKaId} does not match ` +
@@ -194,15 +200,17 @@ export class GossipPublishHandler {
 
   private setContextGraphSubscription(
     id: string,
-    next: ContextGraphSub,
+    next: ContextGraphSubInput,
     options?: { persist?: boolean },
   ): void {
+    const previous = this.subscribedContextGraphs.get(id);
+    const normalized = normalizeContextGraphSubscriptionTransition(previous, next);
     const setter = this.callbacks.setContextGraphSubscription;
     if (setter) {
-      setter(id, next, options);
+      setter(id, normalized, options);
       return;
     }
-    this.subscribedContextGraphs.set(id, next);
+    this.subscribedContextGraphs.set(id, normalized);
   }
 
   private recordDiscoveredContextGraph(id: string, metadata: ContextGraphDiscoveryMetadata): void {
@@ -475,6 +483,7 @@ export class GossipPublishHandler {
               <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
               <http://dkg.io/ontology/createdBy> ?createdBy .
           } }`,
+          { source: 'agent.gossipPublish.subGraphRegistration' },
         );
         if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
           const regQuads = generateSubGraphRegistration({
@@ -496,9 +505,9 @@ export class GossipPublishHandler {
           : [];
         const merkleRoot = computeFlatKCRoot(normalized, privateRoots);
         const txHash = request.txHash ?? '';
-        const blockNumber = protoToNumber(request.blockNumber ?? 0);
-        const startKAId = protoToBigInt(request.startKAId ?? 0);
-        const endKAId = protoToBigInt(request.endKAId ?? 0);
+        const blockNumber = protobufScalarToNumber(request.blockNumber ?? 0);
+        const startKAId = protobufScalarToBigInt(request.startKAId ?? 0);
+        const endKAId = protobufScalarToBigInt(request.endKAId ?? 0);
         const graphManager = new GraphManager(this.store);
         let workspaceHead;
         try {
@@ -617,6 +626,7 @@ export class GossipPublishHandler {
                 `ASK { GRAPH <${assertSafeIri(metaGraph)}> { ` +
                   `<${assertSafeIri(graphPublish.scope.ual)}> ` +
                   `<http://dkg.io/ontology/status> "confirmed" } }`,
+                { source: 'agent.gossipPublish.confirmedGuard' },
               );
               if (confirmed.type === 'boolean' && confirmed.value) {
                 return 'stale' as const;
@@ -749,9 +759,9 @@ export class GossipPublishHandler {
         // If the gossip message includes on-chain proof (txHash + blockNumber),
         // attempt targeted verification and promote to confirmed if valid.
         const txHash = request.txHash ?? '';
-        const blockNumber = protoToNumber(request.blockNumber ?? 0);
-        const startKAId = protoToBigInt(request.startKAId ?? 0);
-        const endKAId = protoToBigInt(request.endKAId ?? 0);
+        const blockNumber = protobufScalarToNumber(request.blockNumber ?? 0);
+        const startKAId = protobufScalarToBigInt(request.startKAId ?? 0);
+        const endKAId = protobufScalarToBigInt(request.endKAId ?? 0);
 
         if (txHash && blockNumber > 0 && startKAId > 0n && request.publisherAddress) {
           phase?.('chain-verify', 'start');
@@ -985,6 +995,7 @@ export class GossipPublishHandler {
     const cgData = contextGraphDataGraphUri(contextGraphId);
     const result = await this.store.query(
       `SELECT ?peer WHERE { GRAPH <${cgMeta}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?peer } }`,
+      { source: 'agent.gossipPublish.allowedPeers' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return null;
     return result.bindings
@@ -993,19 +1004,6 @@ export class GossipPublishHandler {
       .map(v => v.replace(/^"|"$/g, ''));
   }
 }
-
-function protoToNumber(val: number | { low: number; high: number; unsigned: boolean }): number {
-  if (typeof val === 'number') return val;
-  return ((val.high >>> 0) * 0x100000000) + (val.low >>> 0);
-}
-
-function protoToBigInt(val: string | number | bigint | { low: number; high: number; unsigned: boolean }): bigint {
-  if (typeof val === 'string') return BigInt(val);
-  if (typeof val === 'bigint') return val;
-  if (typeof val === 'number') return BigInt(val);
-  return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
-}
-
 
 function stripLiteral(s: string): string {
   if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);

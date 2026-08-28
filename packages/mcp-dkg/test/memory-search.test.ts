@@ -98,22 +98,63 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
     expect(result.content[0].text).toMatch(/backend not ready/);
   });
 
-  it('passes the raw peerId (not DID form) to the daemon for WM-view routing', async () => {
+  it('prefers the daemon-resolved agentAddress for wallet-keyed WM routing', async () => {
     client.agentIdentity = {
       peerId: 'peer-raw-abc',
-      agentAddress: 'did:dkg:agent:peer-raw-abc',
+      agentAddress: '0x1111111111111111111111111111111111111111',
     };
     client.memoryFixtures.set('agent-context::working-memory', [
       { uri: { value: 'urn:x' }, text: { value: 'this snippet is plenty long to clear the 20-char floor for matching' } },
     ]);
     await server.call('dkg_memory_search', { query: 'snippet plenty' });
-    // Every fan-out call must carry the raw peerId, not the DID form —
-    // the DID prefix routes WM into a non-existent namespace and
-    // silently zeroes out hits (the regression this guards).
+    // Every fan-out call must carry the primary agent address used by rc.17+
+    // assertion writes. Passing peerId here routes older query engines to the
+    // empty legacy namespace and silently zeroes project sub-graph hits.
     for (const call of client.queryCalls) {
-      expect(call.agentAddress).toBe('peer-raw-abc');
+      expect(call.agentAddress).toBe('0x1111111111111111111111111111111111111111');
       expect(String(call.agentAddress)).not.toMatch(/^did:/);
     }
+  });
+
+  it('falls back to peerId when the daemon has no default agentAddress', async () => {
+    client.agentIdentity = { peerId: 'peer-legacy-only' };
+    await server.call('dkg_memory_search', { query: 'legacy namespace' });
+    for (const call of client.queryCalls) {
+      expect(call.agentAddress).toBe('peer-legacy-only');
+    }
+  });
+
+  it('finds project sub-graph memory stored under the resolved wallet namespace', async () => {
+    const wallet = '0x2222222222222222222222222222222222222222';
+    client = new FakeClient({
+      query: async (args) => {
+        if (
+          args.contextGraphId === 'project-with-subgraphs'
+          && args.view === 'working-memory'
+          && args.agentAddress === wallet
+        ) {
+          return {
+            bindings: [{
+              uri: { value: 'urn:model:17' },
+              text: { value: 'Deterministic benchmark family 17 for expanded DKG query coverage' },
+            }],
+          };
+        }
+        return { bindings: [] };
+      },
+    });
+    client.agentIdentity = { peerId: 'peer-legacy', agentAddress: wallet };
+    server = new FakeServer();
+    registerMemorySearchTool(server.asMcpServer(), client.asDkgClient(), makeConfig());
+
+    const result = await server.call('dkg_memory_search', {
+      query: 'deterministic benchmark family 17',
+      projectId: 'project-with-subgraphs',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/urn:model:17/);
+    expect(result.content[0].text).toMatch(/project-wm:1/);
   });
 
   it('respects the SKILL.md §6.3 6-element combined-string layer contract', async () => {

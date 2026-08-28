@@ -7,7 +7,9 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   buildAuthoritativePublicMetaAskQuery,
+  buildAuthoritativePublicMetaQuads,
   hasAuthoritativePublicMetaDefinition,
+  inspectAuthoritativePublicMetaDefinition,
 } from '../src/context-graph-public-meta-proof.js';
 
 function authoritativePublicMetaQuads(contextGraphId: string): Quad[] {
@@ -30,6 +32,19 @@ function authoritativePublicMetaQuads(contextGraphId: string): Quad[] {
 }
 
 describe('authoritative public metadata proof', () => {
+  it('classifies every canonical requirement as missing when that quad is absent', () => {
+    const contextGraphId = 'public/canonical-requirement-classification';
+    const canonical = buildAuthoritativePublicMetaQuads(contextGraphId);
+
+    for (const [missingIndex, expectedMissing] of canonical.entries()) {
+      const inspection = inspectAuthoritativePublicMetaDefinition(
+        contextGraphId,
+        canonical.filter((_, index) => index !== missingIndex),
+      );
+      expect(inspection.missing).toEqual([expectedMissing]);
+    }
+  });
+
   it('keeps fetched-snapshot evaluation and the generated store query in lockstep', async () => {
     const cases = [
       {

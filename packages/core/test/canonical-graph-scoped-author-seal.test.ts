@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import * as coreBarrel from '../src/index.js';
 import { ASSERTION_SEAL_PREDICATES } from '../src/assertion-seal.js';
 import {
   MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1,
@@ -7,6 +8,7 @@ import {
   assertCanonicalGraphScopedAuthorSealV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
+  canonicalizeAuthorSealStoreRoundTripRowV1,
   classifyCanonicalGraphScopedAuthorSealRowsV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
@@ -121,6 +123,40 @@ describe('CanonicalGraphScopedAuthorSealV1 bytes and projection', () => {
     ).payload).toEqual(privatePayload);
   });
 
+  it('canonicalizes only backend-equivalent UAL and dateTime post-read forms', () => {
+    const rows = projectCanonicalGraphScopedAuthorSealRowsV1(PAYLOAD, COORDINATE);
+    const ual = rows.find((row) => row.predicate === ASSERTION_SEAL_PREDICATES.KA_UAL)!;
+    const finalizedAt = rows.find(
+      (row) => row.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_FINALIZED_AT,
+    )!;
+    expect(canonicalizeAuthorSealStoreRoundTripRowV1({
+      ...ual,
+      object: PAYLOAD.kaUal,
+    })).toEqual(ual);
+    expect(canonicalizeAuthorSealStoreRoundTripRowV1({
+      ...finalizedAt,
+      object: `"2026-07-19T13:34:56.789+01:00"^^<${XSD}dateTime>`,
+    })).toEqual(finalizedAt);
+    expect(canonicalizeAuthorSealStoreRoundTripRowV1({
+      ...finalizedAt,
+      object: `"2026-07-19T13:34:56.7890+01:00"^^<${XSD}dateTime>`,
+    })).toEqual(finalizedAt);
+    for (const nonEquivalent of [
+      `"2026-07-19T12:34:56.7899Z"^^<${XSD}dateTime>`,
+      `"2026-07-19T12:34:56.789"^^<${XSD}dateTime>`,
+      `"2026-02-30T12:34:56.789Z"^^<${XSD}dateTime>`,
+    ]) {
+      expect(canonicalizeAuthorSealStoreRoundTripRowV1({
+        ...finalizedAt,
+        object: nonEquivalent,
+      }).object).toBe(nonEquivalent);
+    }
+    expect(canonicalizeAuthorSealStoreRoundTripRowV1({
+      ...finalizedAt,
+      object: `"not-an-instant"^^<${XSD}dateTime>`,
+    }).object).toBe(`"not-an-instant"^^<${XSD}dateTime>`);
+  });
+
   it('derives the prefix-free tagged subgraph subject and metadata graph', () => {
     const subgraphCoordinate = validatedCoordinate({
       ...COORDINATE,
@@ -158,6 +194,52 @@ describe('CanonicalGraphScopedAuthorSealV1 typed store inverse', () => {
       publicTripleCount: 12977,
       privateTripleCount: 0,
     });
+  });
+
+  it('canonicalizes EIP-55 checksummed store addresses to the lowercase seal', () => {
+    // Hardhat #1 / #0 — genuine EIP-55 checksummed addresses. They contain a–f
+    // digits, so the checksummed form differs from lowercase; the 0x3333…/0x4444…
+    // fixtures above would make this regression vacuous (they have no letters).
+    const CHECKSUMMED_AUTHOR = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+    const CHECKSUMMED_KAV10 = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+    const lowerAuthor = CHECKSUMMED_AUTHOR.toLowerCase();
+    const lowerKav10 = CHECKSUMMED_KAV10.toLowerCase();
+    expect(CHECKSUMMED_AUTHOR).not.toBe(lowerAuthor);
+    expect(CHECKSUMMED_KAV10).not.toBe(lowerKav10);
+
+    const coordinate = validatedCoordinate({ ...COORDINATE, authorAddress: lowerAuthor });
+    const payload = validatedPayload({
+      ...PAYLOAD,
+      authorAddress: lowerAuthor,
+      assertedAtKav10Address: lowerKav10,
+      kaUal: `did:dkg:otp:20430/${lowerAuthor}/7`,
+      reservedKaId: ((BigInt(lowerAuthor) << 96n) | 7n).toString(),
+    });
+
+    const lowerRows = toStoreRows(projectCanonicalGraphScopedAuthorSealRowsV1(payload, coordinate));
+    const checksummedRows = lowerRows.map((row) => {
+      if (row.predicateIri === ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS) {
+        return { ...row, object: toStoreObject(JSON.stringify(CHECKSUMMED_AUTHOR)) };
+      }
+      if (row.predicateIri === ASSERTION_SEAL_PREDICATES.ASSERTED_AT_KAV10_ADDRESS) {
+        return { ...row, object: toStoreObject(JSON.stringify(CHECKSUMMED_KAV10)) };
+      }
+      return row;
+    });
+
+    const lower = decodeCanonicalGraphScopedAuthorSealRowsV1(lowerRows, coordinate);
+    const checksummed = decodeCanonicalGraphScopedAuthorSealRowsV1(checksummedRows, coordinate);
+
+    // Checksummed store rows decode to the identical canonical payload, seal
+    // bytes, and digest as the lowercase rows — the property that matters.
+    expect(checksummed.payload.authorAddress).toBe(lowerAuthor);
+    expect(checksummed.payload.assertedAtKav10Address).toBe(lowerKav10);
+    expect(checksummed.payload).toEqual(lower.payload);
+    expect(checksummed.sealDigest).toBe(lower.sealDigest);
+    expect(checksummed.canonicalSealBytes).toEqual(lower.canonicalSealBytes);
+    // The PR #1780 candidate classifier still admits the checksummed rows.
+    expect(() => classifyCanonicalGraphScopedAuthorSealRowsV1(checksummedRows, coordinate))
+      .not.toThrow();
   });
 
   it('pins Oxigraph/Blazegraph typed-term parity rendering', () => {
@@ -424,3 +506,27 @@ function toStoreObject(object: string): CanonicalAuthorSealStoreRowV1['object'] 
     datatypeIri: `${XSD}string`,
   };
 }
+
+describe('CanonicalGraphScopedAuthorSealV1 public package barrel', () => {
+  it('re-exports the codec API from ../src/index.js and behaves identically', () => {
+    // Verifies the consumer-facing import contract: a regression that dropped
+    // the seal export block from src/index.ts would make these barrel symbols
+    // undefined and fail here, even though the direct-module tests stay green.
+    expect(typeof coreBarrel.canonicalizeCanonicalGraphScopedAuthorSealV1).toBe('function');
+    expect(typeof coreBarrel.computeCanonicalGraphScopedAuthorSealDigestV1).toBe('function');
+    expect(typeof coreBarrel.projectCanonicalGraphScopedAuthorSealRowsV1).toBe('function');
+    expect(typeof coreBarrel.decodeCanonicalGraphScopedAuthorSealRowsV1).toBe('function');
+    expect(typeof coreBarrel.CanonicalGraphScopedAuthorSealError).toBe('function');
+    expect(coreBarrel.MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1)
+      .toBe(MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1);
+
+    expect(coreBarrel.canonicalizeCanonicalGraphScopedAuthorSealV1(PAYLOAD)).toBe(CANONICAL);
+    expect(coreBarrel.computeCanonicalGraphScopedAuthorSealDigestV1(PAYLOAD)).toBe(SEAL_DIGEST);
+
+    const rows = toStoreRows(
+      coreBarrel.projectCanonicalGraphScopedAuthorSealRowsV1(PAYLOAD, COORDINATE),
+    );
+    expect(coreBarrel.decodeCanonicalGraphScopedAuthorSealRowsV1(rows, COORDINATE).payload)
+      .toEqual(PAYLOAD);
+  });
+});

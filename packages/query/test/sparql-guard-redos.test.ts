@@ -12,12 +12,10 @@ import {
  * to-exponential search-space growth on adversarial preambles like
  * "thousands of PREFIX decls followed by no terminal form".
  *
- * The fix replaced the monolithic regex with a small, anchored
- * declaration scanner that consumes O(n) characters total regardless
- * of preamble shape. These tests pin two properties:
- *   1. functional equivalence on the documented happy-path inputs;
- *   2. linear runtime on adversarial inputs the legacy regex spent
- *      polynomial time on.
+ * The fix replaced the monolithic regex with the core package's anchored
+ * declaration scanner. This query-package suite pins wrapper behaviour and
+ * absolute hang guards; core owns the isolated scaling benchmark beside the
+ * classifier implementation.
  *
  * Because this guard runs on operator-supplied SPARQL arriving over
  * HTTP, a regression here directly re-opens a CPU-DoS vector.
@@ -116,18 +114,18 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
   // The scanner replacement consumes each declaration via a single
   // anchored regex with no nested quantifier — total work is O(n).
 
-  // Same-shape measurement helper as the epcis ReDoS regression so
-  // CI flake characteristics stay consistent across packages.
+  // Wall time is sufficient for these lightweight wrapper hang guards. The
+  // core package owns the long, isolated scaling assertion.
   const measure = (input: string) => {
-    let minMs = Infinity;
+    for (let i = 0; i < 2; i++) detectSparqlQueryForm(input);
+    let fastestMs = Infinity;
     for (let i = 0; i < 5; i++) {
-      const t0 = performance.now();
-      const r = detectSparqlQueryForm(input);
-      const elapsed = performance.now() - t0;
-      expect(typeof r).toBe('string');
-      if (elapsed < minMs) minMs = elapsed;
+      const startedAt = performance.now();
+      const result = detectSparqlQueryForm(input);
+      fastestMs = Math.min(fastestMs, performance.now() - startedAt);
+      expect(typeof result).toBe('string');
     }
-    return minMs;
+    return fastestMs;
   };
 
   it('rejects N=1000 dangling PREFIX decls (no terminal form) in linear time', () => {
@@ -135,21 +133,6 @@ describe('CodeQL js/redos regression: bounded runtime on adversarial preambles',
     const input = decls + '\n'; // no SELECT — adversarial tail
     const ms = measure(input);
     expect(ms).toBeLessThan(500);
-  });
-
-  it('rejects N=10_000 dangling PREFIX decls in bounded time (10x input → bounded growth)', () => {
-    const smallInput = Array.from({ length: 1_000 }, (_, i) => `PREFIX p${i}: <http://x.org/${i}/>`).join('\n') + '\n';
-    const largeInput = Array.from({ length: 10_000 }, (_, i) => `PREFIX p${i}: <http://x.org/${i}/>`).join('\n') + '\n';
-
-    const smallMs = measure(smallInput);
-    const largeMs = measure(largeInput);
-
-    // Hang guard: 10k decls must reject in under a second. The buggy
-    // regex took >>10s here in local repro.
-    expect(largeMs).toBeLessThan(1000);
-    // Linearity guard: 10x input → bounded growth. 25x ceiling +
-    // 25ms cushion for noise (same calibration as epcis ReDoS test).
-    expect(largeMs).toBeLessThan(smallMs * 25 + 25);
   });
 
   it('classifies N=10_000 valid PREFIX decls + trailing SELECT in linear time', () => {

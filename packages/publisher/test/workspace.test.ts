@@ -6,6 +6,7 @@ import {
   TypedEventBus,
   generateEd25519Keypair,
   decodeWorkspacePublishRequest,
+  decodeEncryptedWorkspacePayload,
   encodeGossipEnvelope,
   encodeEncryptedWorkspacePayload,
   encryptWorkspacePayload,
@@ -22,6 +23,7 @@ import {
   SharedMemoryHandler,
   StaleWriteError,
   resolveKnowledgeAssetWorkspaceHead,
+  resolvePublishedKnowledgeAssetWorkspaceHead,
   type ShareOptions,
   type ConditionalShareOptions,
 } from '../src/index.js';
@@ -61,6 +63,10 @@ let DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 let WORKSPACE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
 let WORKSPACE_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 const ENTITY = 'urn:test:entity:1';
+const SNAPSHOT_PEER_A = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const SNAPSHOT_PEER_B = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+const SNAPSHOT_SELF_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const SNAPSHOT_PEER_C = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 let _kav10Address: string;
 let _provider: ethers.JsonRpcProvider;
 const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
@@ -248,8 +254,9 @@ describe('Workspace: share', () => {
     const result = await publisher.share(CONTEXT_GRAPH, quads, opts);
 
     expect(result.shareOperationId).toMatch(/^swm-\d+-[a-z0-9]+$/);
-    expect(result.message).toBeInstanceOf(Uint8Array);
-    expect(result.message.length).toBeGreaterThan(0);
+    expect(result.gossipPayload.message).toBeInstanceOf(Uint8Array);
+    expect(result.gossipPayload.message.length).toBeGreaterThan(0);
+    expect(result.message).toBe(result.gossipPayload.message);
 
     const workspaceResult = await store.query(
       `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
@@ -267,6 +274,255 @@ describe('Workspace: share', () => {
     if (metaResult.type === 'bindings') {
       expect(metaResult.bindings.length).toBe(1);
     }
+  });
+
+  it('returns isolated encryption-time fan-out snapshots for concurrent shares', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    publisher.setWorkspaceAgentRecipientResolver(async ({ contextGraphId }) => ({
+      requiresEncryption: true,
+      recipients: [{
+        ...recipientKeyFor(senderAgentAddress),
+        agentAddress: senderAgentAddress,
+        peerId: contextGraphId === 'snapshot-a' ? SNAPSHOT_PEER_A : SNAPSHOT_PEER_B,
+      }],
+    }));
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
+      expect(input.resolution.recipients[0]?.peerId).toBe(
+        input.contextGraphId === 'snapshot-a' ? SNAPSHOT_PEER_A : SNAPSHOT_PEER_B,
+      );
+      return input.plaintext;
+    });
+
+    const [first, second] = await Promise.all([
+      publisher.share('snapshot-a', [q('urn:test:snapshot-a', 'http://schema.org/name', '"A"')], {
+        publisherPeerId: SNAPSHOT_SELF_PEER,
+        senderAgentAddress,
+      }),
+      publisher.share('snapshot-b', [q('urn:test:snapshot-b', 'http://schema.org/name', '"B"')], {
+        publisherPeerId: SNAPSHOT_SELF_PEER,
+        senderAgentAddress,
+      }),
+    ]);
+
+    expect(first.gossipPayload).toEqual({
+      message: expect.any(Uint8Array),
+      fanout: {
+        kind: 'captured',
+        snapshot: {
+          source: 'agent-roster',
+          members: [SNAPSHOT_PEER_A],
+          complete: true,
+        },
+      },
+    });
+    expect(second.gossipPayload).toEqual({
+      message: expect.any(Uint8Array),
+      fanout: {
+        kind: 'captured',
+        snapshot: {
+          source: 'agent-roster',
+          members: [SNAPSHOT_PEER_B],
+          complete: true,
+        },
+      },
+    });
+  });
+
+  it('owns resolver recipient records and key bytes before encryption and fan-out', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    const resolverKey = recipientKeyFor(senderAgentAddress);
+    const resolverPublicKeyBytes = resolverKey.publicKeyBytes;
+    if (!resolverPublicKeyBytes) throw new Error('expected recipient public key');
+    const originalPublicKeyBytes = Uint8Array.from(resolverPublicKeyBytes);
+    const resolverRecipient = {
+      ...resolverKey,
+      agentAddress: senderAgentAddress,
+      peerId: SNAPSHOT_PEER_A,
+    };
+
+    publisher.setWorkspaceAgentRecipientResolver(async () => ({
+      requiresEncryption: true,
+      recipients: [resolverRecipient],
+    }));
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
+      resolverRecipient.peerId = SNAPSHOT_PEER_B;
+      resolverPublicKeyBytes.fill(0);
+
+      const capturedRecipient = input.resolution.recipients[0];
+      expect(capturedRecipient).not.toBe(resolverRecipient);
+      expect(capturedRecipient.peerId).toBe(SNAPSHOT_PEER_A);
+      expect(capturedRecipient.publicKeyBytes).not.toBe(resolverPublicKeyBytes);
+      expect(capturedRecipient.publicKeyBytes).toEqual(originalPublicKeyBytes);
+      expect(Object.isFrozen(input.resolution)).toBe(true);
+      expect(Object.isFrozen(input.resolution.recipients)).toBe(true);
+      expect(Object.isFrozen(capturedRecipient)).toBe(true);
+      expect(() => {
+        (capturedRecipient as { peerId?: string }).peerId = SNAPSHOT_PEER_B;
+      }).toThrow();
+      return input.plaintext;
+    });
+
+    const result = await publisher.share(
+      'snapshot-owned-recipient',
+      [q('urn:test:snapshot-owned-recipient', 'http://schema.org/name', '"owned"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+
+    expect(result.gossipPayload.fanout.kind).toBe('captured');
+    expect(result.gossipPayload.fanout.kind === 'captured'
+      ? result.gossipPayload.fanout.snapshot
+      : null).toEqual({
+      source: 'agent-roster',
+      members: [SNAPSHOT_PEER_A],
+      complete: true,
+    });
+  });
+
+  it('uses the validated non-empty recipient snapshot in built-in encryption', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    const recipient = recipientKeyFor(senderAgentAddress);
+    publisher.setWorkspaceAgentRecipientResolver(async () => ({
+      requiresEncryption: true,
+      recipients: [{
+        ...recipient,
+        agentAddress: senderAgentAddress,
+        peerId: SNAPSHOT_PEER_A,
+      }],
+    }));
+
+    const result = await publisher.share(
+      'snapshot-built-in-encryption',
+      [q('urn:test:snapshot-built-in', 'http://schema.org/name', '"built-in"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+
+    expect(result.gossipPayload.fanout.kind).toBe('captured');
+    if (result.gossipPayload.fanout.kind !== 'captured') throw new Error('expected captured fan-out');
+    const envelope = decodeEncryptedWorkspacePayload(result.gossipPayload.message);
+    expect(envelope.recipients).toHaveLength(1);
+    expect(result.gossipPayload.fanout.snapshot).toEqual({
+      source: 'agent-roster',
+      members: [SNAPSHOT_PEER_A],
+      complete: true,
+    });
+  });
+
+  it('does not leak recipient state from a failed pre-commit encryption', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    publisher.setWorkspaceAgentRecipientResolver(async ({ contextGraphId }) => ({
+      requiresEncryption: true,
+      recipients: [{
+        ...recipientKeyFor(senderAgentAddress),
+        agentAddress: senderAgentAddress,
+        peerId: contextGraphId === 'snapshot-fail' ? SNAPSHOT_PEER_B : SNAPSHOT_PEER_C,
+      }],
+    }));
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
+      if (input.contextGraphId === 'snapshot-fail') throw new Error('encryption failed');
+      return input.plaintext;
+    });
+
+    await expect(publisher.share(
+      'snapshot-fail',
+      [q('urn:test:snapshot-fail', 'http://schema.org/name', '"fail"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    )).rejects.toThrow('encryption failed');
+
+    const recovered = await publisher.share(
+      'snapshot-fresh',
+      [q('urn:test:snapshot-fresh', 'http://schema.org/name', '"fresh"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+    expect(recovered.gossipPayload).toEqual({
+      message: expect.any(Uint8Array),
+      fanout: {
+        kind: 'captured',
+        snapshot: {
+          source: 'agent-roster',
+          members: [SNAPSHOT_PEER_C],
+          complete: true,
+        },
+      },
+    });
+  });
+
+  it('keeps gossip enabled when an unchanged encryption member advertises a malformed peer ID', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    const recipient = recipientKeyFor(senderAgentAddress);
+    let advertisedPeerId = SNAPSHOT_PEER_A;
+    publisher.setWorkspaceAgentRecipientResolver(async () => ({
+      requiresEncryption: true,
+      recipients: [{
+        ...recipient,
+        agentAddress: senderAgentAddress,
+        peerId: advertisedPeerId,
+      }],
+    }));
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => input.plaintext);
+
+    const first = await publisher.share(
+      'snapshot-malformed-peer',
+      [q('urn:test:snapshot-malformed-peer:first', 'http://schema.org/name', '"first"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+    advertisedPeerId = 'not-a-peer-id';
+    const second = await publisher.share(
+      'snapshot-malformed-peer',
+      [q('urn:test:snapshot-malformed-peer:second', 'http://schema.org/name', '"second"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+
+    expect(first.gossipPayload.fanout.kind).toBe('captured');
+    expect(first.gossipPayload.fanout.kind === 'captured'
+      ? first.gossipPayload.fanout.snapshot
+      : null).toEqual({
+      source: 'agent-roster',
+      members: [SNAPSHOT_PEER_A],
+      complete: true,
+    });
+    expect(second.gossipPayload.fanout.kind).toBe('captured');
+    expect(second.gossipPayload.fanout.kind === 'captured'
+      ? second.gossipPayload.fanout.snapshot
+      : null).toEqual({
+      source: 'agent-roster',
+      members: [],
+      complete: false,
+    });
+  });
+
+  it.each([
+    [
+      'an empty encrypted roster',
+      { requiresEncryption: true, recipients: [] },
+      /has no valid DKG agent recipients/,
+    ],
+    [
+      'recipients on the plaintext arm',
+      {
+        requiresEncryption: false,
+        recipients: [{
+          ...recipientKeyFor('0x0000000000000000000000000000000000000001'),
+          agentAddress: '0x0000000000000000000000000000000000000001',
+        }],
+      },
+      /returned recipients while encryption is disabled/,
+    ],
+    [
+      'a malformed encrypted recipient',
+      { requiresEncryption: true, recipients: [{ agentAddress: ethers.Wallet.createRandom().address }] },
+      /returned an invalid DKG agent recipient/,
+    ],
+  ])('rejects custom resolver output with %s', async (_label, invalidResolution, expected) => {
+    publisher.setWorkspaceAgentRecipientResolver(async () => invalidResolution as any);
+
+    await expect(publisher.share(
+      'snapshot-invalid-resolver',
+      [q('urn:test:snapshot-invalid-resolver', 'http://schema.org/name', '"invalid"')],
+      {
+        publisherPeerId: SNAPSHOT_SELF_PEER,
+        senderAgentAddress: ethers.Wallet.createRandom().address,
+      },
+    )).rejects.toThrow(expected);
   });
 
   // ── Strict curator-ack gate (OT-RFC-49 curator-leader) ──
@@ -528,8 +784,8 @@ describe('Workspace: publishFromSharedMemory', () => {
       graphlessQuads.slice(splitAt),
       { publisherPeerId: 'peer-aggregate-second' },
     );
-    expect(firstShare.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
-    expect(secondShare.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(firstShare.gossipPayload.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(secondShare.gossipPayload.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
 
     let receivedParams: V10ACKProviderParams | undefined;
     const stopAfterCapture = new Error('stop after over-limit ACK capture');
@@ -1200,13 +1456,17 @@ describe('SharedMemoryHandler', () => {
 
   it('persists one durable KA-level transport owner across assertion versions', async () => {
     const peerId = '12D3KooWOwner';
+    const firstPublishedAt = 1_700_000_000_000;
+    // Oxigraph canonicalizes the valid xsd:dateTime fraction `.120Z` to `.12Z`.
+    // The resolver must validate the value semantically and normalize it to ms.
+    const secondPublishedAt = 1_700_000_000_120;
 
     const msg1 = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "First" <${DATA_GRAPH}> .`),
       publisherPeerId: peerId,
       shareOperationId: 'ws-own-1',
-      timestampMs: Date.now(),
+      timestampMs: firstPublishedAt,
     });
     await handler.handle(msg1, peerId);
 
@@ -1219,6 +1479,32 @@ describe('SharedMemoryHandler', () => {
       kaUal: firstRequest.kaUal ?? '',
     });
     expect(afterFirst?.publisherPeerId).toBe(peerId);
+    expect(afterFirst?.publishedAt).toBe(firstPublishedAt.toString());
+    await expect(resolvePublishedKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    })).resolves.toMatchObject({ publishedAt: firstPublishedAt.toString() });
+
+    await store.deleteByPattern({
+      graph: gm.sharedMemoryMetaUri(CONTEXT_GRAPH),
+      subject: `urn:dkg:share:${CONTEXT_GRAPH}:ws-own-1`,
+      predicate: 'http://dkg.io/ontology/publishedAt',
+    });
+    const legacyHeadWithoutPublishedAt = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    });
+    expect(legacyHeadWithoutPublishedAt?.publishedAt).toBeUndefined();
+    await expect(resolvePublishedKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    })).rejects.toThrow(/missing canonical publishedAt/u);
 
     const msg2 = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
@@ -1226,7 +1512,7 @@ describe('SharedMemoryHandler', () => {
       publisherPeerId: peerId,
       shareOperationId: 'ws-own-2',
       assertionVersion: '2',
-      timestampMs: Date.now(),
+      timestampMs: secondPublishedAt,
     });
     await handler.handle(msg2, peerId);
 
@@ -1239,6 +1525,7 @@ describe('SharedMemoryHandler', () => {
     expect(afterSecond).toMatchObject({
       assertionVersion: '2',
       publisherPeerId: peerId,
+      publishedAt: secondPublishedAt.toString(),
     });
   });
 });
@@ -2451,8 +2738,8 @@ describe('Workspace: conditionalShare (CAS)', () => {
     // a dummy "success" shape) cannot pass.
     const casResult = await publisher.conditionalShare(CONTEXT_GRAPH, [], literalOpts);
     expect(casResult.shareOperationId).toMatch(/.+/);
-    expect(casResult.message).toBeInstanceOf(Uint8Array);
-    expect(casResult.message.length).toBeGreaterThan(0);
+    expect(casResult.gossipPayload.message).toBeInstanceOf(Uint8Array);
+    expect(casResult.gossipPayload.message.length).toBeGreaterThan(0);
   });
 
   it('serializes concurrent CAS writes to the same subject+predicate', async () => {

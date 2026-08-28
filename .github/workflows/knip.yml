@@ -1,21 +1,17 @@
 name: Knip (dead-code baseline)
 
-# Warn-only dead-code scan. Runs on every PR and on pushes to protected
-# branches. Intentionally uses --no-exit-code so the job always reports
-# "success"; the point is to surface regressions in PR summaries, not to
-# block merges. Once the baseline is fully clean we can flip this to a
-# blocker by removing --no-exit-code and adding the job to the required
-# status checks.
+# Warn-only dead-code baseline. It is intentionally scheduled rather than run
+# on every PR: --no-exit-code means it cannot protect a merge, and its output
+# otherwise adds an always-green check to every change. Once the baseline is
+# clean, replace the schedule with a required regression gate.
 #
 # Config lives in knip.json at the repo root. Known false-positives (e.g.
 # Solidity-only deps that knip can't parse) belong in knip.json's
 # `ignoreDependencies`, not here.
 
 on:
-  push:
-    branches: [main, v10-rc, rc17-vm-wip]
-  pull_request:
-    branches: [main, v10-rc, rc17-vm-wip]
+  schedule:
+    - cron: '45 4 * * 1'
   workflow_dispatch:
 
 concurrency:

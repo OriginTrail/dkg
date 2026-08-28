@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { createOperationContext, PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import { createOperationContext, PROTOCOL_SYNC_CHANGELOG, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import {
+  runDurableSync,
+  type DurableSyncFetchRequest,
+} from '../src/sync/requester/durable-sync.js';
+import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import { runOrderedContextGraphSyncs } from '../src/sync/requester/ordered-sync.js';
 import {
@@ -31,14 +35,11 @@ function durableContext(contextGraphIds: string[]) {
     ctx,
     remotePeerId: 'peer',
     contextGraphIds,
-    createContextGraphSyncDeadline: () => Date.now() + 1_000,
-    fetchSyncPages: async (
-      _ctx: unknown,
-      _peer: string,
-      contextGraphId: string,
-      _swm: boolean,
-      phase: 'data' | 'meta',
-    ) => page(contextGraphId, phase),
+    durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 1_000),
+    fetchSyncPages: async ({
+      contextGraphId,
+      phase,
+    }: DurableSyncFetchRequest) => page(contextGraphId, phase),
     processDurableBatchInWorker: async () => ({
       verifiedData: [], verifiedMeta: [], totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0,
       rejectedKcs: 0, emptyResponses: 1, metaOnlyResponses: 0, dataRejectedMissingMeta: 0,
@@ -59,6 +60,7 @@ function lifecycleAgent(
   return {
     config: { syncContextGraphPriorities: priorities },
     createContextGraphSyncDeadline: () => Date.now() + 1_000,
+    createGraphScopedAuthenticationDeadline: () => Date.now() + 1_000,
     fetchSyncPages: async (
       _ctx: unknown,
       _peer: string,
@@ -119,6 +121,32 @@ describe('requester per-CG priority admission', () => {
     );
 
     expect(admissions).toEqual(['high', 'default', 'low']);
+  });
+
+  it('admits system Context Graphs last so their failures cannot starve user graphs', async () => {
+    // System graphs are the observed poison transfers in the per-peer fanout,
+    // and the fanout stops on the first failure — so they must run after every
+    // user graph even when the agent config never mentions them. An explicit
+    // operator entry (0 here) restores ordinary scheduling.
+    const admissions: string[] = [];
+    const agent = lifecycleAgent(
+      { [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]: 0 },
+      async (contextGraphId, work) => {
+        admissions.push(contextGraphId);
+        return work();
+      },
+    );
+
+    await (LifecycleSyncMethods.prototype.runLegacyDurableSync as any).call(
+      agent,
+      ctx,
+      'peer',
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS, 'user-a', SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'user-b'],
+    );
+
+    expect(admissions).toEqual([
+      'user-a', SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'user-b', SYSTEM_CONTEXT_GRAPHS.AGENTS,
+    ]);
   });
 
   it('preserves completed durable progress when a later admission is deferred', async () => {
@@ -254,15 +282,19 @@ describe('requester per-CG priority admission', () => {
         warn: (_ctx: unknown, message: string) => warnings.push(message),
         debug: noop,
       },
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      syncSharedMemoryFromPeerDetailedExecution:
+        LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
 
     const summary = await (
       LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed as any
     ).call(agent, 'peer', contextGraphIds, {
       sharedMemorySyncPlan: {
-        publicContextGraphIds: contextGraphIds,
-        privateRecoverFromCurator: [],
-        eligibleContextGraphIds: contextGraphIds,
+        targets: contextGraphIds.map((contextGraphId) => ({
+          contextGraphId,
+          lane: 'selected-public',
+        })),
       },
     });
 
@@ -292,15 +324,19 @@ describe('requester per-CG priority admission', () => {
       syncCheckpoints: new Map(),
       workspaceOwnedEntities: new Map(),
       log: { info: noop, warn: noop, debug: noop },
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      syncSharedMemoryFromPeerDetailedExecution:
+        LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
 
     const summary = await (
       LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed as any
     ).call(agent, 'peer', contextGraphIds, {
       sharedMemorySyncPlan: {
-        publicContextGraphIds: [],
-        privateRecoverFromCurator: contextGraphIds,
-        eligibleContextGraphIds: contextGraphIds,
+        targets: contextGraphIds.map((contextGraphId) => ({
+          contextGraphId,
+          lane: 'ordinary-private',
+        })),
       },
     });
 
@@ -400,7 +436,10 @@ describe('requester per-CG priority admission', () => {
         run: async () => {
           await runDurableSync({
             ...durableContext([contextGraphId]),
-            fetchSyncPages: async (_ctx, _peer, id, _swm, phase) => {
+            fetchSyncPages: async ({
+              contextGraphId: id,
+              phase,
+            }: DurableSyncFetchRequest) => {
               if (id === 'low-1' && phase === 'meta' && lowOneBlocked) {
                 await new Promise<void>((resolve) => { releaseLowOne = resolve; });
                 lowOneBlocked = false;

@@ -12,7 +12,8 @@
  *      written, networks that haven't opted in stay untouched).
  *   2. Persisted == current → no wipe, idempotent.
  *   3. Marker changed → wipe ALL of: store.nq, store.nq.tmp,
- *      random-sampling.wal, every publish-journal.* file. Save new marker.
+ *      random-sampling.wal, every publish-journal.* file, and the finalization
+ *      inbox main/WAL/SHM files. Save new marker.
  *   4. First boot WITH marker present (no persisted state) → wipe.
  *      Documented design: only way to reach here on an existing install
  *      is "auto-update brought a release with a fresh marker", which by
@@ -42,6 +43,10 @@ function seedAllFiles(dataDir: string) {
   writeFileSync(join(dataDir, 'publish-journal.0'), 'journal-0');
   writeFileSync(join(dataDir, 'publish-journal.1'), 'journal-1');
   writeFileSync(join(dataDir, 'publish-journal.staging'), 'journal-staging');
+  writeFileSync(join(dataDir, 'finalization-inbox-v1.sqlite3'), 'sqlite-main');
+  writeFileSync(join(dataDir, 'finalization-inbox-v1.sqlite3-journal'), 'sqlite-journal');
+  writeFileSync(join(dataDir, 'finalization-inbox-v1.sqlite3-wal'), 'sqlite-wal');
+  writeFileSync(join(dataDir, 'finalization-inbox-v1.sqlite3-shm'), 'sqlite-shm');
   // Files that MUST be preserved across the wipe.
   writeFileSync(join(dataDir, 'wallets.json'), '[{"address":"0x..."}]');
   writeFileSync(join(dataDir, 'auth.token'), 'secret-token');
@@ -104,6 +109,10 @@ describe('chainResetWipe — first boot with marker present', () => {
         'publish-journal.0',
         'publish-journal.1',
         'publish-journal.staging',
+        'finalization-inbox-v1.sqlite3',
+        'finalization-inbox-v1.sqlite3-journal',
+        'finalization-inbox-v1.sqlite3-wal',
+        'finalization-inbox-v1.sqlite3-shm',
       ]),
     );
     expect(result.removedFiles).not.toContain('store.nq');
@@ -114,6 +123,10 @@ describe('chainResetWipe — first boot with marker present', () => {
     expect(existsSync(join(dataDir, 'store.nq'))).toBe(false);
     expect(existsSync(join(dataDir, 'store.nq.tmp'))).toBe(false);
     expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(false);
+    expect(existsSync(join(dataDir, 'finalization-inbox-v1.sqlite3'))).toBe(false);
+    expect(existsSync(join(dataDir, 'finalization-inbox-v1.sqlite3-journal'))).toBe(false);
+    expect(existsSync(join(dataDir, 'finalization-inbox-v1.sqlite3-wal'))).toBe(false);
+    expect(existsSync(join(dataDir, 'finalization-inbox-v1.sqlite3-shm'))).toBe(false);
     expect(existsSync(join(dataDir, 'wallets.json'))).toBe(true);
     expect(existsSync(join(dataDir, STATE_FILE))).toBe(true);
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
@@ -177,6 +190,10 @@ describe('chainResetWipe — marker changed (chain reset)', () => {
     expect(existsSync(join(dataDir, 'publish-journal.0'))).toBe(false);
     expect(existsSync(join(dataDir, 'publish-journal.1'))).toBe(false);
     expect(existsSync(join(dataDir, 'publish-journal.staging'))).toBe(false);
+    expect(existsSync(join(dataDir, 'finalization-inbox-v1.sqlite3'))).toBe(false);
+    expect(existsSync(join(dataDir, 'finalization-inbox-v1.sqlite3-journal'))).toBe(false);
+    expect(existsSync(join(dataDir, 'finalization-inbox-v1.sqlite3-wal'))).toBe(false);
+    expect(existsSync(join(dataDir, 'finalization-inbox-v1.sqlite3-shm'))).toBe(false);
 
     // Preserved (the contract that makes auto-wipe safe):
     expect(existsSync(join(dataDir, 'wallets.json'))).toBe(true);

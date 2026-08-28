@@ -40,6 +40,7 @@ export {
   RecoverableAuthorAttestationErrorV1,
 } from './rfc64/recoverable-author-attestation-v1.js';
 export * from './rfc64/author-catalog-producer.js';
+export * from './rfc64/swm-author-inventory-producer-v1.js';
 export * from './rfc64/public-catalog-transport-v1.js';
 export * from './rfc64/public-catalog-current-head-discovery-v1.js';
 export * from './rfc64/open-catalog-policy-v1.js';
@@ -56,6 +57,7 @@ export {
 export * from './rfc64/public-catalog-successor-producer-v1.js';
 export * from './rfc64/public-open-catalog-scope-v1.js';
 export * from './rfc64/public-catalog-native-reconciler-v1.js';
+export * from './rfc64/public-catalog-activation-config-v1.js';
 export * from './rfc64/policy-cell-v1.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
@@ -74,15 +76,46 @@ export { FinalizationHandler } from './finalization-handler.js';
 export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
+export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+export {
+  classifySharedMemoryFreshness,
+  type SelectedSharedMemorySyncResult,
+  type SharedMemoryFreshnessSummary,
+} from './sync/shared-memory-freshness.js';
+export {
+  type Rfc64SelectedSwmGraphSyncStatus,
+} from './sync/selected-swm-graph-sync-status.js';
 export {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
+  VmReconcileShutdownTimeoutError,
+  VM_RECONCILE_SHUTDOWN_TIMEOUT_ERROR_CODE,
   VmReconcileUnavailableError,
   type ContextGraphReconcileResult,
   type ContextGraphReconcileStatus,
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
+export {
+  ContextGraphAssetFetchConflictError,
+  ContextGraphAssetFetchValidationError,
+  ExactAssetFetchLifecycleClosedError,
+  MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+  runExactAssetFetch,
+  type ContextGraphAssetFetchItemResult,
+  type ContextGraphAssetFetchItemStatus,
+  type ContextGraphAssetFetchResult,
+  type ExactAssetChainSnapshot,
+  type ExactAssetFetchDependencies,
+  type ExactAssetFetchEvidence,
+  type ExactAssetLocalState,
+} from './sync/exact-asset-fetch.js';
+export {
+  ContextGraphMembershipPersistQueueClosedError,
+  ContextGraphMembershipPersistQueueFullError,
+  ContextGraphMembershipPersistShutdownTimeoutError,
+  CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
+} from './context-graph-membership-persist-scheduler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
 export {
   CclEvaluator,
@@ -117,6 +150,10 @@ export {
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
 export type {
+  ConfiguredContextGraphMetadataReconciliationDiagnostic,
+  ConfiguredContextGraphMetadataReconciliationResult,
+} from './configured-context-graph-metadata-reconciliation.js';
+export type {
   AcceptRfc64CatalogAccessSnapshotParamsV1,
   PublishAuthorCatalogExactSetSuccessorParamsV1,
   PublishAuthorCatalogExactSetSuccessorResultV1,
@@ -127,12 +164,41 @@ export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
 export {
+  Rfc64CatalogReconciliationTerminalErrorV1,
+  type Rfc64CatalogReconciliationFailureCompletionV1,
+  type Rfc64CatalogReconciliationFailureOutcomeV1,
+  type Rfc64CatalogReconciliationTerminalReasonV1,
+} from './rfc64/public-catalog-reconciliation-failure-v1.js';
+export {
+  Rfc64CatalogSynchronizationErrorV1,
+} from './rfc64/catalog-synchronization-error-v1.js';
+export {
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_OUTCOMES_V1,
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_OUTCOMES_V1,
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_SUCCESS_OUTCOMES_V1,
+  isRfc64CatalogReconciliationFailureOutcomeV1,
+  isRfc64CatalogReconciliationSuccessOutcomeV1,
+  isRfc64PublicCatalogReceiverFailureCompletionV1,
+  isRfc64PublicCatalogReceiverSuccessCompletionV1,
+  type Rfc64CatalogReconciliationSuccessOutcomeV1,
+  type Rfc64PublicCatalogReceiverCompletionOutcomeV1,
+  type Rfc64PublicCatalogReceiverCompletionV1,
+  type Rfc64PublicCatalogReceiverFailureCompletionV1,
+  type Rfc64PublicCatalogReceiverSuccessCompletionV1,
+} from './rfc64/public-catalog-reconciliation-outcome-v1.js';
+export {
+  DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY,
+  SYNC_ADMISSION_SOURCES,
   contextGraphPriority,
   countSyncPriorityClasses,
+  normalizeSyncAdmissionSource,
   normalizeSyncContextGraphPriorities,
   orderContextGraphIdsByPriority,
+  resolveSyncContextGraphPriorities,
   syncPriorityClass,
   validateSyncResponderSnapshotLimitsConfig,
+  type SyncAdmissionSource,
+  type SyncAdmissionConfig,
   type SyncContextGraphPriorityConfig,
   type SyncPriorityClass,
   type SyncResponderSnapshotLimitsConfig,
@@ -192,8 +258,11 @@ export {
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  type Rfc64CatalogBootstrapConfigV1,
+  type Rfc64CatalogBootstrapPolicyV1,
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
+  type ContextGraphSyncMode,
   type ContextGraphDiscoveryMetadata,
   type ContextGraphDiscoveryOptions,
   type PublishOpts,
@@ -213,6 +282,8 @@ export {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
+  type SelectedVmReconcileCursorStore,
+  type SelectedVmReconcileCursorRecord,
   type ContextGraphWritePreflightProbe,
   type PeerHealth,
   type CclPublishedEvaluationRecord,
@@ -222,6 +293,9 @@ export {
   type ImportedArtifactByteStore,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
+  type SharedMemorySyncDiagnostics,
+  type SharedMemorySyncResult,
+  type SwmSnapshotCoverage,
 } from './dkg-agent-types.js';
 export {
   computeImportedArtifactSelector,
@@ -234,6 +308,9 @@ export {
 } from './imported-artifact.js';
 export {
   bindRandomSampling,
+  RandomSamplingShutdownTimeoutError,
+  RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_ERROR_CODE,
+  stopRandomSamplingHandleWithin,
   type RandomSamplingBindOptions,
   type RandomSamplingDisabledReason,
   type RandomSamplingHandle,
@@ -304,18 +381,64 @@ export {
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency } from './map-with-concurrency.js';
-export { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 export {
-  CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS,
+  CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+  CATCHUP_STOP_ON_PROOF,
+  catchupWaveSizes,
+} from './sync/catchup-concurrency.js';
+// Only what a cross-package consumer genuinely needs. The CLI daemon's Worker
+// catch-up runner drives the same plane policy and must not deep-import the
+// compiled `dist/`; everything else here — the backoff curve, the env parser,
+// the injected clock seams — is retry-policy internals, and in-package tests
+// import those from `./sync/catchup-policy.js` directly rather than pinning
+// them to the published surface.
+export {
+  CATCHUP_BACKPRESSURE_MAX_WAIT_MS,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
+  catchupAdmissionSource,
   catchupPriorityForMode,
+  catchupSourceForMode,
+  runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
+  type CatchupAdmissionSource,
+  type CatchupBackpressureRetryPolicy,
   type CatchupMode,
   type CatchupPlaneContext,
+  type CatchupPlanePolicyClock,
   type CatchupPlanePolicyOptions,
   type CatchupPlanePolicyResult,
+  type CatchupPlaneSourceOverride,
   type CatchupPlaneResult,
 } from './sync/catchup-policy.js';
+// #2050 — the bounded repeat of the public SWM peer walk. Both drivers of that
+// walk call the same stop rule, and one of them is the CLI daemon's Worker
+// runner, so the rule and the operator-facing bounds it reads must be on the
+// published surface. The env PARSERS stay in-package for the same reason the
+// retry policy's do: in-package tests import them from
+// `./sync/catchup-pass-policy.js` directly rather than pinning them here.
+export {
+  DEFAULT_SWM_CATCHUP_MAX_PASSES,
+  DEFAULT_SWM_CATCHUP_PASS_BUDGET_MS,
+  SwmCatchupPassTracker,
+  catchupPassNowMs,
+  resolveSwmCatchupPassConfig,
+  shouldRunAnotherCatchupPass,
+  type CatchupPassConfig,
+  type CatchupPassCoverage,
+  type CatchupPassDecision,
+  type CatchupPassDecisionReason,
+  type CatchupPassPolicyInput,
+} from './sync/catchup-pass-policy.js';
+// Which peer may let one answer stand for a WHOLE Context Graph is the load-
+// bearing distinction of the foreground catch-up walk (#2006), and the walk
+// lives in the CLI's worker. Publishing the model — rather than letting the
+// bridge re-shape it into a bare string — is what keeps the two sides from
+// drifting: adding or renaming a provenance value must break the consumer, not
+// silently downgrade it to "not authoritative".
+export {
+  authoritativeSyncPeerId,
+  type SyncPeerResolution,
+} from './dkg-agent-cg-resolve.js';
 export {
   classifyDurableProgress,
   createFailedPeerDurableSyncResult,
@@ -325,6 +448,22 @@ export {
   type DurableProgressClassificationOptions,
   type DurableProgressSummary,
 } from './sync/durable-progress.js';
+export {
+  DurableRecoveryCoordinator,
+  classifyDurableRecoverySlice,
+  rankDurableRecoveryPeers,
+  selectCanonicalDurableRecoveryManifest,
+  type DurableRecoveryContinuationOutcome,
+  type DurableRecoveryOwnerControl,
+  type DurableRecoveryPeerCandidate,
+  type DurableRecoveryPeerHealth,
+  type DurableRecoverySliceEvidence,
+} from './sync/durable-recovery-coordinator.js';
+// The ONE reduction for `SwmSnapshotCoverage`. Exported so the CLI catch-up
+// walk reduces across peers with the same rule the agent uses across Context
+// Graphs — two implementations is how a numerator and a denominator end up
+// coming from different peers.
+export { selectSwmSnapshotCoverage } from './sync/requester/shared-memory-sync.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
 // it identically to the in-agent lifecycle, without deep-importing `dist/`.

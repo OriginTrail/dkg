@@ -28,11 +28,13 @@ import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-au
 
 const COMPOSITION_KEYS = [
   'assertedAtKav10Address',
+  'catalogAuthorAddress',
   'catalogLane',
   'finalizedContextGraph',
   'inventory',
   'placements',
 ] as const;
+const LEGACY_COMPOSITION_KEYS = ['requireCompleteAuthorSet'] as const;
 const CATALOG_LANE_KEYS = ['contextGraphId', 'subGraphName'] as const;
 const PLACEMENT_KEYS = ['authorship', 'sealBinding'] as const;
 
@@ -50,10 +52,18 @@ export interface FinalizedVmPlacementEvidenceV1 {
 export interface ComposeFinalizedVmSetRequestV1 {
   /** Trusted lifecycle/KAV10 deployment address against which catalog seals were authored. */
   readonly assertedAtKav10Address: EvmAddressV1;
+  /** Exact author lane whose finalized chain rows must all be present. */
+  readonly catalogAuthorAddress: EvmAddressV1;
   readonly catalogLane: FinalizedVmCatalogLaneV1;
   readonly finalizedContextGraph: FinalizedContextGraphReadV1;
   readonly inventory: FinalizedVmChainInventoryV1;
   readonly placements: readonly FinalizedVmPlacementEvidenceV1[];
+  /**
+   * @deprecated Completeness is derived from finalized access policy. Retained
+   * only so pre-10.0.15 callers remain source/runtime compatible; `false`
+   * cannot weaken private author-set completeness.
+   */
+  readonly requireCompleteAuthorSet?: boolean;
 }
 
 interface ResolvedFinalizedVmPlacementV1 {
@@ -80,6 +90,7 @@ export type FinalizedVmCompositionErrorCodeV1 =
   | 'finalized-vm-composition-input'
   | 'finalized-vm-composition-inventory'
   | 'finalized-vm-composition-placement'
+  | 'finalized-vm-composition-incomplete'
   | 'finalized-vm-composition-mismatch'
   | 'finalized-vm-composition-duplicate';
 
@@ -109,9 +120,11 @@ export function composeFinalizedVmSetV1(
     COMPOSITION_KEYS,
     'finalized VM composition request',
     'finalized-vm-composition-input',
+    LEGACY_COMPOSITION_KEYS,
   );
   const catalogLane = snapshotCatalogLane(request.catalogLane);
   let assertedAtKav10Address: EvmAddressV1;
+  let catalogAuthorAddress: EvmAddressV1;
   let inventory: Readonly<FinalizedVmChainInventoryV1>;
   let finalizedContextGraph: Readonly<FinalizedContextGraphReadV1>;
   try {
@@ -120,6 +133,11 @@ export function composeFinalizedVmSetV1(
       'finalized VM assertedAtKav10Address',
     );
     assertedAtKav10Address = request.assertedAtKav10Address;
+    assertCanonicalEvmAddress(
+      request.catalogAuthorAddress,
+      'finalized VM catalogAuthorAddress',
+    );
+    catalogAuthorAddress = request.catalogAuthorAddress;
     inventory = snapshotFinalizedVmChainInventoryV1(request.inventory);
     finalizedContextGraph = snapshotFinalizedContextGraphReadV1(
       request.finalizedContextGraph,
@@ -170,6 +188,7 @@ export function composeFinalizedVmSetV1(
     if (
       authorship.contextGraphId !== catalogLane.contextGraphId
       || authorship.subGraphName !== catalogLane.subGraphName
+      || authorship.authorAddress !== catalogAuthorAddress
       || authorship.governanceChainId !== finalizedContextGraph.chainId
       || authorship.governanceContractAddress !== finalizedContextGraph.governanceContract
     ) {
@@ -213,7 +232,20 @@ export function composeFinalizedVmSetV1(
   const materializations: Readonly<FinalizedVmMaterializationPlanRowV1>[] = [];
   for (const candidate of inventory.rows) {
     const placement = placementsByKaId.get(candidate.kaId);
-    if (placement === undefined) continue;
+    if (placement === undefined) {
+      // Completeness is a property of the finalized policy, never a caller
+      // option that could weaken a private author lane's closure requirement.
+      if (
+        finalizedContextGraph.accessPolicy === 1
+        && candidate.authorAddress === catalogAuthorAddress
+      ) {
+        fail(
+          'finalized-vm-composition-incomplete',
+          `known-incomplete: no-authorized-provider for finalized KA ${candidate.kaId}`,
+        );
+      }
+      continue;
+    }
     assertCandidateMatchesPlacement(
       candidate,
       inventory,
@@ -383,6 +415,7 @@ function snapshotRecord<Code extends FinalizedVmCompositionErrorCodeV1>(
   expectedKeys: readonly string[],
   label: string,
   code: Code,
+  optionalKeys: readonly string[] = [],
 ): Record<string, unknown> {
   try {
     if (input === null || typeof input !== 'object' || Array.isArray(input)) {
@@ -391,15 +424,17 @@ function snapshotRecord<Code extends FinalizedVmCompositionErrorCodeV1>(
     const prototype = Object.getPrototypeOf(input);
     if (prototype !== Object.prototype && prototype !== null) throw new Error('not plain');
     const actualKeys = Reflect.ownKeys(input);
-    const expected = new Set(expectedKeys);
+    const accepted = new Set([...expectedKeys, ...optionalKeys]);
     if (
-      actualKeys.length !== expectedKeys.length
-      || actualKeys.some((key) => typeof key !== 'string' || !expected.has(key))
+      actualKeys.length < expectedKeys.length
+      || actualKeys.length > accepted.size
+      || expectedKeys.some((key) => !actualKeys.includes(key))
+      || actualKeys.some((key) => typeof key !== 'string' || !accepted.has(key))
     ) {
       throw new Error('unknown or missing fields');
     }
     const snapshot = Object.create(null) as Record<string, unknown>;
-    for (const key of expectedKeys) {
+    for (const key of actualKeys as string[]) {
       const descriptor = Object.getOwnPropertyDescriptor(input, key);
       if (
         descriptor === undefined

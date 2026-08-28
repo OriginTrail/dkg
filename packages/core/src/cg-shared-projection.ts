@@ -1,7 +1,6 @@
 import {
   parseRdfLiteralLexicalTerm,
 } from '@origintrail-official/dkg-rdf-utils';
-import { sha256 } from '@noble/hashes/sha2.js';
 
 import type { AuthorCatalogRowV1 } from './author-catalog-codec.js';
 import type { SignedAuthorCatalogHeadEnvelopeV1 } from './author-catalog-objects.js';
@@ -13,9 +12,7 @@ import {
   type CanonicalGraphScopedAuthorSealV1,
   type SealTripleCountV1,
 } from './canonical-graph-scoped-author-seal.js';
-import {
-  KA_BUNDLE_PROJECTION_DIGEST_DOMAIN_V1,
-} from './ka-bundle-v1.js';
+import { computeKaProjectionDigestV1 } from './ka-bundle-v1.js';
 import {
   V10MerkleTree,
 } from './crypto/v10-merkle.js';
@@ -52,9 +49,6 @@ const PRIVATE_COMMITMENT_PREDICATE_PREFIX =
 const XSD_HEX_BINARY_IRI = 'http://www.w3.org/2001/XMLSchema#hexBinary';
 const UTF8 = new TextEncoder();
 const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-const PROJECTION_DIGEST_DOMAIN = UTF8.encode(
-  KA_BUNDLE_PROJECTION_DIGEST_DOMAIN_V1,
-);
 const SENTINEL_NO_PRIVATE_DIGEST_V10 =
   '0xdfba2a3576c2aa2d73ecd8c55d1c27cfb15691ca9d3237b86434a06592f160ee' as Digest32V1;
 const LOWER_LANGUAGE_TAG = /^[a-z]{1,8}(?:-[a-z0-9]{1,8})*$/;
@@ -261,7 +255,7 @@ export function verifyCgSharedProjectionV1(
     );
   }
 
-  const projectionDigest = computeProjectionDigest(projectionBytes);
+  const projectionDigest = computeKaProjectionDigestV1(projectionBytes);
   if (
     projectionDigest !== metadata.projectionDigest
     || projectionDigest !== metadata.transfer.projectionDigest
@@ -792,13 +786,6 @@ function assertProjectionWithinLocalLimits(
       'signed publicTripleCount exceeds the local in-memory leaf limit',
     );
   }
-}
-
-function computeProjectionDigest(projectionBytes: Uint8Array): Digest32V1 {
-  const hasher = sha256.create();
-  hasher.update(PROJECTION_DIGEST_DOMAIN);
-  hasher.update(projectionBytes);
-  return bytesToDigest(hasher.digest());
 }
 
 function digestToBytes(value: Digest32V1): Uint8Array {

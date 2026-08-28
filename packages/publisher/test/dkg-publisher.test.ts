@@ -911,7 +911,7 @@ describe('DKGPublisher', () => {
 
     it('allows SWM write without sub-graph (root CG)', async () => {
       // `share()` returns a `ShareResult` with `{ shareOperationId,
-      // message }`. `toBeDefined()` alone would accept `{}` or a
+      // gossipPayload }`. `toBeDefined()` alone would accept `{}` or a
       // skeleton object; pin both fields so a regression that
       // silently swallows the write (and returns a dummy shape) is
       // caught.
@@ -921,8 +921,8 @@ describe('DKGPublisher', () => {
         publisherPeerId: 'QmTestPeer',
       });
       expect(result.shareOperationId).toMatch(/.+/);
-      expect(result.message).toBeInstanceOf(Uint8Array);
-      expect(result.message.length).toBeGreaterThan(0);
+      expect(result.gossipPayload.message).toBeInstanceOf(Uint8Array);
+      expect(result.gossipPayload.message.length).toBeGreaterThan(0);
     });
   });
 });

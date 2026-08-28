@@ -29,6 +29,7 @@ import {
 } from './config.js';
 import { resolveDaemonEntryPoint } from './daemon-entrypoint.js';
 import { ApiClient } from './api-client.js';
+import { isTerminalCatchupJobState } from './catchup-status.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from './cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from './store-wizard.js';
 import { runConfiguredSourceWorker } from './source-worker-runner.js';
@@ -201,15 +202,20 @@ type CatchupStatusCommandOptions = { watch?: boolean; interval?: string | number
 function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus']>>) {
   console.log(`Context Graph: ${status.contextGraphId}`);
   console.log(`Job:           ${status.jobId}`);
-  console.log(`Status:        ${status.status}`);
+  console.log(`Job Status:    ${status.jobStatus}`);
+  if (status.graphSync) {
+    console.log(`Graph Sync:    ${status.graphSync.state} (${status.graphSync.mechanism})`);
+  }
   console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
   console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);
   if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
   if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
   if (status.result) {
     const totalConnectedPeers = status.result.totalPeers ?? status.result.connectedPeers;
+    const notAttempted = status.result.peersNotAttempted ?? 0;
     console.log(
-      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${totalConnectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
+      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${totalConnectedPeers}`
+      + `${notAttempted > 0 ? `, ${notAttempted} not needed` : ''}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
     );
     if (status.result.deferredBackpressure > 0) {
       console.log(`Deferred:      ${status.result.deferredBackpressure} phase(s) by local scheduler backpressure`);
@@ -245,7 +251,6 @@ async function runCatchupStatusCommand(contextGraph: string, opts: CatchupStatus
   const client = await ApiClient.connect();
   const watch = !!opts.watch;
   const intervalSeconds = Math.max(1, Number(opts.interval ?? 2));
-  const terminalStates = new Set(['done', 'failed', 'denied', 'deferred', 'unreachable']);
 
   do {
     const status = await client.catchupStatus(contextGraph);
@@ -254,7 +259,7 @@ async function runCatchupStatusCommand(contextGraph: string, opts: CatchupStatus
       console.log(`Watching catch-up status every ${intervalSeconds}s\n`);
     }
     printCatchupStatus(status);
-    if (!watch || terminalStates.has(status.status)) {
+    if (!watch || isTerminalCatchupJobState(status.jobStatus)) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, intervalSeconds * 1000));

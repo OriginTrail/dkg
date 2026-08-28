@@ -1,7 +1,10 @@
 {
   "name": "@origintrail-official/dkg",
-  "version": "10.0.9",
+  "version": "10.0.14",
   "type": "module",
+  "engines": {
+    "node": ">=22.13.0 <23.0.0 || >=23.4.0"
+  },
   "main": "dist/cli.js",
   "bin": {
     "dkg": "./dist/cli.js"
@@ -15,8 +18,8 @@
     }
   },
   "scripts": {
-    "prebuild": "pnpm -r --filter @origintrail-official/dkg-adapter-openclaw... --filter @origintrail-official/dkg-adapter-hermes... --filter @origintrail-official/dkg-mcp... --filter @origintrail-official/dkg-okf... run build",
-    "build": "tsc && node ../../scripts/copy-cli-runtime-assets.mjs",
+    "prebuild": "pnpm -r --filter @origintrail-official/dkg-adapter-openclaw... --filter @origintrail-official/dkg-adapter-hermes... --filter @origintrail-official/dkg-adapter-prime-agent... --filter @origintrail-official/dkg-mcp... --filter @origintrail-official/dkg-okf... run build",
+    "build": "tsc && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
     "prepack": "node ../../scripts/copy-cli-runtime-assets.mjs",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
@@ -34,6 +37,7 @@
   "dependencies": {
     "@origintrail-official/dkg-adapter-openclaw": "workspace:*",
     "@origintrail-official/dkg-adapter-hermes": "workspace:*",
+    "@origintrail-official/dkg-adapter-prime-agent": "workspace:*",
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",

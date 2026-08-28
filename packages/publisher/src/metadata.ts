@@ -429,6 +429,17 @@ export type ConfirmedGraphKnowledgeAssetMetadataRead =
   | { state: 'invalid' }
   | { state: 'confirmed'; envelope: ConfirmedGraphKnowledgeAssetMetadataEnvelope };
 
+export interface LocallyTrustedKnowledgeAssetControlAnchor {
+  readonly assertionVersion: string;
+  readonly merkleRoot: Uint8Array;
+}
+
+export interface LocallyTrustedKnowledgeAssetControlEnvelope {
+  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers: string[];
+  publisherPeerId: string;
+}
+
 function rdfLiteralLexicalValue(value: string): string | undefined {
   const match = /^("(?:\\.|[^"\\])*")/.exec(value);
   if (!match) return undefined;
@@ -629,31 +640,36 @@ export async function readConfirmedGraphKnowledgeAssetMetadataEnvelope(
   };
 }
 
-/** Persist locally authored access controls outside sync-visible metadata. */
-export async function replaceLocallyTrustedKnowledgeAssetControls(
+/**
+ * Persist one validated local-control entry. Both the rolling-compatible
+ * metadata-quad API and the typed envelope API terminate here; neither needs
+ * to adapt through the other.
+ */
+async function writeLocallyTrustedKnowledgeAssetControlEntry(
   store: TripleStore,
   ual: string,
-  metadataQuads: readonly Quad[],
+  version: bigint,
+  root: string,
+  sidecarQuads: readonly Quad[],
 ): Promise<void> {
   assertSafeGraphIriForSparql(ual);
-  const version = parseControlVersion(
-    readControlAnchor(metadataQuads, `${DKG}assertionVersion`, 'assertionVersion'),
-  );
-  const root = normalizeControlRoot(
-    readControlAnchor(metadataQuads, `${DKG}merkleRoot`, 'merkleRoot'),
-  );
   const entry = `${ual}/_local_controls/${version}/${root}`;
   assertSafeGraphIriForSparql(entry);
-  const controls = metadataQuads
-    .filter(
-      (quad) => quad.subject === ual && LOCAL_TRUSTED_KA_SIDECAR_PREDICATES.has(quad.predicate),
-    )
-    .map((quad) => ({
-      ...quad,
-      subject: entry,
-      graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
-    }));
+  const controls = sidecarQuads.map((quad) => ({
+    ...quad,
+    subject: entry,
+    graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+  }));
   validateLocallyTrustedControlRows(controls);
+  const storedVersion = parseControlVersion(
+    readControlAnchor(controls, `${DKG}assertionVersion`, 'assertionVersion'),
+  );
+  const storedRoot = normalizeControlRoot(
+    readControlAnchor(controls, `${DKG}merkleRoot`, 'merkleRoot'),
+  );
+  if (storedVersion !== version || storedRoot !== root) {
+    throw new Error('Locally trusted KA control entry does not match its assertion anchor');
+  }
   await store.insert([
     ...controls,
     {
@@ -662,6 +678,59 @@ export async function replaceLocallyTrustedKnowledgeAssetControls(
       object: ual,
       graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
     },
+  ]);
+}
+
+/** Persist locally authored access controls outside sync-visible metadata. */
+export async function replaceLocallyTrustedKnowledgeAssetControls(
+  store: TripleStore,
+  ual: string,
+  metadataQuads: readonly Quad[],
+): Promise<void> {
+  const sidecarQuads = metadataQuads.filter(
+    (quad) => quad.subject === ual && LOCAL_TRUSTED_KA_SIDECAR_PREDICATES.has(quad.predicate),
+  );
+  const version = parseControlVersion(
+    readControlAnchor(sidecarQuads, `${DKG}assertionVersion`, 'assertionVersion'),
+  );
+  const root = normalizeControlRoot(
+    readControlAnchor(sidecarQuads, `${DKG}merkleRoot`, 'merkleRoot'),
+  );
+  await writeLocallyTrustedKnowledgeAssetControlEntry(
+    store,
+    ual,
+    version,
+    root,
+    sidecarQuads,
+  );
+}
+
+/**
+ * Replace one receiver-authenticated local control envelope directly. The
+ * caller supplies only the assertion anchor and controls; visible KA metadata
+ * is deliberately not part of this local-only persistence contract.
+ */
+export async function replaceLocallyTrustedKnowledgeAssetControlEnvelope(
+  store: TripleStore,
+  ual: string,
+  anchor: LocallyTrustedKnowledgeAssetControlAnchor,
+  controls: LocallyTrustedKnowledgeAssetControlEnvelope,
+): Promise<void> {
+  const scope = createGraphKnowledgeAssetScope(ual, anchor.assertionVersion);
+  if (anchor.merkleRoot.length !== 32) {
+    throw new Error('Locally trusted KA controls require one 32-byte merkleRoot');
+  }
+  const graph = LOCAL_TRUSTED_KA_CONTROLS_GRAPH;
+  const version = BigInt(scope.assertionVersion);
+  const root = toHex(anchor.merkleRoot).toLowerCase();
+  await writeLocallyTrustedKnowledgeAssetControlEntry(store, scope.ual, version, root, [
+    mq(scope.ual, `${DKG}assertionVersion`, intLit(BigInt(scope.assertionVersion)), graph),
+    mq(scope.ual, `${DKG}merkleRoot`, lit(root), graph),
+    mq(scope.ual, `${DKG}accessPolicy`, lit(controls.accessPolicy), graph),
+    mq(scope.ual, `${DKG}publisherPeerId`, lit(controls.publisherPeerId), graph),
+    ...[...new Set(controls.allowedPeers)].sort().map((peerId) => (
+      mq(scope.ual, `${DKG}allowedPeer`, lit(peerId), graph)
+    )),
   ]);
 }
 
@@ -737,6 +806,55 @@ export async function readLocallyTrustedKnowledgeAssetControls(
   return highest[0]!.rows
     .filter((quad) => LOCAL_TRUSTED_KA_CONTROL_PREDICATES.has(quad.predicate))
     .map((quad) => ({ ...quad, subject: ual, graph: metaGraph }));
+}
+
+/**
+ * Read the local-only control sidecar through the publisher-owned RDF contract.
+ * Consumers receive a typed envelope instead of duplicating predicate and
+ * literal parsing rules outside this module.
+ */
+export async function readLocallyTrustedKnowledgeAssetControlEnvelope(
+  store: TripleStore,
+  metaGraph: string,
+  ual: string,
+  incomingMetadataQuads: readonly Quad[],
+  options: QueryOptions = {},
+): Promise<LocallyTrustedKnowledgeAssetControlEnvelope | undefined> {
+  const rows = await readLocallyTrustedKnowledgeAssetControls(
+    store,
+    metaGraph,
+    ual,
+    incomingMetadataQuads,
+    options,
+  );
+  if (rows.length === 0) return undefined;
+
+  const lexicalValues = (predicate: string): string[] => [...new Set(
+    rows
+      .filter((quad) => quad.predicate === predicate)
+      .map((quad) => rdfLiteralLexicalValue(quad.object))
+      .filter((value): value is string => value !== undefined),
+  )];
+  const policies = lexicalValues(`${DKG}accessPolicy`);
+  const publishers = lexicalValues(`${DKG}publisherPeerId`);
+  const allowedPeers = lexicalValues(`${DKG}allowedPeer`).sort();
+  const accessPolicy = policies[0];
+  if (
+    policies.length !== 1
+    || publishers.length !== 1
+    || (
+      accessPolicy !== 'public'
+      && accessPolicy !== 'ownerOnly'
+      && accessPolicy !== 'allowList'
+    )
+  ) {
+    throw new Error('Locally trusted KA controls could not be decoded');
+  }
+  return {
+    accessPolicy,
+    allowedPeers,
+    publisherPeerId: publishers[0]!,
+  };
 }
 
 function validateLocallyTrustedControlRows(rows: readonly Quad[]): void {
@@ -1230,11 +1348,13 @@ export async function readMaterializedVersion(
   store: TripleStore,
   metaGraph: string,
   ual: string,
+  options: QueryOptions = {},
 ): Promise<MaterializedVersion | null> {
   assertSafeGraphIriForSparql(metaGraph);
   assertSafeGraphIriForSparql(ual);
   const res = await store.query(
     `SELECT ?v WHERE { GRAPH <${metaGraph}> { <${ual}> <${MATERIALIZED_VERSION_PRED}> ?v } } LIMIT 1`,
+    options,
   );
   if (res.type !== 'bindings' || res.bindings.length === 0) return null;
   return parseMaterializedVersion(res.bindings[0]['v']);
@@ -1251,12 +1371,14 @@ export async function shouldApplyMaterialization(
   ual: string,
   incoming: MaterializedVersion,
   incomingAssertionVersion?: bigint,
+  options: QueryOptions = {},
 ): Promise<boolean> {
   if (incomingAssertionVersion !== undefined) {
     assertSafeGraphIriForSparql(metaGraph);
     assertSafeGraphIriForSparql(ual);
     const assertionVersions = await store.query(
       `SELECT ?v WHERE { GRAPH <${metaGraph}> { <${ual}> <${ASSERTION_VERSION_PRED}> ?v } }`,
+      options,
     );
     if (assertionVersions.type === 'bindings') {
       for (const row of assertionVersions.bindings) {
@@ -1269,7 +1391,7 @@ export async function shouldApplyMaterialization(
       }
     }
   }
-  const current = await readMaterializedVersion(store, metaGraph, ual);
+  const current = await readMaterializedVersion(store, metaGraph, ual, options);
   if (!current) return true;
   return compareMaterializedVersion(incoming, current) >= 0;
 }
@@ -1279,11 +1401,15 @@ export async function writeMaterializedVersion(
   metaGraph: string,
   ual: string,
   version: MaterializedVersion,
+  options: QueryOptions = {},
 ): Promise<void> {
   assertSafeGraphIriForSparql(metaGraph);
   assertSafeGraphIriForSparql(ual);
-  await store.deleteByPattern({ graph: metaGraph, subject: ual, predicate: MATERIALIZED_VERSION_PRED });
-  await store.insert([materializedVersionQuad(metaGraph, ual, version)]);
+  await store.deleteByPattern(
+    { graph: metaGraph, subject: ual, predicate: MATERIALIZED_VERSION_PRED },
+    options,
+  );
+  await store.insert([materializedVersionQuad(metaGraph, ual, version)], options);
 }
 
 export function materializedVersionQuad(
@@ -1329,9 +1455,11 @@ export async function withMaterializationLock<T>(
   metaGraph: string,
   ual: string,
   fn: () => Promise<T>,
+  options: { signal?: AbortSignal } = {},
 ): Promise<T> {
   const key = `${metaGraph}\u0000${ual}`;
   const prev = _materializationLocks.get(key);
+  let entered = false;
   // Build our work promise so subsequent callers can chain after us
   // BEFORE we start awaiting prev (otherwise two near-simultaneous
   // callers would both see `prev === undefined` and run in parallel).
@@ -1339,17 +1467,49 @@ export async function withMaterializationLock<T>(
     if (prev) {
       try { await prev; } catch { /* prev's caller already handled it */ }
     }
+    if (options.signal?.aborted) {
+      throw new DOMException('Materialization lock wait aborted', 'AbortError');
+    }
+    entered = true;
     return fn();
   })();
   _materializationLocks.set(key, work);
-  try {
-    return await work;
-  } finally {
+  // Cleanup follows the serialized tail, not the caller-facing abort race. If
+  // a waiter aborts behind an active owner, deleting the key immediately would
+  // let a third writer bypass that owner and violate the TOCTOU guarantee.
+  void work.finally(() => {
     // GC: if no one else queued after us, drop the entry so the map
     // doesn't grow unbounded across long-running daemons.
     if (_materializationLocks.get(key) === work) {
       _materializationLocks.delete(key);
     }
+  }).catch(() => undefined);
+  if (!options.signal) return work;
+
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<T>((_resolve, reject) => {
+    onAbort = () => {
+      // Once the critical section has started it is an atomic durability unit:
+      // its caller must observe its real completion before shutdown can close
+      // the store. Cancellation only removes callers still waiting for the
+      // previous owner; it must never detach an entered writer.
+      if (entered) return;
+      // An aborted waiter that never entered the critical section contributes
+      // no serialization work. Restore the prior owner as the visible tail so
+      // repeated stop/restart cycles cannot accumulate an unbounded promise
+      // chain behind one physically hung store mutation.
+      if (!entered && prev && _materializationLocks.get(key) === work) {
+        _materializationLocks.set(key, prev);
+      }
+      reject(new DOMException('Materialization lock wait aborted', 'AbortError'));
+    };
+    if (options.signal!.aborted) onAbort();
+    else options.signal!.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return entered ? await work : await Promise.race([work, aborted]);
+  } finally {
+    if (onAbort) options.signal.removeEventListener('abort', onAbort);
   }
 }
 
@@ -1858,6 +2018,11 @@ export const VM_CURRENT_ASSERTION_PRED = `${DKG}vmCurrentAssertion`;
 export const KA_ID_PRED = `${DKG}kaId`;
 export const RESERVED_UAL_PRED = `${DKG}reservedUal`;
 export const PROV_WAS_REVISION_OF = `${PROV}wasRevisionOf`;
+// In-flight lane markers stamped on the lifecycle URN while a share /
+// promote operation is outstanding. Their presence means the draft is NOT
+// purely local — the legacy-WM migration eligibility gate keys off them.
+export const SHARE_OPERATION_ID_PRED = `${DKG}shareOperationId`;
+export const PROMOTE_OPERATION_INTENT_PRED = `${DKG}promoteOperationIntent`;
 
 /** OT-RFC-43 §10.5.4 per-layer / overall KA status enum (string-stable). */
 export type KaStatus = 'draft-open' | 'wm-sealed' | 'swm-shared' | 'vm-confirmed';

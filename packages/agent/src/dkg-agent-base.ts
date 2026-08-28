@@ -15,10 +15,23 @@ import {
   openRfc64PersistenceV1,
   type Rfc64PersistenceV1,
 } from './rfc64/persistence-v1.js';
+import {
+  openSqliteFinalizationRecoveryStore,
+} from './finalization-recovery-sqlite-store.js';
+import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
+import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
+import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
+import { ContextGraphBindingState } from './context-graph-binding-state.js';
+import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
+import type {
+  Rfc64AuthorizedSwmRecoveryPlanV1,
+  Rfc64SwmRecoveryCoordinatorV1,
+} from
+  './rfc64/swm-recovery-coordinator-v1.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -154,6 +167,7 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import { SelectedSwmMetaTransferCoordinator } from './sync/selected-swm-meta-transfer-coordinator.js';
 import { bindRandomSampling, type RandomSamplingDisabledReason, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -357,6 +371,8 @@ import {
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
   type VmReconcileNegativeRecord,
+  type SelectedVmReconcileCursorRecord,
+  type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -412,6 +428,11 @@ function readNonNegativeNumberEnv(name: string, fallback: number): number {
   if (raw === undefined || raw.trim() === '') return fallback;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
+}
+
+function readPositiveSafeIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 export function createListContextGraphsCacheInvalidatingStore(
@@ -893,14 +914,26 @@ export class DKGAgentBase {
     );
   static readonly VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS =
     Math.max(5_000, DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS);
-  static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS =
-    Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']) || 10 * 60_000;
-  static readonly VM_RECONCILE_CACHE_MAX_ENTRIES =
-    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CACHE_MAX_ENTRIES']) || 1_000);
+  static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS = (() => {
+    const configured = Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']);
+    return Number.isFinite(configured) && configured > 0
+      ? configured
+      : 10 * 60_000;
+  })();
+  static readonly VM_RECONCILE_CACHE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
+    'DKG_VM_RECONCILE_CACHE_MAX_ENTRIES',
+    1_000,
+  );
   static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
-  static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES =
-    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES']) || 1_000);
+  static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
+    'DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES',
+    1_000,
+  );
+  /** Maximum peers connected/probed/transported by one exact-recovery pass. */
+  static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
+  /** Bounded proof universe retained across passes; transport still uses the cap above. */
+  static readonly VM_RECONCILE_EXACT_ROSTER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_QUEUE_MAX_PENDING']) || 256);
   /**
@@ -910,6 +943,22 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_BATCH_SIZE =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_BATCH_SIZE']) || 10);
+  /** Hard ceiling: RS heal is best-effort maintenance and must stay bounded. */
+  static readonly RS_HEAL_BATCH_MAX = 64;
+  /**
+   * Maximum stranded KCs one RS-heal pass may inspect before yielding. RS heal
+   * is periodic repair work, so bounding each pass keeps foreground publish,
+   * SWM and gossip operations from competing with an entire historical backlog.
+  */
+  static readonly RS_HEAL_BATCH_SIZE = Math.min(
+    DKGAgentBase.RS_HEAL_BATCH_MAX,
+    readPositiveSafeIntegerEnv('DKG_RS_HEAL_BATCH_SIZE', 8),
+  );
+  /** Bounded per-CG keyset cursor retention for the independent RS-heal pager. */
+  static readonly RS_HEAL_CG_STATE_MAX_ENTRIES = Math.min(
+    10_000,
+    readPositiveSafeIntegerEnv('DKG_RS_HEAL_CG_STATE_MAX_ENTRIES', 1_000),
+  );
   /**
    * Parallel ordinal work per CG. Combined with the default two-CG dispatcher
    * concurrency this caps chain/store pressure at ten in-flight ordinals.
@@ -923,6 +972,8 @@ export class DKGAgentBase {
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_MAX_FOREGROUND_BURST']) || 8);
   static readonly VM_RECONCILE_SHUTDOWN_TIMEOUT_MS =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_SHUTDOWN_TIMEOUT_MS']) || 5_000);
+  static readonly RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS =
+    Math.max(1, Number(process.env['DKG_RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS']) || 5_000);
   static readonly CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS =
     Math.max(1, Number(process.env['DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS']) || 5_000);
   /**
@@ -936,7 +987,11 @@ export class DKGAgentBase {
     Number(process.env['DKG_VM_RECONCILE_CONFIRMATION_DEPTH']) || 5;
 
   static readonly LIST_CONTEXT_GRAPHS_CACHE_TTL_MS =
-    readNonNegativeNumberEnv('DKG_LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', 5_000);
+    // A full catalogue scan enriches every globally known graph and is
+    // intentionally expensive. Keep repeat UI/CLI reads off the store for one
+    // minute by default; operators can still shorten the window or set it to
+    // zero through the existing environment override.
+    readNonNegativeNumberEnv('DKG_LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', 60_000);
   static readonly LIST_CONTEXT_GRAPHS_CACHE_MAX =
     Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_CACHE_MAX']) || 32);
   static readonly LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS =
@@ -963,6 +1018,17 @@ export class DKGAgentBase {
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — unified per-CG coalescing and node-wide admission policy. */
   protected vmReconcileDispatcher?: VmReconcileDispatcher<ContextGraphReconcileResult>;
+  /** Closed dispatcher retained until every physically active worker settles. */
+  protected vmReconcileRetirement: Promise<void> | null = null;
+  /** Reconcile engines may outlive a caller's abort race; stop drains these before store teardown. */
+  protected readonly vmReconcilePhysicalRuns = new Set<Promise<unknown>>();
+  /** Admitted authenticated graph-scoped stores must physically drain before backing-store teardown. */
+  protected readonly graphScopedStorePhysicalRuns = new Set<Promise<unknown>>();
+  protected graphScopedStoreClosed = false;
+  /** True only after startup has installed every dependency the VM worker uses. */
+  protected vmReconcileRuntimeReady = false;
+  /** A timed-out physical retirement quarantines this instance until stop is retried. */
+  protected vmReconcileShutdownBlocked = false;
   /** Next eligible CG index for bounded periodic-sweep admission. */
   protected vmReconcileSweepCursor = 0;
   /** Deterministically staggered cold-start prime, separate from the interval. */
@@ -971,6 +1037,19 @@ export class DKGAgentBase {
   protected vmReconcileSweepInFlight: Promise<void> | null = null;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */
   protected readonly reconcileCursors = new Map<string, CursorState>();
+  /**
+   * RFC-64 selected-only VM progress is separate from membership subscriptions.
+   * Each entry is fenced by the exact chain deployment, numeric chain binding,
+   * and a monotonically increasing process-local generation; its watermark is
+   * persisted in a dedicated non-subscription record when the configured store
+   * supports it.
+   */
+  protected readonly selectedVmReconcileCursors = new Map<string, {
+    record: SelectedVmReconcileCursorRecord;
+    cursor: CursorState;
+    bindingGeneration: number;
+  }>();
+  protected selectedVmReconcileBindingGeneration = 0;
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
   protected readonly recentReconciledUals = new RecentUalSet();
   /**
@@ -985,11 +1064,38 @@ export class DKGAgentBase {
   protected coreHostRecordingGeneration = 0;
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
   protected readonly vmReconcileNegativeCache = new Map<string, Omit<VmReconcileNegativeRecord, 'cacheKey'>>();
-  /** Keys already consulted in the durable store during this process lifetime. */
-  protected readonly vmReconcileNegativeCacheHydrated = new Set<string>();
+  /** Bounded access-ordered keys already consulted in the durable store. */
+  protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
-  /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
-  protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
+  /** Bounded, process-local clean-absence rotations for production VM recovery. */
+  protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
+  /** Next stable batch index to consider when the bounded rotation cache has waiters. */
+  protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
+  /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */
+  protected readonly vmReconcileCuratorPeersByCg = new Map<string, string[]>();
+  /** Exclusive peer-id cursor used to walk oversized curator registries. */
+  protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();
+  /** Bounded per-principal persistence lanes keep compensation ordered without heap backlog. */
+  protected readonly contextGraphMembershipPersistence = new ContextGraphMembershipPersistScheduler();
+  protected contextGraphMembershipPersistenceShutdownBlocked = false;
+  static readonly CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS = 5_000;
+  /** Late exact responses must not mutate rotation state after shutdown begins. */
+  protected vmReconcileRotationClosed = false;
+  /** Monotonic guard: every VM reconcile continuation from an earlier node run stays stale. */
+  protected vmReconcileLifecycleGeneration = 0;
+  /** Abortable boundary paired with the generation guard for restart-safe async work. */
+  protected vmReconcileLifecycleController = new AbortController();
+  /**
+   * Phase D/A4 — one owned per-CG active-fetch cooldown record. Keeping the
+   * timestamp and lifecycle owner together makes it impossible for stale
+   * cleanup to observe or leave half of the suppression state behind.
+   */
+  protected readonly vmReconcileFetchCooldowns = new Map<string, {
+    startedAt: number;
+    owner: symbol;
+  }>();
+  /** Last stranded UAL visited by the bounded RS-heal sweep for each CG. */
+  protected readonly rsHealCursorByCg = new Map<string, string>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */
   protected readonly vmReconcileCatchupPeerCursor = new Map<string, number>();
   protected readonly vmReconcileCatchupPeerOrder = new Map<string, {
@@ -1035,6 +1141,8 @@ export class DKGAgentBase {
    * protected by it. Agents without dataDir remain deliberately dormant.
    */
   protected rfc64PersistenceV1?: Rfc64PersistenceV1;
+  /** Explicit owner for finalization persistence and network identity lifetimes. */
+  protected readonly finalizationRuntime = new FinalizationRuntime();
   /**
    * RFC-64 Gate 1 public author-catalog service, wired onto the production
    * router during `start()` when {@link rfc64PersistenceV1} is open. Undefined
@@ -1050,6 +1158,8 @@ export class DKGAgentBase {
   /** Serialize local author-head construction/CAS independently per exact scope. */
   protected readonly rfc64AuthorCatalogMutationQueuesV1 = new Map<string, Promise<void>>();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  /** Process-local reverse candidates plus the monotonic binding fence. */
+  protected readonly contextGraphBindingState = new ContextGraphBindingState();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
@@ -1473,6 +1583,22 @@ export class DKGAgentBase {
    */
   protected readonly catchupOnConnectAt = new Map<string, number>();
   /**
+   * The canonical on-connect scheduler's pending state. A generic connection
+   * event can be upgraded in place when RFC-64 bootstrap supplies an exact
+   * mixed plan before its timer fires; no second queue or cooldown ledger is
+   * involved.
+   */
+  protected readonly queuedSyncOnConnectPeers = new Set<string>();
+  protected readonly pendingRfc64SwmRecoveries = new Map<
+    string,
+    Readonly<{
+      plan: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
+      handleSyncError: (remotePeer: string, error: unknown) => void;
+    }>
+  >();
+  /** Typed RFC-64 admission and current-configuration validation boundary. */
+  protected rfc64SwmRecoveryCoordinatorV1!: Rfc64SwmRecoveryCoordinatorV1;
+  /**
    * Per-peer timestamp of the last time all live connections to that peer
    * were gone. Used to avoid suppressing reconnect catch-up with a
    * `lastSuccessfulSyncAt` value from before an offline gap.
@@ -1509,6 +1635,8 @@ export class DKGAgentBase {
    * so denied peers must remain eligible on the next reconciler cadence.
    */
   protected readonly lastSyncProgressAt = new Map<string, number>();
+  /** Peer + selected-CG scoped seed/retry/terminal state for RFC-64 SWM. */
+  protected readonly selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   /**
    * Per-peer sync-reconciler backoff. `failures` is the count of
    * consecutive reconciler attempts that did NOT produce a successful
@@ -1536,6 +1664,22 @@ export class DKGAgentBase {
   protected syncCheckpoints: SyncCheckpointStore = new MemorySyncCheckpointStore();
   protected changelogCursors: ChangelogCursorStore = new MemoryChangelogCursorStore();
   protected syncVerifyWorker?: SyncVerifyWorker;
+  /** Agent-owned retained selected-SWM transfers, created lazily and drained before store close. */
+  protected selectedSwmMetaTransfers?: SelectedSwmMetaTransferCoordinator;
+
+  protected getSelectedSwmMetaTransfers(): SelectedSwmMetaTransferCoordinator {
+    this.selectedSwmMetaTransfers ??= new SelectedSwmMetaTransferCoordinator();
+    return this.selectedSwmMetaTransfers;
+  }
+
+  protected async closeSelectedSwmMetaTransfers(): Promise<void> {
+    const transfers = this.selectedSwmMetaTransfers;
+    if (!transfers) return;
+    await transfers.close();
+    if (this.selectedSwmMetaTransfers === transfers) {
+      this.selectedSwmMetaTransfers = undefined;
+    }
+  }
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */
   protected readonly localAgents = new Map<string, AgentKeyRecord>();
@@ -1631,6 +1775,15 @@ export class DKGAgentBase {
     });
   }
 
+  /** Open after RFC-64 ownership and before networking starts. */
+  protected async prepareFinalizationRecoveryStore(): Promise<void> {
+    if (!this.config.dataDir || this.finalizationRuntime.getRecoveryStore()) return;
+    const store = await openSqliteFinalizationRecoveryStore(
+      this.config.dataDir,
+    );
+    this.finalizationRuntime.attachRecoveryStore(store);
+  }
+
   /** Yield between fixed-size adapter batches so startup cannot monopolize the event loop. */
   protected async yieldRfc64InventoryV1StartupBatch(): Promise<void> {
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1644,6 +1797,49 @@ export class DKGAgentBase {
     const persistence = this.rfc64PersistenceV1;
     this.rfc64PersistenceV1 = undefined;
     await persistence?.close();
+  }
+
+  /** Drain and checkpoint the inbox before releasing the broader persistence lifetime. */
+  protected async closeFinalizationRecoveryStore(): Promise<void> {
+    await this.finalizationHandler?.stopRecoveryWorker();
+    const store = this.finalizationRuntime.detachRecoveryStore();
+    await store?.close();
+  }
+
+  async getFinalizationRecoveryHealth(): Promise<FinalizationRecoveryHealth> {
+    const store = this.finalizationRuntime.getRecoveryStore();
+    if (!store) {
+      return {
+        available: false,
+        closed: false,
+        ready: false,
+        canonicalReceiptCapability: 'not-configured',
+        degradedReason: 'not-configured',
+        stateCounts: {},
+        livePayloadBytes: 0,
+        dueEntries: 0,
+      };
+    }
+    const health = await store.health();
+    const canonicalReceiptCapability = this.chain.chainId !== 'none'
+      && typeof this.chain.resolveCanonicalFinalizationReceipt === 'function'
+      ? 'supported'
+      : 'unsupported';
+    return {
+      ...health,
+      ready: (health.ready ?? health.available)
+        && canonicalReceiptCapability === 'supported',
+      canonicalReceiptCapability,
+      ...(
+        canonicalReceiptCapability === 'unsupported'
+          && health.available
+          && health.degradedReason === undefined
+          ? {
+              degradedReason: 'canonical-finalization-receipt-unsupported',
+            }
+          : {}
+      ),
+    };
   }
 
   /**

@@ -25,12 +25,17 @@ const RFC64_GATE2_CONTEXT_GRAPH_STORAGE_ADDRESS =
 const RFC64_GATE2_KNOWLEDGE_ASSET_STORAGE_ADDRESS =
   '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 
-export interface FinalizedVmHarnessConfigV1 {
+export interface FinalizedVmHarnessAssetConfigV1 {
   readonly assertionRoot: Digest32V1;
   readonly assertionVersion: string;
   readonly authorAddress: EvmAddressV1;
-  readonly contextGraphId: string;
   readonly kaId: string;
+}
+
+export interface FinalizedVmHarnessConfigV1 {
+  readonly accessPolicy: 0 | 1;
+  readonly assets: readonly Readonly<FinalizedVmHarnessAssetConfigV1>[];
+  readonly contextGraphId: string;
   readonly nameHash: Digest32V1;
   readonly onChainContextGraphId: string;
 }
@@ -46,23 +51,49 @@ const FINALIZED_BLOCK_HASH = `0x${'77'.repeat(32)}`;
 export function parseFinalizedVmHarnessConfigV1(
   input: string,
 ): Readonly<FinalizedVmHarnessConfigV1> {
-  if (Buffer.byteLength(input) > 16_384) {
-    throw new TypeError('finalized VM harness config exceeds 16 KiB');
+  if (Buffer.byteLength(input) > 1_000_000) {
+    throw new TypeError('finalized VM harness config exceeds 1 MiB');
   }
   const parsed = plainRecord(JSON.parse(input), 'finalized VM harness config');
   const contextGraphId = requiredString(parsed.contextGraphId, 'finalizedVm.contextGraphId');
   assertContextGraphIdV1(contextGraphId);
-  const authorAddress = canonicalEvmAddress(parsed.authorAddress, 'finalizedVm.authorAddress');
-  const assertionRoot = requiredDigest(parsed.assertionRoot, 'finalizedVm.assertionRoot');
-  const assertionVersion = canonicalDecimalWire(
-    parsed.assertionVersion,
-    'finalizedVm.assertionVersion',
-  );
-  if (BigInt(assertionVersion) === 0n) {
-    throw new TypeError('finalized VM assertion version must be non-zero');
-  }
+  const accessPolicy = parsed.accessPolicy === undefined
+    ? 0
+    : canonicalAccessPolicy(parsed.accessPolicy, 'finalizedVm.accessPolicy');
   const nameHash = requiredDigest(parsed.nameHash, 'finalizedVm.nameHash');
-  const kaId = canonicalDecimalWire(parsed.kaId, 'finalizedVm.kaId');
+  const assetsInput = parsed.assets === undefined
+    ? [{
+        assertionRoot: parsed.assertionRoot,
+        assertionVersion: parsed.assertionVersion,
+        authorAddress: parsed.authorAddress,
+        kaId: parsed.kaId,
+      }]
+    : plainArray(parsed.assets, 'finalizedVm.assets');
+  if (assetsInput.length === 0) {
+    throw new TypeError('finalizedVm.assets must not be empty');
+  }
+  const assets = assetsInput.map((value, index) => {
+    const asset = plainRecord(value, `finalizedVm.assets[${index}]`);
+    const assertionVersion = canonicalDecimalWire(
+      asset.assertionVersion,
+      `finalizedVm.assets[${index}].assertionVersion`,
+    );
+    if (BigInt(assertionVersion) === 0n) {
+      throw new TypeError(`finalizedVm.assets[${index}].assertionVersion must be non-zero`);
+    }
+    return Object.freeze({
+      assertionRoot: requiredDigest(
+        asset.assertionRoot,
+        `finalizedVm.assets[${index}].assertionRoot`,
+      ),
+      assertionVersion,
+      authorAddress: canonicalEvmAddress(
+        asset.authorAddress,
+        `finalizedVm.assets[${index}].authorAddress`,
+      ),
+      kaId: canonicalDecimalWire(asset.kaId, `finalizedVm.assets[${index}].kaId`),
+    });
+  });
   const onChainContextGraphId = canonicalDecimalWire(
     parsed.onChainContextGraphId,
     'finalizedVm.onChainContextGraphId',
@@ -71,11 +102,9 @@ export function parseFinalizedVmHarnessConfigV1(
     throw new TypeError('finalized VM on-chain context graph id must be non-zero');
   }
   return Object.freeze({
-    assertionRoot,
-    assertionVersion,
-    authorAddress,
+    accessPolicy,
+    assets: Object.freeze(assets),
     contextGraphId,
-    kaId,
     nameHash,
     onChainContextGraphId,
   });
@@ -85,32 +114,32 @@ export async function startFinalizedVmHarnessRuntimeV1(
   config: Readonly<FinalizedVmHarnessConfigV1>,
 ): Promise<Readonly<FinalizedVmHarnessRuntimeV1>> {
   const fixture = Object.freeze({
-    accessPolicy: 0,
+    accessPolicy: config.accessPolicy,
     active: true,
     assertedAtChainId: RFC64_GATE2_DEPLOYMENT.assertedAtChainId,
     assertedAtKav10Address:
       RFC64_GATE2_DEPLOYMENT.assertedAtKav10Address as EvmAddressV1,
     knowledgeAssetStorageAddress: RFC64_GATE2_KNOWLEDGE_ASSET_STORAGE_ADDRESS,
-    assets: Object.freeze([Object.freeze({
-      assertionRoot: config.assertionRoot,
-      assertionVersion: config.assertionVersion,
-      authorAddress: config.authorAddress,
-      kaId: config.kaId,
+    assets: Object.freeze(config.assets.map((asset) => Object.freeze({
+      assertionRoot: asset.assertionRoot,
+      assertionVersion: asset.assertionVersion,
+      authorAddress: asset.authorAddress,
+      kaId: asset.kaId,
       publisherAddress: '0x6666666666666666666666666666666666666666' as EvmAddressV1,
-    })]),
+    }))),
     blockHash: FINALIZED_BLOCK_HASH as Digest32V1,
     blockNumberQuantity: '0x7b',
     contextGraphStorageAddress: RFC64_GATE2_CONTEXT_GRAPH_STORAGE_ADDRESS,
     nameHash: config.nameHash,
     networkId: RFC64_GATE2_DEPLOYMENT.networkId as NetworkIdV1,
     onChainContextGraphId: config.onChainContextGraphId,
-    ownerAddress: config.authorAddress,
+    ownerAddress: config.assets[0]!.authorAddress,
     publishPolicy: 1,
   } satisfies FinalizedVmLoopbackFixtureConfigV1);
   const rpcFixture = createFinalizedVmLoopbackRpcV1(fixture);
   const chainAdapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
   const created = await chainAdapter.createOnChainContextGraph({
-    accessPolicy: 0,
+    accessPolicy: config.accessPolicy,
     publishPolicy: 1,
     nameHash: config.nameHash,
   });
@@ -223,6 +252,11 @@ function requiredDigest(value: unknown, label: string): Digest32V1 {
 function canonicalDecimalWire(value: unknown, label: string): string {
   if (typeof value === 'string' && /^(0|[1-9][0-9]*)$/u.test(value)) return value;
   throw new TypeError(`${label} is not a canonical non-negative integer`);
+}
+
+function canonicalAccessPolicy(value: unknown, label: string): 0 | 1 {
+  if (value === 0 || value === 1) return value;
+  throw new TypeError(`${label} must be 0 or 1`);
 }
 
 function canonicalEvmAddress(value: unknown, label: string): EvmAddressV1 {

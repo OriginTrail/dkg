@@ -1,5 +1,11 @@
 export * from './chain-adapter.js';
 export {
+  resolvePublicFinalizedMaterializationAuthority,
+  type PublicFinalizedMaterializationAuthorityRequest,
+  type PublicFinalizedMaterializationAuthorityResult,
+  type PublicFinalizedMaterializationAuthorityUnavailableReason,
+} from './public-finalized-materialization-authority.js';
+export {
   CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
   CONTROL_EIP1271_CALL_FROM_V1,
   CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1,
@@ -18,6 +24,7 @@ export {
   assertVerifiedControlEnvelopeIssuerSignatureV1,
   readVerifiedControlEnvelopeIssuerSignatureV1,
   verifyControlEnvelopeIssuerSignatureV1,
+  verifyEip191ControlEnvelopeIssuerSignatureV1,
   type ControlSignatureVerificationDispositionV1,
   type ControlSignatureVerificationErrorCodeV1,
   type ControlSignatureVerificationReasonV1,
@@ -68,6 +75,15 @@ export {
   type StrictCurrentFinalizedEvmRpcConfigV1,
 } from './strict-current-finalized-evm-rpc.js';
 export { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from './strict-current-finalized-evm-snapshot-factory.js';
+export {
+  FINALIZED_CHAIN_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+  FINALIZED_CHAIN_READ_OWNERS,
+  acquireFinalizedChainRead,
+  finalizedChainReadRegistryDepth,
+  isFinalizedChainAdmissionContention,
+  type FinalizedChainReadOwnerV1,
+} from './finalized-chain-read-admission.js';
+export type { EndpointAdmissionPolicyV1 } from './nonqueueing-admission.js';
 export {
   type StrictCurrentFinalizedEvmReadCallV1,
   type StrictCurrentFinalizedEvmReadRequestV1,
@@ -158,8 +174,10 @@ export {
 } from './hub-resolution-cache.js';
 export { PcaUnavailableError, isPcaUnavailableError } from './pca-errors.js';
 export {
+  DEFAULT_FINALITY_CONFIRMATIONS,
   MIN_RPC_RECEIPT_TIMEOUT_MS,
   RPC_RECEIPT_TIMEOUT_MS,
+  resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
 } from './evm-adapter-constants.js';
 export {
