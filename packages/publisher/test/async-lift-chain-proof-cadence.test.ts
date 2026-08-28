@@ -533,6 +533,42 @@ describe('GH#2270 chain-proof cadence', () => {
       expect(events).toEqual(['enter', 'exit', 'enter', 'exit']);
     });
 
+    it('a failed inventory acquisition does not poison the chain — the next pass reads fresh', async () => {
+      // r7 (🟡 3883690945) — the rejection handler on the acquisition chain is load-bearing:
+      // the chain must carry only settlement, never the failure. A one-shot list() failure
+      // rejects its own pass; the NEXT pass performs a fresh read (not the memoized rejection)
+      // and real dispatch work proceeds.
+      let asks = 0;
+      const publisher = h.createPublisher({
+        chainProofDispatchBatchSize: 1,
+        rand: () => 0,
+        chainProofResolver: async () => {
+          asks += 1;
+          return { status: 'pending-mempool' };
+        },
+      });
+      const { jobId } = await h.failAfterRecordedTxHash(publisher, kaVmPublishRequest());
+
+      const originalList = publisher.list.bind(publisher);
+      let listCalls = 0;
+      let failNext = true;
+      (publisher as { list: typeof publisher.list }).list = async (filter) => {
+        listCalls += 1;
+        if (failNext) {
+          failNext = false;
+          throw new Error('transient store read failure');
+        }
+        return originalList(filter);
+      };
+
+      await expect(publisher.recover()).rejects.toThrow('transient store read failure');
+      const callsAfterFailure = listCalls;
+      await publisher.recover();
+      expect(listCalls).toBe(callsAfterFailure + 1); // a fresh read, not a replayed rejection
+      expect(asks).toBe(1); // the held job was actually dispatched
+      expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    });
+
     it('a held job cleared while its verdict is in flight releases its schedule slot', async () => {
       // r6 (🔴 3883453613) — the record is DELETED (operator clear) while the resolver is in
       // flight; the locked re-read finds nothing. The turn must release its slot: without the
